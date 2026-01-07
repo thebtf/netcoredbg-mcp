@@ -401,6 +401,10 @@ class SessionManager:
 
         config = self._last_launch_config.copy()
 
+        # Always stop existing session first to ensure clean state
+        # This is needed even when pre_build=False to avoid relaunch issues
+        await self.stop()
+
         # Force pre_build if rebuild requested and we have build info
         if rebuild and config.get("build_project"):
             config["pre_build"] = True

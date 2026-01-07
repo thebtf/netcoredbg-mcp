@@ -265,61 +265,61 @@ class BuildPolicy:
                 if value is None and i + 1 < len(args):
                     value = args[i + 1]
                     i += 1
-                if value and value not in ALLOWED_CONFIGURATIONS:
+                if not value:
+                    raise ValueError(f"Argument {key} requires a value")
+                if value not in ALLOWED_CONFIGURATIONS:
                     raise ValueError(f"Invalid configuration: {value}")
-                validated.append(key)
-                if value:
-                    validated.append(value)
+                validated.extend([key, value])
 
             elif key in ("-f", "--framework"):
                 if value is None and i + 1 < len(args):
                     value = args[i + 1]
                     i += 1
-                if value and not FRAMEWORK_PATTERN.match(value):
+                if not value:
+                    raise ValueError(f"Argument {key} requires a value")
+                if not FRAMEWORK_PATTERN.match(value):
                     raise ValueError(f"Invalid framework: {value}")
-                validated.append(key)
-                if value:
-                    validated.append(value)
+                validated.extend([key, value])
 
             elif key in ("-r", "--runtime"):
                 if value is None and i + 1 < len(args):
                     value = args[i + 1]
                     i += 1
-                if value and not RUNTIME_PATTERN.match(value):
+                if not value:
+                    raise ValueError(f"Argument {key} requires a value")
+                if not RUNTIME_PATTERN.match(value):
                     raise ValueError(f"Invalid runtime: {value}")
-                validated.append(key)
-                if value:
-                    validated.append(value)
+                validated.extend([key, value])
 
             elif key in ("-o", "--output"):
                 if value is None and i + 1 < len(args):
                     value = args[i + 1]
                     i += 1
-                if value:
-                    # Validate output path
-                    self.validate_output_path(value)
-                    validated.append(key)
-                    validated.append(value)
+                if not value:
+                    raise ValueError(f"Argument {key} requires a value")
+                # Validate output path
+                self.validate_output_path(value)
+                validated.extend([key, value])
 
             elif key in ("-v", "--verbosity"):
                 if value is None and i + 1 < len(args):
                     value = args[i + 1]
                     i += 1
-                if value and value.lower() not in ALLOWED_VERBOSITY:
+                if not value:
+                    raise ValueError(f"Argument {key} requires a value")
+                if value.lower() not in ALLOWED_VERBOSITY:
                     raise ValueError(f"Invalid verbosity: {value}")
-                validated.append(key)
-                if value:
-                    validated.append(value)
+                validated.extend([key, value])
 
             elif key == "--interactive":
                 if value is None and i + 1 < len(args):
                     value = args[i + 1]
                     i += 1
-                if value and value.lower() not in ("true", "false"):
+                if not value:
+                    raise ValueError(f"Argument {key} requires a value")
+                if value.lower() not in ("true", "false"):
                     raise ValueError(f"Invalid interactive value: {value}")
-                validated.append(key)
-                if value:
-                    validated.append(value)
+                validated.extend([key, value])
 
             else:
                 # Boolean flags

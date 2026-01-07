@@ -53,6 +53,9 @@ class BuildManager:
     def get_session(self, workspace_root: str) -> BuildSession:
         """Get or create build session for workspace.
 
+        Note: This method is not thread-safe. It should be called from a single
+        asyncio event loop. For MCP servers, this is guaranteed by the framework.
+
         Args:
             workspace_root: Root directory of workspace
 

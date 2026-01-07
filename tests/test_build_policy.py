@@ -2,7 +2,6 @@
 
 import os
 import pytest
-import tempfile
 
 from netcoredbg_mcp.build.policy import (
     BuildPolicy,

@@ -239,6 +239,7 @@ class TestBuildManagerPreLaunchBuild:
                 str(tmp_path), str(project), restore_first=False
             )
 
+        assert result.success is True
         # Filter to dotnet commands only (exclude cleanup taskkill calls)
         dotnet_commands = [c for c in commands if c[0] == "dotnet"]
         assert len(dotnet_commands) == 1
