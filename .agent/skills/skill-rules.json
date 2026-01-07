@@ -1,0 +1,56 @@
+{
+  "version": "1.0",
+  "description": "Skill activation rules for AI agents",
+  "skills": {
+    "coding": {
+      "description": "Standard development workflow for implementing features and fixes",
+      "activation": {
+        "keywords": ["implement", "fix", "add", "create", "build", "feature", "refactor", "update"],
+        "intents": ["write code", "implement feature", "fix bug", "add functionality"],
+        "file_patterns": ["*.cs", "*.py", "*.ts", "*.js", "*.go", "*.rs"]
+      },
+      "skill_file": ".agent/skills/coding/SKILL.md",
+      "priority": 10
+    },
+    "architecture": {
+      "description": "System design and architectural planning workflow",
+      "activation": {
+        "keywords": ["design", "plan", "architect", "structure", "diagram", "spec"],
+        "intents": ["design system", "plan architecture", "create specification"],
+        "file_patterns": ["*.md", "arch/*"]
+      },
+      "skill_file": ".agent/skills/architecture/SKILL.md",
+      "priority": 20
+    },
+    "debugging": {
+      "description": "Troubleshooting and bug investigation workflow",
+      "activation": {
+        "keywords": ["bug", "error", "crash", "broken", "not working", "debug", "investigate"],
+        "intents": ["fix bug", "investigate error", "debug issue"],
+        "file_patterns": []
+      },
+      "skill_file": ".agent/skills/debugging/SKILL.md",
+      "priority": 15
+    },
+    "integration": {
+      "description": "PR creation, code review, and merge workflow",
+      "activation": {
+        "keywords": ["PR", "pull request", "merge", "review", "CodeRabbit"],
+        "intents": ["create PR", "review code", "merge changes"],
+        "file_patterns": []
+      },
+      "skill_file": ".agent/skills/integration/SKILL.md",
+      "priority": 25
+    },
+    "recovery": {
+      "description": "Context restoration after session reset",
+      "activation": {
+        "keywords": ["continue", "resume", "where were we", "context lost"],
+        "intents": ["restore context", "continue work"],
+        "file_patterns": ["CONTINUITY-*.md"]
+      },
+      "skill_file": ".agent/skills/recovery/SKILL.md",
+      "priority": 5
+    }
+  }
+}
