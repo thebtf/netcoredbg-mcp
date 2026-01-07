@@ -2,17 +2,14 @@
 
 import asyncio
 import logging
+import os
 import sys
 
-from mcp.server.stdio import stdio_server
-
-from .server import create_server
+from .server import create_server, get_session
 
 
 def configure_logging() -> None:
     """Configure logging based on environment."""
-    import os
-
     level = os.environ.get("LOG_LEVEL", "INFO").upper()
     logging.basicConfig(
         level=getattr(logging, level, logging.INFO),
@@ -28,20 +25,16 @@ async def main() -> None:
 
     logger.info("Starting NetCoreDbg MCP Server...")
 
-    server, session = create_server()
+    mcp = create_server()
 
     try:
-        async with stdio_server() as (read_stream, write_stream):
-            await server.run(
-                read_stream,
-                write_stream,
-                server.create_initialization_options(),
-            )
+        await mcp.run_stdio_async()
     except Exception as e:
         logger.error(f"Server error: {e}")
         raise
     finally:
         # Cleanup session
+        session = get_session()
         if session.is_active:
             await session.stop()
         logger.info("Server stopped")

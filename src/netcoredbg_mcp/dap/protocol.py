@@ -8,42 +8,27 @@ from enum import Enum
 from typing import Any
 
 
-class MessageType(str, Enum):
-    REQUEST = "request"
-    RESPONSE = "response"
-    EVENT = "event"
-
-
 @dataclass
-class DAPMessage:
-    """Base DAP message."""
+class DAPRequest:
+    """DAP request message."""
     seq: int
-    type: MessageType
+    command: str
+    arguments: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"seq": self.seq, "type": self.type.value}
+        d: dict[str, Any] = {
+            "seq": self.seq,
+            "type": "request",
+            "command": self.command,
+        }
+        if self.arguments:
+            d["arguments"] = self.arguments
+        return d
 
     def to_bytes(self) -> bytes:
         content = json.dumps(self.to_dict(), separators=(",", ":"))
         header = f"Content-Length: {len(content)}\r\n\r\n"
         return (header + content).encode("utf-8")
-
-
-@dataclass
-class DAPRequest(DAPMessage):
-    """DAP request message."""
-    command: str
-    arguments: dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self):
-        self.type = MessageType.REQUEST
-
-    def to_dict(self) -> dict[str, Any]:
-        d = super().to_dict()
-        d["command"] = self.command
-        if self.arguments:
-            d["arguments"] = self.arguments
-        return d
 
 
 @dataclass
