@@ -24,7 +24,7 @@ classifiers = [
     "Topic :: Software Development :: Debuggers",
 ]
 dependencies = [
-    "mcp>=1.0.0",
+    "mcp>=1.5.0,<2.0.0",
 ]
 
 [project.optional-dependencies]

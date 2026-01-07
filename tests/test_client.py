@@ -137,7 +137,7 @@ class TestDAPClientResponseHandling:
         client = DAPClient("/path")
 
         # Create a pending future in the current event loop
-        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
         client._pending[1] = future
 
         # Simulate receiving a response

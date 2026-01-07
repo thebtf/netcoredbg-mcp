@@ -72,23 +72,18 @@ class SessionManager:
         Raises:
             ValueError: If path is invalid or outside project scope
         """
-        # Normalize path
+        # Normalize path to absolute
         abs_path = os.path.abspath(path)
 
-        # Check for path traversal attempts
-        if ".." in path:
-            raise ValueError(f"Path traversal not allowed: {path}")
-
-        # Check within project scope
+        # Check within project scope using os.path.commonpath
         if self._project_path:
-            # Use os.path.commonpath for proper comparison
             try:
                 common = os.path.commonpath([abs_path, self._project_path])
                 if common != self._project_path:
                     raise ValueError(f"Path outside project scope: {path}")
-            except ValueError:
-                # Different drives on Windows
-                raise ValueError(f"Path outside project scope: {path}")
+            except ValueError as e:
+                # Different drives on Windows or other path issues
+                raise ValueError(f"Path outside project scope: {path}") from e
 
         # Check existence if required
         if must_exist and not os.path.exists(abs_path):
@@ -127,8 +122,8 @@ class SessionManager:
             for listener in self._state_listeners:
                 try:
                     listener(new_state)
-                except Exception as e:
-                    logger.error(f"State listener error: {e}")
+                except Exception:
+                    logger.exception("State listener error")
 
     async def start(self) -> None:
         """Start DAP client and initialize session."""
@@ -202,11 +197,9 @@ class SessionManager:
         thread_id = event.body.get("threadId", 0)
         reason = event.body.get("reason", "started")
 
-        if reason == "started":
-            # Fetch thread info later
-            pass
-        elif reason == "exited":
+        if reason == "exited":
             self._state.threads = [t for t in self._state.threads if t.id != thread_id]
+        # Note: "started" events are handled lazily via get_threads()
 
     async def launch(
         self,
@@ -255,7 +248,11 @@ class SessionManager:
         if not self._client.is_running:
             await self.start()
 
-        await asyncio.wait_for(self._initialized_event.wait(), timeout=10.0)
+        try:
+            await asyncio.wait_for(self._initialized_event.wait(), timeout=10.0)
+        except asyncio.TimeoutError as e:
+            raise RuntimeError("Timeout waiting for session initialization") from e
+
         await self._sync_all_breakpoints()
         await self._client.set_exception_breakpoints([])
 
@@ -280,6 +277,7 @@ class SessionManager:
         self._set_state(DebugState.IDLE)
         self._initialized_event.clear()
         self._state = SessionState()
+        self._output_bytes = 0  # Reset output tracking for next session
 
         return {"success": True}
 

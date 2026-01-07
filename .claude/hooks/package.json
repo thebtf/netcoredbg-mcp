@@ -1,0 +1,15 @@
+{
+    "name": "novascript-claude-hooks",
+    "version": "1.0.0",
+    "description": "TypeScript hooks for Claude Code skill auto-activation",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "check": "tsc --noEmit"
+    },
+    "devDependencies": {
+        "@types/node": "^22.0.0",
+        "tsx": "^4.21.0",
+        "typescript": "^5.7.2"
+    }
+}

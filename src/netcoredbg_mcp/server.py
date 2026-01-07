@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 
@@ -147,7 +148,10 @@ def create_server(project_path: str | None = None) -> FastMCP:
     @mcp.tool()
     async def get_debug_state() -> dict:
         """Get the current debug session state."""
-        return {"success": True, "data": session.state.to_dict()}
+        try:
+            return {"success": True, "data": session.state.to_dict()}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
     # ============== Breakpoint Tools ==============
 
@@ -325,13 +329,11 @@ def create_server(project_path: str | None = None) -> FastMCP:
     @mcp.resource("debug://state")
     async def debug_state_resource() -> str:
         """Current debug session state."""
-        import json
         return json.dumps(session.state.to_dict(), indent=2)
 
     @mcp.resource("debug://breakpoints")
     async def debug_breakpoints_resource() -> str:
         """All active breakpoints."""
-        import json
         all_bps = session.breakpoints.get_all()
         result = {
             f: [{"line": bp.line, "condition": bp.condition, "verified": bp.verified} for bp in bps]

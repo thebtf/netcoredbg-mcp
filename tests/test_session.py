@@ -67,7 +67,7 @@ class TestPathValidation:
         with patch("netcoredbg_mcp.session.manager.DAPClient"):
             manager = SessionManager(project_path=str(tmp_path))
 
-            with pytest.raises(ValueError, match="traversal"):
+            with pytest.raises(ValueError, match="outside project scope"):
                 manager.validate_path(str(tmp_path / ".." / "other.cs"))
 
     def test_validate_path_no_project_scope(self, tmp_path):
@@ -113,7 +113,7 @@ class TestPathValidation:
             txt_file = tmp_path / "test.txt"
             txt_file.write_text("not a .NET assembly")
 
-            with pytest.raises(ValueError, match="must be .NET assembly"):
+            with pytest.raises(ValueError, match=r"must be \.NET assembly"):
                 manager.validate_program(str(txt_file))
 
 
@@ -298,7 +298,7 @@ class TestEventHandlers:
             # Add data exceeding MAX_OUTPUT_BYTES (10MB)
             # Use ~1KB entries to reach limit faster
             large_output = "x" * 1000 + "\n"
-            for i in range(15000):  # 15KB * ~1KB = ~15MB should trigger limit
+            for i in range(15000):  # 15000 entries x ~1KB = ~15MB should trigger limit
                 event = DAPEvent(
                     seq=i,
                     event="output",

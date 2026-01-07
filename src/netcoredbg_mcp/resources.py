@@ -56,5 +56,7 @@ def register_resources(server: "Server", session: "SessionManager") -> None:
         """
         Current threads in the debugged process.
         """
+        # Fetch fresh thread data from the debugger
+        await session.get_threads()
         threads = [{"id": t.id, "name": t.name} for t in session.state.threads]
         return json.dumps(threads, indent=2)

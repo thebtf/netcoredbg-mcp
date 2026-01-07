@@ -48,8 +48,8 @@ async def main() -> None:
 
     try:
         await mcp.run_stdio_async()
-    except Exception as e:
-        logger.error(f"Server error: {e}")
+    except Exception:
+        logger.exception("Server error")
         raise
     finally:
         # Cleanup session

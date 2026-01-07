@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 from typing import Any, Callable
 
 from .protocol import (
@@ -48,11 +49,15 @@ class DAPClient:
         candidates = [
             os.path.join(package_dir, "bin", "netcoredbg", "netcoredbg.exe"),
             os.path.join(package_dir, "bin", "netcoredbg", "netcoredbg"),
-            "netcoredbg",  # System PATH
         ]
         for path in candidates:
             if os.path.exists(path):
                 return path
+
+        # Check system PATH using shutil.which
+        system_path = shutil.which("netcoredbg")
+        if system_path:
+            return system_path
 
         raise FileNotFoundError(
             "netcoredbg not found. Set NETCOREDBG_PATH environment variable."
@@ -100,8 +105,12 @@ class DAPClient:
                 try:
                     await asyncio.wait_for(self._process.wait(), timeout=2.0)
                 except asyncio.TimeoutError:
-                    logger.error(f"Failed to kill process {pid}")
-                    # Don't nullify if still running
+                    logger.exception(f"Failed to kill process {pid}")
+                    # Cancel pending requests even on timeout
+                    for future in self._pending.values():
+                        if not future.done():
+                            future.cancel()
+                    self._pending.clear()
                     return
             self._process = None
 
@@ -122,7 +131,10 @@ class DAPClient:
     def off_event(self, event_name: str, handler: Callable[[DAPEvent], None]) -> None:
         """Unregister event handler."""
         if event_name in self._event_handlers:
-            self._event_handlers[event_name].remove(handler)
+            try:
+                self._event_handlers[event_name].remove(handler)
+            except ValueError:
+                pass  # Handler not registered
 
     async def send_request(
         self, command: str, arguments: dict[str, Any] | None = None, timeout: float = 30.0
@@ -145,7 +157,7 @@ class DAPClient:
             return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
             self._pending.pop(seq, None)
-            raise TimeoutError(f"Request {command} timed out after {timeout}s")
+            raise TimeoutError(f"Request {command} timed out after {timeout}s") from None
 
     async def _send(self, request: DAPRequest) -> None:
         """Send request to netcoredbg."""
@@ -192,8 +204,8 @@ class DAPClient:
 
                 except asyncio.CancelledError:
                     break
-                except Exception as e:
-                    logger.error(f"Error reading DAP message: {e}")
+                except Exception:
+                    logger.exception("Error reading DAP message")
                     break
         finally:
             # Cleanup on read loop exit (handles zombie process)
@@ -202,7 +214,7 @@ class DAPClient:
                 try:
                     self._process.terminate()
                 except Exception:
-                    pass
+                    logger.debug("Failed to terminate process during cleanup")
 
     def _handle_message(self, data: dict[str, Any]) -> None:
         """Handle incoming DAP message."""
@@ -221,11 +233,11 @@ class DAPClient:
                 for handler in handlers:
                     try:
                         handler(message)
-                    except Exception as e:
-                        logger.error(f"Event handler error: {e}")
+                    except Exception:
+                        logger.exception("Event handler error")
 
-        except Exception as e:
-            logger.error(f"Error handling message: {e}, data: {data}")
+        except Exception:
+            logger.exception(f"Error handling message, data: {data}")
 
     # High-level DAP commands
 
