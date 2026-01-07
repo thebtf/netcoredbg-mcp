@@ -212,10 +212,11 @@ async def get_project_root(ctx: Context | None = None) -> Path | None:
     if ctx is not None:
         try:
             roots = await ctx.list_roots()
+            logger.info(f"MCP list_roots() returned {len(roots) if roots else 0} roots")
             if roots:
                 # Use the first root
                 uri = str(roots[0].uri)
-                logger.debug(f"Got root from client: {uri}")
+                logger.info(f"Got root from client: {uri}")
 
                 path = parse_file_uri(uri)
                 if path and path.exists() and path.is_dir():
@@ -223,9 +224,11 @@ async def get_project_root(ctx: Context | None = None) -> Path | None:
                     return path
                 else:
                     logger.warning(f"MCP root path invalid or not accessible: {path}")
+            else:
+                logger.info("MCP client did not provide any roots")
         except Exception as e:
             # Client may not support roots - this is fine
-            logger.debug(f"Could not get roots from client: {e}")
+            logger.info(f"Could not get roots from client: {e}")
 
     # 2. Check environment variables
     for env_var in config.env_var_names:
