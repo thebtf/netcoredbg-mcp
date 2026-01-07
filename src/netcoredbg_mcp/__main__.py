@@ -55,6 +55,8 @@ async def main() -> None:
 
     # Capture CWD at startup (before any chdir)
     startup_cwd = Path.cwd()
+    logger.info(f"[DIAGNOSTIC] Startup CWD: {startup_cwd}")
+    logger.info(f"[DIAGNOSTIC] __file__: {__file__}")
 
     # Validate mutually exclusive options
     project_from_cwd = getattr(args, "project_from_cwd", False)

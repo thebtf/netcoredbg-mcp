@@ -326,13 +326,14 @@ class SessionManager:
         # Set exception breakpoints (stop on all exceptions by default)
         await self._client.set_exception_breakpoints([])
 
-        # Launch program
+        # Launch program with justMyCode=False to show all stack frames
         response = await self._client.launch(
             program=program,
             cwd=cwd,
             args=args,
             env=env,
             stop_at_entry=stop_at_entry,
+            just_my_code=False,
         )
 
         if not response.success:
@@ -369,7 +370,7 @@ class SessionManager:
         await self._sync_all_breakpoints()
         await self._client.set_exception_breakpoints([])
 
-        response = await self._client.attach(process_id)
+        response = await self._client.attach(process_id, just_my_code=False)
         if not response.success:
             raise RuntimeError(f"Attach failed: {response.message}")
 
@@ -533,8 +534,23 @@ class SessionManager:
         return {"success": response.success, "threadId": tid}
 
     async def pause(self, thread_id: int | None = None) -> dict[str, Any]:
-        """Pause execution."""
-        tid = thread_id or self._state.current_thread_id or 0
+        """Pause execution.
+
+        If no thread_id is provided, uses current_thread_id or queries
+        available threads and pauses the first one.
+        """
+        tid = thread_id or self._state.current_thread_id
+        if tid is None:
+            # Query threads and use the first one
+            threads = await self.get_threads()
+            if threads:
+                tid = threads[0].id
+                logger.debug(f"pause: no thread_id provided, using first thread {tid}")
+            else:
+                raise RuntimeError(
+                    "No threads available to pause. The program may not be running."
+                )
+
         response = await self._client.pause(tid)
         return {"success": response.success, "threadId": tid}
 
@@ -561,9 +577,15 @@ class SessionManager:
             raise RuntimeError("No thread for stack trace")
 
         response = await self._client.stack_trace(tid, start_frame, levels)
+        logger.debug(
+            f"stack_trace response for thread {tid}: success={response.success}, "
+            f"body={response.body}, message={response.message}"
+        )
         if response.success:
             frames = []
-            for f in response.body.get("stackFrames", []):
+            raw_frames = response.body.get("stackFrames", [])
+            logger.debug(f"Parsing {len(raw_frames)} stack frames")
+            for f in raw_frames:
                 source = f.get("source", {})
                 frames.append(
                     StackFrame(
@@ -577,17 +599,31 @@ class SessionManager:
             if frames:
                 self._state.current_frame_id = frames[0].id
             return frames
-        return []
+        else:
+            logger.warning(
+                f"stack_trace failed for thread {tid}: {response.message}"
+            )
+            return []
 
     async def get_scopes(self, frame_id: int | None = None) -> list[dict[str, Any]]:
         """Get scopes for frame."""
         fid = frame_id or self._state.current_frame_id
+        logger.debug(
+            f"get_scopes: frame_id={frame_id}, current_frame_id={self._state.current_frame_id}, "
+            f"resolved_fid={fid}"
+        )
         if fid is None:
-            raise RuntimeError("No frame for scopes")
+            raise RuntimeError(
+                "No frame for scopes. Call get_call_stack first to select a frame, "
+                "or provide frame_id explicitly."
+            )
 
         response = await self._client.scopes(fid)
         if response.success:
-            return response.body.get("scopes", [])
+            scopes = response.body.get("scopes", [])
+            logger.debug(f"get_scopes: found {len(scopes)} scopes for frame {fid}")
+            return scopes
+        logger.warning(f"get_scopes failed for frame {fid}: {response.message}")
         return []
 
     async def get_variables(self, variables_reference: int) -> list[Variable]:

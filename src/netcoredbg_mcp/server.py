@@ -81,6 +81,9 @@ def create_server(project_path: str | None = None) -> FastMCP:
         args: list[str] | None = None,
         env: dict[str, str] | None = None,
         stop_at_entry: bool = False,
+        pre_build: bool = False,
+        build_project: str | None = None,
+        build_configuration: str = "Debug",
     ) -> dict:
         """
         Start debugging a .NET program.
@@ -91,6 +94,9 @@ def create_server(project_path: str | None = None) -> FastMCP:
             args: Command line arguments
             env: Environment variables
             stop_at_entry: Stop at entry point
+            pre_build: Build the project before launching (fixes stale binary issues)
+            build_project: Path to .csproj file (required if pre_build=True)
+            build_configuration: Build configuration (Debug/Release)
         """
         try:
             # Resolve project root from MCP context (may update session)
@@ -104,12 +110,20 @@ def create_server(project_path: str | None = None) -> FastMCP:
             if cwd:
                 validated_cwd = session.validate_path(cwd, must_exist=True)
 
+            # Validate build_project if provided
+            validated_build_project = None
+            if build_project:
+                validated_build_project = session.validate_path(build_project, must_exist=True)
+
             result = await session.launch(
                 program=validated_program,
                 cwd=validated_cwd,
                 args=args,
                 env=env,
                 stop_at_entry=stop_at_entry,
+                pre_build=pre_build,
+                build_project=validated_build_project,
+                build_configuration=build_configuration,
             )
             return {"success": True, "data": result}
         except Exception as e:
