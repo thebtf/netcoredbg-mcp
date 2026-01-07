@@ -19,7 +19,7 @@ MCP (Model Context Protocol) server for debugging C#/.NET applications using [ne
 ├─────────────────────────────────────────────────────────┤
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐ │
 │  │ MCP Tools   │  │ DAP Client  │  │ Session Manager │ │
-│  │ (18 tools)  │←→│ (protocol)  │←→│ (state)         │ │
+│  │ (20 tools)  │←→│ (protocol)  │←→│ (state)         │ │
 │  └─────────────┘  └──────┬──────┘  └─────────────────┘ │
 └──────────────────────────┼──────────────────────────────┘
                            │ stdio
