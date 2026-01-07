@@ -86,7 +86,15 @@ def create_server(project_path: str | None = None) -> FastMCP:
         build_configuration: str = "Debug",
     ) -> dict:
         """
-        Start debugging a .NET program.
+        Start debugging a .NET program. RECOMMENDED for most debugging scenarios.
+
+        This is the preferred method for debugging .NET applications. It launches
+        a new process under the debugger with full feature support including:
+        - Complete call stack visibility
+        - Full variable inspection
+        - All breakpoint features
+
+        Use attach_debug only for already-running processes (e.g., ASP.NET services).
 
         Args:
             program: Path to the .NET executable or DLL to debug
@@ -131,7 +139,20 @@ def create_server(project_path: str | None = None) -> FastMCP:
 
     @mcp.tool()
     async def attach_debug(process_id: int) -> dict:
-        """Attach to a running .NET process by PID."""
+        """
+        Attach to a running .NET process by PID.
+
+        WARNING: Due to netcoredbg limitations, attach mode has reduced functionality:
+        - Stack traces may be incomplete or empty
+        - Some debugging features may not work as expected
+
+        For most debugging scenarios, use start_debug instead. Only use attach_debug
+        when you need to debug an already-running process (e.g., ASP.NET service,
+        background worker, or containerized application).
+
+        Args:
+            process_id: The PID of the running .NET process to attach to
+        """
         try:
             result = await session.attach(process_id)
             return {"success": True, "data": result}

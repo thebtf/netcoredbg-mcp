@@ -14,11 +14,26 @@ from .utils.project import configure_project_root, get_project_root_sync
 def configure_logging() -> None:
     """Configure logging based on environment."""
     level = os.environ.get("LOG_LEVEL", "INFO").upper()
-    logging.basicConfig(
-        level=getattr(logging, level, logging.INFO),
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        stream=sys.stderr,
-    )
+    log_level = getattr(logging, level, logging.INFO)
+    log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    
+    # Console handler (stderr)
+    console_handler = logging.StreamHandler(sys.stderr)
+    console_handler.setLevel(log_level)
+    console_handler.setFormatter(logging.Formatter(log_format))
+    root_logger.addHandler(console_handler)
+    
+    # File handler for debugging
+    log_file = os.environ.get("LOG_FILE", "")
+    if log_file:
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler.setLevel(log_level)
+        file_handler.setFormatter(logging.Formatter(log_format))
+        root_logger.addHandler(file_handler)
 
 
 def parse_args() -> argparse.Namespace:
