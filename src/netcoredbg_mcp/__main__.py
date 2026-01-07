@@ -1,5 +1,6 @@
 """Entry point for netcoredbg-mcp server."""
 
+import argparse
 import asyncio
 import logging
 import os
@@ -18,14 +19,32 @@ def configure_logging() -> None:
     )
 
 
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="NetCoreDbg MCP Server - Debug .NET applications via MCP"
+    )
+    parser.add_argument(
+        "--project",
+        type=str,
+        default=None,
+        help="Project root path for debugging (default: current working directory). "
+        "All debug operations will be constrained to this path.",
+    )
+    return parser.parse_args()
+
+
 async def main() -> None:
     """Main entry point."""
     configure_logging()
     logger = logging.getLogger(__name__)
 
-    logger.info("Starting NetCoreDbg MCP Server...")
+    args = parse_args()
+    project_path = args.project or os.getcwd()
 
-    mcp = create_server()
+    logger.info(f"Starting NetCoreDbg MCP Server (project: {project_path})...")
+
+    mcp = create_server(project_path)
 
     try:
         await mcp.run_stdio_async()

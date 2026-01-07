@@ -11,21 +11,33 @@ from .session import SessionManager
 
 logger = logging.getLogger(__name__)
 
-# Global session manager
+# Global session manager (single client mode)
 _session: SessionManager | None = None
+_project_path: str | None = None
 
 
 def get_session() -> SessionManager:
-    """Get or create session manager."""
+    """Get or create session manager.
+
+    Note: Single client mode - only one debug session supported at a time.
+    """
     global _session
     if _session is None:
         netcoredbg_path = os.environ.get("NETCOREDBG_PATH")
-        _session = SessionManager(netcoredbg_path)
+        _session = SessionManager(netcoredbg_path, _project_path)
     return _session
 
 
-def create_server() -> FastMCP:
-    """Create and configure the MCP server."""
+def create_server(project_path: str | None = None) -> FastMCP:
+    """Create and configure the MCP server.
+
+    Args:
+        project_path: Root path for the project being debugged.
+            All file operations will be constrained to this path.
+            If None, uses current working directory.
+    """
+    global _project_path
+    _project_path = project_path
     mcp = FastMCP("netcoredbg-mcp")
     session = get_session()
 
@@ -50,8 +62,20 @@ def create_server() -> FastMCP:
             stop_at_entry: Stop at entry point
         """
         try:
+            # Validate program path (security: prevent arbitrary execution)
+            validated_program = session.validate_program(program)
+
+            # Validate cwd if provided
+            validated_cwd = cwd
+            if cwd:
+                validated_cwd = session.validate_path(cwd, must_exist=True)
+
             result = await session.launch(
-                program=program, cwd=cwd, args=args, env=env, stop_at_entry=stop_at_entry
+                program=validated_program,
+                cwd=validated_cwd,
+                args=args,
+                env=env,
+                stop_at_entry=stop_at_entry,
             )
             return {"success": True, "data": result}
         except Exception as e:
@@ -144,7 +168,9 @@ def create_server() -> FastMCP:
             hit_condition: Optional hit count condition
         """
         try:
-            bp = await session.add_breakpoint(file, line, condition, hit_condition)
+            # Validate file path (security: prevent path traversal)
+            validated_file = session.validate_path(file, must_exist=True)
+            bp = await session.add_breakpoint(validated_file, line, condition, hit_condition)
             return {
                 "success": True,
                 "data": {
@@ -161,7 +187,9 @@ def create_server() -> FastMCP:
     async def remove_breakpoint(file: str, line: int) -> dict:
         """Remove a breakpoint from a specific line."""
         try:
-            removed = await session.remove_breakpoint(file, line)
+            # Validate file path (security: prevent path traversal)
+            validated_file = session.validate_path(file)
+            removed = await session.remove_breakpoint(validated_file, line)
             return {"success": True, "data": {"removed": removed}}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -171,9 +199,13 @@ def create_server() -> FastMCP:
         """List all breakpoints or breakpoints in a specific file."""
         try:
             if file:
-                bps = session.breakpoints.get_for_file(file)
+                # Validate file path if provided
+                validated_file = session.validate_path(file)
+                bps = session.breakpoints.get_for_file(validated_file)
                 result = {
-                    file: [{"line": bp.line, "condition": bp.condition, "verified": bp.verified} for bp in bps]
+                    validated_file: [
+                        {"line": bp.line, "condition": bp.condition, "verified": bp.verified} for bp in bps
+                    ]
                 }
             else:
                 all_bps = session.breakpoints.get_all()
@@ -189,7 +221,11 @@ def create_server() -> FastMCP:
     async def clear_breakpoints(file: str | None = None) -> dict:
         """Clear breakpoints from a file or all files."""
         try:
-            count = await session.clear_breakpoints(file)
+            validated_file = None
+            if file:
+                # Validate file path if provided
+                validated_file = session.validate_path(file)
+            count = await session.clear_breakpoints(validated_file)
             return {"success": True, "data": {"removed": count}}
         except Exception as e:
             return {"success": False, "error": str(e)}

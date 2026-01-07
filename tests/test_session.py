@@ -1,6 +1,7 @@
 """Tests for session manager."""
 
 import asyncio
+import os
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -18,6 +19,7 @@ class TestSessionManagerInit:
 
             assert manager.state.state == DebugState.IDLE
             assert not manager.is_active
+            assert manager.project_path is None
 
     def test_init_with_path(self):
         """Test initialization with netcoredbg path."""
@@ -25,6 +27,94 @@ class TestSessionManagerInit:
             manager = SessionManager(netcoredbg_path="/custom/path")
 
             mock_client.assert_called_once_with("/custom/path")
+
+    def test_init_with_project_path(self):
+        """Test initialization with project path."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path="/project/root")
+
+            assert manager.project_path is not None
+            # Project path should be absolute
+            assert os.path.isabs(manager.project_path)
+
+
+class TestPathValidation:
+    """Tests for path validation."""
+
+    def test_validate_path_within_project(self, tmp_path):
+        """Test validate_path allows paths within project."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+
+            # Create a file inside project
+            test_file = tmp_path / "test.cs"
+            test_file.write_text("// test")
+
+            result = manager.validate_path(str(test_file), must_exist=True)
+            assert result == str(test_file.resolve())
+
+    def test_validate_path_outside_project_raises(self, tmp_path):
+        """Test validate_path rejects paths outside project."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+
+            with pytest.raises(ValueError, match="outside project scope"):
+                # Attempt to access parent directory
+                manager.validate_path(str(tmp_path.parent / "other.cs"))
+
+    def test_validate_path_traversal_blocked(self, tmp_path):
+        """Test validate_path blocks path traversal attempts."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+
+            with pytest.raises(ValueError, match="traversal"):
+                manager.validate_path(str(tmp_path / ".." / "other.cs"))
+
+    def test_validate_path_no_project_scope(self, tmp_path):
+        """Test validate_path works without project scope."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()  # No project_path
+
+            # Should work for any valid path when no scope set
+            test_file = tmp_path / "test.cs"
+            test_file.write_text("// test")
+
+            result = manager.validate_path(str(test_file), must_exist=True)
+            assert result == str(test_file.resolve())
+
+    def test_validate_path_must_exist(self, tmp_path):
+        """Test validate_path checks existence when required."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+
+            with pytest.raises(ValueError, match="does not exist"):
+                manager.validate_path(str(tmp_path / "nonexistent.cs"), must_exist=True)
+
+    def test_validate_program_valid(self, tmp_path):
+        """Test validate_program accepts .dll and .exe files."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+
+            # Create test files
+            dll_file = tmp_path / "test.dll"
+            dll_file.write_bytes(b"")
+            exe_file = tmp_path / "test.exe"
+            exe_file.write_bytes(b"")
+
+            assert manager.validate_program(str(dll_file)) == str(dll_file.resolve())
+            assert manager.validate_program(str(exe_file)) == str(exe_file.resolve())
+
+    def test_validate_program_invalid_extension(self, tmp_path):
+        """Test validate_program rejects non-.NET files."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+
+            # Create test file with wrong extension
+            txt_file = tmp_path / "test.txt"
+            txt_file.write_text("not a .NET assembly")
+
+            with pytest.raises(ValueError, match="must be .NET assembly"):
+                manager.validate_program(str(txt_file))
 
 
 class TestSessionManagerState:
@@ -201,20 +291,24 @@ class TestEventHandlers:
             assert "Hello\n" in manager.state.output_buffer
 
     def test_output_buffer_limit(self):
-        """Test output buffer doesn't grow unbounded."""
+        """Test output buffer doesn't grow unbounded (byte-based limit)."""
         with patch("netcoredbg_mcp.session.manager.DAPClient"):
             manager = SessionManager()
 
-            # Add more than 1000 lines
-            for i in range(1100):
+            # Add data exceeding MAX_OUTPUT_BYTES (10MB)
+            # Use ~1KB entries to reach limit faster
+            large_output = "x" * 1000 + "\n"
+            for i in range(15000):  # 15KB * ~1KB = ~15MB should trigger limit
                 event = DAPEvent(
                     seq=i,
                     event="output",
-                    body={"category": "stdout", "output": f"Line {i}\n"},
+                    body={"category": "stdout", "output": large_output},
                 )
                 manager._on_output(event)
 
-            assert len(manager.state.output_buffer) <= 1000
+            # Buffer should be trimmed (10MB / ~1KB per entry = ~10000 entries max)
+            total_bytes = sum(len(s) for s in manager.state.output_buffer)
+            assert total_bytes <= 10_000_000  # MAX_OUTPUT_BYTES
 
 
 class TestInspection:

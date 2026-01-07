@@ -18,6 +18,9 @@ from .protocol import (
 
 logger = logging.getLogger(__name__)
 
+# Limits for security
+MAX_CONTENT_LENGTH = 10_000_000  # 10MB max DAP message size
+
 
 class DAPClient:
     """Async DAP client for netcoredbg communication."""
@@ -25,6 +28,7 @@ class DAPClient:
     def __init__(self, netcoredbg_path: str | None = None):
         self.netcoredbg_path = netcoredbg_path or self._find_netcoredbg()
         self._seq = 0
+        self._request_lock = asyncio.Lock()  # Protect sequence number
         self._pending: dict[int, asyncio.Future[DAPResponse]] = {}
         self._event_handlers: dict[str, list[Callable[[DAPEvent], None]]] = {}
         self._process: asyncio.subprocess.Process | None = None
@@ -86,12 +90,19 @@ class DAPClient:
             self._read_task = None
 
         if self._process:
+            pid = self._process.pid
             try:
                 self._process.terminate()
                 await asyncio.wait_for(self._process.wait(), timeout=5.0)
             except asyncio.TimeoutError:
+                logger.warning(f"Process {pid} did not terminate, killing...")
                 self._process.kill()
-                await self._process.wait()
+                try:
+                    await asyncio.wait_for(self._process.wait(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    logger.error(f"Failed to kill process {pid}")
+                    # Don't nullify if still running
+                    return
             self._process = None
 
         # Cancel pending requests
@@ -120,18 +131,20 @@ class DAPClient:
         if not self.is_running:
             raise RuntimeError("DAP client not running")
 
-        self._seq += 1
-        request = DAPRequest(seq=self._seq, command=command, arguments=arguments or {})
+        # Atomically increment seq and register future
+        async with self._request_lock:
+            self._seq += 1
+            seq = self._seq
+            future: asyncio.Future[DAPResponse] = asyncio.Future()
+            self._pending[seq] = future
 
-        future: asyncio.Future[DAPResponse] = asyncio.Future()
-        self._pending[self._seq] = future
-
+        request = DAPRequest(seq=seq, command=command, arguments=arguments or {})
         await self._send(request)
 
         try:
             return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
-            self._pending.pop(self._seq, None)
+            self._pending.pop(seq, None)
             raise TimeoutError(f"Request {command} timed out after {timeout}s")
 
     async def _send(self, request: DAPRequest) -> None:
@@ -148,34 +161,48 @@ class DAPClient:
         """Read messages from netcoredbg."""
         assert self._process and self._process.stdout
 
-        while True:
-            try:
-                # Read header
-                header_line = await self._process.stdout.readline()
-                if not header_line:
-                    logger.warning("netcoredbg stdout closed")
+        try:
+            while True:
+                try:
+                    # Read header
+                    header_line = await self._process.stdout.readline()
+                    if not header_line:
+                        logger.warning("netcoredbg stdout closed")
+                        break
+
+                    header = header_line.decode("utf-8").strip()
+                    if not header.startswith("Content-Length:"):
+                        continue
+
+                    content_length = int(header.split(":")[1].strip())
+
+                    # Validate Content-Length (security: prevent DoS)
+                    if content_length < 0 or content_length > MAX_CONTENT_LENGTH:
+                        logger.error(f"Invalid Content-Length: {content_length}")
+                        raise ValueError(f"Invalid Content-Length: {content_length}")
+
+                    # Read empty line
+                    await self._process.stdout.readline()
+
+                    # Read content
+                    content = await self._process.stdout.readexactly(content_length)
+                    data = json.loads(content.decode("utf-8"))
+
+                    self._handle_message(data)
+
+                except asyncio.CancelledError:
                     break
-
-                header = header_line.decode("utf-8").strip()
-                if not header.startswith("Content-Length:"):
-                    continue
-
-                content_length = int(header.split(":")[1].strip())
-
-                # Read empty line
-                await self._process.stdout.readline()
-
-                # Read content
-                content = await self._process.stdout.readexactly(content_length)
-                data = json.loads(content.decode("utf-8"))
-
-                self._handle_message(data)
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Error reading DAP message: {e}")
-                break
+                except Exception as e:
+                    logger.error(f"Error reading DAP message: {e}")
+                    break
+        finally:
+            # Cleanup on read loop exit (handles zombie process)
+            if self._process and self._process.returncode is None:
+                logger.warning("Read loop exited, cleaning up process...")
+                try:
+                    self._process.terminate()
+                except Exception:
+                    pass
 
     def _handle_message(self, data: dict[str, Any]) -> None:
         """Handle incoming DAP message."""

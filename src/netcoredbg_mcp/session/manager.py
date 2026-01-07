@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any, Callable
 
 from ..dap import DAPClient, DAPEvent
@@ -21,16 +22,22 @@ from .state import (
 
 logger = logging.getLogger(__name__)
 
+# Output buffer limits (security: prevent DoS)
+MAX_OUTPUT_BYTES = 10_000_000  # 10MB total buffer
+MAX_OUTPUT_ENTRY = 100_000  # 100KB per entry
+
 
 class SessionManager:
     """Manages debug session lifecycle and state."""
 
-    def __init__(self, netcoredbg_path: str | None = None):
+    def __init__(self, netcoredbg_path: str | None = None, project_path: str | None = None):
         self._client = DAPClient(netcoredbg_path)
         self._state = SessionState()
         self._breakpoints = BreakpointRegistry()
         self._state_listeners: list[Callable[[DebugState], None]] = []
         self._initialized_event = asyncio.Event()
+        self._project_path = os.path.abspath(project_path) if project_path else None
+        self._output_bytes = 0  # Track output buffer size
 
     @property
     def state(self) -> SessionState:
@@ -46,6 +53,66 @@ class SessionManager:
     def is_active(self) -> bool:
         """Check if session is active."""
         return self._state.state not in (DebugState.IDLE, DebugState.TERMINATED)
+
+    @property
+    def project_path(self) -> str | None:
+        """Get project path scope."""
+        return self._project_path
+
+    def validate_path(self, path: str, must_exist: bool = False) -> str:
+        """Validate path is within project scope.
+
+        Args:
+            path: Path to validate
+            must_exist: If True, path must exist on filesystem
+
+        Returns:
+            Absolute path
+
+        Raises:
+            ValueError: If path is invalid or outside project scope
+        """
+        # Normalize path
+        abs_path = os.path.abspath(path)
+
+        # Check for path traversal attempts
+        if ".." in path:
+            raise ValueError(f"Path traversal not allowed: {path}")
+
+        # Check within project scope
+        if self._project_path:
+            # Use os.path.commonpath for proper comparison
+            try:
+                common = os.path.commonpath([abs_path, self._project_path])
+                if common != self._project_path:
+                    raise ValueError(f"Path outside project scope: {path}")
+            except ValueError:
+                # Different drives on Windows
+                raise ValueError(f"Path outside project scope: {path}")
+
+        # Check existence if required
+        if must_exist and not os.path.exists(abs_path):
+            raise ValueError(f"Path does not exist: {path}")
+
+        return abs_path
+
+    def validate_program(self, program: str) -> str:
+        """Validate program is a .NET assembly within scope.
+
+        Args:
+            program: Path to program (.dll or .exe)
+
+        Returns:
+            Absolute path to program
+
+        Raises:
+            ValueError: If program is invalid or outside project scope
+        """
+        path = self.validate_path(program, must_exist=True)
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in (".dll", ".exe"):
+            raise ValueError(f"Program must be .NET assembly (.dll/.exe): {program}")
+        return path
 
     def on_state_change(self, listener: Callable[[DebugState], None]) -> None:
         """Register state change listener."""
@@ -116,10 +183,19 @@ class SessionManager:
     def _on_output(self, event: DAPEvent) -> None:
         """Handle output event."""
         body = OutputEventBody.from_dict(event.body)
-        self._state.output_buffer.append(body.output)
-        # Keep buffer reasonable size
-        if len(self._state.output_buffer) > 1000:
-            self._state.output_buffer = self._state.output_buffer[-500:]
+        output = body.output
+
+        # Truncate individual entries (security: prevent single large entry)
+        if len(output) > MAX_OUTPUT_ENTRY:
+            output = output[:MAX_OUTPUT_ENTRY] + "... [truncated]"
+
+        self._state.output_buffer.append(output)
+        self._output_bytes += len(output)
+
+        # Trim buffer by byte size (security: prevent DoS)
+        while self._output_bytes > MAX_OUTPUT_BYTES and self._state.output_buffer:
+            removed = self._state.output_buffer.pop(0)
+            self._output_bytes -= len(removed)
 
     def _on_thread(self, event: DAPEvent) -> None:
         """Handle thread event."""
