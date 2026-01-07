@@ -140,22 +140,32 @@ def create_server(project_path: str | None = None) -> FastMCP:
     @mcp.tool()
     async def attach_debug(process_id: int) -> dict:
         """
-        Attach to a running .NET process by PID.
+        AVOID - Use start_debug instead. Attach to already-running process (LIMITED).
 
-        WARNING: Due to netcoredbg limitations, attach mode has reduced functionality:
-        - Stack traces may be incomplete or empty
-        - Some debugging features may not work as expected
+        LIMITATION: netcoredbg does NOT support justMyCode in attach mode (only in launch).
+        This is an UPSTREAM limitation that CANNOT be fixed by this MCP server.
+        Result: stack traces will be incomplete/empty, debugging will be unreliable.
 
-        For most debugging scenarios, use start_debug instead. Only use attach_debug
-        when you need to debug an already-running process (e.g., ASP.NET service,
-        background worker, or containerized application).
+        ONLY use this if you MUST debug an already-running process that you
+        cannot restart (e.g., production service, container you cannot control).
+
+        For normal debugging, ALWAYS use start_debug which has full functionality.
+        If start_debug fails with build errors, fix the build - don't switch to attach.
 
         Args:
-            process_id: The PID of the running .NET process to attach to
+            process_id: PID of an already-running .NET process (NOT for normal debugging)
         """
         try:
             result = await session.attach(process_id)
-            return {"success": True, "data": result}
+            return {
+                "success": True,
+                "data": result,
+                "warning": (
+                    "ATTACH MODE HAS LIMITED FUNCTIONALITY. "
+                    "Stack traces may be incomplete due to netcoredbg limitation. "
+                    "For reliable debugging, use start_debug instead."
+                ),
+            }
         except Exception as e:
             return {"success": False, "error": str(e)}
 
