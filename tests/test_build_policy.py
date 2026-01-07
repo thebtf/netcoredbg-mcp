@@ -1,15 +1,14 @@
 """Tests for build policy - argument validation and security."""
 
 import os
+
 import pytest
 
 from netcoredbg_mcp.build.policy import (
-    BuildPolicy,
-    BuildCommand,
-    ALLOWED_ARGUMENTS,
-    ALLOWED_CONFIGURATIONS,
     FRAMEWORK_PATTERN,
     RUNTIME_PATTERN,
+    BuildCommand,
+    BuildPolicy,
 )
 
 

@@ -1,12 +1,12 @@
 """Tests for session manager."""
 
-import asyncio
 import os
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from netcoredbg_mcp.session import SessionManager, DebugState
-from netcoredbg_mcp.dap import DAPResponse, DAPEvent
+import pytest
+
+from netcoredbg_mcp.dap import DAPEvent, DAPResponse
+from netcoredbg_mcp.session import DebugState, SessionManager
 
 
 class TestSessionManagerInit:

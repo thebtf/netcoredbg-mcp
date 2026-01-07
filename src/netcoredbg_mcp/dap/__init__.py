@@ -1,6 +1,6 @@
 """DAP (Debug Adapter Protocol) client implementation."""
 
 from .client import DAPClient
-from .protocol import DAPRequest, DAPResponse, DAPEvent
+from .protocol import DAPEvent, DAPRequest, DAPResponse
 
 __all__ = ["DAPClient", "DAPEvent", "DAPRequest", "DAPResponse"]

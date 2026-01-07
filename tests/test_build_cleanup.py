@@ -2,14 +2,15 @@
 
 import asyncio
 import os
+from unittest.mock import AsyncMock, patch
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 
 from netcoredbg_mcp.build.cleanup import (
-    kill_processes_in_directory,
-    kill_debugger_processes,
-    cleanup_for_build,
     KNOWN_DEBUGGER_PROCESSES,
+    cleanup_for_build,
+    kill_debugger_processes,
+    kill_processes_in_directory,
 )
 
 

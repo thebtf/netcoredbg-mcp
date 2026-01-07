@@ -5,16 +5,18 @@ from __future__ import annotations
 import json
 import logging
 import os
+from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 from .session import SessionManager
+from .utils.project import get_project_root
 
 logger = logging.getLogger(__name__)
 
 # Global session manager (single client mode)
 _session: SessionManager | None = None
-_project_path: str | None = None
+_initial_project_path: str | None = None
 
 
 def get_session() -> SessionManager:
@@ -25,20 +27,47 @@ def get_session() -> SessionManager:
     global _session
     if _session is None:
         netcoredbg_path = os.environ.get("NETCOREDBG_PATH")
-        _session = SessionManager(netcoredbg_path, _project_path)
+        _session = SessionManager(netcoredbg_path, _initial_project_path)
     return _session
+
+
+async def resolve_project_root(ctx: Context, session: SessionManager) -> Path | None:
+    """Resolve the current project root, potentially updating session.
+
+    Uses MCP roots from client if available, otherwise falls back to
+    configured project path.
+
+    Args:
+        ctx: MCP Context for accessing client roots
+        session: Session manager to update if project root changes
+
+    Returns:
+        Current project root path
+    """
+    # Try to get project root from MCP context (includes client roots)
+    project_root = await get_project_root(ctx)
+
+    if project_root:
+        # Update session's project path if it differs
+        current = session.project_path
+        new_path = str(project_root)
+        if current != new_path:
+            logger.info(f"Updating project root: {current} -> {new_path}")
+            session.set_project_path(new_path)
+
+    return project_root
 
 
 def create_server(project_path: str | None = None) -> FastMCP:
     """Create and configure the MCP server.
 
     Args:
-        project_path: Root path for the project being debugged.
+        project_path: Initial root path for the project being debugged.
             All file operations will be constrained to this path.
-            If None, uses current working directory.
+            Can be dynamically updated from MCP client roots.
     """
-    global _project_path
-    _project_path = project_path
+    global _initial_project_path
+    _initial_project_path = project_path
     mcp = FastMCP("netcoredbg-mcp")
     session = get_session()
 
@@ -46,6 +75,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
 
     @mcp.tool()
     async def start_debug(
+        ctx: Context,
         program: str,
         cwd: str | None = None,
         args: list[str] | None = None,
@@ -63,6 +93,9 @@ def create_server(project_path: str | None = None) -> FastMCP:
             stop_at_entry: Stop at entry point
         """
         try:
+            # Resolve project root from MCP context (may update session)
+            await resolve_project_root(ctx, session)
+
             # Validate program path (security: prevent arbitrary execution)
             validated_program = session.validate_program(program)
 
@@ -157,6 +190,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
 
     @mcp.tool()
     async def add_breakpoint(
+        ctx: Context,
         file: str,
         line: int,
         condition: str | None = None,
@@ -172,6 +206,9 @@ def create_server(project_path: str | None = None) -> FastMCP:
             hit_condition: Optional hit count condition
         """
         try:
+            # Resolve project root from MCP context
+            await resolve_project_root(ctx, session)
+
             # Validate file path (security: prevent path traversal)
             validated_file = session.validate_path(file, must_exist=True)
             bp = await session.add_breakpoint(validated_file, line, condition, hit_condition)
@@ -188,9 +225,12 @@ def create_server(project_path: str | None = None) -> FastMCP:
             return {"success": False, "error": str(e)}
 
     @mcp.tool()
-    async def remove_breakpoint(file: str, line: int) -> dict:
+    async def remove_breakpoint(ctx: Context, file: str, line: int) -> dict:
         """Remove a breakpoint from a specific line."""
         try:
+            # Resolve project root from MCP context
+            await resolve_project_root(ctx, session)
+
             # Validate file path (security: prevent path traversal)
             validated_file = session.validate_path(file)
             removed = await session.remove_breakpoint(validated_file, line)
@@ -199,10 +239,12 @@ def create_server(project_path: str | None = None) -> FastMCP:
             return {"success": False, "error": str(e)}
 
     @mcp.tool()
-    async def list_breakpoints(file: str | None = None) -> dict:
+    async def list_breakpoints(ctx: Context, file: str | None = None) -> dict:
         """List all breakpoints or breakpoints in a specific file."""
         try:
             if file:
+                # Resolve project root from MCP context
+                await resolve_project_root(ctx, session)
                 # Validate file path if provided
                 validated_file = session.validate_path(file)
                 bps = session.breakpoints.get_for_file(validated_file)
@@ -222,11 +264,13 @@ def create_server(project_path: str | None = None) -> FastMCP:
             return {"success": False, "error": str(e)}
 
     @mcp.tool()
-    async def clear_breakpoints(file: str | None = None) -> dict:
+    async def clear_breakpoints(ctx: Context, file: str | None = None) -> dict:
         """Clear breakpoints from a file or all files."""
         try:
             validated_file = None
             if file:
+                # Resolve project root from MCP context
+                await resolve_project_root(ctx, session)
                 # Validate file path if provided
                 validated_file = session.validate_path(file)
             count = await session.clear_breakpoints(validated_file)

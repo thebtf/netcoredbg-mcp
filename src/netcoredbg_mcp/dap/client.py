@@ -7,14 +7,15 @@ import json
 import logging
 import os
 import shutil
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from .protocol import (
+    Commands,
+    DAPEvent,
     DAPRequest,
     DAPResponse,
-    DAPEvent,
     parse_message,
-    Commands,
 )
 
 logger = logging.getLogger(__name__)

@@ -14,7 +14,7 @@ import asyncio
 import logging
 import os
 import time
-from typing import Callable
+from collections.abc import Callable
 
 from .cleanup import cleanup_for_build
 from .policy import BuildCommand, BuildPolicy

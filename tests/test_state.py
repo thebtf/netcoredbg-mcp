@@ -1,15 +1,14 @@
 """Tests for debug session state management."""
 
-import pytest
 
 from netcoredbg_mcp.session.state import (
-    DebugState,
     Breakpoint,
     BreakpointRegistry,
-    ThreadInfo,
-    StackFrame,
-    Variable,
+    DebugState,
     SessionState,
+    StackFrame,
+    ThreadInfo,
+    Variable,
 )
 
 

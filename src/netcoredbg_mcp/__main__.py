@@ -6,56 +6,9 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Iterator
 
 from .server import create_server, get_session
-
-
-def find_project_root(root: str | Path | None = None) -> str:
-    """Find .NET project root by walking up from CWD.
-
-    Searches for project markers in this order:
-    1. .sln (solution file) - preferred for multi-project setups
-    2. .csproj/.vbproj/.fsproj (project files)
-    3. .git (git root as fallback)
-
-    Falls back to CWD if no marker is found.
-
-    Args:
-        root: If provided, constrains search to this directory and below.
-              Search stops at this boundary.
-
-    Returns:
-        Absolute path to project root (falls back to CWD if no marker found)
-    """
-    current = Path.cwd().resolve()
-    boundary = Path(root).resolve() if root is not None else None
-
-    def ancestors() -> Iterator[Path]:
-        """Yield current directory and ancestors up to boundary."""
-        yield current
-        for parent in current.parents:
-            yield parent
-            if boundary is not None and parent == boundary:
-                return
-
-    # First pass: look for .sln (solution - most specific for .NET)
-    for directory in ancestors():
-        if any(directory.glob("*.sln")):
-            return str(directory)
-
-    # Second pass: look for project files (.csproj, .vbproj, .fsproj)
-    for directory in ancestors():
-        if any(directory.glob("*.csproj")) or any(directory.glob("*.vbproj")) or any(directory.glob("*.fsproj")):
-            return str(directory)
-
-    # Third pass: look for .git
-    for directory in ancestors():
-        if (directory / ".git").exists():  # .git can be file (worktree) or dir
-            return str(directory)
-
-    # Fall back to CWD
-    return str(current)
+from .utils.project import configure_project_root, get_project_root_sync
 
 
 def configure_logging() -> None:
@@ -86,6 +39,7 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Auto-detect project from current working directory. "
         "Searches upward for .sln, .csproj/.vbproj/.fsproj, or .git markers. "
+        "Also uses MCP roots from client if available. "
         "Intended for CLI-based agents like Claude Code. "
         "Cannot be used with --project.",
     )
@@ -99,20 +53,35 @@ async def main() -> None:
 
     args = parse_args()
 
-    # Handle --project-from-cwd
+    # Capture CWD at startup (before any chdir)
+    startup_cwd = Path.cwd()
+
+    # Validate mutually exclusive options
     project_from_cwd = getattr(args, "project_from_cwd", False)
-    if project_from_cwd:
-        if args.project is not None:
-            logger.error("--project-from-cwd cannot be used with --project")
-            sys.exit(1)
-        project_path = find_project_root()
-        logger.info(f"Auto-detected project root: {project_path}")
+    if project_from_cwd and args.project is not None:
+        logger.error("--project-from-cwd cannot be used with --project")
+        sys.exit(1)
+
+    # Configure project root detection
+    configure_project_root(
+        use_project_from_cwd=project_from_cwd,
+        explicit_project_path=args.project,
+        startup_cwd=startup_cwd,
+    )
+
+    # Get initial project root (without MCP context - that comes later from tools)
+    project_path = get_project_root_sync()
+
+    if project_path:
+        logger.info(f"Starting NetCoreDbg MCP Server (project: {project_path})")
     else:
-        project_path = args.project or os.getcwd()
+        logger.info(
+            "Starting NetCoreDbg MCP Server (project root will be determined from MCP client)"
+        )
 
-    logger.info(f"Starting NetCoreDbg MCP Server (project: {project_path})...")
-
-    mcp = create_server(project_path)
+    # Create server - pass project_path for backwards compatibility
+    # The server will also use get_project_root() with Context for dynamic resolution
+    mcp = create_server(str(project_path) if project_path else None)
 
     try:
         await mcp.run_stdio_async()

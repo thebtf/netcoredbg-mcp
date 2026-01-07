@@ -5,19 +5,20 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
-from ..build import BuildManager, BuildError, BuildResult
+from ..build import BuildManager, BuildResult
 from ..dap import DAPClient, DAPEvent
-from ..dap.events import StoppedEventBody, OutputEventBody, StopReason
+from ..dap.events import OutputEventBody, StoppedEventBody
 from ..dap.protocol import Events
 from .state import (
+    Breakpoint,
+    BreakpointRegistry,
     DebugState,
     SessionState,
-    BreakpointRegistry,
-    Breakpoint,
-    ThreadInfo,
     StackFrame,
+    ThreadInfo,
     Variable,
 )
 
@@ -62,6 +63,18 @@ class SessionManager:
     def project_path(self) -> str | None:
         """Get project path scope."""
         return self._project_path
+
+    def set_project_path(self, project_path: str | None) -> None:
+        """Set project path scope dynamically.
+
+        This allows updating the project path after initialization,
+        e.g., when MCP client provides roots.
+
+        Args:
+            project_path: New project path, or None to disable scope checking
+        """
+        self._project_path = os.path.abspath(project_path) if project_path else None
+        logger.debug(f"Project path updated to: {self._project_path}")
 
     @property
     def last_build_result(self) -> BuildResult | None:

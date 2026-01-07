@@ -7,10 +7,11 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from mcp.server import Server
+
     from .session import SessionManager
 
 
-def register_resources(server: "Server", session: "SessionManager") -> None:
+def register_resources(server: Server, session: SessionManager) -> None:
     """Register MCP resources."""
 
     @server.resource("debug://state")
