@@ -1,0 +1,5 @@
+# MCP configuration (contains secrets)
+.mcp.json
+
+# Debug tools
+.mcp-debug-tools/
