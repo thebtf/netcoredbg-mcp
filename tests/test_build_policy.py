@@ -42,6 +42,12 @@ class TestPatterns:
             "netstandard2.1",
             "netstandard2.0",
             "net48",
+            "net451",  # Digits without dot
+            "netcoreapp3.1",  # netcoreapp prefix
+            "netcoreapp2.1",
+            "net8.0-android",  # Platform suffix
+            "net8.0-ios",
+            "net8.0-windows10.0.19041",  # Version suffix
             "NET8.0",  # Case insensitive
         ]
         for framework in valid:
@@ -68,6 +74,13 @@ class TestPatterns:
             "linux-arm64",
             "osx-x64",
             "osx-arm64",
+            "browser-wasm",  # WebAssembly
+            "iossimulator-x64",  # iOS simulator
+            "maccatalyst-arm64",  # Mac Catalyst
+            "linux-loongarch64",  # LoongArch
+            "linux-s390x",  # IBM Z
+            "unix",  # Standalone RID
+            "any",  # Any platform
             "WIN-X64",  # Case insensitive
         ]
         for rid in valid:

@@ -66,15 +66,20 @@ ALLOWED_VERBOSITY: Final[frozenset[str]] = frozenset(
     {"quiet", "minimal", "normal", "detailed", "diagnostic", "q", "m", "n", "d", "diag"}
 )
 
-# Pattern for valid framework monikers (e.g., net8.0, netstandard2.1, net48)
+# Pattern for valid framework monikers
+# Supports: net8.0, net48, net451, netstandard2.1, netcoreapp3.1, net8.0-android,
+# net8.0-windows10.0.19041, etc.
 FRAMEWORK_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^net(?:standard)?[0-9]+(?:\.[0-9]+)?(?:-[a-z]+)?$", re.IGNORECASE
+    r"^net(?:standard|coreapp)?[0-9]+(?:\.[0-9]+)*(?:-[a-z0-9.]+)?$", re.IGNORECASE
 )
 
-# Pattern for valid runtime identifiers (e.g., win-x64, linux-arm64)
+# Pattern for valid runtime identifiers
+# Supports: win-x64, linux-arm64, osx-arm64, browser-wasm, iossimulator-x64, unix, any, etc.
 RUNTIME_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^(?:win|linux|osx|freebsd|alpine|android|ios|tvos|watchos|browser|wasi)"
-    r"(?:-(?:x64|x86|arm|arm64|musl-x64|musl-arm64|bionic-x64|bionic-arm64))?$",
+    r"^(?:win|linux|osx|freebsd|alpine|android|ios|iossimulator|tvos|tvsimulator|"
+    r"watchos|watchsimulator|maccatalyst|browser|wasi|unix|any)"
+    r"(?:-(?:x64|x86|arm|arm64|loongarch64|s390x|ppc64le|riscv64|wasm|"
+    r"musl-x64|musl-arm64|bionic-x64|bionic-arm64))?$",
     re.IGNORECASE,
 )
 

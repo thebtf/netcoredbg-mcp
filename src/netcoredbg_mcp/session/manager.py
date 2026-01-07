@@ -393,13 +393,20 @@ class SessionManager:
             Launch result
 
         Raises:
-            RuntimeError: If no previous launch configuration exists
+            RuntimeError: If no previous launch configuration exists,
+                         or if rebuild requested but no build_project configured
             BuildError: If rebuild fails
         """
         if not self._last_launch_config:
             raise RuntimeError("No previous launch configuration for restart")
 
         config = self._last_launch_config.copy()
+
+        # Validate rebuild request - cannot rebuild without build_project
+        if rebuild and not config.get("build_project"):
+            raise RuntimeError(
+                "Cannot rebuild on restart: no build_project in saved configuration"
+            )
 
         # Always stop existing session first to ensure clean state
         # This is needed even when pre_build=False to avoid relaunch issues
