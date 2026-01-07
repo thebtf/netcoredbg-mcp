@@ -94,10 +94,14 @@ def create_server(project_path: str | None = None) -> FastMCP:
         - Full variable inspection
         - All breakpoint features
 
+        SMART RESOLUTION: For .NET 6+ apps (WPF/WinForms), automatically resolves
+        .exe to .dll to avoid "deps.json conflict" errors. You can pass either
+        App.exe or App.dll - the correct target will be selected automatically.
+
         Use attach_debug only for already-running processes (e.g., ASP.NET services).
 
         Args:
-            program: Path to the .NET executable or DLL to debug
+            program: Path to the .NET executable or DLL to debug (auto-resolved)
             cwd: Working directory for the program
             args: Command line arguments
             env: Environment variables

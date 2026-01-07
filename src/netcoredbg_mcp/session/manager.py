@@ -116,11 +116,19 @@ class SessionManager:
     def validate_program(self, program: str) -> str:
         """Validate program is a .NET assembly within scope.
 
+        For .NET 6+ apps (WPF/WinForms), automatically resolves .exe to .dll
+        to avoid assembly name conflicts. .NET 6+ creates both:
+        - App.exe (native host/launcher)
+        - App.dll (managed assembly with actual code)
+
+        Debugging the .exe causes "deps.json conflict" errors because the runtime
+        finds both assemblies with the same name. The .dll is the correct target.
+
         Args:
             program: Path to program (.dll or .exe)
 
         Returns:
-            Absolute path to program
+            Absolute path to program (resolved to .dll if applicable)
 
         Raises:
             ValueError: If program is invalid or outside project scope
@@ -129,6 +137,20 @@ class SessionManager:
         ext = os.path.splitext(path)[1].lower()
         if ext not in (".dll", ".exe"):
             raise ValueError(f"Program must be .NET assembly (.dll/.exe): {program}")
+
+        # Smart resolution: .exe → .dll for .NET 6+ apps
+        if ext == ".exe":
+            dll_path = os.path.splitext(path)[0] + ".dll"
+            if os.path.isfile(dll_path):
+                # Check for .NET 6+ markers (runtimeconfig.json indicates SDK-style project)
+                runtimeconfig = os.path.splitext(path)[0] + ".runtimeconfig.json"
+                if os.path.isfile(runtimeconfig):
+                    logger.info(
+                        f"Resolved .exe to .dll for .NET 6+ debugging: "
+                        f"{os.path.basename(path)} → {os.path.basename(dll_path)}"
+                    )
+                    return dll_path
+
         return path
 
     def on_state_change(self, listener: Callable[[DebugState], None]) -> None:
