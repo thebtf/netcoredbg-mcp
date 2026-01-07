@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "netcoredbg-mcp"
+version = "0.1.0"
+description = "MCP server for debugging C#/.NET code using netcoredbg"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "netcoredbg-mcp contributors" }
+]
+keywords = ["mcp", "debugging", "dotnet", "csharp", "netcoredbg", "dap"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Debuggers",
+]
+dependencies = [
+    "mcp>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "ruff>=0.1",
+    "mypy>=1.0",
+]
+
+[project.scripts]
+netcoredbg-mcp = "netcoredbg_mcp.__main__:run"
+
+[project.urls]
+Homepage = "https://github.com/thebtf/netcoredbg-mcp"
+Repository = "https://github.com/thebtf/netcoredbg-mcp"
+Issues = "https://github.com/thebtf/netcoredbg-mcp/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/netcoredbg_mcp"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
