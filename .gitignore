@@ -46,3 +46,7 @@ htmlcov/
 .tox/
 .mypy_cache/
 .ruff_cache/
+
+# .NET
+bin/
+obj/
