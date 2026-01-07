@@ -97,6 +97,27 @@ For development using [uv](https://docs.astral.sh/uv/):
 }
 ```
 
+### Claude Code (Global Configuration)
+
+For [Claude Code](https://claude.ai/claude-code) with automatic project detection, use `--project-from-cwd`:
+
+```bash
+claude mcp add --scope user netcoredbg -- netcoredbg-mcp --project-from-cwd
+```
+
+Or with uv (development version):
+
+```bash
+claude mcp add --scope user netcoredbg -- uv --directory /path/to/netcoredbg-mcp run netcoredbg-mcp --project-from-cwd
+```
+
+The `--project-from-cwd` flag automatically detects your .NET project by searching upward from the current directory for:
+1. `.sln` files (solution - preferred for multi-project setups)
+2. `.csproj`/`.vbproj`/`.fsproj` files (project files)
+3. `.git` directory (git root as fallback)
+
+This allows you to debug any .NET project from the directory where Claude Code is running.
+
 ## Available Tools
 
 ### Debug Control
@@ -139,6 +160,13 @@ For development using [uv](https://docs.astral.sh/uv/):
 | `debug://breakpoints` | All active breakpoints |
 | `debug://output` | Debug console output |
 | `debug://threads` | Current threads |
+
+## Command Line Options
+
+| Option | Description |
+|--------|-------------|
+| `--project PATH` | Project root path for debugging. All debug operations will be constrained to this path. |
+| `--project-from-cwd` | Auto-detect project from current working directory. Searches upward for `.sln`, `.csproj`/`.vbproj`/`.fsproj`, or `.git` markers. Cannot be used with `--project`. |
 
 ## Environment Variables
 
