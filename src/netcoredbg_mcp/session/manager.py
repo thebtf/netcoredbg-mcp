@@ -7,6 +7,7 @@ import logging
 import os
 from typing import Any, Callable
 
+from ..build import BuildManager, BuildError, BuildResult
 from ..dap import DAPClient, DAPEvent
 from ..dap.events import StoppedEventBody, OutputEventBody, StopReason
 from ..dap.protocol import Events
@@ -38,6 +39,9 @@ class SessionManager:
         self._initialized_event = asyncio.Event()
         self._project_path = os.path.abspath(project_path) if project_path else None
         self._output_bytes = 0  # Track output buffer size
+        self._build_manager = BuildManager()
+        self._last_build_result: BuildResult | None = None
+        self._last_launch_config: dict[str, Any] | None = None  # For restart
 
     @property
     def state(self) -> SessionState:
@@ -58,6 +62,11 @@ class SessionManager:
     def project_path(self) -> str | None:
         """Get project path scope."""
         return self._project_path
+
+    @property
+    def last_build_result(self) -> BuildResult | None:
+        """Get last build result."""
+        return self._last_build_result
 
     def validate_path(self, path: str, must_exist: bool = False) -> str:
         """Validate path is within project scope.
@@ -201,6 +210,47 @@ class SessionManager:
             self._state.threads = [t for t in self._state.threads if t.id != thread_id]
         # Note: "started" events are handled lazily via get_threads()
 
+    async def pre_launch_build(
+        self,
+        project_file: str,
+        configuration: str = "Debug",
+        restore_first: bool = True,
+        timeout: float = 300.0,
+    ) -> BuildResult:
+        """Execute pre-launch build sequence (restore + build).
+
+        This is the equivalent of VSCode's preLaunchTask for debugging.
+
+        Args:
+            project_file: Path to .csproj or .sln file
+            configuration: Build configuration (Debug/Release)
+            restore_first: Whether to run restore before build
+            timeout: Total timeout for all operations
+
+        Returns:
+            Build result
+
+        Raises:
+            BuildError: If build fails
+            ValueError: If project path is invalid or outside scope
+        """
+        if not self._project_path:
+            raise ValueError("Project path not set for pre-launch build")
+
+        # Validate project file path
+        validated_project = self.validate_path(project_file, must_exist=True)
+
+        # Run pre-launch build
+        result = await self._build_manager.pre_launch_build(
+            workspace_root=self._project_path,
+            project_path=validated_project,
+            configuration=configuration,
+            restore_first=restore_first,
+            timeout=timeout,
+        )
+        self._last_build_result = result
+        return result
+
     async def launch(
         self,
         program: str,
@@ -208,8 +258,46 @@ class SessionManager:
         args: list[str] | None = None,
         env: dict[str, str] | None = None,
         stop_at_entry: bool = False,
+        pre_build: bool = False,
+        build_project: str | None = None,
+        build_configuration: str = "Debug",
     ) -> dict[str, Any]:
-        """Launch program for debugging."""
+        """Launch program for debugging.
+
+        Args:
+            program: Path to .dll or .exe to debug
+            cwd: Working directory
+            args: Command-line arguments
+            env: Environment variables
+            stop_at_entry: Stop at program entry point
+            pre_build: Run pre-launch build before launching
+            build_project: Project file for pre-build (required if pre_build=True)
+            build_configuration: Build configuration for pre-build
+
+        Returns:
+            Launch result
+
+        Raises:
+            RuntimeError: If launch fails
+            BuildError: If pre-build fails
+        """
+        # Run pre-launch build if requested
+        if pre_build:
+            if not build_project:
+                raise ValueError("build_project required when pre_build=True")
+
+            # Stop existing session first to release file locks
+            if self.is_active:
+                logger.info("Stopping existing session before build")
+                await self.stop()
+                # Give processes time to release file handles
+                await asyncio.sleep(0.5)
+
+            await self.pre_launch_build(
+                project_file=build_project,
+                configuration=build_configuration,
+            )
+
         if not self._client.is_running:
             await self.start()
 
@@ -240,6 +328,18 @@ class SessionManager:
         # Configuration done
         await self._client.configuration_done()
         self._set_state(DebugState.RUNNING)
+
+        # Save launch config for restart
+        self._last_launch_config = {
+            "program": program,
+            "cwd": cwd,
+            "args": args,
+            "env": env,
+            "stop_at_entry": stop_at_entry,
+            "pre_build": pre_build,
+            "build_project": build_project,
+            "build_configuration": build_configuration,
+        }
 
         return {"success": True, "program": program}
 
@@ -280,6 +380,43 @@ class SessionManager:
         self._output_bytes = 0  # Reset output tracking for next session
 
         return {"success": True}
+
+    async def restart(self, rebuild: bool = True) -> dict[str, Any]:
+        """Restart debug session with same configuration.
+
+        Stops current session, optionally rebuilds, and relaunches.
+
+        Args:
+            rebuild: Whether to rebuild before restarting (default True)
+
+        Returns:
+            Launch result
+
+        Raises:
+            RuntimeError: If no previous launch configuration exists,
+                         or if rebuild requested but no build_project configured
+            BuildError: If rebuild fails
+        """
+        if not self._last_launch_config:
+            raise RuntimeError("No previous launch configuration for restart")
+
+        config = self._last_launch_config.copy()
+
+        # Validate rebuild request - cannot rebuild without build_project
+        if rebuild and not config.get("build_project"):
+            raise RuntimeError(
+                "Cannot rebuild on restart: no build_project in saved configuration"
+            )
+
+        # Always stop existing session first to ensure clean state
+        # This is needed even when pre_build=False to avoid relaunch issues
+        await self.stop()
+
+        # Force pre_build if rebuild requested and we have build info
+        if rebuild and config.get("build_project"):
+            config["pre_build"] = True
+
+        return await self.launch(**config)
 
     async def _sync_all_breakpoints(self) -> None:
         """Sync all breakpoints to DAP."""

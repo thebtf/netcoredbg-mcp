@@ -73,6 +73,30 @@ Or if installed as a package:
 }
 ```
 
+### Development Version
+
+For development using [uv](https://docs.astral.sh/uv/):
+
+```json
+{
+  "mcpServers": {
+    "netcoredbg": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/path/to/netcoredbg-mcp",
+        "run",
+        "netcoredbg-mcp"
+      ],
+      "env": {
+        "NETCOREDBG_PATH": "/path/to/netcoredbg/netcoredbg.exe",
+        "LOG_LEVEL": "DEBUG"
+      }
+    }
+  }
+}
+```
+
 ## Available Tools
 
 ### Debug Control
