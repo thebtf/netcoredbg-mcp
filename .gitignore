@@ -1,6 +1,9 @@
 # Agent workspace (local only)
 .agent/
 .claude/
+.serena/
+.zencoder/
+.zenflow/
 
 # netcoredbg binary (download separately)
 bin/netcoredbg/
