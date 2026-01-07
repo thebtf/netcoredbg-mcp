@@ -1,5 +1,6 @@
 # Agent workspace (local only)
 .agent/
+.claude/
 
 # netcoredbg binary (download separately)
 bin/netcoredbg/
