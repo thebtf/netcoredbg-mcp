@@ -1,16 +1,10 @@
 {
   "mcpServers": {
     "netcoredbg": {
-      "command": "uv",
-      "args": [
-        "run",
-        "--project",
-        "/path/to/netcoredbg-mcp",
-        "netcoredbg-mcp",
-        "--project-from-cwd"
-      ],
+      "command": "netcoredbg-mcp",
+      "args": ["--project-from-cwd"],
       "env": {
-        "NETCOREDBG_PATH": "/path/to/netcoredbg/netcoredbg.exe"
+        "NETCOREDBG_PATH": "D:\\Bin\\netcoredbg\\netcoredbg.exe"
       }
     }
   }

@@ -7,6 +7,7 @@ import os
 import sys
 from pathlib import Path
 
+from . import __version__
 from .server import create_server, get_session
 from .utils.project import configure_project_root, get_project_root_sync
 
@@ -40,6 +41,11 @@ def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
         description="NetCoreDbg MCP Server - Debug .NET applications via MCP"
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
     )
     parser.add_argument(
         "--project",

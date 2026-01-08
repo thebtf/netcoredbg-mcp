@@ -1,5 +1,6 @@
 # netcoredbg-mcp
 
+[![PyPI](https://img.shields.io/pypi/v/netcoredbg-mcp)](https://pypi.org/project/netcoredbg-mcp/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](#requirements)
 [![MCP](https://img.shields.io/badge/MCP-Server-6f42c1)](https://modelcontextprotocol.io/)
@@ -72,16 +73,23 @@ copy "C:\Program Files\dotnet\shared\Microsoft.NETCore.App\6.0.36\dbgshim.dll" "
 ### Install the MCP Server
 
 ```bash
-# Clone the repository
+# Install from PyPI (recommended)
+uv pip install netcoredbg-mcp
+
+# Or with pip
+pip install netcoredbg-mcp
+```
+
+<details>
+<summary><strong>Install from Source (Development)</strong></summary>
+
+```bash
 git clone https://github.com/thebtf/netcoredbg-mcp.git
 cd netcoredbg-mcp
-
-# Install with uv (recommended)
 uv sync
-
-# Or install with pip
-pip install -e .
 ```
+
+</details>
 
 ### Install netcoredbg
 
@@ -99,31 +107,43 @@ Set `NETCOREDBG_PATH` in your PowerShell profile (`%USERPROFILE%\Documents\Power
 $env:NETCOREDBG_PATH = "D:\Bin\netcoredbg\netcoredbg.exe"
 ```
 
-> [!IMPORTANT]
-> **Use `uv run --project` NOT `uv --directory`**
->
-> The `--directory` flag changes the working directory, which breaks `--project-from-cwd` detection.
-
 ### Base Server Configuration
 
-All clients use this same server definition (adjust paths for your setup):
+All clients use this same server definition:
 
 ```jsonc
 {
   "netcoredbg": {
-    "command": "uv",
-    "args": [
-      "run",
-      "--project", "D:\\Dev\\netcoredbg-mcp",
-      "netcoredbg-mcp",
-      "--project-from-cwd"
-    ],
+    "command": "netcoredbg-mcp",
+    "args": ["--project-from-cwd"],
     "env": {
       "NETCOREDBG_PATH": "D:\\Bin\\netcoredbg\\netcoredbg.exe"
     }
   }
 }
 ```
+
+<details>
+<summary><strong>Running from Source (Development)</strong></summary>
+
+If running from cloned repository instead of PyPI:
+
+```jsonc
+{
+  "netcoredbg": {
+    "command": "uv",
+    "args": ["run", "--project", "D:\\Dev\\netcoredbg-mcp", "netcoredbg-mcp", "--project-from-cwd"],
+    "env": {
+      "NETCOREDBG_PATH": "D:\\Bin\\netcoredbg\\netcoredbg.exe"
+    }
+  }
+}
+```
+
+> [!IMPORTANT]
+> Use `uv run --project` NOT `uv --directory`. The `--directory` flag changes CWD, breaking `--project-from-cwd`.
+
+</details>
 
 ---
 
@@ -135,7 +155,7 @@ All clients use this same server definition (adjust paths for your setup):
 <summary><b>Claude Code</b></summary>
 
 ```powershell
-claude mcp add --scope user netcoredbg -- uv run --project "D:\Dev\netcoredbg-mcp" netcoredbg-mcp --project-from-cwd
+claude mcp add --scope user netcoredbg -- netcoredbg-mcp --project-from-cwd
 ```
 
 **Verify:** `claude mcp list`
@@ -149,14 +169,14 @@ claude mcp add --scope user netcoredbg -- uv run --project "D:\Dev\netcoredbg-mc
 
 ```toml
 [mcp_servers.netcoredbg]
-command = "uv"
-args = ["run", "--project", "D:\\Dev\\netcoredbg-mcp", "netcoredbg-mcp", "--project-from-cwd"]
+command = "netcoredbg-mcp"
+args = ["--project-from-cwd"]
 
 [mcp_servers.netcoredbg.env]
 NETCOREDBG_PATH = "D:\\Bin\\netcoredbg\\netcoredbg.exe"
 ```
 
-**Or via CLI:** `codex mcp add netcoredbg -- uv run --project "D:\Dev\netcoredbg-mcp" netcoredbg-mcp --project-from-cwd`
+**Or via CLI:** `codex mcp add netcoredbg -- netcoredbg-mcp --project-from-cwd`
 
 </details>
 
@@ -169,8 +189,8 @@ NETCOREDBG_PATH = "D:\\Bin\\netcoredbg\\netcoredbg.exe"
 {
   "mcpServers": {
     "netcoredbg": {
-      "command": "uv",
-      "args": ["run", "--project", "D:\\Dev\\netcoredbg-mcp", "netcoredbg-mcp", "--project-from-cwd"],
+      "command": "netcoredbg-mcp",
+      "args": ["--project-from-cwd"],
       "env": {
         "NETCOREDBG_PATH": "D:\\Bin\\netcoredbg\\netcoredbg.exe"
       }
@@ -190,8 +210,8 @@ NETCOREDBG_PATH = "D:\\Bin\\netcoredbg\\netcoredbg.exe"
 {
   "mcpServers": {
     "netcoredbg": {
-      "command": "uv",
-      "args": ["run", "--project", "D:\\Dev\\netcoredbg-mcp", "netcoredbg-mcp", "--project-from-cwd"],
+      "command": "netcoredbg-mcp",
+      "args": ["--project-from-cwd"],
       "env": {
         "NETCOREDBG_PATH": "D:\\Bin\\netcoredbg\\netcoredbg.exe"
       }
@@ -211,8 +231,8 @@ NETCOREDBG_PATH = "D:\\Bin\\netcoredbg\\netcoredbg.exe"
 {
   "mcpServers": {
     "netcoredbg": {
-      "command": "uv",
-      "args": ["run", "--project", "D:\\Dev\\netcoredbg-mcp", "netcoredbg-mcp", "--project-from-cwd"],
+      "command": "netcoredbg-mcp",
+      "args": ["--project-from-cwd"],
       "env": {
         "NETCOREDBG_PATH": "D:\\Bin\\netcoredbg\\netcoredbg.exe"
       }
@@ -234,8 +254,8 @@ NETCOREDBG_PATH = "D:\\Bin\\netcoredbg\\netcoredbg.exe"
 {
   "mcpServers": {
     "netcoredbg": {
-      "command": "uv",
-      "args": ["run", "--project", "D:\\Dev\\netcoredbg-mcp", "netcoredbg-mcp", "--project-from-cwd"],
+      "command": "netcoredbg-mcp",
+      "args": ["--project-from-cwd"],
       "env": {
         "NETCOREDBG_PATH": "D:\\Bin\\netcoredbg\\netcoredbg.exe"
       }
@@ -257,8 +277,8 @@ NETCOREDBG_PATH = "D:\\Bin\\netcoredbg\\netcoredbg.exe"
 {
   "mcpServers": {
     "netcoredbg": {
-      "command": "uv",
-      "args": ["run", "--project", "D:\\Dev\\netcoredbg-mcp", "netcoredbg-mcp", "--project-from-cwd"],
+      "command": "netcoredbg-mcp",
+      "args": ["--project-from-cwd"],
       "env": {
         "NETCOREDBG_PATH": "D:\\Bin\\netcoredbg\\netcoredbg.exe"
       }
@@ -278,8 +298,8 @@ NETCOREDBG_PATH = "D:\\Bin\\netcoredbg\\netcoredbg.exe"
 {
   "mcpServers": {
     "netcoredbg": {
-      "command": "uv",
-      "args": ["run", "--project", "D:\\Dev\\netcoredbg-mcp", "netcoredbg-mcp", "--project-from-cwd"],
+      "command": "netcoredbg-mcp",
+      "args": ["--project-from-cwd"],
       "env": {
         "NETCOREDBG_PATH": "D:\\Bin\\netcoredbg\\netcoredbg.exe"
       }
