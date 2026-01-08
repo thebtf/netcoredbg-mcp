@@ -12,6 +12,7 @@ from ..build import BuildManager, BuildResult
 from ..dap import DAPClient, DAPEvent
 from ..dap.events import OutputEventBody, StoppedEventBody
 from ..dap.protocol import Events
+from ..utils.version import check_version_compatibility
 from .state import (
     Breakpoint,
     BreakpointRegistry,
@@ -43,6 +44,7 @@ class SessionManager:
         self._build_manager = BuildManager()
         self._last_build_result: BuildResult | None = None
         self._last_launch_config: dict[str, Any] | None = None  # For restart
+        self._last_version_warning: str | None = None  # dbgshim version mismatch warning
 
     @property
     def state(self) -> SessionState:
@@ -80,6 +82,42 @@ class SessionManager:
     def last_build_result(self) -> BuildResult | None:
         """Get last build result."""
         return self._last_build_result
+
+    @property
+    def netcoredbg_path(self) -> str:
+        """Get netcoredbg executable path."""
+        return self._client.netcoredbg_path
+
+    @property
+    def last_version_warning(self) -> str | None:
+        """Get last dbgshim version mismatch warning."""
+        return self._last_version_warning
+
+    def check_dbgshim_compatibility(self, program: str) -> str | None:
+        """Check if dbgshim.dll version is compatible with target runtime.
+
+        Args:
+            program: Path to the program being debugged
+
+        Returns:
+            Warning message if versions don't match, None if compatible
+        """
+        try:
+            result = check_version_compatibility(program, self.netcoredbg_path)
+            if not result.compatible and result.warning:
+                logger.warning(f"[VERSION MISMATCH] {result.warning}")
+                self._last_version_warning = result.warning
+                return result.warning
+            elif result.target_version and result.dbgshim_version:
+                logger.info(
+                    f"Version check: target .NET {result.target_version.major}, "
+                    f"dbgshim v{result.dbgshim_version}"
+                )
+            self._last_version_warning = None
+            return None
+        except Exception as e:
+            logger.debug(f"Version compatibility check failed: {e}")
+            return None
 
     def validate_path(self, path: str, must_exist: bool = False) -> str:
         """Validate path is within project scope.
@@ -333,6 +371,9 @@ class SessionManager:
                 configuration=build_configuration,
             )
 
+        # Check dbgshim version compatibility (warns if mismatch)
+        version_warning = self.check_dbgshim_compatibility(program)
+
         if not self._client.is_running:
             await self.start()
 
@@ -377,7 +418,10 @@ class SessionManager:
             "build_configuration": build_configuration,
         }
 
-        return {"success": True, "program": program}
+        result: dict[str, Any] = {"success": True, "program": program}
+        if version_warning:
+            result["warning"] = version_warning
+        return result
 
     async def attach(self, process_id: int) -> dict[str, Any]:
         """Attach to running process."""
