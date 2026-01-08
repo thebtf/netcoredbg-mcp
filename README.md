@@ -1,20 +1,484 @@
 # netcoredbg-mcp
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](#requirements)
+[![MCP](https://img.shields.io/badge/MCP-Server-6f42c1)](https://modelcontextprotocol.io/)
+[![Platform](https://img.shields.io/badge/Platform-Windows-2ea44f)](#limitations)
+
 MCP (Model Context Protocol) server for debugging C#/.NET applications using [netcoredbg](https://github.com/Samsung/netcoredbg).
 
-**Enables AI agents like Claude to debug .NET applications autonomously** — set breakpoints, inspect variables, step through code, and analyze runtime state without requiring VS Code or any IDE.
+**Debug .NET apps from AI agents** — set breakpoints, step through code, inspect variables, and evaluate expressions without requiring VS Code or any IDE.
 
-## Features
+## Quick Links
 
-- **Standalone debugging** — No VS Code required, works directly from terminal/Claude Code
-- **Full DAP support** — Complete Debug Adapter Protocol implementation via netcoredbg
-- **Smart program resolution** — Automatically handles .NET 6+ .exe/.dll conflicts
-- **Pre-build integration** — Build before debug with `pre_build: true`
-- **Version compatibility checks** — Auto-detects dbgshim.dll version mismatches
-- **Breakpoint management** — Add, remove, list, clear breakpoints with conditions
-- **Execution control** — Start, stop, continue, step over/into/out, pause
-- **State inspection** — Variables, call stack, threads, expression evaluation
-- **Exception handling** — Get exception info when stopped on exception
+- **Get Started:** [Install](#installation) · [Configure](#configuration) · [First Debug Session](#first-debug-session)
+- **Reference:** [Tools](#available-tools) · [Troubleshooting](#troubleshooting) · [Architecture](#architecture)
+
+---
+
+## Highlights
+
+| Feature | Description |
+|---------|-------------|
+| 🚀 **Standalone** | No IDE required — works directly with AI agents |
+| 🔧 **Full DAP** | Complete Debug Adapter Protocol via netcoredbg |
+| 🏗️ **Pre-build** | Build before debug with `pre_build: true` |
+| 🎯 **Smart Resolution** | Auto-resolves `.exe` → `.dll` for .NET 6+ |
+| ⚠️ **Version Check** | Detects dbgshim.dll mismatches automatically |
+
+---
+
+## Critical Notes
+
+> [!WARNING]
+> **dbgshim.dll Version Compatibility**
+>
+> The `dbgshim.dll` in your netcoredbg folder **MUST match the major version** of the .NET runtime you're debugging.
+> This is an undocumented Microsoft requirement. Mismatch causes:
+> - `E_NOINTERFACE (0x80004002)` errors
+> - Empty call stacks
+> - Failed variable inspection
+
+| Target Runtime | Required dbgshim.dll Source |
+|----------------|----------------------------|
+| .NET 6.x | `C:\Program Files\dotnet\shared\Microsoft.NETCore.App\6.0.x\dbgshim.dll` |
+| .NET 7.x | `C:\Program Files\dotnet\shared\Microsoft.NETCore.App\7.0.x\dbgshim.dll` |
+| .NET 8.x | `C:\Program Files\dotnet\shared\Microsoft.NETCore.App\8.0.x\dbgshim.dll` |
+| .NET 9.x | `C:\Program Files\dotnet\shared\Microsoft.NETCore.App\9.0.x\dbgshim.dll` |
+
+```powershell
+# Example: Setup for .NET 6 debugging
+copy "C:\Program Files\dotnet\shared\Microsoft.NETCore.App\6.0.36\dbgshim.dll" "D:\Bin\netcoredbg\"
+```
+
+> [!TIP]
+> This MCP server automatically detects mismatches and warns you during `start_debug`.
+
+> [!IMPORTANT]
+> **Prefer `start_debug` over `attach_debug`**
+>
+> `attach_debug` has significant upstream limitations in netcoredbg — stack traces and variable inspection may be incomplete or empty.
+
+---
+
+## Installation
+
+### Requirements
+
+- Python 3.10+
+- [netcoredbg](https://github.com/Samsung/netcoredbg/releases)
+- .NET SDK (for the apps you're debugging)
+
+### Install the MCP Server
+
+```bash
+# Clone the repository
+git clone https://github.com/thebtf/netcoredbg-mcp.git
+cd netcoredbg-mcp
+
+# Install with uv (recommended)
+uv sync
+
+# Or install with pip
+pip install -e .
+```
+
+### Install netcoredbg
+
+Download from [Samsung/netcoredbg releases](https://github.com/Samsung/netcoredbg/releases) and extract:
+- **Windows:** `D:\Bin\netcoredbg\`
+- **macOS/Linux:** `/opt/netcoredbg/`
+
+---
+
+## Configuration
+
+### Environment Variable
+
+Set `NETCOREDBG_PATH` in your shell profile:
+
+```powershell
+# PowerShell profile (~\Documents\PowerShell\Microsoft.PowerShell_profile.ps1)
+$env:NETCOREDBG_PATH = "D:\Bin\netcoredbg\netcoredbg.exe"
+```
+
+```bash
+# Bash/Zsh (~/.bashrc or ~/.zshrc)
+export NETCOREDBG_PATH="/opt/netcoredbg/netcoredbg"
+```
+
+> [!IMPORTANT]
+> **Use `uv run --project` NOT `uv --directory`**
+>
+> The `--directory` flag changes the working directory, which breaks `--project-from-cwd` detection.
+
+### Base Server Configuration
+
+All clients use this same server definition:
+
+```jsonc
+{
+  "netcoredbg": {
+    "command": "uv",
+    "args": [
+      "run",
+      "--project", "/path/to/netcoredbg-mcp",
+      "netcoredbg-mcp",
+      "--project-from-cwd"
+    ],
+    "env": {
+      "NETCOREDBG_PATH": "/path/to/netcoredbg/netcoredbg.exe"
+    }
+  }
+}
+```
+
+---
+
+## Client Setup
+
+<details>
+<summary><b>Claude Code (CLI)</b></summary>
+
+```bash
+claude mcp add --scope user netcoredbg -- \
+  uv run --project "/path/to/netcoredbg-mcp" netcoredbg-mcp --project-from-cwd
+```
+
+**Verify installation:**
+```bash
+claude mcp list
+```
+
+</details>
+
+<details>
+<summary><b>Claude Desktop</b></summary>
+
+Add to your Claude Desktop configuration file:
+
+| OS | Config Location |
+|----|-----------------|
+| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+
+```jsonc
+{
+  "mcpServers": {
+    "netcoredbg": {
+      "command": "uv",
+      "args": ["run", "--project", "/path/to/netcoredbg-mcp", "netcoredbg-mcp", "--project-from-cwd"],
+      "env": {
+        "NETCOREDBG_PATH": "/path/to/netcoredbg/netcoredbg.exe"
+      }
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><b>Cursor</b></summary>
+
+Add to Cursor's MCP configuration:
+
+| OS | Config Location |
+|----|-----------------|
+| macOS | `~/.cursor/mcp.json` |
+| Windows | `%USERPROFILE%\.cursor\mcp.json` |
+
+```jsonc
+{
+  "mcpServers": {
+    "netcoredbg": {
+      "command": "uv",
+      "args": ["run", "--project", "/path/to/netcoredbg-mcp", "netcoredbg-mcp", "--project-from-cwd"],
+      "env": {
+        "NETCOREDBG_PATH": "/path/to/netcoredbg/netcoredbg.exe"
+      }
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><b>Windsurf</b></summary>
+
+Add to Windsurf's MCP configuration:
+
+| OS | Config Location |
+|----|-----------------|
+| macOS | `~/.codeium/windsurf/mcp_config.json` |
+| Windows | `%USERPROFILE%\.codeium\windsurf\mcp_config.json` |
+
+```jsonc
+{
+  "mcpServers": {
+    "netcoredbg": {
+      "command": "uv",
+      "args": ["run", "--project", "/path/to/netcoredbg-mcp", "netcoredbg-mcp", "--project-from-cwd"],
+      "env": {
+        "NETCOREDBG_PATH": "/path/to/netcoredbg/netcoredbg.exe"
+      }
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><b>Zed</b></summary>
+
+Add to Zed's settings file (`~/.config/zed/settings.json`):
+
+```jsonc
+{
+  "context_servers": {
+    "netcoredbg": {
+      "command": {
+        "path": "uv",
+        "args": ["run", "--project", "/path/to/netcoredbg-mcp", "netcoredbg-mcp", "--project-from-cwd"],
+        "env": {
+          "NETCOREDBG_PATH": "/path/to/netcoredbg/netcoredbg.exe"
+        }
+      }
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><b>VS Code + Continue</b></summary>
+
+Add to Continue's configuration (`~/.continue/config.json`):
+
+```jsonc
+{
+  "experimental": {
+    "modelContextProtocolServers": [
+      {
+        "transport": {
+          "type": "stdio",
+          "command": "uv",
+          "args": ["run", "--project", "/path/to/netcoredbg-mcp", "netcoredbg-mcp", "--project-from-cwd"],
+          "env": {
+            "NETCOREDBG_PATH": "/path/to/netcoredbg/netcoredbg.exe"
+          }
+        }
+      }
+    ]
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><b>Project-Scoped Config (.mcp.json)</b></summary>
+
+Add to your .NET project root for automatic loading when opening the project:
+
+```jsonc
+{
+  "mcpServers": {
+    "netcoredbg": {
+      "command": "uv",
+      "args": ["run", "--project", "/path/to/netcoredbg-mcp", "netcoredbg-mcp"],
+      "env": {
+        "NETCOREDBG_PATH": "/path/to/netcoredbg/netcoredbg.exe",
+        "NETCOREDBG_PROJECT_ROOT": "${workspaceFolder}"
+      }
+    }
+  }
+}
+```
+
+> [!NOTE]
+> With project-scoped config, use `NETCOREDBG_PROJECT_ROOT` instead of `--project-from-cwd`.
+
+</details>
+
+---
+
+## First Debug Session
+
+### Typical Workflow
+
+```
+1. start_debug     → Launch program under debugger
+2. add_breakpoint  → Set breakpoints in source files
+3. continue        → Run until breakpoint hit
+4. get_call_stack  → Inspect where you stopped
+5. get_variables   → Examine local variables
+6. step_over       → Step through code
+7. stop_debug      → End session
+```
+
+### Example: start_debug with Pre-build
+
+```python
+start_debug(
+    program="/path/to/MyApp.exe",      # Auto-resolves to .dll for .NET 6+
+    pre_build=True,                     # Build before launching
+    build_project="/path/to/MyApp.csproj",
+    build_configuration="Debug",
+    stop_at_entry=False
+)
+```
+
+### Smart .exe → .dll Resolution
+
+For .NET 6+ applications (WPF, WinForms, Console), the SDK creates:
+- `App.exe` — Native host launcher
+- `App.dll` — Actual managed code
+
+Debugging `.exe` causes a "deps.json conflict" error. This MCP server **automatically resolves `.exe` to `.dll`** when a matching `.dll` and `.runtimeconfig.json` exist.
+
+---
+
+## Available Tools
+
+### Debug Control
+
+| Tool | Description |
+|------|-------------|
+| `start_debug` | **Recommended.** Launch program with full debug support. Supports `pre_build`. |
+| `attach_debug` | Attach to running process ⚠️ Limited functionality |
+| `stop_debug` | Stop the debug session |
+| `continue_execution` | Continue program execution |
+| `pause_execution` | Pause program execution |
+| `step_over` | Step over to next line |
+| `step_into` | Step into function call |
+| `step_out` | Step out of current function |
+| `get_debug_state` | Get current session state |
+
+<details>
+<summary><b>start_debug Parameters</b></summary>
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `program` | string | Path to .exe or .dll (auto-resolved) |
+| `cwd` | string? | Working directory |
+| `args` | list? | Command line arguments |
+| `env` | dict? | Environment variables |
+| `stop_at_entry` | bool | Stop at program entry point |
+| `pre_build` | bool | Build before launching |
+| `build_project` | string? | Path to .csproj (required if pre_build) |
+| `build_configuration` | string | "Debug" or "Release" |
+
+</details>
+
+### Breakpoints
+
+| Tool | Description |
+|------|-------------|
+| `add_breakpoint` | Add breakpoint with optional condition and hit count |
+| `remove_breakpoint` | Remove a breakpoint by file and line |
+| `list_breakpoints` | List all active breakpoints |
+| `clear_breakpoints` | Clear all breakpoints (optionally by file) |
+
+### Inspection
+
+| Tool | Description |
+|------|-------------|
+| `get_threads` | Get all threads with their states |
+| `get_call_stack` | Get call stack for a thread |
+| `get_scopes` | Get variable scopes for a stack frame |
+| `get_variables` | Get variables in a scope |
+| `evaluate_expression` | Evaluate expression in current context |
+| `get_exception_info` | Get exception details when stopped on exception |
+| `get_output` | Get debug console output |
+
+### MCP Resources
+
+| Resource URI | Description |
+|--------------|-------------|
+| `debug://state` | Current session state |
+| `debug://breakpoints` | All active breakpoints |
+| `debug://output` | Debug console output buffer |
+
+---
+
+## Troubleshooting
+
+<details>
+<summary><b>Empty call stack / E_NOINTERFACE (0x80004002)</b></summary>
+
+**Symptom:** `get_call_stack` returns empty array or error containing `0x80004002`.
+
+**Cause:** `dbgshim.dll` version mismatch between netcoredbg and target runtime.
+
+**Solution:**
+1. Check the warning from `start_debug` — it shows exact versions
+2. Copy the correct `dbgshim.dll`:
+
+```powershell
+# Find your .NET runtime versions
+dir "C:\Program Files\dotnet\shared\Microsoft.NETCore.App\"
+
+# Copy matching version (e.g., for .NET 6 app)
+copy "C:\Program Files\dotnet\shared\Microsoft.NETCore.App\6.0.36\dbgshim.dll" "D:\Bin\netcoredbg\"
+```
+
+</details>
+
+<details>
+<summary><b>deps.json conflict error</b></summary>
+
+**Symptom:** Launch fails with "assembly has already been found but with a different file extension".
+
+**Cause:** Debugging `.exe` instead of `.dll` for a .NET 6+ app.
+
+**Solution:** Should be auto-resolved. If not, explicitly pass the `.dll` path:
+```
+program: "App.dll"  # instead of "App.exe"
+```
+
+</details>
+
+<details>
+<summary><b>Program not found with pre_build</b></summary>
+
+**Symptom:** `start_debug` with `pre_build: true` fails saying program doesn't exist.
+
+**Cause:** Old version that validated path before building.
+
+**Solution:** Update to latest version. Path validation is now deferred until after build.
+
+</details>
+
+<details>
+<summary><b>Breakpoints not hitting</b></summary>
+
+**Symptom:** Breakpoints are set but never triggered.
+
+**Possible causes:**
+1. Wrong configuration (Release instead of Debug)
+2. Source mismatch (binary doesn't match source)
+3. JIT optimization affecting line mappings
+
+**Solution:** Use `pre_build: true` to ensure fresh Debug build.
+
+</details>
+
+<details>
+<summary><b>Attach mode: empty stack traces</b></summary>
+
+**Symptom:** After attaching to running process, `get_call_stack` returns empty.
+
+**Cause:** netcoredbg doesn't support `justMyCode` in attach mode (upstream limitation).
+
+**Solution:** Use `start_debug` instead. If you must attach, expect limited functionality.
+
+</details>
+
+---
 
 ## Architecture
 
@@ -39,196 +503,22 @@ MCP (Model Context Protocol) server for debugging C#/.NET applications using [ne
                      └─────────────┘
 ```
 
-## ⚠️ Critical: dbgshim.dll Version Compatibility
+### How It Works
 
-**The `dbgshim.dll` in your netcoredbg folder MUST match the major version of the .NET runtime you're debugging.**
+1. **MCP Layer** — Exposes debugging tools via Model Context Protocol
+2. **Session Manager** — Manages debug session state, validates paths, handles events
+3. **DAP Client** — Communicates with netcoredbg via Debug Adapter Protocol (JSON-RPC over stdio)
+4. **Build Manager** — Optionally builds project before debugging (`pre_build` feature)
+5. **Version Checker** — Validates dbgshim.dll compatibility with target runtime
 
-This is an **undocumented Microsoft requirement** discovered through extensive debugging. Using a mismatched version causes:
-- `E_NOINTERFACE (0x80004002)` errors
-- Empty call stacks
-- Failed variable inspection
-
-| Target Runtime | Required dbgshim.dll Location |
-|----------------|------------------------------|
-| .NET 6.x | `C:\Program Files\dotnet\shared\Microsoft.NETCore.App\6.0.x\dbgshim.dll` |
-| .NET 7.x | `C:\Program Files\dotnet\shared\Microsoft.NETCore.App\7.0.x\dbgshim.dll` |
-| .NET 8.x | `C:\Program Files\dotnet\shared\Microsoft.NETCore.App\8.0.x\dbgshim.dll` |
-| .NET 9.x | `C:\Program Files\dotnet\shared\Microsoft.NETCore.App\9.0.x\dbgshim.dll` |
-
-```powershell
-# Example: Setup for .NET 6 debugging
-copy "C:\Program Files\dotnet\shared\Microsoft.NETCore.App\6.0.36\dbgshim.dll" "D:\Bin\netcoredbg\"
-```
-
-**Auto-detection:** This MCP server automatically detects mismatches and warns you during `start_debug`.
-
-## Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/thebtf/netcoredbg-mcp.git
-cd netcoredbg-mcp
-
-# Install with uv (recommended)
-uv sync
-
-# Or install with pip
-pip install -e .
-```
-
-### Download netcoredbg
-
-Download from [Samsung/netcoredbg releases](https://github.com/Samsung/netcoredbg/releases) and extract to a folder (e.g., `D:\Bin\netcoredbg`).
-
-## Configuration
-
-### Claude Code (Recommended)
-
-```bash
-# Add to Claude Code with automatic project detection
-claude mcp add --scope user netcoredbg -- \
-  uv run --project "/path/to/netcoredbg-mcp" netcoredbg-mcp --project-from-cwd
-```
-
-Set `NETCOREDBG_PATH` in your shell profile:
-
-```powershell
-# PowerShell profile (~\Documents\PowerShell\Microsoft.PowerShell_profile.ps1)
-$env:NETCOREDBG_PATH = "D:\Bin\netcoredbg\netcoredbg.exe"
-```
-
-### JSON Configuration (Claude Desktop, Cursor, etc.)
-
-```json
-{
-  "mcpServers": {
-    "netcoredbg": {
-      "command": "uv",
-      "args": [
-        "run",
-        "--project",
-        "/path/to/netcoredbg-mcp",
-        "netcoredbg-mcp",
-        "--project-from-cwd"
-      ],
-      "env": {
-        "NETCOREDBG_PATH": "/path/to/netcoredbg/netcoredbg.exe"
-      }
-    }
-  }
-}
-```
-
-> **⚠️ Important:** Use `uv run --project` NOT `uv --directory`. The `--directory` flag changes the working directory, breaking `--project-from-cwd` detection.
-
-### Project-Scoped Configuration (`.mcp.json`)
-
-Add to your .NET project root for automatic loading:
-
-```json
-{
-  "mcpServers": {
-    "netcoredbg": {
-      "command": "uv",
-      "args": ["run", "--project", "/path/to/netcoredbg-mcp", "netcoredbg-mcp"],
-      "env": {
-        "NETCOREDBG_PATH": "/path/to/netcoredbg/netcoredbg.exe",
-        "NETCOREDBG_PROJECT_ROOT": "${workspaceFolder}"
-      }
-    }
-  }
-}
-```
-
-## Available Tools
-
-### Debug Control
-
-| Tool | Description |
-|------|-------------|
-| `start_debug` | **Recommended.** Launch program with full debug support. Supports `pre_build` option. |
-| `attach_debug` | Attach to running process (⚠️ limited — see below) |
-| `stop_debug` | Stop the debug session |
-| `continue_execution` | Continue program execution |
-| `pause_execution` | Pause program execution |
-| `step_over` | Step over to next line |
-| `step_into` | Step into function call |
-| `step_out` | Step out of current function |
-| `get_debug_state` | Get current session state |
-
-### start_debug Parameters
-
-```python
-start_debug(
-    program="/path/to/App.exe",      # or App.dll — auto-resolved for .NET 6+
-    cwd="/path/to/working/dir",      # optional working directory
-    args=["--arg1", "value"],        # optional command line args
-    env={"KEY": "value"},            # optional environment variables
-    stop_at_entry=False,             # stop at program entry point
-    pre_build=True,                  # build before launching
-    build_project="/path/to/App.csproj",  # required if pre_build=True
-    build_configuration="Debug"      # Debug or Release
-)
-```
-
-### Smart .exe → .dll Resolution
-
-For .NET 6+ applications (WPF, WinForms, Console), the SDK creates:
-- `App.exe` — Native host launcher
-- `App.dll` — Actual managed code
-
-Debugging `.exe` causes a "deps.json conflict" error. This MCP server **automatically resolves `.exe` to `.dll`** when:
-1. A matching `.dll` exists in the same directory
-2. A `.runtimeconfig.json` file exists (indicates .NET 6+ SDK-style project)
-
-You can pass either `App.exe` or `App.dll` — the correct target is selected automatically.
-
-### ⚠️ Attach Mode Limitations
-
-`attach_debug` has **significant limitations** due to an upstream netcoredbg restriction:
-
-- **`justMyCode` is NOT supported in attach mode** — this is a netcoredbg limitation
-- Stack traces may be **incomplete or empty**
-- Variable inspection may not work reliably
-
-**Always prefer `start_debug`** which has full functionality.
-
-### Breakpoints
-
-| Tool | Description |
-|------|-------------|
-| `add_breakpoint` | Add breakpoint with optional condition and hit count |
-| `remove_breakpoint` | Remove a breakpoint by ID |
-| `list_breakpoints` | List all active breakpoints |
-| `clear_breakpoints` | Clear all breakpoints (optionally by file) |
-
-### Inspection
-
-| Tool | Description |
-|------|-------------|
-| `get_threads` | Get all threads with their states |
-| `get_call_stack` | Get call stack for a thread |
-| `get_scopes` | Get variable scopes (locals, arguments, etc.) for a frame |
-| `get_variables` | Get variables in a scope with types and values |
-| `evaluate_expression` | Evaluate an expression in the current context |
-| `get_exception_info` | Get exception details when stopped on exception |
-| `get_output` | Get debug console output |
-
-## MCP Resources
-
-| Resource URI | Description |
-|--------------|-------------|
-| `debug://state` | Current session state (idle/running/stopped) |
-| `debug://breakpoints` | All active breakpoints |
-| `debug://output` | Debug console output buffer |
-| `debug://threads` | Current threads |
+---
 
 ## Command Line Options
 
 | Option | Description |
 |--------|-------------|
-| `--project PATH` | Explicit project root path. All debug operations constrained to this path. |
-| `--project-from-cwd` | Auto-detect project from CWD by searching for `.sln`, `.csproj`, or `.git`. |
+| `--project PATH` | Explicit project root path |
+| `--project-from-cwd` | Auto-detect project from CWD |
 
 ## Environment Variables
 
@@ -236,88 +526,19 @@ You can pass either `App.exe` or `App.dll` — the correct target is selected au
 |----------|-------------|
 | `NETCOREDBG_PATH` | **Required.** Path to netcoredbg executable |
 | `NETCOREDBG_PROJECT_ROOT` | Project root path (alternative to `--project`) |
-| `MCP_PROJECT_ROOT` | Fallback project root |
 | `LOG_LEVEL` | Logging level: DEBUG, INFO, WARNING, ERROR |
-| `NETCOREDBG_STACKTRACE_DELAY_MS` | Diagnostic delay before stackTrace requests |
+| `LOG_FILE` | Path to log file for diagnostics |
 
-## Troubleshooting
+---
 
-### Empty call stack / E_NOINTERFACE (0x80004002)
+## Limitations
 
-**Symptom:** `get_call_stack` returns empty array or error containing `0x80004002`.
+- **Single session** — Only one debug session at a time (by design)
+- **Attach mode** — Limited functionality due to netcoredbg upstream limitation
+- **dbgshim version** — Must manually match version to target runtime
+- **Windows focus** — Primary development/testing on Windows (Linux/macOS may work)
 
-**Cause:** `dbgshim.dll` version mismatch between netcoredbg and target runtime.
-
-**Solution:**
-1. Check the warning from `start_debug` — it tells you the exact versions
-2. Copy the correct `dbgshim.dll`:
-
-```powershell
-# Find your .NET runtime versions
-dir "C:\Program Files\dotnet\shared\Microsoft.NETCore.App\"
-
-# Copy matching version (e.g., for .NET 6 app)
-copy "C:\Program Files\dotnet\shared\Microsoft.NETCore.App\6.0.36\dbgshim.dll" "D:\Bin\netcoredbg\"
-```
-
-### deps.json conflict error
-
-**Symptom:** Launch fails with "assembly has already been found but with a different file extension".
-
-**Cause:** You're debugging `.exe` instead of `.dll` for a .NET 6+ app.
-
-**Solution:** This should be auto-resolved. If not, explicitly pass the `.dll` path:
-```
-program: "App.dll"  # instead of "App.exe"
-```
-
-### Program not found with pre_build
-
-**Symptom:** `start_debug` with `pre_build: true` fails saying program doesn't exist.
-
-**Cause:** Old version of netcoredbg-mcp that validated path before building.
-
-**Solution:** Update to latest version. The fix defers path validation until after build completes.
-
-### Breakpoints not hitting
-
-**Symptom:** Breakpoints are set but never triggered.
-
-**Possible causes:**
-1. **Wrong configuration:** Debug build required (not Release)
-2. **Source mismatch:** Binary doesn't match source files
-3. **Optimized code:** JIT optimization can affect line mappings
-
-**Solution:** Use `pre_build: true` to ensure fresh Debug build before debugging.
-
-### Attach mode: empty stack traces
-
-**Symptom:** After attaching to running process, `get_call_stack` returns empty.
-
-**Cause:** netcoredbg doesn't support `justMyCode` in attach mode (upstream limitation).
-
-**Solution:** Use `start_debug` instead. If you must attach, expect limited functionality.
-
-## Requirements
-
-- Python 3.10+
-- [netcoredbg](https://github.com/Samsung/netcoredbg/releases)
-- .NET SDK (for the apps you're debugging)
-
-## How It Works
-
-1. **MCP Layer:** Exposes debugging tools via Model Context Protocol
-2. **Session Manager:** Manages debug session state, validates paths, handles events
-3. **DAP Client:** Communicates with netcoredbg via Debug Adapter Protocol (JSON-RPC over stdio)
-4. **Build Manager:** Optionally builds project before debugging (pre_build feature)
-5. **Version Checker:** Validates dbgshim.dll compatibility with target runtime
-
-## Known Limitations
-
-1. **Single session:** Only one debug session at a time (by design for simplicity)
-2. **Attach mode:** Limited functionality due to netcoredbg upstream limitation
-3. **dbgshim version:** Must manually match version to target runtime
-4. **Windows focus:** Primary development/testing on Windows (Linux/macOS may work)
+---
 
 ## License
 
