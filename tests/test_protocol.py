@@ -1,15 +1,16 @@
 """Tests for DAP protocol message types."""
 
 import json
+
 import pytest
 
 from netcoredbg_mcp.dap.protocol import (
+    Commands,
+    DAPEvent,
     DAPRequest,
     DAPResponse,
-    DAPEvent,
-    parse_message,
-    Commands,
     Events,
+    parse_message,
 )
 
 

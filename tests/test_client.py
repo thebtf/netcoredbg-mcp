@@ -1,12 +1,12 @@
 """Tests for DAP client."""
 
 import asyncio
-import json
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 
 from netcoredbg_mcp.dap.client import DAPClient
-from netcoredbg_mcp.dap.protocol import DAPResponse, DAPEvent
+from netcoredbg_mcp.dap.protocol import DAPEvent, DAPResponse
 
 
 class TestDAPClientInit:

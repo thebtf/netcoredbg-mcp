@@ -1,12 +1,12 @@
 """Tests for session manager."""
 
-import asyncio
 import os
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from netcoredbg_mcp.session import SessionManager, DebugState
-from netcoredbg_mcp.dap import DAPResponse, DAPEvent
+import pytest
+
+from netcoredbg_mcp.dap import DAPEvent, DAPResponse
+from netcoredbg_mcp.session import DebugState, SessionManager
 
 
 class TestSessionManagerInit:
@@ -115,6 +115,83 @@ class TestPathValidation:
 
             with pytest.raises(ValueError, match=r"must be \.NET assembly"):
                 manager.validate_program(str(txt_file))
+
+    def test_validate_program_exe_to_dll_resolution_net6(self, tmp_path):
+        """Test validate_program resolves .exe to .dll for .NET 6+ apps.
+
+        .NET 6+ WPF/WinForms apps create both App.exe (native host) and App.dll
+        (managed code). Debugging the .exe causes deps.json conflicts, so we
+        should auto-resolve to the .dll.
+        """
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+
+            # Create .NET 6+ style output (exe + dll + runtimeconfig.json)
+            exe_file = tmp_path / "MyApp.exe"
+            dll_file = tmp_path / "MyApp.dll"
+            runtimeconfig_file = tmp_path / "MyApp.runtimeconfig.json"
+
+            exe_file.write_bytes(b"")
+            dll_file.write_bytes(b"")
+            runtimeconfig_file.write_text('{"runtimeOptions":{}}')
+
+            # When given .exe, should resolve to .dll
+            result = manager.validate_program(str(exe_file))
+            assert result == str(dll_file.resolve())
+
+    def test_validate_program_exe_no_resolution_without_runtimeconfig(self, tmp_path):
+        """Test validate_program does NOT resolve .exe if no runtimeconfig.json.
+
+        Without runtimeconfig.json, this is likely a .NET Framework app where
+        .exe is the correct target.
+        """
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+
+            # Create exe + dll but NO runtimeconfig.json
+            exe_file = tmp_path / "LegacyApp.exe"
+            dll_file = tmp_path / "LegacyApp.dll"
+
+            exe_file.write_bytes(b"")
+            dll_file.write_bytes(b"")
+
+            # Should keep .exe (no auto-resolution)
+            result = manager.validate_program(str(exe_file))
+            assert result == str(exe_file.resolve())
+
+    def test_validate_program_exe_no_resolution_without_matching_dll(self, tmp_path):
+        """Test validate_program keeps .exe if no matching .dll exists."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+
+            # Create only .exe (no .dll)
+            exe_file = tmp_path / "StandaloneApp.exe"
+            runtimeconfig_file = tmp_path / "StandaloneApp.runtimeconfig.json"
+
+            exe_file.write_bytes(b"")
+            runtimeconfig_file.write_text('{"runtimeOptions":{}}')
+
+            # Should keep .exe (no dll to resolve to)
+            result = manager.validate_program(str(exe_file))
+            assert result == str(exe_file.resolve())
+
+    def test_validate_program_dll_no_resolution(self, tmp_path):
+        """Test validate_program does not change .dll paths."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(tmp_path))
+
+            # Create .NET 6+ style output
+            exe_file = tmp_path / "MyApp.exe"
+            dll_file = tmp_path / "MyApp.dll"
+            runtimeconfig_file = tmp_path / "MyApp.runtimeconfig.json"
+
+            exe_file.write_bytes(b"")
+            dll_file.write_bytes(b"")
+            runtimeconfig_file.write_text('{"runtimeOptions":{}}')
+
+            # When given .dll directly, should return .dll unchanged
+            result = manager.validate_program(str(dll_file))
+            assert result == str(dll_file.resolve())
 
 
 class TestSessionManagerState:

@@ -5,19 +5,21 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
-from ..build import BuildManager, BuildError, BuildResult
+from ..build import BuildManager, BuildResult
 from ..dap import DAPClient, DAPEvent
-from ..dap.events import StoppedEventBody, OutputEventBody, StopReason
+from ..dap.events import OutputEventBody, StoppedEventBody
 from ..dap.protocol import Events
+from ..utils.version import check_version_compatibility
 from .state import (
+    Breakpoint,
+    BreakpointRegistry,
     DebugState,
     SessionState,
-    BreakpointRegistry,
-    Breakpoint,
-    ThreadInfo,
     StackFrame,
+    ThreadInfo,
     Variable,
 )
 
@@ -42,6 +44,7 @@ class SessionManager:
         self._build_manager = BuildManager()
         self._last_build_result: BuildResult | None = None
         self._last_launch_config: dict[str, Any] | None = None  # For restart
+        self._last_version_warning: str | None = None  # dbgshim version mismatch warning
 
     @property
     def state(self) -> SessionState:
@@ -63,10 +66,58 @@ class SessionManager:
         """Get project path scope."""
         return self._project_path
 
+    def set_project_path(self, project_path: str | None) -> None:
+        """Set project path scope dynamically.
+
+        This allows updating the project path after initialization,
+        e.g., when MCP client provides roots.
+
+        Args:
+            project_path: New project path, or None to disable scope checking
+        """
+        self._project_path = os.path.abspath(project_path) if project_path else None
+        logger.debug(f"Project path updated to: {self._project_path}")
+
     @property
     def last_build_result(self) -> BuildResult | None:
         """Get last build result."""
         return self._last_build_result
+
+    @property
+    def netcoredbg_path(self) -> str:
+        """Get netcoredbg executable path."""
+        return self._client.netcoredbg_path
+
+    @property
+    def last_version_warning(self) -> str | None:
+        """Get last dbgshim version mismatch warning."""
+        return self._last_version_warning
+
+    def check_dbgshim_compatibility(self, program: str) -> str | None:
+        """Check if dbgshim.dll version is compatible with target runtime.
+
+        Args:
+            program: Path to the program being debugged
+
+        Returns:
+            Warning message if versions don't match, None if compatible
+        """
+        try:
+            result = check_version_compatibility(program, self.netcoredbg_path)
+            if not result.compatible and result.warning:
+                logger.warning(f"[VERSION MISMATCH] {result.warning}")
+                self._last_version_warning = result.warning
+                return result.warning
+            elif result.target_version and result.dbgshim_version:
+                logger.info(
+                    f"Version check: target .NET {result.target_version.major}, "
+                    f"dbgshim v{result.dbgshim_version}"
+                )
+            self._last_version_warning = None
+            return None
+        except Exception as e:
+            logger.debug(f"Version compatibility check failed: {e}")
+            return None
 
     def validate_path(self, path: str, must_exist: bool = False) -> str:
         """Validate path is within project scope.
@@ -100,22 +151,47 @@ class SessionManager:
 
         return abs_path
 
-    def validate_program(self, program: str) -> str:
+    def validate_program(self, program: str, must_exist: bool = True) -> str:
         """Validate program is a .NET assembly within scope.
+
+        For .NET 6+ apps (WPF/WinForms), automatically resolves .exe to .dll
+        to avoid assembly name conflicts. .NET 6+ creates both:
+        - App.exe (native host/launcher)
+        - App.dll (managed assembly with actual code)
+
+        Debugging the .exe causes "deps.json conflict" errors because the runtime
+        finds both assemblies with the same name. The .dll is the correct target.
 
         Args:
             program: Path to program (.dll or .exe)
+            must_exist: If True (default), raises if file doesn't exist.
+                        Set to False when pre_build will create the file.
 
         Returns:
-            Absolute path to program
+            Absolute path to program (resolved to .dll if applicable)
 
         Raises:
             ValueError: If program is invalid or outside project scope
         """
-        path = self.validate_path(program, must_exist=True)
+        path = self.validate_path(program, must_exist=must_exist)
         ext = os.path.splitext(path)[1].lower()
         if ext not in (".dll", ".exe"):
             raise ValueError(f"Program must be .NET assembly (.dll/.exe): {program}")
+
+        # Smart resolution: .exe → .dll for .NET 6+ apps
+        # Only resolve if files exist (skip for pre_build case where must_exist=False)
+        if ext == ".exe" and must_exist:
+            dll_path = os.path.splitext(path)[0] + ".dll"
+            if os.path.isfile(dll_path):
+                # Check for .NET 6+ markers (runtimeconfig.json indicates SDK-style project)
+                runtimeconfig = os.path.splitext(path)[0] + ".runtimeconfig.json"
+                if os.path.isfile(runtimeconfig):
+                    logger.info(
+                        f"Resolved .exe to .dll for .NET 6+ debugging: "
+                        f"{os.path.basename(path)} → {os.path.basename(dll_path)}"
+                    )
+                    return dll_path
+
         return path
 
     def on_state_change(self, listener: Callable[[DebugState], None]) -> None:
@@ -298,6 +374,14 @@ class SessionManager:
                 configuration=build_configuration,
             )
 
+            # Re-validate program path after build (now file should exist)
+            # Also apply smart .exe → .dll resolution for .NET 6+
+            program = self.validate_program(program, must_exist=True)
+            logger.debug(f"Post-build program path: {program}")
+
+        # Check dbgshim version compatibility (warns if mismatch)
+        version_warning = self.check_dbgshim_compatibility(program)
+
         if not self._client.is_running:
             await self.start()
 
@@ -313,13 +397,14 @@ class SessionManager:
         # Set exception breakpoints (stop on all exceptions by default)
         await self._client.set_exception_breakpoints([])
 
-        # Launch program
+        # Launch program with justMyCode=False to show all stack frames
         response = await self._client.launch(
             program=program,
             cwd=cwd,
             args=args,
             env=env,
             stop_at_entry=stop_at_entry,
+            just_my_code=False,
         )
 
         if not response.success:
@@ -341,7 +426,10 @@ class SessionManager:
             "build_configuration": build_configuration,
         }
 
-        return {"success": True, "program": program}
+        result: dict[str, Any] = {"success": True, "program": program}
+        if version_warning:
+            result["warning"] = version_warning
+        return result
 
     async def attach(self, process_id: int) -> dict[str, Any]:
         """Attach to running process."""
@@ -356,7 +444,10 @@ class SessionManager:
         await self._sync_all_breakpoints()
         await self._client.set_exception_breakpoints([])
 
-        response = await self._client.attach(process_id)
+        # NOTE: justMyCode is NOT supported in attach mode by netcoredbg (upstream limitation).
+        # The parameter is passed for API consistency but will be ignored by the debugger.
+        # Stack traces may be incomplete - use start_debug/launch for full functionality.
+        response = await self._client.attach(process_id, just_my_code=False)
         if not response.success:
             raise RuntimeError(f"Attach failed: {response.message}")
 
@@ -520,8 +611,23 @@ class SessionManager:
         return {"success": response.success, "threadId": tid}
 
     async def pause(self, thread_id: int | None = None) -> dict[str, Any]:
-        """Pause execution."""
-        tid = thread_id or self._state.current_thread_id or 0
+        """Pause execution.
+
+        If no thread_id is provided, uses current_thread_id or queries
+        available threads and pauses the first one.
+        """
+        tid = thread_id or self._state.current_thread_id
+        if tid is None:
+            # Query threads and use the first one
+            threads = await self.get_threads()
+            if threads:
+                tid = threads[0].id
+                logger.debug(f"pause: no thread_id provided, using first thread {tid}")
+            else:
+                raise RuntimeError(
+                    "No threads available to pause. The program may not be running."
+                )
+
         response = await self._client.pause(tid)
         return {"success": response.success, "threadId": tid}
 
@@ -548,9 +654,15 @@ class SessionManager:
             raise RuntimeError("No thread for stack trace")
 
         response = await self._client.stack_trace(tid, start_frame, levels)
+        logger.debug(
+            f"stack_trace response for thread {tid}: success={response.success}, "
+            f"body={response.body}, message={response.message}"
+        )
         if response.success:
             frames = []
-            for f in response.body.get("stackFrames", []):
+            raw_frames = response.body.get("stackFrames", [])
+            logger.debug(f"Parsing {len(raw_frames)} stack frames")
+            for f in raw_frames:
                 source = f.get("source", {})
                 frames.append(
                     StackFrame(
@@ -564,17 +676,31 @@ class SessionManager:
             if frames:
                 self._state.current_frame_id = frames[0].id
             return frames
-        return []
+        else:
+            logger.warning(
+                f"stack_trace failed for thread {tid}: {response.message}"
+            )
+            return []
 
     async def get_scopes(self, frame_id: int | None = None) -> list[dict[str, Any]]:
         """Get scopes for frame."""
         fid = frame_id or self._state.current_frame_id
+        logger.debug(
+            f"get_scopes: frame_id={frame_id}, current_frame_id={self._state.current_frame_id}, "
+            f"resolved_fid={fid}"
+        )
         if fid is None:
-            raise RuntimeError("No frame for scopes")
+            raise RuntimeError(
+                "No frame for scopes. Call get_call_stack first to select a frame, "
+                "or provide frame_id explicitly."
+            )
 
         response = await self._client.scopes(fid)
         if response.success:
-            return response.body.get("scopes", [])
+            scopes = response.body.get("scopes", [])
+            logger.debug(f"get_scopes: found {len(scopes)} scopes for frame {fid}")
+            return scopes
+        logger.warning(f"get_scopes failed for frame {fid}: {response.message}")
         return []
 
     async def get_variables(self, variables_reference: int) -> list[Variable]:

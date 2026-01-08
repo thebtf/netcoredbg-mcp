@@ -1,13 +1,12 @@
 """Tests for build state and result types."""
 
-import pytest
 
 from netcoredbg_mcp.build.state import (
-    BuildState,
-    BuildErrorSeverity,
     BuildDiagnostic,
     BuildError,
+    BuildErrorSeverity,
     BuildResult,
+    BuildState,
     parse_msbuild_output,
 )
 

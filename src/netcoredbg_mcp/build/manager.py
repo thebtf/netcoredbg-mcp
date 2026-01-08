@@ -11,9 +11,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
-from .policy import BuildCommand, BuildPolicy
+from .policy import BuildCommand
 from .session import BuildSession
 from .state import BuildError, BuildResult, BuildState
 

@@ -7,14 +7,15 @@ import json
 import logging
 import os
 import shutil
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from .protocol import (
+    Commands,
+    DAPEvent,
     DAPRequest,
     DAPResponse,
-    DAPEvent,
     parse_message,
-    Commands,
 )
 
 logger = logging.getLogger(__name__)
@@ -269,6 +270,7 @@ class DAPClient:
         args: list[str] | None = None,
         env: dict[str, str] | None = None,
         stop_at_entry: bool = False,
+        just_my_code: bool = False,
     ) -> DAPResponse:
         """Launch program for debugging."""
         arguments = {
@@ -277,12 +279,15 @@ class DAPClient:
             "args": args or [],
             "env": env or {},
             "stopAtEntry": stop_at_entry,
+            "justMyCode": just_my_code,
         }
         return await self.send_request(Commands.LAUNCH, arguments)
 
-    async def attach(self, process_id: int) -> DAPResponse:
+    async def attach(self, process_id: int, just_my_code: bool = False) -> DAPResponse:
         """Attach to running process."""
-        return await self.send_request(Commands.ATTACH, {"processId": process_id})
+        return await self.send_request(
+            Commands.ATTACH, {"processId": process_id, "justMyCode": just_my_code}
+        )
 
     async def configuration_done(self) -> DAPResponse:
         """Signal that configuration is complete."""

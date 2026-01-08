@@ -1,12 +1,12 @@
 """Tests for build session - per-workspace state machine."""
 
 import asyncio
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from netcoredbg_mcp.build.session import BuildSession
-from netcoredbg_mcp.build.policy import BuildCommand
-from netcoredbg_mcp.build.state import BuildState, BuildError
+from netcoredbg_mcp.build.state import BuildError, BuildState
 
 
 class TestBuildSessionInit:

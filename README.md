@@ -97,6 +97,32 @@ For development using [uv](https://docs.astral.sh/uv/):
 }
 ```
 
+### Project-Scoped Configuration (`.mcp.json`)
+
+For Claude Code 0.2.50+, you can add a `.mcp.json` file to your project root. This configuration is automatically loaded when Claude Code opens the project:
+
+```json
+{
+  "mcpServers": {
+    "netcoredbg": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "D:\\Dev\\netcoredbg-mcp",
+        "run",
+        "netcoredbg-mcp"
+      ],
+      "env": {
+        "NETCOREDBG_PATH": "C:\\path\\to\\netcoredbg\\netcoredbg.exe",
+        "NETCOREDBG_PROJECT_ROOT": "${workspaceFolder}"
+      }
+    }
+  }
+}
+```
+
+See `.mcp.json.example` for a template.
+
 ### Claude Code (Global Configuration)
 
 For [Claude Code](https://claude.ai/claude-code) with automatic project detection, use `--project-from-cwd`:
@@ -173,12 +199,66 @@ This allows you to debug any .NET project from the directory where Claude Code i
 | Variable | Description |
 |----------|-------------|
 | `NETCOREDBG_PATH` | Path to netcoredbg executable |
+| `NETCOREDBG_PROJECT_ROOT` | Project root path for debugging (alternative to `--project`) |
+| `MCP_PROJECT_ROOT` | Fallback project root (if `NETCOREDBG_PROJECT_ROOT` not set) |
 | `LOG_LEVEL` | Logging level (DEBUG, INFO, WARNING, ERROR) |
 
 ## Requirements
 
 - Python 3.10+
 - netcoredbg (included in `bin/` or provide via `NETCOREDBG_PATH`)
+
+## ⚠️ Critical: dbgshim.dll Version Compatibility
+
+**The `dbgshim.dll` in your netcoredbg folder MUST match the major version of the .NET runtime you're debugging.**
+
+This is an **undocumented Microsoft requirement**. Using a mismatched version causes `E_NOINTERFACE (0x80004002)` errors and empty call stacks.
+
+| Target Runtime | Required dbgshim.dll |
+|----------------|---------------------|
+| .NET 6.x | From `dotnet/shared/Microsoft.NETCore.App/6.0.x/` |
+| .NET 7.x | From `dotnet/shared/Microsoft.NETCore.App/7.0.x/` |
+| .NET 8.x | From `dotnet/shared/Microsoft.NETCore.App/8.0.x/` |
+| .NET 9.x | From `dotnet/shared/Microsoft.NETCore.App/9.0.x/` |
+
+**Auto-detection:** This MCP server automatically detects version mismatches and warns you during `start_debug`. If you see a warning, copy the correct `dbgshim.dll` before debugging.
+
+```powershell
+# Example: Copy dbgshim for .NET 6 debugging
+copy "C:\Program Files\dotnet\shared\Microsoft.NETCore.App\6.0.36\dbgshim.dll" "path\to\netcoredbg\"
+```
+
+## Troubleshooting
+
+### Empty call stack / E_NOINTERFACE (0x80004002) error
+
+**Symptom:** `get_call_stack` returns empty array or error containing `0x80004002`.
+
+**Cause:** `dbgshim.dll` version mismatch. The `dbgshim.dll` in your netcoredbg folder must match the major version of the .NET runtime you're debugging.
+
+**Solution:** Copy `dbgshim.dll` from the matching .NET SDK:
+
+```powershell
+# For .NET 6 apps:
+copy "C:\Program Files\dotnet\shared\Microsoft.NETCore.App\6.0.x\dbgshim.dll" "path\to\netcoredbg\"
+
+# For .NET 8 apps:
+copy "C:\Program Files\dotnet\shared\Microsoft.NETCore.App\8.0.x\dbgshim.dll" "path\to\netcoredbg\"
+```
+
+Replace `6.0.x` or `8.0.x` with your actual installed version (e.g., `6.0.36`).
+
+**Note:** This is an undocumented requirement. Microsoft only documents that `mscordbi.dll` must match the runtime version, but `dbgshim.dll` also has version-specific behavior for `ICorDebugThread3::CreateStackWalk`.
+
+### Diagnostic environment variable
+
+Set `NETCOREDBG_STACKTRACE_DELAY_MS` to add a delay before stackTrace requests (useful for diagnosing timing issues):
+
+```json
+"env": {
+  "NETCOREDBG_STACKTRACE_DELAY_MS": "300"
+}
+```
 
 ## License
 
