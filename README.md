@@ -42,40 +42,24 @@ pip install -e .
 
 ## Configuration
 
-Add to your MCP client configuration (e.g., Claude Desktop, Cursor):
+### Claude Code (Recommended)
 
-```json
-{
-  "mcpServers": {
-    "netcoredbg": {
-      "command": "python",
-      "args": ["-m", "netcoredbg_mcp"],
-      "env": {
-        "NETCOREDBG_PATH": "/path/to/netcoredbg/netcoredbg.exe"
-      }
-    }
-  }
-}
+The easiest way to add netcoredbg-mcp to Claude Code:
+
+```bash
+# Install globally with automatic project detection
+claude mcp add --scope user netcoredbg -- \
+  uv --directory "D:\Dev\netcoredbg-mcp" run netcoredbg-mcp --project-from-cwd
 ```
 
-Or if installed as a package:
+Set `NETCOREDBG_PATH` environment variable or add to your shell profile:
 
-```json
-{
-  "mcpServers": {
-    "netcoredbg": {
-      "command": "netcoredbg-mcp",
-      "env": {
-        "NETCOREDBG_PATH": "/path/to/netcoredbg/netcoredbg.exe"
-      }
-    }
-  }
-}
+```powershell
+# PowerShell profile (~\Documents\PowerShell\Microsoft.PowerShell_profile.ps1)
+$env:NETCOREDBG_PATH = "C:\path\to\netcoredbg\netcoredbg.exe"
 ```
 
-### Development Version
-
-For development using [uv](https://docs.astral.sh/uv/):
+### JSON Configuration (Claude Desktop, Cursor, etc.)
 
 ```json
 {
@@ -84,13 +68,31 @@ For development using [uv](https://docs.astral.sh/uv/):
       "command": "uv",
       "args": [
         "--directory",
-        "/path/to/netcoredbg-mcp",
+        "D:\\Dev\\netcoredbg-mcp",
         "run",
-        "netcoredbg-mcp"
+        "netcoredbg-mcp",
+        "--project-from-cwd"
       ],
       "env": {
-        "NETCOREDBG_PATH": "/path/to/netcoredbg/netcoredbg.exe",
-        "LOG_LEVEL": "DEBUG"
+        "NETCOREDBG_PATH": "C:\\path\\to\\netcoredbg\\netcoredbg.exe"
+      }
+    }
+  }
+}
+```
+
+### Installed Package
+
+If installed via pip (`pip install netcoredbg-mcp`):
+
+```json
+{
+  "mcpServers": {
+    "netcoredbg": {
+      "command": "netcoredbg-mcp",
+      "args": ["--project-from-cwd"],
+      "env": {
+        "NETCOREDBG_PATH": "C:\\path\\to\\netcoredbg\\netcoredbg.exe"
       }
     }
   }
@@ -123,19 +125,7 @@ For Claude Code 0.2.50+, you can add a `.mcp.json` file to your project root. Th
 
 See `.mcp.json.example` for a template.
 
-### Claude Code (Global Configuration)
-
-For [Claude Code](https://claude.ai/claude-code) with automatic project detection, use `--project-from-cwd`:
-
-```bash
-claude mcp add --scope user netcoredbg -- netcoredbg-mcp --project-from-cwd
-```
-
-Or with uv (development version):
-
-```bash
-claude mcp add --scope user netcoredbg -- uv --directory /path/to/netcoredbg-mcp run netcoredbg-mcp --project-from-cwd
-```
+### Project Detection (`--project-from-cwd`)
 
 The `--project-from-cwd` flag automatically detects your .NET project by searching upward from the current directory for:
 1. `.sln` files (solution - preferred for multi-project setups)
@@ -149,8 +139,8 @@ This allows you to debug any .NET project from the directory where Claude Code i
 ### Debug Control
 | Tool | Description |
 |------|-------------|
-| `start_debug` | Start debugging a .NET program |
-| `attach_debug` | Attach to a running .NET process |
+| `start_debug` | **Recommended.** Start debugging a .NET program with full feature support |
+| `attach_debug` | Attach to a running .NET process (⚠️ limited functionality) |
 | `stop_debug` | Stop the debug session |
 | `continue_execution` | Continue program execution |
 | `pause_execution` | Pause program execution |
@@ -158,6 +148,16 @@ This allows you to debug any .NET project from the directory where Claude Code i
 | `step_into` | Step into function call |
 | `step_out` | Step out of current function |
 | `get_debug_state` | Get current session state |
+
+#### ⚠️ Attach Mode Limitations
+
+`attach_debug` has **significant limitations** due to an upstream netcoredbg restriction:
+
+- **`justMyCode` is NOT supported in attach mode** — this is a netcoredbg limitation, not fixable by this MCP server
+- Stack traces may be **incomplete or empty**
+- Variable inspection may not work reliably
+
+**Always prefer `start_debug`** which has full functionality. Use `attach_debug` only when you must debug an already-running process that cannot be restarted (e.g., production service, container).
 
 ### Breakpoints
 | Tool | Description |

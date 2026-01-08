@@ -4,13 +4,13 @@
       "command": "uv",
       "args": [
         "--directory",
-        "D:\\Dev\\netcoredbg-mcp",
+        "/path/to/netcoredbg-mcp",
         "run",
-        "netcoredbg-mcp"
+        "netcoredbg-mcp",
+        "--project-from-cwd"
       ],
       "env": {
-        "NETCOREDBG_PATH": "C:\\path\\to\\netcoredbg\\netcoredbg.exe",
-        "NETCOREDBG_PROJECT_ROOT": "${workspaceFolder}"
+        "NETCOREDBG_PATH": "/path/to/netcoredbg/netcoredbg.exe"
       }
     }
   }
