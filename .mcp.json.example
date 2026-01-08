@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "netcoredbg": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "D:\\Dev\\netcoredbg-mcp",
+        "run",
+        "netcoredbg-mcp"
+      ],
+      "env": {
+        "NETCOREDBG_PATH": "C:\\path\\to\\netcoredbg\\netcoredbg.exe",
+        "NETCOREDBG_PROJECT_ROOT": "${workspaceFolder}"
+      }
+    }
+  }
+}

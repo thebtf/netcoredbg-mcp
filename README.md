@@ -97,6 +97,32 @@ For development using [uv](https://docs.astral.sh/uv/):
 }
 ```
 
+### Project-Scoped Configuration (`.mcp.json`)
+
+For Claude Code 0.2.50+, you can add a `.mcp.json` file to your project root. This configuration is automatically loaded when Claude Code opens the project:
+
+```json
+{
+  "mcpServers": {
+    "netcoredbg": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "D:\\Dev\\netcoredbg-mcp",
+        "run",
+        "netcoredbg-mcp"
+      ],
+      "env": {
+        "NETCOREDBG_PATH": "C:\\path\\to\\netcoredbg\\netcoredbg.exe",
+        "NETCOREDBG_PROJECT_ROOT": "${workspaceFolder}"
+      }
+    }
+  }
+}
+```
+
+See `.mcp.json.example` for a template.
+
 ### Claude Code (Global Configuration)
 
 For [Claude Code](https://claude.ai/claude-code) with automatic project detection, use `--project-from-cwd`:
@@ -173,6 +199,8 @@ This allows you to debug any .NET project from the directory where Claude Code i
 | Variable | Description |
 |----------|-------------|
 | `NETCOREDBG_PATH` | Path to netcoredbg executable |
+| `NETCOREDBG_PROJECT_ROOT` | Project root path for debugging (alternative to `--project`) |
+| `MCP_PROJECT_ROOT` | Fallback project root (if `NETCOREDBG_PROJECT_ROOT` not set) |
 | `LOG_LEVEL` | Logging level (DEBUG, INFO, WARNING, ERROR) |
 
 ## Requirements
