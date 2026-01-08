@@ -151,7 +151,7 @@ class SessionManager:
 
         return abs_path
 
-    def validate_program(self, program: str) -> str:
+    def validate_program(self, program: str, must_exist: bool = True) -> str:
         """Validate program is a .NET assembly within scope.
 
         For .NET 6+ apps (WPF/WinForms), automatically resolves .exe to .dll
@@ -164,6 +164,8 @@ class SessionManager:
 
         Args:
             program: Path to program (.dll or .exe)
+            must_exist: If True (default), raises if file doesn't exist.
+                        Set to False when pre_build will create the file.
 
         Returns:
             Absolute path to program (resolved to .dll if applicable)
@@ -171,13 +173,14 @@ class SessionManager:
         Raises:
             ValueError: If program is invalid or outside project scope
         """
-        path = self.validate_path(program, must_exist=True)
+        path = self.validate_path(program, must_exist=must_exist)
         ext = os.path.splitext(path)[1].lower()
         if ext not in (".dll", ".exe"):
             raise ValueError(f"Program must be .NET assembly (.dll/.exe): {program}")
 
         # Smart resolution: .exe → .dll for .NET 6+ apps
-        if ext == ".exe":
+        # Only resolve if files exist (skip for pre_build case where must_exist=False)
+        if ext == ".exe" and must_exist:
             dll_path = os.path.splitext(path)[0] + ".dll"
             if os.path.isfile(dll_path):
                 # Check for .NET 6+ markers (runtimeconfig.json indicates SDK-style project)
@@ -371,6 +374,11 @@ class SessionManager:
                 configuration=build_configuration,
             )
 
+            # Re-validate program path after build (now file should exist)
+            # Also apply smart .exe → .dll resolution for .NET 6+
+            program = self.validate_program(program, must_exist=True)
+            logger.debug(f"Post-build program path: {program}")
+
         # Check dbgshim version compatibility (warns if mismatch)
         version_warning = self.check_dbgshim_compatibility(program)
 
@@ -436,6 +444,9 @@ class SessionManager:
         await self._sync_all_breakpoints()
         await self._client.set_exception_breakpoints([])
 
+        # NOTE: justMyCode is NOT supported in attach mode by netcoredbg (upstream limitation).
+        # The parameter is passed for API consistency but will be ignored by the debugger.
+        # Stack traces may be incomplete - use start_debug/launch for full functionality.
         response = await self._client.attach(process_id, just_my_code=False)
         if not response.success:
             raise RuntimeError(f"Attach failed: {response.message}")

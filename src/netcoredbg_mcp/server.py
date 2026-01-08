@@ -116,14 +116,15 @@ def create_server(project_path: str | None = None) -> FastMCP:
             await resolve_project_root(ctx, session)
 
             # Validate program path (security: prevent arbitrary execution)
-            validated_program = session.validate_program(program)
+            # If pre_build=True, don't require file to exist yet (build will create it)
+            validated_program = session.validate_program(program, must_exist=not pre_build)
 
-            # Validate cwd if provided
+            # Validate cwd if provided (for pre_build, cwd may not exist yet either)
             validated_cwd = cwd
             if cwd:
-                validated_cwd = session.validate_path(cwd, must_exist=True)
+                validated_cwd = session.validate_path(cwd, must_exist=not pre_build)
 
-            # Validate build_project if provided
+            # Validate build_project if provided (must exist for build to work)
             validated_build_project = None
             if build_project:
                 validated_build_project = session.validate_path(build_project, must_exist=True)
