@@ -85,9 +85,7 @@ pip install -e .
 
 ### Install netcoredbg
 
-Download from [Samsung/netcoredbg releases](https://github.com/Samsung/netcoredbg/releases) and extract:
-- **Windows:** `D:\Bin\netcoredbg\`
-- **macOS/Linux:** `/opt/netcoredbg/`
+Download from [Samsung/netcoredbg releases](https://github.com/Samsung/netcoredbg/releases) and extract to `D:\Bin\netcoredbg\`
 
 ---
 
@@ -95,16 +93,10 @@ Download from [Samsung/netcoredbg releases](https://github.com/Samsung/netcoredb
 
 ### Environment Variable
 
-Set `NETCOREDBG_PATH` in your shell profile:
+Set `NETCOREDBG_PATH` in your PowerShell profile (`%USERPROFILE%\Documents\PowerShell\Microsoft.PowerShell_profile.ps1`):
 
 ```powershell
-# PowerShell profile (~\Documents\PowerShell\Microsoft.PowerShell_profile.ps1)
 $env:NETCOREDBG_PATH = "D:\Bin\netcoredbg\netcoredbg.exe"
-```
-
-```bash
-# Bash/Zsh (~/.bashrc or ~/.zshrc)
-export NETCOREDBG_PATH="/opt/netcoredbg/netcoredbg"
 ```
 
 > [!IMPORTANT]
@@ -114,7 +106,7 @@ export NETCOREDBG_PATH="/opt/netcoredbg/netcoredbg"
 
 ### Base Server Configuration
 
-All clients use this same server definition:
+All clients use this same server definition (adjust paths for your setup):
 
 ```jsonc
 {
@@ -122,12 +114,12 @@ All clients use this same server definition:
     "command": "uv",
     "args": [
       "run",
-      "--project", "/path/to/netcoredbg-mcp",
+      "--project", "D:\\Dev\\netcoredbg-mcp",
       "netcoredbg-mcp",
       "--project-from-cwd"
     ],
     "env": {
-      "NETCOREDBG_PATH": "/path/to/netcoredbg/netcoredbg.exe"
+      "NETCOREDBG_PATH": "D:\\Bin\\netcoredbg\\netcoredbg.exe"
     }
   }
 }
@@ -137,39 +129,50 @@ All clients use this same server definition:
 
 ## Client Setup
 
-<details>
-<summary><b>Claude Code (CLI)</b></summary>
+### CLI Agents
 
-```bash
-claude mcp add --scope user netcoredbg -- \
-  uv run --project "/path/to/netcoredbg-mcp" netcoredbg-mcp --project-from-cwd
+<details open>
+<summary><b>Claude Code</b></summary>
+
+```powershell
+claude mcp add --scope user netcoredbg -- uv run --project "D:\Dev\netcoredbg-mcp" netcoredbg-mcp --project-from-cwd
 ```
 
-**Verify installation:**
-```bash
-claude mcp list
-```
+**Verify:** `claude mcp list`
 
 </details>
 
 <details>
-<summary><b>Claude Desktop</b></summary>
+<summary><b>Codex CLI (OpenAI)</b></summary>
 
-Add to your Claude Desktop configuration file:
+**Config:** `%USERPROFILE%\.codex\config.toml`
 
-| OS | Config Location |
-|----|-----------------|
-| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
-| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+```toml
+[mcp_servers.netcoredbg]
+command = "uv"
+args = ["run", "--project", "D:\\Dev\\netcoredbg-mcp", "netcoredbg-mcp", "--project-from-cwd"]
+
+[mcp_servers.netcoredbg.env]
+NETCOREDBG_PATH = "D:\\Bin\\netcoredbg\\netcoredbg.exe"
+```
+
+**Or via CLI:** `codex mcp add netcoredbg -- uv run --project "D:\Dev\netcoredbg-mcp" netcoredbg-mcp --project-from-cwd`
+
+</details>
+
+<details>
+<summary><b>Gemini CLI (Google)</b></summary>
+
+**Config:** `%USERPROFILE%\.gemini\settings.json`
 
 ```jsonc
 {
   "mcpServers": {
     "netcoredbg": {
       "command": "uv",
-      "args": ["run", "--project", "/path/to/netcoredbg-mcp", "netcoredbg-mcp", "--project-from-cwd"],
+      "args": ["run", "--project", "D:\\Dev\\netcoredbg-mcp", "netcoredbg-mcp", "--project-from-cwd"],
       "env": {
-        "NETCOREDBG_PATH": "/path/to/netcoredbg/netcoredbg.exe"
+        "NETCOREDBG_PATH": "D:\\Bin\\netcoredbg\\netcoredbg.exe"
       }
     }
   }
@@ -179,23 +182,85 @@ Add to your Claude Desktop configuration file:
 </details>
 
 <details>
-<summary><b>Cursor</b></summary>
+<summary><b>Cline</b></summary>
 
-Add to Cursor's MCP configuration:
-
-| OS | Config Location |
-|----|-----------------|
-| macOS | `~/.cursor/mcp.json` |
-| Windows | `%USERPROFILE%\.cursor\mcp.json` |
+**Config:** Open Cline → MCP Servers icon → Configure → "Configure MCP Servers"
 
 ```jsonc
 {
   "mcpServers": {
     "netcoredbg": {
       "command": "uv",
-      "args": ["run", "--project", "/path/to/netcoredbg-mcp", "netcoredbg-mcp", "--project-from-cwd"],
+      "args": ["run", "--project", "D:\\Dev\\netcoredbg-mcp", "netcoredbg-mcp", "--project-from-cwd"],
       "env": {
-        "NETCOREDBG_PATH": "/path/to/netcoredbg/netcoredbg.exe"
+        "NETCOREDBG_PATH": "D:\\Bin\\netcoredbg\\netcoredbg.exe"
+      }
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><b>Roo Code</b></summary>
+
+**Config:** `%USERPROFILE%\.roo\mcp.json` or `.roo\mcp.json` in project
+
+```jsonc
+{
+  "mcpServers": {
+    "netcoredbg": {
+      "command": "uv",
+      "args": ["run", "--project", "D:\\Dev\\netcoredbg-mcp", "netcoredbg-mcp", "--project-from-cwd"],
+      "env": {
+        "NETCOREDBG_PATH": "D:\\Bin\\netcoredbg\\netcoredbg.exe"
+      }
+    }
+  }
+}
+```
+
+</details>
+
+### Desktop Apps
+
+<details>
+<summary><b>Claude Desktop</b></summary>
+
+**Config:** `%APPDATA%\Claude\claude_desktop_config.json`
+
+```jsonc
+{
+  "mcpServers": {
+    "netcoredbg": {
+      "command": "uv",
+      "args": ["run", "--project", "D:\\Dev\\netcoredbg-mcp", "netcoredbg-mcp", "--project-from-cwd"],
+      "env": {
+        "NETCOREDBG_PATH": "D:\\Bin\\netcoredbg\\netcoredbg.exe"
+      }
+    }
+  }
+}
+```
+
+</details>
+
+### IDE Extensions
+
+<details>
+<summary><b>Cursor</b></summary>
+
+**Config:** `%USERPROFILE%\.cursor\mcp.json`
+
+```jsonc
+{
+  "mcpServers": {
+    "netcoredbg": {
+      "command": "uv",
+      "args": ["run", "--project", "D:\\Dev\\netcoredbg-mcp", "netcoredbg-mcp", "--project-from-cwd"],
+      "env": {
+        "NETCOREDBG_PATH": "D:\\Bin\\netcoredbg\\netcoredbg.exe"
       }
     }
   }
@@ -207,44 +272,16 @@ Add to Cursor's MCP configuration:
 <details>
 <summary><b>Windsurf</b></summary>
 
-Add to Windsurf's MCP configuration:
-
-| OS | Config Location |
-|----|-----------------|
-| macOS | `~/.codeium/windsurf/mcp_config.json` |
-| Windows | `%USERPROFILE%\.codeium\windsurf\mcp_config.json` |
+**Config:** `%USERPROFILE%\.codeium\windsurf\mcp_config.json`
 
 ```jsonc
 {
   "mcpServers": {
     "netcoredbg": {
       "command": "uv",
-      "args": ["run", "--project", "/path/to/netcoredbg-mcp", "netcoredbg-mcp", "--project-from-cwd"],
+      "args": ["run", "--project", "D:\\Dev\\netcoredbg-mcp", "netcoredbg-mcp", "--project-from-cwd"],
       "env": {
-        "NETCOREDBG_PATH": "/path/to/netcoredbg/netcoredbg.exe"
-      }
-    }
-  }
-}
-```
-
-</details>
-
-<details>
-<summary><b>Zed</b></summary>
-
-Add to Zed's settings file (`~/.config/zed/settings.json`):
-
-```jsonc
-{
-  "context_servers": {
-    "netcoredbg": {
-      "command": {
-        "path": "uv",
-        "args": ["run", "--project", "/path/to/netcoredbg-mcp", "netcoredbg-mcp", "--project-from-cwd"],
-        "env": {
-          "NETCOREDBG_PATH": "/path/to/netcoredbg/netcoredbg.exe"
-        }
+        "NETCOREDBG_PATH": "D:\\Bin\\netcoredbg\\netcoredbg.exe"
       }
     }
   }
@@ -256,7 +293,7 @@ Add to Zed's settings file (`~/.config/zed/settings.json`):
 <details>
 <summary><b>VS Code + Continue</b></summary>
 
-Add to Continue's configuration (`~/.continue/config.json`):
+**Config:** `%USERPROFILE%\.continue\config.json`
 
 ```jsonc
 {
@@ -266,9 +303,9 @@ Add to Continue's configuration (`~/.continue/config.json`):
         "transport": {
           "type": "stdio",
           "command": "uv",
-          "args": ["run", "--project", "/path/to/netcoredbg-mcp", "netcoredbg-mcp", "--project-from-cwd"],
+          "args": ["run", "--project", "D:\\Dev\\netcoredbg-mcp", "netcoredbg-mcp", "--project-from-cwd"],
           "env": {
-            "NETCOREDBG_PATH": "/path/to/netcoredbg/netcoredbg.exe"
+            "NETCOREDBG_PATH": "D:\\Bin\\netcoredbg\\netcoredbg.exe"
           }
         }
       }
@@ -279,19 +316,21 @@ Add to Continue's configuration (`~/.continue/config.json`):
 
 </details>
 
-<details>
-<summary><b>Project-Scoped Config (.mcp.json)</b></summary>
+### Project-Scoped Config
 
-Add to your .NET project root for automatic loading when opening the project:
+<details>
+<summary><b>.mcp.json (in project root)</b></summary>
+
+Add to your .NET project root for automatic loading:
 
 ```jsonc
 {
   "mcpServers": {
     "netcoredbg": {
       "command": "uv",
-      "args": ["run", "--project", "/path/to/netcoredbg-mcp", "netcoredbg-mcp"],
+      "args": ["run", "--project", "D:\\Dev\\netcoredbg-mcp", "netcoredbg-mcp"],
       "env": {
-        "NETCOREDBG_PATH": "/path/to/netcoredbg/netcoredbg.exe",
+        "NETCOREDBG_PATH": "D:\\Bin\\netcoredbg\\netcoredbg.exe",
         "NETCOREDBG_PROJECT_ROOT": "${workspaceFolder}"
       }
     }
