@@ -208,6 +208,26 @@ This allows you to debug any .NET project from the directory where Claude Code i
 - Python 3.10+
 - netcoredbg (included in `bin/` or provide via `NETCOREDBG_PATH`)
 
+## ⚠️ Critical: dbgshim.dll Version Compatibility
+
+**The `dbgshim.dll` in your netcoredbg folder MUST match the major version of the .NET runtime you're debugging.**
+
+This is an **undocumented Microsoft requirement**. Using a mismatched version causes `E_NOINTERFACE (0x80004002)` errors and empty call stacks.
+
+| Target Runtime | Required dbgshim.dll |
+|----------------|---------------------|
+| .NET 6.x | From `dotnet/shared/Microsoft.NETCore.App/6.0.x/` |
+| .NET 7.x | From `dotnet/shared/Microsoft.NETCore.App/7.0.x/` |
+| .NET 8.x | From `dotnet/shared/Microsoft.NETCore.App/8.0.x/` |
+| .NET 9.x | From `dotnet/shared/Microsoft.NETCore.App/9.0.x/` |
+
+**Auto-detection:** This MCP server automatically detects version mismatches and warns you during `start_debug`. If you see a warning, copy the correct `dbgshim.dll` before debugging.
+
+```powershell
+# Example: Copy dbgshim for .NET 6 debugging
+copy "C:\Program Files\dotnet\shared\Microsoft.NETCore.App\6.0.36\dbgshim.dll" "path\to\netcoredbg\"
+```
+
 ## Troubleshooting
 
 ### Empty call stack / E_NOINTERFACE (0x80004002) error
