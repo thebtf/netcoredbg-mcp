@@ -1,6 +1,5 @@
-# Agent workspace (local only, except skills submodule)
-.agent/*
-!.agent/skills
+# Agent workspace (local only)
+.agent/
 .claude/
 .serena/
 .zencoder/

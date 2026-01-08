@@ -1,3 +1,0 @@
-[submodule ".agent/skills"]
-	path = .agent/skills
-	url = https://github.com/thebtf/agent-skills.git
