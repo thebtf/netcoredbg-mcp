@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -340,8 +341,21 @@ def create_server(project_path: str | None = None) -> FastMCP:
 
     @mcp.tool()
     async def get_call_stack(thread_id: int | None = None, levels: int = 20) -> dict:
-        """Get the call stack for a thread."""
+        """Get the call stack for a thread.
+
+        Diagnostic: Set NETCOREDBG_STACKTRACE_DELAY_MS env var to add delay before
+        stackTrace request. This helps diagnose timing issues with ICorDebugThread3.
+        Example: NETCOREDBG_STACKTRACE_DELAY_MS=300
+        """
         try:
+            # Diagnostic test: configurable delay before stackTrace
+            # If delay helps, root cause is timing (CLR not ready)
+            # If delay doesn't help, root cause is binary mismatch
+            delay_ms = int(os.environ.get("NETCOREDBG_STACKTRACE_DELAY_MS", "0"))
+            if delay_ms > 0:
+                logger.info(f"[DIAGNOSTIC] Applying {delay_ms}ms delay before stackTrace request")
+                await asyncio.sleep(delay_ms / 1000.0)
+
             frames = await session.get_stack_trace(thread_id, 0, levels)
             return {
                 "success": True,
@@ -351,7 +365,14 @@ def create_server(project_path: str | None = None) -> FastMCP:
                 ],
             }
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            error_msg = str(e)
+            # Enhanced error message for E_NOINTERFACE
+            if "0x80004002" in error_msg or "E_NOINTERFACE" in error_msg.upper():
+                logger.warning(
+                    "[DIAGNOSTIC] E_NOINTERFACE on ICorDebugThread3. "
+                    "Try setting NETCOREDBG_STACKTRACE_DELAY_MS=300 to test timing hypothesis."
+                )
+            return {"success": False, "error": error_msg}
 
     @mcp.tool()
     async def get_scopes(frame_id: int | None = None) -> dict:
