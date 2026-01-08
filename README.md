@@ -87,7 +87,7 @@ Download from [Samsung/netcoredbg releases](https://github.com/Samsung/netcoredb
 ```bash
 # Add to Claude Code with automatic project detection
 claude mcp add --scope user netcoredbg -- \
-  uv --directory "/path/to/netcoredbg-mcp" run netcoredbg-mcp --project-from-cwd
+  uv run --project "/path/to/netcoredbg-mcp" netcoredbg-mcp --project-from-cwd
 ```
 
 Set `NETCOREDBG_PATH` in your shell profile:
@@ -105,9 +105,9 @@ $env:NETCOREDBG_PATH = "D:\Bin\netcoredbg\netcoredbg.exe"
     "netcoredbg": {
       "command": "uv",
       "args": [
-        "--directory",
-        "/path/to/netcoredbg-mcp",
         "run",
+        "--project",
+        "/path/to/netcoredbg-mcp",
         "netcoredbg-mcp",
         "--project-from-cwd"
       ],
@@ -119,6 +119,8 @@ $env:NETCOREDBG_PATH = "D:\Bin\netcoredbg\netcoredbg.exe"
 }
 ```
 
+> **⚠️ Important:** Use `uv run --project` NOT `uv --directory`. The `--directory` flag changes the working directory, breaking `--project-from-cwd` detection.
+
 ### Project-Scoped Configuration (`.mcp.json`)
 
 Add to your .NET project root for automatic loading:
@@ -128,7 +130,7 @@ Add to your .NET project root for automatic loading:
   "mcpServers": {
     "netcoredbg": {
       "command": "uv",
-      "args": ["--directory", "/path/to/netcoredbg-mcp", "run", "netcoredbg-mcp"],
+      "args": ["run", "--project", "/path/to/netcoredbg-mcp", "netcoredbg-mcp"],
       "env": {
         "NETCOREDBG_PATH": "/path/to/netcoredbg/netcoredbg.exe",
         "NETCOREDBG_PROJECT_ROOT": "${workspaceFolder}"

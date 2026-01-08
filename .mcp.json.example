@@ -3,9 +3,9 @@
     "netcoredbg": {
       "command": "uv",
       "args": [
-        "--directory",
-        "/path/to/netcoredbg-mcp",
         "run",
+        "--project",
+        "/path/to/netcoredbg-mcp",
         "netcoredbg-mcp",
         "--project-from-cwd"
       ],
