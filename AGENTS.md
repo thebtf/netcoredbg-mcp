@@ -44,7 +44,7 @@ If solution contains "simple", "quick", "temporary", "workaround" — **STOP and
 
 ---
 
-## 🚀 GIT & RELEASE WORKFLOW
+## 🚀 Git & RELEASE WORKFLOW
 
 **NON-NEGOTIABLE. Always follow.**
 
@@ -60,7 +60,7 @@ If solution contains "simple", "quick", "temporary", "workaround" — **STOP and
 2. Make changes, commit (e.g., `git commit -m "docs(workflow): add release process"`)
 3. Push and create PR
 4. Wait for user review and approval
-5. Merge PR (user must execute merge, or approve merge request)
+5. Merge PR (requires user to execute merge or explicitly approve merge request)
 6. **Only after user says "release"**: create and push tag (e.g., `git tag v1.0.1 && git push origin v1.0.1`)
 
 ---
