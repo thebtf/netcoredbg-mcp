@@ -60,9 +60,10 @@ If solution contains "simple", "quick", "temporary", "workaround" — **STOP and
 2. Make changes, commit (e.g., `git commit -m "docs(workflow): add release process"`)
 3. Push and create PR
 4. Wait for user review and approval
-5. Merge PR (requires user to execute merge or explicitly approve merge request)
-6. Verify functionality on the `main` branch
-7. **Only after user says "release"**: create and push tag (e.g., `git tag v1.0.1 && git push origin v1.0.1`)
+5. Merge PR into the `main` branch
+6. Update local `main` branch: `git checkout main && git pull origin main`
+7. Verify functionality on the updated `main` branch
+8. **Only after user says "release"**: Create and push tag (e.g., `git tag v1.0.1 && git push origin v1.0.1`)
 
 ---
 
