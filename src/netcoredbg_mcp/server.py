@@ -82,7 +82,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         args: list[str] | None = None,
         env: dict[str, str] | None = None,
         stop_at_entry: bool = False,
-        pre_build: bool = False,
+        pre_build: bool = True,
         build_project: str | None = None,
         build_configuration: str = "Debug",
     ) -> dict:
@@ -99,6 +99,10 @@ def create_server(project_path: str | None = None) -> FastMCP:
         .exe to .dll to avoid "deps.json conflict" errors. You can pass either
         App.exe or App.dll - the correct target will be selected automatically.
 
+        PRE-BUILD: By default, builds the project before launching to ensure you're
+        debugging the latest code. Provide build_project path to .csproj file.
+        Set pre_build=False to skip building (e.g., for pre-built binaries).
+
         Use attach_debug only for already-running processes (e.g., ASP.NET services).
 
         Args:
@@ -107,13 +111,21 @@ def create_server(project_path: str | None = None) -> FastMCP:
             args: Command line arguments
             env: Environment variables
             stop_at_entry: Stop at entry point
-            pre_build: Build the project before launching (fixes stale binary issues)
-            build_project: Path to .csproj file (required if pre_build=True)
+            pre_build: Build project before launching (default: True). Requires build_project.
+            build_project: Path to .csproj file (required when pre_build=True)
             build_configuration: Build configuration (Debug/Release)
         """
         try:
             # Resolve project root from MCP context (may update session)
             await resolve_project_root(ctx, session)
+
+            # Validate pre_build requires build_project
+            if pre_build and not build_project:
+                return {
+                    "success": False,
+                    "error": "pre_build=True requires build_project path to .csproj file. "
+                    "Either provide build_project or set pre_build=False.",
+                }
 
             # Validate program path (security: prevent arbitrary execution)
             # If pre_build=True, don't require file to exist yet (build will create it)
