@@ -44,6 +44,27 @@ If solution contains "simple", "quick", "temporary", "workaround" — **STOP and
 
 ---
 
+## 🚀 GIT & RELEASE WORKFLOW
+
+**NON-NEGOTIABLE. Always follow.**
+
+| Rule | Description |
+|------|-------------|
+| **No direct commits to main** | All changes via feature branch + PR |
+| **No releases without approval** | Wait for explicit user "go ahead" before tagging |
+| **PR review required** | User must review and approve before merge |
+| **Test before release** | Verify functionality works before creating tags |
+
+**Release process:**
+1. Create feature branch: `git checkout -b work/feature-name`
+2. Make changes, commit
+3. Push and create PR
+4. Wait for user review and approval
+5. Merge PR (user or with user approval)
+6. **Only after user says "release"**: create tag and push
+
+---
+
 ## 📍 KEY PATHS
 
 | What | Where |
