@@ -56,12 +56,12 @@ If solution contains "simple", "quick", "temporary", "workaround" — **STOP and
 | **Test before release** | Verify functionality works before creating tags |
 
 **Release process:**
-1. Create feature branch: `git checkout -b work/feature-name`
-2. Make changes, commit
+1. Create feature branch (e.g., `git checkout -b work/docs-release-workflow`)
+2. Make changes, commit (e.g., `git commit -m "docs(workflow): add release process"`)
 3. Push and create PR
 4. Wait for user review and approval
-5. Merge PR (user or with user approval)
-6. **Only after user says "release"**: create tag and push
+5. Merge PR (user must execute merge, or approve merge request)
+6. **Only after user says "release"**: create and push tag (e.g., `git tag v1.0.1 && git push origin v1.0.1`)
 
 ---
 
