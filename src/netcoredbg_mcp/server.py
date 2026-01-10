@@ -243,7 +243,13 @@ def create_server(project_path: str | None = None) -> FastMCP:
 
     @mcp.tool()
     async def get_debug_state() -> dict:
-        """Get the current debug session state."""
+        """
+        Get the current debug session state.
+
+        IMPORTANT: Always check state before asking user to interact with the app GUI!
+        If the app is paused at a breakpoint, the user cannot interact with UI.
+        Call continue_execution first if state shows stopped/paused.
+        """
         try:
             return {"success": True, "data": session.state.to_dict()}
         except Exception as e:
@@ -261,6 +267,13 @@ def create_server(project_path: str | None = None) -> FastMCP:
     ) -> dict:
         """
         Add a breakpoint at a specific line.
+
+        IMPORTANT TIMING:
+        - Breakpoints set BEFORE start_debug only work for debugging app startup.
+        - For UI apps (WPF/WinForms): remove breakpoints before launch, then add them
+          AFTER the UI is fully loaded. Otherwise the app may hang during initialization.
+        - When debugging UI issues: wait for app to be fully interactive before setting
+          breakpoints in event handlers.
 
         Args:
             file: Absolute path to source file
