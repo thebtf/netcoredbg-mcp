@@ -168,7 +168,7 @@ class BuildPolicy:
                         raise ValueError(f"Symlink not allowed in {context}: {path}")
                 # On Windows, check for reparse point attribute
                 if hasattr(attrs, "st_file_attributes"):
-                    FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+                    FILE_ATTRIBUTE_REPARSE_POINT = 0x400  # noqa: N806
                     if attrs.st_file_attributes & FILE_ATTRIBUTE_REPARSE_POINT:
                         if not allow_symlinks:
                             raise ValueError(
