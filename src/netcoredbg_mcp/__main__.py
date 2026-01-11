@@ -17,17 +17,17 @@ def configure_logging() -> None:
     level = os.environ.get("LOG_LEVEL", "INFO").upper()
     log_level = getattr(logging, level, logging.INFO)
     log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    
+
     # Configure root logger
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level)
-    
+
     # Console handler (stderr)
     console_handler = logging.StreamHandler(sys.stderr)
     console_handler.setLevel(log_level)
     console_handler.setFormatter(logging.Formatter(log_format))
     root_logger.addHandler(console_handler)
-    
+
     # File handler for debugging
     log_file = os.environ.get("LOG_FILE", "")
     if log_file:

@@ -232,6 +232,7 @@ class SessionManager:
         self._client.on_event(Events.EXITED, self._on_exited)
         self._client.on_event(Events.OUTPUT, self._on_output)
         self._client.on_event(Events.THREAD, self._on_thread)
+        self._client.on_event(Events.PROCESS, self._on_process)
 
     def _on_initialized(self, event: DAPEvent) -> None:
         """Handle initialized event."""
@@ -285,6 +286,16 @@ class SessionManager:
         if reason == "exited":
             self._state.threads = [t for t in self._state.threads if t.id != thread_id]
         # Note: "started" events are handled lazily via get_threads()
+
+    def _on_process(self, event: DAPEvent) -> None:
+        """Handle process event."""
+        self._state.process_id = event.body.get("systemProcessId")
+        self._state.process_name = event.body.get("name")
+        if self._state.process_id:
+            logger.info(
+                f"Process started: PID={self._state.process_id}, "
+                f"name={self._state.process_name or 'unknown'}"
+            )
 
     async def pre_launch_build(
         self,
@@ -467,6 +478,9 @@ class SessionManager:
 
         self._set_state(DebugState.IDLE)
         self._initialized_event.clear()
+        # Clear process info before resetting state
+        self._state.process_id = None
+        self._state.process_name = None
         self._state = SessionState()
         self._output_bytes = 0  # Reset output tracking for next session
 

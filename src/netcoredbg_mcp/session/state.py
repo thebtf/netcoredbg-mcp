@@ -169,6 +169,8 @@ class SessionState:
     output_buffer: list[str] = field(default_factory=list)
     exit_code: int | None = None
     exception_info: dict[str, Any] | None = None
+    process_id: int | None = None
+    process_name: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -180,4 +182,6 @@ class SessionState:
             "currentFrameId": self.current_frame_id,
             "exitCode": self.exit_code,
             "exceptionInfo": self.exception_info,
+            "processId": self.process_id,
+            "processName": self.process_name,
         }

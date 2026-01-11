@@ -7,11 +7,15 @@ import json
 import logging
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from mcp.server.fastmcp import Context, FastMCP
 
 from .session import SessionManager
 from .utils.project import get_project_root
+
+if TYPE_CHECKING:
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -313,13 +317,17 @@ def create_server(project_path: str | None = None) -> FastMCP:
                 bps = session.breakpoints.get_for_file(validated_file)
                 result = {
                     validated_file: [
-                        {"line": bp.line, "condition": bp.condition, "verified": bp.verified} for bp in bps
+                        {"line": bp.line, "condition": bp.condition, "verified": bp.verified}
+                        for bp in bps
                     ]
                 }
             else:
                 all_bps = session.breakpoints.get_all()
                 result = {
-                    f: [{"line": bp.line, "condition": bp.condition, "verified": bp.verified} for bp in bps]
+                    f: [
+                        {"line": bp.line, "condition": bp.condition, "verified": bp.verified}
+                        for bp in bps
+                    ]
                     for f, bps in all_bps.items()
                 }
             return {"success": True, "data": result}
@@ -373,7 +381,10 @@ def create_server(project_path: str | None = None) -> FastMCP:
             return {
                 "success": True,
                 "data": [
-                    {"id": f.id, "name": f.name, "source": f.source, "line": f.line, "column": f.column}
+                    {
+                        "id": f.id, "name": f.name, "source": f.source,
+                        "line": f.line, "column": f.column,
+                    }
                     for f in frames
                 ],
             }
@@ -395,7 +406,10 @@ def create_server(project_path: str | None = None) -> FastMCP:
             return {
                 "success": True,
                 "data": [
-                    {"name": s.get("name", ""), "variablesReference": s.get("variablesReference", 0)}
+                    {
+                        "name": s.get("name", ""),
+                        "variablesReference": s.get("variablesReference", 0),
+                    }
                     for s in scopes
                 ],
             }
@@ -448,6 +462,220 @@ def create_server(project_path: str | None = None) -> FastMCP:
             if clear:
                 session.state.output_buffer.clear()
             return {"success": True, "data": {"output": output}}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ============== UI Automation Tools ==============
+
+    # Global UI automation instance
+    from typing import Any
+
+    _ui: Any = None
+
+    def _get_ui() -> Any:
+        """Get or create UI automation instance."""
+        nonlocal _ui
+        if _ui is None:
+            from .ui import UIAutomation
+
+            _ui = UIAutomation()
+        return _ui
+
+    async def _ensure_ui_connected(session: SessionManager) -> Any:
+        """Ensure UI automation is connected to the debug process.
+
+        Raises:
+            NoActiveSessionError: If no debug session is active
+            NoProcessIdError: If process ID not available
+        """
+        from .ui import NoActiveSessionError, NoProcessIdError
+
+        if session.state.state.value == "idle":
+            raise NoActiveSessionError("No debug session is active. Start debugging first.")
+
+        process_id = session.state.process_id
+        if not process_id:
+            raise NoProcessIdError(
+                "Process ID not available. Debug session may not have started the process yet."
+            )
+
+        ui = _get_ui()
+        if ui._process_id != process_id:
+            await ui.connect(process_id)
+        return ui
+
+    @mcp.tool()
+    async def ui_get_window_tree(max_depth: int = 3, max_children: int = 50) -> dict:
+        """
+        Get the visual tree of the debugged application's main window.
+
+        Use this to understand the UI structure before interacting with elements.
+        Call after start_debug and wait for the application window to appear.
+
+        Args:
+            max_depth: Maximum depth to traverse (default 3)
+            max_children: Maximum children per element (default 50)
+
+        Returns:
+            Visual tree with automationId, controlType, name, isEnabled, etc.
+        """
+        try:
+            ui = await _ensure_ui_connected(session)
+            tree = await ui.get_window_tree(max_depth, max_children)
+            return {"success": True, "data": tree.to_dict()}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    async def ui_find_element(
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+    ) -> dict:
+        """
+        Find a UI element by AutomationId, name, or control type.
+
+        At least one search criterion must be provided.
+        Use ui_get_window_tree first to discover available elements.
+
+        Args:
+            automation_id: AutomationId property (most reliable for WPF)
+            name: Element's Name/Title property
+            control_type: Type like "Button", "TextBox", "MenuItem"
+
+        Returns:
+            Element info if found
+        """
+        try:
+            ui = await _ensure_ui_connected(session)
+            element = await ui.find_element(
+                automation_id=automation_id,
+                name=name,
+                control_type=control_type,
+            )
+            info = await ui.get_element_info(element)
+            return {"success": True, "data": info.to_dict()}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    async def ui_get_element_info(
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+    ) -> dict:
+        """
+        Get detailed info about a UI element.
+
+        Args:
+            automation_id: AutomationId property
+            name: Element's Name/Title property
+            control_type: Control type
+
+        Returns:
+            Element properties including rectangle, enabled state, focus state
+        """
+        try:
+            ui = await _ensure_ui_connected(session)
+            element = await ui.find_element(
+                automation_id=automation_id,
+                name=name,
+                control_type=control_type,
+            )
+            info = await ui.get_element_info(element)
+            return {"success": True, "data": info.to_dict()}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    async def ui_set_focus(
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+    ) -> dict:
+        """
+        Set keyboard focus to a UI element.
+
+        Call this before ui_send_keys to ensure keys go to the right element.
+
+        Args:
+            automation_id: AutomationId property
+            name: Element's Name/Title property
+            control_type: Control type
+        """
+        try:
+            ui = await _ensure_ui_connected(session)
+            element = await ui.find_element(
+                automation_id=automation_id,
+                name=name,
+                control_type=control_type,
+            )
+            await ui.set_focus(element)
+            return {"success": True, "data": {"focused": True}}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    async def ui_send_keys(
+        keys: str,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+    ) -> dict:
+        """
+        Send keyboard input to a UI element.
+
+        Uses pywinauto keyboard syntax:
+        - Regular text: "hello"
+        - Enter: "{ENTER}"
+        - Tab: "{TAB}"
+        - Escape: "{ESC}"
+        - Ctrl+C: "^c"
+        - Alt+F4: "%{F4}"
+        - Shift+Tab: "+{TAB}"
+        - Ctrl+Shift+S: "^+s"
+
+        Args:
+            keys: Keys to send (pywinauto syntax)
+            automation_id: Target element's AutomationId
+            name: Target element's Name
+            control_type: Target element's control type
+        """
+        try:
+            ui = await _ensure_ui_connected(session)
+            element = await ui.find_element(
+                automation_id=automation_id,
+                name=name,
+                control_type=control_type,
+            )
+            await ui.send_keys(element, keys)
+            return {"success": True, "data": {"sent": keys}}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    async def ui_click(
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+    ) -> dict:
+        """
+        Click on a UI element.
+
+        Args:
+            automation_id: AutomationId property
+            name: Element's Name/Title property
+            control_type: Control type
+        """
+        try:
+            ui = await _ensure_ui_connected(session)
+            element = await ui.find_element(
+                automation_id=automation_id,
+                name=name,
+                control_type=control_type,
+            )
+            await ui.click(element)
+            return {"success": True, "data": {"clicked": True}}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
