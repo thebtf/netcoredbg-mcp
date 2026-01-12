@@ -67,7 +67,7 @@ If solution contains "simple", "quick", "temporary", "workaround" — **STOP and
 7. Verify functionality on the updated `main` branch (run tests, manual checks as needed)
 8. **Only after user explicitly says "release"** (via direct communication): Create and push an annotated tag (e.g., `git tag -a v1.0.1 -m "Version 1.0.1" && git push origin v1.0.1`)
 
-**If issues are found during verification (step 7):** Create a hotfix PR to address them before proceeding to step 8.
+**If issues are found during verification (step 7):** Create a hotfix PR to address them. After the hotfix PR is merged into the main branch, restart the process from step 6.
 
 ---
 
