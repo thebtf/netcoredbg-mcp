@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from ..build import BuildManager, BuildResult
@@ -348,6 +348,7 @@ class SessionManager:
         pre_build: bool = False,
         build_project: str | None = None,
         build_configuration: str = "Debug",
+        progress_callback: Callable[[float, float, str], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         """Launch program for debugging.
 
@@ -360,6 +361,7 @@ class SessionManager:
             pre_build: Run pre-launch build before launching
             build_project: Project file for pre-build (required if pre_build=True)
             build_configuration: Build configuration for pre-build
+            progress_callback: Async callback(progress, total, message) for progress
 
         Returns:
             Launch result
@@ -368,10 +370,17 @@ class SessionManager:
             RuntimeError: If launch fails
             BuildError: If pre-build fails
         """
+        # Helper to report progress (safely handles None callback)
+        async def report(progress: float, total: float, message: str) -> None:
+            if progress_callback:
+                await progress_callback(progress, total, message)
+
         # Run pre-launch build if requested
         if pre_build:
             if not build_project:
                 raise ValueError("build_project required when pre_build=True")
+
+            await report(0, 100, "Building project...")
 
             # Stop existing session first to release file locks
             if self.is_active:
@@ -385,10 +394,14 @@ class SessionManager:
                 configuration=build_configuration,
             )
 
+            await report(50, 100, "Build complete, starting debugger...")
+
             # Re-validate program path after build (now file should exist)
             # Also apply smart .exe → .dll resolution for .NET 6+
             program = self.validate_program(program, must_exist=True)
             logger.debug(f"Post-build program path: {program}")
+        else:
+            await report(0, 100, "Starting debugger...")
 
         # Check dbgshim version compatibility (warns if mismatch)
         version_warning = self.check_dbgshim_compatibility(program)
@@ -396,17 +409,23 @@ class SessionManager:
         if not self._client.is_running:
             await self.start()
 
+        await report(60, 100, "Initializing debug adapter...")
+
         # Wait for initialized event
         try:
             await asyncio.wait_for(self._initialized_event.wait(), timeout=10.0)
         except asyncio.TimeoutError:
             raise RuntimeError("Timeout waiting for DAP initialization")
 
+        await report(70, 100, "Setting breakpoints...")
+
         # Set all breakpoints before launch
         await self._sync_all_breakpoints()
 
         # Set exception breakpoints (stop on all exceptions by default)
         await self._client.set_exception_breakpoints([])
+
+        await report(80, 100, "Launching program...")
 
         # Launch program with justMyCode=False to show all stack frames
         response = await self._client.launch(
@@ -424,6 +443,8 @@ class SessionManager:
         # Configuration done
         await self._client.configuration_done()
         self._set_state(DebugState.RUNNING)
+
+        await report(100, 100, "Debug session started")
 
         # Save launch config for restart
         self._last_launch_config = {

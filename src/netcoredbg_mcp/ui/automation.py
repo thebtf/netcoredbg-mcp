@@ -338,6 +338,50 @@ class UIAutomation:
             logger.error("Click timed out")
             raise UIOperationTimeoutError("Click timed out after 5 seconds") from e
 
+    async def send_keys_focused(self, keys: str) -> None:
+        """
+        Send keys to currently focused element without element search.
+
+        This is useful after ui_set_focus when re-searching the element
+        would timeout (e.g., for complex controls like DataGrid).
+
+        Uses pywinauto keyboard.send_keys directly, which sends to the
+        currently focused control.
+
+        Args:
+            keys: The keys to send (using pywinauto syntax)
+
+        Raises:
+            NoProcessIdError: If not connected to a process
+            ApplicationNotRespondingError: If cannot send keys
+            UIOperationTimeoutError: If operation times out
+        """
+        if self._app is None:
+            raise NoProcessIdError("Not connected to any process")
+
+        def _send_keys_focused():
+            try:
+                from pywinauto import keyboard
+
+                keyboard.send_keys(keys)
+                logger.debug(f"Sent keys to focused element: {keys}")
+            except Exception as e:
+                logger.error(f"Failed to send keys to focused: {e}")
+                raise ApplicationNotRespondingError(
+                    f"Cannot send keys to focused element: {e}"
+                ) from e
+
+        try:
+            loop = asyncio.get_event_loop()
+            await asyncio.wait_for(
+                loop.run_in_executor(self._executor, _send_keys_focused), timeout=5.0
+            )
+        except asyncio.TimeoutError as e:
+            logger.error("Send keys to focused timed out")
+            raise UIOperationTimeoutError(
+                "Send keys to focused timed out after 5 seconds"
+            ) from e
+
     def shutdown(self):
         """Shutdown the thread pool executor. Call this during server shutdown."""
         try:

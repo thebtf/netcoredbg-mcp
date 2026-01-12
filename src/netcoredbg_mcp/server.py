@@ -76,6 +76,25 @@ def create_server(project_path: str | None = None) -> FastMCP:
     mcp = FastMCP("netcoredbg-mcp")
     session = get_session()
 
+    # Helper to notify resource updates (MCP spec compliance)
+    from pydantic import AnyUrl
+
+    async def notify_state_changed(ctx: Context) -> None:
+        """Notify client that debug://state resource has changed."""
+        try:
+            if ctx.session:
+                await ctx.session.send_resource_updated(AnyUrl("debug://state"))
+        except Exception:
+            pass  # Notification failure shouldn't break the tool
+
+    async def notify_breakpoints_changed(ctx: Context) -> None:
+        """Notify client that debug://breakpoints resource has changed."""
+        try:
+            if ctx.session:
+                await ctx.session.send_resource_updated(AnyUrl("debug://breakpoints"))
+        except Exception:
+            pass
+
     # ============== Debug Control Tools ==============
 
     @mcp.tool()
@@ -145,6 +164,10 @@ def create_server(project_path: str | None = None) -> FastMCP:
             if build_project:
                 validated_build_project = session.validate_path(build_project, must_exist=True)
 
+            # Progress callback to report to MCP client
+            async def report_progress(progress: float, total: float, message: str) -> None:
+                await ctx.report_progress(progress=progress, total=total, message=message)
+
             result = await session.launch(
                 program=validated_program,
                 cwd=validated_cwd,
@@ -154,7 +177,9 @@ def create_server(project_path: str | None = None) -> FastMCP:
                 pre_build=pre_build,
                 build_project=validated_build_project,
                 build_configuration=build_configuration,
+                progress_callback=report_progress,
             )
+            await notify_state_changed(ctx)
             return {"success": True, "data": result}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -192,55 +217,61 @@ def create_server(project_path: str | None = None) -> FastMCP:
             return {"success": False, "error": str(e)}
 
     @mcp.tool()
-    async def stop_debug() -> dict:
+    async def stop_debug(ctx: Context) -> dict:
         """Stop the current debug session."""
         try:
             result = await session.stop()
+            await notify_state_changed(ctx)
             return {"success": True, "data": result}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     @mcp.tool()
-    async def continue_execution(thread_id: int | None = None) -> dict:
+    async def continue_execution(ctx: Context, thread_id: int | None = None) -> dict:
         """Continue program execution."""
         try:
             result = await session.continue_execution(thread_id)
+            await notify_state_changed(ctx)
             return {"success": True, "data": result}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     @mcp.tool()
-    async def pause_execution(thread_id: int | None = None) -> dict:
+    async def pause_execution(ctx: Context, thread_id: int | None = None) -> dict:
         """Pause program execution."""
         try:
             result = await session.pause(thread_id)
+            await notify_state_changed(ctx)
             return {"success": True, "data": result}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     @mcp.tool()
-    async def step_over(thread_id: int | None = None) -> dict:
+    async def step_over(ctx: Context, thread_id: int | None = None) -> dict:
         """Step over to the next line."""
         try:
             result = await session.step_over(thread_id)
+            await notify_state_changed(ctx)
             return {"success": True, "data": result}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     @mcp.tool()
-    async def step_into(thread_id: int | None = None) -> dict:
+    async def step_into(ctx: Context, thread_id: int | None = None) -> dict:
         """Step into the next function call."""
         try:
             result = await session.step_in(thread_id)
+            await notify_state_changed(ctx)
             return {"success": True, "data": result}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     @mcp.tool()
-    async def step_out(thread_id: int | None = None) -> dict:
+    async def step_out(ctx: Context, thread_id: int | None = None) -> dict:
         """Step out of the current function."""
         try:
             result = await session.step_out(thread_id)
+            await notify_state_changed(ctx)
             return {"success": True, "data": result}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -295,6 +326,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
             # Validate file path (security: prevent path traversal)
             validated_file = session.validate_path(file, must_exist=True)
             bp = await session.add_breakpoint(validated_file, line, condition, hit_condition)
+            await notify_breakpoints_changed(ctx)
             return {
                 "success": True,
                 "data": {
@@ -317,6 +349,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
             # Validate file path (security: prevent path traversal)
             validated_file = session.validate_path(file)
             removed = await session.remove_breakpoint(validated_file, line)
+            await notify_breakpoints_changed(ctx)
             return {"success": True, "data": {"removed": removed}}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -361,6 +394,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
                 # Validate file path if provided
                 validated_file = session.validate_path(file)
             count = await session.clear_breakpoints(validated_file)
+            await notify_breakpoints_changed(ctx)
             return {"success": True, "data": {"removed": count}}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -725,6 +759,35 @@ def create_server(project_path: str | None = None) -> FastMCP:
             return {"success": False, "error": str(e)}
 
     @mcp.tool()
+    async def ui_send_keys_focused(keys: str) -> dict:
+        """
+        Send keyboard input to the currently focused element.
+
+        Use this AFTER ui_set_focus to avoid re-searching for complex elements
+        like DataGrid that may timeout on repeated searches.
+
+        Workflow:
+        1. ui_set_focus(automation_id="MyElement")  # Focus the element
+        2. ui_send_keys_focused(keys="^{END}")      # Send keys without re-search
+
+        Uses pywinauto keyboard syntax:
+        - Regular text: "hello"
+        - Enter: "{ENTER}", Tab: "{TAB}", Escape: "{ESC}"
+        - Ctrl+C: "^c", Alt+F4: "%{F4}", Shift+Tab: "+{TAB}"
+        - Arrow keys: "{LEFT}", "{RIGHT}", "{UP}", "{DOWN}"
+        - Ctrl+End: "^{END}", Ctrl+Home: "^{HOME}"
+
+        Args:
+            keys: Keys to send (pywinauto syntax)
+        """
+        try:
+            ui = await _get_ui()
+            await ui.send_keys_focused(keys)
+            return {"success": True, "data": {"sent": keys, "target": "focused"}}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
     async def ui_click(
         automation_id: str | None = None,
         name: str | None = None,
@@ -822,8 +885,21 @@ After window appears, you can automate UI interaction:
 ```
 ui_get_window_tree()                    # Discover UI structure
 ui_find_element(automation_id="btn")    # Find element
-ui_send_keys("^s", automation_id="txt") # Ctrl+S to element
 ui_click(automation_id="btnSave")       # Click button
+```
+
+### Sending Keys to Complex Controls (DataGrid, TreeView, etc.)
+
+For complex controls that timeout on repeated searches, use this workflow:
+```
+ui_set_focus(automation_id="MyDataGrid")  # 1. Focus the element
+ui_send_keys_focused(keys="^{END}")       # 2. Send keys without re-search
+ui_send_keys_focused(keys="{DOWN}")       # 3. Continue sending keys
+```
+
+For simple controls, direct send works:
+```
+ui_send_keys(keys="hello", automation_id="txtInput")
 ```
 
 Keyboard syntax: `{ENTER}`, `{TAB}`, `^c` (Ctrl+C), `%{F4}` (Alt+F4)
@@ -889,14 +965,22 @@ Summarize:
 
     # ============== Resources ==============
 
-    @mcp.resource("debug://state")
+    @mcp.resource("debug://state", mime_type="application/json")
     async def debug_state_resource() -> str:
-        """Current debug session state."""
+        """Current debug session state (JSON).
+
+        Contains: status, stop_reason, threads, process info.
+        Updates when: session starts/stops, breakpoint hit, step completes.
+        """
         return json.dumps(session.state.to_dict(), indent=2)
 
-    @mcp.resource("debug://breakpoints")
+    @mcp.resource("debug://breakpoints", mime_type="application/json")
     async def debug_breakpoints_resource() -> str:
-        """All active breakpoints."""
+        """All active breakpoints (JSON).
+
+        Contains: file paths with line numbers, conditions, verified status.
+        Updates when: breakpoints added/removed/verified.
+        """
         all_bps = session.breakpoints.get_all()
         result = {
             f: [{"line": bp.line, "condition": bp.condition, "verified": bp.verified} for bp in bps]
@@ -904,9 +988,13 @@ Summarize:
         }
         return json.dumps(result, indent=2)
 
-    @mcp.resource("debug://output")
+    @mcp.resource("debug://output", mime_type="text/plain")
     async def debug_output_resource() -> str:
-        """Debug console output."""
+        """Debug console output (plain text).
+
+        Contains: stdout/stderr from debugged process.
+        Updates when: new output arrives.
+        """
         return "".join(session.state.output_buffer)
 
     logger.info("NetCoreDbg MCP Server initialized")
