@@ -22,6 +22,10 @@ def configure_logging() -> None:
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level)
 
+    # Prevent duplicate handlers if called multiple times
+    if root_logger.handlers:
+        return
+
     # Console handler (stderr)
     console_handler = logging.StreamHandler(sys.stderr)
     console_handler.setLevel(log_level)

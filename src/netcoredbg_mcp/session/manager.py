@@ -289,13 +289,26 @@ class SessionManager:
 
     def _on_process(self, event: DAPEvent) -> None:
         """Handle process event."""
-        self._state.process_id = event.body.get("systemProcessId")
-        self._state.process_name = event.body.get("name")
-        if self._state.process_id:
-            logger.info(
-                f"Process started: PID={self._state.process_id}, "
-                f"name={self._state.process_name or 'unknown'}"
-            )
+        pid_raw = event.body.get("systemProcessId")
+        name_raw = event.body.get("name")
+
+        # Normalize PID to int, handle string/invalid values
+        pid = None
+        if pid_raw is not None:
+            try:
+                pid = int(pid_raw)
+            except (TypeError, ValueError):
+                logger.warning(f"Invalid systemProcessId in process event: {pid_raw}")
+                pid = None
+
+        # Normalize name to string
+        name = str(name_raw) if name_raw is not None else None
+
+        self._state.process_id = pid
+        self._state.process_name = name
+
+        if pid is not None:
+            logger.info(f"Process started: PID={pid}, name={name or 'unknown'}")
 
     async def pre_launch_build(
         self,
@@ -414,8 +427,8 @@ class SessionManager:
         # Wait for initialized event
         try:
             await asyncio.wait_for(self._initialized_event.wait(), timeout=10.0)
-        except asyncio.TimeoutError:
-            raise RuntimeError("Timeout waiting for DAP initialization")
+        except asyncio.TimeoutError as e:
+            raise RuntimeError("Timeout waiting for DAP initialization") from e
 
         await report(70, 100, "Setting breakpoints...")
 

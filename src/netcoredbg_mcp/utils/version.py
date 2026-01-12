@@ -136,7 +136,7 @@ def get_dbgshim_version(netcoredbg_path: str) -> VersionInfo | None:
             return None
 
         # VerQueryValueW for VS_FIXEDFILEINFO
-        class VS_FIXEDFILEINFO(ctypes.Structure):  # noqa: N801
+        class VS_FIXEDFILEINFO(ctypes.Structure):
             _fields_ = [
                 ("dwSignature", wintypes.DWORD),
                 ("dwStrucVersion", wintypes.DWORD),
@@ -234,7 +234,7 @@ def check_version_compatibility(
             f"but target is .NET {target_version.major}. "
             f"This may cause E_NOINTERFACE (0x80004002) errors in get_call_stack. "
             f"Copy dbgshim.dll from .NET {target_version.major} SDK to fix: "
-            f'"C:\\Program Files\\dotnet\\shared\\Microsoft.NETCore.App\\"'
+            f'"C:\\Program Files\\dotnet\\shared\\Microsoft.NETCore.App\\{target_version.major}.x.x\\"'
         )
         return VersionCompatibility(
             compatible=False,

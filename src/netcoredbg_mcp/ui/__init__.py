@@ -12,12 +12,12 @@ from .errors import (
 from .serialization import ElementInfo
 
 __all__ = [
-    "UIAutomation",
+    "ApplicationNotRespondingError",
     "ElementInfo",
-    "UIAutomationError",
+    "ElementNotFoundError",
     "NoActiveSessionError",
     "NoProcessIdError",
-    "ElementNotFoundError",
-    "ApplicationNotRespondingError",
+    "UIAutomation",
+    "UIAutomationError",
     "UIOperationTimeoutError",
 ]

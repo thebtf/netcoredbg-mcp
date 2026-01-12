@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 
 class TestProgressCallback:
@@ -77,11 +77,8 @@ class TestResourceNotifications:
         mock_ctx.session.send_resource_updated = AsyncMock()
 
         # Simulate the helper function behavior
-        try:
-            if mock_ctx.session:
-                await mock_ctx.session.send_resource_updated(AnyUrl("debug://state"))
-        except Exception:
-            pass
+        if mock_ctx.session:
+            await mock_ctx.session.send_resource_updated(AnyUrl("debug://state"))
 
         mock_ctx.session.send_resource_updated.assert_called_once()
 
@@ -92,11 +89,9 @@ class TestResourceNotifications:
         mock_ctx.session = None
 
         # Should not raise
-        try:
-            if mock_ctx.session:
-                await mock_ctx.session.send_resource_updated("debug://state")
-        except Exception:
-            pass
+        if mock_ctx.session:
+            await mock_ctx.session.send_resource_updated("debug://state")
+        # Test passes if no exception is raised
 
 
 class TestOutputSearchTools:

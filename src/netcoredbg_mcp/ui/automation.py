@@ -32,6 +32,11 @@ class UIAutomation:
             max_workers=2, thread_name_prefix="ui_auto"
         )
 
+    @property
+    def process_id(self) -> int | None:
+        """Return the currently connected process ID."""
+        return self._process_id
+
     async def connect(self, process_id: int) -> None:
         """
         Connect to process by PID.
@@ -60,7 +65,7 @@ class UIAutomation:
                 ) from e
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             self._app = await loop.run_in_executor(self._executor, _connect)
             self._process_id = process_id
             logger.info(f"Connected to process {process_id}")
@@ -73,12 +78,18 @@ class UIAutomation:
         """
         Disconnect from current process.
 
-        This clears the internal references but does not kill the process.
+        This clears the internal references and releases pywinauto resources
+        but does not kill the process.
         """
         if self._app is not None:
             logger.info(f"Disconnecting from process {self._process_id}")
-            self._app = None
-            self._process_id = None
+            try:
+                # Close UIA connection to release COM resources
+                self._app = None
+            except Exception as e:
+                logger.warning(f"Error during disconnect cleanup: {e}")
+            finally:
+                self._process_id = None
 
     async def get_window_tree(
         self, max_depth: int = 3, max_children: int = 50
@@ -115,7 +126,7 @@ class UIAutomation:
                 ) from e
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             # Set a reasonable timeout for UI operations
             tree = await asyncio.wait_for(
                 loop.run_in_executor(self._executor, _get_tree), timeout=10.0
@@ -154,7 +165,7 @@ class UIAutomation:
         if self._app is None:
             raise NoProcessIdError("Not connected to any process")
 
-        if not any([automation_id, name, control_type]):
+        if not any((automation_id, name, control_type)):
             raise ValueError("At least one search criterion must be provided")
 
         def _find():
@@ -187,7 +198,7 @@ class UIAutomation:
                 ) from e
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             element = await asyncio.wait_for(
                 loop.run_in_executor(self._executor, _find), timeout=10.0
             )
@@ -222,7 +233,7 @@ class UIAutomation:
                 ) from e
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             info = await asyncio.wait_for(
                 loop.run_in_executor(self._executor, _get_info), timeout=5.0
             )
@@ -256,7 +267,7 @@ class UIAutomation:
                 ) from e
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             await asyncio.wait_for(
                 loop.run_in_executor(self._executor, _set_focus), timeout=5.0
             )
@@ -297,7 +308,7 @@ class UIAutomation:
                 ) from e
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             await asyncio.wait_for(
                 loop.run_in_executor(self._executor, _send_keys), timeout=5.0
             )
@@ -330,7 +341,7 @@ class UIAutomation:
                 ) from e
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             await asyncio.wait_for(
                 loop.run_in_executor(self._executor, _click), timeout=5.0
             )
@@ -372,7 +383,7 @@ class UIAutomation:
                 ) from e
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             await asyncio.wait_for(
                 loop.run_in_executor(self._executor, _send_keys_focused), timeout=5.0
             )

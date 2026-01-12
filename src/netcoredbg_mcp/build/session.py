@@ -116,7 +116,7 @@ class BuildSession:
                 return None
 
             # Set JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-            class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):  # noqa: N801
+            class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
                 _fields_ = [
                     ("PerProcessUserTimeLimit", ctypes.c_int64),
                     ("PerJobUserTimeLimit", ctypes.c_int64),
@@ -129,7 +129,7 @@ class BuildSession:
                     ("SchedulingClass", wintypes.DWORD),
                 ]
 
-            class IO_COUNTERS(ctypes.Structure):  # noqa: N801
+            class IO_COUNTERS(ctypes.Structure):
                 _fields_ = [
                     ("ReadOperationCount", ctypes.c_uint64),
                     ("WriteOperationCount", ctypes.c_uint64),
@@ -139,7 +139,7 @@ class BuildSession:
                     ("OtherTransferCount", ctypes.c_uint64),
                 ]
 
-            class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):  # noqa: N801
+            class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
                 _fields_ = [
                     ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
                     ("IoInfo", IO_COUNTERS),
@@ -149,8 +149,8 @@ class BuildSession:
                     ("PeakJobMemoryUsed", ctypes.c_size_t),
                 ]
 
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000  # noqa: N806
-            JobObjectExtendedLimitInformation = 9  # noqa: N806
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+            JobObjectExtendedLimitInformation = 9
 
             info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
             info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
@@ -187,8 +187,8 @@ class BuildSession:
             kernel32 = ctypes.windll.kernel32
 
             # Get process handle from PID
-            PROCESS_SET_QUOTA = 0x0100  # noqa: N806
-            PROCESS_TERMINATE = 0x0001  # noqa: N806
+            PROCESS_SET_QUOTA = 0x0100
+            PROCESS_TERMINATE = 0x0001
             proc_handle = kernel32.OpenProcess(
                 PROCESS_SET_QUOTA | PROCESS_TERMINATE, False, pid
             )

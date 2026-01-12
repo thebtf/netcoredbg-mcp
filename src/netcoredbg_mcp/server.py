@@ -7,15 +7,12 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from mcp.server.fastmcp import Context, FastMCP
 
 from .session import SessionManager
+from .session.state import DebugState
 from .utils.project import get_project_root
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -84,16 +81,16 @@ def create_server(project_path: str | None = None) -> FastMCP:
         try:
             if ctx.session:
                 await ctx.session.send_resource_updated(AnyUrl("debug://state"))
-        except Exception:
-            pass  # Notification failure shouldn't break the tool
+        except Exception as e:
+            logger.warning(f"Failed to send resource update notification for debug://state: {e}")
 
     async def notify_breakpoints_changed(ctx: Context) -> None:
         """Notify client that debug://breakpoints resource has changed."""
         try:
             if ctx.session:
                 await ctx.session.send_resource_updated(AnyUrl("debug://breakpoints"))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to send resource update notification for debug://breakpoints: {e}")
 
     # ============== Debug Control Tools ==============
 
@@ -583,7 +580,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         try:
             output = "".join(session.state.output_buffer)
             all_lines = output.splitlines()
-            tail = all_lines[-lines:] if len(all_lines) > lines else all_lines
+            tail = all_lines[-lines:]
             return {
                 "success": True,
                 "data": {
@@ -620,7 +617,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         """
         from .ui import NoActiveSessionError, NoProcessIdError
 
-        if session.state.state.value == "idle":
+        if session.state.state == DebugState.IDLE:
             raise NoActiveSessionError("No debug session is active. Start debugging first.")
 
         process_id = session.state.process_id
@@ -630,7 +627,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
             )
 
         ui = _get_ui()
-        if ui._process_id != process_id:
+        if ui.process_id != process_id:
             await ui.connect(process_id)
         return ui
 
@@ -781,7 +778,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
             keys: Keys to send (pywinauto syntax)
         """
         try:
-            ui = await _get_ui()
+            ui = await _ensure_ui_connected(session)
             await ui.send_keys_focused(keys)
             return {"success": True, "data": {"sent": keys, "target": "focused"}}
         except Exception as e:
