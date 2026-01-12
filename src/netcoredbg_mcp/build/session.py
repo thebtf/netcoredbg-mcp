@@ -250,8 +250,6 @@ class BuildSession:
             # Read output with limits
             stdout_lines: list[str] = []
             stderr_lines: list[str] = []
-            stdout_bytes = 0
-            stderr_bytes = 0
 
             async def read_stream(
                 stream: asyncio.StreamReader | None,
@@ -371,8 +369,8 @@ class BuildSession:
             if retry_on_lock and self._is_file_lock_error(stdout, stderr):
                 if attempt < MAX_BUILD_RETRIES - 1:
                     logger.warning(
-                        f"Build failed due to file locks (attempt {attempt + 1}/{MAX_BUILD_RETRIES}), "
-                        f"cleaning up and retrying..."
+                        f"Build failed due to file locks "
+                        f"(attempt {attempt + 1}/{MAX_BUILD_RETRIES}), retrying..."
                     )
                     # Run cleanup and retry
                     await cleanup_for_build(

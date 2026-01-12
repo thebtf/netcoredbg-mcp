@@ -4,6 +4,7 @@
 .serena/
 .zencoder/
 .zenflow/
+tmpclaude-*-cwd/
 
 # netcoredbg binary (download separately)
 bin/netcoredbg/
