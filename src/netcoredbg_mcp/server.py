@@ -250,6 +250,9 @@ def create_server(project_path: str | None = None) -> FastMCP:
         """
         Get the current debug session state.
 
+        Returns state, threads, current position, and exception info.
+        The user cannot see this directly - summarize important info for them.
+
         IMPORTANT: Always check state before asking user to interact with the app GUI!
         If the app is paused at a breakpoint, the user cannot interact with UI.
         Call continue_execution first if state shows stopped/paused.
@@ -469,12 +472,92 @@ def create_server(project_path: str | None = None) -> FastMCP:
 
     @mcp.tool()
     async def get_output(clear: bool = False) -> dict:
-        """Get debug output from the debugged program."""
+        """Get stdout/stderr output from the debugged program.
+
+        IMPORTANT: The user cannot see this output directly.
+        YOU must read it and summarize relevant information for the user.
+        Never tell the user to "check the console" or "look at output".
+
+        Call periodically during debugging to catch log messages and errors.
+        """
         try:
             output = "".join(session.state.output_buffer)
             if clear:
                 session.state.output_buffer.clear()
             return {"success": True, "data": {"output": output}}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    async def search_output(pattern: str, context_lines: int = 2) -> dict:
+        """Search program output for a pattern (regex supported).
+
+        Use this instead of get_output when looking for specific messages,
+        errors, or log entries in large output. Returns matching lines with context.
+
+        Args:
+            pattern: Regex pattern to search for (case-insensitive)
+            context_lines: Number of lines before/after each match (default 2)
+
+        Returns:
+            List of matches with line numbers and context
+        """
+        import re
+
+        try:
+            output = "".join(session.state.output_buffer)
+            lines = output.splitlines()
+            matches = []
+
+            try:
+                regex = re.compile(pattern, re.IGNORECASE)
+            except re.error as e:
+                return {"success": False, "error": f"Invalid regex: {e}"}
+
+            for i, line in enumerate(lines):
+                if regex.search(line):
+                    start = max(0, i - context_lines)
+                    end = min(len(lines), i + context_lines + 1)
+                    context = lines[start:end]
+                    matches.append({
+                        "line_number": i + 1,
+                        "match": line,
+                        "context": context,
+                    })
+
+            return {
+                "success": True,
+                "data": {
+                    "pattern": pattern,
+                    "match_count": len(matches),
+                    "matches": matches[:50],  # Limit to 50 matches
+                },
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    async def get_output_tail(lines: int = 50) -> dict:
+        """Get the last N lines of program output.
+
+        Useful for checking recent output without loading everything.
+        The user cannot see this - summarize relevant info for them.
+
+        Args:
+            lines: Number of lines to return (default 50)
+        """
+        try:
+            output = "".join(session.state.output_buffer)
+            all_lines = output.splitlines()
+            tail = all_lines[-lines:] if len(all_lines) > lines else all_lines
+            return {
+                "success": True,
+                "data": {
+                    "total_lines": len(all_lines),
+                    "returned_lines": len(tail),
+                    "output": "\n".join(tail),
+                },
+            }
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -516,6 +599,20 @@ def create_server(project_path: str | None = None) -> FastMCP:
         if ui._process_id != process_id:
             await ui.connect(process_id)
         return ui
+
+    async def _find_ui_element(
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+    ):
+        """Helper to connect to UI and find an element."""
+        ui = await _ensure_ui_connected(session)
+        element = await ui.find_element(
+            automation_id=automation_id,
+            name=name,
+            control_type=control_type,
+        )
+        return ui, element
 
     @mcp.tool()
     async def ui_get_window_tree(max_depth: int = 3, max_children: int = 50) -> dict:
@@ -572,35 +669,6 @@ def create_server(project_path: str | None = None) -> FastMCP:
             return {"success": False, "error": str(e)}
 
     @mcp.tool()
-    async def ui_get_element_info(
-        automation_id: str | None = None,
-        name: str | None = None,
-        control_type: str | None = None,
-    ) -> dict:
-        """
-        Get detailed info about a UI element.
-
-        Args:
-            automation_id: AutomationId property
-            name: Element's Name/Title property
-            control_type: Control type
-
-        Returns:
-            Element properties including rectangle, enabled state, focus state
-        """
-        try:
-            ui = await _ensure_ui_connected(session)
-            element = await ui.find_element(
-                automation_id=automation_id,
-                name=name,
-                control_type=control_type,
-            )
-            info = await ui.get_element_info(element)
-            return {"success": True, "data": info.to_dict()}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-    @mcp.tool()
     async def ui_set_focus(
         automation_id: str | None = None,
         name: str | None = None,
@@ -617,12 +685,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
             control_type: Control type
         """
         try:
-            ui = await _ensure_ui_connected(session)
-            element = await ui.find_element(
-                automation_id=automation_id,
-                name=name,
-                control_type=control_type,
-            )
+            ui, element = await _find_ui_element(automation_id, name, control_type)
             await ui.set_focus(element)
             return {"success": True, "data": {"focused": True}}
         except Exception as e:
@@ -655,12 +718,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
             control_type: Target element's control type
         """
         try:
-            ui = await _ensure_ui_connected(session)
-            element = await ui.find_element(
-                automation_id=automation_id,
-                name=name,
-                control_type=control_type,
-            )
+            ui, element = await _find_ui_element(automation_id, name, control_type)
             await ui.send_keys(element, keys)
             return {"success": True, "data": {"sent": keys}}
         except Exception as e:
@@ -681,16 +739,153 @@ def create_server(project_path: str | None = None) -> FastMCP:
             control_type: Control type
         """
         try:
-            ui = await _ensure_ui_connected(session)
-            element = await ui.find_element(
-                automation_id=automation_id,
-                name=name,
-                control_type=control_type,
-            )
+            ui, element = await _find_ui_element(automation_id, name, control_type)
             await ui.click(element)
             return {"success": True, "data": {"clicked": True}}
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    # ============== Prompts (slash commands) ==============
+
+    @mcp.prompt(
+        name="debug",
+        description="Debug session workflow guide for .NET applications",
+    )
+    def debug_prompt() -> list[dict]:
+        """Start here when debugging .NET applications."""
+        return [
+            {
+                "role": "user",
+                "content": """# .NET Debug Session Guide
+
+## CRITICAL: User Cannot See Debug Output
+
+The user does NOT have access to Debug/Output windows.
+YOU must:
+1. Call `get_output()` periodically to read program output
+2. Summarize important findings for the user
+3. NEVER tell user to "look at Debug Output" or "check the console"
+4. Report errors, exceptions, and relevant log messages proactively
+
+## Debug Workflow
+
+### 1. Start Session
+```
+start_debug(
+    program="path/to/App.dll",      # Use .dll, not .exe for .NET 6+
+    build_project="path/to/App.csproj",  # Optional: rebuild before debug
+    pre_build=True                   # Default: builds before launch
+)
+```
+
+### 2. Set Breakpoints
+```
+add_breakpoint(file="Program.cs", line=15)
+add_breakpoint(file="Handler.cs", line=42, condition="x > 10")
+```
+
+### 3. When Execution Pauses
+```
+get_call_stack()           # See where execution stopped
+get_scopes(frame_id)       # Get variable scopes for frame
+get_variables(reference)   # Inspect variable values
+evaluate_expression("x+1") # Evaluate expressions
+```
+
+### 4. Control Execution
+```
+step_over()           # Next line (skip function calls)
+step_into()           # Enter function
+step_out()            # Exit current function
+continue_execution()  # Run until next breakpoint
+```
+
+### 5. Monitor Output
+```
+get_output()          # Read program stdout/stderr - SUMMARIZE FOR USER
+get_debug_state()     # Check session state
+```
+
+### 6. End Session
+```
+stop_debug()
+```
+
+## Common Issues
+- Empty stack trace? Use `start_debug`, not `attach_debug`
+- deps.json conflict? Build uses .dll, not .exe
+- E_NOINTERFACE? dbgshim.dll version mismatch with .NET runtime
+
+## For UI Applications (WPF/WinForms)
+
+After window appears, you can automate UI interaction:
+```
+ui_get_window_tree()                    # Discover UI structure
+ui_find_element(automation_id="btn")    # Find element
+ui_send_keys("^s", automation_id="txt") # Ctrl+S to element
+ui_click(automation_id="btnSave")       # Click button
+```
+
+Keyboard syntax: `{ENTER}`, `{TAB}`, `^c` (Ctrl+C), `%{F4}` (Alt+F4)
+""",
+            }
+        ]
+
+    @mcp.prompt(
+        name="exception",
+        description="Guide for investigating exceptions during debugging",
+    )
+    def exception_prompt() -> list[dict]:
+        """Steps to investigate an exception."""
+        return [
+            {
+                "role": "user",
+                "content": "The debugger stopped on an exception.",
+            },
+            {
+                "role": "assistant",
+                "content": "I'll investigate the exception. Let me gather the details.",
+            },
+            {
+                "role": "user",
+                "content": """## Exception Investigation Steps
+
+Execute these in order:
+
+### 1. Get Exception Details
+```
+get_debug_state()  # Check exceptionInfo field
+```
+
+### 2. Get Stack Trace
+```
+get_call_stack()   # See where exception occurred
+```
+
+### 3. Inspect Local State
+```
+get_scopes(frame_id)           # Get scopes for the frame
+get_variables(scope_reference)  # See local variables
+```
+
+### 4. Read Recent Output
+```
+get_output()  # Check for error messages before exception
+```
+
+### 5. Report to User
+Summarize:
+- Exception type and message
+- Where it occurred (file, line, method)
+- Likely cause based on local state
+- Suggested fix
+
+### 6. Decision
+- `continue_execution()` to ignore and continue
+- `stop_debug()` to end session and fix code
+""",
+            },
+        ]
 
     # ============== Resources ==============
 

@@ -158,17 +158,17 @@ class UIAutomation:
             raise ValueError("At least one search criterion must be provided")
 
         def _find():
+            # Build search criteria before try block to avoid NameError in except
+            criteria = {}
+            if automation_id is not None:
+                criteria["auto_id"] = automation_id
+            if name is not None:
+                criteria["title"] = name
+            if control_type is not None:
+                criteria["control_type"] = control_type
+
             try:
                 window = self._app.top_window()
-
-                # Build search criteria
-                criteria = {}
-                if automation_id is not None:
-                    criteria["auto_id"] = automation_id
-                if name is not None:
-                    criteria["title"] = name
-                if control_type is not None:
-                    criteria["control_type"] = control_type
 
                 logger.debug(f"Searching for element with criteria: {criteria}")
 
@@ -338,9 +338,9 @@ class UIAutomation:
             logger.error("Click timed out")
             raise UIOperationTimeoutError("Click timed out after 5 seconds") from e
 
-    def __del__(self):
-        """Cleanup executor on deletion."""
+    def shutdown(self):
+        """Shutdown the thread pool executor. Call this during server shutdown."""
         try:
-            self._executor.shutdown(wait=False)
-        except Exception:
-            pass
+            self._executor.shutdown(wait=True)
+        except Exception as e:
+            logger.warning(f"Error during executor shutdown: {e}")

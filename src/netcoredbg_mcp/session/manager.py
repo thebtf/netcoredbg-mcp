@@ -478,9 +478,6 @@ class SessionManager:
 
         self._set_state(DebugState.IDLE)
         self._initialized_event.clear()
-        # Clear process info before resetting state
-        self._state.process_id = None
-        self._state.process_name = None
         self._state = SessionState()
         self._output_bytes = 0  # Reset output tracking for next session
 

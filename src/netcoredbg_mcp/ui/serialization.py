@@ -59,10 +59,9 @@ def serialize_element(
         current_depth: Current depth in the tree (internal use)
 
     Returns:
-        ElementInfo object containing the element's properties
-
-    Raises:
-        Exception: If element becomes stale or inaccessible
+        ElementInfo object containing the element's properties. If serialization
+        fails for any reason (e.g., stale element), a minimal ElementInfo object
+        with default values and an error name is returned.
     """
     try:
         # Get basic properties
