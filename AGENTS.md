@@ -44,6 +44,33 @@ If solution contains "simple", "quick", "temporary", "workaround" — **STOP and
 
 ---
 
+## 🚀 Git & RELEASE WORKFLOW
+
+**NON-NEGOTIABLE. Always follow.**
+
+| Rule | Description |
+|------|-------------|
+| **No direct commits to main** | All changes via feature branch + PR |
+| **No releases without approval** | Wait for explicit user "go ahead" before tagging |
+| **PR review required** | User must review and approve before merge |
+| **Test before release** | Verify functionality works before creating tags |
+
+**Release process:**
+1. Create feature branch (e.g., `git checkout -b work/docs-release-workflow`)
+2. Make changes, commit (e.g., `git commit -m "docs(workflow): add release process"`)
+3. Push and create PR
+4. Wait for user review and approval
+5. Merge PR into the `main` branch
+6. Update local `main` branch:
+   - `git checkout main`
+   - `git pull origin main`
+7. Verify functionality on the updated `main` branch (run tests, manual checks as needed)
+8. **Only after user explicitly says "release"** (via direct communication): Create and push tag (e.g., `git tag v1.0.1 && git push origin v1.0.1`)
+
+**If issues are found during verification (step 7):** Create a hotfix PR to address them before proceeding to step 8.
+
+---
+
 ## 📍 KEY PATHS
 
 | What | Where |
