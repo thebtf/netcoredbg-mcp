@@ -1,14 +1,12 @@
 """UI automation tools."""
 
-from __future__ import annotations
-
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any, Callable
+from typing import Any, Callable
 
-if TYPE_CHECKING:
-    from mcp.server.fastmcp import Context, FastMCP
-    from ..session import SessionManager
+from mcp.server.fastmcp import Context, FastMCP
+
+from ..session import SessionManager
 
 from ..response import build_error_response, build_response
 from ..session.state import DebugState

@@ -1,14 +1,11 @@
 """Output and build diagnostics tools."""
 
-from __future__ import annotations
-
 import logging
 import re
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from mcp.server.fastmcp import FastMCP
-    from ..session import SessionManager
+from mcp.server.fastmcp import FastMCP
+
+from ..session import SessionManager
 
 from ..response import build_error_response, build_response
 
