@@ -6,14 +6,15 @@
 [![MCP](https://img.shields.io/badge/MCP-Server-6f42c1)](https://modelcontextprotocol.io/)
 [![Platform](https://img.shields.io/badge/Platform-Windows-2ea44f)](#limitations)
 
-MCP (Model Context Protocol) server for debugging C#/.NET applications using [netcoredbg](https://github.com/Samsung/netcoredbg).
+AI agents debug .NET apps blind. No call stacks, no variable inspection, no breakpoints — just "it crashed." **netcoredbg-mcp** gives your agent full debugger control through the Model Context Protocol: set breakpoints, step through code, inspect variables, take screenshots of GUI apps, and evaluate expressions — no IDE required.
 
-**Debug .NET apps from AI agents** — set breakpoints, step through code, inspect variables, and evaluate expressions without requiring VS Code or any IDE.
+**42 tools. 4 resources. 7 prompts. One MCP server.**
 
 ## Quick Links
 
 - **Get Started:** [Install](#installation) · [Configure](#configuration) · [First Debug Session](#first-debug-session)
-- **Reference:** [Tools](#available-tools) · [Troubleshooting](#troubleshooting) · [Architecture](#architecture)
+- **Reference:** [Tools](#available-tools) · [Resources](#mcp-resources) · [Prompts](#mcp-prompts) · [Architecture](#architecture)
+- **Guides:** [GUI App Debugging](#gui-app-debugging) · [Visual Inspection](#visual-inspection) · [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -21,11 +22,32 @@ MCP (Model Context Protocol) server for debugging C#/.NET applications using [ne
 
 | Feature | Description |
 |---------|-------------|
-| 🚀 **Standalone** | No IDE required — works directly with AI agents |
-| 🔧 **Full DAP** | Complete Debug Adapter Protocol via netcoredbg |
-| 🏗️ **Pre-build** | Build before debug with `pre_build: true` |
-| 🎯 **Smart Resolution** | Auto-resolves `.exe` → `.dll` for .NET 6+ |
-| ⚠️ **Version Check** | Detects dbgshim.dll mismatches automatically |
+| **42 MCP Tools** | Debug control, breakpoints, inspection, output, UI automation, process management |
+| **Long-Poll Execution** | `continue` and `step_*` tools block until stopped — no polling loops |
+| **State Machine Responses** | Every response includes `state`, `next_actions`, `message` — the agent always knows what to do next |
+| **GUI App Detection** | Auto-detects WPF/WinForms/Avalonia from `runtimeconfig.json` and adjusts workflow hints |
+| **Screenshots + Set-of-Mark** | See the app UI, get numbered element overlays, click by annotation ID |
+| **Pre-build** | Build before debug with `pre_build: true` — hidden warnings surfaced via `get_build_diagnostics` |
+| **Smart Resolution** | Auto-resolves `.exe` to `.dll` for .NET 6+ to avoid deps.json conflicts |
+| **Version Check** | Detects `dbgshim.dll` mismatches automatically on session start |
+| **Process Reaper** | PID file tracking with `cleanup_processes` — never lose orphan debugger processes |
+| **mcp-mux Aware** | Session ownership guards for multi-agent safety via `x-mux` capability |
+| **ToolAnnotations** | `readOnlyHint`, `destructiveHint`, `idempotentHint` on every tool for smart agent routing |
+
+---
+
+## Quick Start (30 seconds)
+
+```bash
+# 1. Install
+pip install netcoredbg-mcp
+
+# 2. Register with Claude Code
+claude mcp add --scope user netcoredbg -- netcoredbg-mcp --project-from-cwd
+
+# 3. Debug
+# "Set a breakpoint on line 42 of Program.cs and run my app"
+```
 
 ---
 
@@ -48,8 +70,8 @@ MCP (Model Context Protocol) server for debugging C#/.NET applications using [ne
 | .NET 9.x | `C:\Program Files\dotnet\shared\Microsoft.NETCore.App\9.0.x\dbgshim.dll` |
 
 ```powershell
-# Example: Setup for .NET 6 debugging
-copy "C:\Program Files\dotnet\shared\Microsoft.NETCore.App\6.0.36\dbgshim.dll" "D:\Bin\netcoredbg\"
+# Example: Setup for .NET 8 debugging
+copy "C:\Program Files\dotnet\shared\Microsoft.NETCore.App\8.0.x\dbgshim.dll" "D:\Bin\netcoredbg\"
 ```
 
 > [!TIP]
@@ -69,6 +91,7 @@ copy "C:\Program Files\dotnet\shared\Microsoft.NETCore.App\6.0.36\dbgshim.dll" "
 - Python 3.10+
 - [netcoredbg](https://github.com/Samsung/netcoredbg/releases)
 - .NET SDK (for the apps you're debugging)
+- [Pillow](https://pypi.org/project/Pillow/) (installed automatically — required for screenshot annotation)
 
 ### Install the MCP Server
 
@@ -367,16 +390,29 @@ Add to your .NET project root for automatic loading:
 
 ## First Debug Session
 
+### The Long-Poll Pattern
+
+Execution tools (`continue_execution`, `step_over`, `step_into`, `step_out`) **block until the program stops**. No polling. One call = one answer.
+
+```
+Agent: continue_execution()
+       ↓ blocks...
+       ↓ program runs...
+       ↓ breakpoint hit!
+       ← returns: { state: "stopped", reason: "breakpoint", location: {...}, source_context: "..." }
+```
+
 ### Typical Workflow
 
 ```
-1. start_debug     → Launch program under debugger
-2. add_breakpoint  → Set breakpoints in source files
-3. continue        → Run until breakpoint hit
-4. get_call_stack  → Inspect where you stopped
-5. get_variables   → Examine local variables
-6. step_over       → Step through code
-7. stop_debug      → End session
+1. start_debug       → Launch with pre_build (builds + starts debugger)
+2. add_breakpoint    → Set breakpoints in source files
+3. continue          → Blocks until breakpoint hit (returns location + source context)
+4. get_call_stack    → Full stack trace (source context included in top frame)
+5. get_variables     → Examine locals, arguments, captures
+6. step_over         → Blocks until next line (returns new location + source)
+7. get_output_tail   → Check program output (user cannot see it)
+8. stop_debug        → End session
 ```
 
 ### Example: start_debug with Pre-build
@@ -384,14 +420,15 @@ Add to your .NET project root for automatic loading:
 ```python
 start_debug(
     program="/path/to/MyApp.exe",      # Auto-resolves to .dll for .NET 6+
-    pre_build=True,                     # Build before launching
+    pre_build=True,                     # Build before launching (default)
     build_project="/path/to/MyApp.csproj",
     build_configuration="Debug",
     stop_at_entry=False
 )
+# Response: { state: "running", app_type: "gui", message: "GUI application detected..." }
 ```
 
-### Smart .exe → .dll Resolution
+### Smart .exe to .dll Resolution
 
 For .NET 6+ applications (WPF, WinForms, Console), the SDK creates:
 - `App.exe` — Native host launcher
@@ -401,21 +438,120 @@ Debugging `.exe` causes a "deps.json conflict" error. This MCP server **automati
 
 ---
 
+## GUI App Debugging
+
+GUI apps (WPF, WinForms, Avalonia) freeze when the debugger pauses — the UI thread stops, windows stop painting, buttons stop responding.
+
+### The Golden Rule
+
+**Never set breakpoints before the window is visible.**
+
+### Correct Workflow
+
+```
+1. start_debug(program="App.dll", build_project="App.csproj")
+   → Response includes app_type="gui"
+
+2. ui_get_window_tree()
+   → Confirm the window loaded
+
+3. ui_take_annotated_screenshot()
+   → See the UI with numbered interactive elements
+
+4. add_breakpoint(file="MainViewModel.cs", line=42)
+   → NOW set breakpoints (window is visible)
+
+5. ui_click(automation_id="btnSave")
+   → Trigger the code path via UI interaction
+
+6. continue_execution()
+   → Blocks until breakpoint hit — inspect state
+
+7. get_call_stack() → get_variables(ref=...)
+   → Read locals at breakpoint
+
+8. continue_execution()
+   → RESUME — the app is frozen while you inspect
+
+9. stop_debug()
+```
+
+### Exception: Startup Debugging
+
+If the bug IS in startup code, use `stop_at_entry`:
+
+```
+start_debug(program="App.dll", ..., stop_at_entry=True)
+# App pauses at Main() — before any UI
+step_over()  # step through init one line at a time
+```
+
+---
+
+## Visual Inspection
+
+### Screenshots
+
+```
+ui_take_screenshot()
+```
+
+Returns base64 PNG of the app window — see exactly what the user sees. Use for verifying layout, checking rendering issues, finding elements not in the automation tree.
+
+### Set-of-Mark Annotation
+
+```
+ui_take_annotated_screenshot(max_depth=3, interactive_only=True)
+```
+
+Returns a screenshot with **numbered red boxes** around interactive elements plus a JSON element index:
+
+```json
+{
+  "image": "base64_png...",
+  "elements": [
+    {"id": 1, "name": "Save", "type": "Button", "automationId": "btnSave"},
+    {"id": 2, "name": "", "type": "TextBox", "automationId": "txtName"}
+  ]
+}
+```
+
+Then click by number:
+
+```
+ui_click_annotated(element_id=1)   # clicks "Save" button
+```
+
+Use when elements lack an AutomationId, when you need spatial context, or when multiple similar elements exist.
+
+### Multi-Row Selection
+
+For selecting multiple rows in a DataGrid, use UIA patterns instead of coordinate clicking:
+
+```
+ui_select_items(automation_id="dataGrid", indices=[4,5,6,7,8], mode="replace")
+```
+
+Works for off-screen rows without scrolling.
+
+---
+
 ## Available Tools
 
-### Debug Control
+### Debug Control (10 tools)
 
 | Tool | Description |
 |------|-------------|
-| `start_debug` | **Recommended.** Launch program with full debug support. Supports `pre_build`. |
-| `attach_debug` | Attach to running process ⚠️ Limited functionality |
-| `stop_debug` | Stop the debug session |
-| `continue_execution` | Continue program execution |
-| `pause_execution` | Pause program execution |
-| `step_over` | Step over to next line |
-| `step_into` | Step into function call |
-| `step_out` | Step out of current function |
-| `get_debug_state` | Get current session state |
+| `start_debug` | Launch program under debugger with optional pre-build. Auto-detects GUI apps. |
+| `attach_debug` | Attach to running process. Limited functionality (upstream limitation). |
+| `stop_debug` | Stop the debug session and release resources. |
+| `restart_debug` | Restart session with same config. Optional rebuild. |
+| `continue_execution` | Resume execution. **Blocks** until stopped event. |
+| `pause_execution` | Pause a running program. Returns immediately. |
+| `step_over` | Step to next line. **Blocks** until step completes. Returns source context. |
+| `step_into` | Step into function call. **Blocks** until step completes. |
+| `step_out` | Step out of current function. **Blocks** until step completes. |
+| `get_debug_state` | Get current session state, threads, position. Read-only. |
 
 <details>
 <summary><b>start_debug Parameters</b></summary>
@@ -427,40 +563,187 @@ Debugging `.exe` causes a "deps.json conflict" error. This MCP server **automati
 | `args` | list? | Command line arguments |
 | `env` | dict? | Environment variables |
 | `stop_at_entry` | bool | Stop at program entry point |
-| `pre_build` | bool | Build before launching |
+| `pre_build` | bool | Build before launching (default: true) |
 | `build_project` | string? | Path to .csproj (required if pre_build) |
 | `build_configuration` | string | "Debug" or "Release" |
 
 </details>
 
-### Breakpoints
+### Breakpoints (6 tools)
 
 | Tool | Description |
 |------|-------------|
-| `add_breakpoint` | Add breakpoint with optional condition and hit count |
-| `remove_breakpoint` | Remove a breakpoint by file and line |
-| `list_breakpoints` | List all active breakpoints |
-| `clear_breakpoints` | Clear all breakpoints (optionally by file) |
+| `add_breakpoint` | Set breakpoint at file:line with optional condition and hit count. |
+| `remove_breakpoint` | Remove a breakpoint by file and line. |
+| `list_breakpoints` | List all active breakpoints (optionally filtered by file). |
+| `clear_breakpoints` | Clear all breakpoints or all in a specific file. Destructive. |
+| `add_function_breakpoint` | Break on function entry by name. Useful when line number unknown. |
+| `configure_exceptions` | Set exception breakpoints: `["all"]`, `["user-unhandled"]`, or `[]`. |
 
-### Inspection
+### Inspection (7 tools)
 
 | Tool | Description |
 |------|-------------|
-| `get_threads` | Get all threads with their states |
-| `get_call_stack` | Get call stack for a thread |
-| `get_scopes` | Get variable scopes for a stack frame |
-| `get_variables` | Get variables in a scope |
-| `evaluate_expression` | Evaluate expression in current context |
-| `get_exception_info` | Get exception details when stopped on exception |
-| `get_output` | Get debug console output |
+| `get_threads` | List all threads with IDs and names. |
+| `get_call_stack` | Stack trace for a thread. Includes source context for top frame. |
+| `get_scopes` | Get variable scopes for a stack frame (returns references). |
+| `get_variables` | Read variable values from a scope reference. |
+| `evaluate_expression` | Evaluate a C# expression in the current debug context. |
+| `set_variable` | Modify a variable's value during debugging (test hypotheses live). |
+| `get_exception_info` | Get exception type, message, and inner exception when stopped on throw. |
 
-### MCP Resources
+### Output (4 tools)
+
+| Tool | Description |
+|------|-------------|
+| `get_output` | Full stdout/stderr from the debugged process. Optional clear. |
+| `get_output_tail` | Last N lines of output. Lightweight recent-output check. |
+| `search_output` | Regex search through output with context lines. |
+| `get_build_diagnostics` | Full build warnings (hidden by default in start_debug). |
+
+### UI Automation (14 tools)
+
+| Tool | Description |
+|------|-------------|
+| `ui_get_window_tree` | Visual tree of the app window (AutomationId, type, name, enabled). |
+| `ui_find_element` | Find element by AutomationId, name, or control type. |
+| `ui_set_focus` | Set keyboard focus to an element. |
+| `ui_send_keys` | Send keyboard input to a specific element (pywinauto syntax). |
+| `ui_send_keys_focused` | Send keys to currently focused element (no re-search). |
+| `ui_click` | Click an element by AutomationId, name, or type. |
+| `ui_right_click` | Right-click to open context menus. |
+| `ui_double_click` | Double-click an element. |
+| `ui_select_items` | Multi-select items by index in DataGrid/ListView (UIA pattern). |
+| `ui_scroll` | Scroll a control (up/down/left/right). |
+| `ui_drag` | Drag from one element to another. |
+| `ui_take_screenshot` | Screenshot of the app window as base64 PNG. |
+| `ui_take_annotated_screenshot` | Screenshot with numbered element overlays (Set-of-Mark). |
+| `ui_click_annotated` | Click an element by its annotation ID from the last annotated screenshot. |
+
+### Process Management (1 tool)
+
+| Tool | Description |
+|------|-------------|
+| `cleanup_processes` | View or terminate tracked debug processes. Safe alternative to taskkill. |
+
+---
+
+## MCP Resources
 
 | Resource URI | Description |
 |--------------|-------------|
-| `debug://state` | Current session state |
-| `debug://breakpoints` | All active breakpoints |
-| `debug://output` | Debug console output buffer |
+| `debug://state` | Current session state (JSON): status, stop reason, threads, process info |
+| `debug://breakpoints` | All active breakpoints (JSON): file paths, lines, conditions, verified status |
+| `debug://output` | Debug console output (plain text): stdout/stderr from debugged process |
+| `debug://threads` | Current threads (JSON): thread IDs and names for the debugged process |
+
+Resources emit `notifications/resources/updated` when their content changes, enabling real-time subscriptions.
+
+---
+
+## MCP Prompts
+
+Prompts are built-in debugging guides the agent can invoke for structured workflows.
+
+| Prompt | Description |
+|--------|-------------|
+| `debug` | Complete debugging guide: state machine, tool usage, anti-patterns, valid actions by state |
+| `debug-gui` | WPF/Avalonia/WinForms workflow: breakpoint timing, UI interaction while debugging |
+| `debug-exception` | Step-by-step exception investigation protocol with common .NET exception table |
+| `debug-visual` | Screenshot and Set-of-Mark annotation workflow for visual UI inspection |
+| `debug-mistakes` | 9 concrete anti-patterns with WRONG/CORRECT examples |
+| `investigate(symptom)` | Targeted investigation plan for a specific exception type or symptom. Includes playbooks for NullReference, InvalidOperation, TaskCanceled, ObjectDisposed, deadlocks, crashes, and performance issues. |
+| `debug-scenario(problem)` | Step-by-step debugging plan for a specific problem description. Generates exact tool calls to execute. |
+
+---
+
+## Architecture
+
+```mermaid
+graph TB
+    subgraph MCP["MCP Server (Python)"]
+        S[server.py<br/>286 lines]
+        subgraph Tools["Tool Modules"]
+            TD[tools/debug.py]
+            TB[tools/breakpoints.py]
+            TI[tools/inspection.py]
+            TO[tools/output.py]
+            TU[tools/ui.py]
+            TP[tools/process.py]
+        end
+        PR[prompts.py]
+        SM[session/manager.py]
+        SS[session/state.py]
+        MX[mux.py]
+        REG[process_registry.py]
+        BM[build/manager.py]
+        BP[build/policy.py]
+        AT[utils/app_type.py]
+        SC[utils/source.py]
+        VC[utils/version.py]
+        UIA[ui/automation.py]
+        USS[ui/screenshot.py]
+    end
+
+    subgraph DAP["DAP Client"]
+        DC[dap/client.py]
+        DP[dap/protocol.py]
+        DE[dap/events.py]
+    end
+
+    S --> Tools
+    S --> PR
+    S --> SM
+    S --> MX
+    Tools --> SM
+    SM --> DC
+    SM --> BM
+    SM --> REG
+    TU --> UIA
+    TU --> USS
+    DC --> DP
+    DC --> DE
+
+    DC <-->|stdio JSON-RPC| NDB[netcoredbg<br/>DAP Server]
+    NDB <-->|CoreCLR Debug API| APP[.NET App]
+
+    style MCP fill:#1a1a2e,stroke:#6f42c1,color:#fff
+    style Tools fill:#16213e,stroke:#0f3460,color:#fff
+    style DAP fill:#16213e,stroke:#0f3460,color:#fff
+```
+
+### How It Works
+
+1. **MCP Layer** — `server.py` registers 42 tools, 4 resources, and 7 prompts via FastMCP
+2. **Tool Modules** — 6 focused modules (debug, breakpoints, inspection, output, UI, process) keep the server thin
+3. **Session Manager** — Manages debug session lifecycle, state machine, path validation, event handling
+4. **DAP Client** — Communicates with netcoredbg via Debug Adapter Protocol (JSON-RPC over stdio)
+5. **Build Manager** — Builds projects before debugging, filters warnings, stores diagnostics
+6. **Process Registry** — PID file tracking for all spawned processes; cleanup on startup and via tool
+7. **UI Automation** — pywinauto-based Windows UI Automation for WPF/WinForms/Avalonia interaction
+8. **Screenshot Engine** — Window capture + Pillow-based Set-of-Mark annotation
+9. **Mux Integration** — Session ownership guards for safe multi-agent operation via mcp-mux
+10. **Version Checker** — Validates dbgshim.dll compatibility with target runtime
+
+---
+
+## Command Line Options
+
+| Option | Description |
+|--------|-------------|
+| `--project PATH` | Explicit project root path |
+| `--project-from-cwd` | Auto-detect project from CWD |
+
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `NETCOREDBG_PATH` | **Required.** Path to netcoredbg executable |
+| `NETCOREDBG_PROJECT_ROOT` | Project root path (alternative to `--project`) |
+| `NETCOREDBG_OUTPUT_FILTER` | Filter program output (hide noise from stdout/stderr) |
+| `NETCOREDBG_STACKTRACE_DELAY_MS` | Diagnostic delay (ms) before stackTrace requests — helps diagnose timing issues |
+| `LOG_LEVEL` | Logging level: DEBUG, INFO, WARNING, ERROR |
+| `LOG_FILE` | Path to log file for diagnostics |
 
 ---
 
@@ -481,8 +764,8 @@ Debugging `.exe` causes a "deps.json conflict" error. This MCP server **automati
 # Find your .NET runtime versions
 dir "C:\Program Files\dotnet\shared\Microsoft.NETCore.App\"
 
-# Copy matching version (e.g., for .NET 6 app)
-copy "C:\Program Files\dotnet\shared\Microsoft.NETCore.App\6.0.36\dbgshim.dll" "D:\Bin\netcoredbg\"
+# Copy matching version (e.g., for .NET 8 app)
+copy "C:\Program Files\dotnet\shared\Microsoft.NETCore.App\8.0.x\dbgshim.dll" "D:\Bin\netcoredbg\"
 ```
 
 </details>
@@ -537,65 +820,59 @@ program: "App.dll"  # instead of "App.exe"
 
 </details>
 
----
+<details>
+<summary><b>GUI app window never appears</b></summary>
 
-## Architecture
+**Symptom:** After `start_debug`, the app window doesn't show up.
 
+**Cause:** A breakpoint was set before launch and hit during window initialization, freezing the UI thread.
+
+**Solution:** Remove all breakpoints before `start_debug`. Set them after `ui_get_window_tree()` confirms the window is visible.
+
+</details>
+
+<details>
+<summary><b>Orphaned debugger processes</b></summary>
+
+**Symptom:** Multiple netcoredbg or dotnet processes accumulating after debug sessions.
+
+**Cause:** Debug sessions terminated without proper cleanup.
+
+**Solution:**
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     MCP Server (Python)                          │
-├─────────────────────────────────────────────────────────────────┤
-│  ┌──────────────┐  ┌──────────────┐  ┌────────────────────────┐ │
-│  │  MCP Tools   │  │  DAP Client  │  │   Session Manager      │ │
-│  │  (20 tools)  │←→│  (protocol)  │←→│   (state + validation) │ │
-│  └──────────────┘  └──────┬───────┘  └────────────────────────┘ │
-│                           │                                      │
-│  ┌──────────────┐         │          ┌────────────────────────┐ │
-│  │ Version      │         │          │   Build Manager        │ │
-│  │ Checker      │         │          │   (pre_build support)  │ │
-│  └──────────────┘         │          └────────────────────────┘ │
-└───────────────────────────┼─────────────────────────────────────┘
-                            │ stdio (JSON-RPC)
-                     ┌──────▼──────┐
-                     │ netcoredbg  │
-                     │ (DAP Server)│
-                     └─────────────┘
+cleanup_processes(force=True)   # kills only processes tracked by this server
 ```
 
-### How It Works
+The server also cleans up stale PID files on startup.
 
-1. **MCP Layer** — Exposes debugging tools via Model Context Protocol
-2. **Session Manager** — Manages debug session state, validates paths, handles events
-3. **DAP Client** — Communicates with netcoredbg via Debug Adapter Protocol (JSON-RPC over stdio)
-4. **Build Manager** — Optionally builds project before debugging (`pre_build` feature)
-5. **Version Checker** — Validates dbgshim.dll compatibility with target runtime
+</details>
 
----
+<details>
+<summary><b>Build warnings causing runtime failures</b></summary>
 
-## Command Line Options
+**Symptom:** Build succeeds but app crashes or behaves unexpectedly.
 
-| Option | Description |
-|--------|-------------|
-| `--project PATH` | Explicit project root path |
-| `--project-from-cwd` | Auto-detect project from CWD |
+**Cause:** Build warnings (hidden by default) often predict runtime issues:
+- CS8602 nullable dereference → NullReferenceException
+- NU1701 compatibility → assembly load failures
+- CS4014 unawaited async → swallowed exceptions
 
-## Environment Variables
+**Solution:**
+```
+get_build_diagnostics()   # reveals all warnings hidden during start_debug
+```
 
-| Variable | Description |
-|----------|-------------|
-| `NETCOREDBG_PATH` | **Required.** Path to netcoredbg executable |
-| `NETCOREDBG_PROJECT_ROOT` | Project root path (alternative to `--project`) |
-| `LOG_LEVEL` | Logging level: DEBUG, INFO, WARNING, ERROR |
-| `LOG_FILE` | Path to log file for diagnostics |
+</details>
 
 ---
 
 ## Limitations
 
-- **Single session** — Only one debug session at a time (by design)
+- **Single session** — One debug session at a time (by design for state machine clarity)
 - **Attach mode** — Limited functionality due to netcoredbg upstream limitation
 - **dbgshim version** — Must manually match version to target runtime
-- **Windows focus** — Primary development/testing on Windows (Linux/macOS may work)
+- **Windows focus** — Primary development/testing on Windows (Linux/macOS: UI automation unavailable, core debugging may work)
+- **mcp-mux multi-agent** — Session ownership prevents conflicting mutations; only the session that started debugging can modify state. Other sessions get read-only access.
 
 ---
 
