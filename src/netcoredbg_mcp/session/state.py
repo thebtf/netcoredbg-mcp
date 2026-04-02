@@ -41,11 +41,30 @@ class Breakpoint:
         return bp
 
 
+@dataclass
+class FunctionBreakpoint:
+    """Represents a function breakpoint."""
+    name: str
+    condition: str | None = None
+    hit_condition: str | None = None
+    verified: bool = False
+    id: int | None = None
+
+    def to_dap(self) -> dict[str, Any]:
+        bp: dict[str, Any] = {"name": self.name}
+        if self.condition:
+            bp["condition"] = self.condition
+        if self.hit_condition:
+            bp["hitCondition"] = self.hit_condition
+        return bp
+
+
 class BreakpointRegistry:
     """Manages breakpoints across files."""
 
     def __init__(self):
         self._breakpoints: dict[str, list[Breakpoint]] = {}  # file -> breakpoints
+        self._function_breakpoints: list[FunctionBreakpoint] = []
 
     def add(self, breakpoint: Breakpoint) -> None:
         """Add a breakpoint."""
@@ -120,6 +139,34 @@ class BreakpointRegistry:
                 # Update line if adjusted by debugger
                 if "line" in dap_bp:
                     self._breakpoints[file_path][i].line = dap_bp["line"]
+
+    def add_function_breakpoint(self, bp: FunctionBreakpoint) -> None:
+        """Add a function breakpoint."""
+        # Update existing if same name
+        for existing in self._function_breakpoints:
+            if existing.name == bp.name:
+                existing.condition = bp.condition
+                existing.hit_condition = bp.hit_condition
+                return
+        self._function_breakpoints.append(bp)
+
+    def remove_function_breakpoint(self, name: str) -> bool:
+        """Remove a function breakpoint by name. Returns True if found."""
+        original_count = len(self._function_breakpoints)
+        self._function_breakpoints = [
+            bp for bp in self._function_breakpoints if bp.name != name
+        ]
+        return len(self._function_breakpoints) < original_count
+
+    def get_function_breakpoints(self) -> list[FunctionBreakpoint]:
+        """Get all function breakpoints."""
+        return list(self._function_breakpoints)
+
+    def clear_function_breakpoints(self) -> int:
+        """Clear all function breakpoints. Returns count removed."""
+        count = len(self._function_breakpoints)
+        self._function_breakpoints = []
+        return count
 
     def _normalize_path(self, path: str) -> str:
         """Normalize file path for consistent lookup."""

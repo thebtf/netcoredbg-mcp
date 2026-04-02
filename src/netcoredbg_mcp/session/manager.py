@@ -17,6 +17,7 @@ from .state import (
     Breakpoint,
     BreakpointRegistry,
     DebugState,
+    FunctionBreakpoint,
     SessionState,
     StackFrame,
     StoppedSnapshot,
@@ -610,6 +611,18 @@ class SessionManager:
         """Sync all breakpoints to DAP."""
         for file_path in self._breakpoints.get_files():
             await self._sync_file_breakpoints(file_path)
+        await self._sync_function_breakpoints()
+
+    async def _sync_function_breakpoints(self) -> None:
+        """Sync function breakpoints to DAP."""
+        bps = self._breakpoints.get_function_breakpoints()
+        dap_bps = [bp.to_dap() for bp in bps]
+        response = await self._client.set_function_breakpoints(dap_bps)
+        if response.success:
+            for i, dap_bp in enumerate(response.body.get("breakpoints", [])):
+                if i < len(bps):
+                    bps[i].verified = dap_bp.get("verified", False)
+                    bps[i].id = dap_bp.get("id")
 
     async def _sync_file_breakpoints(self, file_path: str) -> None:
         """Sync breakpoints for a single file."""
@@ -666,6 +679,37 @@ class SessionManager:
                 await self._client.set_breakpoints(f, [])
 
         return count
+
+    async def add_function_breakpoint(
+        self, name: str, condition: str | None = None, hit_condition: str | None = None
+    ) -> FunctionBreakpoint:
+        """Add a function breakpoint."""
+        bp = FunctionBreakpoint(name=name, condition=condition, hit_condition=hit_condition)
+        self._breakpoints.add_function_breakpoint(bp)
+        if self.is_active:
+            await self._sync_function_breakpoints()
+        return bp
+
+    async def remove_function_breakpoint(self, name: str) -> bool:
+        """Remove a function breakpoint."""
+        removed = self._breakpoints.remove_function_breakpoint(name)
+        if removed and self.is_active:
+            await self._sync_function_breakpoints()
+        return removed
+
+    async def set_variable(
+        self, variables_reference: int, name: str, value: str
+    ) -> dict[str, Any]:
+        """Set a variable's value."""
+        response = await self._client.set_variable(variables_reference, name, value)
+        if response.success:
+            return {
+                "value": response.body.get("value", ""),
+                "type": response.body.get("type"),
+                "variablesReference": response.body.get("variablesReference", 0),
+            }
+        else:
+            raise RuntimeError(response.message or "Failed to set variable")
 
     # Execution control
 

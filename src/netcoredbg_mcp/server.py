@@ -331,6 +331,36 @@ def create_server(project_path: str | None = None) -> FastMCP:
             return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool()
+    async def restart_debug(ctx: Context, rebuild: bool = True) -> dict:
+        """Restart the current debug session with the same configuration.
+
+        Stops the current session, optionally rebuilds, and relaunches.
+        Use this after code changes to debug the updated version.
+
+        Args:
+            rebuild: Whether to rebuild before restarting (default: True)
+        """
+        try:
+            result = await session.restart(rebuild=rebuild)
+            await notify_state_changed(ctx)
+
+            # Detect app type for hints
+            program = result.get("program", "")
+            app_type = detect_app_type(program) if program else None
+
+            message = "Debug session restarted."
+            if app_type == "gui":
+                message += " GUI app detected — wait for window before setting breakpoints."
+
+            return build_response(
+                data={**result, "app_type": app_type},
+                state=session.state.state,
+                message=message,
+            )
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool()
     async def continue_execution(ctx: Context, thread_id: int | None = None) -> dict:
         """Continue program execution. Blocks until the program stops again or timeout.
 
@@ -539,6 +569,66 @@ def create_server(project_path: str | None = None) -> FastMCP:
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
+    @mcp.tool()
+    async def add_function_breakpoint(
+        ctx: Context,
+        function_name: str,
+        condition: str | None = None,
+        hit_condition: str | None = None,
+    ) -> dict:
+        """Set a breakpoint on a function by name.
+
+        Breaks when the named function is entered. This is useful when you know
+        the method name but not the exact line number.
+
+        Args:
+            function_name: Full or partial function name to break on
+            condition: Optional condition expression
+            hit_condition: Optional hit count condition
+        """
+        try:
+            bp = await session.add_function_breakpoint(function_name, condition, hit_condition)
+            await notify_breakpoints_changed(ctx)
+            return build_response(
+                data={"function": bp.name, "condition": bp.condition, "verified": bp.verified},
+                state=session.state.state,
+            )
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool()
+    async def configure_exceptions(
+        filters: list[str] | None = None,
+    ) -> dict:
+        """Configure which exceptions should pause the debugger.
+
+        Controls exception breakpoints — when the debugger should stop on exceptions.
+        By default, no exception filters are set (exceptions don't pause unless uncaught).
+
+        Common filters supported by netcoredbg:
+        - "all": Break on all exceptions (caught and uncaught)
+        - "user-unhandled": Break on exceptions not handled in user code
+
+        Pass an empty list to disable all exception breakpoints.
+
+        Args:
+            filters: List of exception filter names. Pass [] to disable.
+        """
+        try:
+            response = await session._client.set_exception_breakpoints(filters or [])
+            if not response.success:
+                return build_error_response(
+                    f"Failed to set exception breakpoints: {response.message}",
+                    state=session.state.state,
+                )
+            return build_response(
+                data={"filters": filters or [], "configured": True},
+                state=session.state.state,
+                message=f"Exception breakpoints configured: {filters or []}",
+            )
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
     # ============== Inspection Tools ==============
 
     @mcp.tool()
@@ -642,6 +732,28 @@ def create_server(project_path: str | None = None) -> FastMCP:
         """Evaluate an expression in the current debug context."""
         try:
             result = await session.evaluate(expression, frame_id)
+            return build_response(data=result, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool()
+    async def set_variable(
+        variables_reference: int,
+        name: str,
+        value: str,
+    ) -> dict:
+        """Set a variable's value during debugging.
+
+        Modifies a variable in the current scope. The program must be stopped.
+        Use get_variables first to find the variables_reference for the scope.
+
+        Args:
+            variables_reference: Reference from get_scopes or get_variables
+            name: Variable name to modify
+            value: New value as a string expression
+        """
+        try:
+            result = await session.set_variable(variables_reference, name, value)
             return build_response(data=result, state=session.state.state)
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
