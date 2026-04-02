@@ -12,6 +12,7 @@ from ..build import BuildManager, BuildResult
 from ..dap import DAPClient, DAPEvent
 from ..dap.events import OutputEventBody, StoppedEventBody
 from ..dap.protocol import Events
+from ..process_registry import ProcessRegistry
 from ..utils.version import check_version_compatibility
 from .state import (
     Breakpoint,
@@ -44,6 +45,7 @@ class SessionManager:
         self._execution_event = asyncio.Event()  # Signaled on stopped/terminated/exited
         self._project_path = os.path.abspath(project_path) if project_path else None
         self._output_bytes = 0  # Track output buffer size
+        self._process_registry = ProcessRegistry()
         self._build_manager = BuildManager()
         self._last_build_result: BuildResult | None = None
         self._last_launch_config: dict[str, Any] | None = None  # For restart
@@ -58,6 +60,11 @@ class SessionManager:
     def breakpoints(self) -> BreakpointRegistry:
         """Get breakpoint registry."""
         return self._breakpoints
+
+    @property
+    def process_registry(self) -> ProcessRegistry:
+        """Get process registry for tracking spawned processes."""
+        return self._process_registry
 
     @property
     def is_active(self) -> bool:
@@ -219,6 +226,14 @@ class SessionManager:
             return
 
         await self._client.start()
+
+        # Track netcoredbg process
+        if self._client._process and self._client._process.pid:
+            self._process_registry.register(
+                pid=self._client._process.pid,
+                role="netcoredbg",
+            )
+
         self._register_event_handlers()
         self._set_state(DebugState.INITIALIZING)
 
@@ -315,6 +330,11 @@ class SessionManager:
 
         if pid is not None:
             logger.info(f"Process started: PID={pid}, name={name or 'unknown'}")
+            self._process_registry.register(
+                pid=pid,
+                role="debuggee",
+                program=name,
+            )
 
     async def wait_for_stopped(self, timeout: float = 30.0) -> StoppedSnapshot:
         """Wait for execution to stop (breakpoint, step, exception, or termination).
@@ -559,6 +579,9 @@ class SessionManager:
             except Exception as e:
                 logger.warning(f"Error during disconnect: {e}")
             await self._client.stop()
+
+        # Cleanup tracked processes
+        self._process_registry.cleanup_all()
 
         self._set_state(DebugState.IDLE)
         self._initialized_event.clear()

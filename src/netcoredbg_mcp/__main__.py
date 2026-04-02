@@ -110,6 +110,15 @@ async def main() -> None:
     # The server will also use get_project_root() with Context for dynamic resolution
     mcp = create_server(str(project_path) if project_path else None)
 
+    # Startup: configure process registry PID file and clean up orphans
+    session_obj = get_session()
+    if project_path:
+        pidfile = project_path / ".netcoredbg-mcp.pid"
+        session_obj.process_registry.set_pidfile_path(pidfile)
+        reaped = session_obj.process_registry.load_and_reap()
+        if reaped:
+            logger.info(f"Startup cleanup: reaped {reaped} orphaned processes")
+
     try:
         await mcp.run_stdio_async()
     except Exception:
@@ -117,9 +126,11 @@ async def main() -> None:
         raise
     finally:
         # Cleanup resources
-        session = get_session()
-        if session.is_active:
-            await session.stop()
+        session_obj = get_session()
+        if session_obj.is_active:
+            await session_obj.stop()
+        # Shutdown process registry (terminate tracked processes, delete pidfile)
+        session_obj.process_registry.shutdown()
         logger.info("Server stopped")
 
 
