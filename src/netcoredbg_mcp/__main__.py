@@ -116,7 +116,7 @@ async def main() -> None:
         logger.exception("Server error")
         raise
     finally:
-        # Cleanup session
+        # Cleanup resources
         session = get_session()
         if session.is_active:
             await session.stop()

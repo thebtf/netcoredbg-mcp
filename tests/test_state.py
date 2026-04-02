@@ -333,7 +333,7 @@ class TestSessionState:
         assert state.stop_reason is None
         assert state.threads == []
         assert state.current_frame_id is None
-        assert state.output_buffer == []
+        assert len(state.output_buffer) == 0
         assert state.exit_code is None
         assert state.exception_info is None
 

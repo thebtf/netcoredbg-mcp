@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -159,6 +160,22 @@ class Variable:
 
 
 @dataclass
+class StoppedSnapshot:
+    """Snapshot of state when execution stops (or times out).
+
+    Returned by SessionManager.wait_for_stopped() to give the agent
+    a complete picture of what happened after an execution command.
+    """
+    state: DebugState
+    stop_reason: str | None = None
+    thread_id: int | None = None
+    timed_out: bool = False
+    exit_code: int | None = None
+    exception_info: dict[str, Any] | None = None
+    process_alive: bool = True
+
+
+@dataclass
 class SessionState:
     """Complete debug session state."""
     state: DebugState = DebugState.IDLE
@@ -166,7 +183,7 @@ class SessionState:
     stop_reason: str | None = None
     threads: list[ThreadInfo] = field(default_factory=list)
     current_frame_id: int | None = None
-    output_buffer: list[str] = field(default_factory=list)
+    output_buffer: deque[str] = field(default_factory=deque)
     exit_code: int | None = None
     exception_info: dict[str, Any] | None = None
     process_id: int | None = None

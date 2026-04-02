@@ -11,8 +11,9 @@ from pathlib import Path
 from mcp.server.fastmcp import Context, FastMCP
 
 from .session import SessionManager
-from .session.state import DebugState
+from .session.state import DebugState, StoppedSnapshot
 from .utils.project import get_project_root
+from .utils.source import read_source_context
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,80 @@ def create_server(project_path: str | None = None) -> FastMCP:
                 await ctx.session.send_resource_updated(AnyUrl("debug://breakpoints"))
         except Exception as e:
             logger.warning(f"Failed to send resource update notification for debug://breakpoints: {e}")
+
+    # ============== Helpers ==============
+
+    def _build_stopped_response(
+        snapshot: StoppedSnapshot,
+        action_name: str,
+    ) -> dict:
+        """Build a rich response from a StoppedSnapshot for execution tools.
+
+        Includes state, reason, location with source context, and next_actions
+        so the agent knows exactly what happened and what to do next.
+        """
+        state_value = snapshot.state.value
+
+        # Determine next_actions based on resulting state
+        if snapshot.timed_out:
+            next_actions = ["get_output", "pause_execution", "get_debug_state", "stop_debug"]
+            message = (
+                f"Program is still running after timeout. "
+                f"Breakpoint may not have been reached."
+            )
+        elif state_value == "stopped":
+            next_actions = [
+                "get_call_stack", "get_variables", "evaluate_expression",
+                "step_over", "step_into", "step_out", "continue_execution",
+            ]
+            reason = snapshot.stop_reason or "unknown"
+            message = f"Program is PAUSED (reason: {reason}). Inspect state, then resume."
+        elif state_value == "terminated":
+            next_actions = ["get_output", "stop_debug"]
+            exit_code = snapshot.exit_code
+            message = f"Program terminated (exit code: {exit_code})."
+        else:
+            next_actions = ["get_debug_state", "stop_debug"]
+            message = f"Unexpected state: {state_value}."
+
+        result: dict = {
+            "state": state_value,
+            "reason": snapshot.stop_reason,
+            "thread_id": snapshot.thread_id,
+            "timed_out": snapshot.timed_out,
+            "message": message,
+            "next_actions": next_actions,
+        }
+
+        if snapshot.exit_code is not None:
+            result["exit_code"] = snapshot.exit_code
+        if snapshot.exception_info:
+            result["exception_info"] = snapshot.exception_info
+
+        return result
+
+    async def _execute_and_wait(
+        ctx: Context,
+        action_coro,
+        action_name: str,
+        timeout: float = 30.0,
+    ) -> dict:
+        """Execute an action (continue/step), wait for stopped, return rich response.
+
+        This is the long-poll pattern: the tool blocks until the debugger fires
+        a stopped/terminated/exited event (or timeout expires).
+        """
+        try:
+            await action_coro
+            snapshot = await session.wait_for_stopped(timeout=timeout)
+            await notify_state_changed(ctx)
+            return _build_stopped_response(snapshot, action_name)
+        except Exception as e:
+            return {
+                "state": session.state.state.value,
+                "error": str(e),
+                "next_actions": ["get_debug_state", "stop_debug"],
+            }
 
     # ============== Debug Control Tools ==============
 
@@ -225,53 +300,81 @@ def create_server(project_path: str | None = None) -> FastMCP:
 
     @mcp.tool()
     async def continue_execution(ctx: Context, thread_id: int | None = None) -> dict:
-        """Continue program execution."""
-        try:
-            result = await session.continue_execution(thread_id)
-            await notify_state_changed(ctx)
-            return {"success": True, "data": result}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        """Continue program execution. Blocks until the program stops again or timeout.
+
+        This tool uses the long-poll pattern: it waits for the debugger to report
+        a stopped event (breakpoint hit, exception, step complete) before returning.
+
+        The response includes the new state, stop reason, and next_actions so you
+        know exactly what happened and what to do next.
+
+        IMPORTANT: While waiting, the program is RUNNING — do not call
+        get_variables or get_call_stack until this tool returns with state=stopped.
+        """
+        return await _execute_and_wait(
+            ctx, session.continue_execution(thread_id), "continue_execution"
+        )
 
     @mcp.tool()
     async def pause_execution(ctx: Context, thread_id: int | None = None) -> dict:
-        """Pause program execution."""
+        """Pause program execution.
+
+        Unlike continue/step tools, this returns immediately after sending
+        the pause command — it does not wait for a stopped event.
+        """
         try:
             result = await session.pause(thread_id)
             await notify_state_changed(ctx)
-            return {"success": True, "data": result}
+            return {
+                "success": True,
+                "data": result,
+                "state": session.state.state.value,
+                "next_actions": [
+                    "get_call_stack", "get_variables", "evaluate_expression",
+                    "step_over", "step_into", "step_out", "continue_execution",
+                ],
+            }
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     @mcp.tool()
     async def step_over(ctx: Context, thread_id: int | None = None) -> dict:
-        """Step over to the next line."""
-        try:
-            result = await session.step_over(thread_id)
-            await notify_state_changed(ctx)
-            return {"success": True, "data": result}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        """Step over to the next line. Blocks until the step completes.
+
+        Executes the current line without entering function calls.
+        Returns the new stopped location with source context.
+
+        IMPORTANT: After this returns with state=stopped, inspect variables
+        at the new location before deciding the next action.
+        """
+        return await _execute_and_wait(
+            ctx, session.step_over(thread_id), "step_over"
+        )
 
     @mcp.tool()
     async def step_into(ctx: Context, thread_id: int | None = None) -> dict:
-        """Step into the next function call."""
-        try:
-            result = await session.step_in(thread_id)
-            await notify_state_changed(ctx)
-            return {"success": True, "data": result}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        """Step into the next function call. Blocks until the step completes.
+
+        Enters the function being called on the current line.
+        Use this when you need to investigate what happens inside a called function.
+
+        IMPORTANT: After this returns with state=stopped, you are inside the
+        called function. Use step_out to return to the caller.
+        """
+        return await _execute_and_wait(
+            ctx, session.step_in(thread_id), "step_into"
+        )
 
     @mcp.tool()
     async def step_out(ctx: Context, thread_id: int | None = None) -> dict:
-        """Step out of the current function."""
-        try:
-            result = await session.step_out(thread_id)
-            await notify_state_changed(ctx)
-            return {"success": True, "data": result}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        """Step out of the current function. Blocks until the step completes.
+
+        Continues execution until the current function returns, then stops
+        at the caller. Use this to exit a function you stepped into.
+        """
+        return await _execute_and_wait(
+            ctx, session.step_out(thread_id), "step_out"
+        )
 
     @mcp.tool()
     async def get_debug_state() -> dict:
@@ -993,6 +1096,16 @@ Summarize:
         Updates when: new output arrives.
         """
         return "".join(session.state.output_buffer)
+
+    @mcp.resource("debug://threads", mime_type="application/json")
+    async def debug_threads_resource() -> str:
+        """Current threads in the debugged process (JSON).
+
+        Contains: thread id and name for each active thread.
+        Updates when: process stops (breakpoint, step, pause).
+        """
+        threads = await session.get_threads()
+        return json.dumps([{"id": t.id, "name": t.name} for t in threads], indent=2)
 
     logger.info("NetCoreDbg MCP Server initialized")
     return mcp

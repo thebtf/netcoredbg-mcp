@@ -1,4 +1,4 @@
-"""Tests for build manager - singleton orchestrator."""
+"""Tests for build manager."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -10,41 +10,11 @@ from netcoredbg_mcp.build.session import BuildSession
 from netcoredbg_mcp.build.state import BuildError, BuildState
 
 
-class TestBuildManagerSingleton:
-    """Tests for singleton pattern."""
-
-    def test_singleton_returns_same_instance(self):
-        """Test that BuildManager returns same instance."""
-        # Reset singleton for test isolation
-        BuildManager._instance = None
-
-        manager1 = BuildManager()
-        manager2 = BuildManager()
-
-        assert manager1 is manager2
-
-    def test_singleton_initialized_once(self):
-        """Test that singleton is only initialized once."""
-        BuildManager._instance = None
-
-        manager1 = BuildManager()
-        manager1._sessions["test"] = MagicMock()
-
-        manager2 = BuildManager()
-
-        # Sessions should persist
-        assert "test" in manager2._sessions
-
-        # Cleanup
-        del manager2._sessions["test"]
-
-
 class TestBuildManagerSessions:
     """Tests for session management."""
 
     def test_get_session_creates_new(self, tmp_path):
         """Test get_session creates new session if not exists."""
-        BuildManager._instance = None
         manager = BuildManager()
 
         session = manager.get_session(str(tmp_path))
@@ -54,7 +24,6 @@ class TestBuildManagerSessions:
 
     def test_get_session_returns_existing(self, tmp_path):
         """Test get_session returns existing session."""
-        BuildManager._instance = None
         manager = BuildManager()
 
         session1 = manager.get_session(str(tmp_path))
@@ -64,7 +33,6 @@ class TestBuildManagerSessions:
 
     def test_get_session_normalizes_path(self, tmp_path):
         """Test get_session normalizes paths."""
-        BuildManager._instance = None
         manager = BuildManager()
 
         import os
@@ -78,7 +46,6 @@ class TestBuildManagerSessions:
 
     def test_clear_session_removes(self, tmp_path):
         """Test clear_session removes session."""
-        BuildManager._instance = None
         manager = BuildManager()
 
         manager.get_session(str(tmp_path))
@@ -89,7 +56,6 @@ class TestBuildManagerSessions:
 
     def test_clear_session_nonexistent(self, tmp_path):
         """Test clear_session returns False if not exists."""
-        BuildManager._instance = None
         manager = BuildManager()
 
         result = manager.clear_session(str(tmp_path / "nonexistent"))
@@ -102,7 +68,6 @@ class TestBuildManagerStateListeners:
 
     def test_on_build_state_change_registers(self, tmp_path):
         """Test registering global listener."""
-        BuildManager._instance = None
         manager = BuildManager()
         listener = MagicMock()
 
@@ -112,7 +77,6 @@ class TestBuildManagerStateListeners:
 
     def test_global_listener_called_on_state_change(self, tmp_path):
         """Test global listener called when session state changes."""
-        BuildManager._instance = None
         manager = BuildManager()
         listener = MagicMock()
         manager.on_build_state_change(listener)
@@ -129,7 +93,6 @@ class TestBuildManagerBuild:
     @pytest.mark.asyncio
     async def test_build_delegates_to_session(self, tmp_path):
         """Test build delegates to session."""
-        BuildManager._instance = None
         manager = BuildManager()
         project = tmp_path / "Test.csproj"
         project.touch()
@@ -154,7 +117,6 @@ class TestBuildManagerBuild:
     @pytest.mark.asyncio
     async def test_build_with_relative_path(self, tmp_path):
         """Test build with relative project path."""
-        BuildManager._instance = None
         manager = BuildManager()
         project = tmp_path / "Test.csproj"
         project.touch()
@@ -181,7 +143,6 @@ class TestBuildManagerPreLaunchBuild:
     @pytest.mark.asyncio
     async def test_pre_launch_build_restore_and_build(self, tmp_path):
         """Test pre-launch build runs restore then build."""
-        BuildManager._instance = None
         manager = BuildManager()
         project = tmp_path / "Test.csproj"
         project.touch()
@@ -215,7 +176,6 @@ class TestBuildManagerPreLaunchBuild:
     @pytest.mark.asyncio
     async def test_pre_launch_build_without_restore(self, tmp_path):
         """Test pre-launch build without restore."""
-        BuildManager._instance = None
         manager = BuildManager()
         project = tmp_path / "Test.csproj"
         project.touch()
@@ -248,7 +208,6 @@ class TestBuildManagerPreLaunchBuild:
     @pytest.mark.asyncio
     async def test_pre_launch_build_restore_failure_raises(self, tmp_path):
         """Test pre-launch build raises on restore failure."""
-        BuildManager._instance = None
         manager = BuildManager()
         project = tmp_path / "Test.csproj"
         project.touch()
@@ -273,7 +232,6 @@ class TestBuildManagerPreLaunchBuild:
     @pytest.mark.asyncio
     async def test_pre_launch_build_failure_raises(self, tmp_path):
         """Test pre-launch build raises on build failure."""
-        BuildManager._instance = None
         manager = BuildManager()
         project = tmp_path / "Test.csproj"
         project.touch()
@@ -302,7 +260,6 @@ class TestBuildManagerCancel:
     @pytest.mark.asyncio
     async def test_cancel_delegates_to_session(self, tmp_path):
         """Test cancel delegates to session."""
-        BuildManager._instance = None
         manager = BuildManager()
 
         session = manager.get_session(str(tmp_path))
@@ -317,7 +274,6 @@ class TestBuildManagerCancel:
     @pytest.mark.asyncio
     async def test_cancel_nonexistent_workspace(self, tmp_path):
         """Test cancel returns False for nonexistent workspace."""
-        BuildManager._instance = None
         manager = BuildManager()
 
         result = await manager.cancel(str(tmp_path / "nonexistent"))
@@ -327,7 +283,6 @@ class TestBuildManagerCancel:
     @pytest.mark.asyncio
     async def test_cancel_all(self, tmp_path):
         """Test cancel_all cancels all running builds."""
-        BuildManager._instance = None
         manager = BuildManager()
 
         # Create two sessions with running builds
@@ -357,7 +312,6 @@ class TestBuildManagerStatus:
 
     def test_get_state(self, tmp_path):
         """Test get_state returns session state."""
-        BuildManager._instance = None
         manager = BuildManager()
 
         session = manager.get_session(str(tmp_path))
@@ -369,7 +323,6 @@ class TestBuildManagerStatus:
 
     def test_get_state_nonexistent(self, tmp_path):
         """Test get_state returns None for nonexistent workspace."""
-        BuildManager._instance = None
         manager = BuildManager()
 
         state = manager.get_state(str(tmp_path / "nonexistent"))
@@ -378,7 +331,6 @@ class TestBuildManagerStatus:
 
     def test_get_last_result(self, tmp_path):
         """Test get_last_result returns session's last result."""
-        BuildManager._instance = None
         manager = BuildManager()
 
         session = manager.get_session(str(tmp_path))
@@ -390,7 +342,6 @@ class TestBuildManagerStatus:
 
     def test_get_all_states(self, tmp_path):
         """Test get_all_states returns all session states."""
-        BuildManager._instance = None
         manager = BuildManager()
 
         ws1 = tmp_path / "ws1"
@@ -407,7 +358,6 @@ class TestBuildManagerStatus:
 
     def test_to_dict(self, tmp_path):
         """Test to_dict returns manager status."""
-        BuildManager._instance = None
         manager = BuildManager()
 
         session = manager.get_session(str(tmp_path))
