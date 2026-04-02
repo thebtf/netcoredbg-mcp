@@ -10,6 +10,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import Context, FastMCP
 
+from .response import build_error_response, build_response
 from .session import SessionManager
 from .session.state import DebugState, StoppedSnapshot
 from .utils.project import get_project_root
@@ -389,9 +390,12 @@ def create_server(project_path: str | None = None) -> FastMCP:
         Call continue_execution first if state shows stopped/paused.
         """
         try:
-            return {"success": True, "data": session.state.to_dict()}
+            return build_response(
+                data=session.state.to_dict(),
+                state=session.state.state,
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
     # ============== Breakpoint Tools ==============
 
