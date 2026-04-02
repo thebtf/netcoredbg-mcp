@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.types import ToolAnnotations
 
 from .response import build_error_response, build_response
 from .session import SessionManager
@@ -185,7 +186,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
 
     # ============== Debug Control Tools ==============
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def start_debug(
         ctx: Context,
         program: str,
@@ -288,7 +289,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def attach_debug(process_id: int) -> dict:
         """
         AVOID - Use start_debug instead. Attach to already-running process (LIMITED).
@@ -320,7 +321,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
     async def stop_debug(ctx: Context) -> dict:
         """Stop the current debug session."""
         try:
@@ -330,7 +331,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def restart_debug(ctx: Context, rebuild: bool = True) -> dict:
         """Restart the current debug session with the same configuration.
 
@@ -360,7 +361,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def continue_execution(ctx: Context, thread_id: int | None = None) -> dict:
         """Continue program execution. Blocks until the program stops again or timeout.
 
@@ -377,7 +378,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
             ctx, session.continue_execution(thread_id), "continue_execution"
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(idempotentHint=True, openWorldHint=False))
     async def pause_execution(ctx: Context, thread_id: int | None = None) -> dict:
         """Pause program execution.
 
@@ -398,7 +399,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def step_over(ctx: Context, thread_id: int | None = None) -> dict:
         """Step over to the next line. Blocks until the step completes.
 
@@ -412,7 +413,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
             ctx, session.step_over(thread_id), "step_over"
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def step_into(ctx: Context, thread_id: int | None = None) -> dict:
         """Step into the next function call. Blocks until the step completes.
 
@@ -426,7 +427,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
             ctx, session.step_in(thread_id), "step_into"
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def step_out(ctx: Context, thread_id: int | None = None) -> dict:
         """Step out of the current function. Blocks until the step completes.
 
@@ -437,7 +438,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
             ctx, session.step_out(thread_id), "step_out"
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def get_debug_state() -> dict:
         """
         Get the current debug session state.
@@ -459,7 +460,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
 
     # ============== Breakpoint Tools ==============
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(idempotentHint=True, openWorldHint=False))
     async def add_breakpoint(
         ctx: Context,
         file: str,
@@ -503,7 +504,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(idempotentHint=True, openWorldHint=False))
     async def remove_breakpoint(ctx: Context, file: str, line: int) -> dict:
         """Remove a breakpoint from a specific line."""
         try:
@@ -521,7 +522,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def list_breakpoints(ctx: Context, file: str | None = None) -> dict:
         """List all breakpoints or breakpoints in a specific file."""
         try:
@@ -550,7 +551,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
     async def clear_breakpoints(ctx: Context, file: str | None = None) -> dict:
         """Clear breakpoints from a file or all files."""
         try:
@@ -569,7 +570,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(idempotentHint=True, openWorldHint=False))
     async def add_function_breakpoint(
         ctx: Context,
         function_name: str,
@@ -596,7 +597,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(idempotentHint=True, openWorldHint=False))
     async def configure_exceptions(
         filters: list[str] | None = None,
     ) -> dict:
@@ -631,7 +632,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
 
     # ============== Inspection Tools ==============
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def get_threads() -> dict:
         """Get all threads in the debugged process."""
         try:
@@ -643,7 +644,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def get_call_stack(thread_id: int | None = None, levels: int = 20) -> dict:
         """Get the call stack for a thread.
 
@@ -689,7 +690,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
                 )
             return build_error_response(error_msg, state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def get_scopes(frame_id: int | None = None) -> dict:
         """Get variable scopes for a stack frame."""
         try:
@@ -707,7 +708,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def get_variables(variables_reference: int) -> dict:
         """Get variables for a scope or structured variable."""
         try:
@@ -727,7 +728,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def evaluate_expression(expression: str, frame_id: int | None = None) -> dict:
         """Evaluate an expression in the current debug context."""
         try:
@@ -736,7 +737,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def set_variable(
         variables_reference: int,
         name: str,
@@ -758,7 +759,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def get_exception_info(thread_id: int | None = None) -> dict:
         """Get information about the current exception."""
         try:
@@ -767,7 +768,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def get_output(clear: bool = False) -> dict:
         """Get stdout/stderr output from the debugged program.
 
@@ -788,7 +789,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def search_output(pattern: str, context_lines: int = 2) -> dict:
         """Search program output for a pattern (regex supported).
 
@@ -836,7 +837,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def get_output_tail(lines: int = 50) -> dict:
         """Get the last N lines of program output.
 
@@ -914,7 +915,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         )
         return ui, element
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def ui_get_window_tree(max_depth: int = 3, max_children: int = 50) -> dict:
         """
         Get the visual tree of the debugged application's main window.
@@ -936,7 +937,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def ui_find_element(
         automation_id: str | None = None,
         name: str | None = None,
@@ -968,7 +969,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(idempotentHint=True, openWorldHint=False))
     async def ui_set_focus(
         automation_id: str | None = None,
         name: str | None = None,
@@ -991,7 +992,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def ui_send_keys(
         keys: str,
         automation_id: str | None = None,
@@ -1024,7 +1025,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def ui_send_keys_focused(keys: str) -> dict:
         """
         Send keyboard input to the currently focused element.
@@ -1055,7 +1056,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def ui_click(
         automation_id: str | None = None,
         name: str | None = None,
