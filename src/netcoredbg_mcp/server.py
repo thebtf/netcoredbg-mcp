@@ -9,10 +9,14 @@ import os
 from pathlib import Path
 
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.types import ToolAnnotations
 
+from .response import build_error_response, build_response
 from .session import SessionManager
-from .session.state import DebugState
+from .session.state import DebugState, StoppedSnapshot
 from .utils.project import get_project_root
+from .utils.app_type import detect_app_type
+from .utils.source import read_source_context
 
 logger = logging.getLogger(__name__)
 
@@ -92,9 +96,98 @@ def create_server(project_path: str | None = None) -> FastMCP:
         except Exception as e:
             logger.warning(f"Failed to send resource update notification for debug://breakpoints: {e}")
 
+    # ============== Helpers ==============
+
+    def _build_stopped_response(
+        snapshot: StoppedSnapshot,
+        action_name: str,
+    ) -> dict:
+        """Build a rich response from a StoppedSnapshot for execution tools.
+
+        Includes state, reason, location with source context, and next_actions
+        so the agent knows exactly what happened and what to do next.
+        """
+        state_value = snapshot.state.value
+
+        # Determine next_actions based on resulting state
+        if snapshot.timed_out:
+            next_actions = ["get_output", "pause_execution", "get_debug_state", "stop_debug"]
+            message = (
+                "Program is still running after timeout. "
+                "Breakpoint may not have been reached."
+            )
+        elif state_value == "stopped":
+            next_actions = [
+                "get_call_stack", "get_variables", "evaluate_expression",
+                "step_over", "step_into", "step_out", "continue_execution",
+            ]
+            reason = snapshot.stop_reason or "unknown"
+            message = f"Program is PAUSED (reason: {reason}). Inspect state, then resume."
+        elif state_value == "terminated":
+            next_actions = ["get_output", "stop_debug"]
+            exit_code = snapshot.exit_code
+            message = f"Program terminated (exit code: {exit_code})."
+        else:
+            next_actions = ["get_debug_state", "stop_debug"]
+            message = f"Unexpected state: {state_value}."
+
+        result: dict = {
+            "state": state_value,
+            "reason": snapshot.stop_reason,
+            "thread_id": snapshot.thread_id,
+            "timed_out": snapshot.timed_out,
+            "message": message,
+            "next_actions": next_actions,
+        }
+
+        if snapshot.exit_code is not None:
+            result["exit_code"] = snapshot.exit_code
+        if snapshot.exception_info:
+            result["exception_info"] = snapshot.exception_info
+
+        return result
+
+    async def _execute_and_wait(
+        ctx: Context,
+        action_coro,
+        action_name: str,
+        timeout: float = 30.0,
+    ) -> dict:
+        """Execute an action (continue/step), wait for stopped, return rich response.
+
+        This is the long-poll pattern: the tool blocks until the debugger fires
+        a stopped/terminated/exited event (or timeout expires).
+        """
+        try:
+            session._execution_event.clear()
+            await action_coro
+            snapshot = await session.wait_for_stopped(timeout=timeout)
+            response = _build_stopped_response(snapshot, action_name)
+
+            # Add source context if stopped at a known location
+            if snapshot.state == DebugState.STOPPED and snapshot.thread_id:
+                try:
+                    frames = await session.get_stack_trace(snapshot.thread_id, 0, 1)
+                    if frames:
+                        response["location"] = {
+                            "file": frames[0].source,
+                            "line": frames[0].line,
+                            "function": frames[0].name,
+                            "source_context": read_source_context(
+                                frames[0].source, frames[0].line,
+                            ),
+                        }
+                except Exception:
+                    logger.debug("Failed to get source context", exc_info=True)
+
+            await notify_state_changed(ctx)
+            return response
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
     # ============== Debug Control Tools ==============
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def start_debug(
         ctx: Context,
         program: str,
@@ -141,11 +234,11 @@ def create_server(project_path: str | None = None) -> FastMCP:
 
             # Validate pre_build requires build_project
             if pre_build and not build_project:
-                return {
-                    "success": False,
-                    "error": "pre_build=True requires build_project path to .csproj file. "
+                return build_error_response(
+                    "pre_build=True requires build_project path to .csproj file. "
                     "Either provide build_project or set pre_build=False.",
-                }
+                    state=session.state.state,
+                )
 
             # Validate program path (security: prevent arbitrary execution)
             # If pre_build=True, don't require file to exist yet (build will create it)
@@ -177,11 +270,27 @@ def create_server(project_path: str | None = None) -> FastMCP:
                 progress_callback=report_progress,
             )
             await notify_state_changed(ctx)
-            return {"success": True, "data": result}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
 
-    @mcp.tool()
+            # Detect application type for agent hints
+            app_type = detect_app_type(validated_program)
+            data = {**result, "app_type": app_type}
+
+            message = None
+            if app_type == "gui":
+                message = (
+                    "GUI application detected. Let the window fully load before "
+                    "setting breakpoints."
+                )
+
+            return build_response(
+                data=data,
+                state=session.state.state,
+                message=message,
+            )
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def attach_debug(process_id: int) -> dict:
         """
         AVOID - Use start_debug instead. Attach to already-running process (LIMITED).
@@ -201,79 +310,136 @@ def create_server(project_path: str | None = None) -> FastMCP:
         """
         try:
             result = await session.attach(process_id)
-            return {
-                "success": True,
-                "data": result,
-                "warning": (
+            return build_response(
+                data=result,
+                state=session.state.state,
+                warning=(
                     "ATTACH MODE HAS LIMITED FUNCTIONALITY. "
                     "Stack traces may be incomplete due to netcoredbg limitation. "
                     "For reliable debugging, use start_debug instead."
                 ),
-            }
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
     async def stop_debug(ctx: Context) -> dict:
         """Stop the current debug session."""
         try:
             result = await session.stop()
             await notify_state_changed(ctx)
-            return {"success": True, "data": result}
+            return build_response(data=result, state=session.state.state)
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
-    async def continue_execution(ctx: Context, thread_id: int | None = None) -> dict:
-        """Continue program execution."""
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def restart_debug(ctx: Context, rebuild: bool = True) -> dict:
+        """Restart the current debug session with the same configuration.
+
+        Stops the current session, optionally rebuilds, and relaunches.
+        Use this after code changes to debug the updated version.
+
+        Args:
+            rebuild: Whether to rebuild before restarting (default: True)
+        """
         try:
-            result = await session.continue_execution(thread_id)
+            result = await session.restart(rebuild=rebuild)
             await notify_state_changed(ctx)
-            return {"success": True, "data": result}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
 
-    @mcp.tool()
+            # Detect app type for hints
+            program = result.get("program", "")
+            app_type = detect_app_type(program) if program else None
+
+            message = "Debug session restarted."
+            if app_type == "gui":
+                message += " GUI app detected — wait for window before setting breakpoints."
+
+            return build_response(
+                data={**result, "app_type": app_type},
+                state=session.state.state,
+                message=message,
+            )
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def continue_execution(ctx: Context, thread_id: int | None = None) -> dict:
+        """Continue program execution. Blocks until the program stops again or timeout.
+
+        This tool uses the long-poll pattern: it waits for the debugger to report
+        a stopped event (breakpoint hit, exception, step complete) before returning.
+
+        The response includes the new state, stop reason, and next_actions so you
+        know exactly what happened and what to do next.
+
+        IMPORTANT: While waiting, the program is RUNNING — do not call
+        get_variables or get_call_stack until this tool returns with state=stopped.
+        """
+        return await _execute_and_wait(
+            ctx, session.continue_execution(thread_id), "continue_execution"
+        )
+
+    @mcp.tool(annotations=ToolAnnotations(idempotentHint=True, openWorldHint=False))
     async def pause_execution(ctx: Context, thread_id: int | None = None) -> dict:
-        """Pause program execution."""
+        """Pause program execution.
+
+        Unlike continue/step tools, this returns immediately after sending
+        the pause command — it does not wait for a stopped event.
+        """
         try:
             result = await session.pause(thread_id)
             await notify_state_changed(ctx)
-            return {"success": True, "data": result}
+            return build_response(
+                data=result,
+                state=session.state.state,
+                next_actions=[
+                    "get_call_stack", "get_variables", "evaluate_expression",
+                    "step_over", "step_into", "step_out", "continue_execution",
+                ],
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def step_over(ctx: Context, thread_id: int | None = None) -> dict:
-        """Step over to the next line."""
-        try:
-            result = await session.step_over(thread_id)
-            await notify_state_changed(ctx)
-            return {"success": True, "data": result}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        """Step over to the next line. Blocks until the step completes.
 
-    @mcp.tool()
+        Executes the current line without entering function calls.
+        Returns the new stopped location with source context.
+
+        IMPORTANT: After this returns with state=stopped, inspect variables
+        at the new location before deciding the next action.
+        """
+        return await _execute_and_wait(
+            ctx, session.step_over(thread_id), "step_over"
+        )
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def step_into(ctx: Context, thread_id: int | None = None) -> dict:
-        """Step into the next function call."""
-        try:
-            result = await session.step_in(thread_id)
-            await notify_state_changed(ctx)
-            return {"success": True, "data": result}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        """Step into the next function call. Blocks until the step completes.
 
-    @mcp.tool()
+        Enters the function being called on the current line.
+        Use this when you need to investigate what happens inside a called function.
+
+        IMPORTANT: After this returns with state=stopped, you are inside the
+        called function. Use step_out to return to the caller.
+        """
+        return await _execute_and_wait(
+            ctx, session.step_in(thread_id), "step_into"
+        )
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def step_out(ctx: Context, thread_id: int | None = None) -> dict:
-        """Step out of the current function."""
-        try:
-            result = await session.step_out(thread_id)
-            await notify_state_changed(ctx)
-            return {"success": True, "data": result}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        """Step out of the current function. Blocks until the step completes.
 
-    @mcp.tool()
+        Continues execution until the current function returns, then stops
+        at the caller. Use this to exit a function you stepped into.
+        """
+        return await _execute_and_wait(
+            ctx, session.step_out(thread_id), "step_out"
+        )
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def get_debug_state() -> dict:
         """
         Get the current debug session state.
@@ -286,13 +452,16 @@ def create_server(project_path: str | None = None) -> FastMCP:
         Call continue_execution first if state shows stopped/paused.
         """
         try:
-            return {"success": True, "data": session.state.to_dict()}
+            return build_response(
+                data=session.state.to_dict(),
+                state=session.state.state,
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
     # ============== Breakpoint Tools ==============
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(idempotentHint=True, openWorldHint=False))
     async def add_breakpoint(
         ctx: Context,
         file: str,
@@ -324,19 +493,19 @@ def create_server(project_path: str | None = None) -> FastMCP:
             validated_file = session.validate_path(file, must_exist=True)
             bp = await session.add_breakpoint(validated_file, line, condition, hit_condition)
             await notify_breakpoints_changed(ctx)
-            return {
-                "success": True,
-                "data": {
+            return build_response(
+                data={
                     "file": bp.file,
                     "line": bp.line,
                     "condition": bp.condition,
                     "verified": bp.verified,
                 },
-            }
+                state=session.state.state,
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(idempotentHint=True, openWorldHint=False))
     async def remove_breakpoint(ctx: Context, file: str, line: int) -> dict:
         """Remove a breakpoint from a specific line."""
         try:
@@ -347,11 +516,14 @@ def create_server(project_path: str | None = None) -> FastMCP:
             validated_file = session.validate_path(file)
             removed = await session.remove_breakpoint(validated_file, line)
             await notify_breakpoints_changed(ctx)
-            return {"success": True, "data": {"removed": removed}}
+            return build_response(
+                data={"removed": removed},
+                state=session.state.state,
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def list_breakpoints(ctx: Context, file: str | None = None) -> dict:
         """List all breakpoints or breakpoints in a specific file."""
         try:
@@ -376,11 +548,11 @@ def create_server(project_path: str | None = None) -> FastMCP:
                     ]
                     for f, bps in all_bps.items()
                 }
-            return {"success": True, "data": result}
+            return build_response(data=result, state=session.state.state)
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
     async def clear_breakpoints(ctx: Context, file: str | None = None) -> dict:
         """Clear breakpoints from a file or all files."""
         try:
@@ -392,22 +564,88 @@ def create_server(project_path: str | None = None) -> FastMCP:
                 validated_file = session.validate_path(file)
             count = await session.clear_breakpoints(validated_file)
             await notify_breakpoints_changed(ctx)
-            return {"success": True, "data": {"removed": count}}
+            return build_response(
+                data={"removed": count},
+                state=session.state.state,
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(idempotentHint=True, openWorldHint=False))
+    async def add_function_breakpoint(
+        ctx: Context,
+        function_name: str,
+        condition: str | None = None,
+        hit_condition: str | None = None,
+    ) -> dict:
+        """Set a breakpoint on a function by name.
+
+        Breaks when the named function is entered. This is useful when you know
+        the method name but not the exact line number.
+
+        Args:
+            function_name: Full or partial function name to break on
+            condition: Optional condition expression
+            hit_condition: Optional hit count condition
+        """
+        try:
+            bp = await session.add_function_breakpoint(function_name, condition, hit_condition)
+            await notify_breakpoints_changed(ctx)
+            return build_response(
+                data={"function": bp.name, "condition": bp.condition, "verified": bp.verified},
+                state=session.state.state,
+            )
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(idempotentHint=True, openWorldHint=False))
+    async def configure_exceptions(
+        filters: list[str] | None = None,
+    ) -> dict:
+        """Configure which exceptions should pause the debugger.
+
+        Controls exception breakpoints — when the debugger should stop on exceptions.
+        By default, no exception filters are set (exceptions don't pause unless uncaught).
+
+        Common filters supported by netcoredbg:
+        - "all": Break on all exceptions (caught and uncaught)
+        - "user-unhandled": Break on exceptions not handled in user code
+
+        Pass an empty list to disable all exception breakpoints.
+
+        Args:
+            filters: List of exception filter names. Pass [] to disable.
+        """
+        try:
+            success = await session.configure_exception_breakpoints(filters or [])
+            if not success:
+                return build_error_response(
+                    "Failed to set exception breakpoints",
+                    state=session.state.state,
+                )
+            return build_response(
+                data={"filters": filters or [], "configured": True},
+                state=session.state.state,
+                message=f"Exception breakpoints configured: {filters or []}",
+            )
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
 
     # ============== Inspection Tools ==============
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def get_threads() -> dict:
         """Get all threads in the debugged process."""
         try:
             threads = await session.get_threads()
-            return {"success": True, "data": [{"id": t.id, "name": t.name} for t in threads]}
+            return build_response(
+                data=[{"id": t.id, "name": t.name} for t in threads],
+                state=session.state.state,
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def get_call_stack(thread_id: int | None = None, levels: int = 20) -> dict:
         """Get the call stack for a thread.
 
@@ -425,16 +663,24 @@ def create_server(project_path: str | None = None) -> FastMCP:
                 await asyncio.sleep(delay_ms / 1000.0)
 
             frames = await session.get_stack_trace(thread_id, 0, levels)
-            return {
-                "success": True,
-                "data": [
-                    {
-                        "id": f.id, "name": f.name, "source": f.source,
-                        "line": f.line, "column": f.column,
-                    }
-                    for f in frames
-                ],
-            }
+            frames_data = [
+                {
+                    "id": f.id, "name": f.name, "source": f.source,
+                    "line": f.line, "column": f.column,
+                }
+                for f in frames
+            ]
+
+            # Read source context for the top frame
+            source_context = None
+            if frames:
+                source_context = read_source_context(frames[0].source, frames[0].line)
+
+            data = {"frames": frames_data}
+            if source_context is not None:
+                data["source_context"] = source_context
+
+            return build_response(data=data, state=session.state.state)
         except Exception as e:
             error_msg = str(e)
             # Enhanced error message for E_NOINTERFACE
@@ -443,34 +689,33 @@ def create_server(project_path: str | None = None) -> FastMCP:
                     "[DIAGNOSTIC] E_NOINTERFACE on ICorDebugThread3. "
                     "Try setting NETCOREDBG_STACKTRACE_DELAY_MS=300 to test timing hypothesis."
                 )
-            return {"success": False, "error": error_msg}
+            return build_error_response(error_msg, state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def get_scopes(frame_id: int | None = None) -> dict:
         """Get variable scopes for a stack frame."""
         try:
             scopes = await session.get_scopes(frame_id)
-            return {
-                "success": True,
-                "data": [
+            return build_response(
+                data=[
                     {
                         "name": s.get("name", ""),
                         "variablesReference": s.get("variablesReference", 0),
                     }
                     for s in scopes
                 ],
-            }
+                state=session.state.state,
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def get_variables(variables_reference: int) -> dict:
         """Get variables for a scope or structured variable."""
         try:
             variables = await session.get_variables(variables_reference)
-            return {
-                "success": True,
-                "data": [
+            return build_response(
+                data=[
                     {
                         "name": v.name,
                         "value": v.value,
@@ -479,29 +724,52 @@ def create_server(project_path: str | None = None) -> FastMCP:
                     }
                     for v in variables
                 ],
-            }
+                state=session.state.state,
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def evaluate_expression(expression: str, frame_id: int | None = None) -> dict:
         """Evaluate an expression in the current debug context."""
         try:
             result = await session.evaluate(expression, frame_id)
-            return {"success": True, "data": result}
+            return build_response(data=result, state=session.state.state)
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def set_variable(
+        variables_reference: int,
+        name: str,
+        value: str,
+    ) -> dict:
+        """Set a variable's value during debugging.
+
+        Modifies a variable in the current scope. The program must be stopped.
+        Use get_variables first to find the variables_reference for the scope.
+
+        Args:
+            variables_reference: Reference from get_scopes or get_variables
+            name: Variable name to modify
+            value: New value as a string expression
+        """
+        try:
+            result = await session.set_variable(variables_reference, name, value)
+            return build_response(data=result, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def get_exception_info(thread_id: int | None = None) -> dict:
         """Get information about the current exception."""
         try:
             info = await session.get_exception_info(thread_id)
-            return {"success": True, "data": info}
+            return build_response(data=info, state=session.state.state)
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def get_output(clear: bool = False) -> dict:
         """Get stdout/stderr output from the debugged program.
 
@@ -515,11 +783,14 @@ def create_server(project_path: str | None = None) -> FastMCP:
             output = "".join(session.state.output_buffer)
             if clear:
                 session.state.output_buffer.clear()
-            return {"success": True, "data": {"output": output}}
+            return build_response(
+                data={"output": output},
+                state=session.state.state,
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def search_output(pattern: str, context_lines: int = 2) -> dict:
         """Search program output for a pattern (regex supported).
 
@@ -556,18 +827,18 @@ def create_server(project_path: str | None = None) -> FastMCP:
                         "context": context,
                     })
 
-            return {
-                "success": True,
-                "data": {
+            return build_response(
+                data={
                     "pattern": pattern,
                     "match_count": len(matches),
-                    "matches": matches[:50],  # Limit to 50 matches
+                    "matches": matches[:50],
                 },
-            }
+                state=session.state.state,
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def get_output_tail(lines: int = 50) -> dict:
         """Get the last N lines of program output.
 
@@ -581,16 +852,16 @@ def create_server(project_path: str | None = None) -> FastMCP:
             output = "".join(session.state.output_buffer)
             all_lines = output.splitlines()
             tail = all_lines[-lines:]
-            return {
-                "success": True,
-                "data": {
+            return build_response(
+                data={
                     "total_lines": len(all_lines),
                     "returned_lines": len(tail),
                     "output": "\n".join(tail),
                 },
-            }
+                state=session.state.state,
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
     # ============== UI Automation Tools ==============
 
@@ -645,7 +916,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         )
         return ui, element
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def ui_get_window_tree(max_depth: int = 3, max_children: int = 50) -> dict:
         """
         Get the visual tree of the debugged application's main window.
@@ -663,11 +934,11 @@ def create_server(project_path: str | None = None) -> FastMCP:
         try:
             ui = await _ensure_ui_connected(session)
             tree = await ui.get_window_tree(max_depth, max_children)
-            return {"success": True, "data": tree.to_dict()}
+            return build_response(data=tree.to_dict(), state=session.state.state)
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def ui_find_element(
         automation_id: str | None = None,
         name: str | None = None,
@@ -695,11 +966,11 @@ def create_server(project_path: str | None = None) -> FastMCP:
                 control_type=control_type,
             )
             info = await ui.get_element_info(element)
-            return {"success": True, "data": info.to_dict()}
+            return build_response(data=info.to_dict(), state=session.state.state)
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(idempotentHint=True, openWorldHint=False))
     async def ui_set_focus(
         automation_id: str | None = None,
         name: str | None = None,
@@ -718,11 +989,11 @@ def create_server(project_path: str | None = None) -> FastMCP:
         try:
             ui, element = await _find_ui_element(automation_id, name, control_type)
             await ui.set_focus(element)
-            return {"success": True, "data": {"focused": True}}
+            return build_response(data={"focused": True}, state=session.state.state)
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def ui_send_keys(
         keys: str,
         automation_id: str | None = None,
@@ -751,11 +1022,11 @@ def create_server(project_path: str | None = None) -> FastMCP:
         try:
             ui, element = await _find_ui_element(automation_id, name, control_type)
             await ui.send_keys(element, keys)
-            return {"success": True, "data": {"sent": keys}}
+            return build_response(data={"sent": keys}, state=session.state.state)
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def ui_send_keys_focused(keys: str) -> dict:
         """
         Send keyboard input to the currently focused element.
@@ -780,11 +1051,13 @@ def create_server(project_path: str | None = None) -> FastMCP:
         try:
             ui = await _ensure_ui_connected(session)
             await ui.send_keys_focused(keys)
-            return {"success": True, "data": {"sent": keys, "target": "focused"}}
+            return build_response(
+                data={"sent": keys, "target": "focused"}, state=session.state.state,
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def ui_click(
         automation_id: str | None = None,
         name: str | None = None,
@@ -801,9 +1074,9 @@ def create_server(project_path: str | None = None) -> FastMCP:
         try:
             ui, element = await _find_ui_element(automation_id, name, control_type)
             await ui.click(element)
-            return {"success": True, "data": {"clicked": True}}
+            return build_response(data={"clicked": True}, state=session.state.state)
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
     # ============== Prompts (slash commands) ==============
 
@@ -818,88 +1091,130 @@ def create_server(project_path: str | None = None) -> FastMCP:
                 "role": "user",
                 "content": """# .NET Debug Session Guide
 
-## CRITICAL: User Cannot See Debug Output
+## CRITICAL RULES FOR AI DEBUGGER
 
-The user does NOT have access to Debug/Output windows.
-YOU must:
-1. Call `get_output()` periodically to read program output
-2. Summarize important findings for the user
-3. NEVER tell user to "look at Debug Output" or "check the console"
-4. Report errors, exceptions, and relevant log messages proactively
+### State Awareness
+1. **PAUSED = FROZEN:** When state=stopped, the target program is COMPLETELY FROZEN.
+   Its UI won't paint, it won't respond to input, it won't produce output.
+   Do NOT wait for the program to "respond" or "finish loading" - it can't.
+   Inspect state (get_call_stack, get_variables), then RESUME execution.
 
-## Debug Workflow
+2. **RUNNING = REFS INVALID:** When state=running, variable references from the
+   previous stop are INVALID. Do NOT call get_variables with old references.
+   Wait for the program to stop again (execution tools block automatically).
 
-### 1. Start Session
+3. **TERMINATED = DONE:** When state=terminated, the session is over.
+   Read output for errors, then call stop_debug.
+
+### Breakpoint Timing
+4. **GUI APPS (WPF/WinForms/Avalonia):** NEVER set breakpoints before the window
+   is visible. The app will freeze during initialization and the window will
+   never appear.
+
+   Correct workflow:
+   ```
+   start_debug(program="App.dll", pre_build=True, build_project="App.csproj")
+   # If state is stopped/entry: continue_execution()
+   # Wait for window: ui_get_window_tree()
+   # NOW set breakpoints: add_breakpoint(file="ViewModel.cs", line=42)
+   # Trigger the action in the UI: ui_click(automation_id="btnSave")
+   # Execution tools block until breakpoint hit - inspect state
+   ```
+
+5. **CONSOLE APPS:** Breakpoints before launch are fine - they fire on startup code.
+
+### Inspect-Resume Cycle
+6. After hitting a breakpoint, ALWAYS follow this sequence:
+   a. get_call_stack() - understand where execution stopped
+   b. get_scopes(frame_id) - get variable scope references
+   c. get_variables(variables_reference) - read local variable values
+   d. Decide: step deeper, continue to next breakpoint, or stop?
+   e. RESUME - do not leave the app paused indefinitely.
+
+### Output Monitoring
+7. Call get_output_tail() after every significant execution phase to catch
+   runtime errors, assertion failures, and log messages.
+   The user CANNOT see program output - YOU must read and summarize it.
+   Never tell the user to "check the console" or "look at output".
+
+### Exception Handling
+8. When stopped with reason=exception:
+   - Call get_exception_info() BEFORE resuming
+   - Read the exception type, message, and stack trace
+   - Decide: is this expected (resume) or a bug (investigate deeper)?
+
+### Step Strategy
+9. Use step_over for general flow (most common).
+   Use step_into when you need to enter a called function.
+   Use step_out to exit the current function and return to the caller.
+   Prefer step_over unless the bug is inside a function at the current line.
+
+### Function Breakpoints
+10. When you know the method name but not the line number:
+    Use add_function_breakpoint(function_name="OnButtonClick").
+    This breaks when the named function is entered.
+
+### Valid Actions by State
+
+| State | Valid Actions |
+|-------|-------------|
+| IDLE | start_debug, attach_debug |
+| RUNNING | pause_execution, get_output*, get_debug_state, stop_debug, add_breakpoint |
+| STOPPED | get_call_stack, get_variables, get_scopes, evaluate_expression, step_*, continue_execution, add/remove_breakpoint, set_variable, stop_debug, ui_* |
+| TERMINATED | get_output, stop_debug, start_debug (new session) |
+
+*get_output, get_output_tail, search_output are valid in all non-IDLE states.
+
+## Quick Start Workflows
+
+### Debug a Console App
 ```
-start_debug(
-    program="path/to/App.dll",      # Use .dll, not .exe for .NET 6+
-    build_project="path/to/App.csproj",  # Optional: rebuild before debug
-    pre_build=True                   # Default: builds before launch
-)
-```
-
-### 2. Set Breakpoints
-```
+start_debug(program="bin/Debug/net8.0/App.dll", build_project="App.csproj")
 add_breakpoint(file="Program.cs", line=15)
-add_breakpoint(file="Handler.cs", line=42, condition="x > 10")
-```
-
-### 3. When Execution Pauses
-```
-get_call_stack()           # See where execution stopped
-get_scopes(frame_id)       # Get variable scopes for frame
-get_variables(reference)   # Inspect variable values
-evaluate_expression("x+1") # Evaluate expressions
-```
-
-### 4. Control Execution
-```
-step_over()           # Next line (skip function calls)
-step_into()           # Enter function
-step_out()            # Exit current function
-continue_execution()  # Run until next breakpoint
-```
-
-### 5. Monitor Output
-```
-get_output()          # Read program stdout/stderr - SUMMARIZE FOR USER
-get_debug_state()     # Check session state
-```
-
-### 6. End Session
-```
+continue_execution()  # blocks until breakpoint hit
+get_call_stack()
+get_variables(scope_reference)
+continue_execution()  # resume
 stop_debug()
 ```
 
-## Common Issues
-- Empty stack trace? Use `start_debug`, not `attach_debug`
-- deps.json conflict? Build uses .dll, not .exe
-- E_NOINTERFACE? dbgshim.dll version mismatch with .NET runtime
-
-## For UI Applications (WPF/WinForms)
-
-After window appears, you can automate UI interaction:
+### Debug a WPF/Avalonia App
 ```
-ui_get_window_tree()                    # Discover UI structure
-ui_find_element(automation_id="btn")    # Find element
-ui_click(automation_id="btnSave")       # Click button
+start_debug(program="bin/Debug/net8.0/App.dll", build_project="App.csproj")
+# App is running - wait for window
+ui_get_window_tree()  # verify window is visible
+add_breakpoint(file="MainViewModel.cs", line=42)
+ui_click(automation_id="btnAction")  # trigger the code path
+# Execution stops at breakpoint - inspect
+get_call_stack()
+get_variables(scope_reference)
+continue_execution()  # resume the app
+stop_debug()
+```
+
+### Investigate an Exception
+```
+configure_exceptions(filters=["all"])  # break on ALL exceptions
+continue_execution()  # run until exception
+# Stopped with reason=exception
+get_exception_info()
+get_call_stack()
+get_variables(scope_reference)  # inspect state at exception point
+continue_execution()  # or stop_debug() if done
 ```
 
 ### Sending Keys to Complex Controls (DataGrid, TreeView, etc.)
-
-For complex controls that timeout on repeated searches, use this workflow:
 ```
 ui_set_focus(automation_id="MyDataGrid")  # 1. Focus the element
 ui_send_keys_focused(keys="^{END}")       # 2. Send keys without re-search
 ui_send_keys_focused(keys="{DOWN}")       # 3. Continue sending keys
 ```
 
-For simple controls, direct send works:
-```
-ui_send_keys(keys="hello", automation_id="txtInput")
-```
-
-Keyboard syntax: `{ENTER}`, `{TAB}`, `^c` (Ctrl+C), `%{F4}` (Alt+F4)
+## Common Issues
+- Empty stack trace? Use start_debug, not attach_debug
+- deps.json conflict? Build uses .dll, not .exe
+- E_NOINTERFACE? dbgshim.dll version mismatch with .NET runtime
+- App frozen at startup? Breakpoints set too early for GUI apps (see rule 4)
 """,
             }
         ]
@@ -993,6 +1308,16 @@ Summarize:
         Updates when: new output arrives.
         """
         return "".join(session.state.output_buffer)
+
+    @mcp.resource("debug://threads", mime_type="application/json")
+    async def debug_threads_resource() -> str:
+        """Current threads in the debugged process (JSON).
+
+        Contains: thread id and name for each active thread.
+        Updates when: process stops (breakpoint, step, pause).
+        """
+        threads = await session.get_threads()
+        return json.dumps([{"id": t.id, "name": t.name} for t in threads], indent=2)
 
     logger.info("NetCoreDbg MCP Server initialized")
     return mcp

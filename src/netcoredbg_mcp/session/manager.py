@@ -17,8 +17,10 @@ from .state import (
     Breakpoint,
     BreakpointRegistry,
     DebugState,
+    FunctionBreakpoint,
     SessionState,
     StackFrame,
+    StoppedSnapshot,
     ThreadInfo,
     Variable,
 )
@@ -39,6 +41,7 @@ class SessionManager:
         self._breakpoints = BreakpointRegistry()
         self._state_listeners: list[Callable[[DebugState], None]] = []
         self._initialized_event = asyncio.Event()
+        self._execution_event = asyncio.Event()  # Signaled on stopped/terminated/exited
         self._project_path = os.path.abspath(project_path) if project_path else None
         self._output_bytes = 0  # Track output buffer size
         self._build_manager = BuildManager()
@@ -245,6 +248,7 @@ class SessionManager:
         self._state.current_thread_id = body.thread_id
         self._state.stop_reason = body.reason.value
         self._set_state(DebugState.STOPPED)
+        self._execution_event.set()
         logger.info(f"Stopped: reason={body.reason.value}, thread={body.thread_id}")
 
     def _on_continued(self, event: DAPEvent) -> None:
@@ -254,11 +258,13 @@ class SessionManager:
     def _on_terminated(self, event: DAPEvent) -> None:
         """Handle terminated event."""
         self._set_state(DebugState.TERMINATED)
+        self._execution_event.set()
         logger.info("Debug session terminated")
 
     def _on_exited(self, event: DAPEvent) -> None:
         """Handle exited event."""
         self._state.exit_code = event.body.get("exitCode", 0)
+        self._execution_event.set()
         logger.info(f"Process exited with code {self._state.exit_code}")
 
     def _on_output(self, event: DAPEvent) -> None:
@@ -275,7 +281,7 @@ class SessionManager:
 
         # Trim buffer by byte size (security: prevent DoS)
         while self._output_bytes > MAX_OUTPUT_BYTES and self._state.output_buffer:
-            removed = self._state.output_buffer.pop(0)
+            removed = self._state.output_buffer.popleft()
             self._output_bytes -= len(removed)
 
     def _on_thread(self, event: DAPEvent) -> None:
@@ -309,6 +315,50 @@ class SessionManager:
 
         if pid is not None:
             logger.info(f"Process started: PID={pid}, name={name or 'unknown'}")
+
+    async def wait_for_stopped(self, timeout: float = 30.0) -> StoppedSnapshot:
+        """Wait for execution to stop (breakpoint, step, exception, or termination).
+
+        Blocks until a DAP stopped/terminated/exited event fires, or timeout expires.
+        Call this after any execution command (continue, step_over, step_in, step_out)
+        to get the resulting state without polling.
+
+        Args:
+            timeout: Maximum seconds to wait. On timeout, returns snapshot with
+                     timed_out=True and the current state (likely still RUNNING).
+
+        Returns:
+            StoppedSnapshot with the state at the moment execution stopped.
+        """
+        try:
+            await asyncio.wait_for(self._execution_event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            process_alive = (
+                self._client.is_running
+                and self._state.process_id is not None
+            )
+            logger.warning(
+                f"wait_for_stopped timed out after {timeout}s "
+                f"(state={self._state.state.value}, process_alive={process_alive})"
+            )
+            return StoppedSnapshot(
+                state=self._state.state,
+                stop_reason=self._state.stop_reason,
+                thread_id=self._state.current_thread_id,
+                timed_out=True,
+                exit_code=self._state.exit_code,
+                process_alive=process_alive,
+            )
+
+        return StoppedSnapshot(
+            state=self._state.state,
+            stop_reason=self._state.stop_reason,
+            thread_id=self._state.current_thread_id,
+            timed_out=False,
+            exit_code=self._state.exit_code,
+            exception_info=self._state.exception_info,
+            process_alive=self._state.state != DebugState.TERMINATED,
+        )
 
     async def pre_launch_build(
         self,
@@ -512,6 +562,7 @@ class SessionManager:
 
         self._set_state(DebugState.IDLE)
         self._initialized_event.clear()
+        self._execution_event.clear()
         self._state = SessionState()
         self._output_bytes = 0  # Reset output tracking for next session
 
@@ -558,6 +609,18 @@ class SessionManager:
         """Sync all breakpoints to DAP."""
         for file_path in self._breakpoints.get_files():
             await self._sync_file_breakpoints(file_path)
+        await self._sync_function_breakpoints()
+
+    async def _sync_function_breakpoints(self) -> None:
+        """Sync function breakpoints to DAP."""
+        bps = self._breakpoints.get_function_breakpoints()
+        dap_bps = [bp.to_dap() for bp in bps]
+        response = await self._client.set_function_breakpoints(dap_bps)
+        if response.success:
+            for i, dap_bp in enumerate(response.body.get("breakpoints", [])):
+                if i < len(bps):
+                    bps[i].verified = dap_bp.get("verified", False)
+                    bps[i].id = dap_bp.get("id")
 
     async def _sync_file_breakpoints(self, file_path: str) -> None:
         """Sync breakpoints for a single file."""
@@ -614,6 +677,37 @@ class SessionManager:
                 await self._client.set_breakpoints(f, [])
 
         return count
+
+    async def add_function_breakpoint(
+        self, name: str, condition: str | None = None, hit_condition: str | None = None
+    ) -> FunctionBreakpoint:
+        """Add a function breakpoint."""
+        bp = FunctionBreakpoint(name=name, condition=condition, hit_condition=hit_condition)
+        self._breakpoints.add_function_breakpoint(bp)
+        if self.is_active:
+            await self._sync_function_breakpoints()
+        return bp
+
+    async def remove_function_breakpoint(self, name: str) -> bool:
+        """Remove a function breakpoint."""
+        removed = self._breakpoints.remove_function_breakpoint(name)
+        if removed and self.is_active:
+            await self._sync_function_breakpoints()
+        return removed
+
+    async def set_variable(
+        self, variables_reference: int, name: str, value: str
+    ) -> dict[str, Any]:
+        """Set a variable's value."""
+        response = await self._client.set_variable(variables_reference, name, value)
+        if response.success:
+            return {
+                "value": response.body.get("value", ""),
+                "type": response.body.get("type"),
+                "variablesReference": response.body.get("variablesReference", 0),
+            }
+        else:
+            raise RuntimeError(response.message or "Failed to set variable")
 
     # Execution control
 
@@ -779,6 +873,18 @@ class SessionManager:
             }
         else:
             return {"error": response.message or "Evaluation failed"}
+
+    async def configure_exception_breakpoints(self, filters: list[str]) -> bool:
+        """Configure which exceptions should pause the debugger.
+
+        Args:
+            filters: List of exception filter names
+
+        Returns:
+            True if successful
+        """
+        response = await self._client.set_exception_breakpoints(filters)
+        return response.success
 
     async def get_exception_info(
         self, thread_id: int | None = None

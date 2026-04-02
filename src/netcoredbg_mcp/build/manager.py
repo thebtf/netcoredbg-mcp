@@ -1,4 +1,4 @@
-"""Build manager - singleton orchestrating all build sessions.
+"""Build manager - orchestrates all build sessions.
 
 Provides:
 - Per-workspace session management
@@ -8,7 +8,6 @@ Provides:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from collections.abc import Callable
@@ -22,30 +21,20 @@ logger = logging.getLogger(__name__)
 
 
 class BuildManager:
-    """Singleton manager for build sessions across workspaces.
+    """Manager for build sessions across workspaces.
+
+    Each consumer should hold its own instance. SessionManager creates
+    one in its ``__init__``.
 
     Usage:
         manager = BuildManager()
         result = await manager.build("/path/to/workspace", "Project.csproj")
     """
 
-    _instance: BuildManager | None = None
-    _lock = asyncio.Lock()
-
-    def __new__(cls) -> BuildManager:
-        """Singleton pattern."""
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
-
     def __init__(self) -> None:
-        """Initialize manager (only once)."""
-        if self._initialized:
-            return
+        """Initialize manager."""
         self._sessions: dict[str, BuildSession] = {}
         self._global_listeners: list[Callable[[str, BuildState], None]] = []
-        self._initialized = True
 
     def _normalize_path(self, path: str) -> str:
         """Normalize path for consistent key lookup."""

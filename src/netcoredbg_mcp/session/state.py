@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -40,11 +41,30 @@ class Breakpoint:
         return bp
 
 
+@dataclass
+class FunctionBreakpoint:
+    """Represents a function breakpoint."""
+    name: str
+    condition: str | None = None
+    hit_condition: str | None = None
+    verified: bool = False
+    id: int | None = None
+
+    def to_dap(self) -> dict[str, Any]:
+        bp: dict[str, Any] = {"name": self.name}
+        if self.condition:
+            bp["condition"] = self.condition
+        if self.hit_condition:
+            bp["hitCondition"] = self.hit_condition
+        return bp
+
+
 class BreakpointRegistry:
     """Manages breakpoints across files."""
 
     def __init__(self):
         self._breakpoints: dict[str, list[Breakpoint]] = {}  # file -> breakpoints
+        self._function_breakpoints: list[FunctionBreakpoint] = []
 
     def add(self, breakpoint: Breakpoint) -> None:
         """Add a breakpoint."""
@@ -120,6 +140,34 @@ class BreakpointRegistry:
                 if "line" in dap_bp:
                     self._breakpoints[file_path][i].line = dap_bp["line"]
 
+    def add_function_breakpoint(self, bp: FunctionBreakpoint) -> None:
+        """Add a function breakpoint."""
+        # Update existing if same name
+        for existing in self._function_breakpoints:
+            if existing.name == bp.name:
+                existing.condition = bp.condition
+                existing.hit_condition = bp.hit_condition
+                return
+        self._function_breakpoints.append(bp)
+
+    def remove_function_breakpoint(self, name: str) -> bool:
+        """Remove a function breakpoint by name. Returns True if found."""
+        original_count = len(self._function_breakpoints)
+        self._function_breakpoints = [
+            bp for bp in self._function_breakpoints if bp.name != name
+        ]
+        return len(self._function_breakpoints) < original_count
+
+    def get_function_breakpoints(self) -> list[FunctionBreakpoint]:
+        """Get all function breakpoints."""
+        return list(self._function_breakpoints)
+
+    def clear_function_breakpoints(self) -> int:
+        """Clear all function breakpoints. Returns count removed."""
+        count = len(self._function_breakpoints)
+        self._function_breakpoints = []
+        return count
+
     def _normalize_path(self, path: str) -> str:
         """Normalize file path for consistent lookup."""
         # Convert backslashes to forward slashes and lowercase on Windows
@@ -159,6 +207,22 @@ class Variable:
 
 
 @dataclass
+class StoppedSnapshot:
+    """Snapshot of state when execution stops (or times out).
+
+    Returned by SessionManager.wait_for_stopped() to give the agent
+    a complete picture of what happened after an execution command.
+    """
+    state: DebugState
+    stop_reason: str | None = None
+    thread_id: int | None = None
+    timed_out: bool = False
+    exit_code: int | None = None
+    exception_info: dict[str, Any] | None = None
+    process_alive: bool = True
+
+
+@dataclass
 class SessionState:
     """Complete debug session state."""
     state: DebugState = DebugState.IDLE
@@ -166,7 +230,7 @@ class SessionState:
     stop_reason: str | None = None
     threads: list[ThreadInfo] = field(default_factory=list)
     current_frame_id: int | None = None
-    output_buffer: list[str] = field(default_factory=list)
+    output_buffer: deque[str] = field(default_factory=deque)
     exit_code: int | None = None
     exception_info: dict[str, Any] | None = None
     process_id: int | None = None

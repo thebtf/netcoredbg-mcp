@@ -311,6 +311,28 @@ class DAPClient:
             },
         )
 
+    async def set_function_breakpoints(
+        self, breakpoints: list[dict[str, Any]]
+    ) -> DAPResponse:
+        """Set function breakpoints."""
+        return await self.send_request(
+            Commands.SET_FUNCTION_BREAKPOINTS,
+            {"breakpoints": breakpoints},
+        )
+
+    async def set_variable(
+        self, variables_reference: int, name: str, value: str
+    ) -> DAPResponse:
+        """Set a variable's value."""
+        return await self.send_request(
+            Commands.SET_VARIABLE,
+            {
+                "variablesReference": variables_reference,
+                "name": name,
+                "value": value,
+            },
+        )
+
     async def set_exception_breakpoints(
         self, filters: list[str] | None = None
     ) -> DAPResponse:

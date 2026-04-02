@@ -5,6 +5,7 @@ from netcoredbg_mcp.session.state import (
     Breakpoint,
     BreakpointRegistry,
     DebugState,
+    FunctionBreakpoint,
     SessionState,
     StackFrame,
     ThreadInfo,
@@ -250,6 +251,70 @@ class TestBreakpointRegistry:
             breakpoints = registry.get_for_file("C:\\test\\file.cs")
             assert len(breakpoints) == 1
 
+    def test_add_function_breakpoint_new(self):
+        """Test adding a new function breakpoint."""
+        registry = BreakpointRegistry()
+        bp = FunctionBreakpoint(name="MyClass.MyMethod")
+
+        registry.add_function_breakpoint(bp)
+
+        bps = registry.get_function_breakpoints()
+        assert len(bps) == 1
+        assert bps[0].name == "MyClass.MyMethod"
+
+    def test_add_function_breakpoint_updates_existing(self):
+        """Test adding function breakpoint with same name updates existing."""
+        registry = BreakpointRegistry()
+        registry.add_function_breakpoint(FunctionBreakpoint(name="Foo.Bar"))
+        registry.add_function_breakpoint(
+            FunctionBreakpoint(name="Foo.Bar", condition="x > 5")
+        )
+
+        bps = registry.get_function_breakpoints()
+        assert len(bps) == 1
+        assert bps[0].condition == "x > 5"
+
+    def test_remove_function_breakpoint_found(self):
+        """Test removing an existing function breakpoint."""
+        registry = BreakpointRegistry()
+        registry.add_function_breakpoint(FunctionBreakpoint(name="Foo.Bar"))
+
+        removed = registry.remove_function_breakpoint("Foo.Bar")
+
+        assert removed is True
+        assert len(registry.get_function_breakpoints()) == 0
+
+    def test_remove_function_breakpoint_not_found(self):
+        """Test removing a nonexistent function breakpoint."""
+        registry = BreakpointRegistry()
+        registry.add_function_breakpoint(FunctionBreakpoint(name="Foo.Bar"))
+
+        removed = registry.remove_function_breakpoint("DoesNotExist")
+
+        assert removed is False
+        assert len(registry.get_function_breakpoints()) == 1
+
+    def test_get_function_breakpoints_returns_copy(self):
+        """Test get_function_breakpoints returns a new list (not the internal one)."""
+        registry = BreakpointRegistry()
+        registry.add_function_breakpoint(FunctionBreakpoint(name="Foo.Bar"))
+
+        result = registry.get_function_breakpoints()
+        result.append(FunctionBreakpoint(name="Extra"))
+
+        assert len(registry.get_function_breakpoints()) == 1
+
+    def test_clear_function_breakpoints(self):
+        """Test clearing all function breakpoints."""
+        registry = BreakpointRegistry()
+        registry.add_function_breakpoint(FunctionBreakpoint(name="A"))
+        registry.add_function_breakpoint(FunctionBreakpoint(name="B"))
+
+        count = registry.clear_function_breakpoints()
+
+        assert count == 2
+        assert len(registry.get_function_breakpoints()) == 0
+
 
 class TestDataClasses:
     """Tests for other dataclasses."""
@@ -333,7 +398,7 @@ class TestSessionState:
         assert state.stop_reason is None
         assert state.threads == []
         assert state.current_frame_id is None
-        assert state.output_buffer == []
+        assert len(state.output_buffer) == 0
         assert state.exit_code is None
         assert state.exception_info is None
 
