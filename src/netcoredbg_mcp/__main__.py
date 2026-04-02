@@ -120,7 +120,18 @@ async def main() -> None:
             logger.info(f"Startup cleanup: reaped {reaped} orphaned processes")
 
     try:
-        await mcp.run_stdio_async()
+        # Run with x-mux experimental capability for mcp-mux session awareness.
+        # This tells mcp-mux to inject _meta.muxSessionId into every request,
+        # enabling session ownership tracking for multi-agent environments.
+        from mcp.server.stdio import stdio_server
+
+        async with stdio_server() as (read_stream, write_stream):
+            init_options = mcp._mcp_server.create_initialization_options(
+                experimental_capabilities={
+                    "x-mux": {"sharing": "session-aware"},
+                },
+            )
+            await mcp._mcp_server.run(read_stream, write_stream, init_options)
     except Exception:
         logger.exception("Server error")
         raise
