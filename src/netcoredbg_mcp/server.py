@@ -96,6 +96,17 @@ def create_server(project_path: str | None = None) -> FastMCP:
         except Exception as e:
             logger.warning(f"Failed to send resource update notification for debug://breakpoints: {e}")
 
+    # ============== Mux Session Ownership ==============
+
+    from .mux import get_mux_session_id, SessionOwnership
+    _ownership = SessionOwnership()
+
+    def _check_session_access(ctx: Context) -> str | None:
+        """Check if the calling session has access to mutating operations.
+        Returns error message if denied, None if allowed."""
+        session_id = get_mux_session_id(ctx)
+        return _ownership.check_access(session_id)
+
     # ============== Helpers ==============
 
     def _build_stopped_response(
@@ -233,6 +244,10 @@ def create_server(project_path: str | None = None) -> FastMCP:
             build_configuration: Build configuration (Debug/Release)
         """
         try:
+            access_error = _check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
             # Resolve project root from MCP context (may update session)
             await resolve_project_root(ctx, session)
 
@@ -295,7 +310,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
             return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
-    async def attach_debug(process_id: int) -> dict:
+    async def attach_debug(ctx: Context, process_id: int) -> dict:
         """
         AVOID - Use start_debug instead. Attach to already-running process (LIMITED).
 
@@ -313,6 +328,10 @@ def create_server(project_path: str | None = None) -> FastMCP:
             process_id: PID of an already-running .NET process (NOT for normal debugging)
         """
         try:
+            access_error = _check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
             result = await session.attach(process_id)
             return build_response(
                 data=result,
@@ -330,7 +349,12 @@ def create_server(project_path: str | None = None) -> FastMCP:
     async def stop_debug(ctx: Context) -> dict:
         """Stop the current debug session."""
         try:
+            access_error = _check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
             result = await session.stop()
+            _ownership.release()
             await notify_state_changed(ctx)
             return build_response(data=result, state=session.state.state)
         except Exception as e:
@@ -347,6 +371,10 @@ def create_server(project_path: str | None = None) -> FastMCP:
             rebuild: Whether to rebuild before restarting (default: True)
         """
         try:
+            access_error = _check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
             result = await session.restart(rebuild=rebuild)
             await notify_state_changed(ctx)
 
@@ -379,6 +407,10 @@ def create_server(project_path: str | None = None) -> FastMCP:
         IMPORTANT: While waiting, the program is RUNNING — do not call
         get_variables or get_call_stack until this tool returns with state=stopped.
         """
+        access_error = _check_session_access(ctx)
+        if access_error:
+            return build_error_response(access_error, state=session.state.state)
+
         return await _execute_and_wait(
             ctx, session.continue_execution(thread_id), "continue_execution"
         )
@@ -391,6 +423,10 @@ def create_server(project_path: str | None = None) -> FastMCP:
         the pause command — it does not wait for a stopped event.
         """
         try:
+            access_error = _check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
             result = await session.pause(thread_id)
             await notify_state_changed(ctx)
             return build_response(
@@ -414,6 +450,10 @@ def create_server(project_path: str | None = None) -> FastMCP:
         IMPORTANT: After this returns with state=stopped, inspect variables
         at the new location before deciding the next action.
         """
+        access_error = _check_session_access(ctx)
+        if access_error:
+            return build_error_response(access_error, state=session.state.state)
+
         return await _execute_and_wait(
             ctx, session.step_over(thread_id), "step_over"
         )
@@ -428,6 +468,10 @@ def create_server(project_path: str | None = None) -> FastMCP:
         IMPORTANT: After this returns with state=stopped, you are inside the
         called function. Use step_out to return to the caller.
         """
+        access_error = _check_session_access(ctx)
+        if access_error:
+            return build_error_response(access_error, state=session.state.state)
+
         return await _execute_and_wait(
             ctx, session.step_in(thread_id), "step_into"
         )
@@ -439,6 +483,10 @@ def create_server(project_path: str | None = None) -> FastMCP:
         Continues execution until the current function returns, then stops
         at the caller. Use this to exit a function you stepped into.
         """
+        access_error = _check_session_access(ctx)
+        if access_error:
+            return build_error_response(access_error, state=session.state.state)
+
         return await _execute_and_wait(
             ctx, session.step_out(thread_id), "step_out"
         )
@@ -490,6 +538,10 @@ def create_server(project_path: str | None = None) -> FastMCP:
             hit_condition: Optional hit count condition
         """
         try:
+            access_error = _check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
             # Resolve project root from MCP context
             await resolve_project_root(ctx, session)
 
@@ -513,6 +565,10 @@ def create_server(project_path: str | None = None) -> FastMCP:
     async def remove_breakpoint(ctx: Context, file: str, line: int) -> dict:
         """Remove a breakpoint from a specific line."""
         try:
+            access_error = _check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
             # Resolve project root from MCP context
             await resolve_project_root(ctx, session)
 
@@ -560,6 +616,10 @@ def create_server(project_path: str | None = None) -> FastMCP:
     async def clear_breakpoints(ctx: Context, file: str | None = None) -> dict:
         """Clear breakpoints from a file or all files."""
         try:
+            access_error = _check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
             validated_file = None
             if file:
                 # Resolve project root from MCP context
@@ -593,6 +653,10 @@ def create_server(project_path: str | None = None) -> FastMCP:
             hit_condition: Optional hit count condition
         """
         try:
+            access_error = _check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
             bp = await session.add_function_breakpoint(function_name, condition, hit_condition)
             await notify_breakpoints_changed(ctx)
             return build_response(
@@ -604,6 +668,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
 
     @mcp.tool(annotations=ToolAnnotations(idempotentHint=True, openWorldHint=False))
     async def configure_exceptions(
+        ctx: Context,
         filters: list[str] | None = None,
     ) -> dict:
         """Configure which exceptions should pause the debugger.
@@ -621,6 +686,10 @@ def create_server(project_path: str | None = None) -> FastMCP:
             filters: List of exception filter names. Pass [] to disable.
         """
         try:
+            access_error = _check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
             success = await session.configure_exception_breakpoints(filters or [])
             if not success:
                 return build_error_response(
@@ -744,6 +813,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
 
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def set_variable(
+        ctx: Context,
         variables_reference: int,
         name: str,
         value: str,
@@ -759,6 +829,10 @@ def create_server(project_path: str | None = None) -> FastMCP:
             value: New value as a string expression
         """
         try:
+            access_error = _check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
             result = await session.set_variable(variables_reference, name, value)
             return build_response(data=result, state=session.state.state)
         except Exception as e:
@@ -905,7 +979,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
     # ============== Process Management Tools ==============
 
     @mcp.tool(annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
-    async def cleanup_processes(force: bool = False) -> dict:
+    async def cleanup_processes(ctx: Context, force: bool = False) -> dict:
         """View or terminate tracked debug processes.
 
         Without force: shows all tracked processes and their status (alive/dead).
@@ -918,6 +992,11 @@ def create_server(project_path: str | None = None) -> FastMCP:
             force: If True, terminate all tracked processes. If False, just show status.
         """
         try:
+            if force:
+                access_error = _check_session_access(ctx)
+                if access_error:
+                    return build_error_response(access_error, state=session.state.state)
+
             registry = session.process_registry
             status_list = registry.status()
 
@@ -1054,6 +1133,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
 
     @mcp.tool(annotations=ToolAnnotations(idempotentHint=True, openWorldHint=False))
     async def ui_set_focus(
+        ctx: Context,
         automation_id: str | None = None,
         name: str | None = None,
         control_type: str | None = None,
@@ -1069,6 +1149,10 @@ def create_server(project_path: str | None = None) -> FastMCP:
             control_type: Control type
         """
         try:
+            access_error = _check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
             ui, element = await _find_ui_element(automation_id, name, control_type)
             await ui.set_focus(element)
             return build_response(data={"focused": True}, state=session.state.state)
@@ -1077,6 +1161,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
 
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def ui_send_keys(
+        ctx: Context,
         keys: str,
         automation_id: str | None = None,
         name: str | None = None,
@@ -1102,6 +1187,10 @@ def create_server(project_path: str | None = None) -> FastMCP:
             control_type: Target element's control type
         """
         try:
+            access_error = _check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
             ui, element = await _find_ui_element(automation_id, name, control_type)
             await ui.send_keys(element, keys)
             return build_response(data={"sent": keys}, state=session.state.state)
@@ -1109,7 +1198,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
             return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
-    async def ui_send_keys_focused(keys: str) -> dict:
+    async def ui_send_keys_focused(ctx: Context, keys: str) -> dict:
         """
         Send keyboard input to the currently focused element.
 
@@ -1131,6 +1220,10 @@ def create_server(project_path: str | None = None) -> FastMCP:
             keys: Keys to send (pywinauto syntax)
         """
         try:
+            access_error = _check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
             ui = await _ensure_ui_connected(session)
             await ui.send_keys_focused(keys)
             return build_response(
@@ -1141,6 +1234,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
 
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def ui_click(
+        ctx: Context,
         automation_id: str | None = None,
         name: str | None = None,
         control_type: str | None = None,
@@ -1154,6 +1248,10 @@ def create_server(project_path: str | None = None) -> FastMCP:
             control_type: Control type
         """
         try:
+            access_error = _check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
             ui, element = await _find_ui_element(automation_id, name, control_type)
             await ui.click(element)
             return build_response(data={"clicked": True}, state=session.state.state)
