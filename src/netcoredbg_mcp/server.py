@@ -14,6 +14,7 @@ from .response import build_error_response, build_response
 from .session import SessionManager
 from .session.state import DebugState, StoppedSnapshot
 from .utils.project import get_project_root
+from .utils.app_type import detect_app_type
 from .utils.source import read_source_context
 
 logger = logging.getLogger(__name__)
@@ -159,14 +160,28 @@ def create_server(project_path: str | None = None) -> FastMCP:
         try:
             await action_coro
             snapshot = await session.wait_for_stopped(timeout=timeout)
+            response = _build_stopped_response(snapshot, action_name)
+
+            # Add source context if stopped at a known location
+            if snapshot.state == DebugState.STOPPED and snapshot.thread_id:
+                try:
+                    frames = await session.get_stack_trace(snapshot.thread_id, 0, 1)
+                    if frames:
+                        response["location"] = {
+                            "file": frames[0].source,
+                            "line": frames[0].line,
+                            "function": frames[0].name,
+                            "source_context": read_source_context(
+                                frames[0].source, frames[0].line,
+                            ),
+                        }
+                except Exception:
+                    pass  # Source context is best-effort
+
             await notify_state_changed(ctx)
-            return _build_stopped_response(snapshot, action_name)
+            return response
         except Exception as e:
-            return {
-                "state": session.state.state.value,
-                "error": str(e),
-                "next_actions": ["get_debug_state", "stop_debug"],
-            }
+            return build_error_response(str(e), state=session.state.state)
 
     # ============== Debug Control Tools ==============
 
@@ -217,11 +232,11 @@ def create_server(project_path: str | None = None) -> FastMCP:
 
             # Validate pre_build requires build_project
             if pre_build and not build_project:
-                return {
-                    "success": False,
-                    "error": "pre_build=True requires build_project path to .csproj file. "
+                return build_error_response(
+                    "pre_build=True requires build_project path to .csproj file. "
                     "Either provide build_project or set pre_build=False.",
-                }
+                    state=session.state.state,
+                )
 
             # Validate program path (security: prevent arbitrary execution)
             # If pre_build=True, don't require file to exist yet (build will create it)
@@ -253,9 +268,25 @@ def create_server(project_path: str | None = None) -> FastMCP:
                 progress_callback=report_progress,
             )
             await notify_state_changed(ctx)
-            return {"success": True, "data": result}
+
+            # Detect application type for agent hints
+            app_type = detect_app_type(validated_program)
+            data = {**result, "app_type": app_type}
+
+            message = None
+            if app_type == "gui":
+                message = (
+                    "GUI application detected. Let the window fully load before "
+                    "setting breakpoints."
+                )
+
+            return build_response(
+                data=data,
+                state=session.state.state,
+                message=message,
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool()
     async def attach_debug(process_id: int) -> dict:
@@ -277,17 +308,17 @@ def create_server(project_path: str | None = None) -> FastMCP:
         """
         try:
             result = await session.attach(process_id)
-            return {
-                "success": True,
-                "data": result,
-                "warning": (
+            return build_response(
+                data=result,
+                state=session.state.state,
+                warning=(
                     "ATTACH MODE HAS LIMITED FUNCTIONALITY. "
                     "Stack traces may be incomplete due to netcoredbg limitation. "
                     "For reliable debugging, use start_debug instead."
                 ),
-            }
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool()
     async def stop_debug(ctx: Context) -> dict:
@@ -295,9 +326,9 @@ def create_server(project_path: str | None = None) -> FastMCP:
         try:
             result = await session.stop()
             await notify_state_changed(ctx)
-            return {"success": True, "data": result}
+            return build_response(data=result, state=session.state.state)
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool()
     async def continue_execution(ctx: Context, thread_id: int | None = None) -> dict:
@@ -326,17 +357,16 @@ def create_server(project_path: str | None = None) -> FastMCP:
         try:
             result = await session.pause(thread_id)
             await notify_state_changed(ctx)
-            return {
-                "success": True,
-                "data": result,
-                "state": session.state.state.value,
-                "next_actions": [
+            return build_response(
+                data=result,
+                state=session.state.state,
+                next_actions=[
                     "get_call_stack", "get_variables", "evaluate_expression",
                     "step_over", "step_into", "step_out", "continue_execution",
                 ],
-            }
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool()
     async def step_over(ctx: Context, thread_id: int | None = None) -> dict:
@@ -431,17 +461,17 @@ def create_server(project_path: str | None = None) -> FastMCP:
             validated_file = session.validate_path(file, must_exist=True)
             bp = await session.add_breakpoint(validated_file, line, condition, hit_condition)
             await notify_breakpoints_changed(ctx)
-            return {
-                "success": True,
-                "data": {
+            return build_response(
+                data={
                     "file": bp.file,
                     "line": bp.line,
                     "condition": bp.condition,
                     "verified": bp.verified,
                 },
-            }
+                state=session.state.state,
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool()
     async def remove_breakpoint(ctx: Context, file: str, line: int) -> dict:
@@ -454,9 +484,12 @@ def create_server(project_path: str | None = None) -> FastMCP:
             validated_file = session.validate_path(file)
             removed = await session.remove_breakpoint(validated_file, line)
             await notify_breakpoints_changed(ctx)
-            return {"success": True, "data": {"removed": removed}}
+            return build_response(
+                data={"removed": removed},
+                state=session.state.state,
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool()
     async def list_breakpoints(ctx: Context, file: str | None = None) -> dict:
@@ -483,9 +516,9 @@ def create_server(project_path: str | None = None) -> FastMCP:
                     ]
                     for f, bps in all_bps.items()
                 }
-            return {"success": True, "data": result}
+            return build_response(data=result, state=session.state.state)
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool()
     async def clear_breakpoints(ctx: Context, file: str | None = None) -> dict:
@@ -499,9 +532,12 @@ def create_server(project_path: str | None = None) -> FastMCP:
                 validated_file = session.validate_path(file)
             count = await session.clear_breakpoints(validated_file)
             await notify_breakpoints_changed(ctx)
-            return {"success": True, "data": {"removed": count}}
+            return build_response(
+                data={"removed": count},
+                state=session.state.state,
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
     # ============== Inspection Tools ==============
 
@@ -510,9 +546,12 @@ def create_server(project_path: str | None = None) -> FastMCP:
         """Get all threads in the debugged process."""
         try:
             threads = await session.get_threads()
-            return {"success": True, "data": [{"id": t.id, "name": t.name} for t in threads]}
+            return build_response(
+                data=[{"id": t.id, "name": t.name} for t in threads],
+                state=session.state.state,
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool()
     async def get_call_stack(thread_id: int | None = None, levels: int = 20) -> dict:
@@ -532,16 +571,24 @@ def create_server(project_path: str | None = None) -> FastMCP:
                 await asyncio.sleep(delay_ms / 1000.0)
 
             frames = await session.get_stack_trace(thread_id, 0, levels)
-            return {
-                "success": True,
-                "data": [
-                    {
-                        "id": f.id, "name": f.name, "source": f.source,
-                        "line": f.line, "column": f.column,
-                    }
-                    for f in frames
-                ],
-            }
+            frames_data = [
+                {
+                    "id": f.id, "name": f.name, "source": f.source,
+                    "line": f.line, "column": f.column,
+                }
+                for f in frames
+            ]
+
+            # Read source context for the top frame
+            source_context = None
+            if frames:
+                source_context = read_source_context(frames[0].source, frames[0].line)
+
+            data = {"frames": frames_data}
+            if source_context is not None:
+                data["source_context"] = source_context
+
+            return build_response(data=data, state=session.state.state)
         except Exception as e:
             error_msg = str(e)
             # Enhanced error message for E_NOINTERFACE
@@ -550,34 +597,33 @@ def create_server(project_path: str | None = None) -> FastMCP:
                     "[DIAGNOSTIC] E_NOINTERFACE on ICorDebugThread3. "
                     "Try setting NETCOREDBG_STACKTRACE_DELAY_MS=300 to test timing hypothesis."
                 )
-            return {"success": False, "error": error_msg}
+            return build_error_response(error_msg, state=session.state.state)
 
     @mcp.tool()
     async def get_scopes(frame_id: int | None = None) -> dict:
         """Get variable scopes for a stack frame."""
         try:
             scopes = await session.get_scopes(frame_id)
-            return {
-                "success": True,
-                "data": [
+            return build_response(
+                data=[
                     {
                         "name": s.get("name", ""),
                         "variablesReference": s.get("variablesReference", 0),
                     }
                     for s in scopes
                 ],
-            }
+                state=session.state.state,
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool()
     async def get_variables(variables_reference: int) -> dict:
         """Get variables for a scope or structured variable."""
         try:
             variables = await session.get_variables(variables_reference)
-            return {
-                "success": True,
-                "data": [
+            return build_response(
+                data=[
                     {
                         "name": v.name,
                         "value": v.value,
@@ -586,27 +632,28 @@ def create_server(project_path: str | None = None) -> FastMCP:
                     }
                     for v in variables
                 ],
-            }
+                state=session.state.state,
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool()
     async def evaluate_expression(expression: str, frame_id: int | None = None) -> dict:
         """Evaluate an expression in the current debug context."""
         try:
             result = await session.evaluate(expression, frame_id)
-            return {"success": True, "data": result}
+            return build_response(data=result, state=session.state.state)
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool()
     async def get_exception_info(thread_id: int | None = None) -> dict:
         """Get information about the current exception."""
         try:
             info = await session.get_exception_info(thread_id)
-            return {"success": True, "data": info}
+            return build_response(data=info, state=session.state.state)
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool()
     async def get_output(clear: bool = False) -> dict:
@@ -622,9 +669,12 @@ def create_server(project_path: str | None = None) -> FastMCP:
             output = "".join(session.state.output_buffer)
             if clear:
                 session.state.output_buffer.clear()
-            return {"success": True, "data": {"output": output}}
+            return build_response(
+                data={"output": output},
+                state=session.state.state,
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool()
     async def search_output(pattern: str, context_lines: int = 2) -> dict:
@@ -663,16 +713,16 @@ def create_server(project_path: str | None = None) -> FastMCP:
                         "context": context,
                     })
 
-            return {
-                "success": True,
-                "data": {
+            return build_response(
+                data={
                     "pattern": pattern,
                     "match_count": len(matches),
-                    "matches": matches[:50],  # Limit to 50 matches
+                    "matches": matches[:50],
                 },
-            }
+                state=session.state.state,
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool()
     async def get_output_tail(lines: int = 50) -> dict:
@@ -688,16 +738,16 @@ def create_server(project_path: str | None = None) -> FastMCP:
             output = "".join(session.state.output_buffer)
             all_lines = output.splitlines()
             tail = all_lines[-lines:]
-            return {
-                "success": True,
-                "data": {
+            return build_response(
+                data={
                     "total_lines": len(all_lines),
                     "returned_lines": len(tail),
                     "output": "\n".join(tail),
                 },
-            }
+                state=session.state.state,
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
     # ============== UI Automation Tools ==============
 
@@ -770,9 +820,9 @@ def create_server(project_path: str | None = None) -> FastMCP:
         try:
             ui = await _ensure_ui_connected(session)
             tree = await ui.get_window_tree(max_depth, max_children)
-            return {"success": True, "data": tree.to_dict()}
+            return build_response(data=tree.to_dict(), state=session.state.state)
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool()
     async def ui_find_element(
@@ -802,9 +852,9 @@ def create_server(project_path: str | None = None) -> FastMCP:
                 control_type=control_type,
             )
             info = await ui.get_element_info(element)
-            return {"success": True, "data": info.to_dict()}
+            return build_response(data=info.to_dict(), state=session.state.state)
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool()
     async def ui_set_focus(
@@ -825,9 +875,9 @@ def create_server(project_path: str | None = None) -> FastMCP:
         try:
             ui, element = await _find_ui_element(automation_id, name, control_type)
             await ui.set_focus(element)
-            return {"success": True, "data": {"focused": True}}
+            return build_response(data={"focused": True}, state=session.state.state)
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool()
     async def ui_send_keys(
@@ -858,9 +908,9 @@ def create_server(project_path: str | None = None) -> FastMCP:
         try:
             ui, element = await _find_ui_element(automation_id, name, control_type)
             await ui.send_keys(element, keys)
-            return {"success": True, "data": {"sent": keys}}
+            return build_response(data={"sent": keys}, state=session.state.state)
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool()
     async def ui_send_keys_focused(keys: str) -> dict:
@@ -887,9 +937,11 @@ def create_server(project_path: str | None = None) -> FastMCP:
         try:
             ui = await _ensure_ui_connected(session)
             await ui.send_keys_focused(keys)
-            return {"success": True, "data": {"sent": keys, "target": "focused"}}
+            return build_response(
+                data={"sent": keys, "target": "focused"}, state=session.state.state,
+            )
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool()
     async def ui_click(
@@ -908,9 +960,9 @@ def create_server(project_path: str | None = None) -> FastMCP:
         try:
             ui, element = await _find_ui_element(automation_id, name, control_type)
             await ui.click(element)
-            return {"success": True, "data": {"clicked": True}}
+            return build_response(data={"clicked": True}, state=session.state.state)
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return build_error_response(str(e), state=session.state.state)
 
     # ============== Prompts (slash commands) ==============
 
