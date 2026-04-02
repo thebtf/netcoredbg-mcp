@@ -216,6 +216,10 @@ def create_server(project_path: str | None = None) -> FastMCP:
         debugging the latest code. Provide build_project path to .csproj file.
         Set pre_build=False to skip building (e.g., for pre-built binaries).
 
+        BUILD WARNINGS: Hidden by default to reduce noise. If the build succeeds
+        but the app behaves unexpectedly, call get_build_diagnostics() to see
+        all warnings — they may reveal the issue.
+
         Use attach_debug only for already-running processes (e.g., ASP.NET services).
 
         Args:
@@ -863,6 +867,84 @@ def create_server(project_path: str | None = None) -> FastMCP:
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
+    # ============== Build Diagnostics Tools ==============
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    async def get_build_diagnostics(include_warnings: bool = True) -> dict:
+        """Get full build diagnostics including all warnings.
+
+        Build warnings are hidden by default in start_debug/restart_debug responses
+        to reduce context noise. Call this tool when:
+        - Build succeeds but the app crashes or behaves unexpectedly
+        - Investigating assembly loading or compatibility issues
+        - Checking nullable reference, deprecation, or platform warnings
+        - Debugging "it compiles but doesn't work" situations
+
+        Args:
+            include_warnings: Include warning details (default True, the point of this tool)
+        """
+        try:
+            build_result = session.last_build_result
+            if build_result is None:
+                return build_response(
+                    data={"message": "No build has been performed yet."},
+                    state=session.state.state,
+                )
+
+            return build_response(
+                data=build_result.to_dict(include_warnings=include_warnings),
+                state=session.state.state,
+                message=(
+                    f"Build: {build_result.error_count} errors, "
+                    f"{build_result.warning_count} warnings"
+                ),
+            )
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    # ============== Process Management Tools ==============
+
+    @mcp.tool(annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
+    async def cleanup_processes(force: bool = False) -> dict:
+        """View or terminate tracked debug processes.
+
+        Without force: shows all tracked processes and their status (alive/dead).
+        With force=True: terminates all tracked processes (netcoredbg + debuggees).
+
+        Use this instead of manual taskkill. The server tracks which processes
+        it spawned — no risk of killing unrelated processes.
+
+        Args:
+            force: If True, terminate all tracked processes. If False, just show status.
+        """
+        try:
+            registry = session.process_registry
+            status_list = registry.status()
+
+            if force:
+                terminated = registry.cleanup_all()
+                return build_response(
+                    data={
+                        "action": "cleanup",
+                        "terminated": terminated,
+                        "processes": status_list,
+                    },
+                    state=session.state.state,
+                    message=f"Terminated {terminated} processes.",
+                )
+
+            return build_response(
+                data={
+                    "action": "status",
+                    "processes": status_list,
+                    "total": len(status_list),
+                    "alive": sum(1 for p in status_list if p.get("alive")),
+                },
+                state=session.state.state,
+            )
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
     # ============== UI Automation Tools ==============
 
     # Global UI automation instance
@@ -1210,11 +1292,22 @@ ui_send_keys_focused(keys="^{END}")       # 2. Send keys without re-search
 ui_send_keys_focused(keys="{DOWN}")       # 3. Continue sending keys
 ```
 
+## Build Warnings
+11. Build warnings are HIDDEN by default in start_debug/restart_debug responses.
+    If debugging leads nowhere and the app behaves unexpectedly, call
+    get_build_diagnostics() - a warning about nullable references, missing assemblies,
+    or compatibility issues may explain the behavior.
+
+## Process Management
+12. Use cleanup_processes() to view or terminate tracked debug processes.
+    Never use manual taskkill - the server tracks what it spawned.
+
 ## Common Issues
 - Empty stack trace? Use start_debug, not attach_debug
 - deps.json conflict? Build uses .dll, not .exe
 - E_NOINTERFACE? dbgshim.dll version mismatch with .NET runtime
 - App frozen at startup? Breakpoints set too early for GUI apps (see rule 4)
+- Build OK but app crashes? Check get_build_diagnostics() for warnings
 """,
             }
         ]

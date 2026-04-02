@@ -193,8 +193,16 @@ class BuildResult:
         """Count of warnings."""
         return len(self.warnings)
 
-    def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
+    def to_dict(self, include_warnings: bool = False) -> dict[str, Any]:
+        """Convert to dictionary for JSON serialization.
+
+        By default, only errors are included in diagnostics. Warnings are counted
+        but their details are omitted to reduce agent context noise.
+        Use include_warnings=True or get_build_diagnostics tool for full details.
+
+        Args:
+            include_warnings: If True, include warning details in diagnostics.
+        """
         result: dict[str, Any] = {
             "success": self.success,
             "state": self.state.value,
@@ -207,8 +215,22 @@ class BuildResult:
         }
         if self.exit_code is not None:
             result["exitCode"] = self.exit_code
-        if self.diagnostics:
-            result["diagnostics"] = [d.to_dict() for d in self.diagnostics]
+
+        if include_warnings:
+            # Full diagnostics (errors + warnings)
+            if self.diagnostics:
+                result["diagnostics"] = [d.to_dict() for d in self.diagnostics]
+        else:
+            # Errors only — warnings hidden by default
+            errors = self.errors
+            if errors:
+                result["diagnostics"] = [d.to_dict() for d in errors]
+            if self.warning_count > 0:
+                result["warningHint"] = (
+                    f"{self.warning_count} warnings hidden. "
+                    "Call get_build_diagnostics() to see them."
+                )
+
         if self.cancelled:
             result["cancelled"] = True
         return result
