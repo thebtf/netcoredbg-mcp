@@ -325,7 +325,7 @@ class DAPClient:
     ) -> DAPResponse:
         """Set a variable's value."""
         return await self.send_request(
-            "setVariable",
+            Commands.SET_VARIABLE,
             {
                 "variablesReference": variables_reference,
                 "name": name,

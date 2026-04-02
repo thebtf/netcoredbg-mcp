@@ -113,8 +113,8 @@ def create_server(project_path: str | None = None) -> FastMCP:
         if snapshot.timed_out:
             next_actions = ["get_output", "pause_execution", "get_debug_state", "stop_debug"]
             message = (
-                f"Program is still running after timeout. "
-                f"Breakpoint may not have been reached."
+                "Program is still running after timeout. "
+                "Breakpoint may not have been reached."
             )
         elif state_value == "stopped":
             next_actions = [
@@ -159,6 +159,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         a stopped/terminated/exited event (or timeout expires).
         """
         try:
+            session._execution_event.clear()
             await action_coro
             snapshot = await session.wait_for_stopped(timeout=timeout)
             response = _build_stopped_response(snapshot, action_name)
@@ -177,7 +178,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
                             ),
                         }
                 except Exception:
-                    pass  # Source context is best-effort
+                    logger.debug("Failed to get source context", exc_info=True)
 
             await notify_state_changed(ctx)
             return response
@@ -616,10 +617,10 @@ def create_server(project_path: str | None = None) -> FastMCP:
             filters: List of exception filter names. Pass [] to disable.
         """
         try:
-            response = await session._client.set_exception_breakpoints(filters or [])
-            if not response.success:
+            success = await session.configure_exception_breakpoints(filters or [])
+            if not success:
                 return build_error_response(
-                    f"Failed to set exception breakpoints: {response.message}",
+                    "Failed to set exception breakpoints",
                     state=session.state.state,
                 )
             return build_response(

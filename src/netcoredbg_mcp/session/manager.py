@@ -330,8 +330,6 @@ class SessionManager:
         Returns:
             StoppedSnapshot with the state at the moment execution stopped.
         """
-        self._execution_event.clear()
-
         try:
             await asyncio.wait_for(self._execution_event.wait(), timeout=timeout)
         except asyncio.TimeoutError:
@@ -875,6 +873,18 @@ class SessionManager:
             }
         else:
             return {"error": response.message or "Evaluation failed"}
+
+    async def configure_exception_breakpoints(self, filters: list[str]) -> bool:
+        """Configure which exceptions should pause the debugger.
+
+        Args:
+            filters: List of exception filter names
+
+        Returns:
+            True if successful
+        """
+        response = await self._client.set_exception_breakpoints(filters)
+        return response.success
 
     async def get_exception_info(
         self, thread_id: int | None = None

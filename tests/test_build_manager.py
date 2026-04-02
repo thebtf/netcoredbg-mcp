@@ -63,6 +63,17 @@ class TestBuildManagerSessions:
         assert result is False
 
 
+    def test_two_instances_dont_share_sessions(self, tmp_path):
+        """Test that two BuildManager instances have independent sessions."""
+        manager1 = BuildManager()
+        manager2 = BuildManager()
+
+        session1 = manager1.get_session(str(tmp_path))
+        session2 = manager2.get_session(str(tmp_path))
+
+        assert session1 is not session2
+
+
 class TestBuildManagerStateListeners:
     """Tests for global state listeners."""
 

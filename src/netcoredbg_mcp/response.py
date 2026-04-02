@@ -18,6 +18,9 @@ VALID_ACTIONS: dict[str, list[str]] = {
     DebugState.INITIALIZING.value: [
         "get_debug_state", "stop_debug",
     ],
+    DebugState.CONFIGURED.value: [
+        "get_debug_state", "stop_debug", "add_breakpoint", "add_function_breakpoint",
+    ],
     DebugState.RUNNING.value: [
         "pause_execution", "get_output", "get_output_tail", "search_output",
         "get_debug_state", "stop_debug", "add_breakpoint", "add_function_breakpoint",
@@ -41,6 +44,7 @@ VALID_ACTIONS: dict[str, list[str]] = {
 STATE_MESSAGES: dict[str, str] = {
     DebugState.IDLE.value: "No active debug session.",
     DebugState.INITIALIZING.value: "Debug session is initializing.",
+    DebugState.CONFIGURED.value: "Debug session configured. Breakpoints set, awaiting launch.",
     DebugState.RUNNING.value: (
         "Program is RUNNING. Variable references from previous stops are INVALID. "
         "Do NOT call get_variables — wait for the program to stop."

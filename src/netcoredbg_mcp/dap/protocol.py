@@ -101,6 +101,7 @@ class Commands:
     VARIABLES = "variables"
     EVALUATE = "evaluate"
     EXCEPTION_INFO = "exceptionInfo"
+    SET_VARIABLE = "setVariable"
 
 
 # Common DAP events
