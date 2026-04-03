@@ -102,37 +102,39 @@ def capture_window(hwnd: int) -> tuple[bytes, int, int]:
             try:
                 old_bitmap = gdi32.SelectObject(cdc, bitmap)
 
-                # PrintWindow with PW_RENDERFULLCONTENT for best results
-                PW_RENDERFULLCONTENT = 0x00000002
-                success = user32.PrintWindow(hwnd, cdc, PW_RENDERFULLCONTENT)
-                if not success:
-                    # Fallback: try BitBlt
-                    gdi32.BitBlt(cdc, 0, 0, width, height, wdc, 0, 0, 0x00CC0020)  # SRCCOPY
+                try:
+                    # PrintWindow with PW_RENDERFULLCONTENT for best results
+                    PW_RENDERFULLCONTENT = 0x00000002
+                    success = user32.PrintWindow(hwnd, cdc, PW_RENDERFULLCONTENT)
+                    if not success:
+                        # Fallback: try BitBlt
+                        gdi32.BitBlt(cdc, 0, 0, width, height, wdc, 0, 0, 0x00CC0020)
 
-                # Extract bitmap bits
-                from PIL import Image
+                    # Extract bitmap bits
+                    from PIL import Image
 
-                bmi = _create_bitmapinfo(width, height)
-                buffer = ctypes.create_string_buffer(width * height * 4)
+                    bmi = _create_bitmapinfo(width, height)
+                    buffer = ctypes.create_string_buffer(width * height * 4)
 
-                gdi32.GetDIBits(
-                    cdc, bitmap, 0, height,
-                    buffer, ctypes.byref(bmi),
-                    0,  # DIB_RGB_COLORS
-                )
+                    gdi32.GetDIBits(
+                        cdc, bitmap, 0, height,
+                        buffer, ctypes.byref(bmi),
+                        0,  # DIB_RGB_COLORS
+                    )
 
-                # Convert BGRA → RGBA
-                image = Image.frombuffer(
-                    "RGBA", (width, height), buffer, "raw", "BGRA", 0, -1
-                )
+                    # Convert BGRA → RGBA
+                    image = Image.frombuffer(
+                        "RGBA", (width, height), buffer, "raw", "BGRA", 0, -1
+                    )
 
-                # Encode to PNG
-                png_buffer = io.BytesIO()
-                image.save(png_buffer, format="PNG", optimize=True)
-                png_bytes = png_buffer.getvalue()
+                    # Encode to PNG
+                    png_buffer = io.BytesIO()
+                    image.save(png_buffer, format="PNG", optimize=True)
+                    return png_buffer.getvalue(), width, height
 
-                gdi32.SelectObject(cdc, old_bitmap)
-                return png_bytes, width, height
+                finally:
+                    # Always deselect before DeleteObject to prevent GDI leak
+                    gdi32.SelectObject(cdc, old_bitmap)
 
             finally:
                 gdi32.DeleteObject(bitmap)

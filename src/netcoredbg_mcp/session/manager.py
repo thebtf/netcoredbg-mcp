@@ -142,14 +142,15 @@ class SessionManager:
         Raises:
             ValueError: If path is invalid or outside project scope
         """
-        # Normalize path to absolute
-        abs_path = os.path.abspath(path)
+        # Resolve symlinks and normalize to absolute (security: prevent symlink traversal)
+        abs_path = os.path.realpath(path)
 
         # Check within project scope using os.path.commonpath
         if self._project_path:
+            project_real = os.path.realpath(self._project_path)
             try:
-                common = os.path.commonpath([abs_path, self._project_path])
-                if common != self._project_path:
+                common = os.path.commonpath([abs_path, project_real])
+                if common != project_real:
                     raise ValueError(f"Path outside project scope: {path}")
             except ValueError as e:
                 # Different drives on Windows or other path issues
@@ -336,12 +337,23 @@ class SessionManager:
                 program=name,
             )
 
+    def prepare_for_execution(self) -> None:
+        """Prepare for an execution command by creating a fresh event.
+
+        MUST be called immediately before sending the DAP command (continue,
+        step_over, etc.) to avoid race conditions with _execution_event.
+
+        Creates a new Event object so any previously-set state is discarded.
+        The DAP event handlers (_on_stopped, _on_terminated, _on_exited)
+        will set this new event when the program stops.
+        """
+        self._execution_event = asyncio.Event()
+
     async def wait_for_stopped(self, timeout: float = 30.0) -> StoppedSnapshot:
         """Wait for execution to stop (breakpoint, step, exception, or termination).
 
         Blocks until a DAP stopped/terminated/exited event fires, or timeout expires.
-        Call this after any execution command (continue, step_over, step_in, step_out)
-        to get the resulting state without polling.
+        Call prepare_for_execution() before the DAP command, then this after.
 
         Args:
             timeout: Maximum seconds to wait. On timeout, returns snapshot with

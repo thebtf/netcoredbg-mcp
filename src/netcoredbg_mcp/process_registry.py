@@ -363,13 +363,12 @@ class ProcessRegistry:
             self._delete_pidfile()
             return 0
 
-        # If previous server is still alive, don't touch its processes
+        # If previous server is still alive, don't touch its processes or PID file
         if prev_server_pid and _is_pid_alive(prev_server_pid):
             logger.info(
                 f"Previous server (PID {prev_server_pid}) is still alive — "
-                f"skipping PID file cleanup"
+                f"leaving PID file intact"
             )
-            self._delete_pidfile()
             return 0
 
         # Previous server is dead — clean up its orphaned processes

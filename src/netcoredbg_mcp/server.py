@@ -159,7 +159,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
     ) -> dict:
         """Execute an action (continue/step), wait for stopped, return rich response."""
         try:
-            session._execution_event.clear()
+            session.prepare_for_execution()
             await action_coro
             snapshot = await session.wait_for_stopped(timeout=timeout)
             response = _build_stopped_response(snapshot, action_name)
