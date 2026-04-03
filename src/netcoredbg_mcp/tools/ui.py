@@ -569,6 +569,74 @@ def register_ui_tools(
     # -- Advanced interaction tools --
 
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def _select_via_clicks(ui_inst, automation_id: str, indices: list[int], mode: str) -> int:
+        """Fallback: select items by Ctrl+clicking their cached coordinates.
+
+        Does a deeper tree walk (depth=5) to find ListBoxItem/DataItem children,
+        then clicks them with Ctrl held for multi-select.
+        """
+        import ctypes
+
+        # Deep tree walk to find child items
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: ui_inst.get_window_tree.__wrapped__(ui_inst, max_depth=5, max_children=100)
+            if hasattr(ui_inst.get_window_tree, "__wrapped__")
+            else None,
+        )
+
+        # Rebuild: find items inside the control's bounds from refreshed cache
+        cache = ui_inst._element_cache
+        parent_data = cache.get(automation_id)
+        if not parent_data or not parent_data.get("rect"):
+            return 0
+
+        pr = parent_data["rect"]
+
+        # Collect ListItem/DataItem children within parent bounds, sorted by Y position
+        child_items = []
+        for aid, data in cache.items():
+            if aid == automation_id:
+                continue
+            r = data.get("rect")
+            ct = data.get("control_type", "")
+            if not r or ct not in ("ListItem", "DataItem", "TreeItem", "ListBoxItem"):
+                continue
+            if (pr["left"] <= r["left"] and r["right"] <= pr["right"]
+                    and pr["top"] <= r["top"] and r["bottom"] <= pr["bottom"]):
+                child_items.append(r)
+
+        # Sort by vertical position (top to bottom)
+        child_items.sort(key=lambda r: r["top"])
+
+        selected = 0
+        VK_CONTROL = 0x11
+        KEYEVENTF_KEYUP = 0x0002
+
+        for idx_num, target_idx in enumerate(indices):
+            if target_idx >= len(child_items):
+                continue  # Index out of range for visible items
+
+            rect = child_items[target_idx]
+            cx = (rect["left"] + rect["right"]) // 2
+            cy = (rect["top"] + rect["bottom"]) // 2
+
+            if idx_num == 0 and mode == "replace":
+                await ui_inst._click_at_coords(cx, cy)
+            else:
+                # Ctrl+click for multi-select
+                ctypes.windll.user32.keybd_event(VK_CONTROL, 0, 0, 0)
+                try:
+                    await ui_inst._click_at_coords(cx, cy)
+                finally:
+                    ctypes.windll.user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+
+            selected += 1
+            await asyncio.sleep(0.05)  # Small delay between clicks
+
+        return selected
+
     async def ui_select_items(
         ctx: Context,
         automation_id: str,
@@ -628,50 +696,21 @@ def register_ui_tools(
                 return selected_count
 
             loop = asyncio.get_running_loop()
-            selected = await asyncio.wait_for(
-                loop.run_in_executor(None, _select_via_pattern), timeout=10.0,
-            )
+            try:
+                selected = await asyncio.wait_for(
+                    loop.run_in_executor(None, _select_via_pattern), timeout=10.0,
+                )
+            except Exception:
+                # Strategy 1 failed (e.g., add_to_selection error on Extended ListBox)
+                selected = 0
 
-            # Strategy 2: If pattern selected 0, try coordinate click on cached items
-            if selected == 0:
-                # Get children from cache — look for ListItem children of this control
-                cache = ui._element_cache
-                parent_rect = cache.get(automation_id, {}).get("rect")
-                if parent_rect:
-                    # Find child items by their position within parent
-                    child_items = []
-                    for aid, data in cache.items():
-                        if aid == automation_id:
-                            continue
-                        r = data.get("rect")
-                        ct = data.get("control_type", "")
-                        if not r or ct not in ("ListItem", "DataItem", "TreeItem"):
-                            continue
-                        # Check if child is within parent bounds
-                        if (parent_rect["left"] <= r["left"] <= parent_rect["right"]
-                                and parent_rect["top"] <= r["top"] <= parent_rect["bottom"]):
-                            child_items.append((aid, r))
+            # Strategy 2: coordinate Ctrl+click fallback
+            if selected < len(indices):
+                selected = await _select_via_clicks(ui, automation_id, indices, mode)
 
-                    # Click on items at requested indices
-                    for idx_num, target_idx in enumerate(indices):
-                        if target_idx < len(child_items):
-                            _, rect = child_items[target_idx]
-                            cx = (rect["left"] + rect["right"]) // 2
-                            cy = (rect["top"] + rect["bottom"]) // 2
-                            if idx_num == 0 and mode == "replace":
-                                await ui._click_at_coords(cx, cy)
-                            else:
-                                # Ctrl+click for multi-select
-                                import ctypes
-                                VK_CONTROL = 0x11
-                                KEYEVENTF_KEYUP = 0x0002
-                                ctypes.windll.user32.keybd_event(VK_CONTROL, 0, 0, 0)
-                                await ui._click_at_coords(cx, cy)
-                                ctypes.windll.user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
-                            selected += 1
-
+            method = "pattern" if selected == len(indices) else "click_fallback"
             return build_response(
-                data={"selected": selected, "indices": indices, "mode": mode},
+                data={"selected": selected, "indices": indices, "mode": mode, "method": method},
                 state=session.state.state,
             )
         except Exception as e:
