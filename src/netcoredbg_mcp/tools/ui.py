@@ -355,11 +355,11 @@ def register_ui_tools(
         ctx: Context,
         max_width: int = 1024,
         format: str = "webp",
-    ) -> dict:
+    ) -> Any:
         """Take a screenshot of the debugged application's window.
 
-        Returns the screenshot as a WebP image optimized for LLM vision.
-        Default 1024px width + WebP q=75 keeps size under MCP limits (~80-120KB).
+        Returns inline ImageContent (WebP preview ≤480px) for LLM vision
+        plus TextContent with metadata and HD file path.
 
         Use this to see the actual UI state — what the user would see.
 
@@ -373,8 +373,17 @@ def register_ui_tools(
             max_width: Maximum image width (default 1024 — optimal for Claude vision)
             format: Image format: "webp" (smallest), "jpeg", "png"
         """
+        _VALID_FORMATS = {"webp", "jpeg", "png"}
+
         try:
-            from ..ui.screenshot import get_hwnd_for_pid, capture_window_for_llm
+            import base64
+            import json
+            import time as _time
+            from mcp.types import TextContent, ImageContent
+            from ..ui.screenshot import get_hwnd_for_pid, capture_window, _process_screenshot, create_preview
+
+            # Validate format against allow-list
+            safe_format = format if format in _VALID_FORMATS else "webp"
 
             pid = session.state.process_id
             if not pid:
@@ -388,11 +397,52 @@ def register_ui_tools(
                 )
 
             loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(
-                None, lambda: capture_window_for_llm(hwnd, max_width=max_width, format=format),
+
+            # Capture raw screenshot
+            png_bytes, _, _ = await loop.run_in_executor(
+                None, lambda: capture_window(hwnd),
             )
 
-            return build_response(data=result, state=session.state.state)
+            # Create HD version in requested format
+            hd_bytes, hd_w, hd_h, _ = await loop.run_in_executor(
+                None, lambda: _process_screenshot(png_bytes, max_width=max_width, format=safe_format),
+            )
+
+            # Create inline preview (≤480px WebP)
+            preview_bytes, preview_w, _ = await loop.run_in_executor(
+                None, lambda: create_preview(png_bytes, max_width=480, quality=75),
+            )
+
+            # Save HD to session temp dir
+            metadata: dict[str, Any] = {
+                "width": hd_w,
+                "height": hd_h,
+                "preview_width": preview_w,
+                "format": safe_format,
+                "state": session.state.state.value if hasattr(session.state.state, "value") else str(session.state.state),
+            }
+
+            sid = session.session_id
+            if sid:
+                ts = int(_time.time() * 1000) & 0xFFFFFFFF
+                hd_path = session.temp_manager.save_screenshot(
+                    sid, hd_bytes, f"screenshot_{ts:08x}.{safe_format}",
+                )
+                if hd_path:
+                    metadata["hd_path"] = str(hd_path)
+
+            content: list = [
+                ImageContent(
+                    type="image",
+                    data=base64.b64encode(preview_bytes).decode("ascii"),
+                    mimeType="image/webp",
+                ),
+                TextContent(
+                    type="text",
+                    text=json.dumps(metadata),
+                ),
+            ]
+            return content
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
@@ -404,7 +454,7 @@ def register_ui_tools(
         max_width: int = 1024,
         format: str = "webp",
         compact: bool = True,
-    ) -> dict:
+    ) -> Any:
         """Take a screenshot with numbered UI elements overlaid (Set-of-Mark pattern).
 
         Returns annotated WebP image + compact element index.
@@ -446,7 +496,7 @@ def register_ui_tools(
             loop = asyncio.get_running_loop()
 
             # Capture screenshot
-            png_bytes, width, height = await loop.run_in_executor(
+            png_bytes, _, _ = await loop.run_in_executor(
                 None, lambda: capture_window(hwnd),
             )
 
@@ -475,12 +525,22 @@ def register_ui_tools(
             }
 
             # Convert to optimal format
-            from ..ui.screenshot import _process_screenshot
-            img_bytes, final_w, final_h, mime = _process_screenshot(
-                annotated_bytes, max_width=max_width, format=format,
+            from ..ui.screenshot import _process_screenshot, create_preview
+            import base64
+            import json
+            from mcp.types import TextContent, ImageContent
+
+            _VALID_FORMATS = {"webp", "jpeg", "png"}
+            safe_format = format if format in _VALID_FORMATS else "webp"
+
+            hd_bytes, hd_w, hd_h, _ = await loop.run_in_executor(
+                None, lambda: _process_screenshot(annotated_bytes, max_width=max_width, format=safe_format),
             )
 
-            import base64
+            # Create inline preview (≤480px WebP) — in executor to avoid blocking loop
+            preview_bytes, preview_w, _ = await loop.run_in_executor(
+                None, lambda: create_preview(annotated_bytes, max_width=480, quality=75),
+            )
 
             # Build element index — compact (id+name) or full (id+name+type+automationId)
             if compact:
@@ -499,18 +559,38 @@ def register_ui_tools(
                     for e in elements
                 ]
 
-            return build_response(
-                data={
-                    "image": base64.b64encode(img_bytes).decode("ascii"),
-                    "mimeType": mime,
-                    "width": final_w,
-                    "height": final_h,
-                    "elements": elem_index,
-                    "element_count": len(elements),
-                    "generation": _annotation_generation,
-                },
-                state=session.state.state,
-            )
+            # Save HD to session temp dir
+            metadata: dict[str, Any] = {
+                "width": hd_w,
+                "height": hd_h,
+                "preview_width": preview_w,
+                "elements": elem_index,
+                "element_count": len(elements),
+                "generation": _annotation_generation,
+                "format": safe_format,
+                "state": session.state.state.value if hasattr(session.state.state, "value") else str(session.state.state),
+            }
+
+            sid = session.session_id
+            if sid:
+                hd_path = session.temp_manager.save_screenshot(
+                    sid, hd_bytes, f"annotated_{_annotation_generation:04d}.{safe_format}",
+                )
+                if hd_path:
+                    metadata["hd_path"] = str(hd_path)
+
+            content: list = [
+                ImageContent(
+                    type="image",
+                    data=base64.b64encode(preview_bytes).decode("ascii"),
+                    mimeType="image/webp",
+                ),
+                TextContent(
+                    type="text",
+                    text=json.dumps(metadata),
+                ),
+            ]
+            return content
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 

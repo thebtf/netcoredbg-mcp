@@ -13,6 +13,7 @@ from ..dap import DAPClient, DAPEvent
 from ..dap.events import OutputEventBody, StoppedEventBody
 from ..dap.protocol import Events
 from ..process_registry import ProcessRegistry
+from ..ui.temp_manager import SessionTempManager
 from ..utils.version import check_version_compatibility
 from .state import (
     Breakpoint,
@@ -46,10 +47,12 @@ class SessionManager:
         self._project_path = os.path.abspath(project_path) if project_path else None
         self._output_bytes = 0  # Track output buffer size
         self._process_registry = ProcessRegistry()
+        self._temp_manager = SessionTempManager()
         self._build_manager = BuildManager()
         self._last_build_result: BuildResult | None = None
         self._last_launch_config: dict[str, Any] | None = None  # For restart
         self._last_version_warning: str | None = None  # dbgshim version mismatch warning
+        self._session_id: str | None = None
 
     @property
     def state(self) -> SessionState:
@@ -65,6 +68,16 @@ class SessionManager:
     def process_registry(self) -> ProcessRegistry:
         """Get process registry for tracking spawned processes."""
         return self._process_registry
+
+    @property
+    def temp_manager(self) -> SessionTempManager:
+        """Get session temp file manager."""
+        return self._temp_manager
+
+    @property
+    def session_id(self) -> str | None:
+        """Get current session identifier for temp dir isolation."""
+        return self._session_id
 
     @property
     def is_active(self) -> bool:
@@ -541,6 +554,10 @@ class SessionManager:
 
         await report(100, 100, "Debug session started")
 
+        # Generate session ID for temp dir isolation
+        import uuid
+        self._session_id = uuid.uuid4().hex[:12]
+
         # Save launch config for restart
         self._last_launch_config = {
             "program": program,
@@ -581,6 +598,10 @@ class SessionManager:
         await self._client.configuration_done()
         self._set_state(DebugState.RUNNING)
 
+        # Generate session ID for temp dir isolation
+        import uuid
+        self._session_id = uuid.uuid4().hex[:12]
+
         return {"success": True, "processId": process_id}
 
     async def stop(self) -> dict[str, Any]:
@@ -594,6 +615,11 @@ class SessionManager:
 
         # Cleanup tracked processes
         self._process_registry.cleanup_all()
+
+        # Cleanup session temp directory
+        if self._session_id:
+            self._temp_manager.cleanup_session(self._session_id)
+            self._session_id = None
 
         self._set_state(DebugState.IDLE)
         self._initialized_event.clear()
