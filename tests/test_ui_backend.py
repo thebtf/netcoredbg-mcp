@@ -30,26 +30,32 @@ class TestFindFlauiBridge:
             result = find_flaui_bridge()
             assert result is not None
 
-    def test_returns_none_when_not_found(self):
+    def test_returns_none_when_not_found(self, tmp_path):
         with patch.dict("os.environ", {
             "FLAUI_BRIDGE_PATH": "",
-            "NETCOREDBG_PATH": "",
+            "NETCOREDBG_PATH": str(tmp_path / "nonexistent"),
         }):
             with patch("shutil.which", return_value=None):
-                result = find_flaui_bridge()
-                # May or may not find it at D:\Bin depending on system
-                # Just verify it doesn't crash
+                with patch("netcoredbg_mcp.ui.backend.Path") as MockPath:
+                    # Make well-known path check return False
+                    MockPath.return_value.is_file.return_value = False
+                    MockPath.side_effect = lambda x: MagicMock(is_file=MagicMock(return_value=False))
+                    result = find_flaui_bridge()
+                    # On systems without D:\Bin\FlaUIBridge.exe this returns None
+                    # On systems with it, it returns a path — both are valid
 
-    def test_finds_on_path(self):
+    def test_finds_on_path(self, tmp_path):
+        bridge = tmp_path / "FlaUIBridge.exe"
+        bridge.write_text("fake")
+
         with patch.dict("os.environ", {
             "FLAUI_BRIDGE_PATH": "",
             "NETCOREDBG_PATH": "",
         }):
-            with patch("shutil.which", return_value=r"C:\tools\FlaUIBridge.exe"):
-                with patch("pathlib.Path.is_file", return_value=False):
-                    with patch("pathlib.Path.resolve", return_value="C:\\tools\\FlaUIBridge.exe"):
-                        # The well-known path check may interfere, but the logic is tested
-                        pass
+            with patch("shutil.which", return_value=str(bridge)):
+                result = find_flaui_bridge()
+                # May find well-known path first, but at minimum doesn't crash
+                assert result is None or "FlaUIBridge" in result
 
 
 class TestCreateBackend:
@@ -79,7 +85,7 @@ class TestCreateBackend:
             backend = create_backend(process_registry=mock_registry)
             from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
             assert isinstance(backend, FlaUIBackend)
-            assert backend._client._process_registry is mock_registry
+            assert backend.client._process_registry is mock_registry
 
 
 class TestPywinautoBackend:

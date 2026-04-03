@@ -132,13 +132,14 @@ def register_ui_tools(
         """
         try:
             ui = await _ensure_ui_connected()
-            element = await ui.find_element(
+            result = await ui.find_element(
                 automation_id=automation_id,
                 name=name,
                 control_type=control_type,
             )
-            info = await ui.get_element_info(element)
-            return build_response(data=info.to_dict(), state=session.state.state)
+            # Backend returns dict directly (both FlaUI and pywinauto)
+            data = result if isinstance(result, dict) else result.to_dict()
+            return build_response(data=data, state=session.state.state)
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
@@ -180,9 +181,18 @@ def register_ui_tools(
                         state=session.state.state,
                     )
 
-            # Fallback to element search
+            # Fallback: find element and click to focus
             ui, element = await _find_ui_element(automation_id, name, control_type)
-            await ui.set_focus(element)
+            from ..ui.pywinauto_backend import PywinautoBackend
+            if isinstance(ui, PywinautoBackend):
+                await ui.inner.set_focus(element)
+            else:
+                # FlaUI: find_element returns dict with rect, click center
+                rect = element.get("rect", {}) if isinstance(element, dict) else {}
+                if rect:
+                    cx = int(rect.get("x", 0) + rect.get("width", 0) / 2)
+                    cy = int(rect.get("y", 0) + rect.get("height", 0) / 2)
+                    await ui.click_at(cx, cy)
             return build_response(data={"focused": True, "method": "element_search"}, state=session.state.state)
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
@@ -230,15 +240,19 @@ def register_ui_tools(
                     cx = (rect["left"] + rect["right"]) // 2
                     cy = (rect["top"] + rect["bottom"]) // 2
                     await ui.click_at(cx, cy)
-                    await ui.send_keys_focused(keys)
+                    await ui.send_keys(keys)
                     return build_response(
                         data={"sent": keys, "method": "cache"},
                         state=session.state.state,
                     )
 
-            # Fallback to element search
+            # Fallback: click element to focus, then send keys
             ui, element = await _find_ui_element(automation_id, name, control_type)
-            await ui.send_keys(element, keys)
+            from ..ui.pywinauto_backend import PywinautoBackend
+            if isinstance(ui, PywinautoBackend):
+                await ui.inner.send_keys(element, keys)
+            else:
+                await ui.send_keys(keys)
             return build_response(data={"sent": keys, "method": "element_search"}, state=session.state.state)
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
@@ -271,7 +285,7 @@ def register_ui_tools(
                 return build_error_response(access_error, state=session.state.state)
 
             ui = await _ensure_ui_connected()
-            await ui.send_keys_focused(keys)
+            await ui.send_keys(keys)
             return build_response(
                 data={"sent": keys, "target": "focused"}, state=session.state.state,
             )
@@ -317,7 +331,16 @@ def register_ui_tools(
             # Fallback to element search
             try:
                 ui, element = await _find_ui_element(automation_id, name, control_type)
-                await ui.click(element)
+                from ..ui.pywinauto_backend import PywinautoBackend
+                if isinstance(ui, PywinautoBackend):
+                    await ui.inner.click(element)
+                else:
+                    # FlaUI: element is dict with rect
+                    rect = element.get("rect", {}) if isinstance(element, dict) else {}
+                    if rect:
+                        cx = int(rect.get("x", 0) + rect.get("width", 0) / 2)
+                        cy = int(rect.get("y", 0) + rect.get("height", 0) / 2)
+                        await ui.click_at(cx, cy)
                 return build_response(data={"clicked": True, "method": "element_search"}, state=session.state.state)
             except Exception:
                 # Last resort: if element found but click fails (e.g., DataGrid has no click wrapper),

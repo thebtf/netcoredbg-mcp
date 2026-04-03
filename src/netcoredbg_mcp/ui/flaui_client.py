@@ -28,6 +28,7 @@ class FlaUIBridgeClient:
         self._request_id = 0
         self._restart_times: list[float] = []
         self._process_registry = process_registry
+        self._lock = asyncio.Lock()
 
     async def start(self) -> None:
         """Start the bridge subprocess."""
@@ -38,7 +39,7 @@ class FlaUIBridgeClient:
             self._bridge_path,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
         )
         logger.info("FlaUI bridge started (PID %d)", self._process.pid)
 
@@ -58,8 +59,10 @@ class FlaUIBridgeClient:
 
         try:
             if self._process.stdin and not self._process.stdin.is_closing():
-                # Send shutdown command
-                await self._write_request("shutdown", {})
+                # Send shutdown as notification (no id, no response expected)
+                shutdown_msg = json.dumps({"jsonrpc": "2.0", "method": "shutdown"}) + "\n"
+                self._process.stdin.write(shutdown_msg.encode("utf-8"))
+                await self._process.stdin.drain()
                 self._process.stdin.close()
         except Exception:
             pass
@@ -135,18 +138,19 @@ class FlaUIBridgeClient:
         if not await self.ensure_alive():
             raise RuntimeError("FlaUI bridge not available (restart limit exceeded)")
 
-        self._request_id += 1
-        request = {
-            "jsonrpc": "2.0",
-            "id": self._request_id,
-            "method": method,
-            "params": params or {},
-        }
+        async with self._lock:
+            self._request_id += 1
+            request = {
+                "jsonrpc": "2.0",
+                "id": self._request_id,
+                "method": method,
+                "params": params or {},
+            }
 
-        response_data = await asyncio.wait_for(
-            self._send_and_receive(request),
-            timeout=timeout,
-        )
+            response_data = await asyncio.wait_for(
+                self._send_and_receive(request),
+                timeout=timeout,
+            )
 
         if "error" in response_data:
             error = response_data["error"]
