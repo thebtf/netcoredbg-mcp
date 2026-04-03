@@ -338,3 +338,37 @@ def register_debug_tools(
             )
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
+    async def terminate_debug(ctx: Context) -> dict:
+        """Gracefully terminate the debugged program.
+
+        Sends DAP terminate request for clean shutdown. Falls back to
+        forced disconnect if adapter doesn't support terminate.
+
+        Use this instead of stop_debug when you want a graceful exit.
+        """
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            # Check capability
+            caps = session.client.capabilities
+            if not caps.get("supportsTerminateRequest", False):
+                await session.stop()
+                return build_response(
+                    data={"state": session.state.state.value},
+                    state=session.state.state,
+                    message="Adapter does not support terminate; used disconnect instead.",
+                )
+
+            await session.client.terminate()
+            snapshot = await session.wait_for_stopped(timeout=10.0)
+            return build_response(
+                data={"state": snapshot.state.value},
+                state=session.state.state,
+                message="Program terminated gracefully.",
+            )
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)

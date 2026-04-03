@@ -53,11 +53,17 @@ class SessionManager:
         self._last_launch_config: dict[str, Any] | None = None  # For restart
         self._last_version_warning: str | None = None  # dbgshim version mismatch warning
         self._session_id: str | None = None
+        self._quick_eval_lock = asyncio.Lock()
 
     @property
     def state(self) -> SessionState:
         """Get current session state."""
         return self._state
+
+    @property
+    def client(self) -> DAPClient:
+        """Access the underlying DAP client."""
+        return self._client
 
     @property
     def breakpoints(self) -> BreakpointRegistry:
@@ -509,6 +515,54 @@ class SessionManager:
             description=self._state.stop_description,
             text=self._state.stop_text,
         )
+
+    async def quick_evaluate(self, expression: str, frame_id: int | None = None) -> dict[str, Any]:
+        """Pause → evaluate → resume atomically. For use while program is running."""
+        if self._state.state != DebugState.RUNNING:
+            raise RuntimeError(
+                f"Program is not running (state: {self._state.state.value}). "
+                "Use evaluate_expression instead."
+            )
+
+        async with self._quick_eval_lock:
+            # Pause
+            tid = self._state.current_thread_id or 1
+            await self._client.pause(tid)
+            # Wait for stopped
+            self.prepare_for_execution()
+            try:
+                await asyncio.wait_for(self._execution_event.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                raise RuntimeError("Program did not pause within 5 seconds")
+
+            try:
+                # Evaluate
+                fid = frame_id
+                if fid is None:
+                    frames = await self.get_stack_trace(thread_id=tid, levels=1)
+                    if frames:
+                        fid = frames[0].id
+                response = await self._client.evaluate(expression, fid)
+                if response.success:
+                    result = {
+                        "result": response.body.get("result", ""),
+                        "type": response.body.get("type", ""),
+                        "variablesReference": response.body.get("variablesReference", 0),
+                    }
+                else:
+                    result = {"error": response.message or "Evaluation failed"}
+            except Exception as e:
+                result = {"error": str(e)}
+
+            # Resume (always — even if evaluate failed)
+            try:
+                self.prepare_for_execution()
+                await self._client.continue_execution(tid)
+            except Exception:
+                # If resume fails, leave paused (safe state) — agent can inspect
+                pass
+
+            return result
 
     async def pre_launch_build(
         self,

@@ -163,3 +163,44 @@ def register_inspection_tools(
             return build_response(data=info, state=session.state.state)
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    async def get_modules() -> dict:
+        """List loaded assemblies/modules in the debug session.
+
+        Returns module name, path, version, optimization status, and symbol loading state.
+        Useful for diagnosing assembly loading failures and version conflicts.
+
+        Note: Data comes from module load/unload events tracked during the session.
+        """
+        try:
+            modules = [m.to_dict() for m in session.state.modules]
+            return build_response(
+                data={"modules": modules, "count": len(modules)},
+                state=session.state.state,
+            )
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True, openWorldHint=False))
+    async def quick_evaluate(expression: str, frame_id: int | None = None) -> dict:
+        """Evaluate an expression while the program is running (atomic pause-eval-resume).
+
+        Pauses execution for ~5ms, evaluates the expression, then resumes.
+        Use this instead of manually pausing, evaluating, and continuing.
+
+        IMPORTANT: Only works when program is RUNNING. If stopped, use evaluate_expression instead.
+
+        Args:
+            expression: Expression to evaluate (e.g., "myVariable", "list.Count")
+            frame_id: Optional stack frame ID for evaluation context
+        """
+        try:
+            result = await session.quick_evaluate(expression, frame_id)
+            if "error" in result:
+                return build_error_response(result["error"], state=session.state.state)
+            return build_response(data=result, state=session.state.state)
+        except RuntimeError as e:
+            return build_error_response(str(e), state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
