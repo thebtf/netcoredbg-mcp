@@ -154,6 +154,10 @@ def create_server(project_path: str | None = None) -> FastMCP:
         if snapshot.exception_info:
             result["exception_info"] = snapshot.exception_info
 
+        # Surface stopped event description/text (FR-6)
+        result["description"] = snapshot.description or ""
+        result["text"] = snapshot.text or ""
+
         return result
 
     async def _execute_and_wait(
