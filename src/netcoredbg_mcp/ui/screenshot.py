@@ -175,13 +175,45 @@ def _create_bitmapinfo(width: int, height: int) -> ctypes.Structure:
     return bmi
 
 
-def capture_window_as_base64(hwnd: int) -> dict[str, Any]:
+def _downsample_png(png_bytes: bytes, max_width: int) -> tuple[bytes, int, int]:
+    """Downsample a PNG image if its width exceeds max_width.
+
+    Args:
+        png_bytes: Original PNG bytes
+        max_width: Maximum width threshold
+
+    Returns:
+        Tuple of (possibly downsampled png_bytes, final_width, final_height)
+    """
+    from PIL import Image
+
+    image = Image.open(io.BytesIO(png_bytes))
+    if image.width <= max_width:
+        return png_bytes, image.width, image.height
+
+    ratio = max_width / image.width
+    new_height = int(image.height * ratio)
+    image = image.resize((max_width, new_height), Image.LANCZOS)
+
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG", optimize=True)
+    return buffer.getvalue(), max_width, new_height
+
+
+def capture_window_as_base64(
+    hwnd: int, max_width: int = 1920,
+) -> dict[str, Any]:
     """Capture window and return as base64 PNG with metadata.
+
+    Args:
+        hwnd: Window handle
+        max_width: Maximum image width; downsamples if exceeded (default 1920)
 
     Returns:
         Dict with image (base64), width, height
     """
     png_bytes, width, height = capture_window(hwnd)
+    png_bytes, width, height = _downsample_png(png_bytes, max_width)
     return {
         "image": base64.b64encode(png_bytes).decode("ascii"),
         "width": width,
@@ -280,14 +312,19 @@ def annotate_screenshot(
     png_bytes: bytes,
     elements: list[dict[str, Any]],
     window_rect: tuple[int, int, int, int] | None = None,
+    max_width: int = 1920,
 ) -> bytes:
     """Draw numbered bounding boxes on a screenshot.
+
+    If the image width exceeds max_width, downsamples the image and scales
+    all bounding box coordinates proportionally.
 
     Args:
         png_bytes: Original screenshot as PNG bytes
         elements: Element list from collect_visible_elements
         window_rect: Optional (left, top, right, bottom) of the window on screen
             to translate element bounds from screen to window coordinates
+        max_width: Maximum image width; downsamples if exceeded (default 1920)
 
     Returns:
         Annotated PNG bytes
@@ -295,6 +332,14 @@ def annotate_screenshot(
     from PIL import Image, ImageDraw, ImageFont
 
     image = Image.open(io.BytesIO(png_bytes))
+
+    # Calculate scale factor for downsampling
+    scale = 1.0
+    if image.width > max_width:
+        scale = max_width / image.width
+        new_height = int(image.height * scale)
+        image = image.resize((max_width, new_height), Image.LANCZOS)
+
     draw = ImageDraw.Draw(image)
 
     # Try to load a small font for labels
@@ -303,16 +348,16 @@ def annotate_screenshot(
     except (OSError, IOError):
         font = ImageFont.load_default()
 
-    # Window offset for screen→client coordinate conversion
+    # Window offset for screen->client coordinate conversion
     offset_x = window_rect[0] if window_rect else 0
     offset_y = window_rect[1] if window_rect else 0
 
     for elem in elements:
         bounds = elem["bounds"]
-        x = bounds["x"] - offset_x
-        y = bounds["y"] - offset_y
-        w = bounds["width"]
-        h = bounds["height"]
+        x = (bounds["x"] - offset_x) * scale
+        y = (bounds["y"] - offset_y) * scale
+        w = bounds["width"] * scale
+        h = bounds["height"] * scale
 
         # Skip elements outside the image
         if x + w < 0 or y + h < 0 or x > image.width or y > image.height:
