@@ -27,6 +27,7 @@ def register_ui_tools(
 
     # Cache for last annotated screenshot (used by ui_click_annotated)
     _last_annotation: dict[str, Any] | None = None
+    _annotation_generation: int = 0
 
     def _get_ui() -> Any:
         """Get or create UI automation instance."""
@@ -396,7 +397,7 @@ def register_ui_tools(
             interactive_only: Only show interactive elements like buttons/textboxes (default True)
             max_width: Maximum image width; downsamples if exceeded (default 1920)
         """
-        nonlocal _last_annotation
+        nonlocal _last_annotation, _annotation_generation
 
         try:
             from ..ui.screenshot import (
@@ -443,10 +444,12 @@ def register_ui_tools(
             )
 
             # Cache elements for ui_click_annotated
+            _annotation_generation += 1
             _last_annotation = {
                 "elements": elements,
                 "window_rect": window_rect,
                 "hwnd": hwnd,
+                "generation": _annotation_generation,
             }
 
             import base64
@@ -465,6 +468,7 @@ def register_ui_tools(
                         for e in elements
                     ],
                     "element_count": len(elements),
+                    "generation": _annotation_generation,
                 },
                 state=session.state.state,
             )
@@ -472,7 +476,7 @@ def register_ui_tools(
             return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
-    async def ui_click_annotated(ctx: Context, element_id: int) -> dict:
+    async def ui_click_annotated(ctx: Context, element_id: int, generation: int | None = None) -> dict:
         """Click an element by its ID from ui_take_annotated_screenshot.
 
         Uses the numbered element from the last annotated screenshot.
@@ -480,6 +484,7 @@ def register_ui_tools(
 
         Args:
             element_id: Element ID number from the annotated screenshot
+            generation: Generation counter from the screenshot response (optional, warns if stale)
         """
         try:
             access_error = check_session_access(ctx)
@@ -491,6 +496,16 @@ def register_ui_tools(
                     "No annotation data. Call ui_take_annotated_screenshot first.",
                     state=session.state.state,
                 )
+
+            # Warn if annotation data may be stale
+            stale_warning = None
+            current_gen = _last_annotation.get("generation", 0)
+            if generation is not None and generation != current_gen:
+                stale_warning = (
+                    f"Annotation data may be stale: requested generation {generation}, "
+                    f"current is {current_gen}. Consider retaking the screenshot."
+                )
+                logger.warning(stale_warning)
 
             elements = _last_annotation["elements"]
             target = None
@@ -505,25 +520,24 @@ def register_ui_tools(
                     state=session.state.state,
                 )
 
-            # Click center of element bounds
+            # Click center of element bounds using centralized SendInput implementation
             bounds = target["bounds"]
             center_x = bounds["x"] + bounds["width"] // 2
             center_y = bounds["y"] + bounds["height"] // 2
 
-            import ctypes
-            loop = asyncio.get_running_loop()
+            ui = await _ensure_ui_connected()
+            await ui._click_at_coords(center_x, center_y)
 
-            def _click_at(x: int, y: int) -> None:
-                ctypes.windll.user32.SetCursorPos(x, y)
-                MOUSEEVENTF_LEFTDOWN = 0x0002
-                MOUSEEVENTF_LEFTUP = 0x0004
-                ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-                ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-
-            await loop.run_in_executor(None, lambda: _click_at(center_x, center_y))
+            response_data: dict[str, Any] = {
+                "clicked": True,
+                "element": target["name"],
+                "position": {"x": center_x, "y": center_y},
+            }
+            if stale_warning:
+                response_data["warning"] = stale_warning
 
             return build_response(
-                data={"clicked": True, "element": target["name"], "position": {"x": center_x, "y": center_y}},
+                data=response_data,
                 state=session.state.state,
             )
         except Exception as e:

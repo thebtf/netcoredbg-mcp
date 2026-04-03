@@ -273,33 +273,32 @@ def collect_visible_elements(
                 "height": rect.height(),
             }
 
-            # Skip zero-size elements
-            if bounds["width"] <= 0 or bounds["height"] <= 0:
-                return
-
-            # Filter by interactivity
-            if interactive_only and control_type not in INTERACTIVE_TYPES:
-                # Still walk children — interactive elements may be nested
-                pass
-            else:
-                element_id += 1
-                elements.append({
-                    "id": element_id,
-                    "name": name,
-                    "type": control_type,
-                    "automationId": auto_id,
-                    "bounds": bounds,
-                })
+            # Skip adding zero-size elements, but still walk their children
+            # (interactive elements may be nested inside zero-size containers)
+            if bounds["width"] > 0 and bounds["height"] > 0:
+                # Filter by interactivity
+                if interactive_only and control_type not in INTERACTIVE_TYPES:
+                    # Still walk children — interactive elements may be nested
+                    pass
+                else:
+                    element_id += 1
+                    elements.append({
+                        "id": element_id,
+                        "name": name,
+                        "type": control_type,
+                        "automationId": auto_id,
+                        "bounds": bounds,
+                    })
 
         except Exception:
             logger.debug(f"Failed to read element info at depth {depth}", exc_info=True)
 
-        # Walk children
+        # Walk children (always, regardless of this element's bounds)
         try:
             for child in control.children():
                 _walk(child, depth + 1)
         except Exception:
-            pass
+            logger.debug("Failed to enumerate children at depth %d", depth, exc_info=True)
 
     try:
         window = app.top_window()

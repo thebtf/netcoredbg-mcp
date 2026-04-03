@@ -72,13 +72,18 @@ class BreakpointRegistry:
         if file_path not in self._breakpoints:
             self._breakpoints[file_path] = []
 
-        # Check for duplicate
-        for bp in self._breakpoints[file_path]:
+        # Check for duplicate (immutable update — replace with new object)
+        for i, bp in enumerate(self._breakpoints[file_path]):
             if bp.line == breakpoint.line:
-                # Update existing
-                bp.condition = breakpoint.condition
-                bp.hit_condition = breakpoint.hit_condition
-                bp.log_message = breakpoint.log_message
+                self._breakpoints[file_path][i] = Breakpoint(
+                    file=bp.file,
+                    line=bp.line,
+                    condition=breakpoint.condition,
+                    hit_condition=breakpoint.hit_condition,
+                    log_message=breakpoint.log_message,
+                    verified=bp.verified,
+                    id=bp.id,
+                )
                 return
 
         self._breakpoints[file_path].append(breakpoint)
@@ -142,11 +147,16 @@ class BreakpointRegistry:
 
     def add_function_breakpoint(self, bp: FunctionBreakpoint) -> None:
         """Add a function breakpoint."""
-        # Update existing if same name
-        for existing in self._function_breakpoints:
+        # Replace existing if same name (immutable update — create new object)
+        for i, existing in enumerate(self._function_breakpoints):
             if existing.name == bp.name:
-                existing.condition = bp.condition
-                existing.hit_condition = bp.hit_condition
+                self._function_breakpoints[i] = FunctionBreakpoint(
+                    name=bp.name,
+                    condition=bp.condition,
+                    hit_condition=bp.hit_condition,
+                    verified=existing.verified,
+                    id=existing.id,
+                )
                 return
         self._function_breakpoints.append(bp)
 

@@ -19,7 +19,7 @@ def register_output_tools(
     """Register output and build diagnostics tools on the MCP server."""
     from mcp.types import ToolAnnotations
 
-    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    @mcp.tool(annotations=ToolAnnotations(destructiveHint=False, openWorldHint=False))
     async def get_output(clear: bool = False) -> dict:
         """Get stdout/stderr output from the debugged program.
 

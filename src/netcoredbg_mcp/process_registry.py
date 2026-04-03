@@ -72,17 +72,27 @@ def _is_pid_alive_windows(pid: int) -> bool:
         import ctypes
         from ctypes import wintypes
 
+        kernel32 = ctypes.windll.kernel32
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        handle = ctypes.windll.kernel32.OpenProcess(
+        handle = kernel32.OpenProcess(
             PROCESS_QUERY_LIMITED_INFORMATION, False, pid
         )
-        if handle == 0:
+        if not handle:
+            # Check if process exists but we lack permission
+            error = ctypes.GetLastError()
+            ERROR_ACCESS_DENIED = 5
+            if error == ERROR_ACCESS_DENIED:
+                return True  # Process exists, we just can't open it
             return False
 
         # Check if the process has exited
         exit_code = wintypes.DWORD()
-        ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
-        ctypes.windll.kernel32.CloseHandle(handle)
+        kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+        kernel32.CloseHandle(handle)
 
         STILL_ACTIVE = 259
         return exit_code.value == STILL_ACTIVE
@@ -130,14 +140,20 @@ def _terminate_pid_windows(pid: int, timeout: float) -> bool:
     """Terminate on Windows: TerminateProcess."""
     try:
         import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.TerminateProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.restype = wintypes.BOOL
 
         PROCESS_TERMINATE = 0x0001
-        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_TERMINATE, False, pid)
-        if handle == 0:
+        handle = kernel32.OpenProcess(PROCESS_TERMINATE, False, pid)
+        if not handle:
             return not _is_pid_alive(pid)
 
-        result = ctypes.windll.kernel32.TerminateProcess(handle, 1)
-        ctypes.windll.kernel32.CloseHandle(handle)
+        result = kernel32.TerminateProcess(handle, 1)
+        kernel32.CloseHandle(handle)
 
         if result:
             logger.debug(f"Terminated process PID {pid} via TerminateProcess")
