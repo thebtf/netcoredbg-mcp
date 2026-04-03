@@ -86,10 +86,11 @@ def _send_double_click(x: int, y: int) -> None:
     _send_click(x, y, "left")
 
 def _send_keys_via_input(keys: str) -> None:
-    """Send keyboard input using Win32 SendInput / keybd_event.
+    """Send keyboard input using Win32 SendInput API.
 
     Parses pywinauto-style key syntax:
     - Modifiers: ^ (Ctrl), % (Alt), + (Shift)
+    - Grouped modifiers: ^(abc) holds Ctrl for a, b, c
     - Special keys in braces: {ENTER}, {TAB}, {F1}-{F12}, etc.
     - Regular characters: typed via VkKeyScanW
 
@@ -97,9 +98,12 @@ def _send_keys_via_input(keys: str) -> None:
     and fails for WPF InputBindings (e.g., Alt+Z).
     """
     import ctypes
+    import ctypes.wintypes as wintypes
     import time
 
     user32 = ctypes.windll.user32
+
+    INPUT_KEYBOARD = 1
     KEYEVENTF_KEYUP = 0x0002
 
     VK_CONTROL = 0x11
@@ -127,32 +131,79 @@ def _send_keys_via_input(keys: str) -> None:
         "+": VK_SHIFT,
     }
 
+    # ── KEYBDINPUT / INPUT structs for SendInput ──
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [
+            ("wVk", wintypes.WORD),
+            ("wScan", wintypes.WORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", ctypes.POINTER(wintypes.ULONG)),
+        ]
+
+    class INPUT(ctypes.Structure):
+        class _INPUT(ctypes.Union):
+            _fields_ = [("ki", KEYBDINPUT)]
+        _fields_ = [
+            ("type", wintypes.DWORD),
+            ("_input", _INPUT),
+        ]
+
     def _press(vk: int) -> None:
-        user32.keybd_event(vk, 0, 0, 0)
+        inp = INPUT()
+        inp.type = INPUT_KEYBOARD
+        inp._input.ki.wVk = vk
+        inp._input.ki.dwFlags = 0
+        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
     def _release(vk: int) -> None:
-        user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+        inp = INPUT()
+        inp.type = INPUT_KEYBOARD
+        inp._input.ki.wVk = vk
+        inp._input.ki.dwFlags = KEYEVENTF_KEYUP
+        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
     def _tap(vk: int) -> None:
         _press(vk)
         time.sleep(0.01)
         _release(vk)
 
-    def _char_to_vk(ch: str) -> tuple[int, bool]:
-        """Convert a character to (vk_code, needs_shift) via VkKeyScanW."""
+    def _char_to_vk(ch: str) -> tuple[int, bool, bool, bool]:
+        """Convert a character to (vk_code, needs_shift, needs_ctrl, needs_alt) via VkKeyScanW."""
         result = user32.VkKeyScanW(ord(ch))
-        if result == -1:
-            return (0, False)
+        if result == -1 or (result & 0xFF) == 0xFF:
+            return (0, False, False, False)
         vk = result & 0xFF
         shift = bool(result & 0x100)
-        return (vk, shift)
+        ctrl = bool(result & 0x200)
+        alt = bool(result & 0x400)
+        return (vk, shift, ctrl, alt)
+
+    def _type_char(ch: str, held_modifiers: list[int]) -> None:
+        """Type a single character, adding Shift/Ctrl/Alt if VkKeyScanW requires them."""
+        vk, needs_shift, needs_ctrl, needs_alt = _char_to_vk(ch)
+        if not vk:
+            return
+        extra_mods: list[int] = []
+        if needs_shift and VK_SHIFT not in held_modifiers:
+            extra_mods.append(VK_SHIFT)
+        if needs_ctrl and VK_CONTROL not in held_modifiers:
+            extra_mods.append(VK_CONTROL)
+        if needs_alt and VK_MENU not in held_modifiers:
+            extra_mods.append(VK_MENU)
+        for m in extra_mods:
+            _press(m)
+            time.sleep(0.01)
+        _tap(vk)
+        for m in reversed(extra_mods):
+            _release(m)
+            time.sleep(0.01)
 
     i = 0
     length = len(keys)
 
     while i < length:
-        ch = keys[i]
-
         # Collect modifier prefixes
         held_modifiers: list[int] = []
         while i < length and keys[i] in MODIFIER_MAP:
@@ -164,6 +215,29 @@ def _send_keys_via_input(keys: str) -> None:
 
         ch = keys[i]
 
+        # Handle grouped modifier application: ^(abc) holds Ctrl for a, b, c
+        if ch == "(" and held_modifiers:
+            close = keys.find(")", i)
+            if close == -1:
+                raise ValueError(
+                    f"Unclosed parenthesis in key sequence at position {i}"
+                )
+            group_chars = keys[i + 1:close]
+            for mod_vk in held_modifiers:
+                _press(mod_vk)
+                time.sleep(0.01)
+            try:
+                for gch in group_chars:
+                    _type_char(gch, held_modifiers)
+                    time.sleep(0.02)
+            finally:
+                for mod_vk in reversed(held_modifiers):
+                    _release(mod_vk)
+                    time.sleep(0.01)
+            i = close + 1
+            time.sleep(0.02)
+            continue
+
         # Press held modifiers
         for mod_vk in held_modifiers:
             _press(mod_vk)
@@ -172,23 +246,21 @@ def _send_keys_via_input(keys: str) -> None:
         try:
             if ch == "{":
                 # Special key in braces: {ENTER}, {F4}, etc.
-                end = keys.index("}", i)
+                end = keys.find("}", i)
+                if end == -1:
+                    raise ValueError(
+                        f"Unclosed brace in key sequence at position {i}: '{keys[i:]}'"
+                    )
                 key_name = keys[i + 1:end].upper()
                 vk = VK_MAP.get(key_name)
                 if vk is not None:
                     _tap(vk)
+                else:
+                    raise ValueError(f"Unknown special key: {{{key_name}}}")
                 i = end + 1
             else:
                 # Regular character
-                vk, needs_shift = _char_to_vk(ch)
-                if vk:
-                    if needs_shift and VK_SHIFT not in held_modifiers:
-                        _press(VK_SHIFT)
-                        time.sleep(0.01)
-                        _tap(vk)
-                        _release(VK_SHIFT)
-                    else:
-                        _tap(vk)
+                _type_char(ch, held_modifiers)
                 i += 1
         finally:
             # Release held modifiers in reverse order

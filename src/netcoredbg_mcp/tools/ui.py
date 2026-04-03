@@ -1116,8 +1116,10 @@ def register_ui_tools(
                         selection = control.iface_selection.GetCurrentSelection()
                         if selection and selection.Length > 0:
                             selected_elem = selection.GetElement(0)
+                            from pywinauto.uia_element_info import UIAElementInfo
+                            elem_info = UIAElementInfo(selected_elem)
                             from pywinauto.controls.uiawrapper import UIAWrapper
-                            wrapper = UIAWrapper(selected_elem)
+                            wrapper = UIAWrapper(elem_info)
                             children = control.children()
                             idx = -1
                             for i, child in enumerate(children):
@@ -1153,8 +1155,13 @@ def register_ui_tools(
 
                     return {"index": -1, "name": "", "automationId": "", "controlType": ""}
                 else:
-                    # FlaUI backend: delegate to find_element and check selection
-                    return {"index": -1, "name": "", "automationId": "", "controlType": ""}
+                    return {
+                        "index": -1,
+                        "name": "",
+                        "automationId": "",
+                        "controlType": "",
+                        "warning": "Selection query not yet supported via FlaUI backend",
+                    }
 
             loop = asyncio.get_running_loop()
             result = await asyncio.wait_for(
@@ -1206,14 +1213,12 @@ def register_ui_tools(
                         "automationId": auto_id,
                     }
                 else:
-                    # FlaUI backend: element is dict
-                    text = ""
-                    if isinstance(element, dict):
-                        text = element.get("value", element.get("name", ""))
+                    # FlaUI backend: element is dict from bridge
+                    elem = element if isinstance(element, dict) else {}
                     return {
-                        "text": text,
-                        "controlType": element.get("controlType", "") if isinstance(element, dict) else "",
-                        "automationId": element.get("automationId", "") if isinstance(element, dict) else "",
+                        "text": elem.get("value", elem.get("name", "")),
+                        "controlType": elem.get("controlType", ""),
+                        "automationId": elem.get("automationId", ""),
                     }
 
             loop = asyncio.get_running_loop()
@@ -1245,8 +1250,10 @@ def register_ui_tools(
                     if focused is None:
                         return {"name": "", "automationId": "", "controlType": "", "value": ""}
 
+                    from pywinauto.uia_element_info import UIAElementInfo
+                    elem_info = UIAElementInfo(focused)
                     from pywinauto.controls.uiawrapper import UIAWrapper
-                    wrapper = UIAWrapper(focused)
+                    wrapper = UIAWrapper(elem_info)
                     info = wrapper.element_info
 
                     value = ""
@@ -1262,7 +1269,13 @@ def register_ui_tools(
                         "value": value,
                     }
                 else:
-                    return {"name": "", "automationId": "", "controlType": "", "value": ""}
+                    return {
+                        "name": "",
+                        "automationId": "",
+                        "controlType": "",
+                        "value": "",
+                        "warning": "Focused element query not yet supported via FlaUI backend",
+                    }
 
             loop = asyncio.get_running_loop()
             result = await asyncio.wait_for(
@@ -1272,7 +1285,7 @@ def register_ui_tools(
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def ui_wait_for(
         automation_id: str | None = None,
         name: str | None = None,
@@ -1302,11 +1315,17 @@ def register_ui_tools(
 
             ui = await _ensure_ui_connected()
 
-            elapsed = 0.0
+            import time as _time
+            from ..ui import ElementNotFoundError
+
+            start = _time.monotonic()
             poll_interval = 0.5
             last_error = ""
 
-            while elapsed < clamped_timeout:
+            while True:
+                elapsed = _time.monotonic() - start
+                if elapsed >= clamped_timeout:
+                    break
                 try:
                     result = await ui.find_element(
                         automation_id=automation_id,
@@ -1318,10 +1337,19 @@ def register_ui_tools(
                         data={"found": True, "elapsed": round(elapsed, 2), "element": data},
                         state=session.state.state,
                     )
+                except (ElementNotFoundError, TimeoutError, asyncio.TimeoutError):
+                    remaining = clamped_timeout - elapsed
+                    sleep_time = min(poll_interval, remaining)
+                    if sleep_time <= 0:
+                        break
+                    await asyncio.sleep(sleep_time)
                 except Exception as e:
                     last_error = str(e)
-                    await asyncio.sleep(poll_interval)
-                    elapsed += poll_interval
+                    remaining = clamped_timeout - elapsed
+                    sleep_time = min(poll_interval, remaining)
+                    if sleep_time <= 0:
+                        break
+                    await asyncio.sleep(sleep_time)
 
             return build_error_response(
                 f"Element not found within {clamped_timeout}s. Last error: {last_error}",
