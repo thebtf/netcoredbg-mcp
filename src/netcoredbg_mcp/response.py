@@ -87,7 +87,7 @@ def build_response(
         "message": message or STATE_MESSAGES.get(state_value, ""),
     }
 
-    if data:
+    if data is not None:
         result["data"] = data
 
     result.update(extra)
@@ -112,7 +112,7 @@ def build_error_response(
     """
     state_value = state.value if isinstance(state, DebugState) else state
 
-    recovery_actions = next_actions or ["get_debug_state", "stop_debug"]
+    recovery_actions = next_actions or VALID_ACTIONS.get(state_value, ["get_debug_state", "stop_debug"])
 
     return {
         "error": error,

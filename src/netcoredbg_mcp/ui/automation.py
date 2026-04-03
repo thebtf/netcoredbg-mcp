@@ -19,6 +19,72 @@ from .errors import (
 )
 from .serialization import ElementInfo, serialize_element
 
+# ── Win32 SendInput for coordinate-based clicks ─────────────────────
+
+
+def _send_click(x: int, y: int, button: str = "left") -> None:
+    """Click at screen coordinates using SendInput (modern, DPI-aware).
+
+    Args:
+        x: Absolute screen X
+        y: Absolute screen Y
+        button: "left" or "right"
+    """
+    import ctypes
+    import ctypes.wintypes as wintypes
+    import time
+
+    # Move cursor
+    ctypes.windll.user32.SetCursorPos(x, y)
+    time.sleep(0.05)
+
+    # Build INPUT structures for SendInput
+    MOUSEEVENTF_LEFTDOWN = 0x0002
+    MOUSEEVENTF_LEFTUP = 0x0004
+    MOUSEEVENTF_RIGHTDOWN = 0x0008
+    MOUSEEVENTF_RIGHTUP = 0x0010
+    INPUT_MOUSE = 0
+
+    class MOUSEINPUT(ctypes.Structure):
+        _fields_ = [
+            ("dx", ctypes.c_long),
+            ("dy", ctypes.c_long),
+            ("mouseData", wintypes.DWORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+        ]
+
+    class INPUT(ctypes.Structure):
+        class _INPUT(ctypes.Union):
+            _fields_ = [("mi", MOUSEINPUT)]
+        _fields_ = [
+            ("type", wintypes.DWORD),
+            ("_input", _INPUT),
+        ]
+
+    if button == "right":
+        down_flag, up_flag = MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP
+    else:
+        down_flag, up_flag = MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP
+
+    inputs = (INPUT * 2)()
+    inputs[0].type = INPUT_MOUSE
+    inputs[0]._input.mi.dwFlags = down_flag
+    inputs[1].type = INPUT_MOUSE
+    inputs[1]._input.mi.dwFlags = up_flag
+
+    ctypes.windll.user32.SendInput(2, ctypes.byref(inputs), ctypes.sizeof(INPUT))
+
+
+def _send_double_click(x: int, y: int) -> None:
+    """Double-click at screen coordinates using SendInput."""
+    import time
+
+    _send_click(x, y, "left")
+    time.sleep(0.05)
+    _send_click(x, y, "left")
+
 logger = logging.getLogger(__name__)
 
 
@@ -116,58 +182,25 @@ class UIAutomation:
         self._element_cache.clear()
 
     async def _click_at_coords(self, x: int, y: int) -> None:
-        """Click at absolute screen coordinates using Win32 mouse_event."""
-
-        def _click():
-            import ctypes
-            import time
-
-            ctypes.windll.user32.SetCursorPos(x, y)
-            time.sleep(0.05)
-            MOUSEEVENTF_LEFTDOWN = 0x0002
-            MOUSEEVENTF_LEFTUP = 0x0004
-            ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-            ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-
+        """Click at absolute screen coordinates using Win32 SendInput."""
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(self._executor, _click)
+        await loop.run_in_executor(
+            self._executor, lambda: _send_click(x, y, button="left"),
+        )
 
     async def _right_click_at_coords(self, x: int, y: int) -> None:
-        """Right-click at absolute screen coordinates using Win32 mouse_event."""
-
-        def _click():
-            import ctypes
-            import time
-
-            ctypes.windll.user32.SetCursorPos(x, y)
-            time.sleep(0.05)
-            MOUSEEVENTF_RIGHTDOWN = 0x0008
-            MOUSEEVENTF_RIGHTUP = 0x0010
-            ctypes.windll.user32.mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
-            ctypes.windll.user32.mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
-
+        """Right-click at absolute screen coordinates using Win32 SendInput."""
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(self._executor, _click)
+        await loop.run_in_executor(
+            self._executor, lambda: _send_click(x, y, button="right"),
+        )
 
     async def _double_click_at_coords(self, x: int, y: int) -> None:
-        """Double-click at absolute screen coordinates using Win32 mouse_event."""
-
-        def _click():
-            import ctypes
-            import time
-
-            ctypes.windll.user32.SetCursorPos(x, y)
-            time.sleep(0.05)
-            MOUSEEVENTF_LEFTDOWN = 0x0002
-            MOUSEEVENTF_LEFTUP = 0x0004
-            ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-            ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-            time.sleep(0.05)
-            ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-            ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-
+        """Double-click at absolute screen coordinates using Win32 SendInput."""
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(self._executor, _click)
+        await loop.run_in_executor(
+            self._executor, lambda: _send_double_click(x, y),
+        )
 
     async def get_window_tree(
         self, max_depth: int = 3, max_children: int = 50

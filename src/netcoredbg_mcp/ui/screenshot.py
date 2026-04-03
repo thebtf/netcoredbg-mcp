@@ -102,37 +102,39 @@ def capture_window(hwnd: int) -> tuple[bytes, int, int]:
             try:
                 old_bitmap = gdi32.SelectObject(cdc, bitmap)
 
-                # PrintWindow with PW_RENDERFULLCONTENT for best results
-                PW_RENDERFULLCONTENT = 0x00000002
-                success = user32.PrintWindow(hwnd, cdc, PW_RENDERFULLCONTENT)
-                if not success:
-                    # Fallback: try BitBlt
-                    gdi32.BitBlt(cdc, 0, 0, width, height, wdc, 0, 0, 0x00CC0020)  # SRCCOPY
+                try:
+                    # PrintWindow with PW_RENDERFULLCONTENT for best results
+                    PW_RENDERFULLCONTENT = 0x00000002
+                    success = user32.PrintWindow(hwnd, cdc, PW_RENDERFULLCONTENT)
+                    if not success:
+                        # Fallback: try BitBlt
+                        gdi32.BitBlt(cdc, 0, 0, width, height, wdc, 0, 0, 0x00CC0020)
 
-                # Extract bitmap bits
-                from PIL import Image
+                    # Extract bitmap bits
+                    from PIL import Image
 
-                bmi = _create_bitmapinfo(width, height)
-                buffer = ctypes.create_string_buffer(width * height * 4)
+                    bmi = _create_bitmapinfo(width, height)
+                    buffer = ctypes.create_string_buffer(width * height * 4)
 
-                gdi32.GetDIBits(
-                    cdc, bitmap, 0, height,
-                    buffer, ctypes.byref(bmi),
-                    0,  # DIB_RGB_COLORS
-                )
+                    gdi32.GetDIBits(
+                        cdc, bitmap, 0, height,
+                        buffer, ctypes.byref(bmi),
+                        0,  # DIB_RGB_COLORS
+                    )
 
-                # Convert BGRA → RGBA
-                image = Image.frombuffer(
-                    "RGBA", (width, height), buffer, "raw", "BGRA", 0, -1
-                )
+                    # Convert BGRA → RGBA
+                    image = Image.frombuffer(
+                        "RGBA", (width, height), buffer, "raw", "BGRA", 0, -1
+                    )
 
-                # Encode to PNG
-                png_buffer = io.BytesIO()
-                image.save(png_buffer, format="PNG", optimize=True)
-                png_bytes = png_buffer.getvalue()
+                    # Encode to PNG
+                    png_buffer = io.BytesIO()
+                    image.save(png_buffer, format="PNG", optimize=True)
+                    return png_buffer.getvalue(), width, height
 
-                gdi32.SelectObject(cdc, old_bitmap)
-                return png_bytes, width, height
+                finally:
+                    # Always deselect before DeleteObject to prevent GDI leak
+                    gdi32.SelectObject(cdc, old_bitmap)
 
             finally:
                 gdi32.DeleteObject(bitmap)
@@ -271,33 +273,32 @@ def collect_visible_elements(
                 "height": rect.height(),
             }
 
-            # Skip zero-size elements
-            if bounds["width"] <= 0 or bounds["height"] <= 0:
-                return
-
-            # Filter by interactivity
-            if interactive_only and control_type not in INTERACTIVE_TYPES:
-                # Still walk children — interactive elements may be nested
-                pass
-            else:
-                element_id += 1
-                elements.append({
-                    "id": element_id,
-                    "name": name,
-                    "type": control_type,
-                    "automationId": auto_id,
-                    "bounds": bounds,
-                })
+            # Skip adding zero-size elements, but still walk their children
+            # (interactive elements may be nested inside zero-size containers)
+            if bounds["width"] > 0 and bounds["height"] > 0:
+                # Filter by interactivity
+                if interactive_only and control_type not in INTERACTIVE_TYPES:
+                    # Still walk children — interactive elements may be nested
+                    pass
+                else:
+                    element_id += 1
+                    elements.append({
+                        "id": element_id,
+                        "name": name,
+                        "type": control_type,
+                        "automationId": auto_id,
+                        "bounds": bounds,
+                    })
 
         except Exception:
             logger.debug(f"Failed to read element info at depth {depth}", exc_info=True)
 
-        # Walk children
+        # Walk children (always, regardless of this element's bounds)
         try:
             for child in control.children():
                 _walk(child, depth + 1)
         except Exception:
-            pass
+            logger.debug("Failed to enumerate children at depth %d", depth, exc_info=True)
 
     try:
         window = app.top_window()
