@@ -85,6 +85,40 @@ def _send_double_click(x: int, y: int) -> None:
     time.sleep(0.05)
     _send_click(x, y, "left")
 
+def _send_drag(from_x: int, from_y: int, to_x: int, to_y: int) -> None:
+    """Drag from one screen coordinate to another using Win32 API.
+
+    Performs: move to start → mouse down → move to end → mouse up.
+    """
+    import ctypes
+    import time
+
+    user32 = ctypes.windll.user32
+
+    # Move to start position
+    user32.SetCursorPos(from_x, from_y)
+    time.sleep(0.1)
+
+    # Mouse down
+    MOUSEEVENTF_LEFTDOWN = 0x0002
+    MOUSEEVENTF_LEFTUP = 0x0004
+    user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+    time.sleep(0.1)
+
+    # Move to target in steps (smooth drag)
+    steps = 10
+    for i in range(1, steps + 1):
+        ix = from_x + (to_x - from_x) * i // steps
+        iy = from_y + (to_y - from_y) * i // steps
+        user32.SetCursorPos(ix, iy)
+        time.sleep(0.02)
+
+    time.sleep(0.1)
+
+    # Mouse up
+    user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -200,6 +234,15 @@ class UIAutomation:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
             self._executor, lambda: _send_double_click(x, y),
+        )
+
+    async def _drag_at_coords(
+        self, from_x: int, from_y: int, to_x: int, to_y: int,
+    ) -> None:
+        """Drag from one screen coordinate to another."""
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            self._executor, lambda: _send_drag(from_x, from_y, to_x, to_y),
         )
 
     async def get_window_tree(

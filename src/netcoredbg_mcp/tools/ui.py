@@ -772,14 +772,28 @@ def register_ui_tools(
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def ui_drag(
         ctx: Context,
-        from_automation_id: str,
-        to_automation_id: str,
+        from_automation_id: str | None = None,
+        to_automation_id: str | None = None,
+        from_x: int | None = None,
+        from_y: int | None = None,
+        to_x: int | None = None,
+        to_y: int | None = None,
     ) -> dict:
-        """Drag from one UI element to another.
+        """Drag from one position to another.
+
+        Two modes:
+        1. By AutomationId: from_automation_id + to_automation_id (uses cached rectangles)
+        2. By coordinates: from_x, from_y, to_x, to_y (absolute screen coords)
+
+        For mode 1, call ui_get_window_tree first to populate cache.
 
         Args:
-            from_automation_id: AutomationId of the source element
-            to_automation_id: AutomationId of the target element
+            from_automation_id: Source element AutomationId
+            to_automation_id: Target element AutomationId
+            from_x: Source X coordinate (screen absolute)
+            from_y: Source Y coordinate
+            to_x: Target X coordinate
+            to_y: Target Y coordinate
         """
         try:
             access_error = check_session_access(ctx)
@@ -788,19 +802,42 @@ def register_ui_tools(
 
             ui = await _ensure_ui_connected()
 
-            def _drag() -> None:
-                window = ui._app.top_window()
-                from_elem = window.child_window(auto_id=from_automation_id)
-                from_elem.wait("exists", timeout=5)
-                to_elem = window.child_window(auto_id=to_automation_id)
-                to_elem.wait("exists", timeout=5)
-                from_elem.drag_mouse_input(dst=to_elem)
+            # Resolve coordinates from automation IDs if needed
+            fx, fy, tx, ty = from_x, from_y, to_x, to_y
 
-            loop = asyncio.get_running_loop()
-            await asyncio.wait_for(
-                loop.run_in_executor(None, _drag), timeout=10.0,
+            if from_automation_id and not (fx and fy):
+                from_rect = ui.get_cached_rect(from_automation_id)
+                if from_rect:
+                    fx = (from_rect["left"] + from_rect["right"]) // 2
+                    fy = (from_rect["top"] + from_rect["bottom"]) // 2
+                else:
+                    return build_error_response(
+                        f"Element '{from_automation_id}' not in cache. Call ui_get_window_tree first.",
+                        state=session.state.state,
+                    )
+
+            if to_automation_id and not (tx and ty):
+                to_rect = ui.get_cached_rect(to_automation_id)
+                if to_rect:
+                    tx = (to_rect["left"] + to_rect["right"]) // 2
+                    ty = (to_rect["top"] + to_rect["bottom"]) // 2
+                else:
+                    return build_error_response(
+                        f"Element '{to_automation_id}' not in cache. Call ui_get_window_tree first.",
+                        state=session.state.state,
+                    )
+
+            if not all([fx, fy, tx, ty]):
+                return build_error_response(
+                    "Provide either automation_ids or coordinates for both source and target.",
+                    state=session.state.state,
+                )
+
+            await ui._drag_at_coords(fx, fy, tx, ty)
+
+            return build_response(
+                data={"dragged": True, "from": {"x": fx, "y": fy}, "to": {"x": tx, "y": ty}},
+                state=session.state.state,
             )
-
-            return build_response(data={"dragged": True}, state=session.state.state)
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
