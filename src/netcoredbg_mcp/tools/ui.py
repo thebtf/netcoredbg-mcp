@@ -335,11 +335,17 @@ def register_ui_tools(
     # -- Screenshot & annotation tools --
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
-    async def ui_take_screenshot(ctx: Context, max_width: int = 1920) -> dict:
+    async def ui_take_screenshot(
+        ctx: Context,
+        max_width: int = 1024,
+        format: str = "webp",
+    ) -> dict:
         """Take a screenshot of the debugged application's window.
 
-        Returns the screenshot as a base64-encoded PNG image.
-        Use this to see the actual UI state -- what the user would see.
+        Returns the screenshot as a WebP image optimized for LLM vision.
+        Default 1024px width + WebP q=75 keeps size under MCP limits (~80-120KB).
+
+        Use this to see the actual UI state — what the user would see.
 
         Useful for:
         - Verifying UI rendered correctly after a debug step
@@ -348,10 +354,11 @@ def register_ui_tools(
         - Debugging rendering issues
 
         Args:
-            max_width: Maximum image width; downsamples if exceeded (default 1920)
+            max_width: Maximum image width (default 1024 — optimal for Claude vision)
+            format: Image format: "webp" (smallest), "jpeg", "png"
         """
         try:
-            from ..ui.screenshot import get_hwnd_for_pid, capture_window_as_base64
+            from ..ui.screenshot import get_hwnd_for_pid, capture_window_for_llm
 
             pid = session.state.process_id
             if not pid:
@@ -366,7 +373,7 @@ def register_ui_tools(
 
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(
-                None, lambda: capture_window_as_base64(hwnd, max_width=max_width),
+                None, lambda: capture_window_for_llm(hwnd, max_width=max_width, format=format),
             )
 
             return build_response(data=result, state=session.state.state)

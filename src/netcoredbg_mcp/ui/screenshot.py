@@ -177,51 +177,113 @@ def _create_bitmapinfo(width: int, height: int) -> ctypes.Structure:
     return bmi
 
 
-def _downsample_png(png_bytes: bytes, max_width: int) -> tuple[bytes, int, int]:
-    """Downsample a PNG image if its width exceeds max_width.
+def _process_screenshot(
+    raw_png_bytes: bytes,
+    max_width: int = 1024,
+    format: str = "webp",
+    quality: int = 75,
+) -> tuple[bytes, int, int, str]:
+    """Downsample and convert screenshot to optimal format for LLM consumption.
+
+    Uses WebP by default — 25-35% smaller than JPEG with better text/edge quality.
+    Resolution capped at 1024px (Anthropic Computer Use sweet spot; Claude vision
+    auto-downsamples above 1568px anyway).
 
     Args:
-        png_bytes: Original PNG bytes
-        max_width: Maximum width threshold
+        raw_png_bytes: Raw PNG capture from Win32
+        max_width: Maximum width (default 1024 — Computer Use recommended)
+        format: Output format: "webp" (recommended), "jpeg", "png"
+        quality: Compression quality for lossy formats (default 75)
 
     Returns:
-        Tuple of (possibly downsampled png_bytes, final_width, final_height)
+        Tuple of (image_bytes, final_width, final_height, mime_type)
     """
     from PIL import Image
 
-    image = Image.open(io.BytesIO(png_bytes))
-    if image.width <= max_width:
-        return png_bytes, image.width, image.height
+    image = Image.open(io.BytesIO(raw_png_bytes))
 
-    ratio = max_width / image.width
-    new_height = int(image.height * ratio)
-    image = image.resize((max_width, new_height), Image.LANCZOS)
+    # Downsample if needed
+    if image.width > max_width:
+        ratio = max_width / image.width
+        new_height = int(image.height * ratio)
+        image = image.resize((max_width, new_height), Image.LANCZOS)
 
+    width, height = image.size
     buffer = io.BytesIO()
-    image.save(buffer, format="PNG", optimize=True)
-    return buffer.getvalue(), max_width, new_height
+
+    if format == "webp":
+        image.save(buffer, format="WEBP", quality=quality)
+        mime = "image/webp"
+    elif format == "jpeg":
+        # Convert RGBA→RGB for JPEG
+        if image.mode == "RGBA":
+            image = image.convert("RGB")
+        image.save(buffer, format="JPEG", quality=quality)
+        mime = "image/jpeg"
+    else:
+        image.save(buffer, format="PNG", optimize=True)
+        mime = "image/png"
+
+    return buffer.getvalue(), width, height, mime
 
 
-def capture_window_as_base64(
-    hwnd: int, max_width: int = 1920,
+def capture_window_for_llm(
+    hwnd: int,
+    max_width: int = 1024,
+    format: str = "webp",
+    quality: int = 75,
+    save_dir: str | None = None,
 ) -> dict[str, Any]:
-    """Capture window and return as base64 PNG with metadata.
+    """Capture window screenshot optimized for LLM consumption.
+
+    Returns base64 image + optional file path. Uses WebP at 1024px by default
+    to stay within MCP size limits while preserving visual quality.
 
     Args:
         hwnd: Window handle
-        max_width: Maximum image width; downsamples if exceeded (default 1920)
+        max_width: Maximum width (default 1024)
+        format: Image format: "webp", "jpeg", "png"
+        quality: Compression quality for lossy (default 75)
+        save_dir: Directory to save full file (optional)
 
     Returns:
-        Dict with image (base64), width, height
+        Dict with image (base64), width, height, format, mimeType, and optionally filePath
     """
-    png_bytes, width, height = capture_window(hwnd)
-    png_bytes, width, height = _downsample_png(png_bytes, max_width)
-    return {
-        "image": base64.b64encode(png_bytes).decode("ascii"),
+    import os
+    import tempfile
+    import time
+
+    raw_png, orig_w, orig_h = capture_window(hwnd)
+    img_bytes, width, height, mime = _process_screenshot(raw_png, max_width, format, quality)
+
+    result: dict[str, Any] = {
+        "image": base64.b64encode(img_bytes).decode("ascii"),
         "width": width,
         "height": height,
-        "format": "png",
+        "format": format,
+        "mimeType": mime,
+        "sizeBytes": len(img_bytes),
     }
+
+    # Save to file if directory provided
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+        ext = {"webp": ".webp", "jpeg": ".jpg", "png": ".png"}.get(format, ".webp")
+        filename = f"screenshot_{int(time.time())}{ext}"
+        filepath = os.path.join(save_dir, filename)
+        with open(filepath, "wb") as f:
+            f.write(img_bytes)
+        result["filePath"] = filepath
+
+    return result
+
+
+# Keep backward-compatible alias
+def capture_window_as_base64(
+    hwnd: int, max_width: int = 1024,
+) -> dict[str, Any]:
+    """Legacy alias for capture_window_for_llm."""
+    return capture_window_for_llm(hwnd, max_width=max_width)
 
 
 def collect_visible_elements(

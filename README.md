@@ -1,3 +1,5 @@
+🌐 [English](README.md) | [Русский](README.ru.md)
+
 # netcoredbg-mcp
 
 [![PyPI](https://img.shields.io/pypi/v/netcoredbg-mcp)](https://pypi.org/project/netcoredbg-mcp/)
@@ -6,9 +8,13 @@
 [![MCP](https://img.shields.io/badge/MCP-Server-6f42c1)](https://modelcontextprotocol.io/)
 [![Platform](https://img.shields.io/badge/Platform-Windows-2ea44f)](#limitations)
 
-AI agents debug .NET apps blind. No call stacks, no variable inspection, no breakpoints — just "it crashed." **netcoredbg-mcp** gives your agent full debugger control through the Model Context Protocol: set breakpoints, step through code, inspect variables, take screenshots of GUI apps, and evaluate expressions — no IDE required.
+Your AI agent can write .NET code, run tests, even deploy — but when something goes wrong, it's blind. No call stacks. No variable inspection. Can't set breakpoints. Just "it crashed, check the logs."
 
-**42 tools. 4 resources. 7 prompts. One MCP server.**
+**netcoredbg-mcp** turns any AI agent into a capable .NET debugger. Set breakpoints, step through code, inspect variables, take screenshots of WPF windows, evaluate expressions — all through the Model Context Protocol. Zero IDE required.
+
+> *"Like giving your AI agent a VS Code debugger it can actually use."*
+
+**43 tools · 7 prompts · 4 resources · 334 tests**
 
 ## Quick Links
 
@@ -18,11 +24,27 @@ AI agents debug .NET apps blind. No call stacks, no variable inspection, no brea
 
 ---
 
+## What's New in v0.2.0
+
+> Released 2026-04-03. [Full release notes →](https://github.com/thebtf/netcoredbg-mcp/releases/tag/v0.2.0)
+
+- **Long-poll execution** — `continue_execution` and `step_*` now block until the program stops. No more polling loops.
+- **State machine in every response** — every tool returns `state`, `next_actions`, and a human-readable `message`.
+- **Screenshots + Set-of-Mark** — see the actual UI with `ui_take_screenshot`, get numbered element overlays with `ui_take_annotated_screenshot`.
+- **GUI app detection** — WPF, WinForms, and Avalonia auto-detected. Breakpoint timing hints included.
+- **Process Reaper** — tracks spawned processes via PID file. No more orphaned netcoredbg processes.
+- **[mcp-mux](https://github.com/thebtf/mcp-mux) session-aware** — multi-agent safety via `x-mux` capability and session ownership guards.
+- **7 inline debugging skills** — prompts that teach the agent how to debug, including parameterized `investigate("NullReferenceException")`.
+- **Element cache** — UI interactions use cached tree + coordinate clicks instead of unreliable element search. Reliability: 50% → 95%.
+- **Build output filtering** — warnings hidden by default, `get_build_diagnostics()` when you need them.
+
+---
+
 ## Highlights
 
 | Feature | Description |
 |---------|-------------|
-| **42 MCP Tools** | Debug control, breakpoints, inspection, output, UI automation, process management |
+| **43 MCP Tools** | Debug control, breakpoints, inspection, output, UI automation, process management |
 | **Long-Poll Execution** | `continue` and `step_*` tools block until stopped — no polling loops |
 | **State Machine Responses** | Every response includes `state`, `next_actions`, `message` — the agent always knows what to do next |
 | **GUI App Detection** | Auto-detects WPF/WinForms/Avalonia from `runtimeconfig.json` and adjusts workflow hints |
@@ -31,7 +53,7 @@ AI agents debug .NET apps blind. No call stacks, no variable inspection, no brea
 | **Smart Resolution** | Auto-resolves `.exe` to `.dll` for .NET 6+ to avoid deps.json conflicts |
 | **Version Check** | Detects `dbgshim.dll` mismatches automatically on session start |
 | **Process Reaper** | PID file tracking with `cleanup_processes` — never lose orphan debugger processes |
-| **mcp-mux Aware** | Session ownership guards for multi-agent safety via `x-mux` capability |
+| **[mcp-mux](https://github.com/thebtf/mcp-mux) Aware** | Session ownership guards for multi-agent safety — first agent claims the debug session, others get a clear error |
 | **ToolAnnotations** | `readOnlyHint`, `destructiveHint`, `idempotentHint` on every tool for smart agent routing |
 
 ---
@@ -117,6 +139,29 @@ uv sync
 ### Install netcoredbg
 
 Download from [Samsung/netcoredbg releases](https://github.com/Samsung/netcoredbg/releases) and extract to `D:\Bin\netcoredbg\`
+
+---
+
+## Upgrading
+
+```bash
+pip install --upgrade netcoredbg-mcp
+```
+
+### From v0.1.x to v0.2.0
+
+**Breaking changes:**
+- Tool response format changed: `{"success": true, "data": ...}` → `{"state": "...", "next_actions": [...], "data": ...}`. Update any hardcoded response parsing.
+- `resources.py` removed (resources now inline in `server.py`).
+
+**New dependencies:**
+- `Pillow>=10.0` (for screenshot annotation) — installed automatically via pip.
+
+**New features to explore:**
+- `ui_take_screenshot()`, `ui_take_annotated_screenshot()` — visual UI access
+- `cleanup_processes()` — replaces manual `taskkill`
+- `restart_debug()` — rebuild + relaunch in one call
+- `investigate("NullReferenceException")` — parameterized debugging prompts
 
 ---
 
@@ -657,6 +702,21 @@ Prompts are built-in debugging guides the agent can invoke for structured workfl
 
 ---
 
+## Multi-Agent Safety (mcp-mux)
+
+When served through [mcp-mux](https://github.com/thebtf/mcp-mux) (transparent MCP multiplexer), netcoredbg-mcp operates in **session-aware mode**:
+
+- Server declares `x-mux: {sharing: "session-aware"}` capability
+- Each request carries `_meta.muxSessionId` identifying the calling agent
+- First agent to call a mutating tool (start_debug, step, etc.) **claims ownership**
+- Other agents get: *"Debug session is owned by another agent (session sess_XXX)"*
+- Read-only tools (get_variables, screenshots) work for **all agents**
+- Ownership **auto-releases** after 60 seconds of inactivity
+
+This enables safe parallel work — one agent debugs while others observe.
+
+---
+
 ## Architecture
 
 ```mermaid
@@ -714,7 +774,7 @@ graph TB
 
 ### How It Works
 
-1. **MCP Layer** — `server.py` registers 42 tools, 4 resources, and 7 prompts via FastMCP
+1. **MCP Layer** — `server.py` registers 43 tools, 4 resources, and 7 prompts via FastMCP
 2. **Tool Modules** — 6 focused modules (debug, breakpoints, inspection, output, UI, process) keep the server thin
 3. **Session Manager** — Manages debug session lifecycle, state machine, path validation, event handling
 4. **DAP Client** — Communicates with netcoredbg via Debug Adapter Protocol (JSON-RPC over stdio)
