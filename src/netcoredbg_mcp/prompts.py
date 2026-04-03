@@ -269,6 +269,17 @@ pywinauto is used as fallback — works for most controls.
 | Drag | ui_drag(from_automation_id="src", to_automation_id="dst") |
 | Complex keys | ui_set_focus(automation_id="grid") then ui_send_keys_focused(keys="^{END}") |
 
+## Key Syntax Quick Reference
+
+Modifier prefixes apply to the NEXT character or {KEY}:
+- `^` = Ctrl, `%` = Alt, `+` = Shift
+- Alt+Z → `"%z"`, Ctrl+C → `"^c"`, Shift+Tab → `"+{TAB}"`
+- Alt+F4 → `"%{F4}"`, Ctrl+Shift+S → `"^+s"`
+- Special keys in braces: `{ENTER}`, `{TAB}`, `{ESC}`, `{LEFT}`, `{RIGHT}`, `{UP}`, `{DOWN}`
+
+WRONG: `"{ALT}z"`, `"Alt+Z"`, `"{ALT}{Z}"`
+RIGHT: `"%z"`
+
 ## "App Doesn't Respond" Checklist
 
 1. get_debug_state() — is it STOPPED? If yes, you hit a breakpoint. Resume.

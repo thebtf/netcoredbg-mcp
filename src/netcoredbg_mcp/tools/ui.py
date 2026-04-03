@@ -106,7 +106,9 @@ def register_ui_tools(
         try:
             ui = await _ensure_ui_connected()
             tree = await ui.get_window_tree(max_depth, max_children)
-            return build_response(data=tree.to_dict(), state=session.state.state)
+            # Backend returns dict directly (both FlaUI and pywinauto)
+            data = tree if isinstance(tree, dict) else tree.to_dict()
+            return build_response(data=data, state=session.state.state)
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
@@ -211,18 +213,23 @@ def register_ui_tools(
         Tries cached coordinates first (click to focus, then send keys),
         then falls back to pywinauto element search.
 
-        Uses pywinauto keyboard syntax:
-        - Regular text: "hello"
-        - Enter: "{ENTER}"
-        - Tab: "{TAB}"
-        - Escape: "{ESC}"
-        - Ctrl+C: "^c"
-        - Alt+F4: "%{F4}"
+        Key syntax (modifiers are PREFIX characters, special keys in braces):
+        - Regular text: "hello world"
+        - Modifiers: ^ = Ctrl, % = Alt, + = Shift
+        - Alt+Z: "%z"    Alt+F4: "%{F4}"
+        - Ctrl+C: "^c"   Ctrl+Shift+S: "^+s"
         - Shift+Tab: "+{TAB}"
-        - Ctrl+Shift+S: "^+s"
+        - Special keys: {ENTER} {TAB} {ESC} {DELETE} {BACKSPACE}
+        - Arrow keys: {LEFT} {RIGHT} {UP} {DOWN}
+        - Navigation: {HOME} {END} {PGUP} {PGDN}
+        - Function keys: {F1} {F2} ... {F12}
+        - Combined: Ctrl+End = "^{END}", Alt+Z = "%z"
+
+        IMPORTANT: Modifier prefixes (^%+) apply to the NEXT character or {KEY}.
+        For Alt+Z send "%z" (NOT "{ALT}z" or "Alt+Z").
 
         Args:
-            keys: Keys to send (pywinauto syntax)
+            keys: Keys to send (see syntax above)
             automation_id: Target element's AutomationId
             name: Target element's Name
             control_type: Target element's control type
@@ -269,15 +276,18 @@ def register_ui_tools(
         1. ui_set_focus(automation_id="MyElement")  # Focus the element
         2. ui_send_keys_focused(keys="^{END}")      # Send keys without re-search
 
-        Uses pywinauto keyboard syntax:
-        - Regular text: "hello"
-        - Enter: "{ENTER}", Tab: "{TAB}", Escape: "{ESC}"
-        - Ctrl+C: "^c", Alt+F4: "%{F4}", Shift+Tab: "+{TAB}"
-        - Arrow keys: "{LEFT}", "{RIGHT}", "{UP}", "{DOWN}"
-        - Ctrl+End: "^{END}", Ctrl+Home: "^{HOME}"
+        Key syntax (modifiers are PREFIX characters, special keys in braces):
+        - ^ = Ctrl, % = Alt, + = Shift
+        - Alt+Z: "%z"    Ctrl+C: "^c"    Shift+Tab: "+{TAB}"
+        - Special: {ENTER} {TAB} {ESC} {DELETE} {BACKSPACE}
+        - Arrows: {LEFT} {RIGHT} {UP} {DOWN}
+        - Navigation: {HOME} {END} {PGUP} {PGDN}
+        - Combined: Ctrl+End = "^{END}", Ctrl+Home = "^{HOME}"
+
+        IMPORTANT: For Alt+Z send "%z" (NOT "{ALT}z").
 
         Args:
-            keys: Keys to send (pywinauto syntax)
+            keys: Keys to send (see syntax above)
         """
         try:
             access_error = check_session_access(ctx)
