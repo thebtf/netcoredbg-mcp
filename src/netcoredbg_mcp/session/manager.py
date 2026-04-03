@@ -598,6 +598,10 @@ class SessionManager:
         await self._client.configuration_done()
         self._set_state(DebugState.RUNNING)
 
+        # Generate session ID for temp dir isolation
+        import uuid
+        self._session_id = uuid.uuid4().hex[:12]
+
         return {"success": True, "processId": process_id}
 
     async def stop(self) -> dict[str, Any]:
