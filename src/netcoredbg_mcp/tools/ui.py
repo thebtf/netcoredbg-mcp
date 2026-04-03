@@ -373,8 +373,9 @@ def register_ui_tools(
     ) -> Any:
         """Take a screenshot of the debugged application's window.
 
-        Returns inline ImageContent (WebP preview ≤480px) for LLM vision
-        plus TextContent with metadata and HD file path.
+        Returns inline ImageContent (WebP preview ≤480px) directly to your
+        vision pipeline, plus TextContent with metadata and HD file path.
+        The HD file can be read with the Read tool for full resolution.
 
         Use this to see the actual UI state — what the user would see.
 
@@ -773,14 +774,15 @@ def register_ui_tools(
     ) -> dict:
         """Select items by index in a list/grid control (DataGrid, ListView, ListBox).
 
-        Two strategies (tries both):
+        With FlaUI backend: uses SelectionItemPattern (reliable for virtualized lists).
+        With pywinauto backend: two strategies (tries both):
         1. UIA SelectionItemPattern — works for non-virtualized lists
         2. Coordinate click fallback — clicks items using cached rectangles
            (Ctrl+click for multi-select, plain click for first item)
 
         For WPF virtualized lists (VirtualizingStackPanel), strategy 1 may fail
         because off-screen items don't have UI containers. Strategy 2 uses visible
-        item coordinates from the cache.
+        item coordinates from the cache. FlaUI backend handles this natively.
 
         Args:
             automation_id: AutomationId of the list/grid control
