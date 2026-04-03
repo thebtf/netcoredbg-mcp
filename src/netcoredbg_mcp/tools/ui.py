@@ -385,24 +385,23 @@ def register_ui_tools(
         ctx: Context,
         max_depth: int = 3,
         interactive_only: bool = True,
-        max_width: int = 1920,
+        max_width: int = 1024,
+        format: str = "webp",
+        compact: bool = True,
     ) -> dict:
         """Take a screenshot with numbered UI elements overlaid (Set-of-Mark pattern).
 
-        Returns annotated PNG + element index. Each interactive element gets a
-        numbered label on the screenshot and an entry in the index.
-
-        Use this when you need to:
-        - See the UI AND know which elements are interactive
-        - Find elements that are hard to locate by name/AutomationId
-        - Understand spatial relationships between elements
+        Returns annotated WebP image + compact element index.
+        Each interactive element gets a numbered label on the screenshot.
 
         Use ui_click_annotated(element_id) to interact with elements by number.
 
         Args:
             max_depth: How deep to traverse the UI tree (default 3)
-            interactive_only: Only show interactive elements like buttons/textboxes (default True)
-            max_width: Maximum image width; downsamples if exceeded (default 1920)
+            interactive_only: Only interactive elements (default True)
+            max_width: Max image width (default 1024)
+            format: Image format: "webp" (smallest), "jpeg", "png"
+            compact: Compact element index — id+name only (default True, saves ~60KB)
         """
         nonlocal _last_annotation, _annotation_generation
 
@@ -459,21 +458,38 @@ def register_ui_tools(
                 "generation": _annotation_generation,
             }
 
+            # Convert to optimal format
+            from ..ui.screenshot import _process_screenshot
+            img_bytes, final_w, final_h, mime = _process_screenshot(
+                annotated_bytes, max_width=max_width, format=format,
+            )
+
             import base64
+
+            # Build element index — compact (id+name) or full (id+name+type+automationId)
+            if compact:
+                elem_index = [
+                    f"{e['id']}: {e['name'] or e['automationId'] or e['type']}"
+                    for e in elements
+                ]
+            else:
+                elem_index = [
+                    {
+                        "id": e["id"],
+                        "name": e["name"],
+                        "type": e["type"],
+                        "automationId": e["automationId"],
+                    }
+                    for e in elements
+                ]
+
             return build_response(
                 data={
-                    "image": base64.b64encode(annotated_bytes).decode("ascii"),
-                    "width": width,
-                    "height": height,
-                    "elements": [
-                        {
-                            "id": e["id"],
-                            "name": e["name"],
-                            "type": e["type"],
-                            "automationId": e["automationId"],
-                        }
-                        for e in elements
-                    ],
+                    "image": base64.b64encode(img_bytes).decode("ascii"),
+                    "mimeType": mime,
+                    "width": final_w,
+                    "height": final_h,
+                    "elements": elem_index,
                     "element_count": len(elements),
                     "generation": _annotation_generation,
                 },
