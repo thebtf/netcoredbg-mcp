@@ -136,6 +136,9 @@ def register_ui_tools(
         """
         Set keyboard focus to a UI element.
 
+        Tries cached coordinates first (click to focus), then falls back to
+        pywinauto element search.
+
         Call this before ui_send_keys to ensure keys go to the right element.
 
         Args:
@@ -148,9 +151,23 @@ def register_ui_tools(
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
 
+            # Try cache first — click to set focus
+            if automation_id:
+                ui = await _ensure_ui_connected()
+                rect = ui.get_cached_rect(automation_id)
+                if rect:
+                    cx = (rect["left"] + rect["right"]) // 2
+                    cy = (rect["top"] + rect["bottom"]) // 2
+                    await ui._click_at_coords(cx, cy)
+                    return build_response(
+                        data={"focused": True, "method": "cache"},
+                        state=session.state.state,
+                    )
+
+            # Fallback to element search
             ui, element = await _find_ui_element(automation_id, name, control_type)
             await ui.set_focus(element)
-            return build_response(data={"focused": True}, state=session.state.state)
+            return build_response(data={"focused": True, "method": "element_search"}, state=session.state.state)
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
@@ -164,6 +181,9 @@ def register_ui_tools(
     ) -> dict:
         """
         Send keyboard input to a UI element.
+
+        Tries cached coordinates first (click to focus, then send keys),
+        then falls back to pywinauto element search.
 
         Uses pywinauto keyboard syntax:
         - Regular text: "hello"
@@ -186,9 +206,24 @@ def register_ui_tools(
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
 
+            # Try cache first — click to focus, then send keys without element search
+            if automation_id:
+                ui = await _ensure_ui_connected()
+                rect = ui.get_cached_rect(automation_id)
+                if rect:
+                    cx = (rect["left"] + rect["right"]) // 2
+                    cy = (rect["top"] + rect["bottom"]) // 2
+                    await ui._click_at_coords(cx, cy)
+                    await ui.send_keys_focused(keys)
+                    return build_response(
+                        data={"sent": keys, "method": "cache"},
+                        state=session.state.state,
+                    )
+
+            # Fallback to element search
             ui, element = await _find_ui_element(automation_id, name, control_type)
             await ui.send_keys(element, keys)
-            return build_response(data={"sent": keys}, state=session.state.state)
+            return build_response(data={"sent": keys, "method": "element_search"}, state=session.state.state)
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
@@ -237,6 +272,9 @@ def register_ui_tools(
         """
         Click on a UI element.
 
+        Tries cached coordinates first (from last ui_get_window_tree call),
+        then falls back to pywinauto element search.
+
         Args:
             automation_id: AutomationId property
             name: Element's Name/Title property
@@ -247,26 +285,69 @@ def register_ui_tools(
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
 
+            # Try cache first (fast, reliable)
+            if automation_id:
+                ui = await _ensure_ui_connected()
+                rect = ui.get_cached_rect(automation_id)
+                if rect:
+                    cx = (rect["left"] + rect["right"]) // 2
+                    cy = (rect["top"] + rect["bottom"]) // 2
+                    await ui._click_at_coords(cx, cy)
+                    return build_response(
+                        data={"clicked": True, "method": "cache", "position": {"x": cx, "y": cy}},
+                        state=session.state.state,
+                    )
+
+            # Fallback to element search
             ui, element = await _find_ui_element(automation_id, name, control_type)
             await ui.click(element)
-            return build_response(data={"clicked": True}, state=session.state.state)
+            return build_response(data={"clicked": True, "method": "element_search"}, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def ui_click_at(ctx: Context, x: int, y: int) -> dict:
+        """Click at absolute screen coordinates.
+
+        Use with ui_get_window_tree rectangle data when element search fails.
+        Get coordinates from the 'rectangle' field in tree output.
+        Click goes to the center: x = (left + right) / 2, y = (top + bottom) / 2
+
+        Args:
+            x: Screen X coordinate
+            y: Screen Y coordinate
+        """
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            ui = await _ensure_ui_connected()
+            await ui._click_at_coords(x, y)
+            return build_response(
+                data={"clicked": True, "position": {"x": x, "y": y}},
+                state=session.state.state,
+            )
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
     # -- Screenshot & annotation tools --
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
-    async def ui_take_screenshot(ctx: Context) -> dict:
+    async def ui_take_screenshot(ctx: Context, max_width: int = 1920) -> dict:
         """Take a screenshot of the debugged application's window.
 
         Returns the screenshot as a base64-encoded PNG image.
-        Use this to see the actual UI state — what the user would see.
+        Use this to see the actual UI state -- what the user would see.
 
         Useful for:
         - Verifying UI rendered correctly after a debug step
         - Finding elements that don't appear in the automation tree
         - Understanding visual layout and spacing
         - Debugging rendering issues
+
+        Args:
+            max_width: Maximum image width; downsamples if exceeded (default 1920)
         """
         try:
             from ..ui.screenshot import get_hwnd_for_pid, capture_window_as_base64
@@ -283,7 +364,9 @@ def register_ui_tools(
                 )
 
             loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(None, lambda: capture_window_as_base64(hwnd))
+            result = await loop.run_in_executor(
+                None, lambda: capture_window_as_base64(hwnd, max_width=max_width),
+            )
 
             return build_response(data=result, state=session.state.state)
         except Exception as e:
@@ -294,6 +377,7 @@ def register_ui_tools(
         ctx: Context,
         max_depth: int = 3,
         interactive_only: bool = True,
+        max_width: int = 1920,
     ) -> dict:
         """Take a screenshot with numbered UI elements overlaid (Set-of-Mark pattern).
 
@@ -310,6 +394,7 @@ def register_ui_tools(
         Args:
             max_depth: How deep to traverse the UI tree (default 3)
             interactive_only: Only show interactive elements like buttons/textboxes (default True)
+            max_width: Maximum image width; downsamples if exceeded (default 1920)
         """
         nonlocal _last_annotation
 
@@ -352,9 +437,9 @@ def register_ui_tools(
             ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
             window_rect = (rect.left, rect.top, rect.right, rect.bottom)
 
-            # Annotate screenshot
+            # Annotate screenshot (with optional downsampling)
             annotated_bytes = await loop.run_in_executor(
-                None, lambda: annotate_screenshot(png_bytes, elements, window_rect),
+                None, lambda: annotate_screenshot(png_bytes, elements, window_rect, max_width),
             )
 
             # Cache elements for ui_click_annotated
@@ -519,6 +604,8 @@ def register_ui_tools(
     ) -> dict:
         """Right-click on a UI element to open context menu.
 
+        Tries cached coordinates first, then falls back to pywinauto element search.
+
         Args:
             automation_id: AutomationId property
             name: Element's Name/Title property
@@ -529,6 +616,20 @@ def register_ui_tools(
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
 
+            # Try cache first
+            if automation_id:
+                ui = await _ensure_ui_connected()
+                rect = ui.get_cached_rect(automation_id)
+                if rect:
+                    cx = (rect["left"] + rect["right"]) // 2
+                    cy = (rect["top"] + rect["bottom"]) // 2
+                    await ui._right_click_at_coords(cx, cy)
+                    return build_response(
+                        data={"right_clicked": True, "method": "cache", "position": {"x": cx, "y": cy}},
+                        state=session.state.state,
+                    )
+
+            # Fallback to element search
             ui, element = await _find_ui_element(automation_id, name, control_type)
 
             def _right_click() -> None:
@@ -539,7 +640,7 @@ def register_ui_tools(
                 loop.run_in_executor(None, _right_click), timeout=5.0,
             )
 
-            return build_response(data={"right_clicked": True}, state=session.state.state)
+            return build_response(data={"right_clicked": True, "method": "element_search"}, state=session.state.state)
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
@@ -552,6 +653,8 @@ def register_ui_tools(
     ) -> dict:
         """Double-click on a UI element.
 
+        Tries cached coordinates first, then falls back to pywinauto element search.
+
         Args:
             automation_id: AutomationId property
             name: Element's Name/Title property
@@ -562,6 +665,20 @@ def register_ui_tools(
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
 
+            # Try cache first
+            if automation_id:
+                ui = await _ensure_ui_connected()
+                rect = ui.get_cached_rect(automation_id)
+                if rect:
+                    cx = (rect["left"] + rect["right"]) // 2
+                    cy = (rect["top"] + rect["bottom"]) // 2
+                    await ui._double_click_at_coords(cx, cy)
+                    return build_response(
+                        data={"double_clicked": True, "method": "cache", "position": {"x": cx, "y": cy}},
+                        state=session.state.state,
+                    )
+
+            # Fallback to element search
             ui, element = await _find_ui_element(automation_id, name, control_type)
 
             def _double_click() -> None:
@@ -572,7 +689,7 @@ def register_ui_tools(
                 loop.run_in_executor(None, _double_click), timeout=5.0,
             )
 
-            return build_response(data={"double_clicked": True}, state=session.state.state)
+            return build_response(data={"double_clicked": True, "method": "element_search"}, state=session.state.state)
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 

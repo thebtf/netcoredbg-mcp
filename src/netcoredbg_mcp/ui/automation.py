@@ -31,6 +31,7 @@ class UIAutomation:
         self._executor = ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="ui_auto"
         )
+        self._element_cache: dict[str, dict] = {}  # automationId -> {rect, name, control_type}
 
     @property
     def process_id(self) -> int | None:
@@ -90,6 +91,83 @@ class UIAutomation:
                 logger.warning(f"Error during disconnect cleanup: {e}")
             finally:
                 self._process_id = None
+                self._element_cache.clear()
+
+    def _populate_cache(self, element_info: ElementInfo) -> None:
+        """Walk an ElementInfo tree and cache elements that have an automationId."""
+        if element_info.automation_id:
+            self._element_cache[element_info.automation_id] = {
+                "rect": dict(element_info.rectangle),
+                "name": element_info.name,
+                "control_type": element_info.control_type,
+            }
+        for child in element_info.children:
+            self._populate_cache(child)
+
+    def get_cached_rect(self, automation_id: str) -> dict | None:
+        """Return cached rectangle for an automationId, or None if not cached."""
+        entry = self._element_cache.get(automation_id)
+        if entry is not None:
+            return entry.get("rect")
+        return None
+
+    def clear_cache(self) -> None:
+        """Clear the element cache."""
+        self._element_cache.clear()
+
+    async def _click_at_coords(self, x: int, y: int) -> None:
+        """Click at absolute screen coordinates using Win32 mouse_event."""
+
+        def _click():
+            import ctypes
+            import time
+
+            ctypes.windll.user32.SetCursorPos(x, y)
+            time.sleep(0.05)
+            MOUSEEVENTF_LEFTDOWN = 0x0002
+            MOUSEEVENTF_LEFTUP = 0x0004
+            ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+            ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(self._executor, _click)
+
+    async def _right_click_at_coords(self, x: int, y: int) -> None:
+        """Right-click at absolute screen coordinates using Win32 mouse_event."""
+
+        def _click():
+            import ctypes
+            import time
+
+            ctypes.windll.user32.SetCursorPos(x, y)
+            time.sleep(0.05)
+            MOUSEEVENTF_RIGHTDOWN = 0x0008
+            MOUSEEVENTF_RIGHTUP = 0x0010
+            ctypes.windll.user32.mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
+            ctypes.windll.user32.mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(self._executor, _click)
+
+    async def _double_click_at_coords(self, x: int, y: int) -> None:
+        """Double-click at absolute screen coordinates using Win32 mouse_event."""
+
+        def _click():
+            import ctypes
+            import time
+
+            ctypes.windll.user32.SetCursorPos(x, y)
+            time.sleep(0.05)
+            MOUSEEVENTF_LEFTDOWN = 0x0002
+            MOUSEEVENTF_LEFTUP = 0x0004
+            ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+            ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+            time.sleep(0.05)
+            ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+            ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(self._executor, _click)
 
     async def get_window_tree(
         self, max_depth: int = 3, max_children: int = 50
@@ -131,6 +209,9 @@ class UIAutomation:
             tree = await asyncio.wait_for(
                 loop.run_in_executor(self._executor, _get_tree), timeout=10.0
             )
+            # Populate element cache from the tree walk
+            self._element_cache = {}
+            self._populate_cache(tree)
             return tree
         except asyncio.TimeoutError as e:
             logger.error("Window tree retrieval timed out")
