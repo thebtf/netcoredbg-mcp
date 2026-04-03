@@ -629,26 +629,35 @@ def register_ui_tools(
         VK_CONTROL = 0x11
         KEYEVENTF_KEYUP = 0x0002
 
-        for idx_num, target_idx in enumerate(indices):
+        # Click first item (plain click to set initial selection)
+        first_done = False
+        for target_idx in indices:
             if target_idx >= len(child_items):
-                continue  # Index out of range for visible items
-
+                continue
             rect = child_items[target_idx]
             cx = (rect["left"] + rect["right"]) // 2
             cy = (rect["top"] + rect["bottom"]) // 2
-
-            if idx_num == 0 and mode == "replace":
-                await ui_inst._click_at_coords(cx, cy)
-            else:
-                # Ctrl+click for multi-select
-                ctypes.windll.user32.keybd_event(VK_CONTROL, 0, 0, 0)
-                try:
-                    await ui_inst._click_at_coords(cx, cy)
-                finally:
-                    ctypes.windll.user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
-
+            await ui_inst._click_at_coords(cx, cy)
             selected += 1
-            await asyncio.sleep(0.05)  # Small delay between clicks
+            first_done = True
+            break
+
+        # Remaining items: hold Ctrl for entire sequence, click each
+        remaining = [i for i in indices if i != indices[0] and i < len(child_items)]
+        if remaining and first_done:
+            # Press Ctrl ONCE before all remaining clicks
+            ctypes.windll.user32.keybd_event(VK_CONTROL, 0, 0, 0)
+            try:
+                for target_idx in remaining:
+                    rect = child_items[target_idx]
+                    cx = (rect["left"] + rect["right"]) // 2
+                    cy = (rect["top"] + rect["bottom"]) // 2
+                    await asyncio.sleep(0.05)
+                    await ui_inst._click_at_coords(cx, cy)
+                    selected += 1
+            finally:
+                # ALWAYS release Ctrl
+                ctypes.windll.user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
 
         return selected
 
