@@ -22,22 +22,22 @@ def register_ui_tools(
     """Register UI automation tools on the MCP server."""
     from mcp.types import ToolAnnotations
 
-    # Lazy-loaded UI automation instance
-    _ui_holder: dict[str, Any] = {"instance": None}
+    # Lazy-loaded UI backend instance (FlaUI or pywinauto)
+    _backend_holder: dict[str, Any] = {"instance": None}
 
     # Cache for last annotated screenshot (used by ui_click_annotated)
     _last_annotation: dict[str, Any] | None = None
     _annotation_generation: int = 0
 
-    def _get_ui() -> Any:
-        """Get or create UI automation instance."""
-        if _ui_holder["instance"] is None:
-            from ..ui import UIAutomation
-            _ui_holder["instance"] = UIAutomation()
-        return _ui_holder["instance"]
+    def _get_backend() -> Any:
+        """Get or create UI backend (FlaUI preferred, pywinauto fallback)."""
+        if _backend_holder["instance"] is None:
+            from ..ui.backend import create_backend
+            _backend_holder["instance"] = create_backend()
+        return _backend_holder["instance"]
 
     async def _ensure_ui_connected() -> Any:
-        """Ensure UI automation is connected to the debug process.
+        """Ensure UI backend is connected to the debug process.
 
         Raises:
             NoActiveSessionError: If no debug session is active
@@ -54,18 +54,31 @@ def register_ui_tools(
                 "Process ID not available. Debug session may not have started the process yet."
             )
 
-        ui = _get_ui()
-        if ui.process_id != process_id:
-            await ui.connect(process_id)
-        return ui
+        backend = _get_backend()
+        if backend.process_id != process_id:
+            await backend.connect(process_id)
+        return backend
 
     async def _find_ui_element(
         automation_id: str | None = None,
         name: str | None = None,
         control_type: str | None = None,
     ):
-        """Helper to connect to UI and find an element."""
+        """Helper to connect and find element (pywinauto fallback path).
+
+        Returns (backend, element) where element is a pywinauto wrapper.
+        For FlaUI backend, the element is the find_element dict result.
+        """
         ui = await _ensure_ui_connected()
+        from ..ui.pywinauto_backend import PywinautoBackend
+        if isinstance(ui, PywinautoBackend):
+            element = await ui.inner.find_element(
+                automation_id=automation_id,
+                name=name,
+                control_type=control_type,
+            )
+            return ui, element
+        # FlaUI backend: find_element returns a dict
         element = await ui.find_element(
             automation_id=automation_id,
             name=name,
@@ -155,11 +168,11 @@ def register_ui_tools(
             # Try cache first — click to set focus
             if automation_id:
                 ui = await _ensure_ui_connected()
-                rect = ui.get_cached_rect(automation_id)
+                rect = (ui.element_cache.get(automation_id) or {}).get("rect")
                 if rect:
                     cx = (rect["left"] + rect["right"]) // 2
                     cy = (rect["top"] + rect["bottom"]) // 2
-                    await ui._click_at_coords(cx, cy)
+                    await ui.click_at(cx, cy)
                     return build_response(
                         data={"focused": True, "method": "cache"},
                         state=session.state.state,
@@ -210,11 +223,11 @@ def register_ui_tools(
             # Try cache first — click to focus, then send keys without element search
             if automation_id:
                 ui = await _ensure_ui_connected()
-                rect = ui.get_cached_rect(automation_id)
+                rect = (ui.element_cache.get(automation_id) or {}).get("rect")
                 if rect:
                     cx = (rect["left"] + rect["right"]) // 2
                     cy = (rect["top"] + rect["bottom"]) // 2
-                    await ui._click_at_coords(cx, cy)
+                    await ui.click_at(cx, cy)
                     await ui.send_keys_focused(keys)
                     return build_response(
                         data={"sent": keys, "method": "cache"},
@@ -289,11 +302,11 @@ def register_ui_tools(
             # Try cache first (fast, reliable)
             if automation_id:
                 ui = await _ensure_ui_connected()
-                rect = ui.get_cached_rect(automation_id)
+                rect = (ui.element_cache.get(automation_id) or {}).get("rect")
                 if rect:
                     cx = (rect["left"] + rect["right"]) // 2
                     cy = (rect["top"] + rect["bottom"]) // 2
-                    await ui._click_at_coords(cx, cy)
+                    await ui.click_at(cx, cy)
                     return build_response(
                         data={"clicked": True, "method": "cache", "position": {"x": cx, "y": cy}},
                         state=session.state.state,
@@ -309,11 +322,11 @@ def register_ui_tools(
                 # try coordinate click from element's bounding rectangle
                 if automation_id:
                     ui = await _ensure_ui_connected()
-                    rect = ui.get_cached_rect(automation_id)
+                    rect = (ui.element_cache.get(automation_id) or {}).get("rect")
                     if rect:
                         cx = (rect["left"] + rect["right"]) // 2
                         cy = (rect["top"] + rect["bottom"]) // 2
-                        await ui._click_at_coords(cx, cy)
+                        await ui.click_at(cx, cy)
                         return build_response(
                             data={"clicked": True, "method": "coord_fallback", "position": {"x": cx, "y": cy}},
                             state=session.state.state,
@@ -340,7 +353,7 @@ def register_ui_tools(
                 return build_error_response(access_error, state=session.state.state)
 
             ui = await _ensure_ui_connected()
-            await ui._click_at_coords(x, y)
+            await ui.click_at(x, y)
             return build_response(
                 data={"clicked": True, "position": {"x": x, "y": y}},
                 state=session.state.state,
@@ -489,9 +502,7 @@ def register_ui_tools(
                     state=session.state.state,
                 )
 
-            ui = _get_ui()
-            if ui.process_id != pid:
-                await ui.connect(pid)
+            backend = await _ensure_ui_connected()
 
             loop = asyncio.get_running_loop()
 
@@ -500,9 +511,19 @@ def register_ui_tools(
                 None, lambda: capture_window(hwnd),
             )
 
-            # Collect elements
+            # Collect elements — needs pywinauto _app access
+            from ..ui.pywinauto_backend import PywinautoBackend
+            if isinstance(backend, PywinautoBackend):
+                app = backend.inner._app
+            else:
+                # FlaUI backend: fall back to connecting pywinauto just for element collection
+                from ..ui import UIAutomation
+                _fallback_ui = UIAutomation()
+                await _fallback_ui.connect(pid)
+                app = _fallback_ui._app
+
             elements = await loop.run_in_executor(
-                None, lambda: collect_visible_elements(ui._app, max_depth, interactive_only),
+                None, lambda: collect_visible_elements(app, max_depth, interactive_only),
             )
 
             # Get window screen position for coordinate conversion
@@ -645,7 +666,7 @@ def register_ui_tools(
             center_y = bounds["y"] + bounds["height"] // 2
 
             ui = await _ensure_ui_connected()
-            await ui._click_at_coords(center_x, center_y)
+            await ui.click_at(center_x, center_y)
 
             response_data: dict[str, Any] = {
                 "clicked": True,
@@ -845,11 +866,11 @@ def register_ui_tools(
             # Try cache first
             if automation_id:
                 ui = await _ensure_ui_connected()
-                rect = ui.get_cached_rect(automation_id)
+                rect = (ui.element_cache.get(automation_id) or {}).get("rect")
                 if rect:
                     cx = (rect["left"] + rect["right"]) // 2
                     cy = (rect["top"] + rect["bottom"]) // 2
-                    await ui._right_click_at_coords(cx, cy)
+                    await ui.right_click_at(cx, cy)
                     return build_response(
                         data={"right_clicked": True, "method": "cache", "position": {"x": cx, "y": cy}},
                         state=session.state.state,
@@ -894,11 +915,11 @@ def register_ui_tools(
             # Try cache first
             if automation_id:
                 ui = await _ensure_ui_connected()
-                rect = ui.get_cached_rect(automation_id)
+                rect = (ui.element_cache.get(automation_id) or {}).get("rect")
                 if rect:
                     cx = (rect["left"] + rect["right"]) // 2
                     cy = (rect["top"] + rect["bottom"]) // 2
-                    await ui._double_click_at_coords(cx, cy)
+                    await ui.double_click_at(cx, cy)
                     return build_response(
                         data={"double_clicked": True, "method": "cache", "position": {"x": cx, "y": cy}},
                         state=session.state.state,
@@ -995,7 +1016,7 @@ def register_ui_tools(
             fx, fy, tx, ty = from_x, from_y, to_x, to_y
 
             if from_automation_id and not (fx and fy):
-                from_rect = ui.get_cached_rect(from_automation_id)
+                from_rect = (ui.element_cache.get(from_automation_id) or {}).get("rect")
                 if from_rect:
                     fx = (from_rect["left"] + from_rect["right"]) // 2
                     fy = (from_rect["top"] + from_rect["bottom"]) // 2
@@ -1006,7 +1027,7 @@ def register_ui_tools(
                     )
 
             if to_automation_id and not (tx and ty):
-                to_rect = ui.get_cached_rect(to_automation_id)
+                to_rect = (ui.element_cache.get(to_automation_id) or {}).get("rect")
                 if to_rect:
                     tx = (to_rect["left"] + to_rect["right"]) // 2
                     ty = (to_rect["top"] + to_rect["bottom"]) // 2
@@ -1022,7 +1043,7 @@ def register_ui_tools(
                     state=session.state.state,
                 )
 
-            await ui._drag_at_coords(fx, fy, tx, ty)
+            await ui.drag(fx, fy, tx, ty)
 
             return build_response(
                 data={"dragged": True, "from": {"x": fx, "y": fy}, "to": {"x": tx, "y": ty}},
