@@ -275,7 +275,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         Contains: stdout/stderr from debugged process.
         Updates when: new output arrives.
         """
-        return "".join(session.state.output_buffer)
+        return "".join(e.text for e in session.state.output_buffer)
 
     @mcp.resource("debug://threads", mime_type="application/json")
     async def debug_threads_resource() -> str:

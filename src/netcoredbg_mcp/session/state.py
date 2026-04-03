@@ -217,6 +217,34 @@ class Variable:
 
 
 @dataclass
+class OutputEntry:
+    """Single output buffer entry with category metadata."""
+    text: str
+    category: str = "console"  # stdout, stderr, console
+
+
+@dataclass
+class ModuleInfo:
+    """Loaded module/assembly information from DAP module events."""
+    id: int | str = 0
+    name: str = ""
+    path: str | None = None
+    version: str | None = None
+    is_optimized: bool = False
+    symbol_status: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "path": self.path,
+            "version": self.version,
+            "isOptimized": self.is_optimized,
+            "symbolStatus": self.symbol_status,
+        }
+
+
+@dataclass
 class StoppedSnapshot:
     """Snapshot of state when execution stops (or times out).
 
@@ -230,6 +258,8 @@ class StoppedSnapshot:
     exit_code: int | None = None
     exception_info: dict[str, Any] | None = None
     process_alive: bool = True
+    description: str | None = None
+    text: str | None = None
 
 
 @dataclass
@@ -240,11 +270,15 @@ class SessionState:
     stop_reason: str | None = None
     threads: list[ThreadInfo] = field(default_factory=list)
     current_frame_id: int | None = None
-    output_buffer: deque[str] = field(default_factory=deque)
+    output_buffer: deque[OutputEntry] = field(default_factory=deque)
     exit_code: int | None = None
     exception_info: dict[str, Any] | None = None
     process_id: int | None = None
     process_name: str | None = None
+    modules: list[ModuleInfo] = field(default_factory=list)
+    hit_counts: dict[tuple[str, int], int] = field(default_factory=dict)
+    stop_description: str | None = None
+    stop_text: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -258,4 +292,7 @@ class SessionState:
             "exceptionInfo": self.exception_info,
             "processId": self.process_id,
             "processName": self.process_name,
+            "modules": [m.to_dict() for m in self.modules],
+            "stopDescription": self.stop_description,
+            "stopText": self.stop_text,
         }

@@ -365,7 +365,7 @@ class TestEventHandlers:
             )
             manager._on_output(event)
 
-            assert "Hello\n" in manager.state.output_buffer
+            assert any(e.text == "Hello\n" for e in manager.state.output_buffer)
 
     def test_output_buffer_limit(self):
         """Test output buffer doesn't grow unbounded (byte-based limit)."""
@@ -384,7 +384,7 @@ class TestEventHandlers:
                 manager._on_output(event)
 
             # Buffer should be trimmed (10MB / ~1KB per entry = ~10000 entries max)
-            total_bytes = sum(len(s) for s in manager.state.output_buffer)
+            total_bytes = sum(len(e.text) for e in manager.state.output_buffer)
             assert total_bytes <= 10_000_000  # MAX_OUTPUT_BYTES
 
 

@@ -38,6 +38,11 @@ class DAPClient:
         self._buffer = b""
         self._capabilities: dict[str, Any] = {}
 
+    @property
+    def capabilities(self) -> dict[str, Any]:
+        """Get the adapter capabilities from initialize response."""
+        return dict(self._capabilities)
+
     def _find_netcoredbg(self) -> str:
         """Find netcoredbg executable."""
         # Check environment variable
@@ -361,6 +366,10 @@ class DAPClient:
     async def pause(self, thread_id: int) -> DAPResponse:
         """Pause execution."""
         return await self.send_request(Commands.PAUSE, {"threadId": thread_id})
+
+    async def terminate(self) -> DAPResponse:
+        """Send terminate request for graceful shutdown."""
+        return await self.send_request(Commands.TERMINATE)
 
     async def threads(self) -> DAPResponse:
         """Get all threads."""

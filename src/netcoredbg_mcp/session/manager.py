@@ -298,6 +298,8 @@ class SessionManager:
 
     def _on_output(self, event: DAPEvent) -> None:
         """Handle output event."""
+        from .state import OutputEntry
+
         body = OutputEventBody.from_dict(event.body)
         output = body.output
 
@@ -305,13 +307,14 @@ class SessionManager:
         if len(output) > MAX_OUTPUT_ENTRY:
             output = output[:MAX_OUTPUT_ENTRY] + "... [truncated]"
 
-        self._state.output_buffer.append(output)
+        entry = OutputEntry(text=output, category=body.category.value)
+        self._state.output_buffer.append(entry)
         self._output_bytes += len(output)
 
         # Trim buffer by byte size (security: prevent DoS)
         while self._output_bytes > MAX_OUTPUT_BYTES and self._state.output_buffer:
             removed = self._state.output_buffer.popleft()
-            self._output_bytes -= len(removed)
+            self._output_bytes -= len(removed.text)
 
     def _on_thread(self, event: DAPEvent) -> None:
         """Handle thread event."""
