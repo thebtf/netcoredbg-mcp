@@ -1088,3 +1088,272 @@ def register_ui_tools(
             )
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
+
+    # -- Read / query tools --
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    async def ui_get_selected_item(automation_id: str) -> dict:
+        """Get the currently selected item in a list/grid control.
+
+        Returns the selected item's name, index, and properties.
+        Useful for verifying selection state after clicks or keyboard navigation.
+
+        Args:
+            automation_id: AutomationId of the list/grid/combobox control
+        """
+        try:
+            ui = await _ensure_ui_connected()
+
+            def _get_selected() -> dict[str, Any]:
+                from ..ui.pywinauto_backend import PywinautoBackend
+                if isinstance(ui, PywinautoBackend):
+                    window = ui.inner._app.top_window()
+                    control = window.child_window(auto_id=automation_id)
+                    control.wait("exists", timeout=5)
+
+                    # Try SelectionPattern via iface_selection
+                    try:
+                        selection = control.iface_selection.GetCurrentSelection()
+                        if selection and selection.Length > 0:
+                            selected_elem = selection.GetElement(0)
+                            from pywinauto.uia_element_info import UIAElementInfo
+                            elem_info = UIAElementInfo(selected_elem)
+                            from pywinauto.controls.uiawrapper import UIAWrapper
+                            wrapper = UIAWrapper(elem_info)
+                            children = control.children()
+                            idx = -1
+                            for i, child in enumerate(children):
+                                try:
+                                    if child.element_info.runtime_id == wrapper.element_info.runtime_id:
+                                        idx = i
+                                        break
+                                except Exception:
+                                    pass
+                            return {
+                                "index": idx,
+                                "name": wrapper.element_info.name or "",
+                                "automationId": getattr(wrapper.element_info, "automation_id", "") or "",
+                                "controlType": wrapper.element_info.control_type or "",
+                            }
+                    except Exception:
+                        pass
+
+                    # Fallback: iterate children looking for IsSelected
+                    children = control.children()
+                    for i, child in enumerate(children):
+                        try:
+                            iface = child.iface_selection_item
+                            if iface.IsSelected:
+                                return {
+                                    "index": i,
+                                    "name": child.element_info.name or "",
+                                    "automationId": getattr(child.element_info, "automation_id", "") or "",
+                                    "controlType": child.element_info.control_type or "",
+                                }
+                        except Exception:
+                            continue
+
+                    return {"index": -1, "name": "", "automationId": "", "controlType": ""}
+                else:
+                    return {
+                        "index": -1,
+                        "name": "",
+                        "automationId": "",
+                        "controlType": "",
+                        "warning": "Selection query not yet supported via FlaUI backend",
+                    }
+
+            loop = asyncio.get_running_loop()
+            result = await asyncio.wait_for(
+                loop.run_in_executor(None, _get_selected), timeout=10.0,
+            )
+            return build_response(data=result, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    async def ui_read_text(
+        automation_id: str | None = None,
+        name: str | None = None,
+    ) -> dict:
+        """Read text content from a UI element (TextBox, TextBlock, Label, etc).
+
+        For editable elements (TextBox), reads the current value via ValuePattern.
+        For read-only elements (TextBlock, Label), reads the Name property.
+
+        Args:
+            automation_id: AutomationId property
+            name: Element's Name/Title property
+        """
+        try:
+            ui, element = await _find_ui_element(automation_id=automation_id, name=name)
+
+            def _read_text() -> dict[str, Any]:
+                from ..ui.pywinauto_backend import PywinautoBackend
+                if isinstance(ui, PywinautoBackend):
+                    info = element.element_info
+                    control_type = info.control_type or ""
+                    auto_id = getattr(info, "automation_id", "") or ""
+
+                    # Try ValuePattern for editable controls (TextBox, Edit)
+                    try:
+                        iface = element.iface_value
+                        return {
+                            "text": iface.Value or "",
+                            "controlType": control_type,
+                            "automationId": auto_id,
+                        }
+                    except Exception:
+                        pass
+
+                    # Fallback: use Name property (TextBlock, Label, etc.)
+                    return {
+                        "text": info.name or "",
+                        "controlType": control_type,
+                        "automationId": auto_id,
+                    }
+                else:
+                    # FlaUI backend: element is dict from bridge
+                    elem = element if isinstance(element, dict) else {}
+                    return {
+                        "text": elem.get("value", elem.get("name", "")),
+                        "controlType": elem.get("controlType", ""),
+                        "automationId": elem.get("automationId", ""),
+                    }
+
+            loop = asyncio.get_running_loop()
+            result = await asyncio.wait_for(
+                loop.run_in_executor(None, _read_text), timeout=5.0,
+            )
+            return build_response(data=result, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    async def ui_get_focused_element() -> dict:
+        """Get information about the currently focused UI element.
+
+        Returns the focused element's automationId, name, controlType, and value.
+        Useful for verifying focus state after ui_set_focus or tab navigation.
+        """
+        try:
+            ui = await _ensure_ui_connected()
+
+            def _get_focused() -> dict[str, Any]:
+                from ..ui.pywinauto_backend import PywinautoBackend
+                if isinstance(ui, PywinautoBackend):
+                    import comtypes.client  # noqa: F401
+                    from pywinauto.uia_defines import IUIA
+
+                    iuia = IUIA()
+                    focused = iuia.iuia.GetFocusedElement()
+                    if focused is None:
+                        return {"name": "", "automationId": "", "controlType": "", "value": ""}
+
+                    from pywinauto.uia_element_info import UIAElementInfo
+                    elem_info = UIAElementInfo(focused)
+                    from pywinauto.controls.uiawrapper import UIAWrapper
+                    wrapper = UIAWrapper(elem_info)
+                    info = wrapper.element_info
+
+                    value = ""
+                    try:
+                        value = wrapper.iface_value.Value or ""
+                    except Exception:
+                        pass
+
+                    return {
+                        "name": info.name or "",
+                        "automationId": getattr(info, "automation_id", "") or "",
+                        "controlType": info.control_type or "",
+                        "value": value,
+                    }
+                else:
+                    return {
+                        "name": "",
+                        "automationId": "",
+                        "controlType": "",
+                        "value": "",
+                        "warning": "Focused element query not yet supported via FlaUI backend",
+                    }
+
+            loop = asyncio.get_running_loop()
+            result = await asyncio.wait_for(
+                loop.run_in_executor(None, _get_focused), timeout=5.0,
+            )
+            return build_response(data=result, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    async def ui_wait_for(
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        timeout: float = 5.0,
+    ) -> dict:
+        """Wait for a UI element to appear within timeout.
+
+        Polls every 500ms until the element is found or timeout expires.
+        Useful for waiting for dialogs, popups, or dynamically created elements.
+
+        Args:
+            automation_id: AutomationId to wait for
+            name: Element name to wait for
+            control_type: Control type to wait for
+            timeout: Maximum wait time in seconds (default 5)
+        """
+        try:
+            if not any((automation_id, name, control_type)):
+                return build_error_response(
+                    "At least one search criterion must be provided.",
+                    state=session.state.state,
+                )
+
+            # Clamp timeout to reasonable bounds
+            clamped_timeout = max(0.5, min(timeout, 30.0))
+
+            ui = await _ensure_ui_connected()
+
+            import time as _time
+            from ..ui import ElementNotFoundError
+
+            start = _time.monotonic()
+            poll_interval = 0.5
+            last_error = ""
+
+            while True:
+                elapsed = _time.monotonic() - start
+                if elapsed >= clamped_timeout:
+                    break
+                try:
+                    result = await ui.find_element(
+                        automation_id=automation_id,
+                        name=name,
+                        control_type=control_type,
+                    )
+                    data = result if isinstance(result, dict) else result.to_dict()
+                    return build_response(
+                        data={"found": True, "elapsed": round(elapsed, 2), "element": data},
+                        state=session.state.state,
+                    )
+                except (ElementNotFoundError, TimeoutError, asyncio.TimeoutError):
+                    remaining = clamped_timeout - elapsed
+                    sleep_time = min(poll_interval, remaining)
+                    if sleep_time <= 0:
+                        break
+                    await asyncio.sleep(sleep_time)
+                except Exception as e:
+                    last_error = str(e)
+                    remaining = clamped_timeout - elapsed
+                    sleep_time = min(poll_interval, remaining)
+                    if sleep_time <= 0:
+                        break
+                    await asyncio.sleep(sleep_time)
+
+            return build_error_response(
+                f"Element not found within {clamped_timeout}s. Last error: {last_error}",
+                state=session.state.state,
+            )
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)

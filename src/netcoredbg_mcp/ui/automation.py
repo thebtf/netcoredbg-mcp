@@ -85,6 +85,192 @@ def _send_double_click(x: int, y: int) -> None:
     time.sleep(0.05)
     _send_click(x, y, "left")
 
+def _send_keys_via_input(keys: str) -> None:
+    """Send keyboard input using Win32 SendInput API.
+
+    Parses pywinauto-style key syntax:
+    - Modifiers: ^ (Ctrl), % (Alt), + (Shift)
+    - Grouped modifiers: ^(abc) holds Ctrl for a, b, c
+    - Special keys in braces: {ENTER}, {TAB}, {F1}-{F12}, etc.
+    - Regular characters: typed via VkKeyScanW
+
+    This replaces pywinauto.keyboard.send_keys() which uses WM_KEYDOWN
+    and fails for WPF InputBindings (e.g., Alt+Z).
+    """
+    import ctypes
+    import ctypes.wintypes as wintypes
+    import time
+
+    user32 = ctypes.windll.user32
+
+    INPUT_KEYBOARD = 1
+    KEYEVENTF_KEYUP = 0x0002
+
+    VK_CONTROL = 0x11
+    VK_MENU = 0x12  # Alt
+    VK_SHIFT = 0x10
+
+    VK_MAP = {
+        "ENTER": 0x0D, "RETURN": 0x0D,
+        "TAB": 0x09,
+        "ESC": 0x1B, "ESCAPE": 0x1B,
+        "LEFT": 0x25, "RIGHT": 0x27, "UP": 0x26, "DOWN": 0x28,
+        "HOME": 0x24, "END": 0x23,
+        "PGUP": 0x21, "PGDN": 0x22, "PRIOR": 0x21, "NEXT": 0x22,
+        "DELETE": 0x2E, "DEL": 0x2E,
+        "BACKSPACE": 0x08, "BKSP": 0x08, "BS": 0x08,
+        "SPACE": 0x20,
+        "F1": 0x70, "F2": 0x71, "F3": 0x72, "F4": 0x73,
+        "F5": 0x74, "F6": 0x75, "F7": 0x76, "F8": 0x77,
+        "F9": 0x78, "F10": 0x79, "F11": 0x7A, "F12": 0x7B,
+    }
+
+    MODIFIER_MAP = {
+        "^": VK_CONTROL,
+        "%": VK_MENU,
+        "+": VK_SHIFT,
+    }
+
+    # ── KEYBDINPUT / INPUT structs for SendInput ──
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [
+            ("wVk", wintypes.WORD),
+            ("wScan", wintypes.WORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", ctypes.POINTER(wintypes.ULONG)),
+        ]
+
+    class INPUT(ctypes.Structure):
+        class _INPUT(ctypes.Union):
+            _fields_ = [("ki", KEYBDINPUT)]
+        _fields_ = [
+            ("type", wintypes.DWORD),
+            ("_input", _INPUT),
+        ]
+
+    def _press(vk: int) -> None:
+        inp = INPUT()
+        inp.type = INPUT_KEYBOARD
+        inp._input.ki.wVk = vk
+        inp._input.ki.dwFlags = 0
+        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+
+    def _release(vk: int) -> None:
+        inp = INPUT()
+        inp.type = INPUT_KEYBOARD
+        inp._input.ki.wVk = vk
+        inp._input.ki.dwFlags = KEYEVENTF_KEYUP
+        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+
+    def _tap(vk: int) -> None:
+        _press(vk)
+        time.sleep(0.01)
+        _release(vk)
+
+    def _char_to_vk(ch: str) -> tuple[int, bool, bool, bool]:
+        """Convert a character to (vk_code, needs_shift, needs_ctrl, needs_alt) via VkKeyScanW."""
+        result = user32.VkKeyScanW(ord(ch))
+        if result == -1 or (result & 0xFF) == 0xFF:
+            return (0, False, False, False)
+        vk = result & 0xFF
+        shift = bool(result & 0x100)
+        ctrl = bool(result & 0x200)
+        alt = bool(result & 0x400)
+        return (vk, shift, ctrl, alt)
+
+    def _type_char(ch: str, held_modifiers: list[int]) -> None:
+        """Type a single character, adding Shift/Ctrl/Alt if VkKeyScanW requires them."""
+        vk, needs_shift, needs_ctrl, needs_alt = _char_to_vk(ch)
+        if not vk:
+            return
+        extra_mods: list[int] = []
+        if needs_shift and VK_SHIFT not in held_modifiers:
+            extra_mods.append(VK_SHIFT)
+        if needs_ctrl and VK_CONTROL not in held_modifiers:
+            extra_mods.append(VK_CONTROL)
+        if needs_alt and VK_MENU not in held_modifiers:
+            extra_mods.append(VK_MENU)
+        for m in extra_mods:
+            _press(m)
+            time.sleep(0.01)
+        _tap(vk)
+        for m in reversed(extra_mods):
+            _release(m)
+            time.sleep(0.01)
+
+    i = 0
+    length = len(keys)
+
+    while i < length:
+        # Collect modifier prefixes
+        held_modifiers: list[int] = []
+        while i < length and keys[i] in MODIFIER_MAP:
+            held_modifiers.append(MODIFIER_MAP[keys[i]])
+            i += 1
+
+        if i >= length:
+            break
+
+        ch = keys[i]
+
+        # Handle grouped modifier application: ^(abc) holds Ctrl for a, b, c
+        if ch == "(" and held_modifiers:
+            close = keys.find(")", i)
+            if close == -1:
+                raise ValueError(
+                    f"Unclosed parenthesis in key sequence at position {i}"
+                )
+            group_chars = keys[i + 1:close]
+            for mod_vk in held_modifiers:
+                _press(mod_vk)
+                time.sleep(0.01)
+            try:
+                for gch in group_chars:
+                    _type_char(gch, held_modifiers)
+                    time.sleep(0.02)
+            finally:
+                for mod_vk in reversed(held_modifiers):
+                    _release(mod_vk)
+                    time.sleep(0.01)
+            i = close + 1
+            time.sleep(0.02)
+            continue
+
+        # Press held modifiers
+        for mod_vk in held_modifiers:
+            _press(mod_vk)
+            time.sleep(0.01)
+
+        try:
+            if ch == "{":
+                # Special key in braces: {ENTER}, {F4}, etc.
+                end = keys.find("}", i)
+                if end == -1:
+                    raise ValueError(
+                        f"Unclosed brace in key sequence at position {i}: '{keys[i:]}'"
+                    )
+                key_name = keys[i + 1:end].upper()
+                vk = VK_MAP.get(key_name)
+                if vk is not None:
+                    _tap(vk)
+                else:
+                    raise ValueError(f"Unknown special key: {{{key_name}}}")
+                i = end + 1
+            else:
+                # Regular character
+                _type_char(ch, held_modifiers)
+                i += 1
+        finally:
+            # Release held modifiers in reverse order
+            for mod_vk in reversed(held_modifiers):
+                _release(mod_vk)
+                time.sleep(0.01)
+
+        time.sleep(0.02)
+
+
 def _send_drag(from_x: int, from_y: int, to_x: int, to_y: int) -> None:
     """Drag from one screen coordinate to another using Win32 API.
 
@@ -513,8 +699,8 @@ class UIAutomation:
         This is useful after ui_set_focus when re-searching the element
         would timeout (e.g., for complex controls like DataGrid).
 
-        Uses pywinauto keyboard.send_keys directly, which sends to the
-        currently focused control.
+        Uses Win32 SendInput via _send_keys_via_input(), which works
+        for WPF InputBindings (Alt+Z, etc.) unlike WM_KEYDOWN.
 
         Args:
             keys: The keys to send (using pywinauto syntax)
@@ -529,10 +715,8 @@ class UIAutomation:
 
         def _send_keys_focused():
             try:
-                from pywinauto import keyboard
-
-                keyboard.send_keys(keys)
-                logger.debug(f"Sent keys to focused element: {keys}")
+                _send_keys_via_input(keys)
+                logger.debug(f"Sent keys to focused element via SendInput: {keys}")
             except Exception as e:
                 logger.error(f"Failed to send keys to focused: {e}")
                 raise ApplicationNotRespondingError(
