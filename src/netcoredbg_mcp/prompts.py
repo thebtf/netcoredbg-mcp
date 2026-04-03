@@ -253,7 +253,10 @@ step_over()  # step through init one line at a time
 
 ## UI Interaction While Debugging
 
-When the app is RUNNING (not stopped at breakpoint), you can interact with it:
+When the app is RUNNING (not stopped at breakpoint), you can interact with it.
+If FlaUIBridge.exe is available, interactions use FlaUI (UIA3) for reliable
+access to WPF patterns (SelectionItem, ExpandCollapse, Value). Without it,
+pywinauto is used as fallback — works for most controls.
 
 | Action | Tool |
 |--------|------|
