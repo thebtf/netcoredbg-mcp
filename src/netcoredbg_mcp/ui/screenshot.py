@@ -18,6 +18,40 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def create_preview(
+    image_data: bytes,
+    max_width: int = 480,
+    quality: int = 75,
+) -> tuple[bytes, int, int]:
+    """Create a small WebP preview from image data (PNG or raw).
+
+    Args:
+        image_data: Source image bytes (PNG format)
+        max_width: Maximum preview width (default 480px)
+        quality: WebP quality 1-100 (default 75)
+
+    Returns:
+        Tuple of (webp_bytes, width, height). Output should be ≤100KB.
+    """
+    from PIL import Image
+    import io
+
+    img = Image.open(io.BytesIO(image_data))
+
+    # Downscale if wider than max_width
+    if img.width > max_width:
+        ratio = max_width / img.width
+        new_height = int(img.height * ratio)
+        img = img.resize((max_width, new_height), Image.LANCZOS)
+
+    # Convert to WebP
+    buf = io.BytesIO()
+    img.save(buf, format="WEBP", quality=quality)
+    webp_bytes = buf.getvalue()
+
+    return webp_bytes, img.width, img.height
+
+
 def get_hwnd_for_pid(pid: int) -> int | None:
     """Find the main window HWND for a process ID.
 

@@ -29,8 +29,13 @@ def get_session() -> SessionManager:
     """
     global _session
     if _session is None:
+        import atexit
         netcoredbg_path = os.environ.get("NETCOREDBG_PATH")
         _session = SessionManager(netcoredbg_path, _initial_project_path)
+        # Register temp dir cleanup on server exit
+        atexit.register(_session.temp_manager.cleanup_all)
+        # GC stale temp dirs from previous crashed sessions
+        _session.temp_manager.gc_stale()
     return _session
 
 
