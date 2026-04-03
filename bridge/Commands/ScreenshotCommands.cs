@@ -18,8 +18,11 @@ public static class ScreenshotCommands
 
         if (hwndValue is not null)
         {
+            // Find window element by HWND and capture its bounding rectangle
             var hwnd = new IntPtr(hwndValue.Value);
-            capture = Capture.Screen((int)hwnd);
+            var windowElement = automation.FromHandle(hwnd);
+            var rect = windowElement.BoundingRectangle;
+            capture = Capture.Rectangle(rect);
         }
         else
         {

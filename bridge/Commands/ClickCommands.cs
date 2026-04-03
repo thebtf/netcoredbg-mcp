@@ -104,11 +104,19 @@ public static class ClickCommands
             };
         }
 
-        // Fallback to mouse click at center of bounding rectangle
-        var rect = element.BoundingRectangle;
-        var center = new Point(
-            (int)(rect.X + rect.Width / 2),
-            (int)(rect.Y + rect.Height / 2));
+        // Fallback to mouse click — use GetClickablePoint for robustness
+        Point center;
+        if (element.TryGetClickablePoint(out var clickable))
+        {
+            center = clickable;
+        }
+        else
+        {
+            var rect = element.BoundingRectangle;
+            center = new Point(
+                (int)(rect.X + rect.Width / 2),
+                (int)(rect.Y + rect.Height / 2));
+        }
 
         Mouse.Click(center);
 

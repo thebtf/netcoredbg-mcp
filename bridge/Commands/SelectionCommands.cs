@@ -59,10 +59,15 @@ public static class SelectionCommands
                 if (!isFirst)
                     Keyboard.Press(VirtualKeyShort.CONTROL);
 
-                Mouse.Click(center);
-
-                if (!isFirst)
-                    Keyboard.Release(VirtualKeyShort.CONTROL);
+                try
+                {
+                    Mouse.Click(center);
+                }
+                finally
+                {
+                    if (!isFirst)
+                        Keyboard.Release(VirtualKeyShort.CONTROL);
+                }
             }
 
             selected.Add(index);

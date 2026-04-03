@@ -81,7 +81,8 @@ public static class ElementCommands
 
     private static JsonNode BuildTree(AutomationElement element, int maxDepth, int maxChildren, int currentDepth)
     {
-        var node = BuildElementInfo(element);
+        // Skip expensive GetSupportedPatterns in tree walk — only root gets patterns
+        var node = BuildElementInfo(element, includePatterns: currentDepth == 0);
 
         if (currentDepth >= maxDepth)
             return node;
@@ -102,23 +103,11 @@ public static class ElementCommands
         return node;
     }
 
-    private static JsonObject BuildElementInfo(AutomationElement element)
+    private static JsonObject BuildElementInfo(AutomationElement element, bool includePatterns = true)
     {
         var rect = element.BoundingRectangle;
-        var patterns = new JsonArray();
 
-        try
-        {
-            var supported = element.GetSupportedPatterns();
-            foreach (var p in supported)
-                patterns.Add(p.Name);
-        }
-        catch
-        {
-            // Some elements may not support pattern enumeration
-        }
-
-        return new JsonObject
+        var result = new JsonObject
         {
             ["found"] = true,
             ["automationId"] = element.AutomationId,
@@ -132,7 +121,24 @@ public static class ElementCommands
                 ["width"] = rect.Width,
                 ["height"] = rect.Height
             },
-            ["patterns"] = patterns
         };
+
+        if (includePatterns)
+        {
+            var patterns = new JsonArray();
+            try
+            {
+                var supported = element.GetSupportedPatterns();
+                foreach (var p in supported)
+                    patterns.Add(p.Name);
+            }
+            catch
+            {
+                // Some elements may not support pattern enumeration
+            }
+            result["patterns"] = patterns;
+        }
+
+        return result;
     }
 }

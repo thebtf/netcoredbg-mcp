@@ -61,8 +61,8 @@ public static partial class InputCommands
                     i++;
                     var ctrlTarget = ConsumeNextToken(keys, ref i);
                     Keyboard.Press(VirtualKeyShort.CONTROL);
-                    TypeToken(ctrlTarget);
-                    Keyboard.Release(VirtualKeyShort.CONTROL);
+                    try { TypeToken(ctrlTarget); }
+                    finally { Keyboard.Release(VirtualKeyShort.CONTROL); }
                     sent.Add($"Ctrl+{ctrlTarget}");
                     break;
 
@@ -70,8 +70,8 @@ public static partial class InputCommands
                     i++;
                     var altTarget = ConsumeNextToken(keys, ref i);
                     Keyboard.Press(VirtualKeyShort.ALT);
-                    TypeToken(altTarget);
-                    Keyboard.Release(VirtualKeyShort.ALT);
+                    try { TypeToken(altTarget); }
+                    finally { Keyboard.Release(VirtualKeyShort.ALT); }
                     sent.Add($"Alt+{altTarget}");
                     break;
 
@@ -79,8 +79,8 @@ public static partial class InputCommands
                     i++;
                     var shiftTarget = ConsumeNextToken(keys, ref i);
                     Keyboard.Press(VirtualKeyShort.SHIFT);
-                    TypeToken(shiftTarget);
-                    Keyboard.Release(VirtualKeyShort.SHIFT);
+                    try { TypeToken(shiftTarget); }
+                    finally { Keyboard.Release(VirtualKeyShort.SHIFT); }
                     sent.Add($"Shift+{shiftTarget}");
                     break;
 
