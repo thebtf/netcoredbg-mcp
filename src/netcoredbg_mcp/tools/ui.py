@@ -300,9 +300,25 @@ def register_ui_tools(
                     )
 
             # Fallback to element search
-            ui, element = await _find_ui_element(automation_id, name, control_type)
-            await ui.click(element)
-            return build_response(data={"clicked": True, "method": "element_search"}, state=session.state.state)
+            try:
+                ui, element = await _find_ui_element(automation_id, name, control_type)
+                await ui.click(element)
+                return build_response(data={"clicked": True, "method": "element_search"}, state=session.state.state)
+            except Exception:
+                # Last resort: if element found but click fails (e.g., DataGrid has no click wrapper),
+                # try coordinate click from element's bounding rectangle
+                if automation_id:
+                    ui = await _ensure_ui_connected()
+                    rect = ui.get_cached_rect(automation_id)
+                    if rect:
+                        cx = (rect["left"] + rect["right"]) // 2
+                        cy = (rect["top"] + rect["bottom"]) // 2
+                        await ui._click_at_coords(cx, cy)
+                        return build_response(
+                            data={"clicked": True, "method": "coord_fallback", "position": {"x": cx, "y": cy}},
+                            state=session.state.state,
+                        )
+                raise  # re-raise if no fallback possible
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
@@ -568,7 +584,6 @@ def register_ui_tools(
 
     # -- Advanced interaction tools --
 
-    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def _select_via_clicks(ui_inst, automation_id: str, indices: list[int], mode: str) -> int:
         """Fallback: select items by Ctrl+clicking their cached coordinates.
 
@@ -637,6 +652,7 @@ def register_ui_tools(
 
         return selected
 
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def ui_select_items(
         ctx: Context,
         automation_id: str,
