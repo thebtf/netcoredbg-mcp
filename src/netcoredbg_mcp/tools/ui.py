@@ -577,8 +577,14 @@ def register_ui_tools(
     ) -> dict:
         """Select items by index in a list/grid control (DataGrid, ListView, ListBox).
 
-        Uses UIA SelectionItemPattern for reliable multi-select without coordinate guessing.
-        Works even for off-screen items (no scrolling needed).
+        Two strategies (tries both):
+        1. UIA SelectionItemPattern — works for non-virtualized lists
+        2. Coordinate click fallback — clicks items using cached rectangles
+           (Ctrl+click for multi-select, plain click for first item)
+
+        For WPF virtualized lists (VirtualizingStackPanel), strategy 1 may fail
+        because off-screen items don't have UI containers. Strategy 2 uses visible
+        item coordinates from the cache.
 
         Args:
             automation_id: AutomationId of the list/grid control
@@ -592,7 +598,8 @@ def register_ui_tools(
 
             ui = await _ensure_ui_connected()
 
-            def _select() -> int:
+            # Strategy 1: UIA SelectionItemPattern
+            def _select_via_pattern() -> int:
                 window = ui._app.top_window()
                 control = window.child_window(auto_id=automation_id)
                 control.wait("exists", timeout=5)
@@ -622,8 +629,46 @@ def register_ui_tools(
 
             loop = asyncio.get_running_loop()
             selected = await asyncio.wait_for(
-                loop.run_in_executor(None, _select), timeout=10.0,
+                loop.run_in_executor(None, _select_via_pattern), timeout=10.0,
             )
+
+            # Strategy 2: If pattern selected 0, try coordinate click on cached items
+            if selected == 0:
+                # Get children from cache — look for ListItem children of this control
+                cache = ui._element_cache
+                parent_rect = cache.get(automation_id, {}).get("rect")
+                if parent_rect:
+                    # Find child items by their position within parent
+                    child_items = []
+                    for aid, data in cache.items():
+                        if aid == automation_id:
+                            continue
+                        r = data.get("rect")
+                        ct = data.get("control_type", "")
+                        if not r or ct not in ("ListItem", "DataItem", "TreeItem"):
+                            continue
+                        # Check if child is within parent bounds
+                        if (parent_rect["left"] <= r["left"] <= parent_rect["right"]
+                                and parent_rect["top"] <= r["top"] <= parent_rect["bottom"]):
+                            child_items.append((aid, r))
+
+                    # Click on items at requested indices
+                    for idx_num, target_idx in enumerate(indices):
+                        if target_idx < len(child_items):
+                            _, rect = child_items[target_idx]
+                            cx = (rect["left"] + rect["right"]) // 2
+                            cy = (rect["top"] + rect["bottom"]) // 2
+                            if idx_num == 0 and mode == "replace":
+                                await ui._click_at_coords(cx, cy)
+                            else:
+                                # Ctrl+click for multi-select
+                                import ctypes
+                                VK_CONTROL = 0x11
+                                KEYEVENTF_KEYUP = 0x0002
+                                ctypes.windll.user32.keybd_event(VK_CONTROL, 0, 0, 0)
+                                await ui._click_at_coords(cx, cy)
+                                ctypes.windll.user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+                            selected += 1
 
             return build_response(
                 data={"selected": selected, "indices": indices, "mode": mode},
