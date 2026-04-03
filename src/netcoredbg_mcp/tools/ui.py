@@ -33,7 +33,9 @@ def register_ui_tools(
         """Get or create UI backend (FlaUI preferred, pywinauto fallback)."""
         if _backend_holder["instance"] is None:
             from ..ui.backend import create_backend
-            _backend_holder["instance"] = create_backend()
+            _backend_holder["instance"] = create_backend(
+                process_registry=session.process_registry,
+            )
         return _backend_holder["instance"]
 
     async def _ensure_ui_connected() -> Any:

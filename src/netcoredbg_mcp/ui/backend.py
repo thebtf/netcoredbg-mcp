@@ -119,10 +119,13 @@ def find_flaui_bridge() -> str | None:
     return None
 
 
-def create_backend() -> UIBackend:
+def create_backend(process_registry: Any = None) -> UIBackend:
     """Create the best available UI automation backend.
 
     Tries FlaUI first (if bridge binary found), falls back to pywinauto.
+
+    Args:
+        process_registry: Optional ProcessRegistry for FlaUI PID tracking.
 
     Returns:
         UIBackend implementation.
@@ -132,7 +135,7 @@ def create_backend() -> UIBackend:
     if bridge_path:
         logger.info("Using FlaUI backend (bridge: %s)", bridge_path)
         from .flaui_client import FlaUIBackend
-        return FlaUIBackend(bridge_path)
+        return FlaUIBackend(bridge_path, process_registry)
 
     logger.info("FlaUIBridge.exe not found, using pywinauto backend")
     from .pywinauto_backend import PywinautoBackend

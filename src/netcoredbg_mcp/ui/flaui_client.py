@@ -22,11 +22,12 @@ RESTART_WINDOW_SECONDS = 60.0
 class FlaUIBridgeClient:
     """Manages FlaUIBridge.exe subprocess lifecycle."""
 
-    def __init__(self, bridge_path: str) -> None:
+    def __init__(self, bridge_path: str, process_registry: Any = None) -> None:
         self._bridge_path = bridge_path
         self._process: asyncio.subprocess.Process | None = None
         self._request_id = 0
         self._restart_times: list[float] = []
+        self._process_registry = process_registry
 
     async def start(self) -> None:
         """Start the bridge subprocess."""
@@ -41,10 +42,19 @@ class FlaUIBridgeClient:
         )
         logger.info("FlaUI bridge started (PID %d)", self._process.pid)
 
+        # Register PID for reaper
+        if self._process_registry and self._process.pid:
+            self._process_registry.register(
+                pid=self._process.pid,
+                role="flaui_bridge",
+            )
+
     async def stop(self) -> None:
         """Stop the bridge subprocess."""
         if self._process is None:
             return
+
+        pid = self._process.pid
 
         try:
             if self._process.stdin and not self._process.stdin.is_closing():
@@ -59,6 +69,10 @@ class FlaUIBridgeClient:
         except asyncio.TimeoutError:
             self._process.kill()
             await self._process.wait()
+
+        # Unregister from reaper
+        if self._process_registry and pid:
+            self._process_registry.unregister(pid)
 
         logger.info("FlaUI bridge stopped")
         self._process = None
@@ -173,8 +187,8 @@ class FlaUIBridgeClient:
 class FlaUIBackend:
     """UIBackend implementation using FlaUI bridge subprocess."""
 
-    def __init__(self, bridge_path: str) -> None:
-        self._client = FlaUIBridgeClient(bridge_path)
+    def __init__(self, bridge_path: str, process_registry: Any = None) -> None:
+        self._client = FlaUIBridgeClient(bridge_path, process_registry)
         self._element_cache: dict[str, dict] = {}
         self._process_id: int | None = None
 
