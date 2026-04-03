@@ -47,15 +47,15 @@ class SessionTempManager:
             if existing is not None and existing.exists():
                 return existing
 
-        try:
-            dir_path = Path(tempfile.mkdtemp(prefix=f"{TEMP_PREFIX}{session_id}-"))
-            with self._lock:
+            # Create under lock to prevent duplicate dirs for same session_id
+            try:
+                dir_path = Path(tempfile.mkdtemp(prefix=f"{TEMP_PREFIX}{session_id}-"))
                 self._sessions[session_id] = dir_path
-            logger.info("Created session temp dir: %s", dir_path)
-            return dir_path
-        except OSError as e:
-            logger.warning("Failed to create session temp dir: %s", e)
-            return None
+                logger.info("Created session temp dir: %s", dir_path)
+                return dir_path
+            except OSError as e:
+                logger.warning("Failed to create session temp dir: %s", e)
+                return None
 
     def save_screenshot(self, session_id: str, data: bytes, name: str) -> Path | None:
         """Save screenshot data to the session temp directory.
@@ -72,7 +72,13 @@ class SessionTempManager:
         if session_dir is None:
             return None
 
-        file_path = session_dir / name
+        # Sanitize filename: strip path separators to prevent traversal
+        safe_name = Path(name).name
+        if not safe_name or safe_name in (".", ".."):
+            logger.warning("Invalid screenshot name rejected: %s", name)
+            return None
+
+        file_path = session_dir / safe_name
         try:
             file_path.write_bytes(data)
             return file_path
@@ -107,11 +113,12 @@ class SessionTempManager:
             logger.info("Cleaned up %d session temp directories", len(sessions_copy))
 
     @staticmethod
-    def gc_stale(max_age_hours: float = 1.0) -> int:
+    def gc_stale(max_age_hours: float = 4.0) -> int:
         """Remove stale temp directories from previous crashed sessions.
 
         Scans the system temp directory for dirs matching the prefix
-        that are older than max_age_hours.
+        that are older than max_age_hours. Default 4h to avoid removing
+        dirs from concurrent server instances or long debug sessions.
 
         Args:
             max_age_hours: Maximum age in hours before a dir is considered stale.

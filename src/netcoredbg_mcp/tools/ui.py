@@ -373,11 +373,17 @@ def register_ui_tools(
             max_width: Maximum image width (default 1024 — optimal for Claude vision)
             format: Image format: "webp" (smallest), "jpeg", "png"
         """
+        _VALID_FORMATS = {"webp", "jpeg", "png"}
+
         try:
             import base64
             import json
+            import time as _time
             from mcp.types import TextContent, ImageContent
             from ..ui.screenshot import get_hwnd_for_pid, capture_window, _process_screenshot, create_preview
+
+            # Validate format against allow-list
+            safe_format = format if format in _VALID_FORMATS else "webp"
 
             pid = session.state.process_id
             if not pid:
@@ -399,7 +405,7 @@ def register_ui_tools(
 
             # Create HD version in requested format
             hd_bytes, hd_w, hd_h, _ = await loop.run_in_executor(
-                None, lambda: _process_screenshot(png_bytes, max_width=max_width, format=format),
+                None, lambda: _process_screenshot(png_bytes, max_width=max_width, format=safe_format),
             )
 
             # Create inline preview (≤480px WebP)
@@ -412,14 +418,15 @@ def register_ui_tools(
                 "width": hd_w,
                 "height": hd_h,
                 "preview_width": preview_w,
-                "format": format,
+                "format": safe_format,
                 "state": session.state.state.value if hasattr(session.state.state, "value") else str(session.state.state),
             }
 
             sid = session.session_id
             if sid:
+                ts = int(_time.time() * 1000) & 0xFFFFFFFF
                 hd_path = session.temp_manager.save_screenshot(
-                    sid, hd_bytes, f"screenshot_{id(hd_bytes) & 0xFFFF:04x}.{format}",
+                    sid, hd_bytes, f"screenshot_{ts:08x}.{safe_format}",
                 )
                 if hd_path:
                     metadata["hd_path"] = str(hd_path)
@@ -523,12 +530,17 @@ def register_ui_tools(
             import json
             from mcp.types import TextContent, ImageContent
 
-            hd_bytes, hd_w, hd_h, _ = _process_screenshot(
-                annotated_bytes, max_width=max_width, format=format,
+            _VALID_FORMATS = {"webp", "jpeg", "png"}
+            safe_format = format if format in _VALID_FORMATS else "webp"
+
+            hd_bytes, hd_w, hd_h, _ = await loop.run_in_executor(
+                None, lambda: _process_screenshot(annotated_bytes, max_width=max_width, format=safe_format),
             )
 
-            # Create inline preview (≤480px WebP)
-            preview_bytes, preview_w, _ = create_preview(annotated_bytes, max_width=480, quality=75)
+            # Create inline preview (≤480px WebP) — in executor to avoid blocking loop
+            preview_bytes, preview_w, _ = await loop.run_in_executor(
+                None, lambda: create_preview(annotated_bytes, max_width=480, quality=75),
+            )
 
             # Build element index — compact (id+name) or full (id+name+type+automationId)
             if compact:
@@ -555,14 +567,14 @@ def register_ui_tools(
                 "elements": elem_index,
                 "element_count": len(elements),
                 "generation": _annotation_generation,
-                "format": format,
+                "format": safe_format,
                 "state": session.state.state.value if hasattr(session.state.state, "value") else str(session.state.state),
             }
 
             sid = session.session_id
             if sid:
                 hd_path = session.temp_manager.save_screenshot(
-                    sid, hd_bytes, f"annotated_{_annotation_generation:04d}.{format}",
+                    sid, hd_bytes, f"annotated_{_annotation_generation:04d}.{safe_format}",
                 )
                 if hd_path:
                     metadata["hd_path"] = str(hd_path)
