@@ -69,7 +69,8 @@ async def test_hit_counting():
     print("\n1. HIT COUNTING (FR-1)")
     m = await new_session()
     try:
-        m.breakpoints.add(Breakpoint(file=SOURCE, line=_find_line("sum += i")))  # sum += i
+        bp_line = _find_line("sum += i")
+        m.breakpoints.add(Breakpoint(file=SOURCE, line=bp_line))  # sum += i
         await m.launch(program=DLL, args=["hitcount"])
         snapshot = await m.wait_for_stopped(timeout=10)
         await asyncio.sleep(0.3)
@@ -79,7 +80,7 @@ async def test_hit_counting():
         check("Stops at breakpoint", snapshot.stop_reason == "breakpoint")
         check("Breakpoint verified", m.breakpoints.get_for_file(SOURCE)[0].verified)
 
-        hit = m.state.hit_counts.get((norm, 15), 0)
+        hit = m.state.hit_counts.get((norm, bp_line), 0)
         check("Hit count = 1 after first stop", hit == 1, f"got {hit}")
 
         # Continue 4 more times
@@ -89,7 +90,7 @@ async def test_hit_counting():
             await m.wait_for_stopped(timeout=5)
             await asyncio.sleep(0.15)
 
-        hit = m.state.hit_counts.get((norm, 15), 0)
+        hit = m.state.hit_counts.get((norm, bp_line), 0)
         check("Hit count = 5 after 5 stops", hit == 5, f"got {hit}")
 
     finally:
@@ -479,9 +480,14 @@ async def test_ui_invoke_toggle():
         await backend.connect(pid)
         check("UI backend connected", True)
 
-        # Test ui_invoke: invoke button by automationId
+        # Test ui_invoke: invoke button
+        # WinForms: AccessibleName maps to UIA Name (not AutomationId)
+        # Try automation_id first (WPF/Avalonia), fall back to name (WinForms)
         try:
-            result = await backend.invoke_element(automation_id="btnInvoke")
+            try:
+                result = await backend.invoke_element(automation_id="btnInvoke")
+            except Exception:
+                result = await backend.invoke_element(name="btnInvoke")
             check("ui_invoke (btnInvoke)", result.get("invoked", False),
                   f"method={result.get('method')}")
         except Exception as e:
@@ -489,7 +495,10 @@ async def test_ui_invoke_toggle():
 
         # Test ui_toggle: toggle checkbox
         try:
-            result = await backend.toggle_element(automation_id="chkEnabled")
+            try:
+                result = await backend.toggle_element(automation_id="chkEnabled")
+            except Exception:
+                result = await backend.toggle_element(name="chkEnabled")
             check("ui_toggle (chkEnabled)", result.get("toggled", False),
                   f"newState={result.get('newState')}")
             check("ui_toggle returns On", result.get("newState") == "On",
@@ -499,7 +508,10 @@ async def test_ui_invoke_toggle():
 
         # Test ui_toggle again to verify state cycle
         try:
-            result = await backend.toggle_element(automation_id="chkEnabled")
+            try:
+                result = await backend.toggle_element(automation_id="chkEnabled")
+            except Exception:
+                result = await backend.toggle_element(name="chkEnabled")
             check("ui_toggle cycle Off", result.get("newState") == "Off",
                   f"got {result.get('newState')}")
         except Exception as e:
@@ -516,10 +528,11 @@ async def test_ui_invoke_toggle():
             check("find_element with root_id", False, str(e))
 
         # Test XPath search (FlaUI only)
+        # Use "Outer Button" which doesn't change text after interactions
         from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
         if isinstance(backend, FlaUIBackend):
             try:
-                result = await backend.find_by_xpath("//Button[@Name='Invoke Me']")
+                result = await backend.find_by_xpath("//Button[@Name='Outer Button']")
                 check("find_by_xpath (Button)", result.get("found", False),
                       f"matchCount={result.get('matchCount')}")
             except Exception as e:

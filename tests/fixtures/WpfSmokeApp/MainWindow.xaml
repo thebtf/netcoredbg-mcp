@@ -1,0 +1,78 @@
+<Window x:Class="WpfSmokeApp.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="WPF Smoke Test" Height="500" Width="450"
+        AutomationProperties.AutomationId="mainWindow">
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <TextBlock Grid.Row="0" Text="WPF Smoke Test App" FontSize="18" FontWeight="Bold"
+                   Margin="10" AutomationProperties.AutomationId="lblHeader"/>
+
+        <!-- Settings Panel (for root_id scoping) -->
+        <GroupBox Grid.Row="1" Header="Settings Panel" Margin="10"
+                  AutomationProperties.AutomationId="settingsPanel">
+            <StackPanel Margin="5">
+
+                <!-- Invoke Button -->
+                <Button Content="Invoke Me" Margin="0,5"
+                        AutomationProperties.AutomationId="btnInvoke"
+                        Click="BtnInvoke_Click"/>
+
+                <!-- Toggle CheckBox -->
+                <CheckBox Content="Enable Feature" Margin="0,5"
+                          AutomationProperties.AutomationId="chkEnabled"
+                          IsChecked="{Binding IsFeatureEnabled, Mode=TwoWay}"/>
+
+                <!-- TextBox for read_text testing -->
+                <TextBox Text="{Binding StatusText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         Margin="0,5" IsReadOnly="True"
+                         AutomationProperties.AutomationId="txtOutput"/>
+
+                <!-- ComboBox for selection testing -->
+                <ComboBox Margin="0,5"
+                          AutomationProperties.AutomationId="cmbOptions"
+                          SelectedIndex="0">
+                    <ComboBoxItem Content="Option A"/>
+                    <ComboBoxItem Content="Option B"/>
+                    <ComboBoxItem Content="Option C"/>
+                </ComboBox>
+
+                <!-- Duplicate-named button inside panel (for root_id test) -->
+                <Button Content="Action (Inside)" Margin="0,5"
+                        AutomationProperties.AutomationId="btnAction"/>
+
+                <!-- Scoped button -->
+                <Button Content="Scoped Button" Margin="0,5"
+                        AutomationProperties.AutomationId="btnScoped"
+                        Click="BtnScoped_Click"/>
+
+                <!-- ListView for collection testing -->
+                <ListView Margin="0,5" Height="80"
+                          AutomationProperties.AutomationId="lstItems"
+                          ItemsSource="{Binding Items}"/>
+
+            </StackPanel>
+        </GroupBox>
+
+        <!-- Bottom panel (outside settingsPanel for disambiguation) -->
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="10,5">
+            <!-- Duplicate-named button outside panel -->
+            <Button Content="Action (Outside)" Margin="5,0"
+                    AutomationProperties.AutomationId="btnAction"/>
+
+            <Button Content="Outer Button" Margin="5,0"
+                    AutomationProperties.AutomationId="btnOuter"/>
+
+            <Button Content="Open File..." Margin="5,0"
+                    AutomationProperties.AutomationId="btnOpenFile"
+                    Click="BtnOpenFile_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>

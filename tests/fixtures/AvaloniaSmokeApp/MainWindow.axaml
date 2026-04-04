@@ -1,0 +1,72 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="AvaloniaSmokeApp.MainWindow"
+        Title="Avalonia Smoke Test" Width="450" Height="500"
+        AutomationProperties.AutomationId="mainWindow">
+
+    <Grid RowDefinitions="Auto,*,Auto">
+
+        <!-- Header -->
+        <TextBlock Grid.Row="0" Text="Avalonia Smoke Test App" FontSize="18" FontWeight="Bold"
+                   Margin="10" AutomationProperties.AutomationId="lblHeader"/>
+
+        <!-- Settings Panel (for root_id scoping) -->
+        <Border Grid.Row="1" Margin="10" BorderBrush="Gray" BorderThickness="1" CornerRadius="4"
+                AutomationProperties.AutomationId="settingsPanel">
+            <StackPanel Margin="10">
+                <TextBlock Text="Settings Panel" FontWeight="Bold" Margin="0,0,0,5"/>
+
+                <!-- Invoke Button -->
+                <Button Content="Invoke Me" Margin="0,5"
+                        AutomationProperties.AutomationId="btnInvoke"
+                        Click="BtnInvoke_Click"/>
+
+                <!-- Toggle CheckBox -->
+                <CheckBox Content="Enable Feature" Margin="0,5"
+                          AutomationProperties.AutomationId="chkEnabled"/>
+
+                <!-- TextBox for read_text testing -->
+                <TextBox Text="Ready" Margin="0,5" IsReadOnly="True"
+                         AutomationProperties.AutomationId="txtOutput"
+                         Name="TxtOutput"/>
+
+                <!-- ComboBox for selection testing -->
+                <ComboBox Margin="0,5" SelectedIndex="0"
+                          AutomationProperties.AutomationId="cmbOptions">
+                    <ComboBoxItem Content="Option A"/>
+                    <ComboBoxItem Content="Option B"/>
+                    <ComboBoxItem Content="Option C"/>
+                </ComboBox>
+
+                <!-- Duplicate-named button inside panel (for root_id test) -->
+                <Button Content="Action (Inside)" Margin="0,5"
+                        AutomationProperties.AutomationId="btnAction"/>
+
+                <!-- Scoped button -->
+                <Button Content="Scoped Button" Margin="0,5"
+                        AutomationProperties.AutomationId="btnScoped"
+                        Click="BtnScoped_Click"/>
+
+                <!-- ListBox for collection testing -->
+                <ListBox Margin="0,5" Height="80"
+                         AutomationProperties.AutomationId="lstItems">
+                    <ListBoxItem Content="Item 1"/>
+                    <ListBoxItem Content="Item 2"/>
+                    <ListBoxItem Content="Item 3"/>
+                    <ListBoxItem Content="Item 4"/>
+                    <ListBoxItem Content="Item 5"/>
+                </ListBox>
+            </StackPanel>
+        </Border>
+
+        <!-- Bottom panel (outside settingsPanel for disambiguation) -->
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="10,5">
+            <!-- Duplicate-named button outside panel -->
+            <Button Content="Action (Outside)" Margin="5,0"
+                    AutomationProperties.AutomationId="btnAction"/>
+
+            <Button Content="Outer Button" Margin="5,0"
+                    AutomationProperties.AutomationId="btnOuter"/>
+        </StackPanel>
+    </Grid>
+</Window>
