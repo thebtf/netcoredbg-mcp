@@ -125,25 +125,20 @@ Alternative: client-side tracepoints using `quick_evaluate` pattern
 - T031: Smoke test checks for new tools (needs real GUI runtime)
 - T033: Scoped search performance measurement (needs real UI tree with 100+ elements)
 
-### v0.6.0: Advanced Debugging (from debug-mcp features)
+### ~~v0.5.1: Advanced Debugging (from debug-mcp features)~~ DONE
 
-#### R9: State snapshots + diff
-**What:** `create_snapshot(name)` captures all locals at current frame.
-`diff_snapshot(name1, name2)` shows what changed between two stops.
-**Why:** Agent can compare state before/after an operation without manual diff.
-**Effort:** M
+#### ~~R9: State snapshots + diff~~ DONE v0.5.1
+**Implemented in:** `session/snapshots.py:SnapshotManager`, `tools/inspection.py:create_snapshot, diff_snapshots, list_snapshots`
 
-#### R10: Collection analyzer
-**What:** `analyze_collection(variable_ref)` returns: count, type, null count,
-duplicate count, min/max for numeric, first/last N items.
-**Why:** Agent inspects large collections item-by-item. Should be one call.
-**Effort:** M — iterate via DAP variables paging.
+#### ~~R10: Collection analyzer~~ DONE v0.5.1
+**Implemented in:** `tools/inspection.py:analyze_collection` (count, type, nulls, duplicates, numeric stats, first/last N)
 
-#### R11: Object summarizer
-**What:** `summarize_object(variable_ref, depth=2)` returns AI-friendly summary
-of complex objects with nested properties flattened.
-**Why:** Deep nested objects are hard to navigate via get_variables.
-**Effort:** M
+#### ~~R11: Object summarizer~~ DONE v0.5.1
+**Implemented in:** `tools/inspection.py:summarize_object` (recursive get_variables, depth tracking, circular ref detection)
+
+#### R3-alt: Client-side tracepoints DONE v0.5.1
+**Implemented in:** `session/tracepoints.py:TracepointManager`, `tools/inspection.py:add_tracepoint, remove_tracepoint, get_trace_log, clear_trace_log`
+**Note:** netcoredbg does NOT support DAP logMessage. Tracepoints use client-side pause→evaluate→resume (500ms timeout, rate limiting 10/sec).
 
 ### Remaining (LOW priority)
 
