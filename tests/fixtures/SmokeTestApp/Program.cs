@@ -83,13 +83,11 @@ public class Program
     {
         var counter = 0;
         Console.WriteLine("Long-running started. Use quick_evaluate to check counter.");
-        for (var i = 0; i < 100_000_000; i++)
+        for (var i = 0; i < 30; i++)
         {
             counter = i;
-            if (i % 10_000_000 == 0)
-            {
-                Console.WriteLine($"Progress: {i / 1_000_000}M iterations");
-            }
+            System.Threading.Thread.Sleep(200); // 200ms * 30 = ~6s — enough for quick_evaluate
+            Console.WriteLine($"Tick {i}/30");
         }
         Console.WriteLine($"Long-running done. Final counter: {counter}");
     }
