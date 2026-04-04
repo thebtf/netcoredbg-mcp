@@ -20,7 +20,7 @@ def register_output_tools(
     from mcp.types import ToolAnnotations
 
     @mcp.tool(annotations=ToolAnnotations(destructiveHint=False, openWorldHint=False))
-    async def get_output(clear: bool = False) -> dict:
+    async def get_output(clear: bool = False, category: str | None = None) -> dict:
         """Get stdout/stderr output from the debugged program.
 
         IMPORTANT: The user cannot see this output directly.
@@ -28,10 +28,17 @@ def register_output_tools(
         Never tell the user to "check the console" or "look at output".
 
         Call periodically during debugging to catch log messages and errors.
+
+        Args:
+            clear: Clear the output buffer after reading (default False)
+            category: Filter by category: "stdout", "stderr", or "console" (default: all)
         """
         try:
-            output = "".join(session.state.output_buffer)
-            if clear:
+            entries = session.state.output_buffer
+            if category:
+                entries = [e for e in entries if e.category == category]
+            output = "".join(e.text for e in entries)
+            if clear and not category:
                 session.state.output_buffer.clear()
             return build_response(
                 data={"output": output},
@@ -41,7 +48,9 @@ def register_output_tools(
             return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
-    async def search_output(pattern: str, context_lines: int = 2) -> dict:
+    async def search_output(
+        pattern: str, context_lines: int = 2, category: str | None = None,
+    ) -> dict:
         """Search program output for a pattern (regex supported).
 
         Use this instead of get_output when looking for specific messages,
@@ -50,12 +59,16 @@ def register_output_tools(
         Args:
             pattern: Regex pattern to search for (case-insensitive)
             context_lines: Number of lines before/after each match (default 2)
+            category: Filter by category: "stdout", "stderr", or "console" (default: all)
 
         Returns:
             List of matches with line numbers and context
         """
         try:
-            output = "".join(session.state.output_buffer)
+            entries = session.state.output_buffer
+            if category:
+                entries = [e for e in entries if e.category == category]
+            output = "".join(e.text for e in entries)
             lines = output.splitlines()
             matches = []
 
@@ -87,7 +100,7 @@ def register_output_tools(
             return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
-    async def get_output_tail(lines: int = 50) -> dict:
+    async def get_output_tail(lines: int = 50, category: str | None = None) -> dict:
         """Get the last N lines of program output.
 
         Useful for checking recent output without loading everything.
@@ -95,9 +108,13 @@ def register_output_tools(
 
         Args:
             lines: Number of lines to return (default 50)
+            category: Filter by category: "stdout", "stderr", or "console" (default: all)
         """
         try:
-            output = "".join(session.state.output_buffer)
+            entries = session.state.output_buffer
+            if category:
+                entries = [e for e in entries if e.category == category]
+            output = "".join(e.text for e in entries)
             all_lines = output.splitlines()
             tail = all_lines[-lines:]
             return build_response(

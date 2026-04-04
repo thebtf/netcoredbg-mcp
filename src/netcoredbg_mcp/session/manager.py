@@ -10,7 +10,12 @@ from typing import Any
 
 from ..build import BuildManager, BuildResult
 from ..dap import DAPClient, DAPEvent
-from ..dap.events import OutputEventBody, StoppedEventBody
+from ..dap.events import (
+    BreakpointEventBody,
+    ModuleEventBody,
+    OutputEventBody,
+    StoppedEventBody,
+)
 from ..dap.protocol import Events
 from ..process_registry import ProcessRegistry
 from ..ui.temp_manager import SessionTempManager
@@ -20,6 +25,8 @@ from .state import (
     BreakpointRegistry,
     DebugState,
     FunctionBreakpoint,
+    ModuleInfo,
+    OutputEntry,
     SessionState,
     StackFrame,
     StoppedSnapshot,
@@ -53,11 +60,17 @@ class SessionManager:
         self._last_launch_config: dict[str, Any] | None = None  # For restart
         self._last_version_warning: str | None = None  # dbgshim version mismatch warning
         self._session_id: str | None = None
+        self._quick_eval_lock = asyncio.Lock()
 
     @property
     def state(self) -> SessionState:
         """Get current session state."""
         return self._state
+
+    @property
+    def client(self) -> DAPClient:
+        """Access the underlying DAP client."""
+        return self._client
 
     @property
     def breakpoints(self) -> BreakpointRegistry:
@@ -265,6 +278,8 @@ class SessionManager:
         self._client.on_event(Events.OUTPUT, self._on_output)
         self._client.on_event(Events.THREAD, self._on_thread)
         self._client.on_event(Events.PROCESS, self._on_process)
+        self._client.on_event(Events.BREAKPOINT, self._on_breakpoint)
+        self._client.on_event(Events.MODULE, self._on_module)
 
     def _on_initialized(self, event: DAPEvent) -> None:
         """Handle initialized event."""
@@ -276,9 +291,33 @@ class SessionManager:
         body = StoppedEventBody.from_dict(event.body)
         self._state.current_thread_id = body.thread_id
         self._state.stop_reason = body.reason.value
+        self._state.stop_description = body.description
+        self._state.stop_text = body.text
         self._set_state(DebugState.STOPPED)
         self._execution_event.set()
         logger.info(f"Stopped: reason={body.reason.value}, thread={body.thread_id}")
+
+        # Schedule hit counting for breakpoint stops (async — needs stack trace)
+        if body.reason.value == "breakpoint" and body.thread_id is not None:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._update_hit_count(body.thread_id))
+            except RuntimeError:
+                pass  # No running event loop — skip hit counting (test environment)
+
+    async def _update_hit_count(self, thread_id: int) -> None:
+        """Fetch top frame and increment hit count for matching breakpoint."""
+        try:
+            frames = await self.get_stack_trace(thread_id=thread_id, levels=1)
+            if not frames:
+                return
+            top = frames[0]
+            if top.source and top.line:
+                key = (self.breakpoints._normalize_path(top.source), top.line)
+                self._state.hit_counts[key] = self._state.hit_counts.get(key, 0) + 1
+                logger.debug(f"Hit count for {key}: {self._state.hit_counts[key]}")
+        except Exception:
+            logger.debug("Could not update hit count", exc_info=True)
 
     def _on_continued(self, event: DAPEvent) -> None:
         """Handle continued event."""
@@ -298,6 +337,7 @@ class SessionManager:
 
     def _on_output(self, event: DAPEvent) -> None:
         """Handle output event."""
+
         body = OutputEventBody.from_dict(event.body)
         output = body.output
 
@@ -305,13 +345,14 @@ class SessionManager:
         if len(output) > MAX_OUTPUT_ENTRY:
             output = output[:MAX_OUTPUT_ENTRY] + "... [truncated]"
 
-        self._state.output_buffer.append(output)
+        entry = OutputEntry(text=output, category=body.category.value)
+        self._state.output_buffer.append(entry)
         self._output_bytes += len(output)
 
         # Trim buffer by byte size (security: prevent DoS)
         while self._output_bytes > MAX_OUTPUT_BYTES and self._state.output_buffer:
             removed = self._state.output_buffer.popleft()
-            self._output_bytes -= len(removed)
+            self._output_bytes -= len(removed.text)
 
     def _on_thread(self, event: DAPEvent) -> None:
         """Handle thread event."""
@@ -349,6 +390,75 @@ class SessionManager:
                 role="debuggee",
                 program=name,
             )
+
+    def _on_breakpoint(self, event: DAPEvent) -> None:
+        """Handle breakpoint changed/added/removed events from adapter."""
+
+        body = BreakpointEventBody.from_dict(event.body)
+        logger.debug(f"Breakpoint event: reason={body.reason}, id={body.breakpoint_id}")
+
+        if body.reason == "removed" and body.breakpoint_id is not None:
+            # Remove breakpoint by ID from registry
+            for file_path, bps in self.breakpoints.get_all().items():
+                for bp in bps:
+                    if bp.id == body.breakpoint_id:
+                        self.breakpoints.remove(file_path, bp.line)
+                        logger.info(f"Breakpoint {body.breakpoint_id} removed by adapter")
+                        return
+        elif body.reason in ("changed", "new") and body.breakpoint_id is not None:
+            # Update existing breakpoint's verified status and line
+            for file_path, bps in self.breakpoints.get_all().items():
+                for bp in bps:
+                    if bp.id == body.breakpoint_id:
+                        bp.verified = body.verified
+                        if body.line is not None:
+                            bp.line = body.line
+                        logger.debug(
+                            f"Breakpoint {body.breakpoint_id} updated: "
+                            f"verified={body.verified}, line={body.line}"
+                        )
+                        return
+            # New breakpoint from adapter — log but don't create (we don't know the file)
+            if body.reason == "new":
+                logger.info(
+                    f"Adapter reported new breakpoint {body.breakpoint_id} "
+                    f"(not in our registry)"
+                )
+
+    def _on_module(self, event: DAPEvent) -> None:
+        """Handle module load/change/unload events."""
+
+        body = ModuleEventBody.from_dict(event.body)
+        logger.debug(f"Module event: reason={body.reason}, name={body.name}")
+
+        if body.reason == "new":
+            # Add new module — avoid duplicates by ID
+            existing_ids = {m.id for m in self._state.modules}
+            if body.module_id not in existing_ids:
+                self._state.modules.append(ModuleInfo(
+                    id=body.module_id,
+                    name=body.name,
+                    path=body.path,
+                    version=body.version,
+                    is_optimized=body.is_optimized,
+                    symbol_status=body.symbol_status,
+                ))
+                logger.info(f"Module loaded: {body.name}")
+        elif body.reason == "changed":
+            for m in self._state.modules:
+                if m.id == body.module_id:
+                    m.name = body.name
+                    m.path = body.path
+                    m.version = body.version
+                    m.is_optimized = body.is_optimized
+                    m.symbol_status = body.symbol_status
+                    logger.debug(f"Module updated: {body.name}")
+                    break
+        elif body.reason == "removed":
+            self._state.modules = [
+                m for m in self._state.modules if m.id != body.module_id
+            ]
+            logger.info(f"Module unloaded: {body.name}")
 
     def prepare_for_execution(self) -> None:
         """Prepare for an execution command by creating a fresh event.
@@ -393,6 +503,8 @@ class SessionManager:
                 timed_out=True,
                 exit_code=self._state.exit_code,
                 process_alive=process_alive,
+                description=self._state.stop_description,
+                text=self._state.stop_text,
             )
 
         return StoppedSnapshot(
@@ -403,7 +515,57 @@ class SessionManager:
             exit_code=self._state.exit_code,
             exception_info=self._state.exception_info,
             process_alive=self._state.state != DebugState.TERMINATED,
+            description=self._state.stop_description,
+            text=self._state.stop_text,
         )
+
+    async def quick_evaluate(self, expression: str, frame_id: int | None = None) -> dict[str, Any]:
+        """Pause → evaluate → resume atomically. For use while program is running."""
+        if self._state.state != DebugState.RUNNING:
+            raise RuntimeError(
+                f"Program is not running (state: {self._state.state.value}). "
+                "Use evaluate_expression instead."
+            )
+
+        async with self._quick_eval_lock:
+            # Pause — prepare_for_execution MUST be before pause to avoid race
+            tid = self._state.current_thread_id or 1
+            self.prepare_for_execution()
+            await self._client.pause(tid)
+            # Wait for stopped
+            try:
+                await asyncio.wait_for(self._execution_event.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                raise RuntimeError("Program did not pause within 5 seconds")
+
+            try:
+                # Evaluate
+                fid = frame_id
+                if fid is None:
+                    frames = await self.get_stack_trace(thread_id=tid, levels=1)
+                    if frames:
+                        fid = frames[0].id
+                response = await self._client.evaluate(expression, fid)
+                if response.success:
+                    result = {
+                        "result": response.body.get("result", ""),
+                        "type": response.body.get("type", ""),
+                        "variablesReference": response.body.get("variablesReference", 0),
+                    }
+                else:
+                    result = {"error": response.message or "Evaluation failed"}
+            except Exception as e:
+                result = {"error": str(e)}
+
+            # Resume (always — even if evaluate failed)
+            try:
+                self.prepare_for_execution()
+                await self._client.continue_execution(tid)
+            except Exception:
+                # If resume fails, leave paused (safe state) — agent can inspect
+                pass
+
+            return result
 
     async def pre_launch_build(
         self,
@@ -960,3 +1122,170 @@ class SessionManager:
             self._state.exception_info = response.body
             return response.body
         return None
+
+    async def get_exception_context(
+        self,
+        max_frames: int = 10,
+        include_variables_for_frames: int = 1,
+        max_inner_exceptions: int = 5,
+    ) -> dict[str, Any]:
+        """Get full exception context in a single call (exception autopsy).
+
+        Returns exception type, message, inner exception chain, stack frames
+        with source locations, and local variables for top N frames.
+        Replaces the manual sequence: get_exception_info + get_call_stack + get_scopes + get_variables.
+        """
+        if self._state.state != DebugState.STOPPED:
+            raise RuntimeError("Program is not stopped")
+        if self._state.stop_reason != "exception":
+            raise RuntimeError(
+                f"Not stopped at an exception (reason: {self._state.stop_reason}). "
+                "Use get_call_stack + get_variables instead."
+            )
+
+        tid = self._state.current_thread_id
+        if tid is None:
+            raise RuntimeError("No active thread")
+
+        result: dict[str, Any] = {"threadId": tid}
+
+        # 1. Exception info from DAP
+        exc_info = await self.get_exception_info(tid)
+        result["exception"] = exc_info or {}
+
+        # 2. Stack frames
+        frames = await self.get_stack_trace(thread_id=tid, levels=max_frames)
+        frame_data = []
+        for i, frame in enumerate(frames):
+            fd: dict[str, Any] = {
+                "index": i,
+                "name": frame.name,
+                "source": frame.source,
+                "line": frame.line,
+                "column": frame.column,
+                "id": frame.id,
+            }
+
+            # Include variables for top N frames
+            if i < include_variables_for_frames:
+                try:
+                    scopes = await self.get_scopes(frame.id)
+                    scope_vars = {}
+                    for scope in scopes:
+                        ref = scope.get("variablesReference", 0)
+                        if ref:
+                            variables = await self.get_variables(ref)
+                            scope_vars[scope.get("name", "Locals")] = [
+                                {"name": v.name, "value": v.value, "type": v.type}
+                                for v in variables[:20]  # Cap at 20 vars per scope
+                            ]
+                    fd["variables"] = scope_vars
+                except Exception as e:
+                    fd["variables"] = {"error": str(e)}
+
+            frame_data.append(fd)
+
+        result["frames"] = frame_data
+        result["totalFrames"] = len(frames)
+
+        # 3. Inner exceptions via $exception evaluation
+        inner_exceptions = []
+        prefix = "$exception.InnerException"
+        for depth in range(1, max_inner_exceptions + 1):
+            try:
+                type_result = await self.evaluate(f"{prefix}.GetType().FullName")
+                if "error" in type_result:
+                    break
+                msg_result = await self.evaluate(f"{prefix}.Message")
+                inner_exceptions.append({
+                    "type": type_result.get("result", "Unknown"),
+                    "message": msg_result.get("result", ""),
+                    "depth": depth,
+                })
+                prefix = f"{prefix}.InnerException"
+            except Exception:
+                break
+
+        result["innerExceptions"] = inner_exceptions
+
+        return result
+
+    async def get_stop_context(
+        self,
+        include_variables: bool = True,
+        include_output_tail: int = 10,
+    ) -> dict[str, Any]:
+        """Get rich context when stopped at any breakpoint — one call instead of many.
+
+        Returns: stop reason, stack trace with source, locals in top frame,
+        hit count for current location, recent output lines.
+        """
+        if self._state.state != DebugState.STOPPED:
+            raise RuntimeError("Program is not stopped")
+
+        tid = self._state.current_thread_id
+        result: dict[str, Any] = {
+            "state": self._state.state.value,
+            "reason": self._state.stop_reason,
+            "threadId": tid,
+            "description": self._state.stop_description,
+            "text": self._state.stop_text,
+        }
+
+        # Stack trace (top 5 frames)
+        if tid is not None:
+            frames = await self.get_stack_trace(thread_id=tid, levels=5)
+            frame_data = []
+            for frame in frames:
+                fd: dict[str, Any] = {
+                    "name": frame.name,
+                    "source": frame.source,
+                    "line": frame.line,
+                    "id": frame.id,
+                }
+                frame_data.append(fd)
+            result["frames"] = frame_data
+
+            # Variables for top frame
+            if include_variables and frames:
+                try:
+                    scopes = await self.get_scopes(frames[0].id)
+                    local_vars = []
+                    for scope in scopes:
+                        ref = scope.get("variablesReference", 0)
+                        if ref:
+                            variables = await self.get_variables(ref)
+                            for v in variables[:15]:
+                                local_vars.append({
+                                    "name": v.name,
+                                    "value": v.value,
+                                    "type": v.type,
+                                })
+                            break  # Only first scope (Locals)
+                    result["locals"] = local_vars
+                except Exception as e:
+                    result["locals"] = [{"error": str(e)}]
+
+            # Hit count for current location
+            if frames and frames[0].source:
+                norm = self.breakpoints._normalize_path(frames[0].source)
+                key = (norm, frames[0].line)
+                result["hitCount"] = self._state.hit_counts.get(key, 0)
+
+        # Recent output
+        if include_output_tail > 0:
+            tail_entries = list(self._state.output_buffer)[-include_output_tail:]
+            result["recentOutput"] = [
+                {"text": e.text.rstrip(), "category": e.category}
+                for e in tail_entries
+                if e.text.strip()  # Skip empty lines
+            ]
+
+        # Exception info if stopped at exception
+        if self._state.stop_reason == "exception" and tid is not None:
+            try:
+                result["exception"] = await self.get_exception_info(tid)
+            except Exception:
+                pass
+
+        return result

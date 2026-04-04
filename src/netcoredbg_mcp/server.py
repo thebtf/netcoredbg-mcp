@@ -154,6 +154,10 @@ def create_server(project_path: str | None = None) -> FastMCP:
         if snapshot.exception_info:
             result["exception_info"] = snapshot.exception_info
 
+        # Surface stopped event description/text (FR-6)
+        result["description"] = snapshot.description or ""
+        result["text"] = snapshot.text or ""
+
         return result
 
     async def _execute_and_wait(
@@ -275,7 +279,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         Contains: stdout/stderr from debugged process.
         Updates when: new output arrives.
         """
-        return "".join(session.state.output_buffer)
+        return "".join(e.text for e in session.state.output_buffer)
 
     @mcp.resource("debug://threads", mime_type="application/json")
     async def debug_threads_resource() -> str:
