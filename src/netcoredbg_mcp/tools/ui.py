@@ -68,14 +68,16 @@ def register_ui_tools(
         root_id: str | None = None,
         xpath: str | None = None,
     ):
-        """Helper to connect and find element (pywinauto fallback path).
+        """Helper to connect and find element with ambiguity detection.
 
-        Returns (backend, element) where element is a pywinauto wrapper.
-        For FlaUI backend, the element is the find_element dict result.
+        Returns (backend, element, ambiguity_info) where:
+        - element is a pywinauto wrapper or FlaUI dict
+        - ambiguity_info is None (single match) or dict with candidateCount + warning
 
-        Args:
-            root_id: Optional AutomationId to scope search to a subtree.
-            xpath: Optional XPath expression (FlaUI backend only).
+        When searching by name/controlType (not automationId/xpath), uses
+        find_all_cascade to detect multiple matches and returns the best-ranked one.
+        The top-ranked element from find_all_cascade is used for the actual selection,
+        not just for ambiguity reporting.
         """
         ui = await _ensure_ui_connected()
         from ..ui.pywinauto_backend import PywinautoBackend
@@ -86,8 +88,62 @@ def register_ui_tools(
                 control_type=control_type,
                 root_id=root_id,
             )
-            return ui, element
-        # FlaUI backend: find_element returns a dict
+            return ui, element, None
+
+        # FlaUI backend: use find_all_cascade when searching by name/controlType
+        # so we select the best-ranked element, not simply the first match found.
+        ambiguity_info = None
+        if not automation_id and not xpath and (name or control_type):
+            try:
+                ranked = await ui.find_all_cascade(
+                    name=name, control_type=control_type, root_id=root_id, max_results=5,
+                )
+                results = ranked.get("results", [])
+                total = ranked.get("totalMatches", 0)
+                if results:
+                    # Use the top-ranked result as the selected element
+                    top = results[0]
+                    top_automation_id = top.get("automationId") or None
+
+                    if total > 1:
+                        ambiguity_info = {
+                            "ambiguous": True,
+                            "candidateCount": total,
+                            "warning": (
+                                f"Multiple matches ({total}) for search criteria. "
+                                "Using best-ranked result."
+                            ),
+                            "alternatives": [
+                                {
+                                    "automationId": r.get("automationId", ""),
+                                    "name": r.get("name", ""),
+                                    "controlType": r.get("controlType", ""),
+                                    "parentDesc": r.get("parentDesc", ""),
+                                }
+                                for r in results[1:4]  # Show up to 3 alternatives
+                            ],
+                        }
+
+                    # Resolve the top-ranked element: prefer its automationId for
+                    # a precise lookup; fall back to original criteria if no id.
+                    if top_automation_id:
+                        element = await ui.find_element(
+                            automation_id=top_automation_id,
+                            root_id=root_id,
+                        )
+                    else:
+                        element = await ui.find_element(
+                            name=top.get("name") or name,
+                            control_type=top.get("controlType") or control_type,
+                            root_id=root_id,
+                        )
+
+                    if ambiguity_info and isinstance(element, dict):
+                        element.update(ambiguity_info)
+                    return ui, element, ambiguity_info
+            except Exception:
+                pass  # Fall through to normal find_element
+
         element = await ui.find_element(
             automation_id=automation_id,
             name=name,
@@ -95,7 +151,8 @@ def register_ui_tools(
             root_id=root_id,
             xpath=xpath,
         )
-        return ui, element
+
+        return ui, element, ambiguity_info
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def ui_get_window_tree(max_depth: int = 3, max_children: int = 50) -> dict:
@@ -201,7 +258,7 @@ def register_ui_tools(
                     )
 
             # Fallback: find element and click to focus
-            ui, element = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
+            ui, element, _ = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
             from ..ui.pywinauto_backend import PywinautoBackend
             if isinstance(ui, PywinautoBackend):
                 await ui.inner.set_focus(element)
@@ -273,7 +330,7 @@ def register_ui_tools(
                     )
 
             # Fallback: click element to focus, then send keys
-            ui, element = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
+            ui, element, _ = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
             from ..ui.pywinauto_backend import PywinautoBackend
             if isinstance(ui, PywinautoBackend):
                 await ui.inner.send_keys(element, keys)
@@ -361,7 +418,7 @@ def register_ui_tools(
 
             # Fallback to element search
             try:
-                ui, element = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
+                ui, element, _ = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
                 from ..ui.pywinauto_backend import PywinautoBackend
                 if isinstance(ui, PywinautoBackend):
                     await ui.inner.click(element)
@@ -1130,7 +1187,7 @@ def register_ui_tools(
                     )
 
             # Fallback to element search
-            ui, element = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
+            ui, element, _ = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
 
             def _right_click() -> None:
                 element.click_input(button="right")
@@ -1181,7 +1238,7 @@ def register_ui_tools(
                     )
 
             # Fallback to element search
-            ui, element = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
+            ui, element, _ = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
 
             def _double_click() -> None:
                 element.double_click_input()
@@ -1406,10 +1463,14 @@ def register_ui_tools(
         root_id: str | None = None,
         xpath: str | None = None,
     ) -> dict:
-        """Read text content from a UI element (TextBox, TextBlock, Label, etc).
+        """Read text content from a UI element using multi-strategy extraction.
 
-        For editable elements (TextBox), reads the current value via ValuePattern.
-        For read-only elements (TextBlock, Label), reads the Name property.
+        Tries 5 strategies in order: ValuePattern → TextPattern → Name →
+        LegacyIAccessible → visible text descendants. The response includes
+        which strategy provided the text (source field).
+
+        When the primary text looks like a CLR type name (e.g., "Namespace.Class"),
+        automatically falls back to visible descendant text.
 
         Args:
             automation_id: AutomationId property
@@ -1418,46 +1479,12 @@ def register_ui_tools(
             xpath: Optional XPath expression (FlaUI backend only)
         """
         try:
-            ui, element = await _find_ui_element(
-                automation_id=automation_id, name=name, root_id=root_id, xpath=xpath,
-            )
-
-            def _read_text() -> dict[str, Any]:
-                from ..ui.pywinauto_backend import PywinautoBackend
-                if isinstance(ui, PywinautoBackend):
-                    info = element.element_info
-                    control_type = info.control_type or ""
-                    auto_id = getattr(info, "automation_id", "") or ""
-
-                    # Try ValuePattern for editable controls (TextBox, Edit)
-                    try:
-                        iface = element.iface_value
-                        return {
-                            "text": iface.Value or "",
-                            "controlType": control_type,
-                            "automationId": auto_id,
-                        }
-                    except Exception:
-                        pass
-
-                    # Fallback: use Name property (TextBlock, Label, etc.)
-                    return {
-                        "text": info.name or "",
-                        "controlType": control_type,
-                        "automationId": auto_id,
-                    }
-                else:
-                    # FlaUI backend: element is dict from bridge
-                    elem = element if isinstance(element, dict) else {}
-                    return {
-                        "text": elem.get("value", elem.get("name", "")),
-                        "controlType": elem.get("controlType", ""),
-                        "automationId": elem.get("automationId", ""),
-                    }
-
-            loop = asyncio.get_running_loop()
-            result = await asyncio.wait_for(
-                loop.run_in_executor(None, _read_text), timeout=5.0,
+            ui = await _ensure_ui_connected()
+            result = await ui.extract_text(
+                automation_id=automation_id,
+                name=name,
+                root_id=root_id,
+                xpath=xpath,
             )
             return build_response(data=result, state=session.state.state)
         except Exception as e:

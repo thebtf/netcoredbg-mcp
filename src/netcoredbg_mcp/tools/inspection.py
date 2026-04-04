@@ -1,4 +1,4 @@
-"""Variable inspection and evaluation tools."""
+"""Variable inspection, evaluation, tracepoints, snapshots, and analysis tools."""
 
 import asyncio
 import logging
@@ -13,6 +13,66 @@ from ..response import build_error_response, build_response
 from ..utils.source import read_source_context
 
 logger = logging.getLogger(__name__)
+
+_NULL_SENTINELS = frozenset(("null", "Nothing", "None", ""))
+
+
+def compute_collection_stats(items: list, sample_size: int) -> dict[str, Any]:
+    """Compute collection statistics from a list of Variable objects.
+
+    Pure function — no session access. Extracted for testability.
+
+    Args:
+        items: List of Variable objects with .name, .value, .type attributes.
+        sample_size: Number of first/last items to include. Must be > 0.
+
+    Returns:
+        Statistics dict with count, element_type, null_count, first_items,
+        last_items, duplicate_count, and optional numeric stats.
+    """
+    count = len(items)
+    element_type = items[0].type or "unknown" if items else "unknown"
+    null_count = sum(1 for v in items if v.value in _NULL_SENTINELS)
+
+    first_items = [
+        {"name": v.name, "value": v.value, "type": v.type or ""}
+        for v in items[:sample_size]
+    ]
+    last_items = [
+        {"name": v.name, "value": v.value, "type": v.type or ""}
+        for v in items[-sample_size:]
+    ] if count > sample_size else []
+
+    result: dict[str, Any] = {
+        "count": count,
+        "element_type": element_type,
+        "null_count": null_count,
+        "first_items": first_items,
+        "last_items": last_items,
+    }
+
+    numeric_values: list[float] = []
+    for v in items:
+        try:
+            numeric_values.append(float(v.value))
+        except (ValueError, TypeError):
+            pass
+
+    if numeric_values:
+        result["min"] = min(numeric_values)
+        result["max"] = max(numeric_values)
+        result["sum"] = sum(numeric_values)
+        result["average"] = sum(numeric_values) / len(numeric_values)
+
+    seen: set[str] = set()
+    duplicates = 0
+    for v in items:
+        if v.value in seen:
+            duplicates += 1
+        seen.add(v.value)
+    result["duplicate_count"] = duplicates
+
+    return result
 
 
 def register_inspection_tools(
@@ -262,5 +322,355 @@ def register_inspection_tools(
             return build_response(data=result, state=session.state.state)
         except RuntimeError as e:
             return build_error_response(str(e), state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    # ── Tracepoint tools (FR-3) ──────────────────────────────────────
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def add_tracepoint(ctx: Context, file: str, line: int, expression: str) -> dict:
+        """Set a non-stopping tracepoint that logs expression values.
+
+        The tracepoint evaluates the expression each time the line is hit,
+        without visibly pausing the program. Results are stored in a trace
+        buffer accessible via get_trace_log.
+
+        Args:
+            file: Source file path
+            line: Line number (1-based)
+            expression: Expression to evaluate on each hit
+        """
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            from ..session.tracepoints import TracepointManager
+            if not hasattr(session, '_tracepoint_manager'):
+                session._tracepoint_manager = TracepointManager()
+
+            mgr: TracepointManager = session._tracepoint_manager
+
+            # Validate and normalize file path to prevent path traversal
+            real_file = os.path.realpath(os.path.abspath(file))
+            if not os.path.isabs(real_file):
+                return build_error_response("File path must be absolute.", state=session.state.state)
+            if not os.path.isfile(real_file):
+                return build_error_response(
+                    f"File not found: {real_file}", state=session.state.state,
+                )
+            norm_file = real_file
+
+            # Register tracepoint
+            tp = mgr.add(norm_file, line, expression)
+
+            # Set a real DAP breakpoint on this line
+            try:
+                bp_result = await session.add_breakpoint(norm_file, line)
+                if bp_result and isinstance(bp_result, dict):
+                    tp.breakpoint_id = bp_result.get("id")
+            except Exception as e:
+                logger.warning("Failed to set DAP breakpoint for tracepoint %s: %s", tp.id, e)
+
+            return build_response(
+                data={
+                    "id": tp.id,
+                    "file": tp.file,
+                    "line": tp.line,
+                    "expression": tp.expression,
+                    "breakpoint_verified": tp.breakpoint_id is not None,
+                },
+                state=session.state.state,
+            )
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def remove_tracepoint(ctx: Context, tracepoint_id: str) -> dict:
+        """Remove a tracepoint by ID.
+
+        Args:
+            tracepoint_id: Tracepoint ID (e.g., "tp-1")
+        """
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            mgr = getattr(session, '_tracepoint_manager', None)
+            if mgr is None:
+                return build_error_response("No tracepoints configured.", state=session.state.state)
+
+            tp = mgr.remove(tracepoint_id)
+            if tp is None:
+                return build_error_response(
+                    f"Tracepoint '{tracepoint_id}' not found.", state=session.state.state,
+                )
+
+            # Remove the underlying DAP breakpoint so it no longer stops execution
+            try:
+                await session.remove_breakpoint(tp.file, tp.line)
+            except Exception as e:
+                logger.warning("Failed to remove DAP breakpoint for tracepoint %s: %s", tp.id, e)
+
+            return build_response(
+                data={"removed": tracepoint_id, "was_active": tp.active, "hit_count": tp.hit_count},
+                state=session.state.state,
+            )
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    async def get_trace_log(
+        since: float | None = None,
+        tracepoint_id: str | None = None,
+    ) -> dict:
+        """Get tracepoint evaluation log.
+
+        Args:
+            since: Only return entries after this timestamp (monotonic)
+            tracepoint_id: Filter to specific tracepoint
+        """
+        try:
+            mgr = getattr(session, '_tracepoint_manager', None)
+            if mgr is None:
+                return build_response(
+                    data={"entries": [], "total": 0, "truncated": False},
+                    state=session.state.state,
+                )
+
+            entries = mgr.get_log(since=since, tracepoint_id=tracepoint_id)
+            return build_response(
+                data={
+                    "entries": [
+                        {
+                            "timestamp": e.timestamp,
+                            "file": e.file,
+                            "line": e.line,
+                            "expression": e.expression,
+                            "value": e.value,
+                            "thread_id": e.thread_id,
+                            "tracepoint_id": e.tracepoint_id,
+                        }
+                        for e in entries
+                    ],
+                    "total": len(entries),
+                    "truncated": mgr.is_log_full,
+                },
+                state=session.state.state,
+            )
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def clear_trace_log(ctx: Context) -> dict:
+        """Clear the tracepoint evaluation log."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            mgr = getattr(session, '_tracepoint_manager', None)
+            count = mgr.clear_log() if mgr else 0
+            return build_response(
+                data={"cleared": count}, state=session.state.state,
+            )
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    # ── Snapshot tools (FR-4) ────────────────────────────────────────
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def create_snapshot(ctx: Context, name: str) -> dict:
+        """Capture all local variables at the current frame as a named snapshot.
+
+        Must be called when the program is stopped at a breakpoint.
+        Max 20 snapshots per session (oldest evicted when full).
+
+        Args:
+            name: Unique name for this snapshot
+        """
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            from ..session.snapshots import SnapshotManager
+            if not hasattr(session, '_snapshot_manager'):
+                session._snapshot_manager = SnapshotManager()
+
+            snap = await session._snapshot_manager.create(name, session)
+            return build_response(
+                data={
+                    "name": snap.name,
+                    "frame": snap.frame_name,
+                    "variable_count": len(snap.variables),
+                    "timestamp": snap.timestamp,
+                },
+                state=session.state.state,
+            )
+        except (ValueError, RuntimeError) as e:
+            return build_error_response(str(e), state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    async def diff_snapshots(name1: str, name2: str) -> dict:
+        """Compare two snapshots and show variable differences.
+
+        Args:
+            name1: First snapshot name (before state)
+            name2: Second snapshot name (after state)
+        """
+        try:
+            mgr = getattr(session, '_snapshot_manager', None)
+            if mgr is None:
+                return build_error_response("No snapshots created.", state=session.state.state)
+
+            result = mgr.diff(name1, name2)
+            return build_response(data=result, state=session.state.state)
+        except KeyError as e:
+            return build_error_response(str(e), state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    async def list_snapshots() -> dict:
+        """List all captured snapshots with metadata."""
+        try:
+            mgr = getattr(session, '_snapshot_manager', None)
+            if mgr is None:
+                return build_response(
+                    data={"snapshots": []}, state=session.state.state,
+                )
+            snapshots = mgr.list_snapshots()
+            return build_response(
+                data={"snapshots": snapshots}, state=session.state.state,
+            )
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    # ── Collection analyzer (FR-5) ───────────────────────────────────
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    async def analyze_collection(
+        ctx: Context,
+        variables_reference: int,
+        sample_size: int = 5,
+    ) -> dict:
+        """Analyze a collection variable in one call.
+
+        Returns count, element type, null count, first/last N items,
+        and numeric stats (min/max/sum/average) for numeric collections.
+
+        Args:
+            variables_reference: Variable reference from get_variables response
+            sample_size: Number of first/last items to include (default 5)
+        """
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            if sample_size <= 0:
+                return build_error_response(
+                    "sample_size must be greater than 0.", state=session.state.state,
+                )
+
+            from ..session.state import DebugState
+            if session.state.state != DebugState.STOPPED:
+                return build_error_response(
+                    "Program must be stopped to analyze collections.",
+                    state=session.state.state,
+                )
+
+            items = await session.get_variables(variables_reference)
+            if not items:
+                return build_error_response(
+                    "No items found. Variable may not be a collection or reference is expired.",
+                    state=session.state.state,
+                )
+
+            result = compute_collection_stats(items, sample_size)
+            return build_response(data=result, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    # ── Object summarizer (FR-6) ─────────────────────────────────────
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    async def summarize_object(
+        ctx: Context,
+        variables_reference: int,
+        max_depth: int = 2,
+        max_properties: int = 50,
+    ) -> dict:
+        """Produce a flattened summary of a complex object.
+
+        Returns property paths (dot notation), values, and types up to
+        the configured depth. Detects circular references.
+
+        Args:
+            variables_reference: Variable reference from get_variables response
+            max_depth: Maximum nesting depth (default 2, max 5)
+            max_properties: Maximum total properties to return (default 50)
+        """
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            from ..session.state import DebugState
+            if session.state.state != DebugState.STOPPED:
+                return build_error_response(
+                    "Program must be stopped to summarize objects.",
+                    state=session.state.state,
+                )
+
+            clamped_depth = max(1, min(max_depth, 5))
+            properties: list[dict[str, str]] = []
+
+            async def _walk(var_ref: int, prefix: str, depth: int, ancestors: frozenset[int]) -> None:
+                if depth > clamped_depth or len(properties) >= max_properties:
+                    return
+                if var_ref in ancestors:
+                    # True cycle: this ref is on the current call stack
+                    properties.append({
+                        "path": prefix or "<root>",
+                        "value": "<circular ref>",
+                        "type": "",
+                    })
+                    return
+
+                current_ancestors = ancestors | {var_ref}
+                vars_list = await session.get_variables(var_ref)
+
+                for v in vars_list:
+                    if len(properties) >= max_properties:
+                        break
+
+                    path = f"{prefix}.{v.name}" if prefix else v.name
+                    properties.append({
+                        "path": path,
+                        "value": v.value,
+                        "type": v.type or "",
+                    })
+
+                    # Recurse into nested objects
+                    if v.variables_reference > 0 and depth < clamped_depth:
+                        await _walk(v.variables_reference, path, depth + 1, current_ancestors)
+
+            await _walk(variables_reference, "", 0, frozenset())
+
+            total = len(properties)
+            return build_response(
+                data={
+                    "properties": properties,
+                    "total_properties": total,
+                    "truncated": total >= max_properties,
+                    "depth_reached": clamped_depth,
+                },
+                state=session.state.state,
+            )
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)

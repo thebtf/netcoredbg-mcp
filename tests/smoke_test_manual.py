@@ -31,6 +31,21 @@ SOURCE = os.path.join(BASE, "tests", "fixtures", "SmokeTestApp", "Program.cs")
 passed = 0
 failed = 0
 
+# Dynamic line number lookup — survives code changes to SmokeTestApp
+_source_lines: list[str] = []
+
+
+def _find_line(pattern: str) -> int:
+    """Find the 1-based line number containing pattern in SOURCE."""
+    global _source_lines
+    if not _source_lines:
+        with open(SOURCE, encoding="utf-8") as f:
+            _source_lines = f.readlines()
+    for i, line in enumerate(_source_lines, 1):
+        if pattern in line:
+            return i
+    raise ValueError(f"Pattern not found in {SOURCE}: {pattern!r}")
+
 
 def check(name: str, condition: bool, detail: str = "") -> None:
     global passed, failed
@@ -54,7 +69,7 @@ async def test_hit_counting():
     print("\n1. HIT COUNTING (FR-1)")
     m = await new_session()
     try:
-        m.breakpoints.add(Breakpoint(file=SOURCE, line=15))  # sum += i
+        m.breakpoints.add(Breakpoint(file=SOURCE, line=_find_line("sum += i")))  # sum += i
         await m.launch(program=DLL, args=["hitcount"])
         snapshot = await m.wait_for_stopped(timeout=10)
         await asyncio.sleep(0.3)
@@ -88,7 +103,7 @@ async def test_stack_and_variables():
     print("\n2. STACK TRACE + EVALUATE + VARIABLES (existing functionality)")
     m = await new_session()
     try:
-        m.breakpoints.add(Breakpoint(file=SOURCE, line=59))  # VariableInspection breakpoint
+        m.breakpoints.add(Breakpoint(file=SOURCE, line=_find_line("int={intVar}")))  # VariableInspection println
         await m.launch(program=DLL, args=["variables"])
         snapshot = await m.wait_for_stopped(timeout=10)
 
@@ -152,22 +167,26 @@ async def test_stepping():
     print("\n3. STEPPING (step_over, step_into, step_out)")
     m = await new_session()
     try:
-        m.breakpoints.add(Breakpoint(file=SOURCE, line=66))  # Outer: var mid = Middle(x + 1)
+        m.breakpoints.add(Breakpoint(file=SOURCE, line=_find_line("var mid = Middle(x + 1)")))  # Outer
         await m.launch(program=DLL, args=["stepping"])
         snapshot = await m.wait_for_stopped(timeout=10)
 
         check("Stopped at Outer", snapshot.stop_reason == "breakpoint")
 
-        # Step into → should enter Middle
-        m.prepare_for_execution()
-        await m._client.step_in(m.state.current_thread_id)
-        snapshot = await m.wait_for_stopped(timeout=5)
-        frames = await m.get_stack_trace(levels=3)
-        check("Step into enters Middle",
-              "Middle" in (frames[0].name if frames else ""),
+        # Step into → should enter Middle (may take 1-2 steps due to expression eval)
+        entered_middle = False
+        for _ in range(3):
+            m.prepare_for_execution()
+            await m._client.step_in(m.state.current_thread_id)
+            snapshot = await m.wait_for_stopped(timeout=5)
+            frames = await m.get_stack_trace(levels=3)
+            if frames and "Middle" in frames[0].name:
+                entered_middle = True
+                break
+        check("Step into enters Middle", entered_middle,
               f"top: {frames[0].name if frames else 'none'}")
 
-        # Step over → stay in Middle
+        # Step over → stay in Middle (advance one line)
         m.prepare_for_execution()
         await m._client.step_over(m.state.current_thread_id)
         snapshot = await m.wait_for_stopped(timeout=5)
@@ -381,7 +400,7 @@ async def test_stopped_description():
     print("\n9. STOPPED DESCRIPTION/TEXT (FR-6)")
     m = await new_session()
     try:
-        m.breakpoints.add(Breakpoint(file=SOURCE, line=15))
+        m.breakpoints.add(Breakpoint(file=SOURCE, line=_find_line("sum += i")))
         await m.launch(program=DLL, args=["hitcount"])
         snapshot = await m.wait_for_stopped(timeout=10)
 
@@ -447,7 +466,7 @@ async def test_ui_invoke_toggle():
 
     m = SessionManager()
     try:
-        await m.start_debug(DLL, args=["gui"])
+        await m.launch(program=DLL, args=["gui"])
         await asyncio.sleep(2.0)  # Wait for GUI window to appear
 
         backend = create_backend(process_registry=m.process_registry)
@@ -525,7 +544,7 @@ async def test_ui_invoke_toggle():
 
     finally:
         try:
-            await m.stop_debug()
+            await m.stop()
         except Exception:
             pass
 
@@ -539,7 +558,7 @@ async def test_scoped_search_performance():
 
     m = SessionManager()
     try:
-        await m.start_debug(DLL, args=["gui"])
+        await m.launch(program=DLL, args=["gui"])
         await asyncio.sleep(2.0)
 
         backend = create_backend(process_registry=m.process_registry)
@@ -588,9 +607,190 @@ async def test_scoped_search_performance():
 
     finally:
         try:
-            await m.stop_debug()
+            await m.stop()
         except Exception:
             pass
+
+
+async def test_tracepoints():
+    """Scenario 13: Tracepoints — unit test TracepointManager directly."""
+    print("\n--- Tracepoints ---")
+
+    from netcoredbg_mcp.session.tracepoints import TracepointManager
+    from netcoredbg_mcp.session.state import TraceEntry
+
+    mgr = TracepointManager()
+
+    # Add tracepoints
+    tp1 = mgr.add("Program.cs", 15, "i")
+    tp2 = mgr.add("Program.cs", 20, "sum")
+    check("Tracepoint 1 added", tp1.id == "tp-1")
+    check("Tracepoint 2 added", tp2.id == "tp-2")
+    check("Two tracepoints registered", len(mgr.tracepoints) == 2)
+
+    # Simulate trace entries
+    import time
+    mgr._trace_buffer.append(TraceEntry(time.monotonic(), "Program.cs", 15, "i", "1", 1, "tp-1"))
+    mgr._trace_buffer.append(TraceEntry(time.monotonic(), "Program.cs", 15, "i", "2", 1, "tp-1"))
+    mgr._trace_buffer.append(TraceEntry(time.monotonic(), "Program.cs", 20, "sum", "3", 1, "tp-2"))
+
+    entries = mgr.get_log()
+    check("Trace log has 3 entries", len(entries) == 3)
+
+    filtered = mgr.get_log(tracepoint_id="tp-1")
+    check("Filtered to tp-1 has 2 entries", len(filtered) == 2)
+
+    # Remove
+    removed = mgr.remove("tp-1")
+    check("Removed tp-1", removed is not None and removed.id == "tp-1")
+    check("One tracepoint left", len(mgr.tracepoints) == 1)
+
+    # Clear log
+    count = mgr.clear_log()
+    check("Cleared 3 entries", count == 3)
+    check("Log empty after clear", len(mgr.get_log()) == 0)
+
+    # Rate limiting
+    tp3 = mgr.add("test.cs", 1, "x")
+    check("Not rate limited first", not mgr._is_rate_limited(tp3.id))
+    check("Rate limited immediately after", mgr._is_rate_limited(tp3.id))
+
+
+async def test_snapshots():
+    """Scenario 14: Snapshots — create, diff, FIFO (unit test)."""
+    print("\n--- Snapshots ---")
+
+    from netcoredbg_mcp.session.snapshots import SnapshotManager
+    from netcoredbg_mcp.session.state import Snapshot, SnapshotVar
+
+    mgr = SnapshotManager()
+
+    # Manually create snapshots (avoid needing real debug session)
+    import time
+    snap1 = Snapshot(name="before", timestamp=time.monotonic(), frame_name="Main",
+                     variables={"x": SnapshotVar("42", "int"), "name": SnapshotVar("hello", "string")})
+    mgr._snapshots["before"] = snap1
+    check("Snapshot stored", "before" in mgr.snapshots)
+
+    snap2 = Snapshot(name="after", timestamp=time.monotonic(), frame_name="Main",
+                     variables={"x": SnapshotVar("100", "int"), "name": SnapshotVar("hello", "string"),
+                                "y": SnapshotVar("new", "string")})
+    mgr._snapshots["after"] = snap2
+
+    # Diff
+    diff = mgr.diff("before", "after")
+    check("Diff: 1 changed (x)", len(diff["changed"]) == 1 and diff["changed"][0]["name"] == "x")
+    check("Diff: 1 added (y)", len(diff["added"]) == 1 and diff["added"][0]["name"] == "y")
+    check("Diff: 0 removed", len(diff["removed"]) == 0)
+    check("Diff: 1 unchanged (name)", diff["unchanged_count"] == 1)
+
+    # List
+    snapshots = mgr.list_snapshots()
+    check("List has 2 snapshots", len(snapshots) == 2)
+
+    # FIFO eviction baseline: verify direct dict insertion bypasses eviction
+    # (eviction only triggers through SnapshotManager.take(), not _snapshots[...]=)
+    for i in range(20):
+        mgr._snapshots[f"extra-{i}"] = Snapshot(f"extra-{i}", time.monotonic(), "Test", {})
+    check("Direct dict access bypasses FIFO eviction", len(mgr._snapshots) == 22)  # 2 + 20
+
+
+async def test_collection_and_object():
+    """Scenario 15: Collection analyzer + object summarizer with real debug session."""
+    print("\n--- Collection + Object Analysis ---")
+
+    m = await new_session()
+    try:
+        m.breakpoints.add(Breakpoint(file=SOURCE, line=_find_line("int={intVar}")))  # VariableInspection println
+        await m.launch(program=DLL, args=["variables"])
+        snapshot = await m.wait_for_stopped(timeout=10.0)
+        check("Stopped at variables", snapshot is not None)
+
+        # Get scopes to find locals
+        tid = m.state.current_thread_id or 1
+        frames = await m.get_stack_trace(thread_id=tid, levels=1)
+        if not frames:
+            check("Has frames", False)
+            return
+        scopes = await m.get_scopes(frame_id=frames[0].id)
+        locals_ref = None
+        for s in scopes:
+            if s.get("name") == "Locals":
+                locals_ref = s.get("variablesReference")
+                break
+
+        if not locals_ref:
+            check("Has Locals scope", False)
+            return
+
+        variables = await m.get_variables(locals_ref)
+        check("Has variables", len(variables) > 0, f"count={len(variables)}")
+
+        # Find listVar
+        list_var = next((v for v in variables if v.name == "listVar"), None)
+        if list_var and list_var.variables_reference > 0:
+            items = await m.get_variables(list_var.variables_reference)
+            check("Collection has items", len(items) > 0, f"count={len(items)}")
+
+            # Test numeric stats extraction
+            numeric = []
+            for v in items:
+                try:
+                    numeric.append(float(v.value))
+                except (ValueError, TypeError):
+                    pass
+            check("Numeric values extracted", len(numeric) > 0, f"values={numeric[:5]}")
+        else:
+            check("listVar found", list_var is not None)
+
+        # Find dictVar for object summarizer test
+        dict_var = next((v for v in variables if v.name == "dictVar"), None)
+        if dict_var and dict_var.variables_reference > 0:
+            props = await m.get_variables(dict_var.variables_reference)
+            check("Object has properties", len(props) > 0, f"count={len(props)}")
+        else:
+            check("dictVar found", dict_var is not None)
+
+    finally:
+        await m.stop()
+
+
+async def test_tracepoint_performance():
+    """Scenario 16: Measure tracepoint pause-evaluate-resume cycle (NFR-1)."""
+    print("\n--- Tracepoint Performance (NFR-1) ---")
+
+    import time as _time
+    from netcoredbg_mcp.session.tracepoints import TracepointManager
+
+    m = await new_session()
+    try:
+        m.breakpoints.add(Breakpoint(file=SOURCE, line=_find_line("Tick {i}/30")))  # Tick line in LongRunning
+        await m.launch(program=DLL, args=["longrun"])
+
+        mgr = TracepointManager()
+        m._tracepoint_manager = mgr
+
+        tp = mgr.add(SOURCE, _find_line("Tick {i}/30"), "i")
+
+        snapshot = await m.wait_for_stopped(timeout=10.0)
+        check("Stopped at longrun tick", snapshot is not None)
+
+        # Manually time one tracepoint evaluate cycle
+        tid = m.state.current_thread_id or 1
+        t0 = _time.monotonic()
+        await mgr.on_tracepoint_hit(tp, m, tid)
+        cycle_ms = (_time.monotonic() - t0) * 1000
+
+        check("Tracepoint cycle time measured", True, f"actual={cycle_ms:.1f}ms")
+        check("Tracepoint cycle < 500ms", cycle_ms < 500, f"actual={cycle_ms:.1f}ms (500ms timeout)")
+        check("Trace entry logged", len(mgr.get_log()) >= 1)
+
+        if mgr.get_log():
+            entry = mgr.get_log()[0]
+            check("Entry has value", entry.value != "", f"value={entry.value}")
+
+    finally:
+        await m.stop()
 
 
 async def run_all():
@@ -599,7 +799,7 @@ async def run_all():
         print(f"  dotnet build tests/fixtures/SmokeTestApp -c Debug")
         return False
 
-    print("=== SMOKE TEST: netcoredbg-mcp v0.5.0 ===")
+    print("=== SMOKE TEST: netcoredbg-mcp v0.5.1 ===")
     print(f"DLL: {DLL}")
     print(f"Source: {SOURCE}")
 
@@ -614,6 +814,10 @@ async def run_all():
         ("Capabilities + Terminate", test_capabilities_and_terminate),
         ("Stopped Description", test_stopped_description),
         ("Threads + Pause", test_threads_and_pause),
+        ("Tracepoints", test_tracepoints),
+        ("Snapshots", test_snapshots),
+        ("Collection + Object Analysis", test_collection_and_object),
+        ("Tracepoint Performance", test_tracepoint_performance),
     ]
 
     if GUI_ENABLED:

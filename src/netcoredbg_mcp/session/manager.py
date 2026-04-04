@@ -293,17 +293,90 @@ class SessionManager:
         self._state.stop_reason = body.reason.value
         self._state.stop_description = body.description
         self._state.stop_text = body.text
-        self._set_state(DebugState.STOPPED)
-        self._execution_event.set()
         logger.info(f"Stopped: reason={body.reason.value}, thread={body.thread_id}")
 
-        # Schedule hit counting for breakpoint stops (async — needs stack trace)
-        if body.reason.value == "breakpoint" and body.thread_id is not None:
+        # For breakpoint stops with an active tracepoint manager, defer the STOPPED
+        # state notification until after we confirm it is not a tracepoint hit.
+        # Tracepoint hits are transparent to callers — they resume automatically and
+        # must NOT surface as STOPPED events.
+        if (
+            body.reason.value == "breakpoint"
+            and body.thread_id is not None
+            and getattr(self, '_tracepoint_manager', None) is not None
+        ):
             try:
                 loop = asyncio.get_running_loop()
                 loop.create_task(self._update_hit_count(body.thread_id))
+                loop.create_task(self._check_tracepoint(body.thread_id))
             except RuntimeError:
-                pass  # No running event loop — skip hit counting (test environment)
+                # No running event loop (test environment) — fall through to normal stop.
+                self._set_state(DebugState.STOPPED)
+                self._execution_event.set()
+        else:
+            self._set_state(DebugState.STOPPED)
+            self._execution_event.set()
+            # Still schedule hit counting for non-tracepoint breakpoint stops
+            if body.reason.value == "breakpoint" and body.thread_id is not None:
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self._update_hit_count(body.thread_id))
+                except RuntimeError:
+                    pass
+
+    async def _check_tracepoint(self, thread_id: int) -> None:
+        """Check if the stopped location matches a tracepoint and handle it.
+
+        When a tracepoint is found, evaluates the expression and resumes execution
+        WITHOUT surfacing a STOPPED state to callers (transparent non-stopping hit).
+        When no tracepoint matches, transitions to STOPPED and signals _execution_event
+        so that callers waiting on wait_for_stopped() are unblocked.
+        """
+        try:
+            mgr = getattr(self, '_tracepoint_manager', None)
+            if mgr is None:
+                self._set_state(DebugState.STOPPED)
+                self._execution_event.set()
+                return
+
+            frames = await self.get_stack_trace(thread_id=thread_id, levels=1)
+            if not frames:
+                self._set_state(DebugState.STOPPED)
+                self._execution_event.set()
+                return
+
+            top = frames[0]
+            if not top.source or not top.line:
+                self._set_state(DebugState.STOPPED)
+                self._execution_event.set()
+                return
+
+            tp = mgr.find_tracepoint_for_location(top.source, top.line)
+            if tp is None:
+                # Normal user breakpoint — surface the STOPPED event.
+                self._set_state(DebugState.STOPPED)
+                self._execution_event.set()
+                return
+
+            # Check whether a user-defined breakpoint also exists at this location.
+            # If so, the session must remain stopped after evaluation so the user
+            # can inspect state — on_tracepoint_hit respects this via has_user_breakpoint.
+            user_bps = self._breakpoints.get_for_file(top.source)
+            has_user_breakpoint = any(bp.line == top.line for bp in user_bps)
+
+            if has_user_breakpoint:
+                # Surface STOPPED — the user breakpoint takes precedence.
+                self._set_state(DebugState.STOPPED)
+                self._execution_event.set()
+
+            # Tracepoint hit — evaluate (and resume only if no user breakpoint).
+            await mgr.on_tracepoint_hit(
+                tp, self, thread_id, has_user_breakpoint=has_user_breakpoint, top_frame=top
+            )
+        except Exception as e:
+            logger.warning("Tracepoint check failed: %s", e)
+            # On error, fall back to normal STOPPED so the session is not stuck.
+            self._set_state(DebugState.STOPPED)
+            self._execution_event.set()
 
     async def _update_hit_count(self, thread_id: int) -> None:
         """Fetch top frame and increment hit count for matching breakpoint."""
@@ -1015,7 +1088,26 @@ class SessionManager:
         if tid is None:
             raise RuntimeError("No thread for stack trace")
 
-        response = await self._client.stack_trace(tid, start_frame, levels)
+        # Retry on CORDBG_E_PROCESS_NOT_SYNCHRONIZED (0x80131302) — race
+        # between stopped event and ICorDebug internal synchronization.
+        # Occurs after step_in/step_over/step_out when stackTrace is called
+        # before netcoredbg finishes syncing the debuggee process.
+        max_retries = 3
+        retry_delay = 0.1  # 100ms between retries
+        response = None
+        for attempt in range(max_retries + 1):
+            response = await self._client.stack_trace(tid, start_frame, levels)
+            if response.success:
+                break
+            if "0x80131302" in (response.message or "") and attempt < max_retries:
+                logger.debug(
+                    "stack_trace: PROCESS_NOT_SYNCHRONIZED, retry %d/%d after %.0fms",
+                    attempt + 1, max_retries, retry_delay * 1000,
+                )
+                await asyncio.sleep(retry_delay)
+                continue
+            break
+
         logger.debug(
             f"stack_trace response for thread {tid}: success={response.success}, "
             f"body={response.body}, message={response.message}"

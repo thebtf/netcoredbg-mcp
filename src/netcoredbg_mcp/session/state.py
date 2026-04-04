@@ -217,6 +217,46 @@ class Variable:
 
 
 @dataclass
+class TraceEntry:
+    """Single tracepoint evaluation result."""
+    timestamp: float
+    file: str
+    line: int
+    expression: str
+    value: str  # Result or "<error: ...>", "<timeout>", "<rate limited>"
+    thread_id: int
+    tracepoint_id: str
+
+
+@dataclass
+class Tracepoint:
+    """Client-side tracepoint definition."""
+    id: str  # "tp-{counter}"
+    file: str  # Normalized source path
+    line: int
+    expression: str
+    breakpoint_id: int | None = None  # DAP breakpoint ID
+    hit_count: int = 0
+    active: bool = True
+
+
+@dataclass
+class SnapshotVar:
+    """Variable captured in a snapshot."""
+    value: str
+    type: str
+
+
+@dataclass
+class Snapshot:
+    """Captured variable state at a point in time."""
+    name: str
+    timestamp: float
+    frame_name: str
+    variables: dict[str, SnapshotVar] = field(default_factory=dict)
+
+
+@dataclass
 class OutputEntry:
     """Single output buffer entry with category metadata."""
     text: str
