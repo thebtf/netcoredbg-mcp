@@ -8,7 +8,6 @@ namespace SmokeTestApp;
 
 public class Program
 {
-    [STAThread]
     // Scenario 1: Breakpoint hit counting — loop hits the same line multiple times
     static int CountToTen()
     {
@@ -111,7 +110,7 @@ public class Program
         {
             Text = "SmokeTestApp GUI",
             Width = 400,
-            Height = 350,
+            Height = 400,
             StartPosition = FormStartPosition.CenterScreen,
         };
 
@@ -177,6 +176,29 @@ public class Program
 
         panel.Controls.AddRange(new Control[] { invokeBtn, checkBox, scopedBtn, textBox });
 
+        // Duplicate-named button inside panel for root_id scoping test
+        var actionBtnInside = new Button
+        {
+            Name = "btnAction",
+            Text = "Action (Inside)",
+            Location = new System.Drawing.Point(160, 100),
+            Width = 120,
+            Height = 30,
+        };
+        actionBtnInside.AccessibleName = "btnAction";
+        panel.Controls.Add(actionBtnInside);
+
+        // Same-named button outside panel — root_id="settingsPanel" should NOT find this one
+        var actionBtnOutside = new Button
+        {
+            Name = "btnAction",
+            Text = "Action (Outside)",
+            Location = new System.Drawing.Point(20, 260),
+            Width = 120,
+            Height = 30,
+        };
+        actionBtnOutside.AccessibleName = "btnAction";
+
         // Button outside panel (for disambiguation with scoped search)
         var outerBtn = new Button
         {
@@ -213,12 +235,14 @@ public class Program
 
         form.Controls.Add(panel);
         form.Controls.Add(outerBtn);
+        form.Controls.Add(actionBtnOutside);
         form.Controls.Add(fileDialogBtn);
 
         Console.WriteLine("GUI scenario started. Close the window to exit.");
         Application.Run(form);
     }
 
+    [STAThread]
     public static void Main(string[] args)
     {
         var scenario = args.Length > 0 ? args[0] : "all";

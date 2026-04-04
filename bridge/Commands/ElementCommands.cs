@@ -57,7 +57,13 @@ public static class ElementCommands
             conditions.Add(cf.ByControlType(ct));
 
         if (conditions.Count == 0)
-            throw new ArgumentException("At least one search criterion required: automationId, name, or controlType");
+        {
+            // If xpath provided without other criteria, delegate to XPath search
+            var xpath = @params?["xpath"]?.GetValue<string>();
+            if (!string.IsNullOrWhiteSpace(xpath))
+                return FindByXPath(@params, automation, mainWindow);
+            throw new ArgumentException("At least one search criterion required: automationId, name, controlType, or xpath");
+        }
 
         var condition = conditions.Count == 1
             ? conditions[0]
@@ -98,6 +104,8 @@ public static class ElementCommands
 
             var result = BuildElementInfo(element);
             result["matchCount"] = matchCount;
+            if (matchCount > 1)
+                result["warning"] = $"XPath matched {matchCount} elements; returning first. Use more specific XPath to avoid ambiguity.";
             return result;
         }
         catch (Exception ex) when (ex is not InvalidOperationException)
@@ -131,6 +139,11 @@ public static class ElementCommands
     {
         var rootId = @params?["rootAutomationId"]?.GetValue<string>();
         if (string.IsNullOrWhiteSpace(rootId))
+            return mainWindow;
+
+        // Check if mainWindow itself matches rootAutomationId
+        if (mainWindow.Properties.AutomationId.IsSupported &&
+            mainWindow.Properties.AutomationId.Value == rootId)
             return mainWindow;
 
         var cf = new ConditionFactory(automation.PropertyLibrary);

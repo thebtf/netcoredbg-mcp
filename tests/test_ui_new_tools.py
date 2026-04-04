@@ -2,30 +2,9 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
-
-@pytest.fixture
-def mock_backend():
-    """Create a mock FlaUI backend."""
-    backend = AsyncMock()
-    backend.process_id = 1234
-    backend.element_cache = {}
-    return backend
-
-
-@pytest.fixture
-def mock_session():
-    """Create a mock SessionManager with STOPPED state."""
-    from netcoredbg_mcp.session.state import DebugState
-
-    session = MagicMock()
-    session.state.state = DebugState.STOPPED
-    session.state.process_id = 1234
-    session.process_registry = None
-    return session
 
 
 class TestFlaUIBackendInvoke:

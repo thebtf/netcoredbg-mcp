@@ -112,13 +112,13 @@ Alternative: client-side tracepoints using `quick_evaluate` pattern
 **Implemented in:** `tools/ui.py:ui_toggle`, `bridge/Commands/PatternCommands.cs:ToggleElement`
 
 #### ~~R6: `ui_file_dialog` — Standard Windows Open/Save dialog~~ DONE v0.5.0
-**Implemented in:** `tools/ui.py:ui_file_dialog` (multi-strategy: set_value id=1148 → keyboard Alt+N → invoke id=1 → Enter)
+**Implemented in:** `tools/ui.py:ui_file_dialog` (multi-strategy: 1. set_value ComboBox id=1148, 2. keyboard Alt+N → Ctrl+A → type path, 3. invoke button id=1 or by name, 4. Enter fallback. Path escaped for SendKeys special chars.)
 
 #### ~~R7: `root_id` parameter on all find/click tools~~ DONE v0.5.0
 **Implemented in:** 11 tools with `root_id` param, `bridge/Commands/ElementCommands.cs:ResolveSearchRoot`
 
 #### ~~R8: XPath element search~~ DONE v0.5.0
-**Implemented in:** 11 tools with `xpath` param, `bridge/Commands/ElementCommands.cs:FindByXPath` with matchCount warning
+**Implemented in:** 11 tools with `xpath` param, `bridge/Commands/ElementCommands.cs:FindByXPath` with matchCount + warning on multiple matches. `FindElement` delegates to XPath when xpath is the only criterion.
 
 **Remaining from UI expansion (post-merge):**
 - T030: WPF SmokeTestApp with checkbox/invoke button scenarios (needs new WPF project)

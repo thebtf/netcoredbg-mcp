@@ -80,10 +80,11 @@ def register_ui_tools(
         ui = await _ensure_ui_connected()
         from ..ui.pywinauto_backend import PywinautoBackend
         if isinstance(ui, PywinautoBackend):
-            element = await ui.inner.find_element(
+            element = await ui._find_element_scoped(
                 automation_id=automation_id,
                 name=name,
                 control_type=control_type,
+                root_id=root_id,
             )
             return ui, element
         # FlaUI backend: find_element returns a dict
@@ -470,6 +471,19 @@ def register_ui_tools(
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
+    def _escape_sendkeys_path(path: str) -> str:
+        """Escape special SendKeys characters in file paths."""
+        # Characters with special meaning in SendKeys: + ^ % { } ( ) ~
+        result = []
+        for ch in path:
+            if ch in "+^%{}()~":
+                result.append("{")
+                result.append(ch)
+                result.append("}")
+            else:
+                result.append(ch)
+        return "".join(result)
+
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def ui_file_dialog(
         ctx: Context,
@@ -509,10 +523,10 @@ def register_ui_tools(
                         edit_method = "set_value(id=1148)"
                     else:
                         # pywinauto fallback: type the path
-                        await ui.send_keys(f"^a{path}")
+                        await ui.send_keys(f"^a{_escape_sendkeys_path(path)}")
                         edit_method = "keyboard(Ctrl+A, type)"
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("file_dialog strategy 1 (set_value) failed: %s", exc)
 
             # Strategy 2: Fallback — keyboard navigation
             if not edit_method:
@@ -520,7 +534,7 @@ def register_ui_tools(
                     # Standard dialog: Alt+N focuses the file name field
                     await ui.send_keys("%n")
                     await asyncio.sleep(0.2)
-                    await ui.send_keys(f"^a{path}")
+                    await ui.send_keys(f"^a{_escape_sendkeys_path(path)}")
                     edit_method = "keyboard(Alt+N, Ctrl+A, type)"
                 except Exception as e:
                     return build_error_response(
@@ -1318,7 +1332,11 @@ def register_ui_tools(
                 from ..ui.pywinauto_backend import PywinautoBackend
                 if isinstance(ui, PywinautoBackend):
                     window = ui.inner._app.top_window()
-                    control = window.child_window(auto_id=automation_id)
+                    search_root = window
+                    if root_id:
+                        search_root = window.child_window(auto_id=root_id)
+                        search_root.wait("exists", timeout=5)
+                    control = search_root.child_window(auto_id=automation_id)
                     control.wait("exists", timeout=5)
 
                     # Try SelectionPattern via iface_selection

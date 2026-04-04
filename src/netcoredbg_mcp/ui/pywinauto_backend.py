@@ -139,7 +139,8 @@ class PywinautoBackend:
                 else:
                     element.click()
                     method = "Click"
-            except Exception:
+            except Exception as exc:
+                logger.debug("InvokePattern failed, falling back to Click: %s", exc)
                 element.click()
                 method = "Click"
             return method
