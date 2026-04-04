@@ -29,6 +29,21 @@ SOURCE = os.path.join(BASE, "tests", "fixtures", "SmokeTestApp", "Program.cs")
 passed = 0
 failed = 0
 
+# Dynamic line number lookup — survives code changes to SmokeTestApp
+_source_lines: list[str] = []
+
+
+def _find_line(pattern: str) -> int:
+    """Find the 1-based line number containing pattern in SOURCE."""
+    global _source_lines
+    if not _source_lines:
+        with open(SOURCE, encoding="utf-8") as f:
+            _source_lines = f.readlines()
+    for i, line in enumerate(_source_lines, 1):
+        if pattern in line:
+            return i
+    raise ValueError(f"Pattern not found in {SOURCE}: {pattern!r}")
+
 
 def check(name: str, condition: bool, detail: str = "") -> None:
     global passed, failed
@@ -52,7 +67,7 @@ async def test_hit_counting():
     print("\n1. HIT COUNTING (FR-1)")
     m = await new_session()
     try:
-        m.breakpoints.add(Breakpoint(file=SOURCE, line=15))  # sum += i
+        m.breakpoints.add(Breakpoint(file=SOURCE, line=_find_line("sum += i")))  # sum += i
         await m.launch(program=DLL, args=["hitcount"])
         snapshot = await m.wait_for_stopped(timeout=10)
         await asyncio.sleep(0.3)
@@ -86,7 +101,7 @@ async def test_stack_and_variables():
     print("\n2. STACK TRACE + EVALUATE + VARIABLES (existing functionality)")
     m = await new_session()
     try:
-        m.breakpoints.add(Breakpoint(file=SOURCE, line=59))  # VariableInspection breakpoint
+        m.breakpoints.add(Breakpoint(file=SOURCE, line=_find_line("int={intVar}")))  # VariableInspection println
         await m.launch(program=DLL, args=["variables"])
         snapshot = await m.wait_for_stopped(timeout=10)
 
@@ -150,22 +165,26 @@ async def test_stepping():
     print("\n3. STEPPING (step_over, step_into, step_out)")
     m = await new_session()
     try:
-        m.breakpoints.add(Breakpoint(file=SOURCE, line=66))  # Outer: var mid = Middle(x + 1)
+        m.breakpoints.add(Breakpoint(file=SOURCE, line=_find_line("var mid = Middle(x + 1)")))  # Outer
         await m.launch(program=DLL, args=["stepping"])
         snapshot = await m.wait_for_stopped(timeout=10)
 
         check("Stopped at Outer", snapshot.stop_reason == "breakpoint")
 
-        # Step into → should enter Middle
-        m.prepare_for_execution()
-        await m._client.step_in(m.state.current_thread_id)
-        snapshot = await m.wait_for_stopped(timeout=5)
-        frames = await m.get_stack_trace(levels=3)
-        check("Step into enters Middle",
-              "Middle" in (frames[0].name if frames else ""),
+        # Step into → should enter Middle (may take 1-2 steps due to expression eval)
+        entered_middle = False
+        for _ in range(3):
+            m.prepare_for_execution()
+            await m._client.step_in(m.state.current_thread_id)
+            snapshot = await m.wait_for_stopped(timeout=5)
+            frames = await m.get_stack_trace(levels=3)
+            if frames and "Middle" in frames[0].name:
+                entered_middle = True
+                break
+        check("Step into enters Middle", entered_middle,
               f"top: {frames[0].name if frames else 'none'}")
 
-        # Step over → stay in Middle
+        # Step over → stay in Middle (advance one line)
         m.prepare_for_execution()
         await m._client.step_over(m.state.current_thread_id)
         snapshot = await m.wait_for_stopped(timeout=5)
@@ -665,7 +684,7 @@ async def test_collection_and_object():
 
     m = await new_session()
     try:
-        m.breakpoints.add(Breakpoint(file=SOURCE, line=59))  # VariableInspection breakpoint
+        m.breakpoints.add(Breakpoint(file=SOURCE, line=_find_line("int={intVar}")))  # VariableInspection println
         await m.launch(program=DLL, args=["variables"])
         snapshot = await m.wait_for_stopped(timeout=10.0)
         check("Stopped at variables", snapshot is not None)
@@ -728,7 +747,7 @@ async def test_tracepoint_performance():
 
     m = await new_session()
     try:
-        m.breakpoints.add(Breakpoint(file=SOURCE, line=91))  # Tick line in LongRunning
+        m.breakpoints.add(Breakpoint(file=SOURCE, line=_find_line("Tick {i}/30")))  # Tick line in LongRunning
         await m.launch(program=DLL, args=["longrun"])
 
         mgr = TracepointManager()
