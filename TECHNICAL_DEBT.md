@@ -103,38 +103,27 @@ Alternative: client-side tracepoints using `quick_evaluate` pattern
 (pause briefly, evaluate, resume, log). ~50ms per hit.
 **Effort:** H — complex timing, needs async queue.
 
-### v0.5.1: UI Tools Expansion (from Winapp-MCP analysis)
+### ~~v0.5.0: UI Tools Expansion (from Winapp-MCP analysis)~~ DONE PR #26
 
-#### R4: `ui_invoke` — InvokePattern (no mouse movement)
-**What:** Invoke button/menu via UIA InvokePattern instead of mouse click.
-More reliable — works for off-screen elements, no coordinate calculation.
-**Why:** `ui_click` requires visible element, fails if window is partially obscured.
-**Effort:** S — add to both FlaUI bridge and pywinauto backend.
+#### ~~R4: `ui_invoke` — InvokePattern (no mouse movement)~~ DONE v0.5.0
+**Implemented in:** `tools/ui.py:ui_invoke`, `bridge/Commands/PatternCommands.cs:InvokeElement`
 
-#### R5: `ui_toggle` — TogglePattern for CheckBox/ToggleButton
-**What:** Toggle checked state via UIA TogglePattern. Returns new state.
-**Why:** Currently no way to check/uncheck checkboxes reliably.
-**Effort:** S — similar to ui_invoke.
+#### ~~R5: `ui_toggle` — TogglePattern for CheckBox/ToggleButton~~ DONE v0.5.0
+**Implemented in:** `tools/ui.py:ui_toggle`, `bridge/Commands/PatternCommands.cs:ToggleElement`
 
-#### R6: `ui_file_dialog` — Standard Windows Open/Save dialog
-**What:** Complete standard Win32 file dialog: enter path + click Open/Save.
-Handles "File name:" ComboBox (automationId=1148) and accept button.
-Multi-strategy fallback (by id, by name, keyboard).
-**Why:** Very common scenario — every app has file open/save.
-**Effort:** M — multiple strategies for dialog variants.
+#### ~~R6: `ui_file_dialog` — Standard Windows Open/Save dialog~~ DONE v0.5.0
+**Implemented in:** `tools/ui.py:ui_file_dialog` (multi-strategy: set_value id=1148 → keyboard Alt+N → invoke id=1 → Enter)
 
-#### R7: `root_automation_id` parameter on all find/click tools
-**What:** Optional `root_id` parameter to scope UI element search to a subtree.
-`ui_click(automation_id="btn", root_id="panel1")` — search only within panel1.
-**Why:** Performance: avoids full tree walk. Disambiguation: multiple elements with same id.
-**Effort:** S — add parameter to _find_ui_element, pass to backend.
+#### ~~R7: `root_id` parameter on all find/click tools~~ DONE v0.5.0
+**Implemented in:** 11 tools with `root_id` param, `bridge/Commands/ElementCommands.cs:ResolveSearchRoot`
 
-#### R8: XPath element search
-**What:** Support XPath expressions for complex element queries.
-`ui_click(xpath="//Button[@Name='Save']//ancestor::Panel")`.
-FlaUI has built-in XPath support via `FindFirstByXPath`.
-**Why:** Powerful fallback when automationId is missing and name is ambiguous.
-**Effort:** M — add xpath parameter to all UI tools, implement in both backends.
+#### ~~R8: XPath element search~~ DONE v0.5.0
+**Implemented in:** 11 tools with `xpath` param, `bridge/Commands/ElementCommands.cs:FindByXPath` with matchCount warning
+
+**Remaining from UI expansion (post-merge):**
+- T030: WPF SmokeTestApp with checkbox/invoke button scenarios (needs new WPF project)
+- T031: Smoke test checks for new tools (needs real GUI runtime)
+- T033: Scoped search performance measurement (needs real UI tree with 100+ elements)
 
 ### v0.6.0: Advanced Debugging (from debug-mcp features)
 
