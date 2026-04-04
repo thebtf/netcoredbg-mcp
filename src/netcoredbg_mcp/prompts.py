@@ -279,7 +279,10 @@ pywinauto is used as fallback — works for most controls.
 
 | Action | Tool |
 |--------|------|
-| Click button | ui_click(automation_id="btnSave") |
+| Activate button (preferred) | ui_invoke(automation_id="btnSave") — uses InvokePattern, no mouse |
+| Click button (coordinate) | ui_click(automation_id="btnSave") — mouse click, needs visible element |
+| Toggle checkbox | ui_toggle(automation_id="chkEnabled") — returns new state On/Off |
+| Complete file dialog | ui_file_dialog(path="C:/data/test.txt") — enters path and clicks Open |
 | Type text | ui_send_keys(keys="hello", automation_id="txtInput") |
 | Right-click | ui_right_click(automation_id="dataGrid") |
 | Double-click | ui_double_click(automation_id="listItem") |
@@ -287,6 +290,11 @@ pywinauto is used as fallback — works for most controls.
 | Scroll | ui_scroll(automation_id="list", direction="down", amount=5) |
 | Drag | ui_drag(from_automation_id="src", to_automation_id="dst") |
 | Complex keys | ui_set_focus(automation_id="grid") then ui_send_keys_focused(keys="^{END}") |
+| Scoped search | ui_click(automation_id="btn", root_id="panel1") — search within subtree |
+| XPath search | ui_click(xpath="//Button[@Name='Save']") — FlaUI backend only |
+
+PREFER ui_invoke over ui_click for buttons — it works even when the element is off-screen or obscured.
+PREFER ui_toggle over ui_click for checkboxes — it returns the actual state after toggling.
 
 ## Key Syntax Quick Reference
 

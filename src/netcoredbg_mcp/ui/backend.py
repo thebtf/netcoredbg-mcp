@@ -35,8 +35,48 @@ class UIBackend(Protocol):
         automation_id: str | None = None,
         name: str | None = None,
         control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
     ) -> dict[str, Any]:
-        """Find a UI element by criteria."""
+        """Find a UI element by criteria.
+
+        Args:
+            automation_id: AutomationId property.
+            name: Element Name property.
+            control_type: Control type (e.g. "Button").
+            root_id: Optional AutomationId to scope search to a subtree.
+            xpath: Optional XPath expression (FlaUI backend only).
+        """
+        ...
+
+    async def invoke_element(
+        self,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+    ) -> dict[str, Any]:
+        """Invoke element via InvokePattern (no mouse), fallback to Click."""
+        ...
+
+    async def toggle_element(
+        self,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+    ) -> dict[str, Any]:
+        """Toggle CheckBox/ToggleButton via TogglePattern. Returns new state."""
+        ...
+
+    async def find_by_xpath(
+        self,
+        xpath: str,
+        root_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Find element by XPath expression. Returns element info + matchCount."""
         ...
 
     async def click_at(self, x: int, y: int) -> None:

@@ -227,13 +227,15 @@ class FlaUIBackend:
         self._process_id = None
         self._element_cache.clear()
 
-    async def find_element(
-        self,
+    @staticmethod
+    def _build_search_params(
         automation_id: str | None = None,
         name: str | None = None,
         control_type: str | None = None,
-    ) -> dict[str, Any]:
-        """Find element via FlaUI bridge."""
+        root_id: str | None = None,
+        xpath: str | None = None,
+    ) -> dict[str, str]:
+        """Build JSON-RPC params dict from search criteria."""
         params: dict[str, str] = {}
         if automation_id:
             params["automationId"] = automation_id
@@ -241,7 +243,58 @@ class FlaUIBackend:
             params["name"] = name
         if control_type:
             params["controlType"] = control_type
+        if root_id:
+            params["rootAutomationId"] = root_id
+        if xpath:
+            params["xpath"] = xpath
+        return params
+
+    async def find_element(
+        self,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+    ) -> dict[str, Any]:
+        """Find element via FlaUI bridge."""
+        params = self._build_search_params(automation_id, name, control_type, root_id, xpath)
         return await self._client.call("find_element", params)
+
+    async def invoke_element(
+        self,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+    ) -> dict[str, Any]:
+        """Invoke element via FlaUI bridge (InvokePattern, fallback to Click)."""
+        params = self._build_search_params(automation_id, name, control_type, root_id, xpath)
+        return await self._client.call("invoke_element", params)
+
+    async def toggle_element(
+        self,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+    ) -> dict[str, Any]:
+        """Toggle element via FlaUI bridge (TogglePattern)."""
+        params = self._build_search_params(automation_id, name, control_type, root_id, xpath)
+        return await self._client.call("toggle_element", params)
+
+    async def find_by_xpath(
+        self,
+        xpath: str,
+        root_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Find element by XPath via FlaUI bridge."""
+        params: dict[str, str] = {"xpath": xpath}
+        if root_id:
+            params["rootAutomationId"] = root_id
+        return await self._client.call("find_by_xpath", params)
 
     async def click_at(self, x: int, y: int) -> None:
         """Click at coordinates via FlaUI bridge."""

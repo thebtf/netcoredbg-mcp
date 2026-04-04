@@ -65,19 +65,26 @@ def register_ui_tools(
         automation_id: str | None = None,
         name: str | None = None,
         control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
     ):
         """Helper to connect and find element (pywinauto fallback path).
 
         Returns (backend, element) where element is a pywinauto wrapper.
         For FlaUI backend, the element is the find_element dict result.
+
+        Args:
+            root_id: Optional AutomationId to scope search to a subtree.
+            xpath: Optional XPath expression (FlaUI backend only).
         """
         ui = await _ensure_ui_connected()
         from ..ui.pywinauto_backend import PywinautoBackend
         if isinstance(ui, PywinautoBackend):
-            element = await ui.inner.find_element(
+            element = await ui._find_element_scoped(
                 automation_id=automation_id,
                 name=name,
                 control_type=control_type,
+                root_id=root_id,
             )
             return ui, element
         # FlaUI backend: find_element returns a dict
@@ -85,6 +92,8 @@ def register_ui_tools(
             automation_id=automation_id,
             name=name,
             control_type=control_type,
+            root_id=root_id,
+            xpath=xpath,
         )
         return ui, element
 
@@ -117,9 +126,11 @@ def register_ui_tools(
         automation_id: str | None = None,
         name: str | None = None,
         control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
     ) -> dict:
         """
-        Find a UI element by AutomationId, name, or control type.
+        Find a UI element by AutomationId, name, control type, or XPath.
 
         At least one search criterion must be provided.
         Use ui_get_window_tree first to discover available elements.
@@ -128,6 +139,8 @@ def register_ui_tools(
             automation_id: AutomationId property (most reliable for WPF)
             name: Element's Name/Title property
             control_type: Type like "Button", "TextBox", "MenuItem"
+            root_id: Optional AutomationId to scope search to a subtree
+            xpath: Optional XPath expression (FlaUI backend only)
 
         Returns:
             Element info if found
@@ -138,6 +151,8 @@ def register_ui_tools(
                 automation_id=automation_id,
                 name=name,
                 control_type=control_type,
+                root_id=root_id,
+                xpath=xpath,
             )
             # Backend returns dict directly (both FlaUI and pywinauto)
             data = result if isinstance(result, dict) else result.to_dict()
@@ -151,6 +166,8 @@ def register_ui_tools(
         automation_id: str | None = None,
         name: str | None = None,
         control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
     ) -> dict:
         """
         Set keyboard focus to a UI element.
@@ -184,7 +201,7 @@ def register_ui_tools(
                     )
 
             # Fallback: find element and click to focus
-            ui, element = await _find_ui_element(automation_id, name, control_type)
+            ui, element = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
             from ..ui.pywinauto_backend import PywinautoBackend
             if isinstance(ui, PywinautoBackend):
                 await ui.inner.set_focus(element)
@@ -206,6 +223,8 @@ def register_ui_tools(
         automation_id: str | None = None,
         name: str | None = None,
         control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
     ) -> dict:
         """
         Send keyboard input to a UI element.
@@ -254,7 +273,7 @@ def register_ui_tools(
                     )
 
             # Fallback: click element to focus, then send keys
-            ui, element = await _find_ui_element(automation_id, name, control_type)
+            ui, element = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
             from ..ui.pywinauto_backend import PywinautoBackend
             if isinstance(ui, PywinautoBackend):
                 await ui.inner.send_keys(element, keys)
@@ -308,6 +327,8 @@ def register_ui_tools(
         automation_id: str | None = None,
         name: str | None = None,
         control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
     ) -> dict:
         """
         Click on a UI element.
@@ -340,7 +361,7 @@ def register_ui_tools(
 
             # Fallback to element search
             try:
-                ui, element = await _find_ui_element(automation_id, name, control_type)
+                ui, element = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
                 from ..ui.pywinauto_backend import PywinautoBackend
                 if isinstance(ui, PywinautoBackend):
                     await ui.inner.click(element)
@@ -367,6 +388,199 @@ def register_ui_tools(
                             state=session.state.state,
                         )
                 raise  # re-raise if no fallback possible
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def ui_invoke(
+        ctx: Context,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+    ) -> dict:
+        """
+        Invoke a UI element using UIA InvokePattern (no mouse movement).
+
+        Preferred over ui_click for buttons, menu items, and hyperlinks because
+        it works reliably even when the element is off-screen or partially obscured.
+        Falls back to Click() if InvokePattern is not supported.
+
+        Args:
+            automation_id: AutomationId property
+            name: Element's Name/Title property
+            control_type: Control type (Button, MenuItem, Hyperlink, etc.)
+            root_id: Optional AutomationId to scope search to a subtree
+            xpath: Optional XPath expression (FlaUI backend only)
+        """
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            ui = await _ensure_ui_connected()
+            result = await ui.invoke_element(
+                automation_id=automation_id,
+                name=name,
+                control_type=control_type,
+                root_id=root_id,
+                xpath=xpath,
+            )
+            return build_response(data=result, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def ui_toggle(
+        ctx: Context,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+    ) -> dict:
+        """
+        Toggle a CheckBox or ToggleButton using UIA TogglePattern.
+
+        Returns the new toggle state after the operation: "On", "Off", or
+        "Indeterminate". Use this instead of ui_click for checkboxes to get
+        reliable state feedback.
+
+        Args:
+            automation_id: AutomationId property
+            name: Element's Name/Title property
+            control_type: Control type (CheckBox, ToggleButton, etc.)
+            root_id: Optional AutomationId to scope search to a subtree
+            xpath: Optional XPath expression (FlaUI backend only)
+        """
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            ui = await _ensure_ui_connected()
+            result = await ui.toggle_element(
+                automation_id=automation_id,
+                name=name,
+                control_type=control_type,
+                root_id=root_id,
+                xpath=xpath,
+            )
+            return build_response(data=result, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    def _escape_sendkeys_path(path: str) -> str:
+        """Escape special SendKeys characters in file paths."""
+        # Characters with special meaning in SendKeys: + ^ % { } ( ) ~
+        result = []
+        for ch in path:
+            if ch in "+^%{}()~":
+                result.append("{")
+                result.append(ch)
+                result.append("}")
+            else:
+                result.append(ch)
+        return "".join(result)
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def ui_file_dialog(
+        ctx: Context,
+        path: str,
+        accept_button: str = "Open",
+    ) -> dict:
+        """
+        Complete a standard Windows Open/Save file dialog in a single call.
+
+        Enters the file path and clicks the accept button. Handles the standard
+        Win32 dialog layout (File name ComboBox + Open/Save button) with
+        multi-strategy fallback for different dialog variants.
+
+        Args:
+            path: Full file path to enter (e.g. "C:/data/test.txt")
+            accept_button: Name of accept button (default "Open", use "Save" for save dialogs)
+        """
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            ui = await _ensure_ui_connected()
+
+            # Strategy 1: Find file name field by standard automationId "1148"
+            edit_method = ""
+            try:
+                combo = await ui.find_element(automation_id="1148")
+                if combo.get("found"):
+                    # Set value via the ComboBox (bridge handles ValuePattern)
+                    from ..ui.flaui_client import FlaUIBackend
+                    if isinstance(ui, FlaUIBackend):
+                        await ui.client.call("set_value", {
+                            "automationId": "1148",
+                            "value": path,
+                        })
+                        edit_method = "set_value(id=1148)"
+                    else:
+                        # pywinauto fallback: type the path
+                        await ui.send_keys(f"^a{_escape_sendkeys_path(path)}")
+                        edit_method = "keyboard(Ctrl+A, type)"
+            except Exception as exc:
+                logger.debug("file_dialog strategy 1 (set_value) failed: %s", exc)
+
+            # Strategy 2: Fallback — keyboard navigation
+            if not edit_method:
+                try:
+                    # Standard dialog: Alt+N focuses the file name field
+                    await ui.send_keys("%n")
+                    await asyncio.sleep(0.2)
+                    await ui.send_keys(f"^a{_escape_sendkeys_path(path)}")
+                    edit_method = "keyboard(Alt+N, Ctrl+A, type)"
+                except Exception as e:
+                    return build_error_response(
+                        f"Could not enter file path. This may not be a standard file dialog: {e}",
+                        state=session.state.state,
+                    )
+
+            # Find and click the accept button
+            button_method = ""
+            try:
+                # Strategy 1: Standard dialog accept button has automationId "1"
+                result = await ui.invoke_element(automation_id="1")
+                if result.get("invoked"):
+                    button_method = "invoke(id=1)"
+            except Exception:
+                pass
+
+            if not button_method:
+                try:
+                    # Strategy 2: Find button by name
+                    result = await ui.invoke_element(name=accept_button, control_type="Button")
+                    if result.get("invoked"):
+                        button_method = f"invoke(name={accept_button})"
+                except Exception:
+                    pass
+
+            if not button_method:
+                try:
+                    # Strategy 3: Press Enter as last resort
+                    await ui.send_keys("{ENTER}")
+                    button_method = "keyboard(Enter)"
+                except Exception as e:
+                    return build_error_response(
+                        f"File path entered via {edit_method} but could not click accept button: {e}",
+                        state=session.state.state,
+                    )
+
+            return build_response(
+                data={
+                    "completed": True,
+                    "path": path,
+                    "editMethod": edit_method,
+                    "buttonMethod": button_method,
+                },
+                state=session.state.state,
+            )
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
@@ -885,6 +1099,8 @@ def register_ui_tools(
         automation_id: str | None = None,
         name: str | None = None,
         control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
     ) -> dict:
         """Right-click on a UI element to open context menu.
 
@@ -914,7 +1130,7 @@ def register_ui_tools(
                     )
 
             # Fallback to element search
-            ui, element = await _find_ui_element(automation_id, name, control_type)
+            ui, element = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
 
             def _right_click() -> None:
                 element.click_input(button="right")
@@ -934,6 +1150,8 @@ def register_ui_tools(
         automation_id: str | None = None,
         name: str | None = None,
         control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
     ) -> dict:
         """Double-click on a UI element.
 
@@ -963,7 +1181,7 @@ def register_ui_tools(
                     )
 
             # Fallback to element search
-            ui, element = await _find_ui_element(automation_id, name, control_type)
+            ui, element = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
 
             def _double_click() -> None:
                 element.double_click_input()
@@ -1092,7 +1310,11 @@ def register_ui_tools(
     # -- Read / query tools --
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
-    async def ui_get_selected_item(automation_id: str) -> dict:
+    async def ui_get_selected_item(
+        automation_id: str,
+        root_id: str | None = None,
+        xpath: str | None = None,
+    ) -> dict:
         """Get the currently selected item in a list/grid control.
 
         Returns the selected item's name, index, and properties.
@@ -1100,6 +1322,8 @@ def register_ui_tools(
 
         Args:
             automation_id: AutomationId of the list/grid/combobox control
+            root_id: Optional AutomationId to scope search to a subtree
+            xpath: Optional XPath expression (FlaUI backend only)
         """
         try:
             ui = await _ensure_ui_connected()
@@ -1108,7 +1332,11 @@ def register_ui_tools(
                 from ..ui.pywinauto_backend import PywinautoBackend
                 if isinstance(ui, PywinautoBackend):
                     window = ui.inner._app.top_window()
-                    control = window.child_window(auto_id=automation_id)
+                    search_root = window
+                    if root_id:
+                        search_root = window.child_window(auto_id=root_id)
+                        search_root.wait("exists", timeout=5)
+                    control = search_root.child_window(auto_id=automation_id)
                     control.wait("exists", timeout=5)
 
                     # Try SelectionPattern via iface_selection
@@ -1175,6 +1403,8 @@ def register_ui_tools(
     async def ui_read_text(
         automation_id: str | None = None,
         name: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
     ) -> dict:
         """Read text content from a UI element (TextBox, TextBlock, Label, etc).
 
@@ -1184,9 +1414,13 @@ def register_ui_tools(
         Args:
             automation_id: AutomationId property
             name: Element's Name/Title property
+            root_id: Optional AutomationId to scope search to a subtree
+            xpath: Optional XPath expression (FlaUI backend only)
         """
         try:
-            ui, element = await _find_ui_element(automation_id=automation_id, name=name)
+            ui, element = await _find_ui_element(
+                automation_id=automation_id, name=name, root_id=root_id, xpath=xpath,
+            )
 
             def _read_text() -> dict[str, Any]:
                 from ..ui.pywinauto_backend import PywinautoBackend
@@ -1291,6 +1525,8 @@ def register_ui_tools(
         name: str | None = None,
         control_type: str | None = None,
         timeout: float = 5.0,
+        root_id: str | None = None,
+        xpath: str | None = None,
     ) -> dict:
         """Wait for a UI element to appear within timeout.
 
@@ -1302,9 +1538,11 @@ def register_ui_tools(
             name: Element name to wait for
             control_type: Control type to wait for
             timeout: Maximum wait time in seconds (default 5)
+            root_id: Optional AutomationId to scope search to a subtree
+            xpath: Optional XPath expression (FlaUI backend only)
         """
         try:
-            if not any((automation_id, name, control_type)):
+            if not any((automation_id, name, control_type, xpath)):
                 return build_error_response(
                     "At least one search criterion must be provided.",
                     state=session.state.state,
@@ -1331,6 +1569,8 @@ def register_ui_tools(
                         automation_id=automation_id,
                         name=name,
                         control_type=control_type,
+                        root_id=root_id,
+                        xpath=xpath,
                     )
                     data = result if isinstance(result, dict) else result.to_dict()
                     return build_response(
