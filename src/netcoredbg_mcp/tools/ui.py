@@ -68,14 +68,14 @@ def register_ui_tools(
         root_id: str | None = None,
         xpath: str | None = None,
     ):
-        """Helper to connect and find element (pywinauto fallback path).
+        """Helper to connect and find element with ambiguity detection.
 
-        Returns (backend, element) where element is a pywinauto wrapper.
-        For FlaUI backend, the element is the find_element dict result.
+        Returns (backend, element, ambiguity_info) where:
+        - element is a pywinauto wrapper or FlaUI dict
+        - ambiguity_info is None (single match) or dict with candidateCount + warning
 
-        Args:
-            root_id: Optional AutomationId to scope search to a subtree.
-            xpath: Optional XPath expression (FlaUI backend only).
+        When searching by name/controlType (not automationId/xpath), uses
+        find_all_cascade to detect multiple matches and returns the best-ranked one.
         """
         ui = await _ensure_ui_connected()
         from ..ui.pywinauto_backend import PywinautoBackend
@@ -86,8 +86,31 @@ def register_ui_tools(
                 control_type=control_type,
                 root_id=root_id,
             )
-            return ui, element
-        # FlaUI backend: find_element returns a dict
+            return ui, element, None
+
+        # FlaUI backend: check for ambiguity when searching by name/controlType
+        ambiguity_info = None
+        if not automation_id and not xpath and (name or control_type):
+            try:
+                ranked = await ui.find_all_cascade(
+                    name=name, control_type=control_type, root_id=root_id, max_results=5,
+                )
+                total = ranked.get("totalMatches", 0)
+                if total > 1:
+                    results = ranked.get("results", [])
+                    ambiguity_info = {
+                        "ambiguous": True,
+                        "candidateCount": total,
+                        "warning": f"Multiple matches ({total}) for search criteria. Using best-ranked result.",
+                        "alternatives": [
+                            {"automationId": r.get("automationId", ""), "name": r.get("name", ""),
+                             "controlType": r.get("controlType", ""), "parentDesc": r.get("parentDesc", "")}
+                            for r in results[1:4]  # Show up to 3 alternatives
+                        ],
+                    }
+            except Exception:
+                pass  # Fall through to normal find_element
+
         element = await ui.find_element(
             automation_id=automation_id,
             name=name,
@@ -95,7 +118,12 @@ def register_ui_tools(
             root_id=root_id,
             xpath=xpath,
         )
-        return ui, element
+
+        # Merge ambiguity info into element dict if present
+        if ambiguity_info and isinstance(element, dict):
+            element.update(ambiguity_info)
+
+        return ui, element, ambiguity_info
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def ui_get_window_tree(max_depth: int = 3, max_children: int = 50) -> dict:
@@ -201,7 +229,7 @@ def register_ui_tools(
                     )
 
             # Fallback: find element and click to focus
-            ui, element = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
+            ui, element, _ = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
             from ..ui.pywinauto_backend import PywinautoBackend
             if isinstance(ui, PywinautoBackend):
                 await ui.inner.set_focus(element)
@@ -273,7 +301,7 @@ def register_ui_tools(
                     )
 
             # Fallback: click element to focus, then send keys
-            ui, element = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
+            ui, element, _ = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
             from ..ui.pywinauto_backend import PywinautoBackend
             if isinstance(ui, PywinautoBackend):
                 await ui.inner.send_keys(element, keys)
@@ -361,7 +389,7 @@ def register_ui_tools(
 
             # Fallback to element search
             try:
-                ui, element = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
+                ui, element, _ = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
                 from ..ui.pywinauto_backend import PywinautoBackend
                 if isinstance(ui, PywinautoBackend):
                     await ui.inner.click(element)
@@ -1130,7 +1158,7 @@ def register_ui_tools(
                     )
 
             # Fallback to element search
-            ui, element = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
+            ui, element, _ = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
 
             def _right_click() -> None:
                 element.click_input(button="right")
@@ -1181,7 +1209,7 @@ def register_ui_tools(
                     )
 
             # Fallback to element search
-            ui, element = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
+            ui, element, _ = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
 
             def _double_click() -> None:
                 element.double_click_input()

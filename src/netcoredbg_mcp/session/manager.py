@@ -297,13 +297,38 @@ class SessionManager:
         self._execution_event.set()
         logger.info(f"Stopped: reason={body.reason.value}, thread={body.thread_id}")
 
-        # Schedule hit counting for breakpoint stops (async — needs stack trace)
+        # Schedule hit counting + tracepoint check for breakpoint stops
         if body.reason.value == "breakpoint" and body.thread_id is not None:
             try:
                 loop = asyncio.get_running_loop()
                 loop.create_task(self._update_hit_count(body.thread_id))
+                loop.create_task(self._check_tracepoint(body.thread_id))
             except RuntimeError:
-                pass  # No running event loop — skip hit counting (test environment)
+                pass  # No running event loop — skip (test environment)
+
+    async def _check_tracepoint(self, thread_id: int) -> None:
+        """Check if the stopped location matches a tracepoint and handle it."""
+        try:
+            mgr = getattr(self, '_tracepoint_manager', None)
+            if mgr is None:
+                return
+
+            frames = await self.get_stack_trace(thread_id=thread_id, levels=1)
+            if not frames:
+                return
+
+            top = frames[0]
+            if not top.source or not top.line:
+                return
+
+            tp = mgr.find_tracepoint_for_location(top.source, top.line)
+            if tp is None:
+                return
+
+            # This is a tracepoint hit — evaluate and resume
+            await mgr.on_tracepoint_hit(tp, self, thread_id)
+        except Exception as e:
+            logger.warning("Tracepoint check failed: %s", e)
 
     async def _update_hit_count(self, thread_id: int) -> None:
         """Fetch top frame and increment hit count for matching breakpoint."""
