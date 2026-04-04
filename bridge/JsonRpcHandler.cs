@@ -41,6 +41,9 @@ public static class JsonRpcHandler
             ["multi_select"] = SelectionCommands.MultiSelect,
             ["expand_collapse"] = SelectionCommands.ExpandCollapse,
             ["screenshot"] = ScreenshotCommands.Screenshot,
+            ["invoke_element"] = PatternCommands.InvokeElement,
+            ["toggle_element"] = PatternCommands.ToggleElement,
+            ["find_by_xpath"] = ElementCommands.FindByXPath,
         };
 
     public static JsonNode Handle(string method, JsonNode? @params)
