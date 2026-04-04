@@ -1040,7 +1040,26 @@ class SessionManager:
         if tid is None:
             raise RuntimeError("No thread for stack trace")
 
-        response = await self._client.stack_trace(tid, start_frame, levels)
+        # Retry on CORDBG_E_PROCESS_NOT_SYNCHRONIZED (0x80131302) — race
+        # between stopped event and ICorDebug internal synchronization.
+        # Occurs after step_in/step_over/step_out when stackTrace is called
+        # before netcoredbg finishes syncing the debuggee process.
+        max_retries = 3
+        retry_delay = 0.1  # 100ms between retries
+        response = None
+        for attempt in range(max_retries + 1):
+            response = await self._client.stack_trace(tid, start_frame, levels)
+            if response.success:
+                break
+            if "0x80131302" in (response.message or "") and attempt < max_retries:
+                logger.debug(
+                    "stack_trace: PROCESS_NOT_SYNCHRONIZED, retry %d/%d after %.0fms",
+                    attempt + 1, max_retries, retry_delay * 1000,
+                )
+                await asyncio.sleep(retry_delay)
+                continue
+            break
+
         logger.debug(
             f"stack_trace response for thread {tid}: success={response.success}, "
             f"body={response.body}, message={response.message}"
