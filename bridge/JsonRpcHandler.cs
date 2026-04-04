@@ -44,6 +44,8 @@ public static class JsonRpcHandler
             ["invoke_element"] = PatternCommands.InvokeElement,
             ["toggle_element"] = PatternCommands.ToggleElement,
             ["find_by_xpath"] = ElementCommands.FindByXPath,
+            ["find_all_cascade"] = ElementCommands.FindAllCascade,
+            ["extract_text"] = ElementCommands.ExtractText,
         };
 
     public static JsonNode Handle(string method, JsonNode? @params)
