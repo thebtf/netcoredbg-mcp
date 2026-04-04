@@ -211,6 +211,271 @@ public static class ElementCommands
         return parts.Count > 0 ? string.Join(", ", parts) : "(no criteria)";
     }
 
+    // ── Ranked search (FR-1) ───────────────────────────────────────
+
+    public static JsonNode FindAllCascade(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
+    {
+        if (mainWindow is null)
+            throw new InvalidOperationException("Not connected. Call 'connect' first.");
+
+        var searchRoot = ResolveSearchRoot(mainWindow, @params, automation);
+        var maxResults = @params?["maxResults"]?.GetValue<int>() ?? 10;
+        var cf = new ConditionFactory(automation.PropertyLibrary);
+
+        // Build condition from name + controlType (ranking only applies to ambiguous searches)
+        var name = @params?["name"]?.GetValue<string>();
+        var controlType = @params?["controlType"]?.GetValue<string>();
+
+        if (string.IsNullOrWhiteSpace(name) && string.IsNullOrWhiteSpace(controlType))
+            throw new ArgumentException("find_all_cascade requires at least name or controlType");
+
+        var conditions = new List<ConditionBase>();
+        if (!string.IsNullOrWhiteSpace(name))
+            conditions.Add(cf.ByName(name));
+        if (!string.IsNullOrWhiteSpace(controlType) && Enum.TryParse<ControlType>(controlType, true, out var ct))
+            conditions.Add(cf.ByControlType(ct));
+
+        var condition = conditions.Count == 1
+            ? conditions[0]
+            : new AndCondition(conditions.ToArray());
+
+        var allMatches = searchRoot.FindAllDescendants(condition);
+        if (allMatches.Length == 0)
+            return new JsonObject { ["results"] = new JsonArray(), ["totalMatches"] = 0 };
+
+        // Rank matches
+        var scored = new List<(AutomationElement Element, int Score, int Depth, string ParentDesc)>();
+        foreach (var el in allMatches)
+        {
+            try
+            {
+                var depth = GetDepth(el, searchRoot);
+                var score = ScoreElement(el, depth);
+                var parentDesc = GetParentDescription(el);
+                scored.Add((el, score, depth, parentDesc));
+            }
+            catch
+            {
+                // Skip elements that fail to score
+            }
+        }
+
+        scored.Sort((a, b) => b.Score.CompareTo(a.Score));
+
+        var results = new JsonArray();
+        var count = Math.Min(scored.Count, maxResults);
+        for (var i = 0; i < count; i++)
+        {
+            var (el, score, depth, parentDesc) = scored[i];
+            var info = BuildElementInfo(el, includePatterns: false);
+            info["score"] = score;
+            info["depth"] = depth;
+            info["parentDesc"] = parentDesc;
+            results.Add(info);
+        }
+
+        return new JsonObject
+        {
+            ["results"] = results,
+            ["totalMatches"] = allMatches.Length
+        };
+    }
+
+    // ── Text extraction (FR-2) ──────────────────────────────────────
+
+    public static JsonNode ExtractText(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
+    {
+        if (mainWindow is null)
+            throw new InvalidOperationException("Not connected. Call 'connect' first.");
+
+        var searchRoot = ResolveSearchRoot(mainWindow, @params, automation);
+        var element = FindElementCascade(searchRoot, @params, automation);
+
+        // Strategy 1: ValuePattern
+        try
+        {
+            if (element.Patterns.Value.IsSupported)
+            {
+                var val = element.Patterns.Value.Pattern.Value.ValueOrDefault;
+                if (!string.IsNullOrEmpty(val))
+                    return new JsonObject { ["text"] = val, ["source"] = "ValuePattern" };
+            }
+        }
+        catch { /* fall through */ }
+
+        // Strategy 2: TextPattern
+        try
+        {
+            if (element.Patterns.Text.IsSupported)
+            {
+                var text = element.Patterns.Text.Pattern.DocumentRange.GetText(-1);
+                if (!string.IsNullOrEmpty(text))
+                    return new JsonObject { ["text"] = text, ["source"] = "TextPattern" };
+            }
+        }
+        catch { /* fall through */ }
+
+        // Strategy 3: Name property
+        try
+        {
+            var elName = element.Name;
+            if (!string.IsNullOrEmpty(elName))
+            {
+                // Check for CLR type name pattern
+                if (IsLikelyCLRTypeName(elName))
+                {
+                    var descendantText = GetVisibleDescendantText(element);
+                    if (!string.IsNullOrEmpty(descendantText))
+                        return new JsonObject { ["text"] = descendantText, ["source"] = "TextDescendants" };
+                }
+                return new JsonObject { ["text"] = elName, ["source"] = "Name" };
+            }
+        }
+        catch { /* fall through */ }
+
+        // Strategy 4: LegacyIAccessible
+        try
+        {
+            if (element.Patterns.LegacyIAccessible.IsSupported)
+            {
+                var legacyName = element.Patterns.LegacyIAccessible.Pattern.Name.ValueOrDefault;
+                if (!string.IsNullOrEmpty(legacyName))
+                    return new JsonObject { ["text"] = legacyName, ["source"] = "LegacyIAccessible.Name" };
+
+                var legacyValue = element.Patterns.LegacyIAccessible.Pattern.Value.ValueOrDefault;
+                if (!string.IsNullOrEmpty(legacyValue))
+                    return new JsonObject { ["text"] = legacyValue, ["source"] = "LegacyIAccessible.Value" };
+            }
+        }
+        catch { /* fall through */ }
+
+        // Strategy 5: Visible text descendants
+        var descText = GetVisibleDescendantText(element);
+        if (!string.IsNullOrEmpty(descText))
+            return new JsonObject { ["text"] = descText, ["source"] = "TextDescendants" };
+
+        return new JsonObject { ["text"] = "", ["source"] = "None" };
+    }
+
+    // ── Scoring helpers ─────────────────────────────────────────────
+
+    private static int ScoreElement(AutomationElement element, int depth)
+    {
+        var score = 0;
+
+        // Shallower elements preferred
+        score -= depth;
+
+        var automationId = element.AutomationId ?? "";
+        var controlType = element.ControlType.ToString();
+
+        // Standard dialog accept/cancel button bonus
+        if (controlType == "Button" && (automationId == "1" || automationId == "2"))
+            score += 100;
+
+        // DropDown button penalty
+        if (string.Equals(automationId, "DropDown", StringComparison.OrdinalIgnoreCase))
+            score -= 50;
+
+        // ComboBox child penalty
+        try
+        {
+            var parent = element.Parent;
+            if (parent is not null && parent.ControlType == ControlType.ComboBox)
+                score -= 50;
+        }
+        catch { /* ignore */ }
+
+        // Enabled bonus
+        try { if (element.IsEnabled) score += 10; } catch { }
+
+        // Visible bonus
+        try { if (!element.IsOffscreen) score += 10; } catch { }
+
+        return score;
+    }
+
+    private static int GetDepth(AutomationElement element, AutomationElement root)
+    {
+        const int maxDepth = 20;
+        var depth = 0;
+
+        try
+        {
+            var rootHandle = root.Properties.NativeWindowHandle.ValueOrDefault;
+            var current = element;
+
+            while (depth < maxDepth)
+            {
+                var parent = current.Parent;
+                if (parent is null) break;
+
+                try
+                {
+                    var parentHandle = parent.Properties.NativeWindowHandle.ValueOrDefault;
+                    if (parentHandle == rootHandle && rootHandle != IntPtr.Zero)
+                        break;
+                }
+                catch { /* continue walking */ }
+
+                depth++;
+                current = parent;
+            }
+        }
+        catch { /* neutral depth */ }
+
+        return depth;
+    }
+
+    private static string GetParentDescription(AutomationElement element)
+    {
+        try
+        {
+            var parent = element.Parent;
+            if (parent is null) return "";
+            var parentType = parent.ControlType.ToString();
+            var parentName = parent.Name ?? "";
+            return string.IsNullOrEmpty(parentName)
+                ? parentType
+                : $"{parentType} \"{parentName}\"";
+        }
+        catch { return ""; }
+    }
+
+    private static bool IsLikelyCLRTypeName(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        if (text.Contains(' ') || !text.Contains('.')) return false;
+        // Check pattern: "Namespace.SubNs.ClassName" — segments start with uppercase
+        var segments = text.Split('.');
+        return segments.Length >= 2 && segments.All(s =>
+            s.Length > 0 && char.IsUpper(s[0]) && s.All(c => char.IsLetterOrDigit(c) || c == '_'));
+    }
+
+    private static string GetVisibleDescendantText(AutomationElement element)
+    {
+        try
+        {
+            var textChildren = element.FindAllDescendants(
+                new ConditionFactory(new UIA3Automation().PropertyLibrary)
+                    .ByControlType(ControlType.Text));
+
+            var texts = new List<string>();
+            foreach (var child in textChildren)
+            {
+                try
+                {
+                    var childName = child.Name;
+                    if (!string.IsNullOrEmpty(childName))
+                        texts.Add(childName);
+                }
+                catch { /* skip */ }
+            }
+            return texts.Count > 0 ? string.Join(" ", texts) : "";
+        }
+        catch { return ""; }
+    }
+
     // ── Private helpers ──────────────────────────────────────────────
 
     private static JsonNode BuildTree(AutomationElement element, int maxDepth, int maxChildren, int currentDepth)
