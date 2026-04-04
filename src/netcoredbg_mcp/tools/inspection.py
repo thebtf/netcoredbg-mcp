@@ -3,7 +3,6 @@
 import asyncio
 import logging
 import os
-import time
 from typing import Any, Callable, Coroutine
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -14,6 +13,66 @@ from ..response import build_error_response, build_response
 from ..utils.source import read_source_context
 
 logger = logging.getLogger(__name__)
+
+_NULL_SENTINELS = frozenset(("null", "Nothing", "None", ""))
+
+
+def compute_collection_stats(items: list, sample_size: int) -> dict[str, Any]:
+    """Compute collection statistics from a list of Variable objects.
+
+    Pure function — no session access. Extracted for testability.
+
+    Args:
+        items: List of Variable objects with .name, .value, .type attributes.
+        sample_size: Number of first/last items to include. Must be > 0.
+
+    Returns:
+        Statistics dict with count, element_type, null_count, first_items,
+        last_items, duplicate_count, and optional numeric stats.
+    """
+    count = len(items)
+    element_type = items[0].type or "unknown" if items else "unknown"
+    null_count = sum(1 for v in items if v.value in _NULL_SENTINELS)
+
+    first_items = [
+        {"name": v.name, "value": v.value, "type": v.type or ""}
+        for v in items[:sample_size]
+    ]
+    last_items = [
+        {"name": v.name, "value": v.value, "type": v.type or ""}
+        for v in items[-sample_size:]
+    ] if count > sample_size else []
+
+    result: dict[str, Any] = {
+        "count": count,
+        "element_type": element_type,
+        "null_count": null_count,
+        "first_items": first_items,
+        "last_items": last_items,
+    }
+
+    numeric_values: list[float] = []
+    for v in items:
+        try:
+            numeric_values.append(float(v.value))
+        except (ValueError, TypeError):
+            pass
+
+    if numeric_values:
+        result["min"] = min(numeric_values)
+        result["max"] = max(numeric_values)
+        result["sum"] = sum(numeric_values)
+        result["average"] = sum(numeric_values) / len(numeric_values)
+
+    seen: set[str] = set()
+    duplicates = 0
+    for v in items:
+        if v.value in seen:
+            duplicates += 1
+        seen.add(v.value)
+    result["duplicate_count"] = duplicates
+
+    return result
 
 
 def register_inspection_tools(
@@ -292,8 +351,15 @@ def register_inspection_tools(
 
             mgr: TracepointManager = session._tracepoint_manager
 
-            # Normalize file path
-            norm_file = os.path.normpath(file)
+            # Validate and normalize file path to prevent path traversal
+            real_file = os.path.realpath(os.path.abspath(file))
+            if not os.path.isabs(real_file):
+                return build_error_response("File path must be absolute.", state=session.state.state)
+            if not os.path.isfile(real_file):
+                return build_error_response(
+                    f"File not found: {real_file}", state=session.state.state,
+                )
+            norm_file = real_file
 
             # Register tracepoint
             tp = mgr.add(norm_file, line, expression)
@@ -341,6 +407,12 @@ def register_inspection_tools(
                     f"Tracepoint '{tracepoint_id}' not found.", state=session.state.state,
                 )
 
+            # Remove the underlying DAP breakpoint so it no longer stops execution
+            try:
+                await session.remove_breakpoint(tp.file, tp.line)
+            except Exception as e:
+                logger.warning("Failed to remove DAP breakpoint for tracepoint %s: %s", tp.id, e)
+
             return build_response(
                 data={"removed": tracepoint_id, "was_active": tp.active, "hit_count": tp.hit_count},
                 state=session.state.state,
@@ -383,7 +455,7 @@ def register_inspection_tools(
                         for e in entries
                     ],
                     "total": len(entries),
-                    "truncated": len(mgr._trace_buffer) >= 1000,
+                    "truncated": mgr.is_log_full,
                 },
                 state=session.state.state,
             )
@@ -500,6 +572,11 @@ def register_inspection_tools(
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
 
+            if sample_size <= 0:
+                return build_error_response(
+                    "sample_size must be greater than 0.", state=session.state.state,
+                )
+
             from ..session.state import DebugState
             if session.state.state != DebugState.STOPPED:
                 return build_error_response(
@@ -514,50 +591,7 @@ def register_inspection_tools(
                     state=session.state.state,
                 )
 
-            count = len(items)
-            element_type = items[0].type or "unknown" if items else "unknown"
-            null_count = sum(1 for v in items if v.value in ("null", "Nothing", "None", ""))
-
-            first_items = [
-                {"name": v.name, "value": v.value, "type": v.type or ""}
-                for v in items[:sample_size]
-            ]
-            last_items = [
-                {"name": v.name, "value": v.value, "type": v.type or ""}
-                for v in items[-sample_size:]
-            ] if count > sample_size else []
-
-            result: dict[str, Any] = {
-                "count": count,
-                "element_type": element_type,
-                "null_count": null_count,
-                "first_items": first_items,
-                "last_items": last_items,
-            }
-
-            # Numeric stats
-            numeric_values: list[float] = []
-            for v in items:
-                try:
-                    numeric_values.append(float(v.value))
-                except (ValueError, TypeError):
-                    pass
-
-            if numeric_values:
-                result["min"] = min(numeric_values)
-                result["max"] = max(numeric_values)
-                result["sum"] = sum(numeric_values)
-                result["average"] = sum(numeric_values) / len(numeric_values)
-
-            # Duplicate detection via value comparison
-            seen = set()
-            duplicates = 0
-            for v in items:
-                if v.value in seen:
-                    duplicates += 1
-                seen.add(v.value)
-            result["duplicate_count"] = duplicates
-
+            result = compute_collection_stats(items, sample_size)
             return build_response(data=result, state=session.state.state)
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
@@ -595,12 +629,12 @@ def register_inspection_tools(
 
             clamped_depth = max(1, min(max_depth, 5))
             properties: list[dict[str, str]] = []
-            visited_refs: set[int] = set()
 
-            async def _walk(var_ref: int, prefix: str, depth: int) -> None:
+            async def _walk(var_ref: int, prefix: str, depth: int, ancestors: frozenset[int]) -> None:
                 if depth > clamped_depth or len(properties) >= max_properties:
                     return
-                if var_ref in visited_refs:
+                if var_ref in ancestors:
+                    # True cycle: this ref is on the current call stack
                     properties.append({
                         "path": prefix or "<root>",
                         "value": "<circular ref>",
@@ -608,7 +642,7 @@ def register_inspection_tools(
                     })
                     return
 
-                visited_refs.add(var_ref)
+                current_ancestors = ancestors | {var_ref}
                 vars_list = await session.get_variables(var_ref)
 
                 for v in vars_list:
@@ -624,9 +658,9 @@ def register_inspection_tools(
 
                     # Recurse into nested objects
                     if v.variables_reference > 0 and depth < clamped_depth:
-                        await _walk(v.variables_reference, path, depth + 1)
+                        await _walk(v.variables_reference, path, depth + 1, current_ancestors)
 
-            await _walk(variables_reference, "", 0)
+            await _walk(variables_reference, "", 0, frozenset())
 
             total = len(properties)
             return build_response(

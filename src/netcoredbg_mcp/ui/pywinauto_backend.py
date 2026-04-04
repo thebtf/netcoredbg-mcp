@@ -101,10 +101,10 @@ class PywinautoBackend:
     ) -> dict[str, Any]:
         """Find element via pywinauto.
 
-        Note: xpath parameter is ignored on pywinauto backend.
-        Use FlaUI backend for XPath support.
+        Raises NotImplementedError if xpath is provided — pywinauto backend does not
+        support XPath. Use FlaUI backend or remove the xpath argument.
         """
-        if xpath and not any((automation_id, name, control_type)):
+        if xpath:
             raise NotImplementedError(
                 "XPath search requires FlaUI backend. "
                 "Install FlaUIBridge.exe or use automationId/name/controlType search instead."
@@ -122,7 +122,7 @@ class PywinautoBackend:
         xpath: str | None = None,
     ) -> dict[str, Any]:
         """Invoke element via pywinauto (IUIAutomationInvokePattern)."""
-        if xpath and not any((automation_id, name, control_type)):
+        if xpath:
             raise NotImplementedError(
                 "XPath search requires FlaUI backend. "
                 "Use automationId/name/controlType for invoke on pywinauto."
@@ -164,7 +164,7 @@ class PywinautoBackend:
         xpath: str | None = None,
     ) -> dict[str, Any]:
         """Toggle element via pywinauto (IUIAutomationTogglePattern)."""
-        if xpath and not any((automation_id, name, control_type)):
+        if xpath:
             raise NotImplementedError(
                 "XPath search requires FlaUI backend. "
                 "Use automationId/name/controlType for toggle on pywinauto."
@@ -218,7 +218,16 @@ class PywinautoBackend:
             if self._ui._app is None:
                 return {"results": [], "totalMatches": 0}
 
-            window = self._ui._app.top_window()
+            # Scope search to root_id container when specified
+            if root_id:
+                try:
+                    search_root = self._ui._app.top_window().child_window(auto_id=root_id)
+                    search_root.wait("exists", timeout=5)
+                except Exception:
+                    return {"results": [], "totalMatches": 0}
+            else:
+                search_root = self._ui._app.top_window()
+
             criteria: dict[str, str] = {}
             if name:
                 criteria["title"] = name
@@ -228,9 +237,9 @@ class PywinautoBackend:
             if not criteria:
                 return {"results": [], "totalMatches": 0}
 
-            # Find all matching children
+            # Find all matching descendants within the scoped root
             try:
-                matches = window.descendants(**criteria)
+                matches = search_root.descendants(**criteria)
             except Exception:
                 return {"results": [], "totalMatches": 0}
 
@@ -277,7 +286,7 @@ class PywinautoBackend:
         xpath: str | None = None,
     ) -> dict[str, Any]:
         """Extract text using multi-strategy fallback on pywinauto."""
-        if xpath and not any((automation_id, name, control_type)):
+        if xpath:
             raise NotImplementedError(
                 "XPath search requires FlaUI backend. "
                 "Use automationId/name/controlType for text extraction on pywinauto."
@@ -312,7 +321,20 @@ class PywinautoBackend:
             except Exception:
                 pass
 
-            # Strategy 4: Visible text children
+            # Strategy 4: LegacyIAccessible name / value
+            try:
+                iface = element.iface_legacy_accessible
+                if iface is not None:
+                    legacy_name = iface.CurrentName
+                    if legacy_name:
+                        return {"text": legacy_name, "source": "LegacyIAccessible.Name"}
+                    legacy_value = iface.CurrentValue
+                    if legacy_value:
+                        return {"text": legacy_value, "source": "LegacyIAccessible.Value"}
+            except Exception:
+                pass
+
+            # Strategy 5: Visible text children
             try:
                 children = element.descendants(control_type="Text")
                 texts = []

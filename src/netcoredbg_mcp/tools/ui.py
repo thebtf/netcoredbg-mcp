@@ -76,6 +76,8 @@ def register_ui_tools(
 
         When searching by name/controlType (not automationId/xpath), uses
         find_all_cascade to detect multiple matches and returns the best-ranked one.
+        The top-ranked element from find_all_cascade is used for the actual selection,
+        not just for ambiguity reporting.
         """
         ui = await _ensure_ui_connected()
         from ..ui.pywinauto_backend import PywinautoBackend
@@ -88,26 +90,57 @@ def register_ui_tools(
             )
             return ui, element, None
 
-        # FlaUI backend: check for ambiguity when searching by name/controlType
+        # FlaUI backend: use find_all_cascade when searching by name/controlType
+        # so we select the best-ranked element, not simply the first match found.
         ambiguity_info = None
         if not automation_id and not xpath and (name or control_type):
             try:
                 ranked = await ui.find_all_cascade(
                     name=name, control_type=control_type, root_id=root_id, max_results=5,
                 )
+                results = ranked.get("results", [])
                 total = ranked.get("totalMatches", 0)
-                if total > 1:
-                    results = ranked.get("results", [])
-                    ambiguity_info = {
-                        "ambiguous": True,
-                        "candidateCount": total,
-                        "warning": f"Multiple matches ({total}) for search criteria. Using best-ranked result.",
-                        "alternatives": [
-                            {"automationId": r.get("automationId", ""), "name": r.get("name", ""),
-                             "controlType": r.get("controlType", ""), "parentDesc": r.get("parentDesc", "")}
-                            for r in results[1:4]  # Show up to 3 alternatives
-                        ],
-                    }
+                if results:
+                    # Use the top-ranked result as the selected element
+                    top = results[0]
+                    top_automation_id = top.get("automationId") or None
+
+                    if total > 1:
+                        ambiguity_info = {
+                            "ambiguous": True,
+                            "candidateCount": total,
+                            "warning": (
+                                f"Multiple matches ({total}) for search criteria. "
+                                "Using best-ranked result."
+                            ),
+                            "alternatives": [
+                                {
+                                    "automationId": r.get("automationId", ""),
+                                    "name": r.get("name", ""),
+                                    "controlType": r.get("controlType", ""),
+                                    "parentDesc": r.get("parentDesc", ""),
+                                }
+                                for r in results[1:4]  # Show up to 3 alternatives
+                            ],
+                        }
+
+                    # Resolve the top-ranked element: prefer its automationId for
+                    # a precise lookup; fall back to original criteria if no id.
+                    if top_automation_id:
+                        element = await ui.find_element(
+                            automation_id=top_automation_id,
+                            root_id=root_id,
+                        )
+                    else:
+                        element = await ui.find_element(
+                            name=top.get("name") or name,
+                            control_type=top.get("controlType") or control_type,
+                            root_id=root_id,
+                        )
+
+                    if ambiguity_info and isinstance(element, dict):
+                        element.update(ambiguity_info)
+                    return ui, element, ambiguity_info
             except Exception:
                 pass  # Fall through to normal find_element
 
@@ -118,10 +151,6 @@ def register_ui_tools(
             root_id=root_id,
             xpath=xpath,
         )
-
-        # Merge ambiguity info into element dict if present
-        if ambiguity_info and isinstance(element, dict):
-            element.update(ambiguity_info)
 
         return ui, element, ambiguity_info
 

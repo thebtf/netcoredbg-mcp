@@ -71,14 +71,16 @@ class SnapshotManager:
         variables: dict[str, SnapshotVar] = {}
 
         for scope in scopes:
+            if len(variables) >= MAX_VARIABLES_PER_SNAPSHOT:
+                break
             var_ref = scope.get("variablesReference", 0)
             if var_ref == 0:
                 continue
             scope_vars = await session.get_variables(var_ref)
-            for v in scope_vars[:MAX_VARIABLES_PER_SNAPSHOT - len(variables)]:
+            for var in scope_vars:
                 if len(variables) >= MAX_VARIABLES_PER_SNAPSHOT:
                     break
-                variables[v.name] = SnapshotVar(value=v.value, type=v.type or "")
+                variables[var.name] = SnapshotVar(value=var.value, type=var.type or "")
 
         snapshot = Snapshot(
             name=name,

@@ -400,7 +400,7 @@ async def test_stopped_description():
     print("\n9. STOPPED DESCRIPTION/TEXT (FR-6)")
     m = await new_session()
     try:
-        m.breakpoints.add(Breakpoint(file=SOURCE, line=15))
+        m.breakpoints.add(Breakpoint(file=SOURCE, line=_find_line("sum += i")))
         await m.launch(program=DLL, args=["hitcount"])
         snapshot = await m.wait_for_stopped(timeout=10)
 
@@ -688,10 +688,11 @@ async def test_snapshots():
     snapshots = mgr.list_snapshots()
     check("List has 2 snapshots", len(snapshots) == 2)
 
-    # FIFO eviction
+    # FIFO eviction baseline: verify direct dict insertion bypasses eviction
+    # (eviction only triggers through SnapshotManager.take(), not _snapshots[...]=)
     for i in range(20):
         mgr._snapshots[f"extra-{i}"] = Snapshot(f"extra-{i}", time.monotonic(), "Test", {})
-    check("Max snapshots respected", len(mgr._snapshots) == 22)  # 2 + 20 (no eviction via direct dict access)
+    check("Direct dict access bypasses FIFO eviction", len(mgr._snapshots) == 22)  # 2 + 20
 
 
 async def test_collection_and_object():
@@ -769,7 +770,7 @@ async def test_tracepoint_performance():
         mgr = TracepointManager()
         m._tracepoint_manager = mgr
 
-        tp = mgr.add(SOURCE, 91, "i")
+        tp = mgr.add(SOURCE, _find_line("Tick {i}/30"), "i")
 
         snapshot = await m.wait_for_stopped(timeout=10.0)
         check("Stopped at longrun tick", snapshot is not None)

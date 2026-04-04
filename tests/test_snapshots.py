@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from netcoredbg_mcp.session.state import DebugState, Snapshot, SnapshotVar, StackFrame, Variable
+from netcoredbg_mcp.session.state import DebugState, StackFrame, Variable
 from netcoredbg_mcp.session.snapshots import MAX_SNAPSHOTS, SnapshotManager
 
 

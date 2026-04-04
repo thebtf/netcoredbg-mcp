@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import time
-from collections import deque
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from netcoredbg_mcp.session.state import TraceEntry, Tracepoint
+from netcoredbg_mcp.session.state import TraceEntry
 from netcoredbg_mcp.session.tracepoints import (
     MAX_TRACE_ENTRIES,
     RATE_LIMIT_INTERVAL_SECONDS,
@@ -145,3 +144,98 @@ class TestTracepointFindLocation:
         tp = mgr.add("test.cs", 10, "x")
         tp.active = False
         assert mgr.find_tracepoint_for_location("test.cs", 10) is None
+
+
+def _make_session(evaluate_result: str = "42", *, success: bool = True) -> MagicMock:
+    """Build a minimal mock SessionManager for on_tracepoint_hit tests."""
+    session = MagicMock()
+
+    response = MagicMock()
+    response.success = success
+    response.body = {"result": evaluate_result}
+    response.message = None
+
+    session._client.evaluate = AsyncMock(return_value=response)
+    session._client.continue_execution = AsyncMock()
+    session.prepare_for_execution = MagicMock()
+    session.get_stack_trace = AsyncMock(return_value=[MagicMock(id=10)])
+    return session
+
+
+class TestOnTracepointHit:
+
+    @pytest.mark.asyncio
+    async def test_hit_logs_evaluation_result(self):
+        mgr = TracepointManager()
+        tp = mgr.add("test.cs", 10, "x + y")
+        session = _make_session("99")
+
+        await mgr.on_tracepoint_hit(tp, session, thread_id=1)
+
+        assert tp.hit_count == 1
+        log = mgr.get_log()
+        assert len(log) == 1
+        assert log[0].value == "99"
+        assert log[0].tracepoint_id == tp.id
+
+    @pytest.mark.asyncio
+    async def test_hit_resumes_when_no_user_breakpoint(self):
+        mgr = TracepointManager()
+        tp = mgr.add("test.cs", 10, "x")
+        session = _make_session()
+
+        await mgr.on_tracepoint_hit(tp, session, thread_id=1)
+
+        session.prepare_for_execution.assert_called_once()
+        session._client.continue_execution.assert_awaited_once_with(1)
+
+    @pytest.mark.asyncio
+    async def test_hit_does_not_resume_with_user_breakpoint(self):
+        mgr = TracepointManager()
+        tp = mgr.add("test.cs", 10, "x")
+        session = _make_session()
+
+        await mgr.on_tracepoint_hit(tp, session, thread_id=1, has_user_breakpoint=True)
+
+        session._client.continue_execution.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_hit_uses_provided_top_frame(self):
+        """Verifies that top_frame avoids a redundant get_stack_trace call."""
+        mgr = TracepointManager()
+        tp = mgr.add("test.cs", 10, "x")
+        session = _make_session()
+
+        top_frame = MagicMock(id=99)
+        await mgr.on_tracepoint_hit(tp, session, thread_id=1, top_frame=top_frame)
+
+        # get_stack_trace must NOT have been called since top_frame was supplied
+        session.get_stack_trace.assert_not_awaited()
+        # evaluate must have used the supplied frame id
+        session._client.evaluate.assert_awaited_once_with(tp.expression, 99)
+
+    @pytest.mark.asyncio
+    async def test_rate_limited_hit_logs_placeholder(self):
+        mgr = TracepointManager()
+        tp = mgr.add("test.cs", 10, "x")
+        session = _make_session()
+
+        # First hit consumes the rate-limit slot
+        await mgr.on_tracepoint_hit(tp, session, thread_id=1)
+        # Immediate second hit must be rate-limited
+        await mgr.on_tracepoint_hit(tp, session, thread_id=1)
+
+        log = mgr.get_log()
+        assert any(e.value == "<rate limited>" for e in log)
+
+    @pytest.mark.asyncio
+    async def test_evaluation_failure_logs_error(self):
+        mgr = TracepointManager()
+        tp = mgr.add("test.cs", 10, "bad_expr")
+        session = _make_session(success=False)
+        session._client.evaluate.return_value.message = "undefined variable"
+
+        await mgr.on_tracepoint_hit(tp, session, thread_id=1)
+
+        log = mgr.get_log()
+        assert log[0].value.startswith("<error:")

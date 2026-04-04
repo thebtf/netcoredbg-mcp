@@ -337,7 +337,7 @@ public static class ElementCommands
                 // Check for CLR type name pattern
                 if (IsLikelyCLRTypeName(elName))
                 {
-                    var descendantText = GetVisibleDescendantText(element);
+                    var descendantText = GetVisibleDescendantText(element, automation);
                     if (!string.IsNullOrEmpty(descendantText))
                         return new JsonObject { ["text"] = descendantText, ["source"] = "TextDescendants" };
                 }
@@ -363,7 +363,7 @@ public static class ElementCommands
         catch { /* fall through */ }
 
         // Strategy 5: Visible text descendants
-        var descText = GetVisibleDescendantText(element);
+        var descText = GetVisibleDescendantText(element, automation);
         if (!string.IsNullOrEmpty(descText))
             return new JsonObject { ["text"] = descText, ["source"] = "TextDescendants" };
 
@@ -465,12 +465,12 @@ public static class ElementCommands
             s.Length > 0 && char.IsUpper(s[0]) && s.All(c => char.IsLetterOrDigit(c) || c == '_'));
     }
 
-    private static string GetVisibleDescendantText(AutomationElement element)
+    private static string GetVisibleDescendantText(AutomationElement element, UIA3Automation automation)
     {
         try
         {
             var textChildren = element.FindAllDescendants(
-                new ConditionFactory(new UIA3Automation().PropertyLibrary)
+                new ConditionFactory(automation.PropertyLibrary)
                     .ByControlType(ControlType.Text));
 
             var texts = new List<string>();
