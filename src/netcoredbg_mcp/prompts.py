@@ -149,6 +149,21 @@ IDLE ──start_debug──> RUNNING ──breakpoint──> STOPPED ──cont
 **STOPPED** — App FROZEN. UI won't paint. User cannot interact. Inspect then RESUME.
 **TERMINATED** — App exited. Read output. Call stop_debug.
 
+## CRITICAL: Check State Before Asking User to Act
+
+BEFORE asking the user to interact with the app (click a button, enter data, use the UI),
+ALWAYS call `get_debug_state()` first. If state is STOPPED:
+1. The app is FROZEN — the user CANNOT interact with it
+2. Call `continue_execution()` to resume the app FIRST
+3. THEN ask the user to interact
+
+WRONG: "Please click the Save button" (while app is paused at breakpoint — user sees frozen window)
+CORRECT: get_debug_state() → state=STOPPED → continue_execution() → state=RUNNING → "Please click Save"
+
+This applies to ALL user-facing requests: clicking, typing, navigating menus, dragging, etc.
+If you're not sure of the state, check it. The cost of checking is one tool call.
+The cost of NOT checking is a confused user staring at a frozen app.
+
 ## Execution Tools Block Automatically
 
 continue_execution, step_over, step_into, step_out all BLOCK until the program
@@ -203,9 +218,13 @@ GUI apps have a critical difference from console apps: the UI thread.
 When the debugger pauses, the ENTIRE UI thread freezes. The window stops
 painting, buttons stop responding, animations freeze mid-frame.
 
-## The Golden Rule
+## The Golden Rules
 
-**NEVER set breakpoints before the window is visible.**
+**1. NEVER set breakpoints before the window is visible.**
+
+**2. ALWAYS check debug state before asking user to interact with the app.**
+Call `get_debug_state()`. If STOPPED → `continue_execution()` first. A paused
+GUI app has a frozen, unresponsive window — the user cannot click or type anything.
 
 Setting breakpoints in initialization code (constructors, OnLoaded, App.xaml.cs)
 before starting the app will freeze the app DURING initialization. The window
@@ -563,6 +582,24 @@ continue_execution()
 # Response: stopped at Service.cs:42, source_context shows 5 lines around it
 # Already have the context — no need to read the file
 ```
+
+## 10. Asking user to interact with paused app
+
+WRONG:
+```
+# App is stopped at breakpoint (agent doesn't check)
+"Please click the Save button in the app"
+# User sees frozen, unresponsive window
+```
+
+CORRECT:
+```
+get_debug_state()        # state=STOPPED
+continue_execution()     # resume app
+"Please click the Save button"
+```
+
+Always check state before ANY request for user interaction with the app.
 """
 
 # ═══════════════════════════════════════════════════════════════════════
