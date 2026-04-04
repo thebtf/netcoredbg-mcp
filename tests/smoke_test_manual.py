@@ -480,25 +480,29 @@ async def test_ui_invoke_toggle():
         await backend.connect(pid)
         check("UI backend connected", True)
 
-        # Test ui_invoke: invoke button
-        # WinForms: AccessibleName maps to UIA Name (not AutomationId)
-        # Try automation_id first (WPF/Avalonia), fall back to name (WinForms)
-        try:
+        # WinForms: AccessibleName maps to UIA Name (not AutomationId).
+        # Try automation_id first (WPF/Avalonia), fall back to name (WinForms).
+        # Narrow exception: element-not-found raises RuntimeError from backends.
+        _NOT_FOUND = (RuntimeError, LookupError)
+
+        async def _with_name_fallback(method, element_id, **kwargs):
+            """Call backend method by automation_id, fall back to name on not-found."""
             try:
-                result = await backend.invoke_element(automation_id="btnInvoke")
-            except Exception:
-                result = await backend.invoke_element(name="btnInvoke")
+                return await method(automation_id=element_id, **kwargs)
+            except _NOT_FOUND:
+                return await method(name=element_id, **kwargs)
+
+        # Test ui_invoke
+        try:
+            result = await _with_name_fallback(backend.invoke_element, "btnInvoke")
             check("ui_invoke (btnInvoke)", result.get("invoked", False),
                   f"method={result.get('method')}")
         except Exception as e:
             check("ui_invoke (btnInvoke)", False, str(e))
 
-        # Test ui_toggle: toggle checkbox
+        # Test ui_toggle
         try:
-            try:
-                result = await backend.toggle_element(automation_id="chkEnabled")
-            except Exception:
-                result = await backend.toggle_element(name="chkEnabled")
+            result = await _with_name_fallback(backend.toggle_element, "chkEnabled")
             check("ui_toggle (chkEnabled)", result.get("toggled", False),
                   f"newState={result.get('newState')}")
             check("ui_toggle returns On", result.get("newState") == "On",
@@ -508,10 +512,7 @@ async def test_ui_invoke_toggle():
 
         # Test ui_toggle again to verify state cycle
         try:
-            try:
-                result = await backend.toggle_element(automation_id="chkEnabled")
-            except Exception:
-                result = await backend.toggle_element(name="chkEnabled")
+            result = await _with_name_fallback(backend.toggle_element, "chkEnabled")
             check("ui_toggle cycle Off", result.get("newState") == "Off",
                   f"got {result.get('newState')}")
         except Exception as e:
