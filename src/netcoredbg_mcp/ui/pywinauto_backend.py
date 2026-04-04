@@ -203,6 +203,134 @@ class PywinautoBackend:
             "Install FlaUIBridge.exe or use automationId/name/controlType search instead."
         )
 
+    async def find_all_cascade(
+        self,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        max_results: int = 10,
+    ) -> dict[str, Any]:
+        """Find all matching elements with basic ranking on pywinauto."""
+        loop = asyncio.get_running_loop()
+
+        def _find_all():
+            if self._ui._app is None:
+                return {"results": [], "totalMatches": 0}
+
+            window = self._ui._app.top_window()
+            criteria: dict[str, str] = {}
+            if name:
+                criteria["title"] = name
+            if control_type:
+                criteria["control_type"] = control_type
+
+            if not criteria:
+                return {"results": [], "totalMatches": 0}
+
+            # Find all matching children
+            try:
+                matches = window.descendants(**criteria)
+            except Exception:
+                return {"results": [], "totalMatches": 0}
+
+            total = len(matches)
+            # Simple ranking: prefer enabled, visible, shallower elements
+            scored = []
+            for el in matches[:max_results * 2]:  # Over-sample for ranking
+                try:
+                    info = el.element_info
+                    score = 0
+                    try:
+                        if el.is_enabled():
+                            score += 10
+                    except Exception:
+                        pass
+                    try:
+                        if el.is_visible():
+                            score += 10
+                    except Exception:
+                        pass
+                    scored.append({
+                        "found": True,
+                        "automationId": getattr(info, "automation_id", "") or "",
+                        "name": getattr(info, "name", "") or "",
+                        "controlType": getattr(info, "control_type", "") or "",
+                        "score": score,
+                        "depth": 0,  # pywinauto doesn't expose depth easily
+                        "parentDesc": "",
+                    })
+                except Exception:
+                    continue
+
+            scored.sort(key=lambda x: x["score"], reverse=True)
+            return {"results": scored[:max_results], "totalMatches": total}
+
+        return await loop.run_in_executor(self._ui._executor, _find_all)
+
+    async def extract_text(
+        self,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+    ) -> dict[str, Any]:
+        """Extract text using multi-strategy fallback on pywinauto."""
+        if xpath and not any((automation_id, name, control_type)):
+            raise NotImplementedError(
+                "XPath search requires FlaUI backend. "
+                "Use automationId/name/controlType for text extraction on pywinauto."
+            )
+        element = await self._find_element_scoped(automation_id, name, control_type, root_id)
+        loop = asyncio.get_running_loop()
+
+        def _extract():
+            # Strategy 1: ValuePattern
+            try:
+                iface = element.iface_value
+                if iface is not None:
+                    val = iface.CurrentValue
+                    if val:
+                        return {"text": val, "source": "ValuePattern"}
+            except Exception:
+                pass
+
+            # Strategy 2: Name property
+            try:
+                el_name = element.element_info.name
+                if el_name:
+                    return {"text": el_name, "source": "Name"}
+            except Exception:
+                pass
+
+            # Strategy 3: window_text()
+            try:
+                wt = element.window_text()
+                if wt:
+                    return {"text": wt, "source": "WindowText"}
+            except Exception:
+                pass
+
+            # Strategy 4: Visible text children
+            try:
+                children = element.descendants(control_type="Text")
+                texts = []
+                for child in children:
+                    try:
+                        cn = child.element_info.name
+                        if cn:
+                            texts.append(cn)
+                    except Exception:
+                        continue
+                if texts:
+                    return {"text": " ".join(texts), "source": "TextDescendants"}
+            except Exception:
+                pass
+
+            return {"text": "", "source": "None"}
+
+        return await loop.run_in_executor(self._ui._executor, _extract)
+
     async def click_at(self, x: int, y: int) -> None:
         """Click at coordinates."""
         await self._ui._click_at_coords(x, y)

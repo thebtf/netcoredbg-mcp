@@ -79,6 +79,27 @@ class UIBackend(Protocol):
         """Find element by XPath expression. Returns element info + matchCount."""
         ...
 
+    async def find_all_cascade(
+        self,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        max_results: int = 10,
+    ) -> dict[str, Any]:
+        """Find all matching elements with ranked scoring for disambiguation."""
+        ...
+
+    async def extract_text(
+        self,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+    ) -> dict[str, Any]:
+        """Extract text using multi-strategy fallback. Returns text + source."""
+        ...
+
     async def click_at(self, x: int, y: int) -> None:
         """Click at screen coordinates."""
         ...
