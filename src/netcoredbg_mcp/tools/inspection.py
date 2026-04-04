@@ -204,3 +204,63 @@ def register_inspection_tools(
             return build_error_response(str(e), state=session.state.state)
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    async def get_exception_context(
+        max_frames: int = 10,
+        include_variables_for_frames: int = 1,
+        max_inner_exceptions: int = 5,
+    ) -> dict:
+        """Get full exception context in one call (exception autopsy).
+
+        Returns exception type/message, inner exception chain, stack frames with
+        source locations, and local variables for the top N frames — all in a
+        single response. Use this FIRST when the debugger stops on an exception.
+
+        This replaces the manual sequence of:
+        get_exception_info → get_call_stack → get_scopes → get_variables
+
+        Args:
+            max_frames: Maximum stack frames to return (default 10)
+            include_variables_for_frames: Include locals for top N frames (default 1)
+            max_inner_exceptions: Max inner exception chain depth (default 5)
+        """
+        try:
+            result = await session.get_exception_context(
+                max_frames=max_frames,
+                include_variables_for_frames=include_variables_for_frames,
+                max_inner_exceptions=max_inner_exceptions,
+            )
+            return build_response(data=result, state=session.state.state)
+        except RuntimeError as e:
+            return build_error_response(str(e), state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    async def get_stop_context(
+        include_variables: bool = True,
+        include_output_tail: int = 10,
+    ) -> dict:
+        """Get rich context when stopped at any breakpoint — one call replaces many.
+
+        Returns stop reason, stack trace with source, locals in the top frame,
+        hit count for the current breakpoint, and recent output lines.
+
+        Call this FIRST when execution stops. It gives you everything you need
+        to understand the stop without multiple sequential tool calls.
+
+        Args:
+            include_variables: Include local variables for top frame (default True)
+            include_output_tail: Include last N output lines (default 10, 0 to skip)
+        """
+        try:
+            result = await session.get_stop_context(
+                include_variables=include_variables,
+                include_output_tail=include_output_tail,
+            )
+            return build_response(data=result, state=session.state.state)
+        except RuntimeError as e:
+            return build_error_response(str(e), state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)

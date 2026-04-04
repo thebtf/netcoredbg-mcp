@@ -1119,3 +1119,170 @@ class SessionManager:
             self._state.exception_info = response.body
             return response.body
         return None
+
+    async def get_exception_context(
+        self,
+        max_frames: int = 10,
+        include_variables_for_frames: int = 1,
+        max_inner_exceptions: int = 5,
+    ) -> dict[str, Any]:
+        """Get full exception context in a single call (exception autopsy).
+
+        Returns exception type, message, inner exception chain, stack frames
+        with source locations, and local variables for top N frames.
+        Replaces the manual sequence: get_exception_info + get_call_stack + get_scopes + get_variables.
+        """
+        if self._state.state != DebugState.STOPPED:
+            raise RuntimeError("Program is not stopped")
+        if self._state.stop_reason != "exception":
+            raise RuntimeError(
+                f"Not stopped at an exception (reason: {self._state.stop_reason}). "
+                "Use get_call_stack + get_variables instead."
+            )
+
+        tid = self._state.current_thread_id
+        if tid is None:
+            raise RuntimeError("No active thread")
+
+        result: dict[str, Any] = {"threadId": tid}
+
+        # 1. Exception info from DAP
+        exc_info = await self.get_exception_info(tid)
+        result["exception"] = exc_info or {}
+
+        # 2. Stack frames
+        frames = await self.get_stack_trace(thread_id=tid, levels=max_frames)
+        frame_data = []
+        for i, frame in enumerate(frames):
+            fd: dict[str, Any] = {
+                "index": i,
+                "name": frame.name,
+                "source": frame.source,
+                "line": frame.line,
+                "column": frame.column,
+                "id": frame.id,
+            }
+
+            # Include variables for top N frames
+            if i < include_variables_for_frames:
+                try:
+                    scopes = await self.get_scopes(frame.id)
+                    scope_vars = {}
+                    for scope in scopes:
+                        ref = scope.get("variablesReference", 0)
+                        if ref:
+                            variables = await self.get_variables(ref)
+                            scope_vars[scope.get("name", "Locals")] = [
+                                {"name": v.name, "value": v.value, "type": v.type}
+                                for v in variables[:20]  # Cap at 20 vars per scope
+                            ]
+                    fd["variables"] = scope_vars
+                except Exception as e:
+                    fd["variables"] = {"error": str(e)}
+
+            frame_data.append(fd)
+
+        result["frames"] = frame_data
+        result["totalFrames"] = len(frames)
+
+        # 3. Inner exceptions via $exception evaluation
+        inner_exceptions = []
+        prefix = "$exception.InnerException"
+        for depth in range(1, max_inner_exceptions + 1):
+            try:
+                type_result = await self.evaluate(f"{prefix}.GetType().FullName")
+                if "error" in type_result:
+                    break
+                msg_result = await self.evaluate(f"{prefix}.Message")
+                inner_exceptions.append({
+                    "type": type_result.get("result", "Unknown"),
+                    "message": msg_result.get("result", ""),
+                    "depth": depth,
+                })
+                prefix = f"{prefix}.InnerException"
+            except Exception:
+                break
+
+        result["innerExceptions"] = inner_exceptions
+
+        return result
+
+    async def get_stop_context(
+        self,
+        include_variables: bool = True,
+        include_output_tail: int = 10,
+    ) -> dict[str, Any]:
+        """Get rich context when stopped at any breakpoint — one call instead of many.
+
+        Returns: stop reason, stack trace with source, locals in top frame,
+        hit count for current location, recent output lines.
+        """
+        if self._state.state != DebugState.STOPPED:
+            raise RuntimeError("Program is not stopped")
+
+        tid = self._state.current_thread_id
+        result: dict[str, Any] = {
+            "state": self._state.state.value,
+            "reason": self._state.stop_reason,
+            "threadId": tid,
+            "description": self._state.stop_description,
+            "text": self._state.stop_text,
+        }
+
+        # Stack trace (top 5 frames)
+        if tid is not None:
+            frames = await self.get_stack_trace(thread_id=tid, levels=5)
+            frame_data = []
+            for frame in frames:
+                fd: dict[str, Any] = {
+                    "name": frame.name,
+                    "source": frame.source,
+                    "line": frame.line,
+                    "id": frame.id,
+                }
+                frame_data.append(fd)
+            result["frames"] = frame_data
+
+            # Variables for top frame
+            if include_variables and frames:
+                try:
+                    scopes = await self.get_scopes(frames[0].id)
+                    local_vars = []
+                    for scope in scopes:
+                        ref = scope.get("variablesReference", 0)
+                        if ref:
+                            variables = await self.get_variables(ref)
+                            for v in variables[:15]:
+                                local_vars.append({
+                                    "name": v.name,
+                                    "value": v.value,
+                                    "type": v.type,
+                                })
+                            break  # Only first scope (Locals)
+                    result["locals"] = local_vars
+                except Exception as e:
+                    result["locals"] = [{"error": str(e)}]
+
+            # Hit count for current location
+            if frames and frames[0].source:
+                norm = self.breakpoints._normalize_path(frames[0].source)
+                key = (norm, frames[0].line)
+                result["hitCount"] = self._state.hit_counts.get(key, 0)
+
+        # Recent output
+        if include_output_tail > 0:
+            tail_entries = list(self._state.output_buffer)[-include_output_tail:]
+            result["recentOutput"] = [
+                {"text": e.text.rstrip(), "category": e.category}
+                for e in tail_entries
+                if e.text.strip()  # Skip empty lines
+            ]
+
+        # Exception info if stopped at exception
+        if self._state.stop_reason == "exception" and tid is not None:
+            try:
+                result["exception"] = await self.get_exception_info(tid)
+            except Exception:
+                pass
+
+        return result
