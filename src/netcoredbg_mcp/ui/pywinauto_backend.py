@@ -6,10 +6,14 @@ the fallback when FlaUIBridge.exe is not available.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Toggle state enum values from UIA COM
+_TOGGLE_STATE_NAMES = {0: "Off", 1: "On", 2: "Indeterminate"}
 
 
 class PywinautoBackend:
@@ -46,20 +50,158 @@ class PywinautoBackend:
         """Disconnect from process."""
         await self._ui.disconnect()
 
+    async def _find_element_scoped(
+        self,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+    ) -> Any:
+        """Find element, optionally scoped to a root container.
+
+        Returns a pywinauto wrapper element.
+        """
+        if root_id:
+            # Find root container first, then search within it
+            root_element = await self._ui.find_element(automation_id=root_id)
+            # Search within the root element's subtree
+            criteria: dict[str, str] = {}
+            if automation_id:
+                criteria["auto_id"] = automation_id
+            if name:
+                criteria["title"] = name
+            if control_type:
+                criteria["control_type"] = control_type
+
+            if not criteria:
+                return root_element
+
+            loop = asyncio.get_running_loop()
+
+            def _find_in_subtree():
+                child = root_element.child_window(**criteria)
+                child.wait("exists", timeout=5)
+                return child
+
+            return await loop.run_in_executor(self._ui._executor, _find_in_subtree)
+
+        return await self._ui.find_element(
+            automation_id=automation_id,
+            name=name,
+            control_type=control_type,
+        )
+
     async def find_element(
         self,
         automation_id: str | None = None,
         name: str | None = None,
         control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
     ) -> dict[str, Any]:
-        """Find element via pywinauto."""
-        element = await self._ui.find_element(
-            automation_id=automation_id,
-            name=name,
-            control_type=control_type,
-        )
+        """Find element via pywinauto.
+
+        Note: xpath parameter is ignored on pywinauto backend.
+        Use FlaUI backend for XPath support.
+        """
+        if xpath and not any((automation_id, name, control_type)):
+            raise NotImplementedError(
+                "XPath search requires FlaUI backend. "
+                "Install FlaUIBridge.exe or use automationId/name/controlType search instead."
+            )
+        element = await self._find_element_scoped(automation_id, name, control_type, root_id)
         info = await self._ui.get_element_info(element)
         return info.to_dict()
+
+    async def invoke_element(
+        self,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+    ) -> dict[str, Any]:
+        """Invoke element via pywinauto (IUIAutomationInvokePattern)."""
+        if xpath and not any((automation_id, name, control_type)):
+            raise NotImplementedError(
+                "XPath search requires FlaUI backend. "
+                "Use automationId/name/controlType for invoke on pywinauto."
+            )
+        element = await self._find_element_scoped(automation_id, name, control_type, root_id)
+        loop = asyncio.get_running_loop()
+
+        def _invoke():
+            method = "InvokePattern"
+            try:
+                iface = element.iface_invoke
+                if iface is not None:
+                    iface.Invoke()
+                else:
+                    element.click()
+                    method = "Click"
+            except Exception:
+                element.click()
+                method = "Click"
+            return method
+
+        method = await loop.run_in_executor(self._ui._executor, _invoke)
+        info = await self._ui.get_element_info(element)
+        return {
+            "invoked": True,
+            "method": method,
+            "automationId": info.automation_id,
+            "name": info.name,
+            "controlType": info.control_type,
+        }
+
+    async def toggle_element(
+        self,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+    ) -> dict[str, Any]:
+        """Toggle element via pywinauto (IUIAutomationTogglePattern)."""
+        if xpath and not any((automation_id, name, control_type)):
+            raise NotImplementedError(
+                "XPath search requires FlaUI backend. "
+                "Use automationId/name/controlType for toggle on pywinauto."
+            )
+        element = await self._find_element_scoped(automation_id, name, control_type, root_id)
+        loop = asyncio.get_running_loop()
+
+        def _toggle():
+            iface = element.iface_toggle
+            if iface is None:
+                raise RuntimeError(
+                    f"Element does not support TogglePattern. "
+                    f"Control type: {element.element_info.control_type}"
+                )
+            iface.Toggle()
+            new_state_int = iface.CurrentToggleState
+            return _TOGGLE_STATE_NAMES.get(new_state_int, str(new_state_int))
+
+        new_state = await loop.run_in_executor(self._ui._executor, _toggle)
+        info = await self._ui.get_element_info(element)
+        return {
+            "toggled": True,
+            "newState": new_state,
+            "automationId": info.automation_id,
+            "name": info.name,
+            "controlType": info.control_type,
+        }
+
+    async def find_by_xpath(
+        self,
+        xpath: str,
+        root_id: str | None = None,
+    ) -> dict[str, Any]:
+        """XPath search is not supported on pywinauto backend."""
+        raise NotImplementedError(
+            "XPath search requires FlaUI backend. "
+            "Install FlaUIBridge.exe or use automationId/name/controlType search instead."
+        )
 
     async def click_at(self, x: int, y: int) -> None:
         """Click at coordinates."""
