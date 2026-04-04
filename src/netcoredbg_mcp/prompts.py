@@ -296,6 +296,19 @@ pywinauto is used as fallback — works for most controls.
 PREFER ui_invoke over ui_click for buttons — it works even when the element is off-screen or obscured.
 PREFER ui_toggle over ui_click for checkboxes — it returns the actual state after toggling.
 
+## Debugging Intelligence Tools
+
+| Action | Tool |
+|--------|------|
+| Trace execution flow | add_tracepoint(file, line, expression) → get_trace_log() |
+| Compare state between stops | create_snapshot("before") → step → create_snapshot("after") → diff_snapshots("before", "after") |
+| Analyze collection | analyze_collection(variables_reference=ref) — count, nulls, min/max, duplicates |
+| Summarize nested object | summarize_object(variables_reference=ref, max_depth=2) — flat property list |
+
+TRACEPOINT WORKFLOW: Set 5-10 tracepoints on key lines → continue → read trace log.
+This replaces manual step-by-step inspection for execution flow analysis.
+SNAPSHOT WORKFLOW: Snapshot before action → execute → snapshot after → diff to see exact changes.
+
 ## Key Syntax Quick Reference
 
 Modifier prefixes apply to the NEXT character or {KEY}:
