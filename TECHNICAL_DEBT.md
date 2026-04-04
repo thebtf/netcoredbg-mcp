@@ -66,3 +66,99 @@ Full reports: `.agent/data/mcp-dap-coverage-gaps.md`, `.agent/data/netcoredbg-da
 
 #### ~~PR24: Review findings pending~~ DONE
 **Resolved in:** PR #24 merged with all review findings addressed.
+
+---
+
+## Roadmap: v0.5.0 — Agent Intelligence & UI Gaps (from competitor analysis 2026-04-04)
+
+Reference: `.agent/data/competitor-analysis-detail.md`
+
+### v0.5.0: Exception Autopsy + Context Tools (HIGH)
+
+#### R1: Exception autopsy tool (`exception_get_context`)
+**What:** Single tool call that returns: exception type, message, isFirstChance, inner exception
+chain (with depth), stack frames with source locations, local variables for N top frames.
+Replaces 3-4 sequential tool calls (get_exception_info + get_call_stack + get_scopes + get_variables).
+**Why:** Agent wastes 4+ tool calls per exception. debug-mcp proved this pattern works.
+**How:** Use DAP `evaluate` with `$exception.GetType().FullName`, `$exception.Message`,
+`$exception.StackTrace`, walk inner chain via `$exception.InnerException.*`.
+Combine with existing get_stack_trace + get_variables for locals.
+**Effort:** M — compose existing DAP calls, new tool + service.
+
+#### R2: Context autopsy on stop (`get_stop_context`)
+**What:** When stopped at ANY breakpoint (not just exception), one call returns:
+stop reason, stack trace with source context, locals in top frame, hit count,
+recent output (last 10 lines). Replaces the manual inspect-resume cycle.
+**Why:** Agent on screenshot does 5+ tool calls every time it stops. Should be 1.
+**Effort:** M — compose existing calls.
+
+#### R3: Execution flow tracing via tracepoints
+**What:** Set non-stopping breakpoints that log an expression's value.
+`add_tracepoint(file, line, expression)` → logs `{file}:{line} → {value}` to a
+separate trace buffer without pausing. `get_trace_log()` returns ordered entries.
+**Why:** Agent can trace execution flow across many lines without manual step-by-step.
+Enables "set 10 tracepoints → continue → read flow" workflow.
+**How:** DAP `setBreakpoints` with `logMessage` — BLOCKED on netcoredbg.
+Alternative: client-side tracepoints using `quick_evaluate` pattern
+(pause briefly, evaluate, resume, log). ~50ms per hit.
+**Effort:** H — complex timing, needs async queue.
+
+### v0.5.1: UI Tools Expansion (from Winapp-MCP analysis)
+
+#### R4: `ui_invoke` — InvokePattern (no mouse movement)
+**What:** Invoke button/menu via UIA InvokePattern instead of mouse click.
+More reliable — works for off-screen elements, no coordinate calculation.
+**Why:** `ui_click` requires visible element, fails if window is partially obscured.
+**Effort:** S — add to both FlaUI bridge and pywinauto backend.
+
+#### R5: `ui_toggle` — TogglePattern for CheckBox/ToggleButton
+**What:** Toggle checked state via UIA TogglePattern. Returns new state.
+**Why:** Currently no way to check/uncheck checkboxes reliably.
+**Effort:** S — similar to ui_invoke.
+
+#### R6: `ui_file_dialog` — Standard Windows Open/Save dialog
+**What:** Complete standard Win32 file dialog: enter path + click Open/Save.
+Handles "File name:" ComboBox (automationId=1148) and accept button.
+Multi-strategy fallback (by id, by name, keyboard).
+**Why:** Very common scenario — every app has file open/save.
+**Effort:** M — multiple strategies for dialog variants.
+
+#### R7: `root_automation_id` parameter on all find/click tools
+**What:** Optional `root_id` parameter to scope UI element search to a subtree.
+`ui_click(automation_id="btn", root_id="panel1")` — search only within panel1.
+**Why:** Performance: avoids full tree walk. Disambiguation: multiple elements with same id.
+**Effort:** S — add parameter to _find_ui_element, pass to backend.
+
+#### R8: XPath element search
+**What:** Support XPath expressions for complex element queries.
+`ui_click(xpath="//Button[@Name='Save']//ancestor::Panel")`.
+FlaUI has built-in XPath support via `FindFirstByXPath`.
+**Why:** Powerful fallback when automationId is missing and name is ambiguous.
+**Effort:** M — add xpath parameter to all UI tools, implement in both backends.
+
+### v0.6.0: Advanced Debugging (from debug-mcp features)
+
+#### R9: State snapshots + diff
+**What:** `create_snapshot(name)` captures all locals at current frame.
+`diff_snapshot(name1, name2)` shows what changed between two stops.
+**Why:** Agent can compare state before/after an operation without manual diff.
+**Effort:** M
+
+#### R10: Collection analyzer
+**What:** `analyze_collection(variable_ref)` returns: count, type, null count,
+duplicate count, min/max for numeric, first/last N items.
+**Why:** Agent inspects large collections item-by-item. Should be one call.
+**Effort:** M — iterate via DAP variables paging.
+
+#### R11: Object summarizer
+**What:** `summarize_object(variable_ref, depth=2)` returns AI-friendly summary
+of complex objects with nested properties flattened.
+**Why:** Deep nested objects are hard to navigate via get_variables.
+**Effort:** M
+
+### Remaining (LOW priority)
+
+#### L2: Add stepInTargets
+#### L3: Handle continued event body (allThreadsContinued)
+#### L5: Support variable paging (large collections)
+#### L6: Parse output variablesReference (structured data)
