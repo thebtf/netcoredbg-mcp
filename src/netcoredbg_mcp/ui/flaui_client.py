@@ -296,6 +296,35 @@ class FlaUIBackend:
             params["rootAutomationId"] = root_id
         return await self._client.call("find_by_xpath", params)
 
+    async def find_all_cascade(
+        self,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        max_results: int = 10,
+    ) -> dict[str, Any]:
+        """Find all matching elements with ranked scoring via FlaUI bridge."""
+        params: dict[str, Any] = {"maxResults": max_results}
+        if name:
+            params["name"] = name
+        if control_type:
+            params["controlType"] = control_type
+        if root_id:
+            params["rootAutomationId"] = root_id
+        return await self._client.call("find_all_cascade", params)
+
+    async def extract_text(
+        self,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+    ) -> dict[str, Any]:
+        """Extract text using multi-strategy fallback via FlaUI bridge."""
+        params = self._build_search_params(automation_id, name, control_type, root_id, xpath)
+        return await self._client.call("extract_text", params)
+
     async def click_at(self, x: int, y: int) -> None:
         """Click at coordinates via FlaUI bridge."""
         await self._client.call("click", {"x": x, "y": y})

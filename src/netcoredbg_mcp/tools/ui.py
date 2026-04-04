@@ -1406,10 +1406,14 @@ def register_ui_tools(
         root_id: str | None = None,
         xpath: str | None = None,
     ) -> dict:
-        """Read text content from a UI element (TextBox, TextBlock, Label, etc).
+        """Read text content from a UI element using multi-strategy extraction.
 
-        For editable elements (TextBox), reads the current value via ValuePattern.
-        For read-only elements (TextBlock, Label), reads the Name property.
+        Tries 5 strategies in order: ValuePattern → TextPattern → Name →
+        LegacyIAccessible → visible text descendants. The response includes
+        which strategy provided the text (source field).
+
+        When the primary text looks like a CLR type name (e.g., "Namespace.Class"),
+        automatically falls back to visible descendant text.
 
         Args:
             automation_id: AutomationId property
@@ -1418,46 +1422,12 @@ def register_ui_tools(
             xpath: Optional XPath expression (FlaUI backend only)
         """
         try:
-            ui, element = await _find_ui_element(
-                automation_id=automation_id, name=name, root_id=root_id, xpath=xpath,
-            )
-
-            def _read_text() -> dict[str, Any]:
-                from ..ui.pywinauto_backend import PywinautoBackend
-                if isinstance(ui, PywinautoBackend):
-                    info = element.element_info
-                    control_type = info.control_type or ""
-                    auto_id = getattr(info, "automation_id", "") or ""
-
-                    # Try ValuePattern for editable controls (TextBox, Edit)
-                    try:
-                        iface = element.iface_value
-                        return {
-                            "text": iface.Value or "",
-                            "controlType": control_type,
-                            "automationId": auto_id,
-                        }
-                    except Exception:
-                        pass
-
-                    # Fallback: use Name property (TextBlock, Label, etc.)
-                    return {
-                        "text": info.name or "",
-                        "controlType": control_type,
-                        "automationId": auto_id,
-                    }
-                else:
-                    # FlaUI backend: element is dict from bridge
-                    elem = element if isinstance(element, dict) else {}
-                    return {
-                        "text": elem.get("value", elem.get("name", "")),
-                        "controlType": elem.get("controlType", ""),
-                        "automationId": elem.get("automationId", ""),
-                    }
-
-            loop = asyncio.get_running_loop()
-            result = await asyncio.wait_for(
-                loop.run_in_executor(None, _read_text), timeout=5.0,
+            ui = await _ensure_ui_connected()
+            result = await ui.extract_text(
+                automation_id=automation_id,
+                name=name,
+                root_id=root_id,
+                xpath=xpath,
             )
             return build_response(data=result, state=session.state.state)
         except Exception as e:
