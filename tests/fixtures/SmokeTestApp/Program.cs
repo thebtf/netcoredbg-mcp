@@ -1,11 +1,14 @@
-// Smoke test app for netcoredbg-mcp DAP coverage testing.
+// Smoke test app for netcoredbg-mcp DAP coverage + UI tools testing.
 // Each method exercises a specific debugging scenario.
-// Set breakpoints, step through, evaluate expressions, check output categories.
+// "gui" scenario launches a WinForms window for UI automation testing.
+
+using System.Windows.Forms;
 
 namespace SmokeTestApp;
 
 public class Program
 {
+    [STAThread]
     // Scenario 1: Breakpoint hit counting — loop hits the same line multiple times
     static int CountToTen()
     {
@@ -98,6 +101,124 @@ public class Program
         throw new InvalidOperationException("This is an unhandled exception for testing");
     }
 
+    // Scenario 8: GUI with invoke button, checkbox, nested panels for UI tools testing
+    static void GuiScenario()
+    {
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
+
+        var form = new Form
+        {
+            Text = "SmokeTestApp GUI",
+            Width = 400,
+            Height = 350,
+            StartPosition = FormStartPosition.CenterScreen,
+        };
+
+        // Panel for scoped search testing (root_id)
+        var panel = new Panel
+        {
+            Name = "settingsPanel",
+            Dock = DockStyle.Top,
+            Height = 200,
+            BorderStyle = BorderStyle.FixedSingle,
+        };
+        panel.AccessibleName = "settingsPanel";
+
+        // Button for ui_invoke testing
+        var invokeBtn = new Button
+        {
+            Name = "btnInvoke",
+            Text = "Invoke Me",
+            Location = new System.Drawing.Point(20, 20),
+            Width = 120,
+            Height = 30,
+        };
+        invokeBtn.AccessibleName = "btnInvoke";
+        var invokeCount = 0;
+        invokeBtn.Click += (_, _) =>
+        {
+            invokeCount++;
+            invokeBtn.Text = $"Invoked {invokeCount}x";
+        };
+
+        // CheckBox for ui_toggle testing
+        var checkBox = new CheckBox
+        {
+            Name = "chkEnabled",
+            Text = "Enable Feature",
+            Location = new System.Drawing.Point(20, 60),
+            Width = 150,
+            Checked = false,
+        };
+        checkBox.AccessibleName = "chkEnabled";
+
+        // Second button inside panel for scoped search
+        var scopedBtn = new Button
+        {
+            Name = "btnScoped",
+            Text = "Scoped Button",
+            Location = new System.Drawing.Point(20, 100),
+            Width = 120,
+            Height = 30,
+        };
+        scopedBtn.AccessibleName = "btnScoped";
+
+        // TextBox for ui_read_text testing
+        var textBox = new TextBox
+        {
+            Name = "txtOutput",
+            Text = "Initial text",
+            Location = new System.Drawing.Point(20, 140),
+            Width = 200,
+            ReadOnly = true,
+        };
+        textBox.AccessibleName = "txtOutput";
+
+        panel.Controls.AddRange(new Control[] { invokeBtn, checkBox, scopedBtn, textBox });
+
+        // Button outside panel (for disambiguation with scoped search)
+        var outerBtn = new Button
+        {
+            Name = "btnOuter",
+            Text = "Outer Button",
+            Location = new System.Drawing.Point(20, 220),
+            Width = 120,
+            Height = 30,
+        };
+        outerBtn.AccessibleName = "btnOuter";
+
+        // Open File Dialog button for ui_file_dialog testing
+        var fileDialogBtn = new Button
+        {
+            Name = "btnOpenFile",
+            Text = "Open File...",
+            Location = new System.Drawing.Point(160, 220),
+            Width = 120,
+            Height = 30,
+        };
+        fileDialogBtn.AccessibleName = "btnOpenFile";
+        fileDialogBtn.Click += (_, _) =>
+        {
+            using var dialog = new OpenFileDialog
+            {
+                Title = "Select a file",
+                Filter = "All files (*.*)|*.*",
+            };
+            if (dialog.ShowDialog() == DialogResult.OK)
+            {
+                textBox.Text = $"Selected: {dialog.FileName}";
+            }
+        };
+
+        form.Controls.Add(panel);
+        form.Controls.Add(outerBtn);
+        form.Controls.Add(fileDialogBtn);
+
+        Console.WriteLine("GUI scenario started. Close the window to exit.");
+        Application.Run(form);
+    }
+
     public static void Main(string[] args)
     {
         var scenario = args.Length > 0 ? args[0] : "all";
@@ -134,6 +255,10 @@ public class Program
 
             case "unhandled":
                 UnhandledException();
+                break;
+
+            case "gui":
+                GuiScenario();
                 break;
 
             case "all":
