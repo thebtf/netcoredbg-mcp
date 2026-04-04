@@ -10,7 +10,12 @@ from typing import Any
 
 from ..build import BuildManager, BuildResult
 from ..dap import DAPClient, DAPEvent
-from ..dap.events import OutputEventBody, StoppedEventBody
+from ..dap.events import (
+    BreakpointEventBody,
+    ModuleEventBody,
+    OutputEventBody,
+    StoppedEventBody,
+)
 from ..dap.protocol import Events
 from ..process_registry import ProcessRegistry
 from ..ui.temp_manager import SessionTempManager
@@ -20,6 +25,8 @@ from .state import (
     BreakpointRegistry,
     DebugState,
     FunctionBreakpoint,
+    ModuleInfo,
+    OutputEntry,
     SessionState,
     StackFrame,
     StoppedSnapshot,
@@ -293,10 +300,10 @@ class SessionManager:
         # Schedule hit counting for breakpoint stops (async — needs stack trace)
         if body.reason.value == "breakpoint" and body.thread_id is not None:
             try:
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 loop.create_task(self._update_hit_count(body.thread_id))
             except RuntimeError:
-                pass  # No event loop — skip hit counting (test environment)
+                pass  # No running event loop — skip hit counting (test environment)
 
     async def _update_hit_count(self, thread_id: int) -> None:
         """Fetch top frame and increment hit count for matching breakpoint."""
@@ -330,7 +337,6 @@ class SessionManager:
 
     def _on_output(self, event: DAPEvent) -> None:
         """Handle output event."""
-        from .state import OutputEntry
 
         body = OutputEventBody.from_dict(event.body)
         output = body.output
@@ -387,7 +393,6 @@ class SessionManager:
 
     def _on_breakpoint(self, event: DAPEvent) -> None:
         """Handle breakpoint changed/added/removed events from adapter."""
-        from ..dap.events import BreakpointEventBody
 
         body = BreakpointEventBody.from_dict(event.body)
         logger.debug(f"Breakpoint event: reason={body.reason}, id={body.breakpoint_id}")
@@ -422,8 +427,6 @@ class SessionManager:
 
     def _on_module(self, event: DAPEvent) -> None:
         """Handle module load/change/unload events."""
-        from ..dap.events import ModuleEventBody
-        from .state import ModuleInfo
 
         body = ModuleEventBody.from_dict(event.body)
         logger.debug(f"Module event: reason={body.reason}, name={body.name}")
@@ -525,11 +528,11 @@ class SessionManager:
             )
 
         async with self._quick_eval_lock:
-            # Pause
+            # Pause — prepare_for_execution MUST be before pause to avoid race
             tid = self._state.current_thread_id or 1
+            self.prepare_for_execution()
             await self._client.pause(tid)
             # Wait for stopped
-            self.prepare_for_execution()
             try:
                 await asyncio.wait_for(self._execution_event.wait(), timeout=5.0)
             except asyncio.TimeoutError:

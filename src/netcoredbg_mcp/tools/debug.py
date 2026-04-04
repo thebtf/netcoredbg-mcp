@@ -363,8 +363,15 @@ def register_debug_tools(
                     message="Adapter does not support terminate; used disconnect instead.",
                 )
 
+            session.prepare_for_execution()
             await session.client.terminate()
             snapshot = await session.wait_for_stopped(timeout=10.0)
+            if snapshot.timed_out:
+                return build_response(
+                    data={"state": snapshot.state.value},
+                    state=session.state.state,
+                    message="Terminate sent but program did not exit within 10s.",
+                )
             return build_response(
                 data={"state": snapshot.state.value},
                 state=session.state.state,
