@@ -99,6 +99,8 @@ def register_inspection_tools(
     async def get_call_stack(thread_id: int | None = None, levels: int = 20) -> dict:
         """Get the call stack for a thread.
 
+        State: STOPPED required. Returns frame_id values needed for get_scopes().
+
         Diagnostic: Set NETCOREDBG_STACKTRACE_DELAY_MS env var to add delay before
         stackTrace request. This helps diagnose timing issues with ICorDebugThread3.
         Example: NETCOREDBG_STACKTRACE_DELAY_MS=300
@@ -143,7 +145,10 @@ def register_inspection_tools(
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def get_scopes(frame_id: int | None = None) -> dict:
-        """Get variable scopes for a stack frame."""
+        """Get variable scopes for a stack frame.
+
+        State: STOPPED required. Call get_call_stack() first to get frame_id. Returns variables_reference for get_variables().
+        """
         try:
             scopes = await session.get_scopes(frame_id)
             return build_response(
@@ -167,6 +172,8 @@ def register_inspection_tools(
         count: int | None = None,
     ) -> dict:
         """Get variables for a scope or structured variable.
+
+        State: STOPPED required. Call get_scopes() first to get variables_reference.
 
         Supports paging for large collections (e.g. arrays, lists).
 
@@ -197,7 +204,10 @@ def register_inspection_tools(
 
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def evaluate_expression(expression: str, frame_id: int | None = None) -> dict:
-        """Evaluate an expression in the current debug context."""
+        """Evaluate an expression in the current debug context.
+
+        State: STOPPED required.
+        """
         try:
             result = await session.evaluate(expression, frame_id)
             return build_response(data=result, state=session.state.state)
@@ -212,6 +222,8 @@ def register_inspection_tools(
         value: str,
     ) -> dict:
         """Set a variable's value during debugging.
+
+        State: STOPPED required.
 
         Modifies a variable in the current scope. The program must be stopped.
         Use get_variables first to find the variables_reference for the scope.
@@ -233,7 +245,10 @@ def register_inspection_tools(
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def get_exception_info(thread_id: int | None = None) -> dict:
-        """Get information about the current exception."""
+        """Get information about the current exception.
+
+        State: STOPPED required (stopped on exception).
+        """
         try:
             info = await session.get_exception_info(thread_id)
             return build_response(data=info, state=session.state.state)
@@ -288,6 +303,8 @@ def register_inspection_tools(
         max_inner_exceptions: int = 5,
     ) -> dict:
         """Get full exception context in one call (exception autopsy).
+
+        State: STOPPED required (stopped on exception).
 
         Returns exception type/message, inner exception chain, stack frames with
         source locations, and local variables for the top N frames — all in a
@@ -346,6 +363,8 @@ def register_inspection_tools(
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def add_tracepoint(ctx: Context, file: str, line: int, expression: str) -> dict:
         """Set a non-stopping tracepoint that logs expression values.
+
+        State: Works in any state. The tracepoint fires automatically on each hit.
 
         The tracepoint evaluates the expression each time the line is hit,
         without visibly pausing the program. Results are stored in a trace
@@ -443,6 +462,8 @@ def register_inspection_tools(
     ) -> dict:
         """Get tracepoint evaluation log.
 
+        State: Works in any state.
+
         Args:
             since: Only return entries after this timestamp (monotonic)
             tracepoint_id: Filter to specific tracepoint
@@ -499,6 +520,8 @@ def register_inspection_tools(
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def create_snapshot(ctx: Context, name: str) -> dict:
         """Capture all local variables at the current frame as a named snapshot.
+
+        State: STOPPED required.
 
         Must be called when the program is stopped at a breakpoint.
         Max 20 snapshots per session (oldest evicted when full).
@@ -576,6 +599,8 @@ def register_inspection_tools(
     ) -> dict:
         """Analyze a collection variable in one call.
 
+        State: STOPPED required. Get variables_reference from get_variables() response.
+
         Returns count, element type, null count, first/last N items,
         and numeric stats (min/max/sum/average) for numeric collections.
 
@@ -622,6 +647,8 @@ def register_inspection_tools(
         max_properties: int = 50,
     ) -> dict:
         """Produce a flattened summary of a complex object.
+
+        State: STOPPED required. Get variables_reference from get_variables() response.
 
         Returns property paths (dot notation), values, and types up to
         the configured depth. Detects circular references.

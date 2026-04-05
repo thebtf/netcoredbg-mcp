@@ -286,6 +286,8 @@ def register_ui_tools(
         """
         Send keyboard input to a UI element.
 
+        Note: If app is STOPPED at breakpoint, the UI is frozen. Resume with continue_execution() first.
+
         Tries cached coordinates first (click to focus, then send keys),
         then falls back to pywinauto element search.
 
@@ -390,6 +392,8 @@ def register_ui_tools(
         """
         Click on a UI element.
 
+        Note: If app is STOPPED at breakpoint, the UI is frozen. Resume with continue_execution() first.
+
         Tries cached coordinates first (from last ui_get_window_tree call),
         then falls back to pywinauto element search.
 
@@ -459,6 +463,8 @@ def register_ui_tools(
     ) -> dict:
         """
         Invoke a UI element using UIA InvokePattern (no mouse movement).
+
+        Note: If app is STOPPED at breakpoint, the UI is frozen. Resume with continue_execution() first.
 
         Preferred over ui_click for buttons, menu items, and hyperlinks because
         it works reliably even when the element is off-screen or partially obscured.
