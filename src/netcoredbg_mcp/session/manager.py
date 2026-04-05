@@ -395,10 +395,13 @@ class SessionManager:
     def _on_continued(self, event: DAPEvent) -> None:
         """Handle continued event."""
         self._set_state(DebugState.RUNNING)
-        body = event.body if hasattr(event, 'body') else {}
-        if body.get("allThreadsContinued", True):
-            # All threads resumed — clear per-thread state
+        if event.body.get("allThreadsContinued", True):
+            # All threads resumed — clear all stop-state
             self._state.current_thread_id = None
+            self._state.current_frame_id = None
+            self._state.stop_reason = None
+            self._state.stop_description = None
+            self._state.stop_text = None
 
     def _on_terminated(self, event: DAPEvent) -> None:
         """Handle terminated event."""

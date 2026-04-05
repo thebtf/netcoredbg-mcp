@@ -1,7 +1,7 @@
 """Tests for LOW priority DAP features: L2 stepInTargets, L3 allThreadsContinued,
 L5 variable paging, L6 output variablesReference."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -54,9 +54,6 @@ class TestDAPClientStepInTargets:
     @pytest.mark.asyncio
     async def test_step_in_targets_sends_correct_request(self):
         """step_in_targets calls send_request with correct command and frameId."""
-        with patch("netcoredbg_mcp.session.manager.DAPClient"):
-            mgr = make_manager()
-
         from netcoredbg_mcp.dap.client import DAPClient
         client = DAPClient.__new__(DAPClient)
         client.send_request = AsyncMock(return_value=make_dap_response(
@@ -352,3 +349,72 @@ class TestOutputVariablesReference:
         """OutputEntry accepts non-zero variables_reference."""
         entry = OutputEntry(text="obj", category="console", variables_reference=7)
         assert entry.variables_reference == 7
+
+
+# ---------------------------------------------------------------------------
+# MCP tool wrapper — get_step_in_targets response shape
+# ---------------------------------------------------------------------------
+
+class TestGetStepInTargetsMCPWrapper:
+    """Test the response shape produced by the get_step_in_targets MCP tool wrapper.
+
+    The wrapper is: call session.get_step_in_targets, then build_response/build_error_response.
+    We verify the response contract here rather than fighting MCP tool registration.
+    """
+
+    @pytest.mark.asyncio
+    async def test_wrapper_returns_targets_in_response(self):
+        """MCP wrapper builds correct response dict with targets list."""
+        from netcoredbg_mcp.response import build_response
+        from netcoredbg_mcp.session import DebugState
+
+        mgr = make_manager()
+        mgr._state.state = DebugState.STOPPED
+        mgr._state.current_frame_id = 10
+        mgr._client.step_in_targets = AsyncMock(return_value=make_dap_response(
+            body={"targets": [{"id": 1, "label": "Foo()"}]}
+        ))
+
+        targets = await mgr.get_step_in_targets()
+        response = build_response(data={"targets": targets}, state=mgr._state.state)
+
+        assert "error" not in response
+        assert response["data"]["targets"] == [{"id": 1, "label": "Foo()"}]
+
+    @pytest.mark.asyncio
+    async def test_wrapper_returns_error_response_on_no_frame(self):
+        """MCP wrapper returns error response when no frame is available."""
+        from netcoredbg_mcp.response import build_error_response
+        from netcoredbg_mcp.session import DebugState
+
+        mgr = make_manager()
+        mgr._state.state = DebugState.STOPPED
+        mgr._state.current_frame_id = None
+
+        try:
+            await mgr.get_step_in_targets()
+            assert False, "Expected RuntimeError"
+        except RuntimeError as e:
+            response = build_error_response(str(e), state=mgr._state.state)
+
+        assert "error" in response
+        assert "No frame" in response["error"]
+
+    @pytest.mark.asyncio
+    async def test_wrapper_returns_empty_targets_on_dap_failure(self):
+        """MCP wrapper returns empty targets list when DAP returns failure."""
+        from netcoredbg_mcp.response import build_response
+        from netcoredbg_mcp.session import DebugState
+
+        mgr = make_manager()
+        mgr._state.state = DebugState.STOPPED
+        mgr._state.current_frame_id = 5
+        mgr._client.step_in_targets = AsyncMock(
+            return_value=make_dap_response(success=False, message="not supported")
+        )
+
+        targets = await mgr.get_step_in_targets()
+        response = build_response(data={"targets": targets}, state=mgr._state.state)
+
+        assert "error" not in response
+        assert response["data"]["targets"] == []
