@@ -140,9 +140,16 @@ Alternative: client-side tracepoints using `quick_evaluate` pattern
 **Implemented in:** `session/tracepoints.py:TracepointManager`, `tools/inspection.py:add_tracepoint, remove_tracepoint, get_trace_log, clear_trace_log`
 **Note:** netcoredbg does NOT support DAP logMessage. Tracepoints use client-side pause→evaluate→resume (500ms timeout, rate limiting 10/sec).
 
-### Remaining (LOW priority)
+### ~~LOW priority~~ DONE v0.5.2
 
-#### L2: Add stepInTargets
-#### L3: Handle continued event body (allThreadsContinued)
-#### L5: Support variable paging (large collections)
-#### L6: Parse output variablesReference (structured data)
+#### ~~L2: Add stepInTargets~~ DONE v0.5.2
+**Implemented in:** `tools/debug.py:get_step_in_targets`, `tools/debug.py:step_into(target_id=)`, `dap/client.py:step_in_targets`
+
+#### ~~L3: Handle continued event body (allThreadsContinued)~~ DONE v0.5.2
+**Implemented in:** `session/manager.py:_on_continued` — clears current_thread_id when allThreadsContinued
+
+#### ~~L5: Support variable paging (large collections)~~ DONE v0.5.2
+**Implemented in:** `tools/inspection.py:get_variables(filter=, start=, count=)`, `dap/client.py:variables(filter, start, count)`
+
+#### ~~L6: Parse output variablesReference (structured data)~~ DONE v0.5.2
+**Implemented in:** `session/manager.py:_on_output`, `session/state.py:OutputEntry.variables_reference`
