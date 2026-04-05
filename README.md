@@ -14,7 +14,7 @@ Your AI agent can write .NET code, run tests, even deploy — but when something
 
 > *"Like giving your AI agent a VS Code debugger it can actually use."*
 
-**66 tools · 7 prompts · 4 resources · 490+ tests**
+**66 tools · 7 prompts · 4 resources · 498 tests**
 
 ## Quick Links
 
@@ -24,7 +24,7 @@ Your AI agent can write .NET code, run tests, even deploy — but when something
 
 ---
 
-## What's New in v0.5.2
+## What's New in v0.5.3
 
 > Released 2026-04-05. [Full changelog →](CHANGELOG.md)
 

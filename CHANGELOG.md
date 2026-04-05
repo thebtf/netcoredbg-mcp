@@ -5,15 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.3] - 2026-04-05
 
 ### Added
 - **stepInTargets** — choose which function to step into on multi-call lines
 - **Variable paging** — `filter`, `start`, `count` params on `get_variables` for large collections
 - **Output variablesReference** — structured data refs stored with output entries
+- **Codebase search guidance** in debug prompts — agents now directed to use SocratiCode/Serena/LSP before setting breakpoints
+- **Edit-Rebuild-Retest workflow** — explicit cycle for fix-and-verify debugging
+- **Breakpoint timeout guidance** — `timed_out=True` recovery steps
+- **Decision tree** — "Which Prompt to Use" table for 7 debugging prompts
+- 19 new symptom mappings (JsonException, HttpRequestException, SqlException, etc.)
+- State preconditions on 21 tool docstrings (STOPPED/RUNNING required)
+- Sequencing hints in tool docstrings (call_stack → scopes → variables chain)
+- MCP Resources section in debug guide (debug://state, debug://breakpoints, etc.)
 
 ### Changed
 - `_on_continued` handler now respects `allThreadsContinued` field and clears thread state
+- State machine diagram now shows all TERMINATED transitions
+- Frozen-UI warning added to `ui_click`, `ui_invoke`, `ui_send_keys`
 
 ## [0.5.1] - 2026-04-04
 
