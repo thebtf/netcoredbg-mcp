@@ -94,8 +94,14 @@ class TracepointManager:
         """Find an active tracepoint matching a file:line location."""
         normalized = self._normalize_path(file)
         for tp in self._tracepoints.values():
-            if tp.active and self._normalize_path(tp.file) == normalized and tp.line == line:
+            tp_norm = self._normalize_path(tp.file)
+            logger.debug(
+                "Tracepoint match check: frame=%s:%d vs tp=%s:%d (norm: %s vs %s)",
+                file, line, tp.file, tp.line, normalized, tp_norm,
+            )
+            if tp.active and tp_norm == normalized and tp.line == line:
                 return tp
+        logger.debug("No tracepoint match for %s:%d (checked %d tracepoints)", file, line, len(self._tracepoints))
         return None
 
     def _is_rate_limited(self, tp_id: str) -> bool:

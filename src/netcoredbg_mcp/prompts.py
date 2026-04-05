@@ -218,6 +218,20 @@ Hidden by default. If debugging leads nowhere:
 - NU1701 compatibility → assembly load failures
 - CS4014 unawaited async → swallowed exceptions
 
+## Clean Slate: Always Clear Before Starting Fresh
+
+BEFORE starting a new debug scenario or investigation:
+1. clear_breakpoints() for ALL files that had breakpoints in previous runs
+2. configure_exceptions(filters=[]) — remove exception filters
+3. clear_trace_log() — remove old tracepoint data
+
+Leftover breakpoints cause UNEXPECTED STOPS. The user will report "app freezes"
+or "app went into breakpoint" — and it's YOUR old breakpoints from a previous scenario.
+This is the #1 cause of confusion during multi-scenario debugging sessions.
+
+WRONG: start new investigation with old breakpoints still active
+CORRECT: clear_breakpoints → set ONLY the breakpoints you need NOW → proceed
+
 ## Process Management
 
 cleanup_processes() — view/kill tracked processes. Never use taskkill.

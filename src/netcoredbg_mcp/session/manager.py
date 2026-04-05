@@ -330,65 +330,78 @@ class SessionManager:
         WITHOUT surfacing a STOPPED state to callers (transparent non-stopping hit).
         When no tracepoint matches, transitions to STOPPED and signals _execution_event
         so that callers waiting on wait_for_stopped() are unblocked.
+
+        Entire operation is wrapped in a 5s timeout to prevent event loop starvation
+        if DAP requests hang (e.g., debugger unresponsive).
         """
         try:
-            mgr = getattr(self, '_tracepoint_manager', None)
-            if mgr is None:
-                self._set_state(DebugState.STOPPED)
-                self._execution_event.set()
-                return
-
-            frames = await self.get_stack_trace(thread_id=thread_id, levels=1)
-            if not frames:
-                self._set_state(DebugState.STOPPED)
-                self._execution_event.set()
-                return
-
-            top = frames[0]
-            if not top.source or not top.line:
-                self._set_state(DebugState.STOPPED)
-                self._execution_event.set()
-                return
-
-            tp = mgr.find_tracepoint_for_location(top.source, top.line)
-            if tp is None:
-                # Normal user breakpoint — surface the STOPPED event.
-                self._set_state(DebugState.STOPPED)
-                self._execution_event.set()
-                return
-
-            # Check whether a user-defined breakpoint also exists at this location.
-            # If so, the session must remain stopped after evaluation so the user
-            # can inspect state — on_tracepoint_hit respects this via has_user_breakpoint.
-            user_bps = self._breakpoints.get_for_file(top.source)
-            has_user_breakpoint = any(bp.line == top.line for bp in user_bps)
-
-            if has_user_breakpoint:
-                # Surface STOPPED — the user breakpoint takes precedence.
-                self._set_state(DebugState.STOPPED)
-                self._execution_event.set()
-
-            # Tracepoint hit — evaluate (and resume only if no user breakpoint).
-            await mgr.on_tracepoint_hit(
-                tp, self, thread_id, has_user_breakpoint=has_user_breakpoint, top_frame=top
-            )
-        except Exception as e:
-            logger.warning("Tracepoint check failed: %s", e)
-            # On error, fall back to normal STOPPED so the session is not stuck.
+            await asyncio.wait_for(self._check_tracepoint_inner(thread_id), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("_check_tracepoint timed out after 5s — falling back to STOPPED")
             self._set_state(DebugState.STOPPED)
             self._execution_event.set()
+        except Exception as e:
+            logger.warning("Tracepoint check failed: %s", e)
+            self._set_state(DebugState.STOPPED)
+            self._execution_event.set()
+
+    async def _check_tracepoint_inner(self, thread_id: int) -> None:
+        """Inner tracepoint check logic (called with timeout wrapper)."""
+        mgr = getattr(self, '_tracepoint_manager', None)
+        if mgr is None:
+            self._set_state(DebugState.STOPPED)
+            self._execution_event.set()
+            return
+
+        frames = await self.get_stack_trace(thread_id=thread_id, levels=1)
+        if not frames:
+            self._set_state(DebugState.STOPPED)
+            self._execution_event.set()
+            return
+
+        top = frames[0]
+        logger.debug("_check_tracepoint: top frame source=%s line=%s", top.source, top.line)
+        if not top.source or not top.line:
+            logger.debug("_check_tracepoint: no source/line, falling through to STOPPED")
+            self._set_state(DebugState.STOPPED)
+            self._execution_event.set()
+            return
+
+        tp = mgr.find_tracepoint_for_location(top.source, top.line)
+        if tp is None:
+            logger.debug("_check_tracepoint: no matching tracepoint, normal STOPPED")
+            self._set_state(DebugState.STOPPED)
+            self._execution_event.set()
+            return
+        logger.debug("_check_tracepoint: matched tracepoint %s, evaluating", tp.id)
+
+        # Check whether a user-defined breakpoint also exists at this location.
+        user_bps = self._breakpoints.get_for_file(top.source)
+        has_user_breakpoint = any(bp.line == top.line for bp in user_bps)
+
+        if has_user_breakpoint:
+            self._set_state(DebugState.STOPPED)
+            self._execution_event.set()
+
+        await mgr.on_tracepoint_hit(
+            tp, self, thread_id, has_user_breakpoint=has_user_breakpoint, top_frame=top
+        )
 
     async def _update_hit_count(self, thread_id: int) -> None:
         """Fetch top frame and increment hit count for matching breakpoint."""
         try:
-            frames = await self.get_stack_trace(thread_id=thread_id, levels=1)
+            frames = await asyncio.wait_for(
+                self.get_stack_trace(thread_id=thread_id, levels=1), timeout=3.0,
+            )
             if not frames:
                 return
             top = frames[0]
             if top.source and top.line:
                 key = (self.breakpoints._normalize_path(top.source), top.line)
                 self._state.hit_counts[key] = self._state.hit_counts.get(key, 0) + 1
-                logger.debug(f"Hit count for {key}: {self._state.hit_counts[key]}")
+                logger.debug("Hit count for %s: %d", key, self._state.hit_counts[key])
+        except asyncio.TimeoutError:
+            logger.debug("_update_hit_count timed out after 3s")
         except Exception:
             logger.debug("Could not update hit count", exc_info=True)
 
