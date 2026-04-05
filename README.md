@@ -14,7 +14,7 @@ Your AI agent can write .NET code, run tests, even deploy — but when something
 
 > *"Like giving your AI agent a VS Code debugger it can actually use."*
 
-**43 tools · 7 prompts · 4 resources · 334 tests**
+**66 tools · 7 prompts · 4 resources · 490+ tests**
 
 ## Quick Links
 
@@ -24,19 +24,18 @@ Your AI agent can write .NET code, run tests, even deploy — but when something
 
 ---
 
-## What's New in v0.2.0
+## What's New in v0.5.2
 
-> Released 2026-04-03. [Full release notes →](https://github.com/thebtf/netcoredbg-mcp/releases/tag/v0.2.0)
+> Released 2026-04-05. [Full changelog →](CHANGELOG.md)
 
-- **Long-poll execution** — `continue_execution` and `step_*` now block until the program stops. No more polling loops.
-- **State machine in every response** — every tool returns `state`, `next_actions`, and a human-readable `message`.
-- **Screenshots + Set-of-Mark** — see the actual UI with `ui_take_screenshot`, get numbered element overlays with `ui_take_annotated_screenshot`.
-- **GUI app detection** — WPF, WinForms, and Avalonia auto-detected. Breakpoint timing hints included.
-- **Process Reaper** — tracks spawned processes via PID file. No more orphaned netcoredbg processes.
-- **[mcp-mux](https://github.com/thebtf/mcp-mux) session-aware** — multi-agent safety via `x-mux` capability and session ownership guards.
-- **7 inline debugging skills** — prompts that teach the agent how to debug, including parameterized `investigate("NullReferenceException")`.
-- **Element cache** — UI interactions use cached tree + coordinate clicks instead of unreliable element search. Reliability: 50% → 95%.
-- **Build output filtering** — warnings hidden by default, `get_build_diagnostics()` when you need them.
+- **Agent Intelligence** — ElementResolver ranked search, ExtractText 5-strategy fallback, CLR type name detection
+- **Client-side Tracepoints** — pause → evaluate → resume without netcoredbg support (asyncio.Lock, rate limiting)
+- **State Snapshots + Diff** — capture variable state, compare across stops (FIFO, max 20)
+- **Collection Analyzer + Object Summarizer** — count/nulls/duplicates/stats, recursive with cycle detection
+- **UI Tools Expansion** — `ui_invoke`, `ui_toggle`, `ui_file_dialog`, `root_id` + `xpath` on 11 tools
+- **stepInTargets** — choose which function to step into on multi-call lines
+- **Variable Paging** — `filter`, `start`, `count` for large collections
+- **WPF + Avalonia test apps** — XAML, AutomationProperties, MVVM patterns for smoke testing
 
 ---
 
@@ -44,11 +43,16 @@ Your AI agent can write .NET code, run tests, even deploy — but when something
 
 | Feature | Description |
 |---------|-------------|
-| **43 MCP Tools** | Debug control, breakpoints, inspection, output, UI automation, process management |
+| **66 MCP Tools** | Debug control, breakpoints, inspection, tracepoints, snapshots, output, UI automation, process management |
 | **Long-Poll Execution** | `continue` and `step_*` tools block until stopped — no polling loops |
 | **State Machine Responses** | Every response includes `state`, `next_actions`, `message` — the agent always knows what to do next |
+| **Agent Intelligence** | ElementResolver ranked search, ExtractText 5-strategy fallback, CLR type name detection |
+| **Client-side Tracepoints** | Pause → evaluate → resume without netcoredbg support — rate limited, asyncio-safe |
+| **State Snapshots + Diff** | Capture variable state at any stop, compare snapshots across sessions (FIFO, max 20) |
 | **GUI App Detection** | Auto-detects WPF/WinForms/Avalonia from `runtimeconfig.json` and adjusts workflow hints |
 | **Screenshots + Set-of-Mark** | See the app UI, get numbered element overlays, click by annotation ID |
+| **stepInTargets** | Choose which function to step into on multi-call lines |
+| **Variable Paging** | `filter`, `start`, `count` parameters for navigating large collections |
 | **Pre-build** | Build before debug with `pre_build: true` — hidden warnings surfaced via `get_build_diagnostics` |
 | **Smart Resolution** | Auto-resolves `.exe` to `.dll` for .NET 6+ to avoid deps.json conflicts |
 | **Version Check** | Detects `dbgshim.dll` mismatches automatically on session start |
@@ -583,7 +587,7 @@ Works for off-screen rows without scrolling.
 
 ## Available Tools
 
-### Debug Control (10 tools)
+### Debug Control (11 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -596,6 +600,7 @@ Works for off-screen rows without scrolling.
 | `step_over` | Step to next line. **Blocks** until step completes. Returns source context. |
 | `step_into` | Step into function call. **Blocks** until step completes. |
 | `step_out` | Step out of current function. **Blocks** until step completes. |
+| `get_step_in_targets` | List callable functions on the current line — pick which one to step into. |
 | `get_debug_state` | Get current session state, threads, position. Read-only. |
 
 <details>
@@ -625,17 +630,21 @@ Works for off-screen rows without scrolling.
 | `add_function_breakpoint` | Break on function entry by name. Useful when line number unknown. |
 | `configure_exceptions` | Set exception breakpoints: `["all"]`, `["user-unhandled"]`, or `[]`. |
 
-### Inspection (7 tools)
+### Inspection (11 tools)
 
 | Tool | Description |
 |------|-------------|
 | `get_threads` | List all threads with IDs and names. |
 | `get_call_stack` | Stack trace for a thread. Includes source context for top frame. |
 | `get_scopes` | Get variable scopes for a stack frame (returns references). |
-| `get_variables` | Read variable values from a scope reference. |
+| `get_variables` | Read variable values from a scope reference. Supports `filter`, `start`, `count` paging. |
 | `evaluate_expression` | Evaluate a C# expression in the current debug context. |
+| `quick_evaluate` | Fast expression evaluation — single value, no side-effect warnings. |
 | `set_variable` | Modify a variable's value during debugging (test hypotheses live). |
 | `get_exception_info` | Get exception type, message, and inner exception when stopped on throw. |
+| `get_exception_context` | Full exception context including inner exceptions and stack frames. |
+| `analyze_collection` | Count, null check, find duplicates, and compute stats on a collection variable. |
+| `summarize_object` | Recursive summary of an object's fields and nested objects with cycle detection. |
 
 ### Output (4 tools)
 
@@ -646,18 +655,38 @@ Works for off-screen rows without scrolling.
 | `search_output` | Regex search through output with context lines. |
 | `get_build_diagnostics` | Full build warnings (hidden by default in start_debug). |
 
-### UI Automation (14 tools)
+### Tracepoints (4 tools)
 
 | Tool | Description |
 |------|-------------|
-| `ui_get_window_tree` | Visual tree of the app window (AutomationId, type, name, enabled). |
-| `ui_find_element` | Find element by AutomationId, name, or control type. |
+| `add_tracepoint` | Add a client-side tracepoint: pause, evaluate expression, log, resume — without netcoredbg support. |
+| `remove_tracepoint` | Remove a tracepoint by file and line. |
+| `get_trace_log` | Retrieve the tracepoint evaluation log. |
+| `clear_trace_log` | Clear the tracepoint log. |
+
+### Snapshots (3 tools)
+
+| Tool | Description |
+|------|-------------|
+| `create_snapshot` | Capture all local variables at the current stop into a named snapshot (FIFO, max 20). |
+| `diff_snapshots` | Compare two snapshots and show added, removed, and changed variables. |
+| `list_snapshots` | List all stored snapshots with metadata. |
+
+### UI Automation (17 tools)
+
+| Tool | Description |
+|------|-------------|
+| `ui_get_window_tree` | Visual tree of the app window (AutomationId, type, name, enabled). Supports `root_id` and `xpath`. |
+| `ui_find_element` | Find element by AutomationId, name, or control type. Supports `root_id` and `xpath`. |
 | `ui_set_focus` | Set keyboard focus to an element. |
 | `ui_send_keys` | Send keyboard input to a specific element (pywinauto syntax). |
 | `ui_send_keys_focused` | Send keys to currently focused element (no re-search). |
-| `ui_click` | Click an element by AutomationId, name, or type. |
+| `ui_click` | Click an element by AutomationId, name, or type. Supports `root_id` and `xpath`. |
 | `ui_right_click` | Right-click to open context menus. |
 | `ui_double_click` | Double-click an element. |
+| `ui_invoke` | Invoke the default action of an element (e.g. press a button via UIA InvokePattern). |
+| `ui_toggle` | Toggle a checkbox, radio button, or toggle switch via UIA TogglePattern. |
+| `ui_file_dialog` | Interact with standard open/save file dialogs — type path and confirm. |
 | `ui_select_items` | Multi-select items by index in DataGrid/ListView (UIA pattern). |
 | `ui_scroll` | Scroll a control (up/down/left/right). |
 | `ui_drag` | Drag from one element to another. |
@@ -774,7 +803,7 @@ graph TB
 
 ### How It Works
 
-1. **MCP Layer** — `server.py` registers 43 tools, 4 resources, and 7 prompts via FastMCP
+1. **MCP Layer** — `server.py` registers 66 tools, 4 resources, and 7 prompts via FastMCP
 2. **Tool Modules** — 6 focused modules (debug, breakpoints, inspection, output, UI, process) keep the server thin
 3. **Session Manager** — Manages debug session lifecycle, state machine, path validation, event handling
 4. **DAP Client** — Communicates with netcoredbg via Debug Adapter Protocol (JSON-RPC over stdio)
