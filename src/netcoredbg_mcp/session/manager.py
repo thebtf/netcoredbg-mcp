@@ -395,6 +395,10 @@ class SessionManager:
     def _on_continued(self, event: DAPEvent) -> None:
         """Handle continued event."""
         self._set_state(DebugState.RUNNING)
+        body = event.body if hasattr(event, 'body') else {}
+        if body.get("allThreadsContinued", True):
+            # All threads resumed — clear per-thread state
+            self._state.current_thread_id = None
 
     def _on_terminated(self, event: DAPEvent) -> None:
         """Handle terminated event."""
@@ -419,6 +423,12 @@ class SessionManager:
             output = output[:MAX_OUTPUT_ENTRY] + "... [truncated]"
 
         entry = OutputEntry(text=output, category=body.category.value)
+
+        # Capture variablesReference if the adapter attached structured output
+        var_ref = event.body.get("variablesReference", 0)
+        if var_ref and var_ref > 0:
+            entry.variables_reference = var_ref
+
         self._state.output_buffer.append(entry)
         self._output_bytes += len(output)
 
@@ -1027,14 +1037,29 @@ class SessionManager:
         response = await self._client.step_over(tid)
         return {"success": response.success, "threadId": tid}
 
-    async def step_in(self, thread_id: int | None = None) -> dict[str, Any]:
-        """Step into."""
+    async def step_in(
+        self, thread_id: int | None = None, target_id: int | None = None
+    ) -> dict[str, Any]:
+        """Step into, optionally targeting a specific call on the line."""
         tid = thread_id or self._state.current_thread_id
         if tid is None:
             raise RuntimeError("No thread for stepping")
 
-        response = await self._client.step_in(tid)
+        response = await self._client.step_in(tid, target_id=target_id)
         return {"success": response.success, "threadId": tid}
+
+    async def get_step_in_targets(self, frame_id: int | None = None) -> list[dict[str, Any]]:
+        """Get available step-in targets for a frame."""
+        fid = frame_id or self._state.current_frame_id
+        if fid is None:
+            raise RuntimeError(
+                "No frame for step-in targets. Call get_call_stack first or provide frame_id."
+            )
+        response = await self._client.step_in_targets(fid)
+        if response.success:
+            targets = response.body.get("targets", [])
+            return [{"id": t["id"], "label": t["label"]} for t in targets]
+        return []
 
     async def step_out(self, thread_id: int | None = None) -> dict[str, Any]:
         """Step out."""
@@ -1157,9 +1182,17 @@ class SessionManager:
         logger.warning(f"get_scopes failed for frame {fid}: {response.message}")
         return []
 
-    async def get_variables(self, variables_reference: int) -> list[Variable]:
-        """Get variables for scope/variable."""
-        response = await self._client.variables(variables_reference)
+    async def get_variables(
+        self,
+        variables_reference: int,
+        filter: str | None = None,
+        start: int | None = None,
+        count: int | None = None,
+    ) -> list[Variable]:
+        """Get variables for scope/variable, with optional paging and filtering."""
+        response = await self._client.variables(
+            variables_reference, filter=filter, start=start, count=count
+        )
         if response.success:
             return [
                 Variable(

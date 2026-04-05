@@ -261,6 +261,7 @@ class OutputEntry:
     """Single output buffer entry with category metadata."""
     text: str
     category: str = "console"  # stdout, stderr, console
+    variables_reference: int = 0  # Non-zero when adapter attaches structured data
 
 
 @dataclass
