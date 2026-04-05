@@ -286,22 +286,55 @@ def register_debug_tools(
             ctx, session.step_over(thread_id), "step_over"
         )
 
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    async def get_step_in_targets(
+        ctx: Context, frame_id: int | None = None
+    ) -> dict:
+        """Get available step-in targets for the current stack frame.
+
+        When multiple function calls exist on one line, this returns each one
+        so you can choose which to enter via step_into(target_id=...).
+
+        Args:
+            frame_id: Stack frame ID (uses current frame if omitted)
+        """
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            targets = await session.get_step_in_targets(frame_id)
+            return build_response(data={"targets": targets}, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
-    async def step_into(ctx: Context, thread_id: int | None = None) -> dict:
+    async def step_into(
+        ctx: Context,
+        thread_id: int | None = None,
+        target_id: int | None = None,
+    ) -> dict:
         """Step into the next function call. Blocks until the step completes.
 
         Enters the function being called on the current line.
         Use this when you need to investigate what happens inside a called function.
 
+        When multiple calls exist on one line, call get_step_in_targets first
+        and pass the desired target's id via target_id.
+
         IMPORTANT: After this returns with state=stopped, you are inside the
         called function. Use step_out to return to the caller.
+
+        Args:
+            thread_id: Thread to step (uses current thread if omitted)
+            target_id: Specific step-in target ID from get_step_in_targets
         """
         access_error = check_session_access(ctx)
         if access_error:
             return build_error_response(access_error, state=session.state.state)
 
         return await execute_and_wait(
-            ctx, session.step_in(thread_id), "step_into"
+            ctx, session.step_in(thread_id, target_id=target_id), "step_into"
         )
 
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))

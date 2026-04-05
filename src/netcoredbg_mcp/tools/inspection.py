@@ -160,10 +160,26 @@ def register_inspection_tools(
             return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
-    async def get_variables(variables_reference: int) -> dict:
-        """Get variables for a scope or structured variable."""
+    async def get_variables(
+        variables_reference: int,
+        filter: str | None = None,
+        start: int | None = None,
+        count: int | None = None,
+    ) -> dict:
+        """Get variables for a scope or structured variable.
+
+        Supports paging for large collections (e.g. arrays, lists).
+
+        Args:
+            variables_reference: Reference from get_scopes or a nested variable
+            filter: Filter to "indexed" (array elements) or "named" (properties only)
+            start: Index of first variable to fetch (for paging)
+            count: Maximum number of variables to return (for paging)
+        """
         try:
-            variables = await session.get_variables(variables_reference)
+            variables = await session.get_variables(
+                variables_reference, filter=filter, start=start, count=count
+            )
             return build_response(
                 data=[
                     {

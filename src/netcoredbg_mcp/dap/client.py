@@ -355,9 +355,18 @@ class DAPClient:
         """Step over (next line)."""
         return await self.send_request(Commands.NEXT, {"threadId": thread_id})
 
-    async def step_in(self, thread_id: int) -> DAPResponse:
+    async def step_in(self, thread_id: int, target_id: int | None = None) -> DAPResponse:
         """Step into function."""
-        return await self.send_request(Commands.STEP_IN, {"threadId": thread_id})
+        args: dict[str, Any] = {"threadId": thread_id}
+        if target_id is not None:
+            args["targetId"] = target_id
+        return await self.send_request(Commands.STEP_IN, args)
+
+    async def step_in_targets(self, frame_id: int) -> DAPResponse:
+        """Get possible step-in targets for a frame."""
+        return await self.send_request(
+            Commands.STEP_IN_TARGETS, {"frameId": frame_id}
+        )
 
     async def step_out(self, thread_id: int) -> DAPResponse:
         """Step out of function."""
@@ -388,11 +397,22 @@ class DAPClient:
         """Get scopes for stack frame."""
         return await self.send_request(Commands.SCOPES, {"frameId": frame_id})
 
-    async def variables(self, variables_reference: int) -> DAPResponse:
+    async def variables(
+        self,
+        variables_reference: int,
+        filter: str | None = None,
+        start: int | None = None,
+        count: int | None = None,
+    ) -> DAPResponse:
         """Get variables for scope/variable."""
-        return await self.send_request(
-            Commands.VARIABLES, {"variablesReference": variables_reference}
-        )
+        args: dict[str, Any] = {"variablesReference": variables_reference}
+        if filter is not None:
+            args["filter"] = filter  # "indexed" or "named"
+        if start is not None:
+            args["start"] = start
+        if count is not None:
+            args["count"] = count
+        return await self.send_request(Commands.VARIABLES, args)
 
     async def evaluate(
         self, expression: str, frame_id: int | None = None, context: str = "watch"
