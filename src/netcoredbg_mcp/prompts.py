@@ -139,15 +139,28 @@ Every tool response includes `state` and `next_actions`. Respect them.
 
 ```
 IDLE ──start_debug──> RUNNING ──breakpoint──> STOPPED ──continue──> RUNNING
-  ^                      |                       |
-  |                      v                       v
-  +---stop_debug---  TERMINATED            (inspect, resume)
+  ^                      |          |             |
+  |                      v          v             v
+  +---stop_debug---  TERMINATED  TERMINATED   TERMINATED
+                    (exit/crash) (terminate)  (terminate)
 ```
+
+If you call start_debug while already debugging, it will return an error. Call stop_debug first.
 
 **IDLE** — No session. Only `start_debug` or `attach_debug`.
 **RUNNING** — App executing. Old variable refs are INVALID. Do NOT call get_variables.
 **STOPPED** — App FROZEN. UI won't paint. User cannot interact. Inspect then RESUME.
 **TERMINATED** — App exited. Read output. Call stop_debug.
+
+## Find Code Before Debugging
+
+BEFORE setting breakpoints, locate the right code:
+- If you have codebase search tools (SocratiCode, Serena, LSP), USE THEM:
+  - Semantic search: "authentication handler" → finds the exact file and method
+  - find_symbol("ProcessPayment") → exact location
+  - find_references("SaveChanges") → all callers
+- These tools work ALONGSIDE the debugger — use them to narrow down, THEN set targeted breakpoints
+- Don't guess file names and line numbers — search first, debug second
 
 ## CRITICAL: Check State Before Asking User to Act
 
@@ -170,12 +183,23 @@ continue_execution, step_over, step_into, step_out all BLOCK until the program
 stops again. You get the result (state, location, source context) in ONE call.
 No polling needed. No loops. One call = one answer.
 
+If execution times out (timed_out=True in response):
+- The breakpoint was NOT hit — the code path may not have been reached
+- Check: get_output_tail() — did the app crash or exit before the breakpoint?
+- Check: list_breakpoints() — is the breakpoint verified (confirmed by debugger)?
+- Try: add_function_breakpoint(function_name="MethodName") — catches all entry paths
+- Try: configure_exceptions(filters=["all"]) — catch exceptions that bypass breakpoints
+
 ## The Inspect-Resume Cycle
 
 When stopped at a breakpoint:
 1. get_call_stack() — where are you? Response includes surrounding source lines.
 2. get_scopes(frame_id) — get variable scope references
 3. get_variables(reference) — read actual values
+3b. (Optional) Deep inspection:
+   - analyze_collection(ref) — count, nulls, min/max for collections
+   - summarize_object(ref, max_depth=2) — flatten nested objects
+   - create_snapshot("name") — save variable state for later comparison
 4. Decide: step deeper? continue? set more breakpoints?
 5. RESUME — always resume. A frozen app = broken user experience.
 
@@ -199,16 +223,77 @@ Hidden by default. If debugging leads nowhere:
 cleanup_processes() — view/kill tracked processes. Never use taskkill.
 restart_debug(rebuild=True) — rebuild + relaunch after code changes.
 
+## Tracepoints & Snapshots
+
+When step-by-step inspection is too slow, use tracepoints:
+1. add_tracepoint(file, line, expression) — logs expression value each time line is hit
+2. continue_execution() — let the app run through the tracepoints
+3. get_trace_log() — read all logged values in order
+This replaces manual step-over loops for execution flow analysis.
+
+Snapshots compare state between stops:
+1. create_snapshot("before") — capture all locals
+2. step_over() or continue_execution()
+3. create_snapshot("after") — capture again
+4. diff_snapshots("before", "after") — see exactly what changed
+
+step_into with target selection:
+1. get_step_in_targets() — see available functions on current line
+2. step_into(target_id=N) — step into the specific function
+
+## Edit-Rebuild-Retest Cycle
+
+After finding and fixing a bug:
+1. continue_execution() or stop_debug() — unfreeze the app
+2. Edit the source code (your normal editing tools)
+3. restart_debug(rebuild=True) — rebuilds and relaunches
+4. Breakpoints PERSIST — no need to re-set them
+5. Reproduce the scenario to verify the fix
+
+If you need a clean slate:
+1. stop_debug()
+2. Edit code
+3. start_debug(..., pre_build=True) — fresh session with rebuild
+
+## Build Failures
+
+If start_debug or restart_debug fails due to build error:
+1. The response includes the error message — READ IT
+2. get_build_diagnostics() — see all compiler errors and warnings
+3. Fix the code
+4. Retry: start_debug(...) or restart_debug(rebuild=True)
+Common: CS1002 (missing semicolon), CS0103 (undefined name), CS0246 (missing using)
+
 ## Valid Actions by State
 
 | State | You CAN do |
 |-------|-----------|
 | IDLE | start_debug, attach_debug |
 | RUNNING | pause_execution, get_output*, get_debug_state, add_breakpoint, stop_debug |
-| STOPPED | get_call_stack, get_variables, get_scopes, evaluate_expression, step_*, continue_execution, set_variable, ui_*, stop_debug |
+| STOPPED | get_call_stack, get_variables, get_scopes, evaluate_expression, step_*, continue_execution, set_variable, ui_*, stop_debug, add_tracepoint, create_snapshot, analyze_collection, summarize_object, get_step_in_targets |
 | TERMINATED | get_output*, stop_debug, start_debug |
 
 *get_output, get_output_tail, search_output work in all non-IDLE states.
+
+## Which Prompt to Use
+
+| Situation | Prompt |
+|-----------|--------|
+| First time debugging | debug (this guide) |
+| GUI app (WPF/Avalonia/WinForms) | debug-gui |
+| Exception or crash | debug-exception |
+| Need to see the UI visually | debug-visual |
+| Known exception type or symptom | investigate("NullReferenceException") |
+| Specific problem description | debug-scenario("button click doesn't save") |
+| Quick anti-pattern check | debug-mistakes |
+
+## MCP Resources
+
+Subscribe to these for real-time updates (no polling needed):
+- debug://state — current session state (JSON, updates on every state change)
+- debug://breakpoints — all active breakpoints (JSON)
+- debug://output — program stdout/stderr (text)
+- debug://threads — active threads (JSON, updates when stopped)
 """
 
 _DEBUG_GUI = """\
@@ -872,6 +957,26 @@ _SYMPTOM_MAPPING: dict[str, str] = {
     "lag": "performance",
     "high cpu": "performance",
     "memory": "performance",
+    "argumentnull": "nullreferenceexception",
+    "argumentnullexception": "nullreferenceexception",
+    "filenotfound": "crash",
+    "directorynotfound": "crash",
+    "ioexception": "crash",
+    "stackoverflow": "crash",
+    "stackoverflowexception": "crash",
+    "httprequest": "taskcanceledexception",
+    "httprequestexception": "taskcanceledexception",
+    "network": "taskcanceledexception",
+    "connection refused": "taskcanceledexception",
+    "json": "invalidoperationexception",
+    "jsonexception": "invalidoperationexception",
+    "deserialization": "invalidoperationexception",
+    "format": "invalidoperationexception",
+    "formatexception": "invalidoperationexception",
+    "parse error": "invalidoperationexception",
+    "sqlexception": "invalidoperationexception",
+    "database": "invalidoperationexception",
+    "dbupdate": "invalidoperationexception",
 }
 
 
