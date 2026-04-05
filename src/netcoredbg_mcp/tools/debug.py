@@ -226,6 +226,8 @@ def register_debug_tools(
     async def continue_execution(ctx: Context, thread_id: int | None = None) -> dict:
         """Continue program execution. Blocks until the program stops again or timeout.
 
+        State: STOPPED required. Blocks until next stop or timeout.
+
         This tool uses the long-poll pattern: it waits for the debugger to report
         a stopped event (breakpoint hit, exception, step complete) before returning.
 
@@ -246,6 +248,8 @@ def register_debug_tools(
     @mcp.tool(annotations=ToolAnnotations(idempotentHint=True, openWorldHint=False))
     async def pause_execution(ctx: Context, thread_id: int | None = None) -> dict:
         """Pause program execution.
+
+        State: RUNNING required.
 
         Unlike continue/step tools, this returns immediately after sending
         the pause command — it does not wait for a stopped event.
@@ -272,6 +276,8 @@ def register_debug_tools(
     async def step_over(ctx: Context, thread_id: int | None = None) -> dict:
         """Step over to the next line. Blocks until the step completes.
 
+        State: STOPPED required.
+
         Executes the current line without entering function calls.
         Returns the new stopped location with source context.
 
@@ -291,6 +297,8 @@ def register_debug_tools(
         ctx: Context, frame_id: int | None = None
     ) -> dict:
         """Get available step-in targets for the current stack frame.
+
+        State: STOPPED required. Call before step_into(target_id=N) to choose target.
 
         When multiple function calls exist on one line, this returns each one
         so you can choose which to enter via step_into(target_id=...).
@@ -316,6 +324,8 @@ def register_debug_tools(
     ) -> dict:
         """Step into the next function call. Blocks until the step completes.
 
+        State: STOPPED required.
+
         Enters the function being called on the current line.
         Use this when you need to investigate what happens inside a called function.
 
@@ -340,6 +350,8 @@ def register_debug_tools(
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def step_out(ctx: Context, thread_id: int | None = None) -> dict:
         """Step out of the current function. Blocks until the step completes.
+
+        State: STOPPED required.
 
         Continues execution until the current function returns, then stops
         at the caller. Use this to exit a function you stepped into.
