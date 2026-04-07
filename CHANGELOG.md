@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.5] - 2026-04-07
+
+### Fixed
+- **mcp-mux isolation** — changed `x-mux` capability from `session-aware` to `isolated` so each CC session gets its own daemon with correct cwd (fixes cross-project path rejection)
+- `validate_path` in SessionManager now supports worktrees + `NETCOREDBG_ALLOWED_PATHS` (mirrors BuildPolicy logic)
+
 ## [0.5.4] - 2026-04-07
 
 ### Fixed
