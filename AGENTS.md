@@ -93,6 +93,14 @@ If solution contains "simple", "quick", "temporary", "workaround" — **STOP and
 |------|-------------|
 | **Unit tests** | Required for ALL new code |
 | **Bug fixes** | Regression test FIRST (NON-NEGOTIABLE) |
+| **Smoke tests** | Expand `tests/smoke_test_manual.py` when fixing bugs discovered in live usage |
+| **Bug → Smoke** | Every bug found during real debugging sessions MUST get a smoke test case |
+
+**Smoke Test Protocol:**
+- Current: 87 checks (85 pass, 2 known failures: XPath on WinForms, file dialog)
+- Run: `NETCOREDBG_PATH="D:/Bin/netcoredbg/netcoredbg.exe" python tests/smoke_test_manual.py`
+- GUI tests require `dotnet build tests/fixtures/SmokeTestApp -c Debug` first
+- When fixing a bug: add smoke test BEFORE the fix, verify it fails, then fix, verify it passes
 
 **Coverage Targets:** (customize per project)
 - Core Domain: 80%
