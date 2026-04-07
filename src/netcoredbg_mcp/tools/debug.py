@@ -292,7 +292,8 @@ def register_debug_tools(
     async def pause_execution(ctx: Context, thread_id: int | None = None) -> dict:
         """Pause program execution.
 
-        State: RUNNING required.
+        State: RUNNING required. Returns immediately (does not block like step tools).
+        Use get_call_stack() after pause to inspect the stopped state.
 
         Unlike continue/step tools, this returns immediately after sending
         the pause command — it does not wait for a stopped event.

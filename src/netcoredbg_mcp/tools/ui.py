@@ -510,6 +510,8 @@ def register_ui_tools(
         "Indeterminate". Use this instead of ui_click for checkboxes to get
         reliable state feedback.
 
+        Note: If app is STOPPED at breakpoint, the UI is frozen. Resume with continue_execution() first.
+
         Args:
             automation_id: AutomationId property
             name: Element's Name/Title property
@@ -1170,6 +1172,8 @@ def register_ui_tools(
 
         Tries cached coordinates first, then falls back to pywinauto element search.
 
+        Note: If app is STOPPED at breakpoint, the UI is frozen. Resume with continue_execution() first.
+
         Args:
             automation_id: AutomationId property
             name: Element's Name/Title property
@@ -1221,6 +1225,8 @@ def register_ui_tools(
 
         Tries cached coordinates first, then falls back to pywinauto element search.
 
+        Note: If app is STOPPED at breakpoint, the UI is frozen. Resume with continue_execution() first.
+
         Args:
             automation_id: AutomationId property
             name: Element's Name/Title property
@@ -1267,6 +1273,8 @@ def register_ui_tools(
         amount: int = 3,
     ) -> dict:
         """Scroll a UI control.
+
+        Note: If app is STOPPED at breakpoint, the UI is frozen. Resume with continue_execution() first.
 
         Args:
             automation_id: AutomationId of the scrollable control
@@ -1383,6 +1391,8 @@ def register_ui_tools(
 
         Returns the selected item's name, index, and properties.
         Useful for verifying selection state after clicks or keyboard navigation.
+
+        Note: FlaUI backend returns selection for the first item only. For full multi-selection state, use ui_find_element to inspect individual items.
 
         Args:
             automation_id: AutomationId of the list/grid/combobox control
@@ -1503,6 +1513,8 @@ def register_ui_tools(
 
         Returns the focused element's automationId, name, controlType, and value.
         Useful for verifying focus state after ui_set_focus or tab navigation.
+
+        Note: Returns the focused element within the app window. May not detect focus in OS-level dialogs.
         """
         try:
             ui = await _ensure_ui_connected()

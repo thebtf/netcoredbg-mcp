@@ -14,7 +14,7 @@ Your AI agent can write .NET code, run tests, even deploy — but when something
 
 > *"Like giving your AI agent a VS Code debugger it can actually use."*
 
-**66 tools · 7 prompts · 4 resources · 498 tests**
+**66 tools · 7 prompts · 4 resources · 546 tests**
 
 ## Quick Links
 
@@ -24,18 +24,17 @@ Your AI agent can write .NET code, run tests, even deploy — but when something
 
 ---
 
-## What's New in v0.5.3
+## What's New in v0.6.0
 
-> Released 2026-04-05. [Full changelog →](CHANGELOG.md)
+> Released 2026-04-07. [Full changelog →](CHANGELOG.md)
 
-- **Agent Intelligence** — ElementResolver ranked search, ExtractText 5-strategy fallback, CLR type name detection
-- **Client-side Tracepoints** — pause → evaluate → resume without netcoredbg support (asyncio.Lock, rate limiting)
-- **State Snapshots + Diff** — capture variable state, compare across stops (FIFO, max 20)
-- **Collection Analyzer + Object Summarizer** — count/nulls/duplicates/stats, recursive with cycle detection
-- **UI Tools Expansion** — `ui_invoke`, `ui_toggle`, `ui_file_dialog`, `root_id` + `xpath` on 11 tools
-- **stepInTargets** — choose which function to step into on multi-call lines
-- **Variable Paging** — `filter`, `start`, `count` for large collections
-- **WPF + Avalonia test apps** — XAML, AutomationProperties, MVVM patterns for smoke testing
+- **MCP Progress Notifications** — build output streaming, 9-phase start_debug progress, execution heartbeat every 5s
+- **Git Worktree Support** — paths in worktrees auto-detected and accepted (#31)
+- **Tracepoint Fix** — auto-resume now works (excluded tracepoint-owned breakpoints from user bp check)
+- **mcp-mux Isolation** — each CC session gets its own daemon with correct project scope
+- **10 Configurable Env Vars** — all hardcoded limits now tunable via environment
+- **100 Smoke Tests** — DataGrid select, tracepoint auto-resume, heartbeat, path validation
+- **Screenshot 1568px** — default max width increased to Claude vision maximum
 
 ---
 
@@ -829,8 +828,19 @@ graph TB
 |----------|-------------|
 | `NETCOREDBG_PATH` | **Required.** Path to netcoredbg executable |
 | `NETCOREDBG_PROJECT_ROOT` | Project root path (alternative to `--project`) |
-| `NETCOREDBG_OUTPUT_FILTER` | Filter program output (hide noise from stdout/stderr) |
+| `NETCOREDBG_ALLOWED_PATHS` | Additional allowed path prefixes (comma-separated) for worktree support |
+| `NETCOREDBG_SCREENSHOT_MAX_WIDTH` | Max screenshot width in pixels (default: 1568) |
+| `NETCOREDBG_SCREENSHOT_QUALITY` | Screenshot WebP/JPEG quality 1-100 (default: 80) |
+| `NETCOREDBG_MAX_TRACE_ENTRIES` | Max tracepoint log entries (default: 1000) |
+| `NETCOREDBG_EVALUATE_TIMEOUT` | Expression evaluation timeout in seconds (default: 0.5) |
+| `NETCOREDBG_RATE_LIMIT_INTERVAL` | Tracepoint rate limit interval (default: 0.1 = max 10/sec) |
+| `NETCOREDBG_MAX_SNAPSHOTS` | Max state snapshots per session (default: 20) |
+| `NETCOREDBG_MAX_VARS_PER_SNAPSHOT` | Max variables per snapshot (default: 200) |
+| `NETCOREDBG_MAX_OUTPUT_BYTES` | Max output buffer size in bytes (default: 10MB) |
+| `NETCOREDBG_MAX_OUTPUT_ENTRY` | Max single output entry size (default: 100KB) |
+| `NETCOREDBG_SESSION_TIMEOUT` | Session ownership timeout in seconds (default: 60) |
 | `NETCOREDBG_STACKTRACE_DELAY_MS` | Diagnostic delay (ms) before stackTrace requests — helps diagnose timing issues |
+| `FLAUI_BRIDGE_PATH` | Path to FlaUIBridge.exe (auto-detected if not set) |
 | `LOG_LEVEL` | Logging level: DEBUG, INFO, WARNING, ERROR |
 | `LOG_FILE` | Path to log file for diagnostics |
 

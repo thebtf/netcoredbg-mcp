@@ -192,6 +192,10 @@ If execution times out (timed_out=True in response):
 
 ## The Inspect-Resume Cycle
 
+**Quick path: use `get_stop_context()` — one call replaces steps 1-3.**
+Returns call stack + variables + recent output in a single response.
+Use the manual steps below only when you need to inspect specific scopes or set variables.
+
 When stopped at a breakpoint:
 1. get_call_stack() — where are you? Response includes surrounding source lines.
 2. get_scopes(frame_id) — get variable scope references
@@ -202,6 +206,15 @@ When stopped at a breakpoint:
    - create_snapshot("name") — save variable state for later comparison
 4. Decide: step deeper? continue? set more breakpoints?
 5. RESUME — always resume. A frozen app = broken user experience.
+
+## Evaluating While Running
+
+If the app is RUNNING and you need a quick value check WITHOUT stopping:
+```
+quick_evaluate(expression="myVariable.Count")
+```
+This atomically pauses, evaluates, resumes — the user sees no pause.
+Use for: checking counters, verifying state, monitoring values during execution.
 
 ## Output Is Your Responsibility
 
@@ -269,6 +282,20 @@ If you need a clean slate:
 2. Edit code
 3. start_debug(..., pre_build=True) — fresh session with rebuild
 
+## Multi-Threaded Debugging
+
+When the app has multiple threads (WPF UI + background workers, ASP.NET request threads):
+
+1. get_threads() — see all threads with names
+2. get_call_stack(thread_id=N) — inspect a specific thread's stack
+3. Most tools default to `current_thread_id` — the thread that triggered the stop
+4. To switch threads: pass explicit `thread_id` to get_call_stack, step_*, continue_*
+
+Common patterns:
+- UI thread frozen → check if background thread holds a lock (pause → get_threads → inspect all stacks)
+- Wrong thread stopped → continue_execution(thread_id=current) to resume only that thread
+- Background crash → get_exception_context shows which thread threw
+
 ## Build Failures
 
 If start_debug or restart_debug fails due to build error:
@@ -283,7 +310,7 @@ Common: CS1002 (missing semicolon), CS0103 (undefined name), CS0246 (missing usi
 | State | You CAN do |
 |-------|-----------|
 | IDLE | start_debug, attach_debug |
-| RUNNING | pause_execution, get_output*, get_debug_state, add_breakpoint, stop_debug |
+| RUNNING | pause_execution, get_output*, get_debug_state, add_breakpoint, stop_debug, quick_evaluate |
 | STOPPED | get_call_stack, get_variables, get_scopes, evaluate_expression, step_*, continue_execution, set_variable, ui_*, stop_debug, add_tracepoint, create_snapshot, analyze_collection, summarize_object, get_step_in_targets |
 | TERMINATED | get_output*, stop_debug, start_debug |
 
@@ -395,6 +422,18 @@ pywinauto is used as fallback — works for most controls.
 PREFER ui_invoke over ui_click for buttons — it works even when the element is off-screen or obscured.
 PREFER ui_toggle over ui_click for checkboxes — it returns the actual state after toggling.
 
+## WinForms Differences
+
+WinForms controls expose UIA properties differently from WPF:
+- `AccessibleName` → UIA `Name` property (NOT `AutomationId`)
+- `Control.Name` → UIA `AutomationId` (but often blank)
+- Many controls lack AutomationId entirely → use `name=` parameter instead of `automation_id=`
+
+When element search fails by automationId, try:
+1. ui_find_element(name="Save") — by visible text/AccessibleName
+2. ui_get_window_tree(max_depth=3) — inspect what's actually in the tree
+3. ui_take_annotated_screenshot() — see elements visually with IDs
+
 ## Debugging Intelligence Tools
 
 | Action | Tool |
@@ -429,6 +468,13 @@ RIGHT: `"%z"`
 
 _DEBUG_EXCEPTION = """\
 ## Exception Investigation Protocol
+
+### Quick Path: One Call (preferred)
+```
+get_exception_context()
+```
+Returns exception info + call stack + local variables + recent output in ONE call.
+Use this FIRST. Only use the manual steps below if you need more detail.
 
 Execute in order. Do NOT skip steps.
 
@@ -470,6 +516,14 @@ Summarize clearly:
 - continue_execution() — skip this exception, see if there are more
 - stop_debug() — end session, go fix the code
 - set_variable(...) — modify a value and continue (test hypothesis)
+
+### If No Exception Was Caught
+If the app crashes without the debugger stopping:
+```
+configure_exceptions(filters=["all"])
+restart_debug()
+```
+This enables breaking on ALL exceptions, including caught ones. Reproduce the crash — the debugger will now stop at the throw site.
 
 ### Common .NET Exceptions
 
@@ -587,7 +641,7 @@ add_breakpoint(file="MainWindow.xaml.cs", line=10)
 
 WRONG:
 ```
-continue_execution()   # returns immediately (old behavior)
+continue_execution()   # before v0.2: returned immediately, needed polling
 get_debug_state()      # running...
 get_debug_state()      # running...
 get_debug_state()      # stopped!
@@ -733,15 +787,21 @@ _EXCEPTION_PLAYBOOKS: dict[str, str] = {
 
 This is the #1 .NET exception. Something is null that shouldn't be.
 
-### Step 1: Find the null
+### Step 1: Quick context (one call)
 ```
-get_exception_info()      # exception message may name the member
-get_call_stack()          # find exact line
+get_exception_context()
+```
+This returns exception info + call stack + variables + recent output.
+
+### Step 2: Deeper investigation (if needed)
+
+Find the null:
+```
 get_scopes(frame_id=...)
 get_variables(ref=...)    # scan locals for null values
 ```
 
-### Step 2: Trace the null backwards
+### Step 3: Trace the null backwards
 Look at the null variable. How was it assigned?
 ```
 # Set breakpoint at the assignment point
@@ -750,14 +810,14 @@ restart_debug(rebuild=False)
 # When hit, inspect what the source returns
 ```
 
-### Step 3: Common causes
+### Step 4: Common causes
 - Database query returned no results (FirstOrDefault → null)
 - Dependency injection not registered (service is null)
 - JSON deserialization missing property (model field is null)
 - UI element not found (FindName returns null)
 - Race condition: value set after null check but before use
 
-### Step 4: Verify fix
+### Step 5: Verify fix
 ```
 set_variable(ref=..., name="suspect", value="new object()")
 continue_execution()
@@ -769,18 +829,21 @@ continue_execution()
 
 Something was called at the wrong time or in the wrong state.
 
-### Step 1: Read the message carefully
+### Step 1: Quick context (one call)
 ```
-get_exception_info()
-# The message usually tells you EXACTLY what's wrong:
-# "Collection was modified; enumeration operation may not proceed"
-# "Sequence contains no elements"
-# "Cannot access a disposed object"
+get_exception_context()
 ```
+This returns exception info + call stack + variables + recent output.
 
-### Step 2: Inspect state
+### Step 2: Deeper investigation (if needed)
+
+Read the message carefully — it usually tells you EXACTLY what's wrong:
+- "Collection was modified; enumeration operation may not proceed"
+- "Sequence contains no elements"
+- "Cannot access a disposed object"
+
+Inspect state:
 ```
-get_call_stack()
 get_variables(ref=...)
 # Look for: disposed objects, empty collections, wrong phase of lifecycle
 ```
@@ -796,19 +859,21 @@ get_variables(ref=...)
 
 An async operation was cancelled — usually a timeout or explicit cancellation.
 
-### Step 1: Find what was cancelled
+### Step 1: Quick context (one call)
 ```
-get_exception_info()
-get_call_stack()
-# Look for: HttpClient calls, database queries, CancellationToken usage
+get_exception_context()
 ```
+This returns exception info + call stack + variables + recent output.
 
-### Step 2: Check cancellation source
+### Step 2: Deeper investigation (if needed)
+
+Check cancellation source:
 ```
 get_variables(ref=...)
 # Look for: CancellationToken.IsCancellationRequested
 # Look for: HttpClient.Timeout value
 # Look for: Task.Delay with cancellation
+# Look for: HttpClient calls, database queries, CancellationToken usage
 ```
 
 ### Step 3: Common causes
@@ -822,13 +887,15 @@ get_variables(ref=...)
 
 Using a resource after it was disposed.
 
-### Step 1: Identify the disposed object
+### Step 1: Quick context (one call)
 ```
-get_exception_info()   # names the object type
-get_call_stack()       # where it was used after disposal
+get_exception_context()
 ```
+This returns exception info + call stack + variables + recent output.
 
-### Step 2: Find where it was disposed
+### Step 2: Deeper investigation (if needed)
+
+Find where it was disposed:
 ```
 add_function_breakpoint(function_name="Dispose")
 restart_debug(rebuild=False)
@@ -892,13 +959,17 @@ If console: let it run — exception will be caught.
 
 ### Step 3: When exception hits
 ```
-get_exception_info()      # what crashed
-get_call_stack()          # where
-get_variables(ref=...)    # state at crash
+get_exception_context()
+```
+This returns exception info + call stack + variables + recent output in ONE call.
+
+### Step 4: Deeper investigation (if needed)
+```
+get_variables(ref=...)    # specific scope inspection
 get_output_tail(lines=50) # last log messages before crash
 ```
 
-### Step 4: If no exception caught
+### Step 5: If no exception caught
 App may crash in native code (access violation, stack overflow).
 ```
 get_output()  # check for native crash messages
@@ -1067,7 +1138,7 @@ def _build_scenario_plan(problem: str, app_type: str, file_hint: str) -> str:
 
     steps.append("## Step 1: Start debug session")
     steps.append("```")
-    steps.append('start_debug(program="bin/Debug/net8.0/App.dll", build_project="App.csproj", pre_build=True)')
+    steps.append('start_debug(program="bin/Debug/<framework>/App.dll", build_project="App.csproj", pre_build=True)')
     steps.append("```\n")
 
     if app_type == "gui":
