@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import os
 from typing import Any, Callable, Coroutine
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -14,9 +13,6 @@ from ..response import build_error_response, build_response
 from ..utils.app_type import detect_app_type
 
 logger = logging.getLogger(__name__)
-
-# Overall timeout for start_debug (build + launch + init)
-START_DEBUG_TIMEOUT = float(os.environ.get("NETCOREDBG_START_TIMEOUT", "120"))
 
 # Timeout for individual MCP notification writes (prevents pipe deadlock through mux)
 NOTIFY_TIMEOUT = 2.0
@@ -157,40 +153,26 @@ def register_debug_tools(
 
             logger.info(
                 f"[start_debug] launching: program={program}, "
-                f"pre_build={pre_build}, timeout={START_DEBUG_TIMEOUT}s"
+                f"pre_build={pre_build}"
             )
 
-            try:
-                result = await asyncio.wait_for(
-                    session.launch(
-                        program=validated_program,
-                        cwd=validated_cwd,
-                        args=args,
-                        env=env,
-                        stop_at_entry=stop_at_entry,
-                        pre_build=pre_build,
-                        build_project=validated_build_project,
-                        build_configuration=build_configuration,
-                        progress_callback=report_progress,
-                        output_callback=on_build_output,
-                    ),
-                    timeout=START_DEBUG_TIMEOUT,
-                )
-            except asyncio.TimeoutError:
-                logger.error(
-                    f"[start_debug] timed out after {START_DEBUG_TIMEOUT}s"
-                )
-                # Try to clean up
-                try:
-                    await session.stop()
-                except Exception:
-                    pass
-                return build_error_response(
-                    f"start_debug timed out after {START_DEBUG_TIMEOUT}s. "
-                    f"Set NETCOREDBG_START_TIMEOUT env var to increase "
-                    f"(current: {START_DEBUG_TIMEOUT}s).",
-                    state=session.state.state,
-                )
+            # No blanket timeout here — each phase has its own:
+            # - Build: 300s (BuildSession._run_command)
+            # - DAP init: 10s (_initialized_event.wait)
+            # - Each DAP command: 30s (DAPClient.send_request)
+            # - Each notification: 2s (_safe_notify)
+            result = await session.launch(
+                program=validated_program,
+                cwd=validated_cwd,
+                args=args,
+                env=env,
+                stop_at_entry=stop_at_entry,
+                pre_build=pre_build,
+                build_project=validated_build_project,
+                build_configuration=build_configuration,
+                progress_callback=report_progress,
+                output_callback=on_build_output,
+            )
             await notify_state_changed(ctx)
 
             # Detect application type for agent hints
@@ -281,22 +263,8 @@ def register_debug_tools(
             msg = "Rebuilding and restarting..." if rebuild else "Restarting without rebuild..."
             await _safe_notify(ctx.report_progress(progress=0, total=100, message=msg))
 
-            try:
-                result = await asyncio.wait_for(
-                    session.restart(rebuild=rebuild),
-                    timeout=START_DEBUG_TIMEOUT,
-                )
-            except asyncio.TimeoutError:
-                logger.error(f"[restart_debug] timed out after {START_DEBUG_TIMEOUT}s")
-                try:
-                    await session.stop()
-                except Exception:
-                    pass
-                return build_error_response(
-                    f"restart_debug timed out after {START_DEBUG_TIMEOUT}s. "
-                    f"Set NETCOREDBG_START_TIMEOUT to increase.",
-                    state=session.state.state,
-                )
+            # Per-phase timeouts handle each step internally
+            result = await session.restart(rebuild=rebuild)
 
             await _safe_notify(
                 ctx.report_progress(progress=100, total=100, message="Debug session restarted")
