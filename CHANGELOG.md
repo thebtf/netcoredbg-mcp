@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-04-07
+
+### Changed
+- **Comprehensive prompt/docs audit** — 20 findings fixed from redoc audit
+  - Prompts: `get_exception_context` quick path (saves 3 tool calls per exception)
+  - Prompts: `get_stop_context` quick path (saves 2 tool calls per stop)
+  - Prompts: multi-threaded debugging section, `quick_evaluate`, `configure_exceptions`
+  - Prompts: WinForms AccessibleName vs AutomationId guidance
+  - Prompts: all `investigate` playbooks updated with `get_exception_context`
+  - Tool docstrings: STOPPED warnings on 4 UI tools, pause_execution state hint
+  - README: v0.6.0 What's New, 546 tests, 12 new env vars, phantom var removed
+  - README.ru.md: synced with EN changes
+
+### Fixed
+- Tracepoint auto-resume — excluded tracepoint-owned breakpoints from user bp check
+- XPath WinForms — use AccessibleName for UIA Name matching
+- DataGrid smoke test added (multi_select, extract_text)
+- 100/100 smoke tests (was 85/87)
+
 ## [0.6.0] - 2026-04-07
 
 ### Added
