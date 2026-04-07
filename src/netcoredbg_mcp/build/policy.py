@@ -99,6 +99,7 @@ class BuildPolicy:
     allow_unc_paths: bool = False
     allow_device_paths: bool = False
     allowed_output_dirs: list[str] = field(default_factory=list)
+    _worktree_cache: list[str] | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Validate and canonicalize workspace root."""
@@ -239,7 +240,14 @@ class BuildPolicy:
         return [os.path.abspath(p.strip()) for p in raw.split(",") if p.strip()]
 
     def _get_allowed_worktree_paths(self) -> list[str]:
-        """Auto-detect git worktree paths for the workspace repository."""
+        """Auto-detect git worktree paths for the workspace repository.
+
+        Results are cached for the lifetime of the BuildPolicy instance
+        to avoid repeated subprocess calls.
+        """
+        if self._worktree_cache is not None:
+            return self._worktree_cache
+
         import subprocess
 
         try:
@@ -249,16 +257,19 @@ class BuildPolicy:
                 cwd=self.workspace_root,
             )
             if result.returncode != 0:
-                return []
+                self._worktree_cache = []
+                return self._worktree_cache
             paths = []
             for line in result.stdout.splitlines():
                 if line.startswith("worktree "):
                     wt_path = line[len("worktree "):].strip()
                     if wt_path:
                         paths.append(os.path.abspath(wt_path))
-            return paths
+            self._worktree_cache = paths
+            return self._worktree_cache
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            return []
+            self._worktree_cache = []
+            return self._worktree_cache
 
     def validate_output_path(self, output_path: str) -> str:
         """Validate output path is within allowed directories.

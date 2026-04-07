@@ -398,8 +398,8 @@ class TestWorktreeAndEnvPaths:
         assert BuildPolicy._is_within(root, root) is True
         assert BuildPolicy._is_within(sibling, root) is False
 
-    def test_output_path_in_worktree(self, tmp_path, monkeypatch):
-        """Output paths in worktrees are accepted."""
+    def test_output_path_in_env_allowed(self, tmp_path, monkeypatch):
+        """Output paths in NETCOREDBG_ALLOWED_PATHS are accepted."""
         workspace = tmp_path / "project"
         workspace.mkdir()
         worktree = tmp_path / "worktree"
@@ -410,3 +410,53 @@ class TestWorktreeAndEnvPaths:
         policy = BuildPolicy(workspace_root=str(workspace))
         result = policy.validate_output_path(str(output))
         assert result == str(output)
+
+    def test_git_worktree_auto_detection(self, tmp_path, monkeypatch):
+        """Paths in auto-detected git worktrees are accepted."""
+        from unittest.mock import patch
+        import subprocess
+
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        worktree = tmp_path / "wt-feature"
+        worktree.mkdir()
+        project = worktree / "App.csproj"
+        project.touch()
+
+        # Mock git worktree list to return our worktree
+        porcelain_output = f"worktree {workspace}\nHEAD abc123\nbranch refs/heads/main\n\nworktree {worktree}\nHEAD def456\nbranch refs/heads/feature\n\n"
+        mock_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=porcelain_output, stderr="",
+        )
+        with patch("subprocess.run", return_value=mock_result):
+            policy = BuildPolicy(workspace_root=str(workspace))
+            result = policy.validate_project_path(str(project))
+            assert result == str(project)
+
+    def test_worktree_cache(self, tmp_path):
+        """Worktree paths are cached after first call."""
+        from unittest.mock import patch
+        import subprocess
+
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        mock_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=f"worktree {workspace}\n\n", stderr="",
+        )
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            policy = BuildPolicy(workspace_root=str(workspace))
+            policy._get_allowed_worktree_paths()
+            policy._get_allowed_worktree_paths()
+            # subprocess.run called only once (cached)
+            assert mock_run.call_count == 1
+
+    def test_git_not_available(self, tmp_path):
+        """Graceful fallback when git is not available."""
+        from unittest.mock import patch
+
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        with patch("subprocess.run", side_effect=FileNotFoundError("git not found")):
+            policy = BuildPolicy(workspace_root=str(workspace))
+            paths = policy._get_allowed_worktree_paths()
+            assert paths == []
