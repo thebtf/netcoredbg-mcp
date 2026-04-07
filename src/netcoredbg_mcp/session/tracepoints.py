@@ -91,17 +91,42 @@ class TracepointManager:
         return os.path.normcase(path.replace("\\", "/"))
 
     def find_tracepoint_for_location(self, file: str, line: int) -> Tracepoint | None:
-        """Find an active tracepoint matching a file:line location."""
+        """Find an active tracepoint matching a file:line location.
+
+        Uses two-stage matching:
+        1. Full path comparison (normalized)
+        2. Filename-only fallback (handles PDB path mismatches)
+        """
+        if not file:
+            return None
         normalized = self._normalize_path(file)
+        filename = os.path.basename(file).lower()
+
+        # Stage 1: full path match
         for tp in self._tracepoints.values():
+            if not tp.active or tp.line != line:
+                continue
             tp_norm = self._normalize_path(tp.file)
-            logger.debug(
-                "Tracepoint match check: frame=%s:%d vs tp=%s:%d (norm: %s vs %s)",
-                file, line, tp.file, tp.line, normalized, tp_norm,
-            )
-            if tp.active and tp_norm == normalized and tp.line == line:
+            if tp_norm == normalized:
+                logger.debug("Tracepoint %s matched by full path: %s:%d", tp.id, file, line)
                 return tp
-        logger.debug("No tracepoint match for %s:%d (checked %d tracepoints)", file, line, len(self._tracepoints))
+
+        # Stage 2: filename-only fallback (PDB may store different directory)
+        for tp in self._tracepoints.values():
+            if not tp.active or tp.line != line:
+                continue
+            tp_filename = os.path.basename(tp.file).lower()
+            if tp_filename == filename:
+                logger.info(
+                    "Tracepoint %s matched by filename fallback: frame=%s tp=%s line=%d",
+                    tp.id, file, tp.file, line,
+                )
+                return tp
+
+        logger.debug(
+            "No tracepoint match for %s:%d (checked %d tracepoints, normalized=%s)",
+            file, line, len(self._tracepoints), normalized,
+        )
         return None
 
     def _is_rate_limited(self, tp_id: str) -> bool:
