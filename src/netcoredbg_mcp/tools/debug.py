@@ -1,6 +1,8 @@
 """Debug session control tools."""
 
+import asyncio
 import logging
+import os
 from typing import Any, Callable, Coroutine
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -12,6 +14,25 @@ from ..response import build_error_response, build_response
 from ..utils.app_type import detect_app_type
 
 logger = logging.getLogger(__name__)
+
+# Overall timeout for start_debug (build + launch + init)
+START_DEBUG_TIMEOUT = float(os.environ.get("NETCOREDBG_START_TIMEOUT", "120"))
+
+# Timeout for individual MCP notification writes (prevents pipe deadlock through mux)
+NOTIFY_TIMEOUT = 2.0
+
+
+async def _safe_notify(coro: Any) -> bool:
+    """Execute an MCP notification coroutine with timeout protection.
+
+    Returns True if notification was sent, False if it failed or timed out.
+    Prevents deadlock when MCP transport pipe buffer is full (e.g. through mux).
+    """
+    try:
+        await asyncio.wait_for(coro, timeout=NOTIFY_TIMEOUT)
+        return True
+    except (asyncio.TimeoutError, Exception):
+        return False
 
 
 def register_debug_tools(
@@ -101,14 +122,14 @@ def register_debug_tools(
             if build_project:
                 validated_build_project = session.validate_path(build_project, must_exist=True)
 
-            # Progress callback to report to MCP client
+            # Progress callback to report to MCP client (timeout-protected)
             async def report_progress(progress: float, total: float, message: str) -> None:
-                try:
-                    await ctx.report_progress(progress=progress, total=total, message=message)
-                except Exception:
-                    pass
+                logger.info(f"[start_debug] progress {progress}/{total}: {message}")
+                await _safe_notify(
+                    ctx.report_progress(progress=progress, total=total, message=message)
+                )
 
-            # Build output streaming callback
+            # Build output streaming callback (timeout-protected)
             _notify_failed = False
             _line_count = 0
             MAX_BUILD_LINES = 500
@@ -119,32 +140,57 @@ def register_debug_tools(
                     return
                 _line_count += 1
                 if _line_count <= MAX_BUILD_LINES:
-                    try:
-                        if stream == "stderr":
-                            await ctx.warning(line)
-                        else:
-                            await ctx.info(line)
-                    except Exception:
+                    coro = ctx.warning(line) if stream == "stderr" else ctx.info(line)
+                    ok = await _safe_notify(coro)
+                    if not ok:
                         _notify_failed = True
-                        logger.warning("MCP notification failed, suppressing further notifications")
+                        logger.warning(
+                            "MCP notification timed out or failed, "
+                            "suppressing further build output notifications"
+                        )
                 elif _line_count == MAX_BUILD_LINES + 1:
-                    try:
-                        await ctx.info(f"... ({_line_count}+ build lines, showing first {MAX_BUILD_LINES})")
-                    except Exception:
+                    ok = await _safe_notify(
+                        ctx.info(f"... ({_line_count}+ build lines, showing first {MAX_BUILD_LINES})")
+                    )
+                    if not ok:
                         _notify_failed = True
 
-            result = await session.launch(
-                program=validated_program,
-                cwd=validated_cwd,
-                args=args,
-                env=env,
-                stop_at_entry=stop_at_entry,
-                pre_build=pre_build,
-                build_project=validated_build_project,
-                build_configuration=build_configuration,
-                progress_callback=report_progress,
-                output_callback=on_build_output,
+            logger.info(
+                f"[start_debug] launching: program={program}, "
+                f"pre_build={pre_build}, timeout={START_DEBUG_TIMEOUT}s"
             )
+
+            try:
+                result = await asyncio.wait_for(
+                    session.launch(
+                        program=validated_program,
+                        cwd=validated_cwd,
+                        args=args,
+                        env=env,
+                        stop_at_entry=stop_at_entry,
+                        pre_build=pre_build,
+                        build_project=validated_build_project,
+                        build_configuration=build_configuration,
+                        progress_callback=report_progress,
+                        output_callback=on_build_output,
+                    ),
+                    timeout=START_DEBUG_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    f"[start_debug] timed out after {START_DEBUG_TIMEOUT}s"
+                )
+                # Try to clean up
+                try:
+                    await session.stop()
+                except Exception:
+                    pass
+                return build_error_response(
+                    f"start_debug timed out after {START_DEBUG_TIMEOUT}s. "
+                    f"Set NETCOREDBG_START_TIMEOUT env var to increase "
+                    f"(current: {START_DEBUG_TIMEOUT}s).",
+                    state=session.state.state,
+                )
             await notify_state_changed(ctx)
 
             # Detect application type for agent hints
@@ -232,20 +278,29 @@ def register_debug_tools(
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
 
-            try:
-                if rebuild:
-                    await ctx.report_progress(progress=0, total=100, message="Rebuilding and restarting...")
-                else:
-                    await ctx.report_progress(progress=0, total=100, message="Restarting without rebuild...")
-            except Exception:
-                pass
-
-            result = await session.restart(rebuild=rebuild)
+            msg = "Rebuilding and restarting..." if rebuild else "Restarting without rebuild..."
+            await _safe_notify(ctx.report_progress(progress=0, total=100, message=msg))
 
             try:
-                await ctx.report_progress(progress=100, total=100, message="Debug session restarted")
-            except Exception:
-                pass
+                result = await asyncio.wait_for(
+                    session.restart(rebuild=rebuild),
+                    timeout=START_DEBUG_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"[restart_debug] timed out after {START_DEBUG_TIMEOUT}s")
+                try:
+                    await session.stop()
+                except Exception:
+                    pass
+                return build_error_response(
+                    f"restart_debug timed out after {START_DEBUG_TIMEOUT}s. "
+                    f"Set NETCOREDBG_START_TIMEOUT to increase.",
+                    state=session.state.state,
+                )
+
+            await _safe_notify(
+                ctx.report_progress(progress=100, total=100, message="Debug session restarted")
+            )
 
             await notify_state_changed(ctx)
 
