@@ -99,6 +99,7 @@ class BuildPolicy:
     allow_unc_paths: bool = False
     allow_device_paths: bool = False
     allowed_output_dirs: list[str] = field(default_factory=list)
+    _worktree_cache: list[str] | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Validate and canonicalize workspace root."""
@@ -182,7 +183,12 @@ class BuildPolicy:
         return abs_path
 
     def validate_project_path(self, project_path: str) -> str:
-        """Validate project path is within workspace.
+        """Validate project path is within workspace or allowed paths.
+
+        Accepts paths within:
+        1. The workspace root directory
+        2. Git worktrees of the same repository (auto-detected)
+        3. Paths listed in NETCOREDBG_ALLOWED_PATHS env var (comma-separated)
 
         Args:
             project_path: Path to project file or directory
@@ -191,21 +197,89 @@ class BuildPolicy:
             Validated absolute path
 
         Raises:
-            ValueError: If path is invalid or outside workspace
+            ValueError: If path is invalid or outside all allowed scopes
         """
         validated = self._validate_path(
             project_path, allow_symlinks=False, context="project_path"
         )
 
-        # Must be within workspace
-        try:
-            common = os.path.commonpath([validated, self.workspace_root])
-            if common != self.workspace_root:
-                raise ValueError(f"Project path outside workspace: {project_path}")
-        except ValueError as e:
-            raise ValueError(f"Project path outside workspace: {project_path}") from e
+        # Check 1: within workspace root
+        if self._is_within(validated, self.workspace_root):
+            return validated
 
-        return validated
+        # Check 2: within git worktree paths
+        for wt_path in self._get_allowed_worktree_paths():
+            if self._is_within(validated, wt_path):
+                return validated
+
+        # Check 3: within NETCOREDBG_ALLOWED_PATHS
+        for allowed in self._get_env_allowed_paths():
+            if self._is_within(validated, allowed):
+                return validated
+
+        raise ValueError(
+            f"Project path outside workspace and allowed paths: {project_path}. "
+            f"Set NETCOREDBG_ALLOWED_PATHS env var to add allowed path prefixes."
+        )
+
+    @staticmethod
+    def _is_within(path: str, root: str) -> bool:
+        """Check if path is within root directory."""
+        try:
+            common = os.path.commonpath([path, root])
+            return common == root
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _get_env_allowed_paths() -> list[str]:
+        """Get additional allowed paths from NETCOREDBG_ALLOWED_PATHS env var."""
+        raw = os.environ.get("NETCOREDBG_ALLOWED_PATHS", "")
+        if not raw:
+            return []
+        return [os.path.abspath(p.strip()) for p in raw.split(",") if p.strip()]
+
+    def _get_allowed_worktree_paths(self) -> list[str]:
+        """Auto-detect git worktree paths for the workspace repository.
+
+        Results are cached for the lifetime of the BuildPolicy instance
+        to avoid repeated subprocess calls.
+        """
+        if self._worktree_cache is not None:
+            return self._worktree_cache
+
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ["git", "worktree", "list", "--porcelain"],
+                capture_output=True, text=True, timeout=5,
+                cwd=self.workspace_root,
+            )
+            if result.returncode != 0:
+                self._worktree_cache = []
+                return self._worktree_cache
+            # Parse porcelain blocks (separated by blank lines).
+            # Skip entries marked "prunable" or whose directory doesn't exist.
+            paths: list[str] = []
+            current_path: str | None = None
+            prunable = False
+            for line in [*result.stdout.splitlines(), ""]:
+                if line.startswith("worktree "):
+                    current_path = line[len("worktree "):].strip()
+                    prunable = False
+                elif line.startswith("prunable "):
+                    prunable = True
+                elif not line and current_path:
+                    abs_path = os.path.abspath(current_path)
+                    if not prunable and os.path.isdir(abs_path):
+                        paths.append(abs_path)
+                    current_path = None
+            self._worktree_cache = paths
+            return self._worktree_cache
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            self._worktree_cache = []
+            return self._worktree_cache
 
     def validate_output_path(self, output_path: str) -> str:
         """Validate output path is within allowed directories.
@@ -223,8 +297,13 @@ class BuildPolicy:
             output_path, allow_symlinks=False, context="output_path"
         )
 
-        # Must be within workspace or explicit allowed directories
-        allowed_roots = [self.workspace_root] + self.allowed_output_dirs
+        # Must be within workspace, explicit allowed directories, worktrees, or env paths
+        allowed_roots = (
+            [self.workspace_root]
+            + self.allowed_output_dirs
+            + self._get_allowed_worktree_paths()
+            + self._get_env_allowed_paths()
+        )
         for allowed in allowed_roots:
             try:
                 common = os.path.commonpath([validated, allowed])

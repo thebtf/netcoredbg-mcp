@@ -335,3 +335,175 @@ class TestGetDotnetCommand:
             policy.get_dotnet_command(
                 BuildCommand.BUILD, str(project), extra_args=["--evil-flag"]
             )
+
+
+class TestWorktreeAndEnvPaths:
+    """Tests for git worktree and NETCOREDBG_ALLOWED_PATHS support."""
+
+    def test_path_within_workspace_accepted(self, tmp_path):
+        """Path inside workspace root is always accepted."""
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        project = workspace / "App.csproj"
+        project.touch()
+        policy = BuildPolicy(workspace_root=str(workspace))
+        result = policy.validate_project_path(str(project))
+        assert result == str(project)
+
+    def test_path_outside_workspace_rejected(self, tmp_path):
+        """Path outside workspace is rejected without env/worktree."""
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        other = tmp_path / "other" / "App.csproj"
+        other.parent.mkdir()
+        other.touch()
+        policy = BuildPolicy(workspace_root=str(workspace))
+        with pytest.raises(ValueError, match="outside workspace"):
+            policy.validate_project_path(str(other))
+
+    def test_env_allowed_paths(self, tmp_path, monkeypatch):
+        """NETCOREDBG_ALLOWED_PATHS env var adds allowed prefixes."""
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        project = worktree / "App.csproj"
+        project.touch()
+        monkeypatch.setenv("NETCOREDBG_ALLOWED_PATHS", str(worktree))
+        policy = BuildPolicy(workspace_root=str(workspace))
+        result = policy.validate_project_path(str(project))
+        assert result == str(project)
+
+    def test_env_allowed_paths_comma_separated(self, tmp_path, monkeypatch):
+        """Multiple paths separated by commas."""
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        wt1 = tmp_path / "wt1"
+        wt1.mkdir()
+        wt2 = tmp_path / "wt2"
+        wt2.mkdir()
+        project = wt2 / "App.csproj"
+        project.touch()
+        monkeypatch.setenv("NETCOREDBG_ALLOWED_PATHS", f"{wt1},{wt2}")
+        policy = BuildPolicy(workspace_root=str(workspace))
+        result = policy.validate_project_path(str(project))
+        assert result == str(project)
+
+    def test_is_within_helper(self, tmp_path):
+        """_is_within correctly checks path containment."""
+        root = str(tmp_path / "root")
+        child = str(tmp_path / "root" / "sub")
+        sibling = str(tmp_path / "root2")
+        assert BuildPolicy._is_within(child, root) is True
+        assert BuildPolicy._is_within(root, root) is True
+        assert BuildPolicy._is_within(sibling, root) is False
+
+    def test_output_path_in_env_allowed(self, tmp_path, monkeypatch):
+        """Output paths in NETCOREDBG_ALLOWED_PATHS are accepted."""
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        output = worktree / "bin" / "Debug"
+        output.mkdir(parents=True)
+        monkeypatch.setenv("NETCOREDBG_ALLOWED_PATHS", str(worktree))
+        policy = BuildPolicy(workspace_root=str(workspace))
+        result = policy.validate_output_path(str(output))
+        assert result == str(output)
+
+    def test_git_worktree_auto_detection(self, tmp_path, monkeypatch):
+        """Paths in auto-detected git worktrees are accepted."""
+        from unittest.mock import patch
+        import subprocess
+
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        worktree = tmp_path / "wt-feature"
+        worktree.mkdir()
+        project = worktree / "App.csproj"
+        project.touch()
+
+        # Mock git worktree list to return our worktree
+        porcelain_output = f"worktree {workspace}\nHEAD abc123\nbranch refs/heads/main\n\nworktree {worktree}\nHEAD def456\nbranch refs/heads/feature\n\n"
+        mock_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=porcelain_output, stderr="",
+        )
+        with patch("subprocess.run", return_value=mock_result):
+            policy = BuildPolicy(workspace_root=str(workspace))
+            result = policy.validate_project_path(str(project))
+            assert result == str(project)
+
+    def test_worktree_cache(self, tmp_path):
+        """Worktree paths are cached after first call."""
+        from unittest.mock import patch
+        import subprocess
+
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        mock_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=f"worktree {workspace}\n\n", stderr="",
+        )
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            policy = BuildPolicy(workspace_root=str(workspace))
+            policy._get_allowed_worktree_paths()
+            policy._get_allowed_worktree_paths()
+            # subprocess.run called only once (cached)
+            assert mock_run.call_count == 1
+
+    def test_git_not_available(self, tmp_path):
+        """Graceful fallback when git is not available."""
+        from unittest.mock import patch
+
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        with patch("subprocess.run", side_effect=FileNotFoundError("git not found")):
+            policy = BuildPolicy(workspace_root=str(workspace))
+            paths = policy._get_allowed_worktree_paths()
+            assert paths == []
+
+    def test_prunable_worktrees_excluded(self, tmp_path):
+        """Worktrees marked prunable are filtered out."""
+        from unittest.mock import patch
+        import subprocess
+
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        active_wt = tmp_path / "wt-active"
+        active_wt.mkdir()
+        prunable_wt = tmp_path / "wt-prunable"
+        prunable_wt.mkdir()
+
+        porcelain = (
+            f"worktree {workspace}\nHEAD abc\nbranch refs/heads/main\n\n"
+            f"worktree {active_wt}\nHEAD def\nbranch refs/heads/feat\n\n"
+            f"worktree {prunable_wt}\nHEAD ghi\nprunable gitdir file/path points to non-existent location\n\n"
+        )
+        mock_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=porcelain, stderr="",
+        )
+        with patch("subprocess.run", return_value=mock_result):
+            policy = BuildPolicy(workspace_root=str(workspace))
+            paths = policy._get_allowed_worktree_paths()
+            assert str(active_wt) in [os.path.abspath(p) for p in paths]
+            assert str(prunable_wt) not in [os.path.abspath(p) for p in paths]
+
+    def test_nonexistent_worktree_dir_excluded(self, tmp_path):
+        """Worktrees pointing to non-existent directories are filtered out."""
+        from unittest.mock import patch
+        import subprocess
+
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        ghost_wt = tmp_path / "wt-ghost"  # NOT created — doesn't exist
+
+        porcelain = (
+            f"worktree {workspace}\nHEAD abc\nbranch refs/heads/main\n\n"
+            f"worktree {ghost_wt}\nHEAD def\nbranch refs/heads/old\n\n"
+        )
+        mock_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=porcelain, stderr="",
+        )
+        with patch("subprocess.run", return_value=mock_result):
+            policy = BuildPolicy(workspace_root=str(workspace))
+            paths = policy._get_allowed_worktree_paths()
+            assert str(ghost_wt) not in [os.path.abspath(p) for p in paths]
