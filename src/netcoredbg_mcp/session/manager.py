@@ -843,36 +843,42 @@ class SessionManager:
             if not build_project:
                 raise ValueError("build_project required when pre_build=True")
 
+            logger.info("[launch] phase 1/9: pre-build")
             await report(0, 100, "Building project...")
 
             # Stop existing session first to release file locks
             if self.is_active:
-                logger.info("Stopping existing session before build")
+                logger.info("[launch] stopping existing session before build")
                 await self.stop()
                 # Give processes time to release file handles
                 await asyncio.sleep(0.5)
 
+            logger.info("[launch] phase 2/9: dotnet build")
             await self.pre_launch_build(
                 project_file=build_project,
                 configuration=build_configuration,
                 output_callback=output_callback,
             )
 
+            logger.info("[launch] phase 3/9: build complete")
             await report(50, 100, "Build complete, starting debugger...")
 
             # Re-validate program path after build (now file should exist)
             # Also apply smart .exe → .dll resolution for .NET 6+
             program = self.validate_program(program, must_exist=True)
-            logger.debug(f"Post-build program path: {program}")
+            logger.info(f"[launch] post-build program path: {program}")
         else:
             await report(0, 100, "Starting debugger...")
 
         # Check dbgshim version compatibility (warns if mismatch)
+        logger.info("[launch] phase 4/9: version check")
         version_warning = self.check_dbgshim_compatibility(program)
 
         if not self._client.is_running:
+            logger.info("[launch] phase 5/9: starting netcoredbg process")
             await self.start()
 
+        logger.info("[launch] phase 6/9: waiting for DAP initialization")
         await report(60, 100, "Initializing debug adapter...")
 
         # Wait for initialized event
@@ -881,6 +887,7 @@ class SessionManager:
         except asyncio.TimeoutError as e:
             raise RuntimeError("Timeout waiting for DAP initialization") from e
 
+        logger.info("[launch] phase 7/9: syncing breakpoints")
         await report(70, 100, "Setting breakpoints...")
 
         # Set all breakpoints before launch
@@ -889,6 +896,7 @@ class SessionManager:
         # Set exception breakpoints (stop on all exceptions by default)
         await self._client.set_exception_breakpoints([])
 
+        logger.info("[launch] phase 8/9: DAP launch command")
         await report(80, 100, "Launching program...")
 
         # Launch program with justMyCode=False to show all stack frames
@@ -905,6 +913,7 @@ class SessionManager:
             raise RuntimeError(f"Launch failed: {response.message}")
 
         # Configuration done
+        logger.info("[launch] phase 9/9: configuration done")
         await self._client.configuration_done()
         self._set_state(DebugState.RUNNING)
 
