@@ -14,7 +14,7 @@ import asyncio
 import logging
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 from .cleanup import cleanup_for_build
 from .policy import BuildCommand, BuildPolicy
@@ -217,6 +217,7 @@ class BuildSession:
         command: list[str],
         cwd: str | None = None,
         timeout: float = 300.0,
+        output_callback: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> tuple[int, str, str]:
         """Run command with output capture and timeout.
 
@@ -255,6 +256,7 @@ class BuildSession:
                 stream: asyncio.StreamReader | None,
                 lines: list[str],
                 byte_counter: list[int],
+                stream_name: str = "stdout",
             ) -> None:
                 if stream is None:
                     return
@@ -273,6 +275,11 @@ class BuildSession:
                         while byte_counter[0] > MAX_OUTPUT_BYTES and lines:
                             removed = lines.pop(0)
                             byte_counter[0] -= len(removed)
+                        if output_callback:
+                            try:
+                                await output_callback(decoded.rstrip("\r\n"), stream_name)
+                            except Exception:
+                                pass  # Don't crash build if notification fails
                     except asyncio.TimeoutError:
                         if self._cancel_requested:
                             raise asyncio.CancelledError()
@@ -285,10 +292,10 @@ class BuildSession:
                 await asyncio.wait_for(
                     asyncio.gather(
                         read_stream(
-                            self._current_process.stdout, stdout_lines, stdout_counter
+                            self._current_process.stdout, stdout_lines, stdout_counter, "stdout"
                         ),
                         read_stream(
-                            self._current_process.stderr, stderr_lines, stderr_counter
+                            self._current_process.stderr, stderr_lines, stderr_counter, "stderr"
                         ),
                     ),
                     timeout=timeout,
@@ -335,6 +342,7 @@ class BuildSession:
         configuration: str,
         timeout: float,
         retry_on_lock: bool,
+        output_callback: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> tuple[int, str, str]:
         """Run build command with retry logic for file lock errors.
 
@@ -354,7 +362,7 @@ class BuildSession:
 
         for attempt in range(MAX_BUILD_RETRIES):
             exit_code, stdout, stderr = await self._run_command(
-                cmd, cwd=self._workspace_root, timeout=timeout
+                cmd, cwd=self._workspace_root, timeout=timeout, output_callback=output_callback
             )
 
             last_exit_code = exit_code
@@ -394,6 +402,7 @@ class BuildSession:
         timeout: float = 300.0,
         cleanup_before_build: bool = False,
         retry_on_lock: bool = True,
+        output_callback: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> BuildResult:
         """Execute build command.
 
@@ -437,7 +446,8 @@ class BuildSession:
                     )
                     logger.info(f"Running clean: {' '.join(clean_cmd)}")
                     exit_code, stdout, stderr = await self._run_command(
-                        clean_cmd, cwd=self._workspace_root, timeout=timeout / 2
+                        clean_cmd, cwd=self._workspace_root, timeout=timeout / 2,
+                        output_callback=output_callback,
                     )
                     if exit_code != 0:
                         duration = (time.perf_counter() - start_time) * 1000
@@ -468,6 +478,7 @@ class BuildSession:
                     configuration=configuration,
                     timeout=timeout,
                     retry_on_lock=retry_on_lock,
+                    output_callback=output_callback,
                 )
 
                 duration = (time.perf_counter() - start_time) * 1000
@@ -561,10 +572,12 @@ class BuildSession:
         self,
         project_path: str,
         timeout: float = 300.0,
+        output_callback: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> BuildResult:
         """Restore NuGet packages."""
         return await self.build(
-            project_path, BuildCommand.RESTORE, timeout=timeout
+            project_path, BuildCommand.RESTORE, timeout=timeout,
+            output_callback=output_callback,
         )
 
     async def rebuild(

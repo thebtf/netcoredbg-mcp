@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from .policy import BuildCommand
@@ -119,6 +119,7 @@ class BuildManager:
         restore_first: bool = True,
         cleanup_before_build: bool = True,
         timeout: float = 300.0,
+        output_callback: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> BuildResult:
         """Execute pre-launch build sequence (restore + build).
 
@@ -147,7 +148,9 @@ class BuildManager:
 
         if restore_first:
             # Run restore first (with half the timeout)
-            restore_result = await session.restore(project_path, timeout=timeout / 2)
+            restore_result = await session.restore(
+                project_path, timeout=timeout / 2, output_callback=output_callback
+            )
             if not restore_result.success:
                 raise BuildError(
                     f"Restore failed: {restore_result.error_count} errors",
@@ -163,6 +166,7 @@ class BuildManager:
             timeout=timeout if not restore_first else timeout / 2,
             cleanup_before_build=cleanup_before_build,
             retry_on_lock=True,
+            output_callback=output_callback,
         )
 
         if not result.success:

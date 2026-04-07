@@ -71,6 +71,16 @@ def register_debug_tools(
             build_project: Path to .csproj file (required when pre_build=True)
             build_configuration: Build configuration (Debug/Release)
         """
+        async def _safe_notify(ctx: Context, message: str, level: str = "info") -> None:
+            """Send MCP notification, silently handle disconnected client."""
+            try:
+                if level == "warning":
+                    await ctx.warning(message)
+                else:
+                    await ctx.info(message)
+            except Exception:
+                pass
+
         try:
             access_error = check_session_access(ctx)
             if access_error:
@@ -105,6 +115,31 @@ def register_debug_tools(
             async def report_progress(progress: float, total: float, message: str) -> None:
                 await ctx.report_progress(progress=progress, total=total, message=message)
 
+            # Build output streaming callback
+            _notify_failed = False
+            _line_count = 0
+            MAX_BUILD_LINES = 500
+
+            async def on_build_output(line: str, stream: str) -> None:
+                nonlocal _notify_failed, _line_count
+                if _notify_failed:
+                    return
+                _line_count += 1
+                if _line_count <= MAX_BUILD_LINES:
+                    try:
+                        if stream == "stderr":
+                            await ctx.warning(line)
+                        else:
+                            await ctx.info(line)
+                    except Exception:
+                        _notify_failed = True
+                        logger.warning("MCP notification failed, suppressing further notifications")
+                elif _line_count == MAX_BUILD_LINES + 1:
+                    try:
+                        await ctx.info(f"... ({_line_count}+ build lines, showing first {MAX_BUILD_LINES})")
+                    except Exception:
+                        _notify_failed = True
+
             result = await session.launch(
                 program=validated_program,
                 cwd=validated_cwd,
@@ -115,6 +150,7 @@ def register_debug_tools(
                 build_project=validated_build_project,
                 build_configuration=build_configuration,
                 progress_callback=report_progress,
+                output_callback=on_build_output,
             )
             await notify_state_changed(ctx)
 
