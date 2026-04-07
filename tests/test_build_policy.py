@@ -335,3 +335,78 @@ class TestGetDotnetCommand:
             policy.get_dotnet_command(
                 BuildCommand.BUILD, str(project), extra_args=["--evil-flag"]
             )
+
+
+class TestWorktreeAndEnvPaths:
+    """Tests for git worktree and NETCOREDBG_ALLOWED_PATHS support."""
+
+    def test_path_within_workspace_accepted(self, tmp_path):
+        """Path inside workspace root is always accepted."""
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        project = workspace / "App.csproj"
+        project.touch()
+        policy = BuildPolicy(workspace_root=str(workspace))
+        result = policy.validate_project_path(str(project))
+        assert result == str(project)
+
+    def test_path_outside_workspace_rejected(self, tmp_path):
+        """Path outside workspace is rejected without env/worktree."""
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        other = tmp_path / "other" / "App.csproj"
+        other.parent.mkdir()
+        other.touch()
+        policy = BuildPolicy(workspace_root=str(workspace))
+        with pytest.raises(ValueError, match="outside workspace"):
+            policy.validate_project_path(str(other))
+
+    def test_env_allowed_paths(self, tmp_path, monkeypatch):
+        """NETCOREDBG_ALLOWED_PATHS env var adds allowed prefixes."""
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        project = worktree / "App.csproj"
+        project.touch()
+        monkeypatch.setenv("NETCOREDBG_ALLOWED_PATHS", str(worktree))
+        policy = BuildPolicy(workspace_root=str(workspace))
+        result = policy.validate_project_path(str(project))
+        assert result == str(project)
+
+    def test_env_allowed_paths_comma_separated(self, tmp_path, monkeypatch):
+        """Multiple paths separated by commas."""
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        wt1 = tmp_path / "wt1"
+        wt1.mkdir()
+        wt2 = tmp_path / "wt2"
+        wt2.mkdir()
+        project = wt2 / "App.csproj"
+        project.touch()
+        monkeypatch.setenv("NETCOREDBG_ALLOWED_PATHS", f"{wt1},{wt2}")
+        policy = BuildPolicy(workspace_root=str(workspace))
+        result = policy.validate_project_path(str(project))
+        assert result == str(project)
+
+    def test_is_within_helper(self, tmp_path):
+        """_is_within correctly checks path containment."""
+        root = str(tmp_path / "root")
+        child = str(tmp_path / "root" / "sub")
+        sibling = str(tmp_path / "root2")
+        assert BuildPolicy._is_within(child, root) is True
+        assert BuildPolicy._is_within(root, root) is True
+        assert BuildPolicy._is_within(sibling, root) is False
+
+    def test_output_path_in_worktree(self, tmp_path, monkeypatch):
+        """Output paths in worktrees are accepted."""
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        output = worktree / "bin" / "Debug"
+        output.mkdir(parents=True)
+        monkeypatch.setenv("NETCOREDBG_ALLOWED_PATHS", str(worktree))
+        policy = BuildPolicy(workspace_root=str(workspace))
+        result = policy.validate_output_path(str(output))
+        assert result == str(output)

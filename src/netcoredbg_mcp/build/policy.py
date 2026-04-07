@@ -182,7 +182,12 @@ class BuildPolicy:
         return abs_path
 
     def validate_project_path(self, project_path: str) -> str:
-        """Validate project path is within workspace.
+        """Validate project path is within workspace or allowed paths.
+
+        Accepts paths within:
+        1. The workspace root directory
+        2. Git worktrees of the same repository (auto-detected)
+        3. Paths listed in NETCOREDBG_ALLOWED_PATHS env var (comma-separated)
 
         Args:
             project_path: Path to project file or directory
@@ -191,21 +196,69 @@ class BuildPolicy:
             Validated absolute path
 
         Raises:
-            ValueError: If path is invalid or outside workspace
+            ValueError: If path is invalid or outside all allowed scopes
         """
         validated = self._validate_path(
             project_path, allow_symlinks=False, context="project_path"
         )
 
-        # Must be within workspace
-        try:
-            common = os.path.commonpath([validated, self.workspace_root])
-            if common != self.workspace_root:
-                raise ValueError(f"Project path outside workspace: {project_path}")
-        except ValueError as e:
-            raise ValueError(f"Project path outside workspace: {project_path}") from e
+        # Check 1: within workspace root
+        if self._is_within(validated, self.workspace_root):
+            return validated
 
-        return validated
+        # Check 2: within git worktree paths
+        for wt_path in self._get_allowed_worktree_paths():
+            if self._is_within(validated, wt_path):
+                return validated
+
+        # Check 3: within NETCOREDBG_ALLOWED_PATHS
+        for allowed in self._get_env_allowed_paths():
+            if self._is_within(validated, allowed):
+                return validated
+
+        raise ValueError(
+            f"Project path outside workspace and allowed paths: {project_path}. "
+            f"Set NETCOREDBG_ALLOWED_PATHS env var to add allowed path prefixes."
+        )
+
+    @staticmethod
+    def _is_within(path: str, root: str) -> bool:
+        """Check if path is within root directory."""
+        try:
+            common = os.path.commonpath([path, root])
+            return common == root
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _get_env_allowed_paths() -> list[str]:
+        """Get additional allowed paths from NETCOREDBG_ALLOWED_PATHS env var."""
+        raw = os.environ.get("NETCOREDBG_ALLOWED_PATHS", "")
+        if not raw:
+            return []
+        return [os.path.abspath(p.strip()) for p in raw.split(",") if p.strip()]
+
+    def _get_allowed_worktree_paths(self) -> list[str]:
+        """Auto-detect git worktree paths for the workspace repository."""
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ["git", "worktree", "list", "--porcelain"],
+                capture_output=True, text=True, timeout=5,
+                cwd=self.workspace_root,
+            )
+            if result.returncode != 0:
+                return []
+            paths = []
+            for line in result.stdout.splitlines():
+                if line.startswith("worktree "):
+                    wt_path = line[len("worktree "):].strip()
+                    if wt_path:
+                        paths.append(os.path.abspath(wt_path))
+            return paths
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            return []
 
     def validate_output_path(self, output_path: str) -> str:
         """Validate output path is within allowed directories.
@@ -223,8 +276,13 @@ class BuildPolicy:
             output_path, allow_symlinks=False, context="output_path"
         )
 
-        # Must be within workspace or explicit allowed directories
-        allowed_roots = [self.workspace_root] + self.allowed_output_dirs
+        # Must be within workspace, explicit allowed directories, worktrees, or env paths
+        allowed_roots = (
+            [self.workspace_root]
+            + self.allowed_output_dirs
+            + self._get_allowed_worktree_paths()
+            + self._get_env_allowed_paths()
+        )
         for allowed in allowed_roots:
             try:
                 common = os.path.commonpath([validated, allowed])
