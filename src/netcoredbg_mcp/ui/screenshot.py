@@ -12,26 +12,34 @@ import base64
 import ctypes
 import io
 import logging
+import os
 from ctypes import wintypes
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Screenshot defaults — configurable via environment variables.
+# NETCOREDBG_SCREENSHOT_MAX_WIDTH: Max inline preview width (default 1280, Claude vision optimal).
+# NETCOREDBG_SCREENSHOT_QUALITY: WebP/JPEG quality 1-100 (default 80).
+# Claude vision auto-downsamples above 1568px, so values > 1568 waste bandwidth.
+SCREENSHOT_MAX_WIDTH = int(os.environ.get("NETCOREDBG_SCREENSHOT_MAX_WIDTH", "1280"))
+SCREENSHOT_QUALITY = int(os.environ.get("NETCOREDBG_SCREENSHOT_QUALITY", "80"))
+
 
 def create_preview(
     image_data: bytes,
-    max_width: int = 480,
-    quality: int = 75,
+    max_width: int = 1280,
+    quality: int = 80,
 ) -> tuple[bytes, int, int]:
-    """Create a small WebP preview from image data (PNG or raw).
+    """Create a WebP preview from image data (PNG or raw).
 
     Args:
         image_data: Source image bytes (PNG format)
-        max_width: Maximum preview width (default 480px)
-        quality: WebP quality 1-100 (default 75)
+        max_width: Maximum preview width (default 1280px — Claude vision optimal)
+        quality: WebP quality 1-100 (default 80)
 
     Returns:
-        Tuple of (webp_bytes, width, height). Output should be ≤100KB.
+        Tuple of (webp_bytes, width, height).
     """
     from PIL import Image
     import io
@@ -213,21 +221,20 @@ def _create_bitmapinfo(width: int, height: int) -> ctypes.Structure:
 
 def _process_screenshot(
     raw_png_bytes: bytes,
-    max_width: int = 1024,
+    max_width: int = SCREENSHOT_MAX_WIDTH,
     format: str = "webp",
-    quality: int = 75,
+    quality: int = SCREENSHOT_QUALITY,
 ) -> tuple[bytes, int, int, str]:
     """Downsample and convert screenshot to optimal format for LLM consumption.
 
     Uses WebP by default — 25-35% smaller than JPEG with better text/edge quality.
-    Resolution capped at 1024px (Anthropic Computer Use sweet spot; Claude vision
-    auto-downsamples above 1568px anyway).
+    Configurable via NETCOREDBG_SCREENSHOT_MAX_WIDTH and NETCOREDBG_SCREENSHOT_QUALITY.
 
     Args:
         raw_png_bytes: Raw PNG capture from Win32
-        max_width: Maximum width (default 1024 — Computer Use recommended)
+        max_width: Maximum width (default from NETCOREDBG_SCREENSHOT_MAX_WIDTH)
         format: Output format: "webp" (recommended), "jpeg", "png"
-        quality: Compression quality for lossy formats (default 75)
+        quality: Compression quality for lossy formats (default from NETCOREDBG_SCREENSHOT_QUALITY)
 
     Returns:
         Tuple of (image_bytes, final_width, final_height, mime_type)
@@ -263,9 +270,9 @@ def _process_screenshot(
 
 def capture_window_for_llm(
     hwnd: int,
-    max_width: int = 1024,
+    max_width: int = SCREENSHOT_MAX_WIDTH,
     format: str = "webp",
-    quality: int = 75,
+    quality: int = SCREENSHOT_QUALITY,
     save_dir: str | None = None,
 ) -> dict[str, Any]:
     """Capture window screenshot optimized for LLM consumption.
@@ -314,7 +321,7 @@ def capture_window_for_llm(
 
 # Keep backward-compatible alias
 def capture_window_as_base64(
-    hwnd: int, max_width: int = 1024,
+    hwnd: int, max_width: int = SCREENSHOT_MAX_WIDTH,
 ) -> dict[str, Any]:
     """Legacy alias for capture_window_for_llm."""
     return capture_window_for_llm(hwnd, max_width=max_width)

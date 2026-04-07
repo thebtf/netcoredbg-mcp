@@ -678,14 +678,13 @@ def register_ui_tools(
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def ui_take_screenshot(
         ctx: Context,
-        max_width: int = 1024,
+        max_width: int = 1280,
         format: str = "webp",
     ) -> Any:
         """Take a screenshot of the debugged application's window.
 
-        Returns inline ImageContent (WebP preview ≤480px) directly to your
-        vision pipeline, plus TextContent with metadata and HD file path.
-        The HD file can be read with the Read tool for full resolution.
+        Returns inline ImageContent (WebP at max_width resolution) directly
+        to your vision pipeline, plus TextContent with metadata and HD file path.
 
         Use this to see the actual UI state — what the user would see.
 
@@ -695,8 +694,10 @@ def register_ui_tools(
         - Understanding visual layout and spacing
         - Debugging rendering issues
 
+        Note: If app is STOPPED at breakpoint, the UI is frozen. Resume with continue_execution() first.
+
         Args:
-            max_width: Maximum image width (default 1024 — optimal for Claude vision)
+            max_width: Maximum image width (default 1280 — optimal for Claude vision, max useful is 1568)
             format: Image format: "webp" (smallest), "jpeg", "png"
         """
         _VALID_FORMATS = {"webp", "jpeg", "png"}
@@ -734,9 +735,9 @@ def register_ui_tools(
                 None, lambda: _process_screenshot(png_bytes, max_width=max_width, format=safe_format),
             )
 
-            # Create inline preview (≤480px WebP)
+            # Create inline preview (≤1280px WebP — Claude vision optimal)
             preview_bytes, preview_w, _ = await loop.run_in_executor(
-                None, lambda: create_preview(png_bytes, max_width=480, quality=75),
+                None, lambda: create_preview(png_bytes, max_width=max_width, quality=80),
             )
 
             # Save HD to session temp dir
@@ -777,7 +778,7 @@ def register_ui_tools(
         ctx: Context,
         max_depth: int = 3,
         interactive_only: bool = True,
-        max_width: int = 1024,
+        max_width: int = 1280,
         format: str = "webp",
         compact: bool = True,
     ) -> Any:
@@ -871,9 +872,9 @@ def register_ui_tools(
                 None, lambda: _process_screenshot(annotated_bytes, max_width=max_width, format=safe_format),
             )
 
-            # Create inline preview (≤480px WebP) — in executor to avoid blocking loop
+            # Create inline preview (≤max_width WebP) — in executor to avoid blocking loop
             preview_bytes, preview_w, _ = await loop.run_in_executor(
-                None, lambda: create_preview(annotated_bytes, max_width=480, quality=75),
+                None, lambda: create_preview(annotated_bytes, max_width=max_width, quality=80),
             )
 
             # Build element index — compact (id+name) or full (id+name+type+automationId)
