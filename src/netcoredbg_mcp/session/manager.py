@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -631,7 +632,11 @@ class SessionManager:
         """
         self._execution_event = asyncio.Event()
 
-    async def wait_for_stopped(self, timeout: float = 30.0) -> StoppedSnapshot:
+    async def wait_for_stopped(
+        self,
+        timeout: float = 30.0,
+        heartbeat_callback: Callable[[float], Awaitable[None]] | None = None,
+    ) -> StoppedSnapshot:
         """Wait for execution to stop (breakpoint, step, exception, or termination).
 
         Blocks until a DAP stopped/terminated/exited event fires, or timeout expires.
@@ -640,31 +645,52 @@ class SessionManager:
         Args:
             timeout: Maximum seconds to wait. On timeout, returns snapshot with
                      timed_out=True and the current state (likely still RUNNING).
+            heartbeat_callback: Optional async callable invoked every ~5s while waiting,
+                                 receiving elapsed seconds. Exceptions are suppressed.
 
         Returns:
             StoppedSnapshot with the state at the moment execution stopped.
         """
-        try:
-            await asyncio.wait_for(self._execution_event.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
-            process_alive = (
-                self._client.is_running
-                and self._state.process_id is not None
-            )
-            logger.warning(
-                f"wait_for_stopped timed out after {timeout}s "
-                f"(state={self._state.state.value}, process_alive={process_alive})"
-            )
-            return StoppedSnapshot(
-                state=self._state.state,
-                stop_reason=self._state.stop_reason,
-                thread_id=self._state.current_thread_id,
-                timed_out=True,
-                exit_code=self._state.exit_code,
-                process_alive=process_alive,
-                description=self._state.stop_description,
-                text=self._state.stop_text,
-            )
+        start_time = time.monotonic()
+        heartbeat_interval = 5.0
+
+        while True:
+            remaining = timeout - (time.monotonic() - start_time)
+            if remaining <= 0:
+                process_alive = (
+                    self._client.is_running
+                    and self._state.process_id is not None
+                )
+                logger.warning(
+                    f"wait_for_stopped timed out after {timeout}s "
+                    f"(state={self._state.state.value}, process_alive={process_alive})"
+                )
+                return StoppedSnapshot(
+                    state=self._state.state,
+                    stop_reason=self._state.stop_reason,
+                    thread_id=self._state.current_thread_id,
+                    timed_out=True,
+                    exit_code=self._state.exit_code,
+                    process_alive=process_alive,
+                    description=self._state.stop_description,
+                    text=self._state.stop_text,
+                )
+
+            wait_time = min(heartbeat_interval, remaining)
+            try:
+                await asyncio.wait_for(self._execution_event.wait(), timeout=wait_time)
+                break  # Event fired — stopped
+            except asyncio.TimeoutError:
+                if self._execution_event.is_set():
+                    break
+                # Not stopped yet — fire heartbeat
+                elapsed = time.monotonic() - start_time
+                if heartbeat_callback:
+                    try:
+                        await heartbeat_callback(elapsed)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("heartbeat_callback raised %s: %s", type(exc).__name__, exc)
+                # Continue waiting
 
         return StoppedSnapshot(
             state=self._state.state,
@@ -732,6 +758,7 @@ class SessionManager:
         configuration: str = "Debug",
         restore_first: bool = True,
         timeout: float = 300.0,
+        output_callback: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> BuildResult:
         """Execute pre-launch build sequence (restore + build).
 
@@ -763,6 +790,7 @@ class SessionManager:
             configuration=configuration,
             restore_first=restore_first,
             timeout=timeout,
+            output_callback=output_callback,
         )
         self._last_build_result = result
         return result
@@ -778,6 +806,7 @@ class SessionManager:
         build_project: str | None = None,
         build_configuration: str = "Debug",
         progress_callback: Callable[[float, float, str], Awaitable[None]] | None = None,
+        output_callback: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         """Launch program for debugging.
 
@@ -821,6 +850,7 @@ class SessionManager:
             await self.pre_launch_build(
                 project_file=build_project,
                 configuration=build_configuration,
+                output_callback=output_callback,
             )
 
             await report(50, 100, "Build complete, starting debugger...")

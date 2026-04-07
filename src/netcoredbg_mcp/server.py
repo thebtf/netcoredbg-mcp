@@ -168,9 +168,46 @@ def create_server(project_path: str | None = None) -> FastMCP:
     ) -> dict:
         """Execute an action (continue/step), wait for stopped, return rich response."""
         try:
+            # Phase 1: Report resuming
+            try:
+                await ctx.report_progress(progress=0, total=100, message=f"{action_name}...")
+            except Exception:
+                pass
+
             session.prepare_for_execution()
             await action_coro
-            snapshot = await session.wait_for_stopped(timeout=timeout)
+
+            # Phase 2: Report waiting
+            try:
+                await ctx.report_progress(progress=30, total=100, message="Waiting for stop event...")
+            except Exception:
+                pass
+
+            # Heartbeat callback — fires every ~5s while waiting
+            async def heartbeat(elapsed: float) -> None:
+                try:
+                    await ctx.report_progress(
+                        progress=30, total=100,
+                        message=f"Still waiting... ({elapsed:.0f}s)",
+                    )
+                except Exception:
+                    pass
+
+            snapshot = await session.wait_for_stopped(timeout=timeout, heartbeat_callback=heartbeat)
+
+            # Phase 3: Report result
+            try:
+                if snapshot.timed_out:
+                    msg = f"Timed out waiting ({timeout:.0f}s) — program still running"
+                elif snapshot.state == DebugState.TERMINATED:
+                    msg = f"Program terminated (exit code: {snapshot.exit_code})"
+                else:
+                    reason = snapshot.stop_reason or "unknown"
+                    msg = f"Program stopped: {reason}"
+                await ctx.report_progress(progress=100, total=100, message=msg)
+            except Exception:
+                pass
+
             response = _build_stopped_response(snapshot, action_name)
 
             # Add source context if stopped at a known location

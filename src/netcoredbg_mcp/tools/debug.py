@@ -103,7 +103,35 @@ def register_debug_tools(
 
             # Progress callback to report to MCP client
             async def report_progress(progress: float, total: float, message: str) -> None:
-                await ctx.report_progress(progress=progress, total=total, message=message)
+                try:
+                    await ctx.report_progress(progress=progress, total=total, message=message)
+                except Exception:
+                    pass
+
+            # Build output streaming callback
+            _notify_failed = False
+            _line_count = 0
+            MAX_BUILD_LINES = 500
+
+            async def on_build_output(line: str, stream: str) -> None:
+                nonlocal _notify_failed, _line_count
+                if _notify_failed:
+                    return
+                _line_count += 1
+                if _line_count <= MAX_BUILD_LINES:
+                    try:
+                        if stream == "stderr":
+                            await ctx.warning(line)
+                        else:
+                            await ctx.info(line)
+                    except Exception:
+                        _notify_failed = True
+                        logger.warning("MCP notification failed, suppressing further notifications")
+                elif _line_count == MAX_BUILD_LINES + 1:
+                    try:
+                        await ctx.info(f"... ({_line_count}+ build lines, showing first {MAX_BUILD_LINES})")
+                    except Exception:
+                        _notify_failed = True
 
             result = await session.launch(
                 program=validated_program,
@@ -115,6 +143,7 @@ def register_debug_tools(
                 build_project=validated_build_project,
                 build_configuration=build_configuration,
                 progress_callback=report_progress,
+                output_callback=on_build_output,
             )
             await notify_state_changed(ctx)
 
@@ -203,7 +232,21 @@ def register_debug_tools(
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
 
+            try:
+                if rebuild:
+                    await ctx.report_progress(progress=0, total=100, message="Rebuilding and restarting...")
+                else:
+                    await ctx.report_progress(progress=0, total=100, message="Restarting without rebuild...")
+            except Exception:
+                pass
+
             result = await session.restart(rebuild=rebuild)
+
+            try:
+                await ctx.report_progress(progress=100, total=100, message="Debug session restarted")
+            except Exception:
+                pass
+
             await notify_state_changed(ctx)
 
             # Detect app type for hints
