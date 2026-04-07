@@ -239,7 +239,21 @@ def register_debug_tools(
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
 
+            try:
+                if rebuild:
+                    await ctx.report_progress(progress=0, total=100, message="Rebuilding and restarting...")
+                else:
+                    await ctx.report_progress(progress=0, total=100, message="Restarting without rebuild...")
+            except Exception:
+                pass
+
             result = await session.restart(rebuild=rebuild)
+
+            try:
+                await ctx.report_progress(progress=100, total=100, message="Debug session restarted")
+            except Exception:
+                pass
+
             await notify_state_changed(ctx)
 
             # Detect app type for hints
