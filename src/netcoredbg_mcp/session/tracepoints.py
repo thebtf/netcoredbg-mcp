@@ -100,7 +100,7 @@ class TracepointManager:
         if not file:
             return None
         normalized = self._normalize_path(file)
-        filename = os.path.basename(file).lower()
+        filename = os.path.normcase(os.path.basename(file))
 
         # Stage 1: full path match
         for tp in self._tracepoints.values():
@@ -112,10 +112,12 @@ class TracepointManager:
                 return tp
 
         # Stage 2: filename-only fallback (PDB may store different directory)
+        # Uses os.path.normcase for platform-correct comparison (case-insensitive
+        # on Windows, case-sensitive on Linux/macOS)
         for tp in self._tracepoints.values():
             if not tp.active or tp.line != line:
                 continue
-            tp_filename = os.path.basename(tp.file).lower()
+            tp_filename = os.path.normcase(os.path.basename(tp.file))
             if tp_filename == filename:
                 logger.info(
                     "Tracepoint %s matched by filename fallback: frame=%s tp=%s line=%d",
