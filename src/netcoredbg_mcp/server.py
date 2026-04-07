@@ -199,6 +199,8 @@ def create_server(project_path: str | None = None) -> FastMCP:
             try:
                 if snapshot.timed_out:
                     msg = f"Timed out waiting ({timeout:.0f}s) — program still running"
+                elif snapshot.state == DebugState.TERMINATED:
+                    msg = f"Program terminated (exit code: {snapshot.exit_code})"
                 else:
                     reason = snapshot.stop_reason or "unknown"
                     msg = f"Program stopped: {reason}"
