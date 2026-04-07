@@ -460,3 +460,50 @@ class TestWorktreeAndEnvPaths:
             policy = BuildPolicy(workspace_root=str(workspace))
             paths = policy._get_allowed_worktree_paths()
             assert paths == []
+
+    def test_prunable_worktrees_excluded(self, tmp_path):
+        """Worktrees marked prunable are filtered out."""
+        from unittest.mock import patch
+        import subprocess
+
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        active_wt = tmp_path / "wt-active"
+        active_wt.mkdir()
+        prunable_wt = tmp_path / "wt-prunable"
+        prunable_wt.mkdir()
+
+        porcelain = (
+            f"worktree {workspace}\nHEAD abc\nbranch refs/heads/main\n\n"
+            f"worktree {active_wt}\nHEAD def\nbranch refs/heads/feat\n\n"
+            f"worktree {prunable_wt}\nHEAD ghi\nprunable gitdir file/path points to non-existent location\n\n"
+        )
+        mock_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=porcelain, stderr="",
+        )
+        with patch("subprocess.run", return_value=mock_result):
+            policy = BuildPolicy(workspace_root=str(workspace))
+            paths = policy._get_allowed_worktree_paths()
+            assert str(active_wt) in [os.path.abspath(p) for p in paths]
+            assert str(prunable_wt) not in [os.path.abspath(p) for p in paths]
+
+    def test_nonexistent_worktree_dir_excluded(self, tmp_path):
+        """Worktrees pointing to non-existent directories are filtered out."""
+        from unittest.mock import patch
+        import subprocess
+
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        ghost_wt = tmp_path / "wt-ghost"  # NOT created — doesn't exist
+
+        porcelain = (
+            f"worktree {workspace}\nHEAD abc\nbranch refs/heads/main\n\n"
+            f"worktree {ghost_wt}\nHEAD def\nbranch refs/heads/old\n\n"
+        )
+        mock_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=porcelain, stderr="",
+        )
+        with patch("subprocess.run", return_value=mock_result):
+            policy = BuildPolicy(workspace_root=str(workspace))
+            paths = policy._get_allowed_worktree_paths()
+            assert str(ghost_wt) not in [os.path.abspath(p) for p in paths]

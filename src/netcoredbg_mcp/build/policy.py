@@ -259,12 +259,22 @@ class BuildPolicy:
             if result.returncode != 0:
                 self._worktree_cache = []
                 return self._worktree_cache
-            paths = []
-            for line in result.stdout.splitlines():
+            # Parse porcelain blocks (separated by blank lines).
+            # Skip entries marked "prunable" or whose directory doesn't exist.
+            paths: list[str] = []
+            current_path: str | None = None
+            prunable = False
+            for line in [*result.stdout.splitlines(), ""]:
                 if line.startswith("worktree "):
-                    wt_path = line[len("worktree "):].strip()
-                    if wt_path:
-                        paths.append(os.path.abspath(wt_path))
+                    current_path = line[len("worktree "):].strip()
+                    prunable = False
+                elif line.startswith("prunable "):
+                    prunable = True
+                elif not line and current_path:
+                    abs_path = os.path.abspath(current_path)
+                    if not prunable and os.path.isdir(abs_path):
+                        paths.append(abs_path)
+                    current_path = None
             self._worktree_cache = paths
             return self._worktree_cache
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
