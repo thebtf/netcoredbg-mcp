@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # NETCOREDBG_SCREENSHOT_MAX_WIDTH: Max inline preview width (default 1280, Claude vision optimal).
 # NETCOREDBG_SCREENSHOT_QUALITY: WebP/JPEG quality 1-100 (default 80).
 # Claude vision auto-downsamples above 1568px, so values > 1568 waste bandwidth.
-SCREENSHOT_MAX_WIDTH = int(os.environ.get("NETCOREDBG_SCREENSHOT_MAX_WIDTH", "1280"))
+SCREENSHOT_MAX_WIDTH = int(os.environ.get("NETCOREDBG_SCREENSHOT_MAX_WIDTH", "1568"))
 SCREENSHOT_QUALITY = int(os.environ.get("NETCOREDBG_SCREENSHOT_QUALITY", "80"))
 
 

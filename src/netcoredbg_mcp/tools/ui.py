@@ -678,7 +678,7 @@ def register_ui_tools(
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def ui_take_screenshot(
         ctx: Context,
-        max_width: int = 1280,
+        max_width: int = 1568,
         format: str = "webp",
     ) -> Any:
         """Take a screenshot of the debugged application's window.
@@ -778,7 +778,7 @@ def register_ui_tools(
         ctx: Context,
         max_depth: int = 3,
         interactive_only: bool = True,
-        max_width: int = 1280,
+        max_width: int = 1568,
         format: str = "webp",
         compact: bool = True,
     ) -> Any:
