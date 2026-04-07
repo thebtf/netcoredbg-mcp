@@ -1,13 +1,14 @@
 <Window x:Class="WpfSmokeApp.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="WPF Smoke Test" Height="500" Width="450"
+        Title="WPF Smoke Test" Height="620" Width="450"
         AutomationProperties.AutomationId="mainWindow">
 
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
@@ -61,8 +62,22 @@
             </StackPanel>
         </GroupBox>
 
+        <!-- DataGrid for select/read testing -->
+        <DataGrid Grid.Row="2" Margin="10,5" Height="120"
+                  AutomationProperties.AutomationId="dataGrid"
+                  AutoGenerateColumns="False"
+                  SelectionMode="Extended"
+                  IsReadOnly="True"
+                  ItemsSource="{Binding People}">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="*"/>
+                <DataGridTextColumn Header="Role" Binding="{Binding Role}" Width="*"/>
+                <DataGridTextColumn Header="Level" Binding="{Binding Level}" Width="*"/>
+            </DataGrid.Columns>
+        </DataGrid>
+
         <!-- Bottom panel (outside settingsPanel for disambiguation) -->
-        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="10,5">
+        <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="10,5">
             <!-- Duplicate-named button outside panel -->
             <Button Content="Action (Outside)" Margin="5,0"
                     AutomationProperties.AutomationId="btnAction"/>

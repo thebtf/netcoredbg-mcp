@@ -1,10 +1,10 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         x:Class="AvaloniaSmokeApp.MainWindow"
-        Title="Avalonia Smoke Test" Width="450" Height="500"
+        Title="Avalonia Smoke Test" Width="450" Height="620"
         AutomationProperties.AutomationId="mainWindow">
 
-    <Grid RowDefinitions="Auto,*,Auto">
+    <Grid RowDefinitions="Auto,*,Auto,Auto">
 
         <!-- Header -->
         <TextBlock Grid.Row="0" Text="Avalonia Smoke Test App" FontSize="18" FontWeight="Bold"
@@ -59,8 +59,21 @@
             </StackPanel>
         </Border>
 
+        <!-- DataGrid for select/read testing -->
+        <DataGrid Grid.Row="2" Margin="10,5" Height="120"
+                  AutomationProperties.AutomationId="dataGrid"
+                  SelectionMode="Extended"
+                  IsReadOnly="True"
+                  Name="DataGrid">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="*"/>
+                <DataGridTextColumn Header="Role" Binding="{Binding Role}" Width="*"/>
+                <DataGridTextColumn Header="Level" Binding="{Binding Level}" Width="*"/>
+            </DataGrid.Columns>
+        </DataGrid>
+
         <!-- Bottom panel (outside settingsPanel for disambiguation) -->
-        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="10,5">
+        <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="10,5">
             <!-- Duplicate-named button outside panel -->
             <Button Content="Action (Outside)" Margin="5,0"
                     AutomationProperties.AutomationId="btnAction"/>

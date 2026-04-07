@@ -233,10 +233,35 @@ public class Program
             }
         };
 
+        // DataGrid for select/read testing
+        var dataGrid = new DataGridView
+        {
+            Name = "dataGrid",
+            Location = new System.Drawing.Point(20, 300),
+            Width = 350,
+            Height = 120,
+            AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
+            SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+            MultiSelect = true,
+            ReadOnly = true,
+            AllowUserToAddRows = false,
+        };
+        dataGrid.AccessibleName = "dataGrid";
+        dataGrid.Columns.Add("Name", "Name");
+        dataGrid.Columns.Add("Role", "Role");
+        dataGrid.Columns.Add("Level", "Level");
+        dataGrid.Rows.Add("Alice", "Developer", "Senior");
+        dataGrid.Rows.Add("Bob", "Designer", "Mid");
+        dataGrid.Rows.Add("Charlie", "Manager", "Lead");
+        dataGrid.Rows.Add("Diana", "Tester", "Junior");
+        dataGrid.Rows.Add("Eve", "DevOps", "Senior");
+
+        form.Height = 470;
         form.Controls.Add(panel);
         form.Controls.Add(outerBtn);
         form.Controls.Add(actionBtnOutside);
         form.Controls.Add(fileDialogBtn);
+        form.Controls.Add(dataGrid);
 
         Console.WriteLine("GUI scenario started. Close the window to exit.");
         Application.Run(form);

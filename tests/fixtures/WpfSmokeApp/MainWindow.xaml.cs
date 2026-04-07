@@ -74,6 +74,15 @@ public class MainViewModel : INotifyPropertyChanged
         "Item 5",
     };
 
+    public ObservableCollection<PersonRow> People { get; } = new()
+    {
+        new("Alice", "Developer", "Senior"),
+        new("Bob", "Designer", "Mid"),
+        new("Charlie", "Manager", "Lead"),
+        new("Diana", "Tester", "Junior"),
+        new("Eve", "DevOps", "Senior"),
+    };
+
     public event PropertyChangedEventHandler? PropertyChanged;
 
     protected void OnPropertyChanged([CallerMemberName] string? name = null)
@@ -81,3 +90,5 @@ public class MainViewModel : INotifyPropertyChanged
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
     }
 }
+
+public record PersonRow(string Name, string Role, string Level);
