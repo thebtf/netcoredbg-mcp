@@ -807,13 +807,122 @@ async def test_tracepoint_performance():
         await m.stop()
 
 
+async def test_tracepoint_auto_resume():
+    """Scenario 17: Tracepoint auto-resume — tracepoint must NOT stop the app."""
+    print("\n--- Tracepoint Auto-Resume ---")
+
+    from netcoredbg_mcp.session.tracepoints import TracepointManager
+
+    m = await new_session()
+    try:
+        await m.launch(program=DLL, args=["hitcount"])
+
+        # Set up tracepoint manager with tracepoint on "sum += i" line
+        mgr = TracepointManager()
+        m._tracepoint_manager = mgr
+        tp_line = _find_line("sum += i")
+        tp = mgr.add(SOURCE, tp_line, "i")
+
+        # Set real DAP breakpoint for the tracepoint
+        await m.add_breakpoint(SOURCE, tp_line)
+
+        # Also set a REAL breakpoint on "return sum" to eventually stop
+        return_line = _find_line("return sum")
+        m.breakpoints.add(Breakpoint(file=SOURCE, line=return_line))
+        await m._sync_file_breakpoints(SOURCE)
+
+        # Continue — tracepoint should fire 10x silently, then stop at return_line
+        m.prepare_for_execution()
+        await m._client.continue_execution(m.state.current_thread_id or 1)
+        snapshot = await m.wait_for_stopped(timeout=15.0)
+
+        check("Stopped after tracepoints", snapshot is not None and not snapshot.timed_out)
+        check("Trace log has entries", len(mgr.get_log()) > 0, f"entries={len(mgr.get_log())}")
+
+        if mgr.get_log():
+            check("Tracepoint logged values", mgr.get_log()[0].value != "", f"value={mgr.get_log()[0].value}")
+
+    finally:
+        await m.stop()
+
+
+async def test_path_validation_worktrees():
+    """Scenario 18: Path validation accepts worktree-style paths."""
+    print("\n--- Path Validation ---")
+
+    m = await new_session()
+
+    # Test 1: Normal project path accepted
+    try:
+        validated = m.validate_path(SOURCE)
+        check("Normal path accepted", os.path.isabs(validated))
+    except ValueError as e:
+        check("Normal path accepted", False, str(e))
+
+    # Test 2: Env var override
+    old = os.environ.get("NETCOREDBG_ALLOWED_PATHS", "")
+    try:
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        os.environ["NETCOREDBG_ALLOWED_PATHS"] = tmp
+        validated = m.validate_path(os.path.join(tmp, "test.cs"))
+        check("Env allowed path accepted", os.path.isabs(validated))
+    except ValueError as e:
+        check("Env allowed path accepted", False, str(e))
+    finally:
+        os.environ["NETCOREDBG_ALLOWED_PATHS"] = old
+
+    # Test 3: Outside path rejected (only when project_path is set)
+    if m.project_path:
+        try:
+            m.validate_path("C:\\Windows\\System32\\cmd.exe")
+            check("Outside path rejected", False, "should have raised ValueError")
+        except ValueError:
+            check("Outside path rejected", True)
+    else:
+        check("Outside path rejected (skipped — no project_path)", True, "scope check requires project_path")
+
+
+async def test_heartbeat_during_wait():
+    """Scenario 19: Heartbeat fires during long wait_for_stopped."""
+    print("\n--- Heartbeat During Wait ---")
+
+    import time as _time
+
+    m = await new_session()
+    try:
+        await m.launch(program=DLL, args=["longrun"])
+        await asyncio.sleep(0.5)
+
+        # Wait with heartbeat — longrun takes ~6s, so heartbeat should fire at least once
+        heartbeats = []
+
+        async def on_heartbeat(elapsed: float) -> None:
+            heartbeats.append(elapsed)
+
+        m.prepare_for_execution()
+        await m._client.continue_execution(m.state.current_thread_id or 1)
+
+        t0 = _time.monotonic()
+        snapshot = await m.wait_for_stopped(timeout=15.0, heartbeat_callback=on_heartbeat)
+        elapsed = _time.monotonic() - t0
+
+        check("Long run completed", snapshot is not None)
+        check("Heartbeat fired", len(heartbeats) >= 1, f"count={len(heartbeats)}")
+        check("Heartbeat timing reasonable", heartbeats[0] >= 4.0 if heartbeats else False,
+              f"first={heartbeats[0]:.1f}s" if heartbeats else "none")
+
+    finally:
+        await m.stop()
+
+
 async def run_all():
     if not os.path.exists(DLL):
         print(f"ERROR: Build SmokeTestApp first:")
         print(f"  dotnet build tests/fixtures/SmokeTestApp -c Debug")
         return False
 
-    print("=== SMOKE TEST: netcoredbg-mcp v0.5.1 ===")
+    print("=== SMOKE TEST: netcoredbg-mcp v0.6.0 ===")
     print(f"DLL: {DLL}")
     print(f"Source: {SOURCE}")
 
@@ -832,6 +941,9 @@ async def run_all():
         ("Snapshots", test_snapshots),
         ("Collection + Object Analysis", test_collection_and_object),
         ("Tracepoint Performance", test_tracepoint_performance),
+        ("Tracepoint Auto-Resume", test_tracepoint_auto_resume),
+        ("Path Validation", test_path_validation_worktrees),
+        ("Heartbeat During Wait", test_heartbeat_during_wait),
     ]
 
     if GUI_ENABLED:
