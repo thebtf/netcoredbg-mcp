@@ -436,9 +436,14 @@ class SessionManager:
             return
         logger.debug("_check_tracepoint: matched tracepoint %s, evaluating", tp.id)
 
-        # Check whether a user-defined breakpoint also exists at this location.
+        # Check whether a USER-defined breakpoint (not tracepoint-owned) exists here.
+        # Tracepoints add their own DAP breakpoint — exclude those from the check.
+        tracepoint_lines = {t.line for t in mgr.tracepoints.values() if t.active}
         user_bps = self._breakpoints.get_for_file(top.source)
-        has_user_breakpoint = any(bp.line == top.line for bp in user_bps)
+        has_user_breakpoint = any(
+            bp.line == top.line and bp.line not in tracepoint_lines
+            for bp in user_bps
+        )
 
         if has_user_breakpoint:
             self._set_state(DebugState.STOPPED)
