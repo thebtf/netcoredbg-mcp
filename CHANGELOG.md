@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.4] - 2026-04-07
+
+### Fixed
+- **Git worktree support** — `validate_project_path` and `validate_output_path` now accept paths in git worktrees (#31)
+- Auto-detect worktrees via `git worktree list --porcelain` (cached, 5s timeout)
+- `NETCOREDBG_ALLOWED_PATHS` env var for additional allowed path prefixes
+- Filter prunable worktrees and verify directory exists before allowing
+- Tracepoint timeout guards (5s on `_check_tracepoint`, 3s on `_update_hit_count`)
+- Debug logging for tracepoint path matching diagnostics
+
 ## [0.5.3] - 2026-04-05
 
 ### Added
