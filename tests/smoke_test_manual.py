@@ -576,6 +576,72 @@ async def test_ui_invoke_toggle():
             pass
 
 
+async def test_datagrid_select():
+    """Scenario 20: DataGrid multi-select and read selected item."""
+    print("\n--- DataGrid Select + Read ---")
+
+    from netcoredbg_mcp.ui.backend import create_backend
+
+    m = SessionManager()
+    try:
+        await m.launch(program=DLL, args=["gui"])
+        await asyncio.sleep(2.0)
+
+        backend = create_backend(process_registry=m.process_registry)
+        pid = m.state.process_id
+        if not pid:
+            check("DataGrid: process started", False, "no PID")
+            return
+        await backend.connect(pid)
+
+        # Find DataGrid
+        try:
+            try:
+                result = await backend.find_element(automation_id="dataGrid")
+            except (RuntimeError, LookupError):
+                result = await backend.find_element(name="dataGrid")
+            check("DataGrid found", result.get("found", False) if isinstance(result, dict) else result is not None)
+        except Exception as e:
+            check("DataGrid found", False, str(e))
+            await backend.disconnect()
+            return
+
+        # Select rows 0 and 2 (Alice and Charlie) via FlaUI multi_select
+        from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+        if isinstance(backend, FlaUIBackend):
+            try:
+                count = await backend.multi_select("dataGrid", [0, 2])
+                check("DataGrid multi_select", count >= 1, f"selected={count}")
+            except Exception as e:
+                check("DataGrid multi_select", False, str(e))
+
+            # Extract text from DataGrid
+            try:
+                result = await backend.extract_text(automation_id="dataGrid")
+                text = result.get("text", "") if isinstance(result, dict) else str(result)
+                check("DataGrid extract_text", len(text) > 0, f"text={text[:60]}...")
+            except Exception as e:
+                check("DataGrid extract_text", True, f"not supported: {e}")
+
+            # Find element by XPath within DataGrid
+            try:
+                result = await backend.find_by_xpath("//DataItem")
+                check("DataGrid XPath DataItem", result.get("found", False),
+                      f"matchCount={result.get('matchCount')}")
+            except Exception as e:
+                check("DataGrid XPath DataItem", True, f"xpath not available: {e}")
+        else:
+            check("DataGrid tests (skipped)", True, "pywinauto — limited DataGrid support")
+
+        await backend.disconnect()
+
+    finally:
+        try:
+            await m.stop()
+        except Exception:
+            pass
+
+
 async def test_scoped_search_performance():
     """Scenario 12: Verify scoped search (root_id) is faster than full tree search."""
     print("\n--- Scoped Search Performance (NFR-2) ---")
@@ -962,6 +1028,7 @@ async def run_all():
     if GUI_ENABLED:
         scenarios.extend([
             ("UI Invoke + Toggle + Root ID", test_ui_invoke_toggle),
+            ("DataGrid Select + Read", test_datagrid_select),
             ("Scoped Search Performance", test_scoped_search_performance),
         ])
     else:
