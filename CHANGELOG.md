@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-04-07
+
+### Added
+- **MCP Progress Notifications** — all long-running tools now report real-time progress
+  - Build output streaming: each `dotnet build` line → `ctx.info()` (stdout) / `ctx.warning()` (stderr)
+  - Phase-level progress for `start_debug`: 9 phases from 0% to 100%
+  - Execution tool heartbeat: `continue_execution`, `step_*` report "Still waiting... (5s, 10s...)"
+  - `restart_debug` progress: rebuild/no-rebuild phases
+  - 500-line build output cap with summary
+  - Circuit breaker: suppress notifications on client disconnect
+  - Distinct messages for stopped/terminated/timed-out states
+
+### Fixed
+- Git worktree path validation (#31) + `NETCOREDBG_ALLOWED_PATHS` env var
+- mcp-mux isolation: `session-aware` → `isolated` (cross-project scope fix)
+- Tracepoint filename-only fallback matching + `os.path.normcase`
+- Tracepoint timeout guards (5s check, 3s hit count)
+- All hardcoded limits now configurable via 10 env vars
+
 ## [0.5.6] - 2026-04-07
 
 ### Fixed
