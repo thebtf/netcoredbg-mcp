@@ -215,43 +215,50 @@ class SessionManager:
             return False
 
     def _get_worktree_paths(self) -> list[str]:
-        """Auto-detect git worktree paths (cached)."""
+        """Auto-detect git worktree paths from filesystem (no subprocess).
+
+        Reads .git/worktrees/<name>/gitdir files directly instead of spawning
+        git subprocess. This avoids hangs when running inside daemon processes
+        where inherited stdin/env causes git to block on prompts.
+        """
         if not hasattr(self, '_worktree_cache'):
             self._worktree_cache: list[str] = []
             if self._project_path:
-                import subprocess
                 try:
+                    # Find the .git directory (could be file pointing to gitdir for worktrees)
+                    git_dir = os.path.join(self._project_path, ".git")
+                    if os.path.isfile(git_dir):
+                        # This is a worktree itself — read the gitdir pointer
+                        with open(git_dir) as f:
+                            content = f.read().strip()
+                        if content.startswith("gitdir: "):
+                            real_git_dir = os.path.abspath(
+                                os.path.join(self._project_path, content[len("gitdir: "):])
+                            )
+                            # Navigate up to the main .git directory
+                            # e.g., /main/.git/worktrees/wt-name → /main/.git
+                            git_dir = os.path.dirname(os.path.dirname(real_git_dir))
+
+                    worktrees_dir = os.path.join(git_dir, "worktrees")
+                    if os.path.isdir(worktrees_dir):
+                        for entry in os.listdir(worktrees_dir):
+                            gitdir_file = os.path.join(worktrees_dir, entry, "gitdir")
+                            if os.path.isfile(gitdir_file):
+                                try:
+                                    with open(gitdir_file) as f:
+                                        wt_gitdir = f.read().strip()
+                                    # gitdir contains path to <worktree>/.git
+                                    wt_path = os.path.dirname(os.path.abspath(wt_gitdir))
+                                    if os.path.isdir(wt_path):
+                                        self._worktree_cache.append(wt_path)
+                                except (OSError, ValueError):
+                                    continue
                     logger.debug(
-                        f"[worktree] running git worktree list in {self._project_path}"
+                        f"[worktree] found {len(self._worktree_cache)} worktrees "
+                        f"from {worktrees_dir}"
                     )
-                    result = subprocess.run(
-                        ["git", "worktree", "list", "--porcelain"],
-                        capture_output=True, text=True, timeout=5,
-                        cwd=self._project_path,
-                    )
-                    logger.debug(
-                        f"[worktree] git returned {result.returncode}, "
-                        f"stdout={len(result.stdout)} bytes"
-                    )
-                    if result.returncode == 0:
-                        current_path = None
-                        prunable = False
-                        for line in [*result.stdout.splitlines(), ""]:
-                            if line.startswith("worktree "):
-                                current_path = line[len("worktree "):].strip()
-                                prunable = False
-                            elif line.startswith("prunable "):
-                                prunable = True
-                            elif not line and current_path:
-                                abs_wt = os.path.abspath(current_path)
-                                if not prunable and os.path.isdir(abs_wt):
-                                    self._worktree_cache.append(abs_wt)
-                                current_path = None
-                    logger.debug(f"[worktree] found {len(self._worktree_cache)} worktrees")
-                except subprocess.TimeoutExpired:
-                    logger.warning("[worktree] git worktree list timed out after 5s")
-                except (FileNotFoundError, OSError) as e:
-                    logger.warning(f"[worktree] git not available: {e}")
+                except OSError as e:
+                    logger.debug(f"[worktree] cannot read worktrees: {e}")
         return self._worktree_cache
 
     @staticmethod
