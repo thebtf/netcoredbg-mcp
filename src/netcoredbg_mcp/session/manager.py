@@ -36,9 +36,9 @@ from .state import (
 
 logger = logging.getLogger(__name__)
 
-# Output buffer limits (security: prevent DoS)
-MAX_OUTPUT_BYTES = 10_000_000  # 10MB total buffer
-MAX_OUTPUT_ENTRY = 100_000  # 100KB per entry
+# Output buffer limits (security: prevent DoS). Configurable via env vars.
+MAX_OUTPUT_BYTES = int(os.environ.get("NETCOREDBG_MAX_OUTPUT_BYTES", "10000000"))  # 10MB default
+MAX_OUTPUT_ENTRY = int(os.environ.get("NETCOREDBG_MAX_OUTPUT_ENTRY", "100000"))  # 100KB default
 
 
 class SessionManager:

@@ -7,6 +7,7 @@ Supports diff between two snapshots to see added/removed/changed variables.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections import OrderedDict
 from typing import TYPE_CHECKING, Any
@@ -18,8 +19,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-MAX_SNAPSHOTS = 20
-MAX_VARIABLES_PER_SNAPSHOT = 200
+MAX_SNAPSHOTS = int(os.environ.get("NETCOREDBG_MAX_SNAPSHOTS", "20"))
+MAX_VARIABLES_PER_SNAPSHOT = int(os.environ.get("NETCOREDBG_MAX_VARS_PER_SNAPSHOT", "200"))
 
 
 class SnapshotManager:

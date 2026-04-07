@@ -9,6 +9,7 @@ mutating operations so only the session owner can control the debug session.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -18,7 +19,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # How long before an owning session is considered stale (seconds)
-SESSION_OWNERSHIP_TIMEOUT = 60.0
+SESSION_OWNERSHIP_TIMEOUT = float(os.environ.get("NETCOREDBG_SESSION_TIMEOUT", "60.0"))
 
 
 def get_mux_session_id(ctx: Context) -> str | None:

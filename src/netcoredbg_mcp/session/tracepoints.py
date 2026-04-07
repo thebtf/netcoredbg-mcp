@@ -21,9 +21,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-MAX_TRACE_ENTRIES = 1000
-EVALUATE_TIMEOUT_SECONDS = 0.5
-RATE_LIMIT_INTERVAL_SECONDS = 0.1  # Max 10 hits/sec per tracepoint
+MAX_TRACE_ENTRIES = int(os.environ.get("NETCOREDBG_MAX_TRACE_ENTRIES", "1000"))
+EVALUATE_TIMEOUT_SECONDS = float(os.environ.get("NETCOREDBG_EVALUATE_TIMEOUT", "0.5"))
+RATE_LIMIT_INTERVAL_SECONDS = float(os.environ.get("NETCOREDBG_RATE_LIMIT_INTERVAL", "0.1"))  # Max 10 hits/sec
 
 
 
