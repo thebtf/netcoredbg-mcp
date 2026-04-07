@@ -158,6 +158,11 @@ class SessionManager:
     def validate_path(self, path: str, must_exist: bool = False) -> str:
         """Validate path is within project scope.
 
+        Accepts paths within:
+        1. The project root directory
+        2. Git worktrees of the same repository (auto-detected)
+        3. Paths listed in NETCOREDBG_ALLOWED_PATHS env var (comma-separated)
+
         Args:
             path: Path to validate
             must_exist: If True, path must exist on filesystem
@@ -166,27 +171,82 @@ class SessionManager:
             Absolute path
 
         Raises:
-            ValueError: If path is invalid or outside project scope
+            ValueError: If path is invalid or outside all allowed scopes
         """
         # Resolve symlinks and normalize to absolute (security: prevent symlink traversal)
         abs_path = os.path.realpath(path)
 
-        # Check within project scope using os.path.commonpath
+        # Check within project scope
         if self._project_path:
             project_real = os.path.realpath(self._project_path)
-            try:
-                common = os.path.commonpath([abs_path, project_real])
-                if common != project_real:
-                    raise ValueError(f"Path outside project scope: {path}")
-            except ValueError as e:
-                # Different drives on Windows or other path issues
-                raise ValueError(f"Path outside project scope: {path}") from e
+
+            # Check 1: within project root
+            if self._is_path_within(abs_path, project_real):
+                pass  # OK
+            # Check 2: within git worktrees
+            elif any(self._is_path_within(abs_path, wt) for wt in self._get_worktree_paths()):
+                pass  # OK
+            # Check 3: within NETCOREDBG_ALLOWED_PATHS
+            elif any(self._is_path_within(abs_path, ap) for ap in self._get_env_allowed_paths()):
+                pass  # OK
+            else:
+                raise ValueError(
+                    f"Path outside project scope: {path}. "
+                    f"Set NETCOREDBG_ALLOWED_PATHS env var to add allowed path prefixes."
+                )
 
         # Check existence if required
         if must_exist and not os.path.exists(abs_path):
             raise ValueError(f"Path does not exist: {path}")
 
         return abs_path
+
+    @staticmethod
+    def _is_path_within(path: str, root: str) -> bool:
+        """Check if path is within root directory."""
+        try:
+            common = os.path.commonpath([path, root])
+            return common == root
+        except ValueError:
+            return False
+
+    def _get_worktree_paths(self) -> list[str]:
+        """Auto-detect git worktree paths (cached)."""
+        if not hasattr(self, '_worktree_cache'):
+            self._worktree_cache: list[str] = []
+            if self._project_path:
+                import subprocess
+                try:
+                    result = subprocess.run(
+                        ["git", "worktree", "list", "--porcelain"],
+                        capture_output=True, text=True, timeout=5,
+                        cwd=self._project_path,
+                    )
+                    if result.returncode == 0:
+                        current_path = None
+                        prunable = False
+                        for line in [*result.stdout.splitlines(), ""]:
+                            if line.startswith("worktree "):
+                                current_path = line[len("worktree "):].strip()
+                                prunable = False
+                            elif line.startswith("prunable "):
+                                prunable = True
+                            elif not line and current_path:
+                                abs_wt = os.path.abspath(current_path)
+                                if not prunable and os.path.isdir(abs_wt):
+                                    self._worktree_cache.append(abs_wt)
+                                current_path = None
+                except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                    pass
+        return self._worktree_cache
+
+    @staticmethod
+    def _get_env_allowed_paths() -> list[str]:
+        """Get additional allowed paths from NETCOREDBG_ALLOWED_PATHS env var."""
+        raw = os.environ.get("NETCOREDBG_ALLOWED_PATHS", "")
+        if not raw:
+            return []
+        return [os.path.abspath(p.strip()) for p in raw.split(",") if p.strip()]
 
     def validate_program(self, program: str, must_exist: bool = True) -> str:
         """Validate program is a .NET assembly within scope.

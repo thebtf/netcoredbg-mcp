@@ -128,7 +128,7 @@ async def main() -> None:
         async with stdio_server() as (read_stream, write_stream):
             init_options = mcp._mcp_server.create_initialization_options(
                 experimental_capabilities={
-                    "x-mux": {"sharing": "session-aware"},
+                    "x-mux": {"sharing": "isolated"},
                 },
             )
             await mcp._mcp_server.run(read_stream, write_stream, init_options)
