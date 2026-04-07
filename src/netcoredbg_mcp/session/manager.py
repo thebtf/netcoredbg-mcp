@@ -175,7 +175,9 @@ class SessionManager:
             ValueError: If path is invalid or outside all allowed scopes
         """
         # Resolve symlinks and normalize to absolute (security: prevent symlink traversal)
+        logger.debug(f"[validate_path] resolving: {path}")
         abs_path = os.path.realpath(path)
+        logger.debug(f"[validate_path] resolved to: {abs_path}")
 
         # Check within project scope
         if self._project_path:
@@ -183,14 +185,15 @@ class SessionManager:
 
             # Check 1: within project root
             if self._is_path_within(abs_path, project_real):
-                pass  # OK
+                logger.debug("[validate_path] within project root")
             # Check 2: within git worktrees
             elif any(self._is_path_within(abs_path, wt) for wt in self._get_worktree_paths()):
-                pass  # OK
+                logger.debug("[validate_path] within git worktree")
             # Check 3: within NETCOREDBG_ALLOWED_PATHS
             elif any(self._is_path_within(abs_path, ap) for ap in self._get_env_allowed_paths()):
-                pass  # OK
+                logger.debug("[validate_path] within NETCOREDBG_ALLOWED_PATHS")
             else:
+                logger.warning(f"[validate_path] REJECTED: {abs_path} outside all scopes")
                 raise ValueError(
                     f"Path outside project scope: {path}. "
                     f"Set NETCOREDBG_ALLOWED_PATHS env var to add allowed path prefixes."
@@ -218,10 +221,17 @@ class SessionManager:
             if self._project_path:
                 import subprocess
                 try:
+                    logger.debug(
+                        f"[worktree] running git worktree list in {self._project_path}"
+                    )
                     result = subprocess.run(
                         ["git", "worktree", "list", "--porcelain"],
                         capture_output=True, text=True, timeout=5,
                         cwd=self._project_path,
+                    )
+                    logger.debug(
+                        f"[worktree] git returned {result.returncode}, "
+                        f"stdout={len(result.stdout)} bytes"
                     )
                     if result.returncode == 0:
                         current_path = None
@@ -237,8 +247,11 @@ class SessionManager:
                                 if not prunable and os.path.isdir(abs_wt):
                                     self._worktree_cache.append(abs_wt)
                                 current_path = None
-                except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-                    pass
+                    logger.debug(f"[worktree] found {len(self._worktree_cache)} worktrees")
+                except subprocess.TimeoutExpired:
+                    logger.warning("[worktree] git worktree list timed out after 5s")
+                except (FileNotFoundError, OSError) as e:
+                    logger.warning(f"[worktree] git not available: {e}")
         return self._worktree_cache
 
     @staticmethod

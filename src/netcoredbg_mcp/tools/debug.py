@@ -94,7 +94,9 @@ def register_debug_tools(
                 return build_error_response(access_error, state=session.state.state)
 
             # Resolve project root from MCP context (may update session)
+            logger.debug("[start_debug] resolving project root...")
             await resolve_project_root(ctx, session)
+            logger.debug(f"[start_debug] project root: {session.project_path}")
 
             # Validate pre_build requires build_project
             if pre_build and not build_project:
@@ -106,17 +108,23 @@ def register_debug_tools(
 
             # Validate program path (security: prevent arbitrary execution)
             # If pre_build=True, don't require file to exist yet (build will create it)
+            logger.debug(f"[start_debug] validating program: {program}")
             validated_program = session.validate_program(program, must_exist=not pre_build)
+            logger.debug(f"[start_debug] program validated: {validated_program}")
 
             # Validate cwd if provided (for pre_build, cwd may not exist yet either)
             validated_cwd = cwd
             if cwd:
+                logger.debug(f"[start_debug] validating cwd: {cwd}")
                 validated_cwd = session.validate_path(cwd, must_exist=not pre_build)
+                logger.debug(f"[start_debug] cwd validated: {validated_cwd}")
 
             # Validate build_project if provided (must exist for build to work)
             validated_build_project = None
             if build_project:
+                logger.debug(f"[start_debug] validating build_project: {build_project}")
                 validated_build_project = session.validate_path(build_project, must_exist=True)
+                logger.debug(f"[start_debug] build_project validated: {validated_build_project}")
 
             # Progress callback to report to MCP client (timeout-protected)
             async def report_progress(progress: float, total: float, message: str) -> None:
