@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -15,11 +15,6 @@ class TestBuildOutputCallback:
     async def test_callback_receives_stdout_lines(self):
         """output_callback called with stdout lines."""
         from netcoredbg_mcp.build.session import BuildSession
-
-        session = BuildSession.__new__(BuildSession)
-        session._workspace_root = "."
-        session._current_process = None
-        session._job_handle = None
 
         lines_received = []
 
@@ -154,7 +149,7 @@ class TestHeartbeat:
             # Set event after first heartbeat to end wait
             mgr._execution_event.set()
 
-        snapshot = await mgr.wait_for_stopped(
+        _snapshot = await mgr.wait_for_stopped(
             timeout=30.0, heartbeat_callback=heartbeat,
         )
         assert len(heartbeats) >= 1

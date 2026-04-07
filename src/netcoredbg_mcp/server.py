@@ -196,9 +196,13 @@ def create_server(project_path: str | None = None) -> FastMCP:
             snapshot = await session.wait_for_stopped(timeout=timeout, heartbeat_callback=heartbeat)
 
             # Phase 3: Report result
-            reason = snapshot.stop_reason or "unknown"
             try:
-                await ctx.report_progress(progress=100, total=100, message=f"Program stopped: {reason}")
+                if snapshot.timed_out:
+                    msg = f"Timed out waiting ({timeout:.0f}s) — program still running"
+                else:
+                    reason = snapshot.stop_reason or "unknown"
+                    msg = f"Program stopped: {reason}"
+                await ctx.report_progress(progress=100, total=100, message=msg)
             except Exception:
                 pass
 

@@ -688,8 +688,8 @@ class SessionManager:
                 if heartbeat_callback:
                     try:
                         await heartbeat_callback(elapsed)
-                    except Exception:
-                        pass
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("heartbeat_callback raised %s: %s", type(exc).__name__, exc)
                 # Continue waiting
 
         return StoppedSnapshot(

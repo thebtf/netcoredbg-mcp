@@ -71,16 +71,6 @@ def register_debug_tools(
             build_project: Path to .csproj file (required when pre_build=True)
             build_configuration: Build configuration (Debug/Release)
         """
-        async def _safe_notify(ctx: Context, message: str, level: str = "info") -> None:
-            """Send MCP notification, silently handle disconnected client."""
-            try:
-                if level == "warning":
-                    await ctx.warning(message)
-                else:
-                    await ctx.info(message)
-            except Exception:
-                pass
-
         try:
             access_error = check_session_access(ctx)
             if access_error:
@@ -113,7 +103,10 @@ def register_debug_tools(
 
             # Progress callback to report to MCP client
             async def report_progress(progress: float, total: float, message: str) -> None:
-                await ctx.report_progress(progress=progress, total=total, message=message)
+                try:
+                    await ctx.report_progress(progress=progress, total=total, message=message)
+                except Exception:
+                    pass
 
             # Build output streaming callback
             _notify_failed = False

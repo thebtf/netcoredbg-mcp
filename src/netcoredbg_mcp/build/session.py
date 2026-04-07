@@ -278,8 +278,8 @@ class BuildSession:
                         if output_callback:
                             try:
                                 await output_callback(decoded.rstrip("\r\n"), stream_name)
-                            except Exception:
-                                pass  # Don't crash build if notification fails
+                            except Exception as exc:  # noqa: BLE001
+                                logger.debug("output_callback raised %s: %s", type(exc).__name__, exc)
                     except asyncio.TimeoutError:
                         if self._cancel_requested:
                             raise asyncio.CancelledError()
