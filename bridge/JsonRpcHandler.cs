@@ -37,6 +37,7 @@ public static class JsonRpcHandler
             ["double_click"] = ClickCommands.DoubleClick,
             ["drag"] = ClickCommands.Drag,
             ["send_keys"] = InputCommands.SendKeys,
+            ["send_keys_batch"] = InputCommands.SendKeysBatch,
             ["set_value"] = InputCommands.SetValue,
             ["multi_select"] = SelectionCommands.MultiSelect,
             ["expand_collapse"] = SelectionCommands.ExpandCollapse,

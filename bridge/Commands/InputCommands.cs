@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using FlaUI.Core;
@@ -11,6 +12,29 @@ namespace FlaUIBridge.Commands;
 
 public static partial class InputCommands
 {
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    private const int SW_RESTORE = 9;
+
+    /// <summary>
+    /// Ensure the main window is foreground before any SendInput operation.
+    /// Without this, keyboard/mouse input goes to the terminal instead.
+    /// </summary>
+    private static void EnsureForeground(AutomationElement? mainWindow)
+    {
+        if (mainWindow is null) return;
+        var hwnd = mainWindow.Properties.NativeWindowHandle.ValueOrDefault;
+        if (hwnd != IntPtr.Zero)
+        {
+            ShowWindow(hwnd, SW_RESTORE);
+            SetForegroundWindow(hwnd);
+        }
+    }
+
     private static readonly IReadOnlyDictionary<string, VirtualKeyShort> SpecialKeys =
         new Dictionary<string, VirtualKeyShort>(StringComparer.OrdinalIgnoreCase)
         {
@@ -49,6 +73,19 @@ public static partial class InputCommands
     {
         var keys = @params?["keys"]?.GetValue<string>()
             ?? throw new ArgumentException("Missing required parameter: keys");
+
+        // Ensure target window is foreground before sending keyboard input.
+        // Without this, SendInput goes to the terminal/IDE instead of the app.
+        EnsureForeground(mainWindow);
+
+        // If automationId provided, focus that specific element via UIA
+        var automationId = @params?["automationId"]?.GetValue<string>();
+        if (automationId is not null && mainWindow is not null)
+        {
+            var cf = new ConditionFactory(automation.PropertyLibrary);
+            var element = mainWindow.FindFirstDescendant(cf.ByAutomationId(automationId));
+            element?.Focus();
+        }
 
         var sent = new List<string>();
         var i = 0;
@@ -116,6 +153,92 @@ public static partial class InputCommands
         {
             ["sent"] = true,
             ["keys"] = string.Join("", sent)
+        };
+    }
+
+    /// <summary>
+    /// Send a batch of key sequences with delay between each, holding foreground
+    /// and element focus for the entire batch. Single MCP round-trip for N keystrokes.
+    /// </summary>
+    public static JsonNode SendKeysBatch(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
+    {
+        var keysArray = @params?["keys"]?.AsArray()
+            ?? throw new ArgumentException("Missing required parameter: keys (array of strings)");
+        var delayMs = @params?["delay_ms"]?.GetValue<int>() ?? 50;
+        var automationId = @params?["automationId"]?.GetValue<string>();
+
+        // Foreground once for entire batch
+        EnsureForeground(mainWindow);
+
+        // Focus target element once
+        AutomationElement? targetElement = null;
+        if (automationId is not null && mainWindow is not null)
+        {
+            var cf = new ConditionFactory(automation.PropertyLibrary);
+            targetElement = mainWindow.FindFirstDescendant(cf.ByAutomationId(automationId));
+            targetElement?.Focus();
+        }
+
+        var sentCount = 0;
+        foreach (var keyNode in keysArray)
+        {
+            var keyStr = keyNode?.GetValue<string>();
+            if (string.IsNullOrEmpty(keyStr)) continue;
+
+            // Re-verify foreground before each key (in case OS stole it)
+            EnsureForeground(mainWindow);
+            targetElement?.Focus();
+
+            // Parse and send single key sequence
+            var j = 0;
+            while (j < keyStr.Length)
+            {
+                switch (keyStr[j])
+                {
+                    case '^':
+                        j++;
+                        var ct = ConsumeNextToken(keyStr, ref j);
+                        Keyboard.Press(VirtualKeyShort.CONTROL);
+                        try { TypeToken(ct); } finally { Keyboard.Release(VirtualKeyShort.CONTROL); }
+                        break;
+                    case '%':
+                        j++;
+                        var at = ConsumeNextToken(keyStr, ref j);
+                        Keyboard.Press(VirtualKeyShort.ALT);
+                        try { TypeToken(at); } finally { Keyboard.Release(VirtualKeyShort.ALT); }
+                        break;
+                    case '+':
+                        j++;
+                        var st = ConsumeNextToken(keyStr, ref j);
+                        Keyboard.Press(VirtualKeyShort.SHIFT);
+                        try { TypeToken(st); } finally { Keyboard.Release(VirtualKeyShort.SHIFT); }
+                        break;
+                    case '{':
+                        var cb = keyStr.IndexOf('}', j);
+                        if (cb < 0) throw new ArgumentException($"Unclosed brace at {j}");
+                        var kn = keyStr[(j + 1)..cb];
+                        j = cb + 1;
+                        if (SpecialKeys.TryGetValue(kn, out var vk))
+                        { Keyboard.Press(vk); Keyboard.Release(vk); }
+                        else throw new ArgumentException($"Unknown key: {{{kn}}}");
+                        break;
+                    default:
+                        Keyboard.Type(keyStr[j].ToString());
+                        j++;
+                        break;
+                }
+            }
+
+            sentCount++;
+            if (delayMs > 0 && sentCount < keysArray.Count)
+                Thread.Sleep(delayMs);
+        }
+
+        return new JsonObject
+        {
+            ["sent"] = true,
+            ["count"] = sentCount,
+            ["delay_ms"] = delayMs
         };
     }
 

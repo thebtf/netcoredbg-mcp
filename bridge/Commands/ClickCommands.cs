@@ -11,6 +11,14 @@ namespace FlaUIBridge.Commands;
 
 public static class ClickCommands
 {
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    private const int SW_RESTORE = 9;
+
     public static JsonNode Click(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
         var automationId = @params?["automationId"]?.GetValue<string>();
@@ -25,6 +33,16 @@ public static class ClickCommands
 
         if (x is not null && y is not null)
         {
+            // Ensure target window is foreground for coordinate clicks
+            if (mainWindow is not null)
+            {
+                var hwnd = mainWindow.Properties.NativeWindowHandle.ValueOrDefault;
+                if (hwnd != IntPtr.Zero)
+                {
+                    ShowWindow(hwnd, SW_RESTORE);
+                    SetForegroundWindow(hwnd);
+                }
+            }
             Mouse.Click(new Point(x.Value, y.Value));
             return new JsonObject { ["clicked"] = true, ["x"] = x.Value, ["y"] = y.Value };
         }
