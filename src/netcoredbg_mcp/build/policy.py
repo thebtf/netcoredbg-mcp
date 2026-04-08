@@ -240,46 +240,47 @@ class BuildPolicy:
         return [os.path.abspath(p.strip()) for p in raw.split(",") if p.strip()]
 
     def _get_allowed_worktree_paths(self) -> list[str]:
-        """Auto-detect git worktree paths for the workspace repository.
+        """Auto-detect git worktree paths from filesystem (no subprocess).
 
-        Results are cached for the lifetime of the BuildPolicy instance
-        to avoid repeated subprocess calls.
+        Reads .git/worktrees/<name>/gitdir files directly instead of spawning
+        git subprocess. This avoids hangs when running inside daemon processes
+        where inherited stdin/env causes git to block.
+
+        Results are cached for the lifetime of the BuildPolicy instance.
         """
         if self._worktree_cache is not None:
             return self._worktree_cache
 
-        import subprocess
-
+        paths: list[str] = []
         try:
-            result = subprocess.run(
-                ["git", "worktree", "list", "--porcelain"],
-                capture_output=True, text=True, timeout=5,
-                cwd=self.workspace_root,
-            )
-            if result.returncode != 0:
-                self._worktree_cache = []
-                return self._worktree_cache
-            # Parse porcelain blocks (separated by blank lines).
-            # Skip entries marked "prunable" or whose directory doesn't exist.
-            paths: list[str] = []
-            current_path: str | None = None
-            prunable = False
-            for line in [*result.stdout.splitlines(), ""]:
-                if line.startswith("worktree "):
-                    current_path = line[len("worktree "):].strip()
-                    prunable = False
-                elif line.startswith("prunable "):
-                    prunable = True
-                elif not line and current_path:
-                    abs_path = os.path.abspath(current_path)
-                    if not prunable and os.path.isdir(abs_path):
-                        paths.append(abs_path)
-                    current_path = None
-            self._worktree_cache = paths
-            return self._worktree_cache
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            self._worktree_cache = []
-            return self._worktree_cache
+            git_dir = os.path.join(self.workspace_root, ".git")
+            if os.path.isfile(git_dir):
+                with open(git_dir) as f:
+                    content = f.read().strip()
+                if content.startswith("gitdir: "):
+                    real_git_dir = os.path.abspath(
+                        os.path.join(self.workspace_root, content[len("gitdir: "):])
+                    )
+                    git_dir = os.path.dirname(os.path.dirname(real_git_dir))
+
+            worktrees_dir = os.path.join(git_dir, "worktrees")
+            if os.path.isdir(worktrees_dir):
+                for entry in os.listdir(worktrees_dir):
+                    gitdir_file = os.path.join(worktrees_dir, entry, "gitdir")
+                    if os.path.isfile(gitdir_file):
+                        try:
+                            with open(gitdir_file) as f:
+                                wt_gitdir = f.read().strip()
+                            wt_path = os.path.dirname(os.path.abspath(wt_gitdir))
+                            if os.path.isdir(wt_path):
+                                paths.append(wt_path)
+                        except (OSError, ValueError):
+                            continue
+        except OSError:
+            pass
+
+        self._worktree_cache = paths
+        return self._worktree_cache
 
     def validate_output_path(self, output_path: str) -> str:
         """Validate output path is within allowed directories.
