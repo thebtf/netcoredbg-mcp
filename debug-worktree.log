@@ -1,0 +1,57 @@
+2026-04-08 00:29:24,531 asyncio DEBUG Using proactor: IocpProactor
+2026-04-08 00:29:24,619 netcoredbg_mcp.session.manager INFO [launch] phase 1/9: pre-build
+2026-04-08 00:29:24,620 netcoredbg_mcp.session.manager INFO [launch] phase 2/9: dotnet build
+2026-04-08 00:29:24,695 netcoredbg_mcp.build.session INFO Build state: idle -> building
+2026-04-08 00:29:24,725 netcoredbg_mcp.build.session INFO Running: dotnet restore D:\Dev\novascript-wt\test-wt\NovaScript.Wpf\NovaScript.Wpf.csproj --interactive false
+2026-04-08 00:29:25,557 netcoredbg_mcp.build.session INFO Build state: building -> ready
+2026-04-08 00:29:25,557 netcoredbg_mcp.build.session INFO Build state: ready -> building
+2026-04-08 00:29:25,917 netcoredbg_mcp.build.cleanup INFO Killed all netcoredbg.exe processes
+2026-04-08 00:29:25,917 netcoredbg_mcp.build.cleanup DEBUG Found 1 project directories to clean
+2026-04-08 00:29:28,188 netcoredbg_mcp.build.cleanup INFO Cleanup complete: 1 processes terminated
+2026-04-08 00:29:28,188 netcoredbg_mcp.build.session INFO Pre-build cleanup: 1 processes killed
+2026-04-08 00:29:28,188 netcoredbg_mcp.build.session INFO Running: dotnet build D:\Dev\novascript-wt\test-wt\NovaScript.Wpf\NovaScript.Wpf.csproj -c Debug
+2026-04-08 00:29:29,761 netcoredbg_mcp.build.session INFO Build state: building -> ready
+2026-04-08 00:29:29,761 netcoredbg_mcp.session.manager INFO [launch] phase 3/9: build complete
+2026-04-08 00:29:29,761 netcoredbg_mcp.session.manager INFO Resolved .exe to .dll for .NET 6+ debugging: NovaScript.exe \u2192 NovaScript.dll
+2026-04-08 00:29:29,761 netcoredbg_mcp.session.manager INFO [launch] post-build program path: D:\Dev\novascript-wt\test-wt\NovaScript.Wpf\bin\Debug\net6.0-windows\NovaScript.dll
+2026-04-08 00:29:29,761 netcoredbg_mcp.session.manager INFO [launch] phase 4/9: version check
+2026-04-08 00:29:29,762 netcoredbg_mcp.utils.version DEBUG Detected target runtime version: 6.0.0
+2026-04-08 00:29:29,762 netcoredbg_mcp.utils.version DEBUG Detected dbgshim.dll version: 8.0.10.47301
+2026-04-08 00:29:29,762 netcoredbg_mcp.session.manager WARNING [VERSION MISMATCH] dbgshim.dll version mismatch: dbgshim is v8.x but target is .NET 6. This may cause E_NOINTERFACE (0x80004002) errors in get_call_stack. Copy dbgshim.dll from .NET 6 SDK to fix: "C:\Program Files\dotnet\shared\Microsoft.NETCore.App\6.x.x\"
+2026-04-08 00:29:29,762 netcoredbg_mcp.session.manager INFO [launch] phase 5/9: starting netcoredbg process
+2026-04-08 00:29:29,762 netcoredbg_mcp.dap.client INFO Starting netcoredbg: D:\Bin\netcoredbg\netcoredbg.exe
+2026-04-08 00:29:29,766 netcoredbg_mcp.dap.client INFO netcoredbg started with PID 71976
+2026-04-08 00:29:29,766 netcoredbg_mcp.process_registry INFO Registered process: PID=71976, role=netcoredbg, program=None
+2026-04-08 00:29:29,766 netcoredbg_mcp.session.manager INFO State changed: idle -> initializing
+2026-04-08 00:29:29,766 netcoredbg_mcp.dap.client DEBUG >>> initialize: {'clientID': 'netcoredbg-mcp', 'clientName': 'NetCoreDbg MCP Server', 'adapterID': 'coreclr', 'pathFormat': 'path', 'linesStartAt1': True, 'columnsStartAt1': True, 'supportsVariableType': True, 'supportsVariablePaging': False, 'supportsRunInTerminalRequest': False, 'supportsProgressReporting': False}
+2026-04-08 00:29:29,780 netcoredbg_mcp.dap.client DEBUG <<< Event capabilities: {'capabilities': {'exceptionBreakpointFilters': [{'filter': 'all', 'label': 'all'}, {'filter': 'user-unhandled', 'label': 'user-unhandled'}], 'supportTerminateDebuggee': True, 'supportsCancelRequest': True, 'supportsConditionalBreakpoints': True, 'supportsConfigurationDoneRequest': True, 'supportsExceptionFilterOptions': True, 'supportsExceptionInfoRequest': True, 'supportsExceptionOptions': False, 'supportsFunctionBreakpoints': True, 'supportsSetExpression': True, 'supportsSetVariable': True, 'supportsTerminateRequest': True}}
+2026-04-08 00:29:29,780 netcoredbg_mcp.dap.client DEBUG <<< Response initialize: success=True
+2026-04-08 00:29:29,780 netcoredbg_mcp.dap.client DEBUG <<< Event initialized: {}
+2026-04-08 00:29:29,780 netcoredbg_mcp.session.manager INFO DAP adapter initialized
+2026-04-08 00:29:29,780 netcoredbg_mcp.session.manager INFO DAP initialized, waiting for initialized event...
+2026-04-08 00:29:29,780 netcoredbg_mcp.session.manager INFO [launch] phase 6/9: waiting for DAP initialization
+2026-04-08 00:29:29,780 netcoredbg_mcp.session.manager INFO [launch] phase 7/9: syncing breakpoints
+2026-04-08 00:29:29,780 netcoredbg_mcp.dap.client DEBUG >>> setFunctionBreakpoints: {'breakpoints': []}
+2026-04-08 00:29:29,781 netcoredbg_mcp.dap.client DEBUG <<< Response setFunctionBreakpoints: success=True
+2026-04-08 00:29:29,781 netcoredbg_mcp.dap.client DEBUG >>> setExceptionBreakpoints: {'filters': []}
+2026-04-08 00:29:29,781 netcoredbg_mcp.dap.client DEBUG <<< Response setExceptionBreakpoints: success=True
+2026-04-08 00:29:29,781 netcoredbg_mcp.session.manager INFO [launch] phase 8/9: DAP launch command
+2026-04-08 00:29:29,781 netcoredbg_mcp.dap.client DEBUG >>> launch: {'program': 'D:\\Dev\\novascript-wt\\test-wt\\NovaScript.Wpf\\bin\\Debug\\net6.0-windows\\NovaScript.dll', 'cwd': 'D:/Dev/novascript-wt/test-wt/NovaScript.Wpf', 'args': [], 'env': {}, 'stopAtEntry': False, 'justMyCode': False}
+2026-04-08 00:29:29,782 netcoredbg_mcp.dap.client DEBUG <<< Response launch: success=True
+2026-04-08 00:29:29,782 netcoredbg_mcp.session.manager INFO [launch] phase 9/9: configuration done
+2026-04-08 00:29:29,782 netcoredbg_mcp.dap.client DEBUG >>> configurationDone: {}
+2026-04-08 00:29:29,919 netcoredbg_mcp.dap.client DEBUG <<< Event process: {'isLocalProcess': True, 'name': 'dotnet', 'startMethod': 'launch', 'systemProcessId': 57752}
+2026-04-08 00:29:29,919 netcoredbg_mcp.session.manager INFO Process started: PID=57752, name=dotnet
+2026-04-08 00:29:29,920 netcoredbg_mcp.process_registry INFO Registered process: PID=57752, role=debuggee, program=dotnet
+2026-04-08 00:29:29,920 netcoredbg_mcp.dap.client DEBUG <<< Response configurationDone: success=True
+2026-04-08 00:29:29,920 netcoredbg_mcp.session.manager INFO State changed: initializing -> running
+2026-04-08 00:29:29,920 netcoredbg_mcp.dap.client DEBUG >>> disconnect: {'terminateDebuggee': True}
+2026-04-08 00:29:29,946 netcoredbg_mcp.dap.client DEBUG <<< Event exited: {'exitCode': 0}
+2026-04-08 00:29:29,946 netcoredbg_mcp.session.manager INFO Process exited with code 0
+2026-04-08 00:29:29,946 netcoredbg_mcp.dap.client DEBUG <<< Event terminated: {}
+2026-04-08 00:29:29,946 netcoredbg_mcp.session.manager INFO State changed: running -> terminated
+2026-04-08 00:29:29,946 netcoredbg_mcp.session.manager INFO Debug session terminated
+2026-04-08 00:29:29,947 netcoredbg_mcp.dap.client DEBUG <<< Response disconnect: success=True
+2026-04-08 00:29:29,947 netcoredbg_mcp.dap.client WARNING Read loop exited, cleaning up process...
+2026-04-08 00:29:29,951 netcoredbg_mcp.dap.client INFO netcoredbg stopped
+2026-04-08 00:29:29,951 netcoredbg_mcp.session.manager INFO State changed: terminated -> idle

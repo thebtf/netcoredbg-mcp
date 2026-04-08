@@ -402,8 +402,8 @@ def register_inspection_tools(
             # Set a real DAP breakpoint on this line
             try:
                 bp_result = await session.add_breakpoint(norm_file, line)
-                if bp_result and isinstance(bp_result, dict):
-                    tp.breakpoint_id = bp_result.get("id")
+                if bp_result and hasattr(bp_result, "id"):
+                    tp.breakpoint_id = bp_result.id
             except Exception as e:
                 logger.warning("Failed to set DAP breakpoint for tracepoint %s: %s", tp.id, e)
 

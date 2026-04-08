@@ -214,6 +214,15 @@ class DAPClient:
                     logger.exception("Error reading DAP message")
                     break
         finally:
+            # Cancel all pending request futures immediately so callers don't
+            # hang for 30s waiting for a response from a dead process.
+            for future in self._pending.values():
+                if not future.done():
+                    future.set_exception(
+                        RuntimeError("netcoredbg process died — pending request cancelled")
+                    )
+            self._pending.clear()
+
             # Cleanup on read loop exit (handles zombie process)
             if self._process and self._process.returncode is None:
                 logger.warning("Read loop exited, cleaning up process...")

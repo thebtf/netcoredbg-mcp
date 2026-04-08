@@ -229,47 +229,50 @@ def register_ui_tools(
         """
         Set keyboard focus to a UI element.
 
-        Tries cached coordinates first (click to focus), then falls back to
-        pywinauto element search.
+        Uses UIA-based Focus() for FlaUI backend (monitor/DPI-agnostic),
+        or element search + set_focus for pywinauto backend.
 
         Call this before ui_send_keys to ensure keys go to the right element.
 
         Args:
-            automation_id: AutomationId property
-            name: Element's Name/Title property
-            control_type: Control type
+            automation_id: AutomationId property (FlaUI + pywinauto)
+            name: Element's Name/Title property (FlaUI + pywinauto)
+            control_type: Control type (pywinauto only)
+            root_id: Optional AutomationId to scope search (pywinauto only)
+            xpath: Optional XPath expression (pywinauto only)
         """
         try:
             access_error = check_session_access(ctx)
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
 
-            # Try cache first — click to set focus
-            if automation_id:
-                ui = await _ensure_ui_connected()
-                rect = (ui.element_cache.get(automation_id) or {}).get("rect")
-                if rect:
-                    cx = (rect["left"] + rect["right"]) // 2
-                    cy = (rect["top"] + rect["bottom"]) // 2
-                    await ui.click_at(cx, cy)
-                    return build_response(
-                        data={"focused": True, "method": "cache"},
-                        state=session.state.state,
-                    )
+            ui = await _ensure_ui_connected()
 
-            # Fallback: find element and click to focus
-            ui, element, _ = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
+            # Use UIA-based focus via bridge (DPI/monitor-agnostic)
+            from ..ui.flaui_client import FlaUIBackend
+            if isinstance(ui, FlaUIBackend):
+                params: dict = {}
+                if automation_id:
+                    params["automationId"] = automation_id
+                if name:
+                    params["name"] = name
+                result = await ui.client.call("set_focus", params)
+                return build_response(
+                    data=result if isinstance(result, dict) else {"focused": True, "method": "UIA.Focus"},
+                    state=session.state.state,
+                )
+
+            # Pywinauto fallback: find element and set focus
             from ..ui.pywinauto_backend import PywinautoBackend
             if isinstance(ui, PywinautoBackend):
+                _, element, _ = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
                 await ui.inner.set_focus(element)
-            else:
-                # FlaUI: find_element returns dict with rect, click center
-                rect = element.get("rect", {}) if isinstance(element, dict) else {}
-                if rect:
-                    cx = int(rect.get("x", 0) + rect.get("width", 0) / 2)
-                    cy = int(rect.get("y", 0) + rect.get("height", 0) / 2)
-                    await ui.click_at(cx, cy)
-            return build_response(data={"focused": True, "method": "element_search"}, state=session.state.state)
+                return build_response(
+                    data={"focused": True, "method": "pywinauto"},
+                    state=session.state.state,
+                )
+
+            return build_error_response("No UI backend available", state=session.state.state)
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
