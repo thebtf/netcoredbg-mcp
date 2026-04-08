@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import os
-import shutil
 from collections.abc import Callable
 from typing import Any
 
@@ -44,30 +43,13 @@ class DAPClient:
         return dict(self._capabilities)
 
     def _find_netcoredbg(self) -> str:
-        """Find netcoredbg executable."""
-        # Check environment variable
-        env_path = os.environ.get("NETCOREDBG_PATH")
-        if env_path and os.path.exists(env_path):
-            return env_path
+        """Find netcoredbg executable.
 
-        # Check relative to this package
-        package_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-        candidates = [
-            os.path.join(package_dir, "bin", "netcoredbg", "netcoredbg.exe"),
-            os.path.join(package_dir, "bin", "netcoredbg", "netcoredbg"),
-        ]
-        for path in candidates:
-            if os.path.exists(path):
-                return path
-
-        # Check system PATH using shutil.which
-        system_path = shutil.which("netcoredbg")
-        if system_path:
-            return system_path
-
-        raise FileNotFoundError(
-            "netcoredbg not found. Set NETCOREDBG_PATH environment variable."
-        )
+        Delegates to setup.netcoredbg.find_netcoredbg() which handles:
+        NETCOREDBG_PATH → ~/.netcoredbg-mcp/netcoredbg/ → PATH → auto-download
+        """
+        from ..setup.netcoredbg import find_netcoredbg
+        return find_netcoredbg()
 
     @property
     def is_running(self) -> bool:
