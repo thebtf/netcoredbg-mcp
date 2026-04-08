@@ -1071,13 +1071,30 @@ class SessionManager:
     async def _sync_function_breakpoints(self) -> None:
         """Sync function breakpoints to DAP."""
         bps = self._breakpoints.get_function_breakpoints()
+        if not bps:
+            return
+
+        # Check capability — some netcoredbg versions crash on this request
+        caps = self._client.capabilities
+        if not caps.get("supportsFunctionBreakpoints", False):
+            logger.warning(
+                "DAP adapter does not advertise supportsFunctionBreakpoints — "
+                "skipping function breakpoint sync to prevent crash"
+            )
+            return
+
         dap_bps = [bp.to_dap() for bp in bps]
         response = await self._client.set_function_breakpoints(dap_bps)
-        if response.success:
-            for i, dap_bp in enumerate(response.body.get("breakpoints", [])):
-                if i < len(bps):
-                    bps[i].verified = dap_bp.get("verified", False)
-                    bps[i].id = dap_bp.get("id")
+        if not response.success:
+            logger.warning(
+                "setFunctionBreakpoints failed: %s",
+                response.message or "unknown error",
+            )
+            return
+        for i, dap_bp in enumerate(response.body.get("breakpoints", [])):
+            if i < len(bps):
+                bps[i].verified = dap_bp.get("verified", False)
+                bps[i].id = dap_bp.get("id")
 
     async def _sync_file_breakpoints(self, file_path: str) -> None:
         """Sync breakpoints for a single file."""

@@ -46,6 +46,7 @@ public static class JsonRpcHandler
             ["find_by_xpath"] = ElementCommands.FindByXPath,
             ["find_all_cascade"] = ElementCommands.FindAllCascade,
             ["extract_text"] = ElementCommands.ExtractText,
+            ["set_focus"] = FocusCommands.SetFocus,
         };
 
     public static JsonNode Handle(string method, JsonNode? @params)
