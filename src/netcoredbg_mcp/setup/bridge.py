@@ -25,19 +25,27 @@ def find_bridge_source() -> Path | None:
     """Find the bridge C# source directory.
 
     Search order:
-    1. Package data (installed via pip — source in site-packages)
-    2. Repository (development mode — bridge/ next to src/)
+    1. Package data — sibling to this package in site-packages
+       (pip install puts bridge/ at <site-packages>/netcoredbg_mcp/bridge/)
+    2. Repository — bridge/ next to src/ in the repo root
 
     Returns:
         Path to directory containing FlaUIBridge.csproj, or None.
     """
-    # Walk up from this file to find bridge/ dir
-    current = Path(__file__).resolve()
-    for parent in current.parents:
+    # 1. Package data: <site-packages>/netcoredbg_mcp/bridge/
+    pkg_dir = Path(__file__).resolve().parent.parent  # setup/ → netcoredbg_mcp/
+    pkg_bridge = pkg_dir / "bridge" / _CSPROJ_NAME
+    if pkg_bridge.is_file():
+        logger.debug("Bridge source from package_data: %s", pkg_bridge.parent)
+        return pkg_bridge.parent
+
+    # 2. Repository: walk up to find bridge/ dir
+    for parent in Path(__file__).resolve().parents:
         csproj = parent / "bridge" / _CSPROJ_NAME
         if csproj.is_file():
-            logger.debug("Bridge source found: %s", csproj.parent)
+            logger.debug("Bridge source from repo: %s", csproj.parent)
             return csproj.parent
+
     return None
 
 
