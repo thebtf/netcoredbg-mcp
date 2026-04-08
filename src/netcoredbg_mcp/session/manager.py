@@ -901,8 +901,17 @@ class SessionManager:
         else:
             await report(0, 100, "Starting debugger...")
 
-        # Check dbgshim version compatibility (warns if mismatch)
-        logger.info("[launch] phase 4/9: version check")
+        # Try dynamic dbgshim swap before version check (eliminates mismatch)
+        logger.info("[launch] phase 4/9: dbgshim version management")
+        try:
+            from ..setup.dbgshim import select_and_swap_dbgshim
+            swapped = select_and_swap_dbgshim(program, self.netcoredbg_path)
+            if swapped:
+                logger.info("[launch] dbgshim swapped to match target runtime")
+        except Exception as e:
+            logger.debug("[launch] dbgshim swap skipped: %s", e)
+
+        # Check dbgshim version compatibility (warns if still mismatched)
         version_warning = self.check_dbgshim_compatibility(program)
 
         if not self._client.is_running:

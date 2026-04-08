@@ -21,7 +21,7 @@ class TestDAPClientInit:
     def test_init_from_env(self):
         """Test initialization from environment variable."""
         with patch.dict("os.environ", {"NETCOREDBG_PATH": "/env/netcoredbg"}):
-            with patch("os.path.exists", return_value=True):
+            with patch("os.path.isfile", return_value=True):
                 client = DAPClient()
                 assert client.netcoredbg_path == "/env/netcoredbg"
 

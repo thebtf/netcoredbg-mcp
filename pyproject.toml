@@ -48,6 +48,14 @@ Issues = "https://github.com/thebtf/netcoredbg-mcp/issues"
 [tool.hatch.build.targets.wheel]
 packages = ["src/netcoredbg_mcp"]
 
+[tool.hatch.build.targets.wheel.force-include]
+# Include FlaUI bridge C# source for auto-build on user's machine
+"bridge/Commands" = "netcoredbg_mcp/bridge/Commands"
+"bridge/FlaUIBridge.csproj" = "netcoredbg_mcp/bridge/FlaUIBridge.csproj"
+"bridge/JsonRpcHandler.cs" = "netcoredbg_mcp/bridge/JsonRpcHandler.cs"
+"bridge/Program.cs" = "netcoredbg_mcp/bridge/Program.cs"
+"bridge/app.manifest" = "netcoredbg_mcp/bridge/app.manifest"
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"

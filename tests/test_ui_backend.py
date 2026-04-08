@@ -6,56 +6,27 @@ from netcoredbg_mcp.ui.backend import find_flaui_bridge, create_backend
 
 
 class TestFindFlauiBridge:
-    """Tests for FlaUI bridge binary discovery."""
+    """Tests for FlaUI bridge binary discovery (delegates to setup.bridge)."""
 
-    def test_finds_via_env_var(self, tmp_path):
+    def test_delegates_to_setup_bridge(self, tmp_path):
+        """find_flaui_bridge delegates to setup.bridge.find_or_build_bridge."""
         bridge = tmp_path / "FlaUIBridge.exe"
         bridge.write_text("fake")
-
-        with patch.dict("os.environ", {"FLAUI_BRIDGE_PATH": str(bridge)}):
+        with patch(
+            "netcoredbg_mcp.setup.bridge.find_or_build_bridge",
+            return_value=str(bridge),
+        ):
             result = find_flaui_bridge()
-            assert result is not None
-            assert "FlaUIBridge.exe" in result
+            assert result == str(bridge)
 
-    def test_finds_next_to_netcoredbg(self, tmp_path):
-        bridge = tmp_path / "FlaUIBridge.exe"
-        bridge.write_text("fake")
-        netcoredbg = tmp_path / "netcoredbg.exe"
-        netcoredbg.write_text("fake")
-
-        with patch.dict("os.environ", {
-            "NETCOREDBG_PATH": str(netcoredbg),
-            "FLAUI_BRIDGE_PATH": "",
-        }):
+    def test_returns_none_when_not_found(self):
+        """Returns None when setup.bridge returns None."""
+        with patch(
+            "netcoredbg_mcp.setup.bridge.find_or_build_bridge",
+            return_value=None,
+        ):
             result = find_flaui_bridge()
-            assert result is not None
-
-    def test_returns_none_when_not_found(self, tmp_path):
-        with patch.dict("os.environ", {
-            "FLAUI_BRIDGE_PATH": "",
-            "NETCOREDBG_PATH": str(tmp_path / "nonexistent"),
-        }):
-            with patch("shutil.which", return_value=None):
-                with patch("netcoredbg_mcp.ui.backend.Path") as MockPath:
-                    # Make well-known path check return False
-                    MockPath.return_value.is_file.return_value = False
-                    MockPath.side_effect = lambda x: MagicMock(is_file=MagicMock(return_value=False))
-                    result = find_flaui_bridge()
-                    # On systems without D:\Bin\FlaUIBridge.exe this returns None
-                    # On systems with it, it returns a path — both are valid
-
-    def test_finds_on_path(self, tmp_path):
-        bridge = tmp_path / "FlaUIBridge.exe"
-        bridge.write_text("fake")
-
-        with patch.dict("os.environ", {
-            "FLAUI_BRIDGE_PATH": "",
-            "NETCOREDBG_PATH": "",
-        }):
-            with patch("shutil.which", return_value=str(bridge)):
-                result = find_flaui_bridge()
-                # May find well-known path first, but at minimum doesn't crash
-                assert result is None or "FlaUIBridge" in result
+            assert result is None
 
 
 class TestCreateBackend:
