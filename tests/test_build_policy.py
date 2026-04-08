@@ -411,11 +411,8 @@ class TestWorktreeAndEnvPaths:
         result = policy.validate_output_path(str(output))
         assert result == str(output)
 
-    def test_git_worktree_auto_detection(self, tmp_path, monkeypatch):
+    def test_git_worktree_auto_detection(self, tmp_path):
         """Paths in auto-detected git worktrees are accepted."""
-        from unittest.mock import patch
-        import subprocess
-
         workspace = tmp_path / "project"
         workspace.mkdir()
         worktree = tmp_path / "wt-feature"
@@ -423,87 +420,82 @@ class TestWorktreeAndEnvPaths:
         project = worktree / "App.csproj"
         project.touch()
 
-        # Mock git worktree list to return our worktree
-        porcelain_output = f"worktree {workspace}\nHEAD abc123\nbranch refs/heads/main\n\nworktree {worktree}\nHEAD def456\nbranch refs/heads/feature\n\n"
-        mock_result = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=porcelain_output, stderr="",
-        )
-        with patch("subprocess.run", return_value=mock_result):
-            policy = BuildPolicy(workspace_root=str(workspace))
-            result = policy.validate_project_path(str(project))
-            assert result == str(project)
+        # Create .git/worktrees/<name>/gitdir structure
+        git_dir = workspace / ".git"
+        git_dir.mkdir()
+        worktrees_dir = git_dir / "worktrees"
+        worktrees_dir.mkdir()
+        wt_entry = worktrees_dir / "wt-feature"
+        wt_entry.mkdir()
+        (wt_entry / "gitdir").write_text(str(worktree / ".git"))
+
+        policy = BuildPolicy(workspace_root=str(workspace))
+        result = policy.validate_project_path(str(project))
+        assert result == str(project)
 
     def test_worktree_cache(self, tmp_path):
         """Worktree paths are cached after first call."""
-        from unittest.mock import patch
-        import subprocess
-
         workspace = tmp_path / "project"
         workspace.mkdir()
-        mock_result = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=f"worktree {workspace}\n\n", stderr="",
-        )
-        with patch("subprocess.run", return_value=mock_result) as mock_run:
-            policy = BuildPolicy(workspace_root=str(workspace))
-            policy._get_allowed_worktree_paths()
-            policy._get_allowed_worktree_paths()
-            # subprocess.run called only once (cached)
-            assert mock_run.call_count == 1
+        git_dir = workspace / ".git"
+        git_dir.mkdir()
+        (git_dir / "worktrees").mkdir()
+
+        policy = BuildPolicy(workspace_root=str(workspace))
+        result1 = policy._get_allowed_worktree_paths()
+        result2 = policy._get_allowed_worktree_paths()
+        # Same object returned (cached)
+        assert result1 is result2
 
     def test_git_not_available(self, tmp_path):
-        """Graceful fallback when git is not available."""
-        from unittest.mock import patch
-
+        """Graceful fallback when .git directory doesn't exist."""
         workspace = tmp_path / "project"
         workspace.mkdir()
-        with patch("subprocess.run", side_effect=FileNotFoundError("git not found")):
-            policy = BuildPolicy(workspace_root=str(workspace))
-            paths = policy._get_allowed_worktree_paths()
-            assert paths == []
+        # No .git directory
+        policy = BuildPolicy(workspace_root=str(workspace))
+        paths = policy._get_allowed_worktree_paths()
+        assert paths == []
 
-    def test_prunable_worktrees_excluded(self, tmp_path):
-        """Worktrees marked prunable are filtered out."""
-        from unittest.mock import patch
-        import subprocess
-
+    def test_multiple_worktrees_detected(self, tmp_path):
+        """Multiple worktrees are detected from .git/worktrees."""
         workspace = tmp_path / "project"
         workspace.mkdir()
-        active_wt = tmp_path / "wt-active"
-        active_wt.mkdir()
-        prunable_wt = tmp_path / "wt-prunable"
-        prunable_wt.mkdir()
+        wt1 = tmp_path / "wt-feature"
+        wt1.mkdir()
+        wt2 = tmp_path / "wt-bugfix"
+        wt2.mkdir()
 
-        porcelain = (
-            f"worktree {workspace}\nHEAD abc\nbranch refs/heads/main\n\n"
-            f"worktree {active_wt}\nHEAD def\nbranch refs/heads/feat\n\n"
-            f"worktree {prunable_wt}\nHEAD ghi\nprunable gitdir file/path points to non-existent location\n\n"
-        )
-        mock_result = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=porcelain, stderr="",
-        )
-        with patch("subprocess.run", return_value=mock_result):
-            policy = BuildPolicy(workspace_root=str(workspace))
-            paths = policy._get_allowed_worktree_paths()
-            assert str(active_wt) in [os.path.abspath(p) for p in paths]
-            assert str(prunable_wt) not in [os.path.abspath(p) for p in paths]
+        git_dir = workspace / ".git"
+        git_dir.mkdir()
+        worktrees_dir = git_dir / "worktrees"
+        worktrees_dir.mkdir()
+        entry1 = worktrees_dir / "wt-feature"
+        entry1.mkdir()
+        (entry1 / "gitdir").write_text(str(wt1 / ".git"))
+        entry2 = worktrees_dir / "wt-bugfix"
+        entry2.mkdir()
+        (entry2 / "gitdir").write_text(str(wt2 / ".git"))
+
+        policy = BuildPolicy(workspace_root=str(workspace))
+        paths = policy._get_allowed_worktree_paths()
+        abs_paths = [os.path.abspath(p) for p in paths]
+        assert str(wt1) in abs_paths
+        assert str(wt2) in abs_paths
 
     def test_nonexistent_worktree_dir_excluded(self, tmp_path):
         """Worktrees pointing to non-existent directories are filtered out."""
-        from unittest.mock import patch
-        import subprocess
-
         workspace = tmp_path / "project"
         workspace.mkdir()
         ghost_wt = tmp_path / "wt-ghost"  # NOT created — doesn't exist
 
-        porcelain = (
-            f"worktree {workspace}\nHEAD abc\nbranch refs/heads/main\n\n"
-            f"worktree {ghost_wt}\nHEAD def\nbranch refs/heads/old\n\n"
-        )
-        mock_result = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=porcelain, stderr="",
-        )
-        with patch("subprocess.run", return_value=mock_result):
-            policy = BuildPolicy(workspace_root=str(workspace))
-            paths = policy._get_allowed_worktree_paths()
-            assert str(ghost_wt) not in [os.path.abspath(p) for p in paths]
+        git_dir = workspace / ".git"
+        git_dir.mkdir()
+        worktrees_dir = git_dir / "worktrees"
+        worktrees_dir.mkdir()
+        entry = worktrees_dir / "wt-ghost"
+        entry.mkdir()
+        (entry / "gitdir").write_text(str(ghost_wt / ".git"))
+
+        policy = BuildPolicy(workspace_root=str(workspace))
+        paths = policy._get_allowed_worktree_paths()
+        assert str(ghost_wt) not in [os.path.abspath(p) for p in paths]

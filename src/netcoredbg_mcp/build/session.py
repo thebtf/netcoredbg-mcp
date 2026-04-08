@@ -238,8 +238,11 @@ class BuildSession:
 
         try:
             # Never use shell=True (security)
+            # stdin=DEVNULL prevents hang when parent stdin is non-standard
+            # (e.g. running inside mux daemon where stdin is IPC socket)
             self._current_process = await asyncio.create_subprocess_exec(
                 *command,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
