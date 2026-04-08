@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using FlaUI.Core;
@@ -11,6 +12,29 @@ namespace FlaUIBridge.Commands;
 
 public static partial class InputCommands
 {
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    private const int SW_RESTORE = 9;
+
+    /// <summary>
+    /// Ensure the main window is foreground before any SendInput operation.
+    /// Without this, keyboard/mouse input goes to the terminal instead.
+    /// </summary>
+    private static void EnsureForeground(AutomationElement? mainWindow)
+    {
+        if (mainWindow is null) return;
+        var hwnd = mainWindow.Properties.NativeWindowHandle.ValueOrDefault;
+        if (hwnd != IntPtr.Zero)
+        {
+            ShowWindow(hwnd, SW_RESTORE);
+            SetForegroundWindow(hwnd);
+        }
+    }
+
     private static readonly IReadOnlyDictionary<string, VirtualKeyShort> SpecialKeys =
         new Dictionary<string, VirtualKeyShort>(StringComparer.OrdinalIgnoreCase)
         {
@@ -49,6 +73,19 @@ public static partial class InputCommands
     {
         var keys = @params?["keys"]?.GetValue<string>()
             ?? throw new ArgumentException("Missing required parameter: keys");
+
+        // Ensure target window is foreground before sending keyboard input.
+        // Without this, SendInput goes to the terminal/IDE instead of the app.
+        EnsureForeground(mainWindow);
+
+        // If automationId provided, focus that specific element via UIA
+        var automationId = @params?["automationId"]?.GetValue<string>();
+        if (automationId is not null && mainWindow is not null)
+        {
+            var cf = new ConditionFactory(automation.PropertyLibrary);
+            var element = mainWindow.FindFirstDescendant(cf.ByAutomationId(automationId));
+            element?.Focus();
+        }
 
         var sent = new List<string>();
         var i = 0;
