@@ -118,14 +118,30 @@ copy "C:\Program Files\dotnet\shared\Microsoft.NETCore.App\8.0.x\dbgshim.dll" "D
 - .NET SDK (for the apps you're debugging)
 - [Pillow](https://pypi.org/project/Pillow/) (installed automatically — required for screenshot annotation)
 
-### Install the MCP Server
+### Quick Start (Recommended)
 
 ```bash
-# Install from PyPI (recommended)
-uv pip install netcoredbg-mcp
-
-# Or with pip
+# Install and auto-configure everything
 pip install netcoredbg-mcp
+netcoredbg-mcp --setup
+```
+
+The `--setup` wizard automatically:
+- Downloads netcoredbg from Samsung GitHub
+- Scans installed .NET runtimes for dbgshim versions (eliminates version mismatch errors)
+- Builds the FlaUI bridge for UI automation (Windows)
+- Outputs a ready-to-use MCP configuration snippet
+
+Everything is stored in `~/.netcoredbg-mcp/` — no manual path configuration needed.
+
+### Manual Install
+
+```bash
+# Install from PyPI
+pip install netcoredbg-mcp
+
+# Or with uv
+uv pip install netcoredbg-mcp
 ```
 
 <details>
@@ -139,9 +155,16 @@ uv sync
 
 </details>
 
-### Install netcoredbg
+<details>
+<summary><strong>Manual netcoredbg Install (optional — --setup does this automatically)</strong></summary>
 
-Download from [Samsung/netcoredbg releases](https://github.com/Samsung/netcoredbg/releases) and extract to `D:\Bin\netcoredbg\`
+Download from [Samsung/netcoredbg releases](https://github.com/Samsung/netcoredbg/releases) and set `NETCOREDBG_PATH`:
+
+```powershell
+$env:NETCOREDBG_PATH = "D:\Bin\netcoredbg\netcoredbg.exe"
+```
+
+</details>
 
 ---
 
@@ -170,9 +193,12 @@ pip install --upgrade netcoredbg-mcp
 
 ## Configuration
 
-### Environment Variable
+### Environment Variable (Optional)
 
-Set `NETCOREDBG_PATH` in your PowerShell profile (`%USERPROFILE%\Documents\PowerShell\Microsoft.PowerShell_profile.ps1`):
+> **Note:** After `netcoredbg-mcp --setup`, `NETCOREDBG_PATH` is no longer required.
+> The server auto-detects netcoredbg from `~/.netcoredbg-mcp/netcoredbg/`.
+
+Override only if using a custom netcoredbg installation:
 
 ```powershell
 $env:NETCOREDBG_PATH = "D:\Bin\netcoredbg\netcoredbg.exe"
