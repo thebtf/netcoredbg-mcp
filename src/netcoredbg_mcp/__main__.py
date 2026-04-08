@@ -68,6 +68,13 @@ def parse_args() -> argparse.Namespace:
         "Intended for CLI-based agents like Claude Code. "
         "Cannot be used with --project.",
     )
+    parser.add_argument(
+        "--setup",
+        action="store_true",
+        default=False,
+        help="Run first-time setup: download netcoredbg, scan dbgshim "
+        "versions, build FlaUI bridge, generate MCP configuration.",
+    )
     return parser.parse_args()
 
 
@@ -77,6 +84,11 @@ async def main() -> None:
     logger = logging.getLogger(__name__)
 
     args = parse_args()
+
+    # Handle --setup: run wizard and exit (don't start MCP server)
+    if getattr(args, "setup", False):
+        from .setup.wizard import run_setup
+        sys.exit(run_setup())
 
     # Capture CWD at startup (before any chdir)
     startup_cwd = Path.cwd()
