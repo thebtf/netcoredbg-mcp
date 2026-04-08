@@ -241,7 +241,9 @@ class SessionManager:
 
                     worktrees_dir = os.path.join(git_dir, "worktrees")
                     if os.path.isdir(worktrees_dir):
-                        for entry in os.listdir(worktrees_dir):
+                        entries = os.listdir(worktrees_dir)
+                        logger.debug(f"[worktree] entries in {worktrees_dir}: {entries}")
+                        for entry in entries:
                             gitdir_file = os.path.join(worktrees_dir, entry, "gitdir")
                             if os.path.isfile(gitdir_file):
                                 try:
@@ -249,10 +251,19 @@ class SessionManager:
                                         wt_gitdir = f.read().strip()
                                     # gitdir contains path to <worktree>/.git
                                     wt_path = os.path.dirname(os.path.abspath(wt_gitdir))
+                                    logger.debug(
+                                        f"[worktree] {entry}: gitdir={wt_gitdir!r}, "
+                                        f"path={wt_path}, exists={os.path.isdir(wt_path)}"
+                                    )
                                     if os.path.isdir(wt_path):
                                         self._worktree_cache.append(wt_path)
-                                except (OSError, ValueError):
+                                except (OSError, ValueError) as e:
+                                    logger.debug(f"[worktree] {entry}: error reading gitdir: {e}")
                                     continue
+                            else:
+                                logger.debug(f"[worktree] {entry}: no gitdir file")
+                    else:
+                        logger.debug(f"[worktree] no worktrees dir at {worktrees_dir}")
                     logger.debug(
                         f"[worktree] found {len(self._worktree_cache)} worktrees "
                         f"from {worktrees_dir}"
