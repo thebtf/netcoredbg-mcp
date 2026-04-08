@@ -59,6 +59,7 @@ async def _kill_processes_windows(directory: str, timeout: float) -> int:
                 "get",
                 "ProcessId,ExecutablePath",
                 "/format:csv",
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             ),
@@ -91,6 +92,7 @@ async def _kill_processes_windows(directory: str, timeout: float) -> int:
                         "/F",
                         "/PID",
                         str(pid),
+                        stdin=asyncio.subprocess.DEVNULL,
                         stdout=asyncio.subprocess.DEVNULL,
                         stderr=asyncio.subprocess.DEVNULL,
                     ),
@@ -122,6 +124,7 @@ async def _kill_processes_unix(directory: str, timeout: float) -> int:
                 "+D",
                 str(dir_path),
                 "-t",  # Output only PIDs
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             ),
@@ -178,6 +181,7 @@ async def kill_debugger_processes(
             if os.name == "nt":
                 proc = await asyncio.create_subprocess_exec(
                     "taskkill", "/F", "/IM", "netcoredbg.exe",
+                    stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
                 )
@@ -187,6 +191,7 @@ async def kill_debugger_processes(
             else:
                 proc = await asyncio.create_subprocess_exec(
                     "pkill", "-9", "netcoredbg",
+                    stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
                 )
@@ -201,6 +206,7 @@ async def kill_debugger_processes(
             if os.name == "nt":
                 proc = await asyncio.create_subprocess_exec(
                     "taskkill", "/F", "/PID", str(netcoredbg_pid),
+                    stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
                 )
@@ -219,6 +225,7 @@ async def kill_debugger_processes(
             if os.name == "nt":
                 proc = await asyncio.create_subprocess_exec(
                     "taskkill", "/F", "/IM", program_name,
+                    stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
                 )
@@ -228,6 +235,7 @@ async def kill_debugger_processes(
             else:
                 proc = await asyncio.create_subprocess_exec(
                     "pkill", "-9", "-f", program_name,
+                    stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
                 )
