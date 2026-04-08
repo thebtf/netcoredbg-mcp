@@ -320,25 +320,29 @@ def register_ui_tools(
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
 
-            # Try cache first — click to focus, then send keys without element search
-            if automation_id:
-                ui = await _ensure_ui_connected()
-                rect = (ui.element_cache.get(automation_id) or {}).get("rect")
-                if rect:
-                    cx = (rect["left"] + rect["right"]) // 2
-                    cy = (rect["top"] + rect["bottom"]) // 2
-                    await ui.click_at(cx, cy)
-                    await ui.send_keys(keys)
-                    return build_response(
-                        data={"sent": keys, "method": "cache"},
-                        state=session.state.state,
-                    )
+            ui = await _ensure_ui_connected()
 
-            # Fallback: click element to focus, then send keys
-            ui, element, _ = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
+            # FlaUI backend: route through bridge send_keys (handles
+            # SetForegroundWindow + optional UIA element focus)
+            from ..ui.flaui_client import FlaUIBackend
+            if isinstance(ui, FlaUIBackend):
+                params: dict = {"keys": keys}
+                if automation_id:
+                    params["automationId"] = automation_id
+                result = await ui.client.call("send_keys", params)
+                return build_response(
+                    data={"sent": keys, "method": "bridge", **(result if isinstance(result, dict) else {})},
+                    state=session.state.state,
+                )
+
+            # Pywinauto fallback: find element, then send keys
             from ..ui.pywinauto_backend import PywinautoBackend
             if isinstance(ui, PywinautoBackend):
-                await ui.inner.send_keys(element, keys)
+                if automation_id or name or control_type:
+                    _, element, _ = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
+                    await ui.inner.send_keys(element, keys)
+                else:
+                    await ui.send_keys(keys)
             else:
                 await ui.send_keys(keys)
             return build_response(data={"sent": keys, "method": "element_search"}, state=session.state.state)
@@ -376,6 +380,16 @@ def register_ui_tools(
                 return build_error_response(access_error, state=session.state.state)
 
             ui = await _ensure_ui_connected()
+
+            # FlaUI backend: route through bridge (handles SetForegroundWindow)
+            from ..ui.flaui_client import FlaUIBackend
+            if isinstance(ui, FlaUIBackend):
+                await ui.client.call("send_keys", {"keys": keys})
+                return build_response(
+                    data={"sent": keys, "target": "focused", "method": "bridge"},
+                    state=session.state.state,
+                )
+
             await ui.send_keys(keys)
             return build_response(
                 data={"sent": keys, "target": "focused"}, state=session.state.state,
@@ -410,16 +424,29 @@ def register_ui_tools(
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
 
-            # Try cache first (fast, reliable)
-            if automation_id:
-                ui = await _ensure_ui_connected()
-                rect = (ui.element_cache.get(automation_id) or {}).get("rect")
-                if rect:
-                    cx = (rect["left"] + rect["right"]) // 2
-                    cy = (rect["top"] + rect["bottom"]) // 2
-                    await ui.click_at(cx, cy)
+            ui = await _ensure_ui_connected()
+
+            # FlaUI backend: use bridge click (automationId → InvokePattern,
+            # coords → SetForegroundWindow + Mouse.Click)
+            from ..ui.flaui_client import FlaUIBackend
+            if isinstance(ui, FlaUIBackend):
+                params: dict = {}
+                if automation_id:
+                    params["automationId"] = automation_id
+                elif automation_id is None and name is None:
+                    # Coordinate click from cache
+                    pass
+                if not params:
+                    # Try cache coordinates
+                    if automation_id:
+                        rect = (ui.element_cache.get(automation_id) or {}).get("rect")
+                        if rect:
+                            params["x"] = (rect["left"] + rect["right"]) // 2
+                            params["y"] = (rect["top"] + rect["bottom"]) // 2
+                if params:
+                    result = await ui.client.call("click", params)
                     return build_response(
-                        data={"clicked": True, "method": "cache", "position": {"x": cx, "y": cy}},
+                        data={"clicked": True, "method": "bridge", **(result if isinstance(result, dict) else {})},
                         state=session.state.state,
                     )
 
