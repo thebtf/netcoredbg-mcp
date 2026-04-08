@@ -156,6 +156,92 @@ public static partial class InputCommands
         };
     }
 
+    /// <summary>
+    /// Send a batch of key sequences with delay between each, holding foreground
+    /// and element focus for the entire batch. Single MCP round-trip for N keystrokes.
+    /// </summary>
+    public static JsonNode SendKeysBatch(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
+    {
+        var keysArray = @params?["keys"]?.AsArray()
+            ?? throw new ArgumentException("Missing required parameter: keys (array of strings)");
+        var delayMs = @params?["delay_ms"]?.GetValue<int>() ?? 50;
+        var automationId = @params?["automationId"]?.GetValue<string>();
+
+        // Foreground once for entire batch
+        EnsureForeground(mainWindow);
+
+        // Focus target element once
+        AutomationElement? targetElement = null;
+        if (automationId is not null && mainWindow is not null)
+        {
+            var cf = new ConditionFactory(automation.PropertyLibrary);
+            targetElement = mainWindow.FindFirstDescendant(cf.ByAutomationId(automationId));
+            targetElement?.Focus();
+        }
+
+        var sentCount = 0;
+        foreach (var keyNode in keysArray)
+        {
+            var keyStr = keyNode?.GetValue<string>();
+            if (string.IsNullOrEmpty(keyStr)) continue;
+
+            // Re-verify foreground before each key (in case OS stole it)
+            EnsureForeground(mainWindow);
+            targetElement?.Focus();
+
+            // Parse and send single key sequence
+            var j = 0;
+            while (j < keyStr.Length)
+            {
+                switch (keyStr[j])
+                {
+                    case '^':
+                        j++;
+                        var ct = ConsumeNextToken(keyStr, ref j);
+                        Keyboard.Press(VirtualKeyShort.CONTROL);
+                        try { TypeToken(ct); } finally { Keyboard.Release(VirtualKeyShort.CONTROL); }
+                        break;
+                    case '%':
+                        j++;
+                        var at = ConsumeNextToken(keyStr, ref j);
+                        Keyboard.Press(VirtualKeyShort.ALT);
+                        try { TypeToken(at); } finally { Keyboard.Release(VirtualKeyShort.ALT); }
+                        break;
+                    case '+':
+                        j++;
+                        var st = ConsumeNextToken(keyStr, ref j);
+                        Keyboard.Press(VirtualKeyShort.SHIFT);
+                        try { TypeToken(st); } finally { Keyboard.Release(VirtualKeyShort.SHIFT); }
+                        break;
+                    case '{':
+                        var cb = keyStr.IndexOf('}', j);
+                        if (cb < 0) throw new ArgumentException($"Unclosed brace at {j}");
+                        var kn = keyStr[(j + 1)..cb];
+                        j = cb + 1;
+                        if (SpecialKeys.TryGetValue(kn, out var vk))
+                        { Keyboard.Press(vk); Keyboard.Release(vk); }
+                        else throw new ArgumentException($"Unknown key: {{{kn}}}");
+                        break;
+                    default:
+                        Keyboard.Type(keyStr[j].ToString());
+                        j++;
+                        break;
+                }
+            }
+
+            sentCount++;
+            if (delayMs > 0 && sentCount < keysArray.Count)
+                Thread.Sleep(delayMs);
+        }
+
+        return new JsonObject
+        {
+            ["sent"] = true,
+            ["count"] = sentCount,
+            ["delay_ms"] = delayMs
+        };
+    }
+
     public static JsonNode SetValue(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
         if (mainWindow is null)

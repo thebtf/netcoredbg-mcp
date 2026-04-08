@@ -398,6 +398,64 @@ def register_ui_tools(
             return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def ui_send_keys_batch(
+        ctx: Context,
+        keys: list[str],
+        automation_id: str | None = None,
+        delay_ms: int = 50,
+    ) -> dict:
+        """
+        Send a batch of key sequences in a single call, holding focus throughout.
+
+        Solves the race condition where the terminal steals focus between
+        individual send_keys calls. The bridge holds foreground + element focus
+        for the entire batch, sending keys with configurable delay.
+
+        Use this for: arrow navigation (20x DOWN), typing sequences, keyboard shortcuts.
+
+        Args:
+            keys: List of key strings, each sent separately with delay.
+                  Example: ["{DOWN}", "{DOWN}", "{DOWN}"] for 3 arrow presses.
+            automation_id: Target element to focus before sending.
+            delay_ms: Milliseconds between each key (default 50ms).
+        """
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            ui = await _ensure_ui_connected()
+
+            from ..ui.flaui_client import FlaUIBackend
+            if isinstance(ui, FlaUIBackend):
+                params: dict = {"keys": keys, "delay_ms": delay_ms}
+                if automation_id:
+                    params["automationId"] = automation_id
+                result = await ui.client.call("send_keys_batch", params)
+                return build_response(
+                    data={
+                        "sent": True,
+                        "count": len(keys),
+                        "method": "bridge_batch",
+                        **(result if isinstance(result, dict) else {}),
+                    },
+                    state=session.state.state,
+                )
+
+            # Pywinauto fallback: send one by one (no focus hold guarantee)
+            import asyncio
+            for key in keys:
+                await ui.send_keys(key)
+                if delay_ms > 0:
+                    await asyncio.sleep(delay_ms / 1000)
+            return build_response(
+                data={"sent": True, "count": len(keys), "method": "pywinauto_sequential"},
+                state=session.state.state,
+            )
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def ui_click(
         ctx: Context,
         automation_id: str | None = None,
