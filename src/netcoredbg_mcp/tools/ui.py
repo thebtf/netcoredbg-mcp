@@ -229,15 +229,17 @@ def register_ui_tools(
         """
         Set keyboard focus to a UI element.
 
-        Tries cached coordinates first (click to focus), then falls back to
-        pywinauto element search.
+        Uses UIA-based Focus() for FlaUI backend (monitor/DPI-agnostic),
+        or element search + set_focus for pywinauto backend.
 
         Call this before ui_send_keys to ensure keys go to the right element.
 
         Args:
-            automation_id: AutomationId property
-            name: Element's Name/Title property
-            control_type: Control type
+            automation_id: AutomationId property (FlaUI + pywinauto)
+            name: Element's Name/Title property (FlaUI + pywinauto)
+            control_type: Control type (pywinauto only)
+            root_id: Optional AutomationId to scope search (pywinauto only)
+            xpath: Optional XPath expression (pywinauto only)
         """
         try:
             access_error = check_session_access(ctx)

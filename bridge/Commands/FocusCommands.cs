@@ -14,10 +14,10 @@ namespace FlaUIBridge.Commands;
 /// </summary>
 public static class FocusCommands
 {
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", SetLastError = true)]
     private static extern bool SetForegroundWindow(IntPtr hWnd);
 
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", SetLastError = true)]
     private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
     private const int SW_RESTORE = 9;

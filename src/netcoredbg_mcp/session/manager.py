@@ -1069,21 +1069,25 @@ class SessionManager:
         await self._sync_function_breakpoints()
 
     async def _sync_function_breakpoints(self) -> None:
-        """Sync function breakpoints to DAP."""
+        """Sync function breakpoints to DAP.
+
+        Sends the current function breakpoint list (may be empty — needed
+        for remove to propagate). Checks capability first to prevent crashes
+        on adapters that don't support function breakpoints.
+        """
         bps = self._breakpoints.get_function_breakpoints()
-        if not bps:
-            return
+        dap_bps = [bp.to_dap() for bp in bps]
 
         # Check capability — some netcoredbg versions crash on this request
         caps = self._client.capabilities
         if not caps.get("supportsFunctionBreakpoints", False):
-            logger.warning(
-                "DAP adapter does not advertise supportsFunctionBreakpoints — "
-                "skipping function breakpoint sync to prevent crash"
-            )
+            if dap_bps:
+                logger.warning(
+                    "DAP adapter does not advertise supportsFunctionBreakpoints — "
+                    "skipping function breakpoint sync to prevent crash"
+                )
             return
 
-        dap_bps = [bp.to_dap() for bp in bps]
         response = await self._client.set_function_breakpoints(dap_bps)
         if not response.success:
             logger.warning(
@@ -1155,11 +1159,29 @@ class SessionManager:
     async def add_function_breakpoint(
         self, name: str, condition: str | None = None, hit_condition: str | None = None
     ) -> FunctionBreakpoint:
-        """Add a function breakpoint."""
+        """Add a function breakpoint.
+
+        Raises RuntimeError if the DAP adapter doesn't support function
+        breakpoints or if the sync fails — the breakpoint is rolled back
+        from the local registry so state stays consistent.
+        """
+        # Check capability before modifying registry
+        if self.is_active:
+            caps = self._client.capabilities
+            if not caps.get("supportsFunctionBreakpoints", False):
+                raise RuntimeError(
+                    "DAP adapter does not support function breakpoints"
+                )
+
         bp = FunctionBreakpoint(name=name, condition=condition, hit_condition=hit_condition)
         self._breakpoints.add_function_breakpoint(bp)
         if self.is_active:
-            await self._sync_function_breakpoints()
+            try:
+                await self._sync_function_breakpoints()
+            except Exception:
+                # Rollback: remove from registry if DAP sync failed
+                self._breakpoints.remove_function_breakpoint(name)
+                raise
         return bp
 
     async def remove_function_breakpoint(self, name: str) -> bool:
