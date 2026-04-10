@@ -24,13 +24,16 @@ public static class ElementCommands
 
         var window = windows[0];
         JsonRpcHandler.MainWindow = window;
+        // Store pid independently so window enumeration still works after
+        // set_active_window switches MainWindow to a dialog that later closes.
+        JsonRpcHandler.ProcessId = pid;
 
-        Program.Log($"Connected to window: {window.Name} (pid={pid})");
+        Program.Log($"Connected to window: {SafeString(() => window.Name)} (pid={pid})");
 
         return new JsonObject
         {
             ["connected"] = true,
-            ["title"] = window.Name
+            ["title"] = SafeString(() => window.Name)
         };
     }
 
@@ -149,7 +152,12 @@ public static class ElementCommands
             }
         }
 
+        // "primary" reports the currently-tracked main window's title if it
+        // is still readable; otherwise fall back to the first enumerated
+        // live window so agents always have a non-empty anchor.
         var primaryName = SafeString(() => mainWindow.Name);
+        if (string.IsNullOrEmpty(primaryName) && windows.Count > 0)
+            primaryName = SafeString(() => windows[0].Name);
 
         return new JsonObject
         {
@@ -168,16 +176,22 @@ public static class ElementCommands
     internal static List<AutomationElement> GetProcessTopLevelWindows(
         AutomationElement mainWindow, UIA3Automation automation)
     {
-        var result = new List<AutomationElement> { mainWindow };
-        var seen = new HashSet<IntPtr> { SafeHandle(mainWindow) };
+        // Enumerate from the ProcessId that connect() stored independently
+        // of MainWindow. Relying on mainWindow.Properties.ProcessId would
+        // throw after set_active_window switched to a dialog that later
+        // closed, which would strand the bridge with no discoverable windows.
+        var pid = JsonRpcHandler.ProcessId;
+        var result = new List<AutomationElement>();
+        var seen = new HashSet<IntPtr>();
 
-        int pid;
-        try
+        if (pid == 0)
         {
-            pid = mainWindow.Properties.ProcessId.Value;
-        }
-        catch
-        {
+            // Fallback for the unusual case where connect() never ran —
+            // try to use whatever handle mainWindow still exposes.
+            result.Add(mainWindow);
+            var fallbackHandle = SafeHandle(mainWindow);
+            if (fallbackHandle != IntPtr.Zero)
+                seen.Add(fallbackHandle);
             return result;
         }
 
@@ -189,14 +203,21 @@ public static class ElementCommands
             foreach (var sibling in siblings)
             {
                 var handle = SafeHandle(sibling);
-                if (handle != IntPtr.Zero && seen.Add(handle))
+                if (handle == IntPtr.Zero)
+                    continue;
+                if (seen.Add(handle))
                     result.Add(sibling);
             }
         }
         catch
         {
-            // Desktop enumeration is best-effort; mainWindow alone is still valid output.
+            // Desktop enumeration is best-effort.
         }
+
+        // If live enumeration returned nothing but mainWindow still looks
+        // usable, surface it so callers retain at least one reference.
+        if (result.Count == 0)
+            result.Add(mainWindow);
 
         return result;
     }
@@ -262,13 +283,35 @@ public static class ElementCommands
                 "criterion, or pass rootAutomationId as the unique AutomationId.");
         }
 
-        // Pass 2: no window-level match — descend into each window looking for
-        // a descendant with that AutomationId.
+        // Pass 2: no window-level match — descend into each window looking
+        // for a descendant with that AutomationId. Collect across all windows
+        // so an ambiguous rootId (same AutomationId present in two windows)
+        // fails loudly rather than silently resolving to whichever window
+        // happens to be enumerated first.
+        var descendantMatches = new List<(AutomationElement Element, string WindowTitle)>();
         foreach (var window in topLevel)
         {
             var descendant = window.FindFirstDescendant(cf.ByAutomationId(rootId));
             if (descendant is not null)
-                return descendant;
+            {
+                string title;
+                try { title = window.Properties.Name.IsSupported ? window.Properties.Name.Value : ""; }
+                catch { title = ""; }
+                descendantMatches.Add((descendant, title));
+            }
+        }
+
+        if (descendantMatches.Count == 1)
+            return descendantMatches[0].Element;
+
+        if (descendantMatches.Count > 1)
+        {
+            var windowTitles = descendantMatches.Select(m => $"'{m.WindowTitle}'");
+            throw new InvalidOperationException(
+                $"Ambiguous rootAutomationId '{rootId}': found in " +
+                $"{descendantMatches.Count} windows ({string.Join(", ", windowTitles)}). " +
+                "Use set_active_window to target a specific top-level window first, " +
+                "then pass rootAutomationId without ambiguity.");
         }
 
         throw new InvalidOperationException(
@@ -316,12 +359,14 @@ public static class ElementCommands
                 "set_active_window requires at least one of: automationId, name");
 
         var topLevel = GetProcessTopLevelWindows(mainWindow, automation);
-        AutomationElement? match = null;
 
         // Two-pass scan so automationId universally wins over name across
         // the full window list, not just within a single window iteration.
-        // Otherwise a name match on an earlier window would shadow an
-        // automationId match on a later window.
+        // Ambiguous matches (same automationId or same title on multiple
+        // top-level windows) throw an explicit error instead of silently
+        // returning the first — non-determinism on a stateful switch is the
+        // worst kind of bug for downstream agents.
+        var automationIdMatches = new List<AutomationElement>();
         if (!string.IsNullOrWhiteSpace(automationId))
         {
             foreach (var window in topLevel)
@@ -331,16 +376,27 @@ public static class ElementCommands
                     if (window.Properties.AutomationId.IsSupported &&
                         window.Properties.AutomationId.Value == automationId)
                     {
-                        match = window;
-                        break;
+                        automationIdMatches.Add(window);
                     }
                 }
                 catch { /* skip — unsupported on this window */ }
             }
+
+            if (automationIdMatches.Count > 1)
+            {
+                var titles = automationIdMatches.Select(w => $"'{SafeString(() => w.Name)}'");
+                throw new InvalidOperationException(
+                    $"Ambiguous set_active_window(automationId='{automationId}'): " +
+                    $"{automationIdMatches.Count} windows match ({string.Join(", ", titles)}). " +
+                    "AutomationId should uniquely identify a top-level window.");
+            }
         }
+
+        AutomationElement? match = automationIdMatches.Count == 1 ? automationIdMatches[0] : null;
 
         if (match is null && !string.IsNullOrWhiteSpace(name))
         {
+            var nameMatches = new List<AutomationElement>();
             foreach (var window in topLevel)
             {
                 try
@@ -348,12 +404,23 @@ public static class ElementCommands
                     if (window.Properties.Name.IsSupported &&
                         window.Properties.Name.Value == name)
                     {
-                        match = window;
-                        break;
+                        nameMatches.Add(window);
                     }
                 }
                 catch { /* skip — unsupported on this window */ }
             }
+
+            if (nameMatches.Count > 1)
+            {
+                var ids = nameMatches.Select(w => $"automationId='{SafeString(() => w.AutomationId)}'");
+                throw new InvalidOperationException(
+                    $"Ambiguous set_active_window(name='{name}'): " +
+                    $"{nameMatches.Count} windows share this title ({string.Join(", ", ids)}). " +
+                    "Pass a unique automationId instead, or close the duplicate window first.");
+            }
+
+            if (nameMatches.Count == 1)
+                match = nameMatches[0];
         }
 
         if (match is null)

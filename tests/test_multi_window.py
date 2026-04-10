@@ -223,21 +223,27 @@ class TestSwitchWindow:
         backend._client.call.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_switch_preserves_bridge_error_payload(self):
-        """When bridge returns a non-dict response, switch_window returns a safe default."""
+    async def test_switch_raises_on_non_dict_bridge_response(self):
+        """A non-dict response indicates a bridge contract violation and must
+        surface as an explicit error rather than being masked into a silent
+        ``switched=False``."""
         backend = _make_backend()
         backend._client.call.return_value = None
 
-        result = await backend.switch_window(name="Missing")
-
-        assert result == {"switched": False}
+        with pytest.raises(RuntimeError, match="non-dict response"):
+            await backend.switch_window(name="Missing")
 
 
 class TestPywinautoSwitchWindow:
-    """Pywinauto fallback must refuse multi-window retargeting explicitly."""
+    """Pywinauto fallback must report capability unsupported via a structured
+    response rather than raising, so tool-layer callers can surface a clean
+    error without catching NotImplementedError on the UIBackend protocol."""
 
     @pytest.mark.asyncio
-    async def test_raises_not_implemented(self):
+    async def test_returns_structured_unsupported_response(self):
         backend = PywinautoBackend()
-        with pytest.raises(NotImplementedError, match="FlaUI bridge"):
-            await backend.switch_window(name="Create collection")
+        result = await backend.switch_window(name="Create collection")
+        assert isinstance(result, dict)
+        assert result.get("switched") is False
+        assert result.get("unsupported") is True
+        assert "FlaUI bridge" in result.get("reason", "")

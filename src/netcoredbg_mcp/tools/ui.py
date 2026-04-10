@@ -172,10 +172,16 @@ def register_ui_tools(
             max_children: Maximum children per element (default 50)
 
         Returns:
-            {"windows": [tree, ...], "count": N, "primary": "Main App"}
+            FlaUI backend: {"windows": [tree, ...], "count": N, "primary": "Main App"}
             Each tree entry carries automationId, controlType, name, rect,
             children, etc. Use ui_switch_window to retarget subsequent calls
             at a specific window (e.g. a modal dialog).
+
+            pywinauto fallback backend: a single-window tree dict with
+            automationId/name/rect/children at the root (no windows array,
+            no count, no primary). Callers that need to support both
+            backends should probe for the "windows" key and fall back to
+            treating the response itself as a single-window tree.
         """
         try:
             ui = await _ensure_ui_connected()
@@ -232,12 +238,18 @@ def register_ui_tools(
 
             ui = await _ensure_ui_connected()
             result = await ui.switch_window(name=name, automation_id=automation_id)
-            return build_response(
-                data=result if isinstance(result, dict) else {"switched": False},
-                state=session.state.state,
-            )
-        except NotImplementedError as e:
-            return build_error_response(str(e), state=session.state.state)
+            if not isinstance(result, dict):
+                return build_error_response(
+                    f"switch_window: backend returned non-dict response "
+                    f"({type(result).__name__})",
+                    state=session.state.state,
+                )
+            if result.get("unsupported") is True:
+                return build_error_response(
+                    result.get("reason", "switch_window not supported on current backend"),
+                    state=session.state.state,
+                )
+            return build_response(data=result, state=session.state.state)
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 

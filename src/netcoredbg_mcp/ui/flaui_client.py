@@ -426,4 +426,9 @@ class FlaUIBackend:
         if name:
             params["name"] = name
         result = await self._client.call("set_active_window", params)
-        return result if isinstance(result, dict) else {"switched": False}
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"set_active_window: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result

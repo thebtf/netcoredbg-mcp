@@ -397,13 +397,20 @@ class PywinautoBackend:
         """Multi-window retargeting is a FlaUI-only feature.
 
         The pywinauto backend is a legacy fallback and does not track multiple
-        top-level windows; users relying on modal dialog automation must run
-        with the FlaUI bridge.
+        top-level windows. Instead of raising (which would surprise callers
+        holding the UIBackend protocol contract), return a structured
+        capability response with ``switched=False`` and ``unsupported=True``
+        so the tool layer can surface a clean error without try/except on a
+        NotImplementedError.
         """
-        raise NotImplementedError(
-            "switch_window requires the FlaUI bridge backend. "
-            "The pywinauto backend does not support multi-window retargeting."
-        )
+        return {
+            "switched": False,
+            "unsupported": True,
+            "reason": (
+                "switch_window requires the FlaUI bridge backend. "
+                "The pywinauto backend does not support multi-window retargeting."
+            ),
+        }
 
     def get_cached_rect(self, automation_id: str) -> dict | None:
         """Get cached rectangle for an element by AutomationId."""

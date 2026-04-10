@@ -9,6 +9,7 @@ public static class JsonRpcHandler
 {
     private static UIA3Automation? _automation;
     private static AutomationElement? _mainWindow;
+    private static int _processId;
 
     internal static UIA3Automation Automation
     {
@@ -28,6 +29,17 @@ public static class JsonRpcHandler
     {
         get => _mainWindow;
         set => _mainWindow = value;
+    }
+
+    // ProcessId is captured at connect() and retained independently from
+    // MainWindow so that window enumeration still works after set_active_window
+    // has switched the tracked reference to a dialog that subsequently closes.
+    // Reading pid from a stale AutomationElement would throw, leaving the
+    // bridge unable to find any top-level window afterwards.
+    internal static int ProcessId
+    {
+        get => _processId;
+        set => _processId = value;
     }
 
     private static readonly IReadOnlyDictionary<string, Func<JsonNode?, UIA3Automation, AutomationElement?, JsonNode>> Handlers =
@@ -79,5 +91,6 @@ public static class JsonRpcHandler
         _automation?.Dispose();
         _automation = null;
         _mainWindow = null;
+        _processId = 0;
     }
 }
