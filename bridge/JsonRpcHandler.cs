@@ -19,6 +19,11 @@ public static class JsonRpcHandler
         }
     }
 
+    // MainWindow is a process-wide static. This is safe because the bridge is
+    // spawned as a dedicated subprocess per MCP session (see FlaUIBridgeClient
+    // in src/netcoredbg_mcp/ui/flaui_client.py) — each session has its own
+    // bridge process and therefore its own MainWindow. Sharing one bridge
+    // across sessions would require reworking this into per-session state.
     internal static AutomationElement? MainWindow
     {
         get => _mainWindow;

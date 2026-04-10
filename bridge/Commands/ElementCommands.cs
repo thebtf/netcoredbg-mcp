@@ -204,7 +204,15 @@ public static class ElementCommands
     private static IntPtr SafeHandle(AutomationElement element)
     {
         try { return element.Properties.NativeWindowHandle.ValueOrDefault; }
-        catch { return IntPtr.Zero; }
+        catch (Exception ex)
+        {
+            // Log when a top-level window hides its handle — without this,
+            // GetProcessTopLevelWindows silently excludes every sibling whose
+            // handle can't be read (because IntPtr.Zero is in the seen set)
+            // and debugging an empty tree becomes much harder.
+            Program.Log($"SafeHandle: NativeWindowHandle unavailable ({ex.GetType().Name}: {ex.Message})");
+            return IntPtr.Zero;
+        }
     }
 
     // ── Shared helpers (used by PatternCommands too) ──────────────────
@@ -223,14 +231,41 @@ public static class ElementCommands
             return mainWindow;
 
         var cf = new ConditionFactory(automation.PropertyLibrary);
+        var topLevel = GetProcessTopLevelWindows(mainWindow, automation);
 
-        foreach (var window in GetProcessTopLevelWindows(mainWindow, automation))
+        // Pass 1: check whether any top-level window itself matches by identity.
+        // Collecting all matches first lets us warn on ambiguous names (common
+        // with dialogs like "Error", "Warning", "Progress" that appear twice).
+        var windowMatches = new List<AutomationElement>();
+        foreach (var window in topLevel)
         {
-            // The window itself may match rootId by AutomationId or by Name
-            // (agents commonly pass the window title as root_id for modal dialogs).
             if (MatchesWindowIdentity(window, rootId))
-                return window;
+                windowMatches.Add(window);
+        }
 
+        if (windowMatches.Count == 1)
+            return windowMatches[0];
+
+        if (windowMatches.Count > 1)
+        {
+            var titles = new List<string>();
+            foreach (var w in windowMatches)
+            {
+                string title;
+                try { title = w.Properties.Name.IsSupported ? w.Properties.Name.Value : ""; }
+                catch { title = ""; }
+                titles.Add($"'{title}'");
+            }
+            throw new InvalidOperationException(
+                $"Ambiguous root '{rootId}': {windowMatches.Count} top-level windows match " +
+                $"({string.Join(", ", titles)}). Use set_active_window with a more specific " +
+                "criterion, or pass rootAutomationId as the unique AutomationId.");
+        }
+
+        // Pass 2: no window-level match — descend into each window looking for
+        // a descendant with that AutomationId.
+        foreach (var window in topLevel)
+        {
             var descendant = window.FindFirstDescendant(cf.ByAutomationId(rootId));
             if (descendant is not null)
                 return descendant;
@@ -280,10 +315,16 @@ public static class ElementCommands
             throw new ArgumentException(
                 "set_active_window requires at least one of: automationId, name");
 
+        var topLevel = GetProcessTopLevelWindows(mainWindow, automation);
         AutomationElement? match = null;
-        foreach (var window in GetProcessTopLevelWindows(mainWindow, automation))
+
+        // Two-pass scan so automationId universally wins over name across
+        // the full window list, not just within a single window iteration.
+        // Otherwise a name match on an earlier window would shadow an
+        // automationId match on a later window.
+        if (!string.IsNullOrWhiteSpace(automationId))
         {
-            if (!string.IsNullOrWhiteSpace(automationId))
+            foreach (var window in topLevel)
             {
                 try
                 {
@@ -294,10 +335,13 @@ public static class ElementCommands
                         break;
                     }
                 }
-                catch { /* continue */ }
+                catch { /* skip — unsupported on this window */ }
             }
+        }
 
-            if (!string.IsNullOrWhiteSpace(name))
+        if (match is null && !string.IsNullOrWhiteSpace(name))
+        {
+            foreach (var window in topLevel)
             {
                 try
                 {
@@ -308,7 +352,7 @@ public static class ElementCommands
                         break;
                     }
                 }
-                catch { /* continue */ }
+                catch { /* skip — unsupported on this window */ }
             }
         }
 
@@ -556,8 +600,12 @@ public static class ElementCommands
         // Shallower elements preferred
         score -= depth;
 
-        var automationId = element.AutomationId ?? "";
-        var controlType = element.ControlType.ToString();
+        // Property reads may throw on uncooperative UIA providers. Elements
+        // from newly-widened ResolveSearchRoot scans can include unusual
+        // top-level windows — silently dropping them from ranking would hide
+        // otherwise-valid matches.
+        var automationId = SafeString(() => element.AutomationId);
+        var controlType = SafeString(() => element.ControlType.ToString());
 
         // Standard dialog accept/cancel button bonus
         if (controlType == "Button" && (automationId == "1" || automationId == "2"))

@@ -29,14 +29,14 @@ public static class PatternCommands
 
         Wait.UntilInputIsProcessed();
 
-        return new JsonObject
-        {
-            ["invoked"] = true,
-            ["method"] = method,
-            ["automationId"] = element.AutomationId,
-            ["name"] = element.Name,
-            ["controlType"] = element.ControlType.ToString()
-        };
+        // Use BuildElementInfo so every property read is try/catch-wrapped.
+        // Direct access here would throw on WPF modal elements with
+        // unsupported properties (e.g. ClassName #30012) AFTER the invoke
+        // already succeeded, reporting error for a completed action.
+        var info = ElementCommands.BuildElementInfo(element, includePatterns: false);
+        info["invoked"] = true;
+        info["method"] = method;
+        return info;
     }
 
     public static JsonNode ToggleElement(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
@@ -66,9 +66,16 @@ public static class PatternCommands
                 ? string.Join(", ", patterns)
                 : "none detected";
 
+            // Property accesses may throw on uncooperative UIA providers, so
+            // build a defensive description instead of interpolating directly.
+            string safeAid, safeName, safeCtrl;
+            try { safeAid = element.AutomationId ?? ""; } catch { safeAid = ""; }
+            try { safeName = element.Name ?? ""; } catch { safeName = ""; }
+            try { safeCtrl = element.ControlType.ToString(); } catch { safeCtrl = "?"; }
+
             throw new InvalidOperationException(
                 $"Element does not support TogglePattern. " +
-                $"Element: {element.ControlType} '{element.Name}' (id='{element.AutomationId}'). " +
+                $"Element: {safeCtrl} '{safeName}' (id='{safeAid}'). " +
                 $"Supported patterns: {patternList}");
         }
 
@@ -77,13 +84,9 @@ public static class PatternCommands
 
         var newState = element.Patterns.Toggle.Pattern.ToggleState.ValueOrDefault;
 
-        return new JsonObject
-        {
-            ["toggled"] = true,
-            ["newState"] = newState.ToString(),
-            ["automationId"] = element.AutomationId,
-            ["name"] = element.Name,
-            ["controlType"] = element.ControlType.ToString()
-        };
+        var info = ElementCommands.BuildElementInfo(element, includePatterns: false);
+        info["toggled"] = true;
+        info["newState"] = newState.ToString();
+        return info;
     }
 }

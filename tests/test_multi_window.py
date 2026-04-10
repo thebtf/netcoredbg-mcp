@@ -138,6 +138,32 @@ class TestMultiWindowGetTree:
 
         assert backend.element_cache == {}
 
+    @pytest.mark.asyncio
+    async def test_none_response_produces_empty_cache(self):
+        """Defensive guard — the bridge must not return None, but if it does,
+        _iter_windows should short-circuit and the cache should stay empty."""
+        backend = _make_backend()
+        backend._element_cache["stale"] = {"rect": {}, "name": "x", "control_type": "y"}
+        backend._client.call.return_value = None
+
+        result = await backend.get_window_tree()
+
+        assert result is None
+        assert backend.element_cache == {}
+
+    @pytest.mark.asyncio
+    async def test_error_shape_with_found_false_is_not_cached(self):
+        """If the bridge ever returns an error-flavored envelope {'found': False,
+        'error': '...'}, _iter_windows treats it as a single legacy node but
+        there is nothing to cache (no automationId or rect)."""
+        backend = _make_backend()
+        backend._client.call.return_value = {"found": False, "error": "boom"}
+
+        result = await backend.get_window_tree()
+
+        assert result == {"found": False, "error": "boom"}
+        assert backend.element_cache == {}
+
 
 class TestSwitchWindow:
     """FlaUIBackend.switch_window contract with the bridge's set_active_window."""
