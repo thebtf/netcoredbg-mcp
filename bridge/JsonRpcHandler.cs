@@ -32,6 +32,7 @@ public static class JsonRpcHandler
             ["connect"] = ElementCommands.Connect,
             ["find_element"] = ElementCommands.FindElement,
             ["get_tree"] = ElementCommands.GetTree,
+            ["set_active_window"] = ElementCommands.SetActiveWindow,
             ["click"] = ClickCommands.Click,
             ["right_click"] = ClickCommands.RightClick,
             ["double_click"] = ClickCommands.DoubleClick,

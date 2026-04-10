@@ -125,14 +125,95 @@ public static class ElementCommands
         var maxDepth = @params?["maxDepth"]?.GetValue<int>() ?? 3;
         var maxChildren = @params?["maxChildren"]?.GetValue<int>() ?? 25;
 
-        return BuildTree(mainWindow, maxDepth, maxChildren, 0);
+        // Walk every top-level window owned by the target process. WPF
+        // Window.ShowDialog() creates a sibling top-level window under the
+        // Desktop, not a descendant of the main app window — walking only
+        // mainWindow would hide modal dialogs from the caller.
+        var windows = GetProcessTopLevelWindows(mainWindow, automation);
+
+        var windowsArray = new JsonArray();
+        foreach (var window in windows)
+        {
+            try
+            {
+                windowsArray.Add(BuildTree(window, maxDepth, maxChildren, 0));
+            }
+            catch (Exception ex)
+            {
+                // One window failing must not hide the others.
+                windowsArray.Add(new JsonObject
+                {
+                    ["found"] = false,
+                    ["error"] = ex.Message,
+                });
+            }
+        }
+
+        var primaryName = SafeString(() => mainWindow.Name);
+
+        return new JsonObject
+        {
+            ["windows"] = windowsArray,
+            ["count"] = windows.Count,
+            ["primary"] = primaryName,
+        };
+    }
+
+    /// <summary>
+    /// Enumerate every top-level window owned by the same process as mainWindow.
+    /// Returns mainWindow first, followed by every sibling top-level window,
+    /// deduplicated by native window handle. This is the canonical source for
+    /// multi-window operations (GetTree, ResolveSearchRoot, SetActiveWindow).
+    /// </summary>
+    internal static List<AutomationElement> GetProcessTopLevelWindows(
+        AutomationElement mainWindow, UIA3Automation automation)
+    {
+        var result = new List<AutomationElement> { mainWindow };
+        var seen = new HashSet<IntPtr> { SafeHandle(mainWindow) };
+
+        int pid;
+        try
+        {
+            pid = mainWindow.Properties.ProcessId.Value;
+        }
+        catch
+        {
+            return result;
+        }
+
+        try
+        {
+            var desktop = automation.GetDesktop();
+            var cf = new ConditionFactory(automation.PropertyLibrary);
+            var siblings = desktop.FindAllChildren(cf.ByProcessId(pid));
+            foreach (var sibling in siblings)
+            {
+                var handle = SafeHandle(sibling);
+                if (handle != IntPtr.Zero && seen.Add(handle))
+                    result.Add(sibling);
+            }
+        }
+        catch
+        {
+            // Desktop enumeration is best-effort; mainWindow alone is still valid output.
+        }
+
+        return result;
+    }
+
+    private static IntPtr SafeHandle(AutomationElement element)
+    {
+        try { return element.Properties.NativeWindowHandle.ValueOrDefault; }
+        catch { return IntPtr.Zero; }
     }
 
     // ── Shared helpers (used by PatternCommands too) ──────────────────
 
     /// <summary>
     /// Resolve search root: if rootAutomationId is provided, find that element
-    /// and use it as the search scope. Otherwise return the mainWindow.
+    /// and use it as the search scope. Scanning is widened to every top-level
+    /// window of the target process so modal dialogs (which are siblings of the
+    /// main window, not descendants) can be addressed as a root.
     /// </summary>
     internal static AutomationElement ResolveSearchRoot(
         AutomationElement mainWindow, JsonNode? @params, UIA3Automation automation)
@@ -141,18 +222,114 @@ public static class ElementCommands
         if (string.IsNullOrWhiteSpace(rootId))
             return mainWindow;
 
-        // Check if mainWindow itself matches rootAutomationId
-        if (mainWindow.Properties.AutomationId.IsSupported &&
-            mainWindow.Properties.AutomationId.Value == rootId)
-            return mainWindow;
-
         var cf = new ConditionFactory(automation.PropertyLibrary);
-        var root = mainWindow.FindFirstDescendant(cf.ByAutomationId(rootId));
-        if (root is null)
-            throw new InvalidOperationException(
-                $"Root element not found: '{rootId}'. Use get_tree to verify the element exists.");
 
-        return root;
+        foreach (var window in GetProcessTopLevelWindows(mainWindow, automation))
+        {
+            // The window itself may match rootId by AutomationId or by Name
+            // (agents commonly pass the window title as root_id for modal dialogs).
+            if (MatchesWindowIdentity(window, rootId))
+                return window;
+
+            var descendant = window.FindFirstDescendant(cf.ByAutomationId(rootId));
+            if (descendant is not null)
+                return descendant;
+        }
+
+        throw new InvalidOperationException(
+            $"Root element not found: '{rootId}'. Use get_tree to verify the element exists " +
+            "or use set_active_window to target a top-level window by name.");
+    }
+
+    private static bool MatchesWindowIdentity(AutomationElement window, string rootId)
+    {
+        try
+        {
+            if (window.Properties.AutomationId.IsSupported &&
+                window.Properties.AutomationId.Value == rootId)
+                return true;
+        }
+        catch { /* AutomationId may not be supported on this element */ }
+
+        try
+        {
+            if (window.Properties.Name.IsSupported &&
+                window.Properties.Name.Value == rootId)
+                return true;
+        }
+        catch { /* Name may not be supported on this element */ }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Switch the bridge's tracked main window to a different top-level window
+    /// owned by the same process. Lookup priority: automationId → name. Required
+    /// so agents can target WPF modal dialogs, which are sibling top-level
+    /// windows rather than descendants of the original app window.
+    /// </summary>
+    public static JsonNode SetActiveWindow(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
+    {
+        if (mainWindow is null)
+            throw new InvalidOperationException("Not connected. Call 'connect' first.");
+
+        var automationId = @params?["automationId"]?.GetValue<string>();
+        var name = @params?["name"]?.GetValue<string>();
+
+        if (string.IsNullOrWhiteSpace(automationId) && string.IsNullOrWhiteSpace(name))
+            throw new ArgumentException(
+                "set_active_window requires at least one of: automationId, name");
+
+        AutomationElement? match = null;
+        foreach (var window in GetProcessTopLevelWindows(mainWindow, automation))
+        {
+            if (!string.IsNullOrWhiteSpace(automationId))
+            {
+                try
+                {
+                    if (window.Properties.AutomationId.IsSupported &&
+                        window.Properties.AutomationId.Value == automationId)
+                    {
+                        match = window;
+                        break;
+                    }
+                }
+                catch { /* continue */ }
+            }
+
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                try
+                {
+                    if (window.Properties.Name.IsSupported &&
+                        window.Properties.Name.Value == name)
+                    {
+                        match = window;
+                        break;
+                    }
+                }
+                catch { /* continue */ }
+            }
+        }
+
+        if (match is null)
+        {
+            var criteria = new List<string>();
+            if (!string.IsNullOrWhiteSpace(automationId)) criteria.Add($"automationId='{automationId}'");
+            if (!string.IsNullOrWhiteSpace(name)) criteria.Add($"name='{name}'");
+            throw new InvalidOperationException(
+                $"No top-level window matches {string.Join(", ", criteria)} " +
+                "in the target process.");
+        }
+
+        JsonRpcHandler.MainWindow = match;
+
+        return new JsonObject
+        {
+            ["switched"] = true,
+            ["title"] = SafeString(() => match.Name),
+            ["automationId"] = SafeString(() => match.AutomationId),
+        };
     }
 
     /// <summary>
@@ -517,22 +694,19 @@ public static class ElementCommands
 
     internal static JsonObject BuildElementInfo(AutomationElement element, bool includePatterns = true)
     {
-        var rect = element.BoundingRectangle;
-
+        // Every property access is wrapped individually because a UIA provider may
+        // not implement any given property. An unsupported property throws
+        // "The requested property '<Name> [#<id>]' is not supported" which would
+        // otherwise abort BuildElementInfo, BuildTree, and the whole get_tree call.
+        // WPF modal dialogs in particular are known to lack ClassName (#30012).
         var result = new JsonObject
         {
             ["found"] = true,
-            ["automationId"] = element.AutomationId,
-            ["name"] = element.Name,
-            ["controlType"] = element.ControlType.ToString(),
-            ["className"] = element.ClassName,
-            ["rect"] = new JsonObject
-            {
-                ["x"] = rect.X,
-                ["y"] = rect.Y,
-                ["width"] = rect.Width,
-                ["height"] = rect.Height
-            },
+            ["automationId"] = SafeString(() => element.AutomationId),
+            ["name"] = SafeString(() => element.Name),
+            ["controlType"] = SafeString(() => element.ControlType.ToString()),
+            ["className"] = SafeString(() => element.ClassName),
+            ["rect"] = SafeRect(element),
         };
 
         if (includePatterns)
@@ -552,5 +726,36 @@ public static class ElementCommands
         }
 
         return result;
+    }
+
+    private static string SafeString(Func<string?> read)
+    {
+        try { return read() ?? ""; }
+        catch { return ""; }
+    }
+
+    private static JsonObject SafeRect(AutomationElement element)
+    {
+        try
+        {
+            var rect = element.BoundingRectangle;
+            return new JsonObject
+            {
+                ["x"] = rect.X,
+                ["y"] = rect.Y,
+                ["width"] = rect.Width,
+                ["height"] = rect.Height,
+            };
+        }
+        catch
+        {
+            return new JsonObject
+            {
+                ["x"] = 0,
+                ["y"] = 0,
+                ["width"] = 0,
+                ["height"] = 0,
+            };
+        }
     }
 }

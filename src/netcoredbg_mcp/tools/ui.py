@@ -157,17 +157,25 @@ def register_ui_tools(
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def ui_get_window_tree(max_depth: int = 3, max_children: int = 50) -> dict:
         """
-        Get the visual tree of the debugged application's main window.
+        Get the visual tree of the debugged application — ALL top-level windows.
 
-        Use this to understand the UI structure before interacting with elements.
+        Covers the main app window and any sibling windows (modal dialogs,
+        popups, file pickers) owned by the same process. Modal dialogs
+        created via WPF Window.ShowDialog() are sibling top-level windows,
+        not descendants of the main window — they appear in the "windows"
+        array alongside the main window.
+
         Call after start_debug and wait for the application window to appear.
 
         Args:
-            max_depth: Maximum depth to traverse (default 3)
+            max_depth: Maximum depth to traverse within each window (default 3)
             max_children: Maximum children per element (default 50)
 
         Returns:
-            Visual tree with automationId, controlType, name, isEnabled, etc.
+            {"windows": [tree, ...], "count": N, "primary": "Main App"}
+            Each tree entry carries automationId, controlType, name, rect,
+            children, etc. Use ui_switch_window to retarget subsequent calls
+            at a specific window (e.g. a modal dialog).
         """
         try:
             ui = await _ensure_ui_connected()
@@ -175,6 +183,61 @@ def register_ui_tools(
             # Backend returns dict directly (both FlaUI and pywinauto)
             data = tree if isinstance(tree, dict) else tree.to_dict()
             return build_response(data=data, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(idempotentHint=True, openWorldHint=False))
+    async def ui_switch_window(
+        ctx: Context,
+        name: str | None = None,
+        automation_id: str | None = None,
+    ) -> dict:
+        """
+        Retarget the UI backend at a different top-level window of the same process.
+
+        Use this to enter modal dialogs, file pickers, or popups that appear
+        as sibling windows of the app's main window. After switching, all
+        subsequent ui_* calls (find_element, click, send_keys, etc.) operate
+        inside the new window's subtree.
+
+        Typical flow:
+          1. ui_get_window_tree() → inspect "windows" array
+          2. ui_switch_window(name="Create collection") → enter dialog
+          3. ui_find_element(control_type="Edit") → locate dialog TextBox
+          4. ui_send_keys_batch(keys=["Characters", "{ENTER}"]) → type + submit
+          5. After dialog closes, ui_switch_window(name="Main App Title")
+             to return to the original window
+
+        Requires the FlaUI bridge backend; the pywinauto fallback raises
+        NotImplementedError. At least one of name or automation_id must be
+        provided; automation_id is matched first.
+
+        Args:
+            name: Window title (e.g., the dialog's Title/Name property)
+            automation_id: Window's AutomationId property (if any)
+
+        Returns:
+            {"switched": True, "title": "...", "automationId": "..."} on success
+        """
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            if not name and not automation_id:
+                return build_error_response(
+                    "ui_switch_window requires at least one of: name, automation_id",
+                    state=session.state.state,
+                )
+
+            ui = await _ensure_ui_connected()
+            result = await ui.switch_window(name=name, automation_id=automation_id)
+            return build_response(
+                data=result if isinstance(result, dict) else {"switched": False},
+                state=session.state.state,
+            )
+        except NotImplementedError as e:
+            return build_error_response(str(e), state=session.state.state)
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 

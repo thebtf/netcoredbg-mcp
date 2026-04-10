@@ -389,6 +389,22 @@ class PywinautoBackend:
         tree = await self._ui.get_window_tree(max_depth, max_children)
         return tree.to_dict()
 
+    async def switch_window(
+        self,
+        name: str | None = None,
+        automation_id: str | None = None,
+    ) -> dict:
+        """Multi-window retargeting is a FlaUI-only feature.
+
+        The pywinauto backend is a legacy fallback and does not track multiple
+        top-level windows; users relying on modal dialog automation must run
+        with the FlaUI bridge.
+        """
+        raise NotImplementedError(
+            "switch_window requires the FlaUI bridge backend. "
+            "The pywinauto backend does not support multi-window retargeting."
+        )
+
     def get_cached_rect(self, automation_id: str) -> dict | None:
         """Get cached rectangle for an element by AutomationId."""
         return self._ui.get_cached_rect(automation_id)
