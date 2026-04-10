@@ -174,7 +174,72 @@ public class Program
         };
         textBox.AccessibleName = "txtOutput";
 
-        panel.Controls.AddRange(new Control[] { invokeBtn, checkBox, scopedBtn, textBox });
+        // Open-second-window button inside the panel — opens a modeless
+        // sibling top-level form so the smoke test can verify the full
+        // multi-window flow (get_tree -> switch_window -> find_element
+        // inside the new window) against a real second top-level window.
+        // Form.Show() (not ShowDialog) returns immediately, so the bridge
+        // is free to serve subsequent queries.
+        Form? secondWindow = null;
+        var openSecondBtn = new Button
+        {
+            Name = "btnOpenSecond",
+            Text = "Open Second",
+            // Positioned beside scopedBtn (20,100) and outside the column
+            // used by actionBtnInside (160,100) to avoid visual overlap.
+            Location = new System.Drawing.Point(20, 165),
+            Width = 120,
+            Height = 30,
+        };
+        openSecondBtn.AccessibleName = "btnOpenSecond";
+        openSecondBtn.Click += (_, _) =>
+        {
+            if (secondWindow is { IsDisposed: false })
+            {
+                secondWindow.Activate();
+                return;
+            }
+
+            // No AccessibleName override — we want the WinForms Text "Create
+            // collection" to become the UIA Name so the smoke test can
+            // target the window by title (which is how real agents will
+            // address modal dialogs).
+            secondWindow = new Form
+            {
+                Text = "Create collection",
+                Width = 360,
+                Height = 180,
+                StartPosition = FormStartPosition.CenterParent,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                MinimizeBox = false,
+                MaximizeBox = false,
+            };
+
+            var input = new TextBox
+            {
+                Name = "dlgInput",
+                Location = new System.Drawing.Point(20, 20),
+                Width = 300,
+            };
+            input.AccessibleName = "dlgInput";
+
+            var closeBtn = new Button
+            {
+                Name = "dlgClose",
+                Text = "Close",
+                Location = new System.Drawing.Point(140, 70),
+                Width = 80,
+            };
+            closeBtn.AccessibleName = "dlgClose";
+            closeBtn.Click += (_, _) => secondWindow?.Close();
+
+            secondWindow.FormClosed += (_, _) => secondWindow = null;
+            secondWindow.Controls.Add(input);
+            secondWindow.Controls.Add(closeBtn);
+            secondWindow.Show();
+        };
+
+        panel.Controls.AddRange(new Control[] { invokeBtn, checkBox, scopedBtn, textBox, openSecondBtn });
 
         // Duplicate-named button inside panel for root_id scoping test
         var actionBtnInside = new Button

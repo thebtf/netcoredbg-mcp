@@ -357,15 +357,36 @@ class FlaUIBackend:
         return len(result.get("indices", []))
 
     async def get_window_tree(self, max_depth: int = 3, max_children: int = 50) -> Any:
-        """Get tree via FlaUI bridge and update cache."""
+        """Get tree via FlaUI bridge and update cache.
+
+        Bridge returns the multi-window shape `{windows: [...], count, primary}`
+        covering every top-level window of the target process, which is how
+        modal dialogs (siblings of the app's main window) become reachable.
+        Caching walks every window so ui_click / ui_send_keys can resolve
+        elements inside any of them.
+        """
         result = await self._client.call("get_tree", {
             "maxDepth": max_depth,
             "maxChildren": max_children,
         })
-        # Update element cache from tree
         self._element_cache.clear()
-        self._cache_from_tree(result)
+        for window_tree in self._iter_windows(result):
+            self._cache_from_tree(window_tree)
         return result
+
+    @staticmethod
+    def _iter_windows(tree_result: Any) -> list[dict]:
+        """Yield window subtrees regardless of whether the bridge returned the
+        multi-window envelope or a legacy single-tree response."""
+        if not isinstance(tree_result, dict):
+            return []
+        windows = tree_result.get("windows")
+        if isinstance(windows, list):
+            return [w for w in windows if isinstance(w, dict)]
+        # Legacy single-tree shape — treat the root node as the only window.
+        if "found" in tree_result or "automationId" in tree_result:
+            return [tree_result]
+        return []
 
     def _cache_from_tree(self, node: dict) -> None:
         """Recursively cache element rects from tree response."""
@@ -385,3 +406,29 @@ class FlaUIBackend:
         for child in node.get("children", []):
             if isinstance(child, dict) and not child.get("truncated"):
                 self._cache_from_tree(child)
+
+    async def switch_window(
+        self,
+        name: str | None = None,
+        automation_id: str | None = None,
+    ) -> dict:
+        """Retarget the bridge at a different top-level window of the same process.
+
+        Matching priority inside the bridge: automationId → name. This is how
+        callers enter a modal dialog (sibling top-level window) after
+        ``get_window_tree`` surfaces it.
+        """
+        if not name and not automation_id:
+            raise ValueError("switch_window requires at least one of: name, automation_id")
+        params: dict[str, str] = {}
+        if automation_id:
+            params["automationId"] = automation_id
+        if name:
+            params["name"] = name
+        result = await self._client.call("set_active_window", params)
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"set_active_window: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result

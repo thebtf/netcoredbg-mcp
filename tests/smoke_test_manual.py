@@ -642,6 +642,166 @@ async def test_datagrid_select():
             pass
 
 
+async def test_multi_window_envelope():
+    """Scenario: engram issue #7 -- end-to-end multi-window flow.
+
+    Drives the full multi-window lifecycle against a real bridge process:
+    main window visible, click Open Second -> modeless sibling top-level
+    window appears -> get_window_tree surfaces both windows in the envelope
+    -> switch_window retargets into the second window -> find_element
+    resolves an element inside the second window that does not exist in
+    the main window -> switch back to main.
+
+    This reproduces the bug path from engram #7 (modal dialogs are sibling
+    top-level windows, not descendants) using Form.Show() instead of
+    ShowDialog() to avoid WinForms modal-vs-InvokePattern blocking quirks.
+    The novascript WPF scenario uses ShowDialog() directly but gets the
+    same UIA representation (sibling top-level window), which this test
+    exercises faithfully.
+    """
+    print("\n--- Multi-Window Envelope (engram #7) ---")
+
+    from netcoredbg_mcp.ui.backend import create_backend
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    m = SessionManager()
+    try:
+        await m.launch(program=DLL, args=["gui"])
+        await asyncio.sleep(2.0)
+
+        backend = create_backend(process_registry=m.process_registry)
+        pid = m.state.process_id
+        if not pid:
+            check("MultiWindow: process started", False, "no PID")
+            return
+        await backend.connect(pid)
+
+        if not isinstance(backend, FlaUIBackend):
+            check("MultiWindow (skipped)", True,
+                  "pywinauto -- multi-window requires FlaUI bridge")
+            await backend.disconnect()
+            return
+
+        # 1. Baseline envelope with just the main window present
+        primary: str = ""
+        try:
+            tree = await backend.get_window_tree(max_depth=3, max_children=50)
+            assert isinstance(tree, dict)
+            windows = tree.get("windows")
+            assert isinstance(windows, list)
+
+            check("MultiWindow: baseline envelope has main window only",
+                  len(windows) == 1,
+                  f"count={tree.get('count')}")
+
+            primary_val = tree.get("primary")
+            primary = primary_val if isinstance(primary_val, str) else ""
+            check("MultiWindow: primary is main window name",
+                  isinstance(primary_val, str) and len(primary) > 0,
+                  f"primary={primary_val}")
+
+            first = windows[0]
+            check("MultiWindow: main window has className field (Fix A guard)",
+                  isinstance(first, dict) and "className" in first,
+                  "className key missing -- BuildElementInfo Fix A regression")
+        except Exception as e:
+            check("MultiWindow: baseline envelope", False, str(e))
+            await backend.disconnect()
+            return
+
+        # 2. Element cache populated from the walk
+        cache_size = len(backend.element_cache)
+        check("MultiWindow: element cache populated",
+              cache_size > 0,
+              f"entries={cache_size}")
+
+        # 3. Open the second top-level window
+        try:
+            await backend.invoke_element(name="btnOpenSecond")
+            check("MultiWindow: open second window", True)
+        except Exception as e:
+            check("MultiWindow: open second window", False, str(e))
+            await backend.disconnect()
+            return
+        await asyncio.sleep(0.8)
+
+        # 4. After opening, envelope surfaces both windows as siblings
+        try:
+            tree2 = await backend.get_window_tree(max_depth=3, max_children=50)
+            assert isinstance(tree2, dict)
+            windows2 = tree2.get("windows") or []
+            window_names = [
+                w.get("name", "") for w in windows2 if isinstance(w, dict)
+            ]
+            second_visible = any("Create collection" in n for n in window_names)
+            check("MultiWindow: second window visible as sibling",
+                  second_visible,
+                  f"names={window_names}")
+            check("MultiWindow: envelope reports count>=2",
+                  len(windows2) >= 2,
+                  f"count={tree2.get('count')}")
+        except Exception as e:
+            check("MultiWindow: envelope after open", False, str(e))
+            await backend.disconnect()
+            return
+
+        # 5. Switch into the second window
+        try:
+            result = await backend.switch_window(name="Create collection")
+            check("MultiWindow: switch_window to second window",
+                  isinstance(result, dict) and result.get("switched") is True,
+                  f"title={result.get('title') if isinstance(result, dict) else '?'}")
+        except Exception as e:
+            check("MultiWindow: switch_window to second window", False, str(e))
+
+        # 6. Find an element inside the second window that doesn't exist in main
+        try:
+            found = await backend.find_element(automation_id="dlgInput")
+            check("MultiWindow: find TextBox in second window",
+                  isinstance(found, dict) and found.get("found", False),
+                  f"found={found.get('found') if isinstance(found, dict) else '?'}")
+        except Exception as e:
+            check("MultiWindow: find TextBox in second window", False, str(e))
+
+        # 7. Close second window via its Close button
+        try:
+            await backend.invoke_element(automation_id="dlgClose")
+            check("MultiWindow: close second window via button", True)
+            await asyncio.sleep(0.5)
+        except Exception as e:
+            check("MultiWindow: close second window via button", False, str(e))
+
+        # 8. Switch back to the main window
+        try:
+            result = await backend.switch_window(name=primary)
+            check("MultiWindow: switch back to main window",
+                  isinstance(result, dict) and result.get("switched") is True,
+                  f"title={result.get('title') if isinstance(result, dict) else '?'}")
+        except Exception as e:
+            check("MultiWindow: switch back to main", False, str(e))
+
+        # 9. switch_window surfaces an explicit error for an unknown window
+        try:
+            unknown_error: str | None = None
+            try:
+                await backend.switch_window(name="___no_such_window_xyzzy___")
+            except Exception as err:
+                unknown_error = str(err)
+            check("MultiWindow: switch_window rejects unknown window",
+                  unknown_error is not None and "No top-level window" in (unknown_error or ""),
+                  f"error={unknown_error}")
+        except Exception as e:
+            check("MultiWindow: switch_window rejects unknown window", False, str(e))
+
+        await backend.disconnect()
+
+    finally:
+        try:
+            await m.stop()
+        except Exception:
+            pass
+
+
 async def test_scoped_search_performance():
     """Scenario 12: Verify scoped search (root_id) is faster than full tree search."""
     print("\n--- Scoped Search Performance (NFR-2) ---")
@@ -1029,6 +1189,7 @@ async def run_all():
         scenarios.extend([
             ("UI Invoke + Toggle + Root ID", test_ui_invoke_toggle),
             ("DataGrid Select + Read", test_datagrid_select),
+            ("Multi-Window Envelope", test_multi_window_envelope),
             ("Scoped Search Performance", test_scoped_search_performance),
         ])
     else:

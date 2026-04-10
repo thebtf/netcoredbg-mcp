@@ -122,6 +122,14 @@ class UIBackend(Protocol):
         """Get the UI element tree."""
         ...
 
+    async def switch_window(
+        self,
+        name: str | None = None,
+        automation_id: str | None = None,
+    ) -> dict:
+        """Retarget the backend at a different top-level window of the same process."""
+        ...
+
     @property
     def element_cache(self) -> dict[str, dict]:
         """Cached element rectangles from last tree walk."""

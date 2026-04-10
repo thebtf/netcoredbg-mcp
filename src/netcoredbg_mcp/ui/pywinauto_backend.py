@@ -389,6 +389,29 @@ class PywinautoBackend:
         tree = await self._ui.get_window_tree(max_depth, max_children)
         return tree.to_dict()
 
+    async def switch_window(
+        self,
+        name: str | None = None,
+        automation_id: str | None = None,
+    ) -> dict:
+        """Multi-window retargeting is a FlaUI-only feature.
+
+        The pywinauto backend is a legacy fallback and does not track multiple
+        top-level windows. Instead of raising (which would surprise callers
+        holding the UIBackend protocol contract), return a structured
+        capability response with ``switched=False`` and ``unsupported=True``
+        so the tool layer can surface a clean error without try/except on a
+        NotImplementedError.
+        """
+        return {
+            "switched": False,
+            "unsupported": True,
+            "reason": (
+                "switch_window requires the FlaUI bridge backend. "
+                "The pywinauto backend does not support multi-window retargeting."
+            ),
+        }
+
     def get_cached_rect(self, automation_id: str) -> dict | None:
         """Get cached rectangle for an element by AutomationId."""
         return self._ui.get_cached_rect(automation_id)
