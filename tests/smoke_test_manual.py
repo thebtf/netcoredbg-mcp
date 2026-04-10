@@ -642,6 +642,129 @@ async def test_datagrid_select():
             pass
 
 
+async def test_multi_window_envelope():
+    """Scenario: engram issue #7 — multi-window bridge API smoke test.
+
+    Exercises the Python + bridge layer for the new multi-window contract
+    without relying on a modal dialog being driveable via WinForms UIA
+    (WinForms has several pre-existing quirks around modal discovery and
+    synchronous InvokePattern that make a dialog-based smoke test flaky).
+
+    What this verifies against a real bridge process:
+    - ui_get_window_tree returns the new {windows:[...], count, primary} shape
+    - The element cache is populated from the window list
+    - ui_switch_window successfully retargets to the (only) top-level window
+      using its AccessibleName
+    - ui_switch_window returns a structured error for a bogus window name
+    - BuildElementInfo safe-property handling does not crash on a standard
+      app tree (regression guard for Fix A)
+
+    End-to-end modal dialog verification happens in novascript (the real
+    WPF consumer) — see engram issue #7.
+    """
+    print("\n--- Multi-Window Envelope (engram #7) ---")
+
+    from netcoredbg_mcp.ui.backend import create_backend
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    m = SessionManager()
+    try:
+        await m.launch(program=DLL, args=["gui"])
+        await asyncio.sleep(2.0)
+
+        backend = create_backend(process_registry=m.process_registry)
+        pid = m.state.process_id
+        if not pid:
+            check("MultiWindow: process started", False, "no PID")
+            return
+        await backend.connect(pid)
+
+        if not isinstance(backend, FlaUIBackend):
+            check("MultiWindow (skipped)", True,
+                  "pywinauto -- multi-window requires FlaUI bridge")
+            await backend.disconnect()
+            return
+
+        # 1. get_window_tree returns the new envelope with at least one window
+        primary: str = ""
+        try:
+            tree = await backend.get_window_tree(max_depth=3, max_children=50)
+            check("MultiWindow: tree is dict",
+                  isinstance(tree, dict),
+                  f"type={type(tree).__name__}")
+            assert isinstance(tree, dict)
+
+            windows = tree.get("windows")
+            check("MultiWindow: tree.windows is list",
+                  isinstance(windows, list),
+                  f"type={type(windows).__name__}")
+            assert isinstance(windows, list)
+
+            check("MultiWindow: at least one window present",
+                  len(windows) >= 1,
+                  f"count={tree.get('count')}")
+
+            primary_val = tree.get("primary")
+            primary = primary_val if isinstance(primary_val, str) else ""
+            check("MultiWindow: primary is the first window name",
+                  isinstance(primary_val, str) and len(primary) > 0,
+                  f"primary={primary_val}")
+
+            first = windows[0] if windows else None
+            check("MultiWindow: first window has automationId field",
+                  isinstance(first, dict) and "automationId" in first,
+                  f"keys={list(first.keys())[:6] if isinstance(first, dict) else 'n/a'}")
+            check("MultiWindow: first window has rect field",
+                  isinstance(first, dict) and isinstance(first.get("rect"), dict),
+                  "rect missing")
+            check("MultiWindow: first window has className field (may be empty)",
+                  isinstance(first, dict) and "className" in first,
+                  "className key missing -- BuildElementInfo Fix A regression")
+        except Exception as e:
+            check("MultiWindow: get_window_tree envelope", False, str(e))
+            await backend.disconnect()
+            return
+
+        # 2. element cache populated from the walk
+        try:
+            cache_size = len(backend.element_cache)
+            check("MultiWindow: element cache populated",
+                  cache_size > 0,
+                  f"entries={cache_size}")
+        except Exception as e:
+            check("MultiWindow: element cache populated", False, str(e))
+
+        # 3. switch_window succeeds with the main window's own name
+        try:
+            result = await backend.switch_window(name=primary)
+            check("MultiWindow: switch_window to main window",
+                  isinstance(result, dict) and result.get("switched") is True,
+                  f"title={result.get('title') if isinstance(result, dict) else '?'}")
+        except Exception as e:
+            check("MultiWindow: switch_window to main", False, str(e))
+
+        # 4. switch_window rejects an unknown window with a structured error
+        try:
+            unknown_error: str | None = None
+            try:
+                await backend.switch_window(name="___no_such_window_xyzzy___")
+            except Exception as err:
+                unknown_error = str(err)
+            check("MultiWindow: switch_window rejects unknown window",
+                  unknown_error is not None and "No top-level window" in (unknown_error or ""),
+                  f"error={unknown_error}")
+        except Exception as e:
+            check("MultiWindow: switch_window rejects unknown window", False, str(e))
+
+        await backend.disconnect()
+
+    finally:
+        try:
+            await m.stop()
+        except Exception:
+            pass
+
+
 async def test_scoped_search_performance():
     """Scenario 12: Verify scoped search (root_id) is faster than full tree search."""
     print("\n--- Scoped Search Performance (NFR-2) ---")
@@ -1029,6 +1152,7 @@ async def run_all():
         scenarios.extend([
             ("UI Invoke + Toggle + Root ID", test_ui_invoke_toggle),
             ("DataGrid Select + Read", test_datagrid_select),
+            ("Multi-Window Envelope", test_multi_window_envelope),
             ("Scoped Search Performance", test_scoped_search_performance),
         ])
     else:
