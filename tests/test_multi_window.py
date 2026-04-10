@@ -212,6 +212,6 @@ class TestPywinautoSwitchWindow:
 
     @pytest.mark.asyncio
     async def test_raises_not_implemented(self):
-        backend = PywinautoBackend(process_registry=None)
+        backend = PywinautoBackend()
         with pytest.raises(NotImplementedError, match="FlaUI bridge"):
             await backend.switch_window(name="Create collection")
