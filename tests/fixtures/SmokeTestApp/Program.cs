@@ -185,7 +185,9 @@ public class Program
         {
             Name = "btnOpenSecond",
             Text = "Open Second",
-            Location = new System.Drawing.Point(160, 100),
+            // Positioned beside scopedBtn (20,100) and outside the column
+            // used by actionBtnInside (160,100) to avoid visual overlap.
+            Location = new System.Drawing.Point(20, 165),
             Width = 120,
             Height = 30,
         };
