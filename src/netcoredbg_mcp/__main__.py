@@ -11,6 +11,29 @@ from . import __version__
 from .server import create_server, get_session
 from .utils.project import configure_project_root, get_project_root_sync
 
+# Transport errors that indicate the stdio pipe was closed from the other
+# side — either the MCP client (Claude Code / IDE) itself, or an intermediate
+# multiplexer like mcp-mux. These are not server bugs; the correct response is
+# a clean, silent shutdown so the parent process can restart us on demand.
+#
+# BrokenPipeError / ConnectionResetError: OS-level pipe closure on write.
+# EOFError: stdin returned empty read (other side hung up).
+# anyio.ClosedResourceError / anyio.EndOfStream: anyio stdio_server wrappers
+#   used by FastMCP translate pipe closures into these. Importing anyio at the
+#   module level keeps the tuple static so the except clause can reference it
+#   by name with no runtime import cost.
+try:
+    import anyio as _anyio
+    _TRANSPORT_SHUTDOWN_ERRORS: tuple[type[BaseException], ...] = (
+        BrokenPipeError,
+        ConnectionResetError,
+        EOFError,
+        _anyio.ClosedResourceError,
+        _anyio.EndOfStream,
+    )
+except ImportError:
+    _TRANSPORT_SHUTDOWN_ERRORS = (BrokenPipeError, ConnectionResetError, EOFError)
+
 
 def configure_logging() -> None:
     """Configure logging based on environment."""
@@ -144,6 +167,13 @@ async def main() -> None:
                 },
             )
             await mcp._mcp_server.run(read_stream, write_stream, init_options)
+    except _TRANSPORT_SHUTDOWN_ERRORS as exc:
+        # Transport was closed from the client side (Claude Code dropped stdio,
+        # mcp-mux broadcast collision, pipe buffer full under backpressure, etc.).
+        # Don't log a traceback — a closed pipe is a normal shutdown signal, not
+        # a bug in this server. The parent process (IDE / mcp-mux) will restart
+        # this subprocess if the user runs another debug command.
+        logger.info("Transport closed by client: %s: %s", type(exc).__name__, exc)
     except Exception:
         logger.exception("Server error")
         raise
@@ -163,6 +193,10 @@ def run() -> None:
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+    except _TRANSPORT_SHUTDOWN_ERRORS:
+        # Exit code 0 on transport shutdown so the process manager (systemd,
+        # mcp-mux, IDE) treats us as cleanly exited, not crashed.
+        sys.exit(0)
 
 
 if __name__ == "__main__":
