@@ -60,15 +60,15 @@
 
 ## Phase 4: Integration + Release
 
-- [ ] T13: Prompts + docs update
+- [x] T13: Prompts + docs update
   - Files: `src/netcoredbg_mcp/prompts.py`, existing readme/docs if any
   - AC: GUI debugging action table adds 5 new rows (ui_drag updated, ui_send_system_event, ui_hold_modifiers, ui_release_modifiers, ui_get_held_modifiers). Worked example block for Ctrl+click multi-select workflow end-to-end added.
 
-- [ ] T14: Bridge rebuild + deploy to home dir
+- [x] T14: Bridge rebuild + deploy to home dir
   - Files: build outputs under `bridge/bin/Release/publish-sc/`, deploy to `~/.netcoredbg-mcp/bridge/` + `D:/Bin/FlaUIBridge.exe`
   - AC: `dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true` produces new FlaUIBridge.exe ~154MB. Deployed to both paths. Verified via `ls -la` size + mtime matches.
 
-- [ ] T15: Version bump 0.9.0 → 0.10.0
+- [x] T15: Version bump 0.9.0 → 0.10.0
   - Files: `pyproject.toml`, `src/netcoredbg_mcp/__init__.py`
   - AC: MINOR bump (three new tool families + one enhanced tool = significant surface area). Both files updated to `0.10.0`.
 
