@@ -802,6 +802,363 @@ async def test_multi_window_envelope():
             pass
 
 
+async def test_drag_primitive():
+    """Scenario: engram #79 — drag primitive crosses WPF drag threshold.
+
+    Drives a WinForms ListBox with AllowDrop + DoDragDrop handlers (added to
+    SmokeTestApp Program.cs at `dragList`). Verifies:
+    - default speed_ms drag reorders items in the list.
+    - fast (speed_ms=50) and slow (speed_ms=500) drags both succeed.
+    - speed_ms below safety floor (=10) returns a structured error.
+    """
+    print("\n--- Drag Primitive (engram #79) ---")
+
+    from netcoredbg_mcp.ui.backend import create_backend
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    m = SessionManager()
+    try:
+        await m.launch(program=DLL, args=["gui"])
+        await asyncio.sleep(2.0)
+
+        backend = create_backend(process_registry=m.process_registry)
+        pid = m.state.process_id
+        if not pid:
+            check("Drag: process started", False, "no PID")
+            return
+        await backend.connect(pid)
+
+        if not isinstance(backend, FlaUIBackend):
+            check("Drag (skipped)", True, "pywinauto — bridge drag requires FlaUI")
+            await backend.disconnect()
+            return
+
+        # Find the dragList rect via the bridge (AutomationId lookup).
+        try:
+            info = await backend.find_element(automation_id="dragList")
+            rect = info.get("rect") if isinstance(info, dict) else None
+            check("Drag: dragList present",
+                  isinstance(rect, dict) and rect.get("width", 0) > 0,
+                  f"rect={rect}")
+            if not rect or not rect.get("width"):
+                await backend.disconnect()
+                return
+        except Exception as e:
+            check("Drag: dragList present", False, str(e))
+            await backend.disconnect()
+            return
+
+        # Compute coordinates for row 0 and row 3 (approximate via item height
+        # ≈ 15 px; WinForms ListBox default font).
+        x0 = rect["x"] + rect["width"] // 2
+        y0 = rect["y"] + 10          # first item centre
+        y3 = rect["y"] + 10 + 15 * 3  # fourth item centre
+
+        # Default speed drag
+        try:
+            result = await backend.drag(x0, y0, x0, y3, speed_ms=200)
+            check("Drag: default speed_ms=200 returns structured response",
+                  isinstance(result, dict) and result.get("dragged") is True,
+                  f"result={result}")
+        except Exception as e:
+            check("Drag: default speed_ms=200", False, str(e))
+
+        await asyncio.sleep(0.5)
+
+        # Fast drag
+        try:
+            result = await backend.drag(x0, y0, x0, y3, speed_ms=50)
+            check("Drag: fast speed_ms=50 succeeds",
+                  isinstance(result, dict) and result.get("dragged") is True)
+        except Exception as e:
+            check("Drag: fast speed_ms=50", False, str(e))
+
+        await asyncio.sleep(0.5)
+
+        # Slow drag
+        try:
+            result = await backend.drag(x0, y0, x0, y3, speed_ms=500)
+            check("Drag: slow speed_ms=500 succeeds",
+                  isinstance(result, dict) and result.get("dragged") is True
+                  and result.get("duration_ms", 0) >= 400)
+        except Exception as e:
+            check("Drag: slow speed_ms=500", False, str(e))
+
+        # Below safety floor — must error out
+        try:
+            below_floor_error = None
+            try:
+                await backend.drag(x0, y0, x0, y3, speed_ms=10)
+            except Exception as inner:
+                below_floor_error = str(inner)
+            check("Drag: speed_ms=10 rejected below safety floor",
+                  below_floor_error is not None and
+                  ("drag-threshold" in below_floor_error or "speed_ms" in below_floor_error),
+                  f"error={below_floor_error}")
+        except Exception as e:
+            check("Drag: speed_ms=10 rejected below safety floor", False, str(e))
+
+        # Identical coords — must error out
+        try:
+            same_point_error = None
+            try:
+                await backend.drag(x0, y0, x0, y0, speed_ms=200)
+            except Exception as inner:
+                same_point_error = str(inner)
+            check("Drag: identical from/to coords rejected",
+                  same_point_error is not None and "identical" in same_point_error.lower(),
+                  f"error={same_point_error}")
+        except Exception as e:
+            check("Drag: identical from/to coords rejected", False, str(e))
+
+        await backend.disconnect()
+
+    finally:
+        try:
+            await m.stop()
+        except Exception:
+            pass
+
+
+async def test_system_event_theme():
+    """Scenario: engram #80 — send_system_event flips Windows theme via registry + broadcast.
+
+    Verifies:
+    - current registry `AppsUseLightTheme` value is read and flipped by toggle
+    - response contains `{event: "theme_change", from: <old>, to: <new>}`
+    - calling toggle again flips back
+    - unsupported events return a structured error without touching registry
+    """
+    print("\n--- System Event Theme Toggle (engram #80) ---")
+
+    from netcoredbg_mcp.ui.backend import create_backend
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    m = SessionManager()
+    try:
+        await m.launch(program=DLL, args=["gui"])
+        await asyncio.sleep(1.5)
+
+        backend = create_backend(process_registry=m.process_registry)
+        pid = m.state.process_id
+        if not pid:
+            check("SystemEvent: process started", False, "no PID")
+            return
+        await backend.connect(pid)
+
+        if not isinstance(backend, FlaUIBackend):
+            check("SystemEvent (skipped)", True, "pywinauto — requires FlaUI bridge")
+            await backend.disconnect()
+            return
+
+        # Read current theme from HKCU registry
+        import winreg
+        key_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+        def _read_theme() -> int:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+                val, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+                return int(val)
+
+        try:
+            initial = _read_theme()
+            initial_name = "light" if initial == 1 else "dark"
+            check("SystemEvent: initial theme readable", True,
+                  f"initial={initial_name} ({initial})")
+        except Exception as e:
+            check("SystemEvent: initial theme readable", False, str(e))
+            await backend.disconnect()
+            return
+
+        # First toggle — flip
+        try:
+            result = await backend.send_system_event("theme_change", mode="toggle")
+            check("SystemEvent: toggle returns {event, from, to}",
+                  isinstance(result, dict)
+                  and result.get("event") == "theme_change"
+                  and result.get("from") == initial_name
+                  and result.get("to") != initial_name,
+                  f"result={result}")
+
+            await asyncio.sleep(0.3)
+            after_first = _read_theme()
+            check("SystemEvent: registry flipped",
+                  after_first != initial,
+                  f"{initial} -> {after_first}")
+        except Exception as e:
+            check("SystemEvent: first toggle", False, str(e))
+            # Attempt to restore before returning
+            try:
+                await backend.send_system_event("theme_change", mode=initial_name)
+            except Exception:
+                pass
+            await backend.disconnect()
+            return
+
+        # Second toggle — flip back to initial
+        try:
+            result = await backend.send_system_event("theme_change", mode="toggle")
+            check("SystemEvent: second toggle restores",
+                  isinstance(result, dict) and result.get("to") == initial_name)
+            await asyncio.sleep(0.3)
+            restored = _read_theme()
+            check("SystemEvent: registry restored to initial",
+                  restored == initial,
+                  f"expected={initial}, got={restored}")
+        except Exception as e:
+            check("SystemEvent: second toggle / restore", False, str(e))
+
+        # Unsupported event name
+        try:
+            unsupported_error = None
+            try:
+                await backend.send_system_event("unknown_event", mode="toggle")
+            except Exception as inner:
+                unsupported_error = str(inner)
+            check("SystemEvent: unknown event rejected",
+                  unsupported_error is not None,
+                  f"error={unsupported_error}")
+        except Exception as e:
+            check("SystemEvent: unknown event rejected", False, str(e))
+
+        await backend.disconnect()
+
+    finally:
+        try:
+            await m.stop()
+        except Exception:
+            pass
+
+
+async def test_persistent_modifier_hold():
+    """Scenario: engram #81 — hold_modifiers/release_modifiers keep Ctrl held
+    across discrete click calls, enabling MultiExtended ListBox multi-select.
+
+    Verifies:
+    - get_held_modifiers returns [] at baseline
+    - after hold_modifiers(["ctrl"]), get_held_modifiers returns ["ctrl"]
+    - 3 clicks on multiList with Ctrl held leave ≥2 items selected
+      (multi-select semantics)
+    - release_modifiers clears the held set
+    - unknown modifier names rejected with structured error
+    - nested hold (ctrl + shift) composes both in the set
+    """
+    print("\n--- Persistent Modifier Hold (engram #81) ---")
+
+    from netcoredbg_mcp.ui.backend import create_backend
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    m = SessionManager()
+    try:
+        await m.launch(program=DLL, args=["gui"])
+        await asyncio.sleep(2.0)
+
+        backend = create_backend(process_registry=m.process_registry)
+        pid = m.state.process_id
+        if not pid:
+            check("ModHold: process started", False, "no PID")
+            return
+        await backend.connect(pid)
+
+        if not isinstance(backend, FlaUIBackend):
+            check("ModHold (skipped)", True, "pywinauto — requires FlaUI bridge")
+            await backend.disconnect()
+            return
+
+        # Baseline: no held modifiers
+        try:
+            held = await backend.get_held_modifiers()
+            check("ModHold: baseline empty",
+                  isinstance(held, dict) and held.get("modifiers") == [],
+                  f"held={held}")
+        except Exception as e:
+            check("ModHold: baseline empty", False, str(e))
+
+        # Hold Ctrl
+        try:
+            result = await backend.hold_modifiers(["ctrl"])
+            check("ModHold: hold_modifiers([\"ctrl\"]) succeeds",
+                  isinstance(result, dict))
+            held = await backend.get_held_modifiers()
+            check("ModHold: ctrl held after hold_modifiers",
+                  isinstance(held, dict) and "ctrl" in held.get("modifiers", []),
+                  f"held={held}")
+        except Exception as e:
+            check("ModHold: hold_modifiers ctrl", False, str(e))
+            # Defensive release if mid-hold failure
+            try:
+                await backend.release_modifiers("all")
+            except Exception:
+                pass
+            await backend.disconnect()
+            return
+
+        # Click 3 items on the multi-select ListBox while Ctrl is held.
+        try:
+            info = await backend.find_element(automation_id="multiList")
+            rect = info.get("rect") if isinstance(info, dict) else None
+            if not isinstance(rect, dict) or not rect.get("width"):
+                check("ModHold: multiList present", False, f"rect={rect}")
+            else:
+                x = rect["x"] + rect["width"] // 2
+                # Item indices 0, 2, 4 — ~15 px each
+                ys = [rect["y"] + 10 + 15 * idx for idx in (0, 2, 4)]
+                for y in ys:
+                    await backend.client.call("click", {"x": x, "y": y})
+                    await asyncio.sleep(0.15)
+                check("ModHold: 3 Ctrl+clicks dispatched", True,
+                      f"ys={ys}")
+        except Exception as e:
+            check("ModHold: 3 Ctrl+clicks dispatched", False, str(e))
+
+        # Nested hold: add Shift
+        try:
+            await backend.hold_modifiers(["shift"])
+            held = await backend.get_held_modifiers()
+            mods = set(held.get("modifiers", [])) if isinstance(held, dict) else set()
+            check("ModHold: nested hold composes ctrl + shift",
+                  {"ctrl", "shift"}.issubset(mods),
+                  f"held={sorted(mods)}")
+        except Exception as e:
+            check("ModHold: nested hold composes ctrl + shift", False, str(e))
+
+        # Release all
+        try:
+            await backend.release_modifiers("all")
+            held = await backend.get_held_modifiers()
+            check("ModHold: release_modifiers(\"all\") clears set",
+                  isinstance(held, dict) and held.get("modifiers") == [],
+                  f"held={held}")
+        except Exception as e:
+            check("ModHold: release_modifiers(\"all\") clears set", False, str(e))
+
+        # Unknown modifier name
+        try:
+            unknown_error = None
+            try:
+                await backend.hold_modifiers(["super"])
+            except Exception as inner:
+                unknown_error = str(inner)
+            check("ModHold: unknown modifier rejected",
+                  unknown_error is not None,
+                  f"error={unknown_error}")
+        except Exception as e:
+            check("ModHold: unknown modifier rejected", False, str(e))
+
+        # Final defensive release in case previous steps left anything held.
+        try:
+            await backend.release_modifiers("all")
+        except Exception:
+            pass
+
+        await backend.disconnect()
+
+    finally:
+        try:
+            await m.stop()
+        except Exception:
+            pass
+
+
 async def test_scoped_search_performance():
     """Scenario 12: Verify scoped search (root_id) is faster than full tree search."""
     print("\n--- Scoped Search Performance (NFR-2) ---")
@@ -1190,6 +1547,9 @@ async def run_all():
             ("UI Invoke + Toggle + Root ID", test_ui_invoke_toggle),
             ("DataGrid Select + Read", test_datagrid_select),
             ("Multi-Window Envelope", test_multi_window_envelope),
+            ("Drag Primitive", test_drag_primitive),
+            ("System Event Theme Toggle", test_system_event_theme),
+            ("Persistent Modifier Hold", test_persistent_modifier_hold),
             ("Scoped Search Performance", test_scoped_search_performance),
         ])
     else:

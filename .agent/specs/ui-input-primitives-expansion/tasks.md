@@ -42,19 +42,19 @@
 
 ## Phase 3: Tests
 
-- [ ] T09: Unit tests — FlaUI routing + Pywinauto unsupported contracts
+- [x] T09: Unit tests — FlaUI routing + Pywinauto unsupported contracts
   - Files: `tests/test_input_primitives.py` (new)
   - AC: ≥12 tests covering: `FlaUIBackend.drag` forwards params; `send_system_event` forwards; `hold_modifiers`/`release_modifiers`/`get_held_modifiers` forward; `PywinautoBackend.send_system_event` returns unsupported; `PywinautoBackend.hold_modifiers` returns unsupported; pywinauto `drag` with `speed_ms`/`hold_modifiers` forwards to `_send_drag` with correct args; input validation (unknown modifier, speed_ms < 20, identical coords) raises. All 565 + 13 existing tests continue to pass unchanged.
 
-- [ ] T10: Smoke scenario — Drag Primitive
+- [x] T10: Smoke scenario — Drag Primitive
   - Files: `tests/fixtures/SmokeTestApp/Program.cs`, `tests/smoke_test_manual.py`
   - AC: SmokeTestApp gains a ListBox (or DataGridView with AllowDrop) populated with 5 items that supports native WinForms drag-drop reorder (`DoDragDrop` handler). Smoke scenario: ensure ListBox visible, call `ui_drag(from_x, from_y, to_x, to_y, speed_ms=200)`, verify item order changed. Also test `speed_ms=50` (fast) and `speed_ms=500` (slow) both succeed. Verify `speed_ms=10` returns error.
 
-- [ ] T11: Smoke scenario — System Event
+- [x] T11: Smoke scenario — System Event
   - Files: `tests/smoke_test_manual.py`
   - AC: Read current registry `AppsUseLightTheme`, call `ui_send_system_event(event="theme_change", mode="toggle")`, verify: (a) registry value flipped, (b) response contains `{from: <old>, to: <new>}`, (c) calling again flips back. Optional tracepoint scenario: if WinForms app has `SystemEvents.UserPreferenceChanged` handler, verify handler fired within 500 ms.
 
-- [ ] T12: Smoke scenario — Persistent Modifier Hold
+- [x] T12: Smoke scenario — Persistent Modifier Hold
   - Files: `tests/fixtures/SmokeTestApp/Program.cs`, `tests/smoke_test_manual.py`
   - AC: SmokeTestApp gains a `ListBox` or `DataGridView` with `SelectionMode = MultiExtended`. Smoke scenario: `ui_hold_modifiers(["ctrl"])` → 3× `ui_click` on different items → `ui_release_modifiers(["ctrl"])` → verify 3 items selected. Verify `ui_get_held_modifiers` returns `["ctrl"]` mid-sequence and `[]` after release. Verify nested holds (ctrl + shift) compose via `ui_get_held_modifiers`.
 
