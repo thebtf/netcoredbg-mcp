@@ -249,6 +249,24 @@ public static class ClickCommands
             thresholdY += Math.Sign(deltaY);
         }
 
+        // Diagonal short-drag guard: rounding above can leave both axes
+        // below DragThresholdPixels (e.g. (0,0)→(10,10) with threshold 4
+        // produces first waypoint (4,4), which sits inside the WPF
+        // rectreshold and skips DoDragDrop). Force the dominant axis out
+        // past the threshold so the first move always crosses it.
+        if (Math.Abs(thresholdX - x1) < DragThresholdPixels &&
+            Math.Abs(thresholdY - y1) < DragThresholdPixels)
+        {
+            if (Math.Abs(deltaX) >= Math.Abs(deltaY) && deltaX != 0)
+            {
+                thresholdX = x1 + (Math.Sign(deltaX) * DragThresholdPixels);
+            }
+            else if (deltaY != 0)
+            {
+                thresholdY = y1 + (Math.Sign(deltaY) * DragThresholdPixels);
+            }
+        }
+
         var waypoints = new List<Point>(steps);
         for (var index = 1; index <= steps; index++)
         {

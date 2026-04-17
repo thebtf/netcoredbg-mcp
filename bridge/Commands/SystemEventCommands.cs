@@ -84,6 +84,12 @@ public static class SystemEventCommands
 
         if (sendResult == IntPtr.Zero)
         {
+            // Throw — returning a JsonObject here would reach Python callers
+            // as a normal dict (FlaUIBackend.send_system_event only checks
+            // isinstance(result, dict)) and broadcast/rollback failures would
+            // silently pass as success. A thrown exception turns into a
+            // JSON-RPC error response, which the Python layer surfaces as
+            // RuntimeError — the correct signal for a system-level failure.
             var errorCode = Marshal.GetLastWin32Error();
             var broadcastFailure = DescribeBroadcastFailure(errorCode);
 
@@ -96,31 +102,17 @@ public static class SystemEventCommands
                 Program.Log(
                     $"theme_change broadcast failed after registry write ({broadcastFailure}); rolled back to {currentMode}");
 
-                return new JsonObject
-                {
-                    ["event"] = ThemeChangeEventName,
-                    ["from"] = currentMode,
-                    ["to"] = currentMode,
-                    ["attempted_to"] = targetMode,
-                    ["warning"] = "broadcast failed",
-                    ["rolled_back"] = true
-                };
+                throw new InvalidOperationException(
+                    $"theme_change broadcast failed ({broadcastFailure}); registry rolled back to {currentMode}. " +
+                    $"Attempted target mode: {targetMode}.");
             }
 
             Program.Log(
                 $"theme_change broadcast failed after registry write ({broadcastFailure}); rollback failed: {rollbackFailure}");
 
-            return new JsonObject
-            {
-                ["ok"] = false,
-                ["event"] = ThemeChangeEventName,
-                ["from"] = currentMode,
-                ["attempted_to"] = targetMode,
-                ["rollback_failed"] = true,
-                ["error"] = "broadcast failed and registry rollback failed",
-                ["broadcast_failure"] = broadcastFailure,
-                ["rollback_error"] = rollbackFailure
-            };
+            throw new InvalidOperationException(
+                $"theme_change broadcast failed ({broadcastFailure}) AND registry rollback failed ({rollbackFailure}). " +
+                $"Registry may still hold target mode '{targetMode}' from '{currentMode}'. Manual recovery required.");
         }
 
         Program.Log($"theme_change system event: {currentMode} -> {targetMode}");

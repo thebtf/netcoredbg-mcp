@@ -355,6 +355,18 @@ def _send_drag(
     if from_x == to_x and from_y == to_y:
         raise ValueError("from and to coordinates are identical (0 px distance)")
 
+    # Mirror the bridge's sub-threshold guard (see bridge/Commands/ClickCommands.cs).
+    # WPF's MinimumHorizontal/VerticalDragDistance is 4 px in each axis by
+    # default; drags that never cross it do not trigger DoDragDrop. Reject
+    # sub-threshold drags here too so ui_drag behaves identically regardless
+    # of FlaUI-vs-pywinauto backend.
+    _DRAG_THRESHOLD_PX = 4
+    if abs(to_x - from_x) < _DRAG_THRESHOLD_PX and abs(to_y - from_y) < _DRAG_THRESHOLD_PX:
+        raise ValueError(
+            f"drag distance below WPF threshold (<{_DRAG_THRESHOLD_PX} px in each axis); "
+            "adjust coordinates or use ui_click"
+        )
+
     user32 = ctypes.windll.user32
     modifiers = hold_modifiers or []
     modifier_vks: list[int] = []
