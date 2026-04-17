@@ -358,6 +358,8 @@ def _send_drag(
     user32 = ctypes.windll.user32
     modifiers = hold_modifiers or []
     modifier_vks: list[int] = []
+    pressed_modifier_vks: list[int] = []
+    mouse_down_sent = False
 
     for modifier_name in modifiers:
         normalized = modifier_name.strip().lower()
@@ -376,22 +378,26 @@ def _send_drag(
     steps = max(10, speed_ms // 20)
     sleep_per_step = speed_ms / steps / 1000.0
 
-    for modifier_vk in modifier_vks:
-        _press(modifier_vk)
-        time.sleep(0.01)
-
     try:
+        for modifier_vk in modifier_vks:
+            _press(modifier_vk)
+            pressed_modifier_vks.append(modifier_vk)
+            time.sleep(0.01)
+
         user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+        mouse_down_sent = True
 
-        for i in range(1, steps + 1):
-            ix = from_x + (to_x - from_x) * i // steps
-            iy = from_y + (to_y - from_y) * i // steps
-            user32.SetCursorPos(ix, iy)
-            time.sleep(sleep_per_step)
-
-        user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+        try:
+            for i in range(1, steps + 1):
+                ix = from_x + (to_x - from_x) * i // steps
+                iy = from_y + (to_y - from_y) * i // steps
+                user32.SetCursorPos(ix, iy)
+                time.sleep(sleep_per_step)
+        finally:
+            if mouse_down_sent:
+                user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
     finally:
-        for modifier_vk in reversed(modifier_vks):
+        for modifier_vk in reversed(pressed_modifier_vks):
             _release(modifier_vk)
             time.sleep(0.01)
 

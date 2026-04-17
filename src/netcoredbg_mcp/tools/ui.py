@@ -1542,6 +1542,16 @@ def register_ui_tools(
             from_y: Source Y coordinate
             to_x: Target X coordinate
             to_y: Target Y coordinate
+            speed_ms: Total drag duration in milliseconds. Minimum 20 ms so the
+                gesture always emits enough waypoints to cross common WPF drag
+                thresholds reliably.
+            hold_modifiers: Optional modifier names to hold for the full drag.
+                Accepted values: ctrl, shift, alt, win.
+
+        Notes:
+            - Identical from/to coordinates are rejected.
+            - Short drags that stay below the system drag threshold should use
+              ui_click instead of ui_drag.
         """
         try:
             access_error = check_session_access(ctx)
@@ -1645,6 +1655,11 @@ def register_ui_tools(
 
             ui = await _ensure_ui_connected()
             result = await ui.send_system_event(normalized_event, mode=normalized_mode)
+            if not isinstance(result, dict):
+                return build_error_response(
+                    f"send_system_event: backend returned non-dict response ({type(result).__name__})",
+                    state=session.state.state,
+                )
             if result.get("unsupported") is True:
                 return build_error_response(
                     result.get("reason", "send_system_event not supported on current backend"),
@@ -1665,6 +1680,11 @@ def register_ui_tools(
             normalized_modifiers = _normalize_modifier_list(modifiers)
             ui = await _ensure_ui_connected()
             result = await ui.hold_modifiers(normalized_modifiers)
+            if not isinstance(result, dict):
+                return build_error_response(
+                    f"hold_modifiers: backend returned non-dict response ({type(result).__name__})",
+                    state=session.state.state,
+                )
             if result.get("unsupported") is True:
                 return build_error_response(
                     result.get("reason", "hold_modifiers not supported on current backend"),
@@ -1688,6 +1708,11 @@ def register_ui_tools(
             normalized_modifiers = _normalize_release_modifiers(modifiers)
             ui = await _ensure_ui_connected()
             result = await ui.release_modifiers(normalized_modifiers)
+            if not isinstance(result, dict):
+                return build_error_response(
+                    f"release_modifiers: backend returned non-dict response ({type(result).__name__})",
+                    state=session.state.state,
+                )
             if result.get("unsupported") is True:
                 return build_error_response(
                     result.get("reason", "release_modifiers not supported on current backend"),
@@ -1707,6 +1732,11 @@ def register_ui_tools(
 
             ui = await _ensure_ui_connected()
             result = await ui.get_held_modifiers()
+            if not isinstance(result, dict):
+                return build_error_response(
+                    f"get_held_modifiers: backend returned non-dict response ({type(result).__name__})",
+                    state=session.state.state,
+                )
             if result.get("unsupported") is True:
                 return build_error_response(
                     result.get("reason", "get_held_modifiers not supported on current backend"),

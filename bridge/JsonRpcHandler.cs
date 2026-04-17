@@ -11,6 +11,12 @@ public static class JsonRpcHandler
     private static UIA3Automation? _automation;
     private static AutomationElement? _mainWindow;
     private static int _processId;
+    // SendKeys / SendKeysBatch press and release modifiers within a single
+    // batch (see InputCommands.cs) and do not read or update this set. If a
+    // caller holds Ctrl via hold_modifiers and then fires a send_keys batch,
+    // the batch's internal Ctrl press/release does not leak into this set —
+    // but bridge-level send_keys still executes on top of the already-held
+    // Ctrl, which is the intended composition for maintainers to preserve.
     public static HashSet<VirtualKeyShort> HeldModifiers = new();
     public static readonly object HeldModifiersLock = new();
 

@@ -91,7 +91,7 @@ Two new JSON-RPC methods on the FlaUI bridge:
 - `hold_modifiers`: `{modifiers: ["ctrl"|"shift"|"alt"|"win"]}`. Presses each listed modifier via `Keyboard.Press(VirtualKeyShort.X)`, records each pressed modifier in a session-scoped hash set stored on `JsonRpcHandler` (e.g., `HeldModifiers`). Idempotent: pressing an already-held modifier is a no-op, not a double-press.
 - `release_modifiers`: `{modifiers: [...] | "all"}`. Releases each listed modifier and removes it from the held set. `"all"` releases every currently held modifier.
 
-The held-modifier set is consulted by `ui_click`, `ui_right_click`, `ui_double_click`, `ui_drag`, `ui_send_keys`, `ui_send_keys_batch`, `ui_send_keys_focused` — i.e., every input primitive that produces a click or a keystroke. These primitives MUST NOT double-press a modifier that is already held; they use whichever is currently held plus any per-call modifier from the key syntax (`^`, `%`, `+`) as a superset.
+The held-modifier set is consulted by `ui_click`, `ui_right_click`, `ui_double_click`, `ui_drag`, `ui_send_keys`, `ui_send_keys_batch`, `ui_send_keys_focused` — i.e., every input primitive that produces a click or a keystroke. These primitives MUST NOT double-press a modifier that is already held; they use whichever is currently held plus any per-call modifier from the key syntax (`^`, `%`, `+`) as a superset. The drag-threshold guarantees in this spec apply to `ui_drag` only; plain click tools keep their existing click semantics and are not upgraded into threshold-crossing drags.
 
 ### FR-6: MCP tools `ui_hold_modifiers` and `ui_release_modifiers`
 
@@ -121,7 +121,7 @@ Between a `send_system_event` bridge call returning success and `SystemParameter
 
 ### NFR-3: Held modifier auto-release reliability
 
-When the bridge process is killed via SIGKILL / Ctrl+C / window close, the `finally` block or `AppDomain.ProcessExit` handler MUST release every held modifier. Verified by a dedicated smoke scenario: hold Ctrl, terminate bridge, assert no subsequent typing in a Notepad-like external app produces Ctrl+character behaviour.
+On the normal .NET shutdown path (including stdin EOF, Ctrl+C handled as process shutdown, window close, or `Main` returning), the `finally` block plus `AppDomain.ProcessExit` handler MUST release every held modifier. Verified by a dedicated smoke scenario: hold Ctrl, terminate bridge on a graceful shutdown path, assert no subsequent typing in a Notepad-like external app produces Ctrl+character behaviour. Force-kill paths such as `taskkill /F` are explicitly outside the guarantee.
 
 ### NFR-4: Backwards compatibility
 
@@ -168,8 +168,8 @@ All three primitives MUST work on Windows 10 (21H2 and later) and Windows 11 (22
 **As a** netcoredbg-mcp maintainer, **I want** end-to-end smoke coverage for each primitive, **so that** regressions are caught without relying on the downstream NovaScript test loop.
 
 **Acceptance Criteria:**
-- [ ] The SmokeTestApp fixture (`tests/fixtures/SmokeTestApp`) gains a WPF-hosted drag-drop control AND a theme-change tracepoint AND a multi-select DataGrid. All three fit in the existing `gui` scenario (no new scenario required).
-- [ ] `tests/smoke_test_manual.py` gains one new scenario each: `Drag Primitive`, `System Event`, `Persistent Modifier Hold`. Each passes 100% of its checks against a live bridge.
+- [ ] The SmokeTestApp fixture (`tests/fixtures/SmokeTestApp`) gains a drag-reorder list that starts `DoDragDrop` only after `MouseMove` crosses `SystemInformation.DragSize`, plus a theme-change tracepoint and a multi-select control. All three fit in the existing `gui` scenario (no new scenario required).
+- [ ] `tests/smoke_test_manual.py` gains one new scenario each: `Drag Primitive`, `System Event`, `Persistent Modifier Hold`. The drag smoke reads back the live list order after each drag when UIA text extraction is available, and otherwise falls back to checking the bridge returned non-error responses with duration close to the requested `speed_ms`.
 - [ ] Total smoke count rises from 112 → ≥130; zero regressions in the existing 112.
 
 ### US5: Unit coverage for Python routing + backend contracts (P2)
@@ -187,7 +187,7 @@ All three primitives MUST work on Windows 10 (21H2 and later) and Windows 11 (22
 - `hold_modifiers` with an unknown modifier name: MUST reject the whole call with a structured error listing the accepted four values. Partial hold ("pressed ctrl then failed on `foo`") would leave inconsistent state.
 - `release_modifiers` listing a modifier that is not held: MUST be a no-op, not an error (release-of-unheld is idempotent).
 - Multiple bridge subprocesses sharing a Windows host: each bridge has its own `HeldModifiers` set. A modifier held by bridge A does NOT affect bridge B. The UIA / SendInput layer is global to the desktop, so a modifier pressed by bridge A IS globally pressed — this is a known constraint, and users are expected to run one bridge at a time per target process.
-- Bridge killed with `taskkill /F` (no `finally` runs): on a truly unclean exit, a modifier can be left stuck. This is noted in the docstring and in engram feedback; mitigation is a best-effort `AppDomain.ProcessExit` handler but NOT a guarantee. The smoke test covers graceful exit only.
+- Bridge killed with `taskkill /F` (no `finally` / `ProcessExit` path): on a truly unclean exit, a modifier can be left stuck. `AppDomain.ProcessExit` runs on the normal .NET shutdown path, including stdin EOF leading to `Main` returning, but does NOT run on force-kill. Users must re-run `hold_modifiers` only after they have manually recovered any stuck modifier state. The smoke test covers graceful exit only.
 
 ## Out of Scope
 

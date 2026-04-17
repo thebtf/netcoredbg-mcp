@@ -441,8 +441,10 @@ ui_release_modifiers(modifiers="all")
 # Rows 3, 5, 7 are now selected on a SelectionMode=Extended/MultiExtended control.
 ```
 
-The bridge auto-releases any held modifiers on graceful shutdown so a crashed
-session does not leave Ctrl/Shift/Alt stuck across the Windows desktop.
+The bridge auto-releases any held modifiers on graceful shutdown (stdin EOF,
+disconnect, or normal process exit) so the session does not leave
+Ctrl/Shift/Alt stuck across the Windows desktop. Force-kill paths are not
+supported and may still require manual recovery.
 
 ## WinForms Differences
 

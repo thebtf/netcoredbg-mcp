@@ -322,9 +322,10 @@ public class Program
         dataGrid.Rows.Add("Eve", "DevOps", "Senior");
 
         // Drag-reorder ListBox for ui_drag smoke test (engram #79).
-        // WinForms ListBox needs AllowDrop + manual drag/drop handlers to
-        // actually reorder items — verifies the drag primitive crosses the
-        // system drag threshold and triggers DoDragDrop correctly.
+        // Record MouseDown, wait for MouseMove to cross the system drag
+        // threshold, then start DoDragDrop so the smoke test proves ui_drag
+        // crosses the real platform threshold instead of turning every click
+        // into an unconditional drag.
         var dragList = new ListBox
         {
             Name = "dragList",
@@ -336,13 +337,46 @@ public class Program
         dragList.Items.AddRange(new object[] { "Alpha", "Beta", "Gamma", "Delta", "Epsilon" });
 
         int? dragSourceIndex = null;
+        System.Drawing.Point? dragStartPos = null;
         dragList.MouseDown += (_, e) =>
         {
-            dragSourceIndex = dragList.IndexFromPoint(e.Location);
-            if (dragSourceIndex is int srcIdx && srcIdx >= 0)
+            if (e.Button != MouseButtons.Left)
             {
-                dragList.DoDragDrop(dragList.Items[srcIdx], DragDropEffects.Move);
+                dragSourceIndex = null;
+                dragStartPos = null;
+                return;
             }
+
+            var srcIdx = dragList.IndexFromPoint(e.Location);
+            dragSourceIndex = srcIdx >= 0 ? srcIdx : null;
+            dragStartPos = dragSourceIndex.HasValue ? e.Location : null;
+        };
+        dragList.MouseMove += (_, e) =>
+        {
+            if (e.Button != MouseButtons.Left || dragSourceIndex is not int srcIdx || dragStartPos is null)
+            {
+                return;
+            }
+
+            var dragSize = SystemInformation.DragSize;
+            var dragBounds = new System.Drawing.Rectangle(
+                dragStartPos.Value.X - (dragSize.Width / 2),
+                dragStartPos.Value.Y - (dragSize.Height / 2),
+                dragSize.Width,
+                dragSize.Height);
+
+            if (dragBounds.Contains(e.Location))
+            {
+                return;
+            }
+
+            dragStartPos = null;
+            dragList.DoDragDrop(dragList.Items[srcIdx], DragDropEffects.Move);
+        };
+        dragList.MouseUp += (_, _) =>
+        {
+            dragSourceIndex = null;
+            dragStartPos = null;
         };
         dragList.DragEnter += (_, e) =>
         {
@@ -362,9 +396,14 @@ public class Program
             {
                 var item = dragList.Items[srcIdx];
                 dragList.Items.RemoveAt(srcIdx);
+                if (dstIdx > srcIdx)
+                {
+                    dstIdx -= 1;
+                }
                 dragList.Items.Insert(dstIdx, item);
             }
             dragSourceIndex = null;
+            dragStartPos = null;
         };
 
         // Multi-select ListBox for ui_hold_modifiers smoke test (engram #81).

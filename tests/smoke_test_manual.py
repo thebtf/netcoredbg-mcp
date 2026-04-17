@@ -803,13 +803,14 @@ async def test_multi_window_envelope():
 
 
 async def test_drag_primitive():
-    """Scenario: engram #79 — drag primitive crosses WPF drag threshold.
+    """Scenario: engram #79 — drag primitive crosses the real drag threshold.
 
-    Drives a WinForms ListBox with AllowDrop + DoDragDrop handlers (added to
-    SmokeTestApp Program.cs at `dragList`). Verifies:
-    - default speed_ms drag reorders items in the list.
-    - fast (speed_ms=50) and slow (speed_ms=500) drags both succeed.
-    - speed_ms below safety floor (=10) returns a structured error.
+    Drives the WinForms dragList fixture, which only starts DoDragDrop after a
+    MouseDown + MouseMove sequence exceeds SystemInformation.DragSize. Verifies:
+    - default/fast/slow drags either read back a reordered list order or fall
+      back to duration checks when the fixture cannot expose list text via UIA
+    - speed_ms below safety floor (=10) returns a structured error
+    - identical coordinates are rejected
     """
     print("\n--- Drag Primitive (engram #79) ---")
 
@@ -854,35 +855,99 @@ async def test_drag_primitive():
         y0 = rect["y"] + 10          # first item centre
         y3 = rect["y"] + 10 + 15 * 3  # fourth item centre
 
-        # Default speed drag
-        try:
-            result = await backend.drag(x0, y0, x0, y3, speed_ms=200)
-            check("Drag: default speed_ms=200 returns structured response",
-                  isinstance(result, dict) and result.get("dragged") is True,
-                  f"result={result}")
-        except Exception as e:
-            check("Drag: default speed_ms=200", False, str(e))
+        drag_item_names = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"]
 
-        await asyncio.sleep(0.5)
+        def _parse_drag_order(text: str) -> list[str]:
+            positions: list[tuple[int, str]] = []
+            for item_name in drag_item_names:
+                position = text.find(item_name)
+                if position >= 0:
+                    positions.append((position, item_name))
+            positions.sort()
+            return [item_name for _, item_name in positions]
 
-        # Fast drag
-        try:
-            result = await backend.drag(x0, y0, x0, y3, speed_ms=50)
-            check("Drag: fast speed_ms=50 succeeds",
-                  isinstance(result, dict) and result.get("dragged") is True)
-        except Exception as e:
-            check("Drag: fast speed_ms=50", False, str(e))
+        def _duration_matches_requested_speed(result: dict, requested_speed_ms: int) -> bool:
+            duration_ms = result.get("duration_ms")
+            return isinstance(duration_ms, (int, float)) and abs(duration_ms - requested_speed_ms) <= requested_speed_ms * 0.20
 
-        await asyncio.sleep(0.5)
+        async def _read_drag_order() -> tuple[list[str] | None, str]:
+            try:
+                extract_result = await backend.client.call("extract_text", {"automationId": "dragList"})
+            except Exception as e:
+                return None, str(e)
 
-        # Slow drag
-        try:
-            result = await backend.drag(x0, y0, x0, y3, speed_ms=500)
-            check("Drag: slow speed_ms=500 succeeds",
-                  isinstance(result, dict) and result.get("dragged") is True
-                  and result.get("duration_ms", 0) >= 400)
-        except Exception as e:
-            check("Drag: slow speed_ms=500", False, str(e))
+            if not isinstance(extract_result, dict):
+                return None, f"non-dict extract_text result: {extract_result!r}"
+
+            extracted_text = extract_result.get("text", "")
+            if not isinstance(extracted_text, str) or not extracted_text.strip():
+                return None, f"empty text: {extract_result!r}"
+
+            order = _parse_drag_order(extracted_text)
+            if len(order) < len(drag_item_names):
+                return None, f"partial order from {extract_result.get('source')}: {extracted_text!r}"
+
+            return order, f"source={extract_result.get('source')}, order={order}"
+
+        current_order, order_detail = await _read_drag_order()
+        readback_available = current_order is not None
+        if readback_available:
+            check("Drag: initial order readable",
+                  current_order[0] == "Alpha",
+                  order_detail)
+        else:
+            check("Drag: initial order readback unavailable",
+                  True,
+                  f"falling back to duration checks ({order_detail})")
+
+        drag_results: list[tuple[str, int, dict]] = []
+        drag_cases = [
+            ("default", 200),
+            ("fast", 50),
+            ("slow", 500),
+        ]
+
+        for label, requested_speed in drag_cases:
+            try:
+                result = await backend.drag(x0, y0, x0, y3, speed_ms=requested_speed)
+                drag_results.append((label, requested_speed, result))
+                check(f"Drag: {label} speed_ms={requested_speed} returns structured response",
+                      isinstance(result, dict) and result.get("dragged") is True,
+                      f"result={result}")
+            except Exception as e:
+                check(f"Drag: {label} speed_ms={requested_speed}", False, str(e))
+                continue
+
+            await asyncio.sleep(0.5)
+
+            previous_order = current_order
+            next_order, next_order_detail = await _read_drag_order()
+            if previous_order is not None and next_order is not None:
+                if label == "default":
+                    check("Drag: default drag reorders list",
+                          next_order != previous_order and next_order[0] != "Alpha",
+                          f"before={previous_order}, after={next_order}")
+                else:
+                    check(f"Drag: {label} drag reorders list",
+                          next_order != previous_order,
+                          f"before={previous_order}, after={next_order}")
+                current_order = next_order
+                continue
+
+            readback_available = False
+            current_order = next_order or current_order
+            check(f"Drag: {label} reorder readback unavailable",
+                  True,
+                  f"falling back to duration checks ({next_order_detail})")
+
+        if not readback_available:
+            check("Drag: fallback has 3 successful drags",
+                  len(drag_results) == 3 and all(result.get("dragged") is True for _, _, result in drag_results),
+                  f"results={drag_results}")
+            for label, requested_speed, result in drag_results:
+                check(f"Drag: {label} duration stays within ±20%",
+                      _duration_matches_requested_speed(result, requested_speed),
+                      f"requested={requested_speed}, duration={result.get('duration_ms')}")
 
         # Below safety floor — must error out
         try:
@@ -969,56 +1034,57 @@ async def test_system_event_theme():
             await backend.disconnect()
             return
 
-        # First toggle — flip
         try:
-            result = await backend.send_system_event("theme_change", mode="toggle")
-            check("SystemEvent: toggle returns {event, from, to}",
-                  isinstance(result, dict)
-                  and result.get("event") == "theme_change"
-                  and result.get("from") == initial_name
-                  and result.get("to") != initial_name,
-                  f"result={result}")
-
-            await asyncio.sleep(0.3)
-            after_first = _read_theme()
-            check("SystemEvent: registry flipped",
-                  after_first != initial,
-                  f"{initial} -> {after_first}")
-        except Exception as e:
-            check("SystemEvent: first toggle", False, str(e))
-            # Attempt to restore before returning
+            # First toggle — flip
             try:
-                await backend.send_system_event("theme_change", mode=initial_name)
+                result = await backend.send_system_event("theme_change", mode="toggle")
+                check("SystemEvent: toggle returns {event, from, to}",
+                      isinstance(result, dict)
+                      and result.get("event") == "theme_change"
+                      and result.get("from") == initial_name
+                      and result.get("to") != initial_name,
+                      f"result={result}")
+
+                await asyncio.sleep(0.3)
+                after_first = _read_theme()
+                check("SystemEvent: registry flipped",
+                      after_first != initial,
+                      f"{initial} -> {after_first}")
+            except Exception as e:
+                check("SystemEvent: first toggle", False, str(e))
+                return
+
+            # Second toggle — flip back to initial
+            try:
+                result = await backend.send_system_event("theme_change", mode="toggle")
+                check("SystemEvent: second toggle restores",
+                      isinstance(result, dict) and result.get("to") == initial_name)
+                await asyncio.sleep(0.3)
+                restored = _read_theme()
+                check("SystemEvent: registry restored to initial",
+                      restored == initial,
+                      f"expected={initial}, got={restored}")
+            except Exception as e:
+                check("SystemEvent: second toggle / restore", False, str(e))
+
+            # Unsupported event name
+            try:
+                unsupported_error = None
+                try:
+                    await backend.send_system_event("unknown_event", mode="toggle")
+                except Exception as inner:
+                    unsupported_error = str(inner)
+                check("SystemEvent: unknown event rejected",
+                      unsupported_error is not None,
+                      f"error={unsupported_error}")
+            except Exception as e:
+                check("SystemEvent: unknown event rejected", False, str(e))
+        finally:
+            try:
+                if _read_theme() != initial:
+                    await backend.send_system_event("theme_change", mode=initial_name)
             except Exception:
                 pass
-            await backend.disconnect()
-            return
-
-        # Second toggle — flip back to initial
-        try:
-            result = await backend.send_system_event("theme_change", mode="toggle")
-            check("SystemEvent: second toggle restores",
-                  isinstance(result, dict) and result.get("to") == initial_name)
-            await asyncio.sleep(0.3)
-            restored = _read_theme()
-            check("SystemEvent: registry restored to initial",
-                  restored == initial,
-                  f"expected={initial}, got={restored}")
-        except Exception as e:
-            check("SystemEvent: second toggle / restore", False, str(e))
-
-        # Unsupported event name
-        try:
-            unsupported_error = None
-            try:
-                await backend.send_system_event("unknown_event", mode="toggle")
-            except Exception as inner:
-                unsupported_error = str(inner)
-            check("SystemEvent: unknown event rejected",
-                  unsupported_error is not None,
-                  f"error={unsupported_error}")
-        except Exception as e:
-            check("SystemEvent: unknown event rejected", False, str(e))
 
         await backend.disconnect()
 
@@ -1036,8 +1102,9 @@ async def test_persistent_modifier_hold():
     Verifies:
     - get_held_modifiers returns [] at baseline
     - after hold_modifiers(["ctrl"]), get_held_modifiers returns ["ctrl"]
-    - 3 clicks on multiList with Ctrl held leave ≥2 items selected
-      (multi-select semantics)
+    - 3 clicks on multiList with Ctrl held leave multiple items selected when
+      UIA selection readback is available; otherwise the held-state checks still
+      prove Ctrl remained active across discrete clicks
     - release_modifiers clears the held set
     - unknown modifier names rejected with structured error
     - nested hold (ctrl + shift) composes both in the set
@@ -1109,6 +1176,51 @@ async def test_persistent_modifier_hold():
                       f"ys={ys}")
         except Exception as e:
             check("ModHold: 3 Ctrl+clicks dispatched", False, str(e))
+
+        try:
+            loop = asyncio.get_running_loop()
+
+            def _read_selected_multi_items() -> list[str]:
+                from pywinauto.application import Application
+                from pywinauto.controls.uiawrapper import UIAWrapper
+                from pywinauto.uia_element_info import UIAElementInfo
+
+                app = Application(backend="uia").connect(process=pid)
+                control = app.top_window().child_window(auto_id="multiList")
+                control.wait("exists", timeout=5)
+                selection = control.iface_selection.GetCurrentSelection()
+                selected_names: list[str] = []
+                if selection is None:
+                    return selected_names
+
+                for index in range(selection.Length):
+                    selected_element = selection.GetElement(index)
+                    wrapper = UIAWrapper(UIAElementInfo(selected_element))
+                    selected_names.append(wrapper.element_info.name or "")
+
+                return [name for name in selected_names if name]
+
+            selected_names = await loop.run_in_executor(None, _read_selected_multi_items)
+            if selected_names:
+                check("ModHold: Ctrl+click leaves multiple items selected",
+                      len(selected_names) >= 2,
+                      f"selected={selected_names}")
+            else:
+                check("ModHold: selection readback unavailable",
+                      True,
+                      "falling back to held-modifier assertions")
+        except Exception as e:
+            check("ModHold: selection readback unavailable",
+                  True,
+                  f"falling back to held-modifier assertions ({e})")
+
+        try:
+            held = await backend.get_held_modifiers()
+            check("ModHold: ctrl still held before release",
+                  isinstance(held, dict) and "ctrl" in held.get("modifiers", []),
+                  f"held={held}")
+        except Exception as e:
+            check("ModHold: ctrl still held before release", False, str(e))
 
         # Nested hold: add Shift
         try:

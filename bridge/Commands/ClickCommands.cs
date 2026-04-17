@@ -1,5 +1,6 @@
 using System.Drawing;
 using System.Diagnostics;
+using System.Runtime.ExceptionServices;
 using System.Text.Json.Nodes;
 using FlaUI.Core;
 using FlaUI.Core.AutomationElements;
@@ -77,22 +78,34 @@ public static class ClickCommands
         if (x1 == x2 && y1 == y2)
             throw new ArgumentException("from and to coordinates are identical (0 px distance)");
 
+        if (Math.Abs(x2 - x1) < DragThresholdPixels && Math.Abs(y2 - y1) < DragThresholdPixels)
+        {
+            throw new ArgumentException(
+                $"drag distance below WPF threshold (<{DragThresholdPixels} px in each axis); adjust coordinates or use ui_click");
+        }
+
         var steps = Math.Max(10, speedMs / 20);
         var temporaryModifiers = ModifierCommands.GetTemporaryModifierKeys(@params?["hold_modifiers"]);
+        var pressedTemporaryModifiers = new List<FlaUI.Core.WindowsAPI.VirtualKeyShort>();
+        var mouseButtonDown = false;
+        ExceptionDispatchInfo? capturedException = null;
+        Exception? cleanupException = null;
 
         EnsureForeground(mainWindow);
-
-        foreach (var modifier in temporaryModifiers)
-        {
-            Keyboard.Press(modifier);
-        }
 
         var stopwatch = Stopwatch.StartNew();
 
         try
         {
+            foreach (var modifier in temporaryModifiers)
+            {
+                Keyboard.Press(modifier);
+                pressedTemporaryModifiers.Add(modifier);
+            }
+
             Mouse.MoveTo(new Point(x1, y1));
             Mouse.Down(MouseButton.Left);
+            mouseButtonDown = true;
 
             var waypoints = BuildDragWaypoints(x1, y1, x2, y2, steps);
             var delayMs = Math.Max(1, (int)Math.Round(speedMs / (double)steps));
@@ -102,17 +115,48 @@ public static class ClickCommands
                 Mouse.MoveTo(waypoint);
                 Thread.Sleep(delayMs);
             }
-
-            Mouse.Up(MouseButton.Left);
+        }
+        catch (Exception ex)
+        {
+            capturedException = ExceptionDispatchInfo.Capture(ex);
         }
         finally
         {
             stopwatch.Stop();
-            for (var i = temporaryModifiers.Count - 1; i >= 0; i--)
+            if (mouseButtonDown)
             {
-                Keyboard.Release(temporaryModifiers[i]);
+                try
+                {
+                    Mouse.Up(MouseButton.Left);
+                }
+                catch (Exception ex)
+                {
+                    Program.Log($"Drag cleanup failed to release left mouse button: {ex.Message}");
+                    cleanupException ??= new InvalidOperationException(
+                        "Drag cleanup failed to release left mouse button.",
+                        ex);
+                }
+            }
+
+            for (var i = pressedTemporaryModifiers.Count - 1; i >= 0; i--)
+            {
+                try
+                {
+                    Keyboard.Release(pressedTemporaryModifiers[i]);
+                }
+                catch (Exception ex)
+                {
+                    Program.Log($"Drag cleanup failed to release modifier {pressedTemporaryModifiers[i]}: {ex.Message}");
+                    cleanupException ??= new InvalidOperationException(
+                        $"Drag cleanup failed to release modifier {pressedTemporaryModifiers[i]}.",
+                        ex);
+                }
             }
         }
+
+        capturedException?.Throw();
+        if (cleanupException is not null)
+            throw cleanupException;
 
         return new JsonObject
         {
