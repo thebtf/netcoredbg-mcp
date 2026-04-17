@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using FlaUI.Core.AutomationElements;
+using FlaUI.Core.WindowsAPI;
 using FlaUI.UIA3;
 using FlaUIBridge.Commands;
 
@@ -10,6 +11,8 @@ public static class JsonRpcHandler
     private static UIA3Automation? _automation;
     private static AutomationElement? _mainWindow;
     private static int _processId;
+    public static HashSet<VirtualKeyShort> HeldModifiers = new();
+    public static readonly object HeldModifiersLock = new();
 
     internal static UIA3Automation Automation
     {
@@ -54,6 +57,10 @@ public static class JsonRpcHandler
             ["right_click"] = ClickCommands.RightClick,
             ["double_click"] = ClickCommands.DoubleClick,
             ["drag"] = ClickCommands.Drag,
+            ["send_system_event"] = SystemEventCommands.SendSystemEvent,
+            ["hold_modifiers"] = ModifierCommands.HoldModifiers,
+            ["release_modifiers"] = ModifierCommands.ReleaseModifiers,
+            ["get_held_modifiers"] = ModifierCommands.GetHeldModifiers,
             ["send_keys"] = InputCommands.SendKeys,
             ["send_keys_batch"] = InputCommands.SendKeysBatch,
             ["set_value"] = InputCommands.SetValue,
@@ -88,6 +95,7 @@ public static class JsonRpcHandler
 
     public static void Dispose()
     {
+        ModifierCommands.ReleaseAllHeldModifiers();
         _automation?.Dispose();
         _automation = null;
         _mainWindow = null;

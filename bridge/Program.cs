@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using FlaUIBridge.Commands;
 
 namespace FlaUIBridge;
 
@@ -7,20 +8,28 @@ public static class Program
 {
     public static void Main()
     {
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => ModifierCommands.ReleaseAllHeldModifiers();
         Log("FlaUIBridge started, waiting for JSON-RPC requests on stdin...");
 
-        string? line;
-        while ((line = Console.In.ReadLine()) is not null)
+        try
         {
-            if (string.IsNullOrWhiteSpace(line))
-                continue;
+            string? line;
+            while ((line = Console.In.ReadLine()) is not null)
+            {
+                if (string.IsNullOrWhiteSpace(line))
+                    continue;
 
-            JsonNode? response = ProcessRequest(line);
-            if (response is null)
-                continue;
+                JsonNode? response = ProcessRequest(line);
+                if (response is null)
+                    continue;
 
-            Console.Out.WriteLine(response.ToJsonString());
-            Console.Out.Flush();
+                Console.Out.WriteLine(response.ToJsonString());
+                Console.Out.Flush();
+            }
+        }
+        finally
+        {
+            ModifierCommands.ReleaseAllHeldModifiers();
         }
 
         Log("stdin closed, shutting down.");

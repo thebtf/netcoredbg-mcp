@@ -6,37 +6,37 @@
 
 ## Phase 1: Bridge Commands (C#)
 
-- [ ] T01: Bridge command `drag` — smooth gesture crossing WPF threshold
+- [x] T01: Bridge command `drag` — smooth gesture crossing WPF threshold
   - Files: `bridge/Commands/ClickCommands.cs` (new `Drag` method + registration), `bridge/JsonRpcHandler.cs`
   - AC: Accepts `{x1, y1, x2, y2, speed_ms? = 200, hold_modifiers? = []}`. Calls `Mouse.MoveTo(x1, y1)` → `Mouse.Down(MouseButton.Left)` → loops `Mouse.MoveTo(interp, interp)` over ≥10 waypoints with total duration ≈ speed_ms → `Mouse.Up(MouseButton.Left)`. Holds listed modifiers via `Keyboard.Press(VirtualKeyShort.X)` before down, releases after up. Rejects speed_ms < 20 and identical from/to coordinates with structured error. Returns `{dragged: true, x1, y1, x2, y2, steps, duration_ms}`.
 
-- [ ] T02: Bridge command `send_system_event` — theme change via registry + broadcast
+- [x] T02: Bridge command `send_system_event` — theme change via registry + broadcast
   - Files: `bridge/Commands/SystemEventCommands.cs` (new), `bridge/JsonRpcHandler.cs`
   - AC: Accepts `{event: "theme_change", mode: "light" | "dark" | "toggle"}`. Only `theme_change` supported in v1 (others → structured error listing supported events). Reads current `AppsUseLightTheme` from `HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize` (creates key if missing). For `toggle`: flips current. Writes both `AppsUseLightTheme` and `SystemUsesLightTheme` to target mode (0 dark, 1 light). Broadcasts via `SendMessageTimeout(HWND_BROADCAST, WM_SETTINGCHANGE, 0, "ImmersiveColorSet", SMTO_ABORTIFHUNG, 100, ...)`. Returns `{event: "theme_change", from: "dark" | "light", to: "dark" | "light"}`. Logs old→new transition.
 
-- [ ] T03: Bridge commands `hold_modifiers` / `release_modifiers` / `get_held_modifiers` — persistent modifier state
+- [x] T03: Bridge commands `hold_modifiers` / `release_modifiers` / `get_held_modifiers` — persistent modifier state
   - Files: `bridge/Commands/ModifierCommands.cs` (new), `bridge/JsonRpcHandler.cs` (new `HeldModifiers` HashSet<VirtualKeyShort> static)
   - AC: `hold_modifiers({modifiers: ["ctrl"|"shift"|"alt"|"win"]})` — validates whitelist, idempotent (no double-press), adds to `JsonRpcHandler.HeldModifiers` hash set, calls `Keyboard.Press(vk)` for newly added only. `release_modifiers({modifiers: [...] | "all"})` — calls `Keyboard.Release(vk)` for held modifiers only, removes from set. `get_held_modifiers()` — returns `{modifiers: ["ctrl", ...]}` sorted. Returns structured errors for unknown modifier names. Registered in JsonRpcHandler.
 
-- [ ] T04: Auto-release held modifiers on bridge shutdown
+- [x] T04: Auto-release held modifiers on bridge shutdown
   - Files: `bridge/Program.cs`
   - AC: Register `AppDomain.CurrentDomain.ProcessExit += (_, _) => { foreach (vk in HeldModifiers) Keyboard.Release(vk); }` at program start. Also add `try/finally` in Main so graceful exit via stdin EOF releases. Covered by smoke test NFR-3.
 
 ## Phase 2: Python Backend + MCP Tools
 
-- [ ] T05: FlaUIBackend Python methods for new bridge commands
+- [x] T05: FlaUIBackend Python methods for new bridge commands
   - Files: `src/netcoredbg_mcp/ui/flaui_client.py`
   - AC: New async methods on `FlaUIBackend`: `drag(x1, y1, x2, y2, speed_ms=200, hold_modifiers=None)` forwards to bridge `drag`; `send_system_event(event, mode="toggle")` forwards to `send_system_event`; `hold_modifiers(modifiers)` / `release_modifiers(modifiers_or_all)` / `get_held_modifiers()` forward to respective commands. Each raises `RuntimeError` on non-dict bridge responses (same pattern as `switch_window`).
 
-- [ ] T06: UIBackend protocol + PywinautoBackend stubs
+- [x] T06: UIBackend protocol + PywinautoBackend stubs
   - Files: `src/netcoredbg_mcp/ui/backend.py`, `src/netcoredbg_mcp/ui/pywinauto_backend.py`
   - AC: Protocol adds `drag`, `send_system_event`, `hold_modifiers`, `release_modifiers`, `get_held_modifiers`. `PywinautoBackend` implementations: `drag` falls back to existing `_send_drag` (Win32) with new `speed_ms`/`hold_modifiers` support via `SendInput`; `send_system_event` / `hold_modifiers` / `release_modifiers` return `{switched: False, unsupported: True, reason: "FlaUI bridge required"}` dict (same pattern as `switch_window`). `get_held_modifiers` returns `{modifiers: []}` on pywinauto (no persistent state to report).
 
-- [ ] T07: MCP tool `ui_drag` enhancement
+- [x] T07: MCP tool `ui_drag` enhancement
   - Files: `src/netcoredbg_mcp/tools/ui.py`
   - AC: Existing `ui_drag` signature extended with `speed_ms: int = 200` and `hold_modifiers: list[str] | None = None`. FlaUI backend routes through new `backend.drag(...)` method (no more `_send_drag` fallthrough). Pywinauto backend uses updated `backend.drag(...)` (which internally calls `_send_drag` with new params). Input validation: `speed_ms < 20` → error; identical from/to → error. Structured error responses preserved.
 
-- [ ] T08: MCP tools for system event and modifier hold
+- [x] T08: MCP tools for system event and modifier hold
   - Files: `src/netcoredbg_mcp/tools/ui.py`
   - AC: Four new MCP tools registered: `ui_send_system_event(ctx, event, mode="toggle")`, `ui_hold_modifiers(ctx, modifiers)`, `ui_release_modifiers(ctx, modifiers)`, `ui_get_held_modifiers()`. Each validates input, routes to backend method, surfaces `{unsupported: True}` backend responses as `build_error_response`. Modifier validation whitelists `{"ctrl", "shift", "alt", "win"}` case-insensitively before passing to backend.
 

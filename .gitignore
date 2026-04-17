@@ -64,3 +64,6 @@ obj/
 
 .engram-project
 
+
+.tmp/
+

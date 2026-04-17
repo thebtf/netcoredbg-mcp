@@ -321,12 +321,74 @@ public class Program
         dataGrid.Rows.Add("Diana", "Tester", "Junior");
         dataGrid.Rows.Add("Eve", "DevOps", "Senior");
 
+        // Drag-reorder ListBox for ui_drag smoke test (engram #79).
+        // WinForms ListBox needs AllowDrop + manual drag/drop handlers to
+        // actually reorder items — verifies the drag primitive crosses the
+        // system drag threshold and triggers DoDragDrop correctly.
+        var dragList = new ListBox
+        {
+            Name = "dragList",
+            Location = new System.Drawing.Point(420, 60),
+            Size = new System.Drawing.Size(160, 160),
+            AllowDrop = true,
+        };
+        dragList.AccessibleName = "dragList";
+        dragList.Items.AddRange(new object[] { "Alpha", "Beta", "Gamma", "Delta", "Epsilon" });
+
+        int? dragSourceIndex = null;
+        dragList.MouseDown += (_, e) =>
+        {
+            dragSourceIndex = dragList.IndexFromPoint(e.Location);
+            if (dragSourceIndex is int srcIdx && srcIdx >= 0)
+            {
+                dragList.DoDragDrop(dragList.Items[srcIdx], DragDropEffects.Move);
+            }
+        };
+        dragList.DragEnter += (_, e) =>
+        {
+            if (e.Data?.GetDataPresent(typeof(string)) == true)
+                e.Effect = DragDropEffects.Move;
+        };
+        dragList.DragOver += (_, e) =>
+        {
+            if (e.Data?.GetDataPresent(typeof(string)) == true)
+                e.Effect = DragDropEffects.Move;
+        };
+        dragList.DragDrop += (sender, e) =>
+        {
+            var pt = dragList.PointToClient(new System.Drawing.Point(e.X, e.Y));
+            var dstIdx = dragList.IndexFromPoint(pt);
+            if (dragSourceIndex is int srcIdx && srcIdx >= 0 && dstIdx >= 0 && dstIdx != srcIdx)
+            {
+                var item = dragList.Items[srcIdx];
+                dragList.Items.RemoveAt(srcIdx);
+                dragList.Items.Insert(dstIdx, item);
+            }
+            dragSourceIndex = null;
+        };
+
+        // Multi-select ListBox for ui_hold_modifiers smoke test (engram #81).
+        // SelectionMode=MultiExtended enables Ctrl+click discontiguous selection,
+        // which requires persistent Ctrl-hold across discrete click calls.
+        var multiSelectList = new ListBox
+        {
+            Name = "multiList",
+            Location = new System.Drawing.Point(420, 240),
+            Size = new System.Drawing.Size(160, 160),
+            SelectionMode = SelectionMode.MultiExtended,
+        };
+        multiSelectList.AccessibleName = "multiList";
+        multiSelectList.Items.AddRange(new object[] { "One", "Two", "Three", "Four", "Five" });
+
+        form.Width = 620;
         form.Height = 470;
         form.Controls.Add(panel);
         form.Controls.Add(outerBtn);
         form.Controls.Add(actionBtnOutside);
         form.Controls.Add(fileDialogBtn);
         form.Controls.Add(dataGrid);
+        form.Controls.Add(dragList);
+        form.Controls.Add(multiSelectList);
 
         Console.WriteLine("GUI scenario started. Close the window to exit.");
         Application.Run(form);
