@@ -13,6 +13,52 @@ from ..session.state import DebugState
 
 logger = logging.getLogger(__name__)
 
+_SUPPORTED_MODIFIERS = {"ctrl", "shift", "alt", "win"}
+_SUPPORTED_SYSTEM_EVENTS = {"theme_change"}
+_SUPPORTED_THEME_MODES = {"toggle", "light", "dark"}
+
+
+def _normalize_modifier_list(modifiers: list[str] | None) -> list[str]:
+    """Validate and normalize modifier names."""
+    if modifiers is None:
+        return []
+
+    normalized: list[str] = []
+    invalid: list[str] = []
+
+    for modifier in modifiers:
+        if not isinstance(modifier, str):
+            invalid.append(str(modifier))
+            continue
+        value = modifier.strip().lower()
+        if value not in _SUPPORTED_MODIFIERS:
+            invalid.append(modifier)
+            continue
+        if value not in normalized:
+            normalized.append(value)
+
+    if invalid:
+        accepted = ", ".join(sorted(_SUPPORTED_MODIFIERS))
+        invalid_names = ", ".join(sorted(str(value) for value in invalid))
+        raise ValueError(
+            f"Unknown modifier names: {invalid_names}. Accepted values: {accepted}"
+        )
+
+    return normalized
+
+
+def _normalize_release_modifiers(modifiers: list[str] | str) -> list[str] | str:
+    """Validate release_modifiers input."""
+    if isinstance(modifiers, str):
+        value = modifiers.strip().lower()
+        if value != "all":
+            raise ValueError(
+                "release_modifiers expects either the string 'all' or a list of modifier names"
+            )
+        return "all"
+
+    return _normalize_modifier_list(modifiers)
+
 
 def register_ui_tools(
     mcp: FastMCP,
@@ -1478,6 +1524,8 @@ def register_ui_tools(
         from_y: int | None = None,
         to_x: int | None = None,
         to_y: int | None = None,
+        speed_ms: int = 200,
+        hold_modifiers: list[str] | None = None,
     ) -> dict:
         """Drag from one position to another.
 
@@ -1494,18 +1542,35 @@ def register_ui_tools(
             from_y: Source Y coordinate
             to_x: Target X coordinate
             to_y: Target Y coordinate
+            speed_ms: Total drag duration in milliseconds. Minimum 20 ms so the
+                gesture always emits enough waypoints to cross common WPF drag
+                thresholds reliably.
+            hold_modifiers: Optional modifier names to hold for the full drag.
+                Accepted values: ctrl, shift, alt, win.
+
+        Notes:
+            - Identical from/to coordinates are rejected.
+            - Short drags that stay below the system drag threshold should use
+              ui_click instead of ui_drag.
         """
         try:
             access_error = check_session_access(ctx)
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
 
+            if speed_ms < 20:
+                return build_error_response(
+                    "speed_ms below drag-threshold safety floor (minimum 20)",
+                    state=session.state.state,
+                )
+
+            normalized_modifiers = _normalize_modifier_list(hold_modifiers)
             ui = await _ensure_ui_connected()
 
             # Resolve coordinates from automation IDs if needed
             fx, fy, tx, ty = from_x, from_y, to_x, to_y
 
-            if from_automation_id and not (fx and fy):
+            if from_automation_id and (fx is None or fy is None):
                 from_rect = (ui.element_cache.get(from_automation_id) or {}).get("rect")
                 if from_rect:
                     fx = (from_rect["left"] + from_rect["right"]) // 2
@@ -1516,7 +1581,7 @@ def register_ui_tools(
                         state=session.state.state,
                     )
 
-            if to_automation_id and not (tx and ty):
+            if to_automation_id and (tx is None or ty is None):
                 to_rect = (ui.element_cache.get(to_automation_id) or {}).get("rect")
                 if to_rect:
                     tx = (to_rect["left"] + to_rect["right"]) // 2
@@ -1527,18 +1592,157 @@ def register_ui_tools(
                         state=session.state.state,
                     )
 
-            if not all([fx, fy, tx, ty]):
+            if fx is None or fy is None or tx is None or ty is None:
                 return build_error_response(
                     "Provide either automation_ids or coordinates for both source and target.",
                     state=session.state.state,
                 )
 
-            await ui.drag(fx, fy, tx, ty)
+            if fx == tx and fy == ty:
+                return build_error_response(
+                    "from and to coordinates are identical (0 px distance)",
+                    state=session.state.state,
+                )
 
-            return build_response(
-                data={"dragged": True, "from": {"x": fx, "y": fy}, "to": {"x": tx, "y": ty}},
-                state=session.state.state,
+            result = await ui.drag(
+                fx,
+                fy,
+                tx,
+                ty,
+                speed_ms=speed_ms,
+                hold_modifiers=normalized_modifiers or None,
             )
+            if not isinstance(result, dict):
+                return build_error_response(
+                    f"drag: backend returned non-dict response ({type(result).__name__})",
+                    state=session.state.state,
+                )
+            if result.get("unsupported") is True:
+                return build_error_response(
+                    result.get("reason", "drag not supported on current backend"),
+                    state=session.state.state,
+                )
+
+            return build_response(data=result, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def ui_send_system_event(
+        ctx: Context,
+        event: str,
+        mode: str = "toggle",
+    ) -> dict:
+        """Send a supported system event through the active UI backend."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            normalized_event = event.strip().lower()
+            if normalized_event not in _SUPPORTED_SYSTEM_EVENTS:
+                return build_error_response(
+                    "Unsupported event. Supported events: theme_change",
+                    state=session.state.state,
+                )
+
+            normalized_mode = mode.strip().lower()
+            if normalized_mode not in _SUPPORTED_THEME_MODES:
+                return build_error_response(
+                    "Unsupported mode. Supported modes: toggle, light, dark",
+                    state=session.state.state,
+                )
+
+            ui = await _ensure_ui_connected()
+            result = await ui.send_system_event(normalized_event, mode=normalized_mode)
+            if not isinstance(result, dict):
+                return build_error_response(
+                    f"send_system_event: backend returned non-dict response ({type(result).__name__})",
+                    state=session.state.state,
+                )
+            if result.get("unsupported") is True:
+                return build_error_response(
+                    result.get("reason", "send_system_event not supported on current backend"),
+                    state=session.state.state,
+                )
+            return build_response(data=result, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def ui_hold_modifiers(ctx: Context, modifiers: list[str]) -> dict:
+        """Hold modifiers across subsequent UI input calls."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            normalized_modifiers = _normalize_modifier_list(modifiers)
+            ui = await _ensure_ui_connected()
+            result = await ui.hold_modifiers(normalized_modifiers)
+            if not isinstance(result, dict):
+                return build_error_response(
+                    f"hold_modifiers: backend returned non-dict response ({type(result).__name__})",
+                    state=session.state.state,
+                )
+            if result.get("unsupported") is True:
+                return build_error_response(
+                    result.get("reason", "hold_modifiers not supported on current backend"),
+                    state=session.state.state,
+                )
+            return build_response(data=result, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def ui_release_modifiers(
+        ctx: Context,
+        modifiers: list[str] | str,
+    ) -> dict:
+        """Release held modifiers or all held modifiers."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            normalized_modifiers = _normalize_release_modifiers(modifiers)
+            ui = await _ensure_ui_connected()
+            result = await ui.release_modifiers(normalized_modifiers)
+            if not isinstance(result, dict):
+                return build_error_response(
+                    f"release_modifiers: backend returned non-dict response ({type(result).__name__})",
+                    state=session.state.state,
+                )
+            if result.get("unsupported") is True:
+                return build_error_response(
+                    result.get("reason", "release_modifiers not supported on current backend"),
+                    state=session.state.state,
+                )
+            return build_response(data=result, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    async def ui_get_held_modifiers(ctx: Context) -> dict:
+        """Inspect currently held modifiers."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            ui = await _ensure_ui_connected()
+            result = await ui.get_held_modifiers()
+            if not isinstance(result, dict):
+                return build_error_response(
+                    f"get_held_modifiers: backend returned non-dict response ({type(result).__name__})",
+                    state=session.state.state,
+                )
+            if result.get("unsupported") is True:
+                return build_error_response(
+                    result.get("reason", "get_held_modifiers not supported on current backend"),
+                    state=session.state.state,
+                )
+            return build_response(data=result, state=session.state.state)
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 

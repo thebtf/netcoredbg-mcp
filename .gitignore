@@ -61,3 +61,15 @@ htmlcov/
 # .NET
 bin/
 obj/
+
+.engram-project
+
+
+.tmp/
+
+
+.pytest_cache_local/
+.pytest_tmp/
+.manual_app_type_checks/
+bridge/obj-codex/
+

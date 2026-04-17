@@ -414,13 +414,37 @@ pywinauto is used as fallback — works for most controls.
 | Double-click | ui_double_click(automation_id="listItem") |
 | Select rows | ui_select_items(automation_id="grid", indices=[0,1,2]) |
 | Scroll | ui_scroll(automation_id="list", direction="down", amount=5) |
-| Drag | ui_drag(from_automation_id="src", to_automation_id="dst") |
+| Drag (threshold-safe) | ui_drag(from_automation_id="src", to_automation_id="dst", speed_ms=200) — crosses WPF drag threshold, triggers DoDragDrop |
+| Drag with modifier | ui_drag(from_x=..., from_y=..., to_x=..., to_y=..., speed_ms=300, hold_modifiers=["ctrl"]) |
 | Complex keys | ui_set_focus(automation_id="grid") then ui_send_keys_focused(keys="^{END}") |
 | Scoped search | ui_click(automation_id="btn", root_id="panel1") — search within subtree |
 | XPath search | ui_click(xpath="//Button[@Name='Save']") — FlaUI backend only |
+| OS theme toggle | ui_send_system_event(event="theme_change", mode="toggle") — fires SystemEvents.UserPreferenceChanged in debuggee |
+| Hold Ctrl across clicks | ui_hold_modifiers(modifiers=["ctrl"]) → multiple ui_click → ui_release_modifiers(modifiers="all") |
+| Inspect held modifiers | ui_get_held_modifiers() — returns the list of currently-held modifier names |
 
 PREFER ui_invoke over ui_click for buttons — it works even when the element is off-screen or obscured.
 PREFER ui_toggle over ui_click for checkboxes — it returns the actual state after toggling.
+
+### Ctrl+click multi-select workflow
+
+Discontiguous multi-selection (Ctrl+click) requires the Ctrl modifier to stay
+held across multiple discrete click calls. `ui_send_keys_batch` releases
+modifiers at the end of each batch, so use the persistent-modifier primitives:
+
+```
+ui_hold_modifiers(modifiers=["ctrl"])
+ui_click(automation_id="Row_3")
+ui_click(automation_id="Row_5")
+ui_click(automation_id="Row_7")
+ui_release_modifiers(modifiers="all")
+# Rows 3, 5, 7 are now selected on a SelectionMode=Extended/MultiExtended control.
+```
+
+The bridge auto-releases any held modifiers on graceful shutdown (stdin EOF,
+disconnect, or normal process exit) so the session does not leave
+Ctrl/Shift/Alt stuck across the Windows desktop. Force-kill paths are not
+supported and may still require manual recovery.
 
 ## WinForms Differences
 

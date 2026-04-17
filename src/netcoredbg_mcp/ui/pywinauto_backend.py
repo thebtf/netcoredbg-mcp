@@ -1,4 +1,4 @@
-"""PywinautoBackend — wraps existing UIAutomation class as a UIBackend.
+"""PywinautoBackend - wraps existing UIAutomation class as a UIBackend.
 
 This preserves all existing pywinauto behavior exactly, serving as
 the fallback when FlaUIBridge.exe is not available.
@@ -366,13 +366,74 @@ class PywinautoBackend:
         """Double-click at coordinates."""
         await self._ui._double_click_at_coords(x, y)
 
-    async def drag(self, from_x: int, from_y: int, to_x: int, to_y: int) -> None:
+    async def drag(
+        self,
+        from_x: int,
+        from_y: int,
+        to_x: int,
+        to_y: int,
+        speed_ms: int = 200,
+        hold_modifiers: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Drag between coordinates."""
-        await self._ui._drag_at_coords(from_x, from_y, to_x, to_y)
+        await self._ui._drag_at_coords(
+            from_x,
+            from_y,
+            to_x,
+            to_y,
+            speed_ms=speed_ms,
+            hold_modifiers=hold_modifiers,
+        )
+        return {
+            "dragged": True,
+            "x1": from_x,
+            "y1": from_y,
+            "x2": to_x,
+            "y2": to_y,
+            "steps": max(10, speed_ms // 20),
+            "duration_ms": speed_ms,
+        }
 
     async def send_keys(self, keys: str) -> None:
         """Send keyboard input to focused element."""
         await self._ui.send_keys_focused(keys)
+
+    async def send_system_event(self, event: str, mode: str = "toggle") -> dict[str, Any]:
+        """System events require the FlaUI bridge backend."""
+        return {
+            "switched": False,
+            "unsupported": True,
+            "reason": (
+                "FlaUI bridge required for send_system_event. "
+                "The pywinauto backend cannot broadcast system events."
+            ),
+        }
+
+    async def hold_modifiers(self, modifiers: list[str]) -> dict[str, Any]:
+        """Persistent held modifiers require the FlaUI bridge backend."""
+        return {
+            "switched": False,
+            "unsupported": True,
+            "reason": (
+                "FlaUI bridge required for hold_modifiers. "
+                "The pywinauto backend does not track persistent modifier state."
+            ),
+        }
+
+    async def release_modifiers(self, modifiers: list[str] | str) -> dict[str, Any]:
+        """Persistent held modifiers require the FlaUI bridge backend."""
+        return {
+            "switched": False,
+            "unsupported": True,
+            "reason": (
+                "FlaUI bridge required for release_modifiers. "
+                "The pywinauto backend does not track persistent modifier state."
+            ),
+        }
+
+    async def get_held_modifiers(self) -> dict[str, Any]:
+        """The pywinauto backend has no persistent modifier hold state."""
+        return {"modifiers": []}
 
     async def multi_select(self, container_id: str, indices: list[int]) -> int:
         """Multi-select items. Returns count selected.

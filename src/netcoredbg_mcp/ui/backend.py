@@ -106,8 +106,32 @@ class UIBackend(Protocol):
         """Double-click at screen coordinates."""
         ...
 
-    async def drag(self, from_x: int, from_y: int, to_x: int, to_y: int) -> None:
+    async def drag(
+        self,
+        from_x: int,
+        from_y: int,
+        to_x: int,
+        to_y: int,
+        speed_ms: int = 200,
+        hold_modifiers: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Drag from one position to another."""
+        ...
+
+    async def send_system_event(self, event: str, mode: str = "toggle") -> dict[str, Any]:
+        """Send a supported system event through the active backend."""
+        ...
+
+    async def hold_modifiers(self, modifiers: list[str]) -> dict[str, Any]:
+        """Hold one or more modifiers until a later release."""
+        ...
+
+    async def release_modifiers(self, modifiers: list[str] | str) -> dict[str, Any]:
+        """Release specific held modifiers or all held modifiers."""
+        ...
+
+    async def get_held_modifiers(self) -> dict[str, Any]:
+        """Inspect currently held modifiers."""
         ...
 
     async def send_keys(self, keys: str) -> None:

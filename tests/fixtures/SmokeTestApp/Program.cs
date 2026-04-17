@@ -321,12 +321,113 @@ public class Program
         dataGrid.Rows.Add("Diana", "Tester", "Junior");
         dataGrid.Rows.Add("Eve", "DevOps", "Senior");
 
+        // Drag-reorder ListBox for ui_drag smoke test (engram #79).
+        // Record MouseDown, wait for MouseMove to cross the system drag
+        // threshold, then start DoDragDrop so the smoke test proves ui_drag
+        // crosses the real platform threshold instead of turning every click
+        // into an unconditional drag.
+        var dragList = new ListBox
+        {
+            Name = "dragList",
+            Location = new System.Drawing.Point(420, 60),
+            Size = new System.Drawing.Size(160, 160),
+            AllowDrop = true,
+        };
+        dragList.AccessibleName = "dragList";
+        dragList.Items.AddRange(new object[] { "Alpha", "Beta", "Gamma", "Delta", "Epsilon" });
+
+        int? dragSourceIndex = null;
+        System.Drawing.Point? dragStartPos = null;
+        dragList.MouseDown += (_, e) =>
+        {
+            if (e.Button != MouseButtons.Left)
+            {
+                dragSourceIndex = null;
+                dragStartPos = null;
+                return;
+            }
+
+            var srcIdx = dragList.IndexFromPoint(e.Location);
+            dragSourceIndex = srcIdx >= 0 ? srcIdx : null;
+            dragStartPos = dragSourceIndex.HasValue ? e.Location : null;
+        };
+        dragList.MouseMove += (_, e) =>
+        {
+            if (e.Button != MouseButtons.Left || dragSourceIndex is not int srcIdx || dragStartPos is null)
+            {
+                return;
+            }
+
+            var dragSize = SystemInformation.DragSize;
+            var dragBounds = new System.Drawing.Rectangle(
+                dragStartPos.Value.X - (dragSize.Width / 2),
+                dragStartPos.Value.Y - (dragSize.Height / 2),
+                dragSize.Width,
+                dragSize.Height);
+
+            if (dragBounds.Contains(e.Location))
+            {
+                return;
+            }
+
+            dragStartPos = null;
+            dragList.DoDragDrop(dragList.Items[srcIdx], DragDropEffects.Move);
+        };
+        dragList.MouseUp += (_, _) =>
+        {
+            dragSourceIndex = null;
+            dragStartPos = null;
+        };
+        dragList.DragEnter += (_, e) =>
+        {
+            if (e.Data?.GetDataPresent(typeof(string)) == true)
+                e.Effect = DragDropEffects.Move;
+        };
+        dragList.DragOver += (_, e) =>
+        {
+            if (e.Data?.GetDataPresent(typeof(string)) == true)
+                e.Effect = DragDropEffects.Move;
+        };
+        dragList.DragDrop += (sender, e) =>
+        {
+            var pt = dragList.PointToClient(new System.Drawing.Point(e.X, e.Y));
+            var dstIdx = dragList.IndexFromPoint(pt);
+            if (dragSourceIndex is int srcIdx && srcIdx >= 0 && dstIdx >= 0 && dstIdx != srcIdx)
+            {
+                var item = dragList.Items[srcIdx];
+                dragList.Items.RemoveAt(srcIdx);
+                if (dstIdx > srcIdx)
+                {
+                    dstIdx -= 1;
+                }
+                dragList.Items.Insert(dstIdx, item);
+            }
+            dragSourceIndex = null;
+            dragStartPos = null;
+        };
+
+        // Multi-select ListBox for ui_hold_modifiers smoke test (engram #81).
+        // SelectionMode=MultiExtended enables Ctrl+click discontiguous selection,
+        // which requires persistent Ctrl-hold across discrete click calls.
+        var multiSelectList = new ListBox
+        {
+            Name = "multiList",
+            Location = new System.Drawing.Point(420, 240),
+            Size = new System.Drawing.Size(160, 160),
+            SelectionMode = SelectionMode.MultiExtended,
+        };
+        multiSelectList.AccessibleName = "multiList";
+        multiSelectList.Items.AddRange(new object[] { "One", "Two", "Three", "Four", "Five" });
+
+        form.Width = 620;
         form.Height = 470;
         form.Controls.Add(panel);
         form.Controls.Add(outerBtn);
         form.Controls.Add(actionBtnOutside);
         form.Controls.Add(fileDialogBtn);
         form.Controls.Add(dataGrid);
+        form.Controls.Add(dragList);
+        form.Controls.Add(multiSelectList);
 
         Console.WriteLine("GUI scenario started. Close the window to exit.");
         Application.Run(form);

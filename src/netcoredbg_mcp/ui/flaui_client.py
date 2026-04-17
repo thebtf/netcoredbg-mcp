@@ -337,16 +337,80 @@ class FlaUIBackend:
         """Double-click via FlaUI bridge."""
         await self._client.call("double_click", {"x": x, "y": y})
 
-    async def drag(self, from_x: int, from_y: int, to_x: int, to_y: int) -> None:
+    async def drag(
+        self,
+        from_x: int,
+        from_y: int,
+        to_x: int,
+        to_y: int,
+        speed_ms: int = 200,
+        hold_modifiers: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Drag via FlaUI bridge."""
-        await self._client.call("drag", {
-            "fromX": from_x, "fromY": from_y,
-            "toX": to_x, "toY": to_y,
-        })
+        result = await self._client.call(
+            "drag",
+            {
+                "x1": from_x,
+                "y1": from_y,
+                "x2": to_x,
+                "y2": to_y,
+                "speed_ms": speed_ms,
+                "hold_modifiers": hold_modifiers or [],
+            },
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"drag: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result
 
     async def send_keys(self, keys: str) -> None:
         """Send keys via FlaUI bridge."""
         await self._client.call("send_keys", {"keys": keys})
+
+    async def send_system_event(self, event: str, mode: str = "toggle") -> dict[str, Any]:
+        """Send a supported system event via FlaUI bridge."""
+        result = await self._client.call(
+            "send_system_event",
+            {"event": event, "mode": mode},
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"send_system_event: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result
+
+    async def hold_modifiers(self, modifiers: list[str]) -> dict[str, Any]:
+        """Hold modifiers via FlaUI bridge."""
+        result = await self._client.call("hold_modifiers", {"modifiers": modifiers})
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"hold_modifiers: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result
+
+    async def release_modifiers(self, modifiers: list[str] | str) -> dict[str, Any]:
+        """Release modifiers via FlaUI bridge."""
+        result = await self._client.call("release_modifiers", {"modifiers": modifiers})
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"release_modifiers: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result
+
+    async def get_held_modifiers(self) -> dict[str, Any]:
+        """Inspect held modifiers via FlaUI bridge."""
+        result = await self._client.call("get_held_modifiers", {})
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"get_held_modifiers: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result
 
     async def multi_select(self, container_id: str, indices: list[int]) -> int:
         """Multi-select via FlaUI bridge."""

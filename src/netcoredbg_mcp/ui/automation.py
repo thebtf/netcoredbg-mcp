@@ -21,6 +21,92 @@ from .serialization import ElementInfo, serialize_element
 
 # ── Win32 SendInput for coordinate-based clicks ─────────────────────
 
+VK_CONTROL = 0x11
+VK_MENU = 0x12
+VK_SHIFT = 0x10
+VK_LWIN = 0x5B
+
+_DRAG_MODIFIER_MAP = {
+    "ctrl": VK_CONTROL,
+    "shift": VK_SHIFT,
+    "alt": VK_MENU,
+    "win": VK_LWIN,
+}
+
+
+def _press(vk: int) -> None:
+    """Press a virtual key using SendInput."""
+    import ctypes
+    import ctypes.wintypes as wintypes
+
+    user32 = ctypes.windll.user32
+    INPUT_KEYBOARD = 1
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [
+            ("wVk", wintypes.WORD),
+            ("wScan", wintypes.WORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", ctypes.POINTER(wintypes.ULONG)),
+        ]
+
+    class INPUT(ctypes.Structure):
+        class _INPUT(ctypes.Union):
+            _fields_ = [("ki", KEYBDINPUT)]
+        _fields_ = [
+            ("type", wintypes.DWORD),
+            ("_input", _INPUT),
+        ]
+
+    inp = INPUT()
+    inp.type = INPUT_KEYBOARD
+    inp._input.ki.wVk = vk
+    inp._input.ki.dwFlags = 0
+    user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+
+
+def _release(vk: int) -> None:
+    """Release a virtual key using SendInput."""
+    import ctypes
+    import ctypes.wintypes as wintypes
+
+    user32 = ctypes.windll.user32
+    INPUT_KEYBOARD = 1
+    KEYEVENTF_KEYUP = 0x0002
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [
+            ("wVk", wintypes.WORD),
+            ("wScan", wintypes.WORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", ctypes.POINTER(wintypes.ULONG)),
+        ]
+
+    class INPUT(ctypes.Structure):
+        class _INPUT(ctypes.Union):
+            _fields_ = [("ki", KEYBDINPUT)]
+        _fields_ = [
+            ("type", wintypes.DWORD),
+            ("_input", _INPUT),
+        ]
+
+    inp = INPUT()
+    inp.type = INPUT_KEYBOARD
+    inp._input.ki.wVk = vk
+    inp._input.ki.dwFlags = KEYEVENTF_KEYUP
+    user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+
+
+def _tap(vk: int) -> None:
+    """Press and release a virtual key."""
+    import time
+
+    _press(vk)
+    time.sleep(0.01)
+    _release(vk)
+
 
 def _send_click(x: int, y: int, button: str = "left") -> None:
     """Click at screen coordinates using SendInput (modern, DPI-aware).
@@ -106,10 +192,6 @@ def _send_keys_via_input(keys: str) -> None:
     INPUT_KEYBOARD = 1
     KEYEVENTF_KEYUP = 0x0002
 
-    VK_CONTROL = 0x11
-    VK_MENU = 0x12  # Alt
-    VK_SHIFT = 0x10
-
     VK_MAP = {
         "ENTER": 0x0D, "RETURN": 0x0D,
         "TAB": 0x09,
@@ -149,25 +231,6 @@ def _send_keys_via_input(keys: str) -> None:
             ("type", wintypes.DWORD),
             ("_input", _INPUT),
         ]
-
-    def _press(vk: int) -> None:
-        inp = INPUT()
-        inp.type = INPUT_KEYBOARD
-        inp._input.ki.wVk = vk
-        inp._input.ki.dwFlags = 0
-        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
-
-    def _release(vk: int) -> None:
-        inp = INPUT()
-        inp.type = INPUT_KEYBOARD
-        inp._input.ki.wVk = vk
-        inp._input.ki.dwFlags = KEYEVENTF_KEYUP
-        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
-
-    def _tap(vk: int) -> None:
-        _press(vk)
-        time.sleep(0.01)
-        _release(vk)
 
     def _char_to_vk(ch: str) -> tuple[int, bool, bool, bool]:
         """Convert a character to (vk_code, needs_shift, needs_ctrl, needs_alt) via VkKeyScanW."""
@@ -271,7 +334,14 @@ def _send_keys_via_input(keys: str) -> None:
         time.sleep(0.02)
 
 
-def _send_drag(from_x: int, from_y: int, to_x: int, to_y: int) -> None:
+def _send_drag(
+    from_x: int,
+    from_y: int,
+    to_x: int,
+    to_y: int,
+    speed_ms: int = 200,
+    hold_modifiers: list[str] | None = None,
+) -> None:
     """Drag from one screen coordinate to another using Win32 API.
 
     Performs: move to start → mouse down → move to end → mouse up.
@@ -279,30 +349,69 @@ def _send_drag(from_x: int, from_y: int, to_x: int, to_y: int) -> None:
     import ctypes
     import time
 
+    if speed_ms < 20:
+        raise ValueError("speed_ms below drag-threshold safety floor (minimum 20)")
+
+    if from_x == to_x and from_y == to_y:
+        raise ValueError("from and to coordinates are identical (0 px distance)")
+
+    # Mirror the bridge's sub-threshold guard (see bridge/Commands/ClickCommands.cs
+    # DragThresholdPixels = 5). WPF's MinimumHorizontal/VerticalDragDistance is
+    # 4 px each axis; bridge uses 5 to include a 1 px safety margin so the first
+    # waypoint is guaranteed past the WPF rect. Pywinauto fallback must use the
+    # same constant so ui_drag behaves identically regardless of backend.
+    _DRAG_THRESHOLD_PX = 5
+    if abs(to_x - from_x) < _DRAG_THRESHOLD_PX and abs(to_y - from_y) < _DRAG_THRESHOLD_PX:
+        raise ValueError(
+            f"drag distance below WPF threshold (<{_DRAG_THRESHOLD_PX} px in each axis); "
+            "adjust coordinates or use ui_click"
+        )
+
     user32 = ctypes.windll.user32
+    modifiers = hold_modifiers or []
+    modifier_vks: list[int] = []
+    pressed_modifier_vks: list[int] = []
+    mouse_down_sent = False
+
+    for modifier_name in modifiers:
+        normalized = modifier_name.strip().lower()
+        vk = _DRAG_MODIFIER_MAP.get(normalized)
+        if vk is None:
+            raise ValueError(
+                f"Unknown modifier names: {modifier_name}. Accepted values: ctrl, shift, alt, win"
+            )
+        if vk not in modifier_vks:
+            modifier_vks.append(vk)
 
     # Move to start position
     user32.SetCursorPos(from_x, from_y)
-    time.sleep(0.1)
-
-    # Mouse down
     MOUSEEVENTF_LEFTDOWN = 0x0002
     MOUSEEVENTF_LEFTUP = 0x0004
-    user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-    time.sleep(0.1)
+    steps = max(10, speed_ms // 20)
+    sleep_per_step = speed_ms / steps / 1000.0
 
-    # Move to target in steps (smooth drag)
-    steps = 10
-    for i in range(1, steps + 1):
-        ix = from_x + (to_x - from_x) * i // steps
-        iy = from_y + (to_y - from_y) * i // steps
-        user32.SetCursorPos(ix, iy)
-        time.sleep(0.02)
+    try:
+        for modifier_vk in modifier_vks:
+            _press(modifier_vk)
+            pressed_modifier_vks.append(modifier_vk)
+            time.sleep(0.01)
 
-    time.sleep(0.1)
+        user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+        mouse_down_sent = True
 
-    # Mouse up
-    user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+        try:
+            for i in range(1, steps + 1):
+                ix = from_x + (to_x - from_x) * i // steps
+                iy = from_y + (to_y - from_y) * i // steps
+                user32.SetCursorPos(ix, iy)
+                time.sleep(sleep_per_step)
+        finally:
+            if mouse_down_sent:
+                user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+    finally:
+        for modifier_vk in reversed(pressed_modifier_vks):
+            _release(modifier_vk)
+            time.sleep(0.01)
 
 
 logger = logging.getLogger(__name__)
@@ -423,12 +532,26 @@ class UIAutomation:
         )
 
     async def _drag_at_coords(
-        self, from_x: int, from_y: int, to_x: int, to_y: int,
+        self,
+        from_x: int,
+        from_y: int,
+        to_x: int,
+        to_y: int,
+        speed_ms: int = 200,
+        hold_modifiers: list[str] | None = None,
     ) -> None:
         """Drag from one screen coordinate to another."""
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
-            self._executor, lambda: _send_drag(from_x, from_y, to_x, to_y),
+            self._executor,
+            lambda: _send_drag(
+                from_x,
+                from_y,
+                to_x,
+                to_y,
+                speed_ms=speed_ms,
+                hold_modifiers=hold_modifiers,
+            ),
         )
 
     async def get_window_tree(
