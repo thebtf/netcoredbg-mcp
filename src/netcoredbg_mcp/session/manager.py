@@ -469,7 +469,12 @@ class SessionManager:
 
         # Check whether a USER-defined breakpoint (not tracepoint-owned) exists here.
         # Tracepoints add their own DAP breakpoint — exclude those from the check.
-        tracepoint_lines = {t.line for t in mgr.tracepoints.values() if t.active}
+        tracepoint_lines = set()
+        for t in mgr.tracepoints.values():
+            if t.active:
+                tracepoint_lines.add(t.line)
+                if t.dap_line is not None:
+                    tracepoint_lines.add(t.dap_line)
         user_bps = self._breakpoints.get_for_file(top.source)
         has_user_breakpoint = any(
             bp.line == top.line and bp.line not in tracepoint_lines
@@ -494,7 +499,15 @@ class SessionManager:
                 return
             top = frames[0]
             if top.source and top.line:
-                key = (self.breakpoints._normalize_path(top.source), top.line)
+                norm = self.breakpoints._normalize_path(top.source)
+                # Use user-requested line as key for stable hit_count lookups.
+                # If DAP adjusted the line, resolve back to the user-requested line.
+                matched_line = top.line
+                for bp in self.breakpoints.get_for_file(top.source):
+                    if bp.line == top.line or bp.dap_line == top.line:
+                        matched_line = bp.line
+                        break
+                key = (norm, matched_line)
                 self._state.hit_counts[key] = self._state.hit_counts.get(key, 0) + 1
                 logger.debug("Hit count for %s: %d", key, self._state.hit_counts[key])
         except asyncio.TimeoutError:
@@ -602,16 +615,21 @@ class SessionManager:
                         logger.info(f"Breakpoint {body.breakpoint_id} removed by adapter")
                         return
         elif body.reason in ("changed", "new") and body.breakpoint_id is not None:
-            # Update existing breakpoint's verified status and line
+            # Update existing breakpoint's verified status; record DAP-adjusted line if changed.
             for file_path, bps in self.breakpoints.get_all().items():
                 for bp in bps:
                     if bp.id == body.breakpoint_id:
                         bp.verified = body.verified
-                        if body.line is not None:
-                            bp.line = body.line
+                        if body.line is not None and body.line != bp.line:
+                            bp.dap_line = body.line
+                        # Propagate to any tracepoint whose underlying bp matches
+                        mgr = getattr(self, "_tracepoint_manager", None)
+                        if mgr is not None:
+                            mgr.set_dap_line_for_breakpoint(body.breakpoint_id, bp.dap_line)
                         logger.debug(
                             f"Breakpoint {body.breakpoint_id} updated: "
-                            f"verified={body.verified}, line={body.line}"
+                            f"verified={body.verified}, requested_line={bp.line}, "
+                            f"dap_line={bp.dap_line}"
                         )
                         return
             # New breakpoint from adapter — log but don't create (we don't know the file)

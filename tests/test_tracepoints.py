@@ -239,3 +239,53 @@ class TestOnTracepointHit:
 
         log = mgr.get_log()
         assert log[0].value.startswith("<error:")
+
+
+class TestTracepointDapLine:
+
+    def test_find_by_dap_line(self):
+        mgr = TracepointManager()
+        tp = mgr.add("test.cs", 10, "x")
+        assert mgr.set_dap_line("tp-1", 11) is True
+        assert mgr.find_tracepoint_for_location("test.cs", 10) is tp
+        assert mgr.find_tracepoint_for_location("test.cs", 11) is tp
+
+    def test_find_by_dap_line_filename_fallback(self):
+        mgr = TracepointManager()
+        tp = mgr.add("C:/src/test.cs", 10, "x")
+        mgr.set_dap_line("tp-1", 11)
+        assert mgr.find_tracepoint_for_location("D:\\otherdir\\test.cs", 11) is tp
+
+    def test_set_dap_line_unknown_tp(self):
+        mgr = TracepointManager()
+        assert mgr.set_dap_line("tp-999", 42) is False
+
+    def test_set_dap_line_clears_value(self):
+        mgr = TracepointManager()
+        mgr.add("test.cs", 10, "x")
+        mgr.set_dap_line("tp-1", 11)
+        assert mgr.tracepoints["tp-1"].dap_line == 11
+        mgr.set_dap_line("tp-1", None)
+        assert mgr.tracepoints["tp-1"].dap_line is None
+
+    def test_set_dap_line_for_breakpoint(self):
+        mgr = TracepointManager()
+        tp = mgr.add("test.cs", 10, "x")
+        tp.breakpoint_id = 42
+        mgr.set_dap_line_for_breakpoint(42, 11)
+        assert tp.dap_line == 11
+
+    def test_set_dap_line_for_breakpoint_not_found(self):
+        mgr = TracepointManager()
+        tp = mgr.add("test.cs", 10, "x")
+        tp.breakpoint_id = 42
+        mgr.set_dap_line_for_breakpoint(999, 11)
+        assert tp.dap_line is None
+
+    def test_find_does_not_match_inactive_by_dap_line(self):
+        mgr = TracepointManager()
+        tp = mgr.add("test.cs", 10, "x")
+        mgr.set_dap_line("tp-1", 11)
+        tp.active = False
+        assert mgr.find_tracepoint_for_location("test.cs", 10) is None
+        assert mgr.find_tracepoint_for_location("test.cs", 11) is None

@@ -47,7 +47,8 @@ class TestBreakpointEvents:
         manager._on_breakpoint(event)
 
         bps = manager.breakpoints.get_for_file("test.cs")
-        assert bps[0].line == 12
+        assert bps[0].line == 10
+        assert bps[0].dap_line == 12
 
     def test_breakpoint_removed(self, manager):
         """Removed event removes breakpoint from registry."""
