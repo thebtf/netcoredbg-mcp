@@ -28,6 +28,27 @@ modified; this directory is a verbatim mirror.
 | [`overview.md`](./overview.md) | Protocol overview: architecture, session startup modes, wire format, initialization sequence, capability negotiation, disconnect/terminate semantics. |
 | [`changelog.md`](./changelog.md) | Full version history from 1.0.x → 1.71.x. Check this when deciding whether a feature is safe to depend on given the netcoredbg adapter surface. |
 | [`contributing.md`](./contributing.md) | Upstream contribution workflow. Included for completeness; not required by consumer agents. |
+| [`img/`](./img/) | Diagrams referenced from `overview.md` (DAP architecture with/without adapters, breakpoint UI, stop/continue state, Java threads, etc.) — 10 assets, verbatim from upstream `gh-pages/img/`. |
+
+## Upstream artifacts to expect
+
+The `specification.md` / `overview.md` / `contributing.md` files are the exact
+contents of the upstream Jekyll site source. That has consequences:
+
+- A Jekyll `---` frontmatter block at the top of each `.md` file (e.g.
+  `layout: specification`). This is upstream content, not a local edit.
+- Internal cross-links use extensionless Jekyll routes like
+  `./specification#…` or `./changelog` (without `.md`). These render correctly
+  on the upstream site but break when viewed directly on GitHub. Don't "fix"
+  them — they will come back on every refresh from `gh-pages`.
+- Occasional minor typographic artifacts (e.g., a stray suffix in
+  `contributing.md`) that Microsoft has not corrected upstream. Leaving them
+  intact keeps this directory a true mirror that diffs cleanly against future
+  snapshots.
+
+If you need a lookup that does not rely on a working link, reach for
+[`debugAdapterProtocol.json`](./debugAdapterProtocol.json) — it is the source
+of truth the prose is generated from.
 
 ## How to use
 
@@ -58,6 +79,9 @@ Run from the repo root when you need to pull a newer snapshot:
 ```powershell
 $ghp = "https://raw.githubusercontent.com/microsoft/debug-adapter-protocol/gh-pages"
 $dir = "docs/dap-protocol"
+New-Item -ItemType Directory -Force "$dir/img" | Out-Null
+
+# Text + schema
 foreach ($f in @(
   @{url="$ghp/debugAdapterProtocol.json"; out="$dir/debugAdapterProtocol.json"},
   @{url="$ghp/specification.md";           out="$dir/specification.md"},
@@ -65,6 +89,16 @@ foreach ($f in @(
   @{url="$ghp/changelog.md";               out="$dir/changelog.md"},
   @{url="$ghp/contributing.md";            out="$dir/contributing.md"}
 )) { Invoke-WebRequest -Uri $f.url -OutFile $f.out -UseBasicParsing }
+
+# Images referenced from overview.md (enumerate via GitHub API so new
+# upstream assets are picked up automatically).
+$imgList = Invoke-RestMethod `
+  -Uri "https://api.github.com/repos/microsoft/debug-adapter-protocol/contents/img?ref=gh-pages" `
+  -Headers @{ 'User-Agent' = 'netcoredbg-mcp' }
+foreach ($asset in $imgList) {
+  Invoke-WebRequest -Uri "$ghp/img/$($asset.name)" `
+    -OutFile "$dir/img/$($asset.name)" -UseBasicParsing
+}
 ```
 
 Then:

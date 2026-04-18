@@ -79,7 +79,7 @@ If solution contains "simple", "quick", "temporary", "workaround" — **STOP and
 | Status | `.agent/status/CURRENT_STATUS.md` |
 | Reports | `.agent/reports/` |
 | Lessons | `.agent/LESSONS_LEARNED.md` |
-| Skills | `.agent/skills/` |
+| Skills | _N/A (no local skills; see `docs/dap-protocol/` for the only project-specific reference)_ |
 | Testing | `.agent/guides/TESTING_GUIDELINES.md` |
 | Architecture | `.agent/arch/README.md` |
 
