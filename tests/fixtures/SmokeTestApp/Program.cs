@@ -419,8 +419,66 @@ public class Program
         multiSelectList.AccessibleName = "multiList";
         multiSelectList.Items.AddRange(new object[] { "One", "Two", "Three", "Four", "Five" });
 
-        form.Width = 620;
-        form.Height = 470;
+        // ── v0.11.1 controls ──────────────────────────────────────────────────────
+        // Placed at X=620 (right of existing layout) so existing control positions
+        // are preserved exactly and existing smoke tests are unaffected.
+
+        // TreeView for expand/collapse testing (US-3)
+        var charactersTree = new TreeView
+        {
+            Name = "charactersTree",
+            Location = new System.Drawing.Point(620, 20),
+            Size = new System.Drawing.Size(220, 200),
+        };
+        charactersTree.AccessibleName = "CharactersTree";
+        var rootNode = new TreeNode("Characters") { Name = "CharactersTreeRoot" };
+        var mainCastNode = new TreeNode("Main cast") { Name = "CharactersTree_MainCast" };
+        mainCastNode.Nodes.Add(new TreeNode("Alice") { Name = "CharactersTree_Character_Alice" });
+        mainCastNode.Nodes.Add(new TreeNode("Bob") { Name = "CharactersTree_Character_Bob" });
+        mainCastNode.Nodes.Add(new TreeNode("Carol") { Name = "CharactersTree_Character_Carol" });
+        rootNode.Nodes.Add(mainCastNode);
+        charactersTree.Nodes.Add(rootNode);
+
+        // TrackBar (slider) for set_value testing (US-4)
+        var durationSlider = new TrackBar
+        {
+            Name = "durationSlider",
+            Location = new System.Drawing.Point(620, 230),
+            Size = new System.Drawing.Size(220, 45),
+            Minimum = 0,
+            Maximum = 100,
+            Value = 50,
+            TickFrequency = 10,
+        };
+        durationSlider.AccessibleName = "DurationSlider";
+
+        // ListBox with 500 items for virtualization testing (US-2)
+        // WinForms ListBox does not support ItemContainerPattern (WPF-only),
+        // so this fixture exercises the "unsupported container" error path.
+        var virtList = new ListBox
+        {
+            Name = "virtList",
+            Location = new System.Drawing.Point(620, 285),
+            Size = new System.Drawing.Size(220, 160),
+        };
+        virtList.AccessibleName = "VirtList";
+        for (var i = 0; i < 500; i++)
+        {
+            virtList.Items.Add($"Item {i}");
+        }
+
+        // TextBox for clipboard round-trip testing (US-5)
+        var clipboardTextBox = new TextBox
+        {
+            Name = "clipboardTextBox",
+            Location = new System.Drawing.Point(620, 455),
+            Size = new System.Drawing.Size(220, 60),
+            Multiline = true,
+        };
+        clipboardTextBox.AccessibleName = "ClipboardTextBox";
+
+        form.Width = 880;
+        form.Height = 550;
         form.Controls.Add(panel);
         form.Controls.Add(outerBtn);
         form.Controls.Add(actionBtnOutside);
@@ -428,6 +486,10 @@ public class Program
         form.Controls.Add(dataGrid);
         form.Controls.Add(dragList);
         form.Controls.Add(multiSelectList);
+        form.Controls.Add(charactersTree);
+        form.Controls.Add(durationSlider);
+        form.Controls.Add(virtList);
+        form.Controls.Add(clipboardTextBox);
 
         Console.WriteLine("GUI scenario started. Close the window to exit.");
         Application.Run(form);

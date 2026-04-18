@@ -1624,6 +1624,335 @@ async def test_heartbeat_during_wait():
         await m.stop()
 
 
+# ─────────────────────────────────────────────────────────────
+# v0.11.1 scenarios
+# ─────────────────────────────────────────────────────────────
+
+async def test_window_lifecycle():
+    """Scenario: maximize → minimize → restore → close (via WindowPattern)."""
+    print("\n--- Window Lifecycle (v0.11.1) ---")
+
+    from netcoredbg_mcp.ui.backend import create_backend
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    m = SessionManager()
+    try:
+        await m.launch(program=DLL, args=["gui"])
+        await asyncio.sleep(2.0)
+
+        backend = create_backend(process_registry=m.process_registry)
+        pid = m.state.process_id
+        if not pid:
+            check("Window lifecycle: process started", False, "no PID")
+            return
+        await backend.connect(pid)
+
+        if not isinstance(backend, FlaUIBackend):
+            check("Window lifecycle (skipped)", True, "pywinauto — WindowPattern requires FlaUI")
+            await backend.disconnect()
+            return
+
+        try:
+            # Maximize
+            result = await backend.maximize_window()
+            check("Maximize: succeeded", result.get("maximized") is True, str(result))
+
+            await asyncio.sleep(0.5)
+
+            # Minimize
+            result = await backend.minimize_window()
+            check("Minimize: succeeded", result.get("minimized") is True, str(result))
+
+            await asyncio.sleep(0.5)
+
+            # Restore
+            result = await backend.restore_window()
+            check("Restore: succeeded", result.get("restored") is True, str(result))
+
+            await asyncio.sleep(0.5)
+
+            # Close (last — window gone after this)
+            result = await backend.close_window()
+            check("Close: succeeded", result.get("closed") is True, str(result))
+
+        except Exception as e:
+            check("Window lifecycle", False, str(e))
+        finally:
+            try:
+                await backend.disconnect()
+            except Exception:
+                pass
+
+    finally:
+        # Session already ended (window was closed) — stop cleans up
+        try:
+            await m.stop()
+        except Exception:
+            pass
+
+
+async def test_expand_collapse_tree():
+    """Scenario: expand CharactersTree nodes, verify Main cast and leaf items."""
+    print("\n--- Expand/Collapse Tree (v0.11.1) ---")
+
+    from netcoredbg_mcp.ui.backend import create_backend
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    m = SessionManager()
+    try:
+        await m.launch(program=DLL, args=["gui"])
+        await asyncio.sleep(2.0)
+
+        backend = create_backend(process_registry=m.process_registry)
+        pid = m.state.process_id
+        if not pid:
+            check("Expand tree: process started", False, "no PID")
+            return
+        await backend.connect(pid)
+
+        if not isinstance(backend, FlaUIBackend):
+            check("Expand tree (skipped)", True, "pywinauto — ExpandCollapsePattern requires FlaUI")
+            await backend.disconnect()
+            return
+
+        try:
+            # Find the tree first to make sure it exists
+            tree_info = await backend.find_element(automation_id="CharactersTree")
+            check(
+                "CharactersTree present",
+                isinstance(tree_info, dict) and tree_info.get("found", True),
+                str(tree_info),
+            )
+
+            # Expand root node
+            result = await backend.expand("CharactersTreeRoot")
+            check(
+                "Expand CharactersTreeRoot",
+                result.get("expanded") is True,
+                str(result),
+            )
+            was_already_root = result.get("was_already", False)
+
+            # Expand again — should be idempotent
+            result2 = await backend.expand("CharactersTreeRoot")
+            check(
+                "Expand idempotent (was_already=True on second call)",
+                result2.get("was_already") is True,
+                str(result2),
+            )
+
+            # Expand Main cast
+            result = await backend.expand("CharactersTree_MainCast")
+            check(
+                "Expand CharactersTree_MainCast",
+                result.get("expanded") is True,
+                str(result),
+            )
+
+            # Collapse root
+            result = await backend.collapse("CharactersTreeRoot")
+            check(
+                "Collapse CharactersTreeRoot",
+                result.get("collapsed") is True,
+                str(result),
+            )
+
+        except Exception as e:
+            check("Expand/collapse tree", False, str(e))
+        finally:
+            await backend.disconnect()
+
+    finally:
+        await m.stop()
+
+
+async def test_set_value_slider():
+    """Scenario: set DurationSlider to valid value, then try out-of-range."""
+    print("\n--- Set Value Slider (v0.11.1) ---")
+
+    from netcoredbg_mcp.ui.backend import create_backend
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    m = SessionManager()
+    try:
+        await m.launch(program=DLL, args=["gui"])
+        await asyncio.sleep(2.0)
+
+        backend = create_backend(process_registry=m.process_registry)
+        pid = m.state.process_id
+        if not pid:
+            check("Slider: process started", False, "no PID")
+            return
+        await backend.connect(pid)
+
+        if not isinstance(backend, FlaUIBackend):
+            check("Slider (skipped)", True, "pywinauto — RangeValuePattern requires FlaUI")
+            await backend.disconnect()
+            return
+
+        try:
+            # Valid value
+            result = await backend.set_value("DurationSlider", 75.0)
+            check(
+                "SetValue 75 on DurationSlider",
+                result.get("set") is True,
+                str(result),
+            )
+            check(
+                "SetValue returns value field",
+                result.get("value") == 75.0,
+                f"value={result.get('value')}",
+            )
+
+            # Out-of-range value
+            result = await backend.set_value("DurationSlider", 200.0)
+            check(
+                "SetValue 200 returns set=False",
+                result.get("set") is False,
+                str(result),
+            )
+            check(
+                "SetValue out-of-range reason contains 'out of range'",
+                "out of range" in result.get("reason", "").lower(),
+                f"reason={result.get('reason')}",
+            )
+
+        except Exception as e:
+            check("Slider set_value", False, str(e))
+        finally:
+            await backend.disconnect()
+
+    finally:
+        await m.stop()
+
+
+async def test_realize_virtualized_item():
+    """Scenario: attempt to realize from WinForms ListBox (expects unsupported container)."""
+    print("\n--- Realize Virtualized Item (v0.11.1) ---")
+
+    from netcoredbg_mcp.ui.backend import create_backend
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    m = SessionManager()
+    try:
+        await m.launch(program=DLL, args=["gui"])
+        await asyncio.sleep(2.0)
+
+        backend = create_backend(process_registry=m.process_registry)
+        pid = m.state.process_id
+        if not pid:
+            check("Realize: process started", False, "no PID")
+            return
+        await backend.connect(pid)
+
+        if not isinstance(backend, FlaUIBackend):
+            check("Realize (skipped)", True, "pywinauto — VirtualizedItemPattern requires FlaUI")
+            await backend.disconnect()
+            return
+
+        try:
+            # WinForms ListBox does not support ItemContainerPattern
+            result = await backend.realize_virtualized_item(
+                container_automation_id="VirtList",
+                property="AutomationId",
+                value="VirtList_Row_150",
+            )
+            # Expected: realized=false because WinForms ListBox lacks ItemContainerPattern
+            check(
+                "WinForms ListBox: realized=False (no ItemContainerPattern)",
+                result.get("realized") is False,
+                str(result),
+            )
+            check(
+                "Failure reason is present",
+                bool(result.get("reason")),
+                f"reason={result.get('reason')}",
+            )
+
+            # Also test item-not-found path on dragList (no ItemContainerPattern either)
+            result2 = await backend.realize_virtualized_item(
+                container_automation_id="dragList",
+                property="Name",
+                value="NonExistentItem",
+            )
+            check(
+                "dragList: realized=False",
+                result2.get("realized") is False,
+                str(result2),
+            )
+
+        except Exception as e:
+            check("Realize virtualized item", False, str(e))
+        finally:
+            await backend.disconnect()
+
+    finally:
+        await m.stop()
+
+
+async def test_clipboard_roundtrip():
+    """Scenario: write to clipboard, read back; test unicode round-trip."""
+    print("\n--- Clipboard Round-trip (v0.11.1) ---")
+
+    from netcoredbg_mcp.ui.backend import create_backend
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    m = SessionManager()
+    try:
+        await m.launch(program=DLL, args=["gui"])
+        await asyncio.sleep(2.0)
+
+        backend = create_backend(process_registry=m.process_registry)
+        pid = m.state.process_id
+        if not pid:
+            check("Clipboard: process started", False, "no PID")
+            return
+        await backend.connect(pid)
+
+        if not isinstance(backend, FlaUIBackend):
+            check("Clipboard (skipped)", True, "pywinauto — Clipboard STA requires FlaUI")
+            await backend.disconnect()
+            return
+
+        try:
+            # ASCII round-trip
+            write_result = await backend.clipboard_write("test123")
+            check("Clipboard write ASCII", write_result.get("written") is True, str(write_result))
+
+            read_result = await backend.clipboard_read()
+            check("Clipboard read has_text", read_result.get("has_text") is True, str(read_result))
+            check(
+                "Clipboard ASCII round-trip",
+                read_result.get("text") == "test123",
+                f"got={read_result.get('text')!r}",
+            )
+
+            # Unicode round-trip
+            unicode_text = "emoji \U0001F389 \u00fcnic\u00f6de"
+            write_result2 = await backend.clipboard_write(unicode_text)
+            check("Clipboard write unicode", write_result2.get("written") is True, str(write_result2))
+
+            read_result2 = await backend.clipboard_read()
+            check(
+                "Clipboard unicode round-trip",
+                read_result2.get("text") == unicode_text,
+                f"expected={unicode_text!r} got={read_result2.get('text')!r}",
+            )
+
+        except Exception as e:
+            check("Clipboard round-trip", False, str(e))
+        finally:
+            # Reset clipboard to empty
+            try:
+                await backend.clipboard_write("")
+            except Exception:
+                pass
+            await backend.disconnect()
+
+    finally:
+        await m.stop()
+
+
 async def run_all():
     if not os.path.exists(DLL):
         print(f"ERROR: Build SmokeTestApp first:")
@@ -1663,6 +1992,11 @@ async def run_all():
             ("System Event Theme Toggle", test_system_event_theme),
             ("Persistent Modifier Hold", test_persistent_modifier_hold),
             ("Scoped Search Performance", test_scoped_search_performance),
+            ("Window Lifecycle", test_window_lifecycle),
+            ("Expand/Collapse Tree", test_expand_collapse_tree),
+            ("Set Value Slider", test_set_value_slider),
+            ("Realize Virtualized Item", test_realize_virtualized_item),
+            ("Clipboard Roundtrip", test_clipboard_roundtrip),
         ])
     else:
         print("\n  [SKIP] GUI scenarios — net8.0-windows build not found")
