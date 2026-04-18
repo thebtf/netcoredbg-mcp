@@ -79,6 +79,19 @@ public static class JsonRpcHandler
             ["find_all_cascade"] = ElementCommands.FindAllCascade,
             ["extract_text"] = ElementCommands.ExtractText,
             ["set_focus"] = FocusCommands.SetFocus,
+            // v0.11.1 — pattern expansion
+            ["close_window"]             = WindowCommands.CloseWindow,
+            ["maximize_window"]          = WindowCommands.MaximizeWindow,
+            ["minimize_window"]          = WindowCommands.MinimizeWindow,
+            ["restore_window"]           = WindowCommands.RestoreWindow,
+            ["move_window"]              = TransformCommands.MoveWindow,
+            ["resize_window"]            = TransformCommands.ResizeWindow,
+            ["expand"]                   = PatternCommands.ExpandElement,
+            ["collapse"]                 = PatternCommands.CollapseElement,
+            ["range_set_value"]          = PatternCommands.SetRangeValue,
+            ["clipboard_read"]           = ClipboardCommands.ReadClipboard,
+            ["clipboard_write"]          = ClipboardCommands.WriteClipboard,
+            ["realize_virtualized_item"] = VirtualizationCommands.RealizeVirtualizedItem,
         };
 
     public static JsonNode Handle(string method, JsonNode? @params)

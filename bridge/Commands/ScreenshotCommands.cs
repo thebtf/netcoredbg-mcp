@@ -1,3 +1,4 @@
+using System.IO;
 using System.Text.Json.Nodes;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Capturing;
