@@ -108,29 +108,29 @@ If solution contains "simple", "quick", "temporary", "workaround" — **STOP and
 
 ---
 
-## 🎯 SKILLS (Auto-Activation)
+## 🎯 SKILLS
 
-Skills auto-activate based on context. Read the appropriate skill for your task:
+Skills are provided by the global `nvmd-platform` plugin and user-scope rules.
+This project keeps **only** project-specific skills locally.
 
-| Task | Skill Path |
-|------|------------|
-| Coding / Features | `.agent/skills/coding/SKILL.md` |
-| PR / Integration | `.agent/skills/integration/SKILL.md` |
-| Planning / Design | `.agent/skills/architecture/SKILL.md` |
-| Debugging | `.agent/skills/debugging/SKILL.md` |
-| After context reset | `.agent/skills/recovery/SKILL.md` |
+| Task | Source |
+|------|--------|
+| Coding, refactoring, testing | Global `nvmd-platform` + user rules |
+| PR / Integration / Review | Global `nvmd-platform` (`/pr:review`, `/nvmd-platform:pr-reviewer`) |
+| Planning / Design | Global `nvmd-platform` (`/nvmd-specify`, `/nvmd-plan`, `/nvmd-tasks`) |
+| Debugging | Global `nvmd-platform` |
+| After context reset | `.agent/CONTINUITY.md` + global recovery flow |
+| DAP wire protocol (project-specific) | `.agent/skills/dap-protocol/SKILL.md` |
+
+The local `dap-protocol` skill is kept because it encodes netcoredbg-specific
+Debug Adapter Protocol behavior that is not covered by generic platform skills.
 
 ---
 
 ## 🎭 ROLES
 
-| Role | Activation | Skill |
-|------|------------|-------|
-| **Coding Agent** | Task given (DEFAULT) | `coding` |
-| **Architect** | "architect mode", "plan" | `architecture` |
-| **Integration Lead** | PR, review, merge | `integration` |
-
-**Continuity files:** `.agent/CONTINUITY-{ROLE}.md`
+Role-based CONTINUITY files (`CONTINUITY-CODER.md`, `-DOCWRITER.md`, `-INTEGRATOR.md`)
+are **deprecated**. Use a single `.agent/CONTINUITY.md` for session state.
 
 ---
 
@@ -163,11 +163,11 @@ Skills auto-activate based on context. Read the appropriate skill for your task:
 
 ## 📓 Continuity Ledger
 
-Maintain per role in `.agent/CONTINUITY-{ROLE}.md`
+Maintain a single `.agent/CONTINUITY.md` (no per-role split).
 
 **Format:**
 ```markdown
-# CONTINUITY — {NAME} / {ROLE}
+# CONTINUITY — netcoredbg-mcp
 
 ## Goal (incl. success criteria)
 ## Constraints/Assumptions
