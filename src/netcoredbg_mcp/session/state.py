@@ -28,6 +28,7 @@ class Breakpoint:
     log_message: str | None = None
     verified: bool = False
     id: int | None = None
+    dap_line: int | None = None  # Adjusted line from DAP if different from requested `line`
 
     def to_dap(self) -> dict[str, Any]:
         """Convert to DAP breakpoint format."""
@@ -139,11 +140,14 @@ class BreakpointRegistry:
 
         for i, dap_bp in enumerate(dap_breakpoints):
             if i < len(self._breakpoints[file_path]):
-                self._breakpoints[file_path][i].verified = dap_bp.get("verified", False)
-                self._breakpoints[file_path][i].id = dap_bp.get("id")
-                # Update line if adjusted by debugger
-                if "line" in dap_bp:
-                    self._breakpoints[file_path][i].line = dap_bp["line"]
+                bp = self._breakpoints[file_path][i]
+                bp.verified = dap_bp.get("verified", False)
+                bp.id = dap_bp.get("id")
+                if "line" in dap_bp and dap_bp["line"] != bp.line:
+                    bp.dap_line = dap_bp["line"]
+                else:
+                    # DAP agrees with requested line — clear any stale adjustment
+                    bp.dap_line = None
 
     def add_function_breakpoint(self, bp: FunctionBreakpoint) -> None:
         """Add a function breakpoint."""
@@ -238,6 +242,7 @@ class Tracepoint:
     breakpoint_id: int | None = None  # DAP breakpoint ID
     hit_count: int = 0
     active: bool = True
+    dap_line: int | None = None  # Adjusted line propagated from the underlying DAP breakpoint
 
 
 @dataclass

@@ -370,6 +370,13 @@ def register_inspection_tools(
         without visibly pausing the program. Results are stored in a trace
         buffer accessible via get_trace_log.
 
+        Async state machines: when the target line is inside an `async` method, the
+        C# compiler moves the first executable instruction to the line after the
+        `await`. netcoredbg reports the adjusted line via DAP, and netcoredbg-mcp
+        tracks both the user-requested and adjusted lines — tracepoint matching
+        works for both. No user action required; `get_trace_log` will contain entries
+        and the program will NOT pause.
+
         Args:
             file: Source file path
             line: Line number (1-based)
@@ -404,6 +411,8 @@ def register_inspection_tools(
                 bp_result = await session.add_breakpoint(norm_file, line)
                 if bp_result and hasattr(bp_result, "id"):
                     tp.breakpoint_id = bp_result.id
+                    if getattr(bp_result, "dap_line", None) is not None:
+                        mgr.set_dap_line(tp.id, bp_result.dap_line)
             except Exception as e:
                 logger.warning("Failed to set DAP breakpoint for tracepoint %s: %s", tp.id, e)
 
@@ -412,6 +421,7 @@ def register_inspection_tools(
                     "id": tp.id,
                     "file": tp.file,
                     "line": tp.line,
+                    "dap_line": tp.dap_line,
                     "expression": tp.expression,
                     "breakpoint_verified": tp.breakpoint_id is not None,
                 },

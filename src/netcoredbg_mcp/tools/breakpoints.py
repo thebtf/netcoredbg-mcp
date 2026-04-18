@@ -85,6 +85,23 @@ def register_breakpoint_tools(
             validated_file = session.validate_path(file)
             removed = await session.remove_breakpoint(validated_file, line)
             await notify_breakpoints_changed(ctx)
+            if not removed:
+                # Look for a breakpoint at this location via its DAP-adjusted line
+                for bp in session.breakpoints.get_for_file(validated_file):
+                    if bp.dap_line == line:
+                        return build_response(
+                            data={
+                                "removed": False,
+                                "hint": (
+                                    f"No breakpoint at requested line {line}. "
+                                    f"A breakpoint requested at line {bp.line} was "
+                                    f"adjusted by DAP to line {bp.dap_line} (typical "
+                                    f"for async state machines). "
+                                    f"Remove it with remove_breakpoint(line={bp.line})."
+                                ),
+                            },
+                            state=session.state.state,
+                        )
             return build_response(
                 data={"removed": removed},
                 state=session.state.state,
@@ -101,6 +118,7 @@ def register_breakpoint_tools(
                 hit_count = session.state.hit_counts.get((norm, bp.line), 0)
                 return {
                     "line": bp.line,
+                    "dap_line": bp.dap_line,
                     "condition": bp.condition,
                     "verified": bp.verified,
                     "hit_count": hit_count,

@@ -469,7 +469,12 @@ class SessionManager:
 
         # Check whether a USER-defined breakpoint (not tracepoint-owned) exists here.
         # Tracepoints add their own DAP breakpoint — exclude those from the check.
-        tracepoint_lines = {t.line for t in mgr.tracepoints.values() if t.active}
+        tracepoint_lines = set()
+        for t in mgr.tracepoints.values():
+            if t.active:
+                tracepoint_lines.add(t.line)
+                if t.dap_line is not None:
+                    tracepoint_lines.add(t.dap_line)
         user_bps = self._breakpoints.get_for_file(top.source)
         has_user_breakpoint = any(
             bp.line == top.line and bp.line not in tracepoint_lines
@@ -484,6 +489,21 @@ class SessionManager:
             tp, self, thread_id, has_user_breakpoint=has_user_breakpoint, top_frame=top
         )
 
+    def _resolve_hit_count_key(self, source: str, runtime_line: int) -> tuple[str, int]:
+        """Map a runtime stop line back to the user-requested breakpoint line.
+
+        DAP may report a stop at a compiler-adjusted line (e.g., inside async
+        state-machine MoveNext frames). Hit counts are keyed by the
+        user-requested line for stable list_breakpoints / get_stop_context
+        lookups. Falls back to the runtime line when no matching breakpoint
+        is found.
+        """
+        norm = self.breakpoints._normalize_path(source)
+        for bp in self.breakpoints.get_for_file(source):
+            if bp.line == runtime_line or bp.dap_line == runtime_line:
+                return (norm, bp.line)
+        return (norm, runtime_line)
+
     async def _update_hit_count(self, thread_id: int) -> None:
         """Fetch top frame and increment hit count for matching breakpoint."""
         try:
@@ -494,7 +514,8 @@ class SessionManager:
                 return
             top = frames[0]
             if top.source and top.line:
-                key = (self.breakpoints._normalize_path(top.source), top.line)
+                # Use user-requested line as key for stable hit_count lookups.
+                key = self._resolve_hit_count_key(top.source, top.line)
                 self._state.hit_counts[key] = self._state.hit_counts.get(key, 0) + 1
                 logger.debug("Hit count for %s: %d", key, self._state.hit_counts[key])
         except asyncio.TimeoutError:
@@ -602,16 +623,24 @@ class SessionManager:
                         logger.info(f"Breakpoint {body.breakpoint_id} removed by adapter")
                         return
         elif body.reason in ("changed", "new") and body.breakpoint_id is not None:
-            # Update existing breakpoint's verified status and line
+            # Update existing breakpoint's verified status; record DAP-adjusted line if changed.
             for file_path, bps in self.breakpoints.get_all().items():
                 for bp in bps:
                     if bp.id == body.breakpoint_id:
                         bp.verified = body.verified
+                        # Mirror BreakpointRegistry.update_from_dap: clear any
+                        # stale adjustment when the adapter now reports the
+                        # requested line, otherwise record the new adjustment.
                         if body.line is not None:
-                            bp.line = body.line
+                            bp.dap_line = body.line if body.line != bp.line else None
+                        # Propagate to any tracepoint whose underlying bp matches
+                        mgr = getattr(self, "_tracepoint_manager", None)
+                        if mgr is not None:
+                            mgr.set_dap_line_for_breakpoint(body.breakpoint_id, bp.dap_line)
                         logger.debug(
                             f"Breakpoint {body.breakpoint_id} updated: "
-                            f"verified={body.verified}, line={body.line}"
+                            f"verified={body.verified}, requested_line={bp.line}, "
+                            f"dap_line={bp.dap_line}"
                         )
                         return
             # New breakpoint from adapter — log but don't create (we don't know the file)
@@ -1590,10 +1619,11 @@ class SessionManager:
                 except Exception as e:
                     result["locals"] = [{"error": str(e)}]
 
-            # Hit count for current location
-            if frames and frames[0].source:
-                norm = self.breakpoints._normalize_path(frames[0].source)
-                key = (norm, frames[0].line)
+            # Hit count for current location.
+            # Resolve runtime -> requested line so the count matches the
+            # key used by _update_hit_count (stable for DAP-adjusted bps).
+            if frames and frames[0].source and frames[0].line:
+                key = self._resolve_hit_count_key(frames[0].source, frames[0].line)
                 result["hitCount"] = self._state.hit_counts.get(key, 0)
 
         # Recent output

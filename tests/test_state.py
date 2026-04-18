@@ -236,7 +236,8 @@ class TestBreakpointRegistry:
         assert breakpoints[0].verified is True
         assert breakpoints[0].id == 1
         assert breakpoints[1].verified is True
-        assert breakpoints[1].line == 21  # Updated from DAP
+        assert breakpoints[1].line == 20  # Original requested line preserved
+        assert breakpoints[1].dap_line == 21  # Adjusted line reported by DAP
 
     def test_path_normalization(self):
         """Test that paths are normalized for lookup."""
@@ -422,3 +423,50 @@ class TestSessionState:
         assert d["threads"][0]["id"] == 1
         assert d["currentFrameId"] == 0
         assert d["exitCode"] is None
+
+
+class TestUpdateFromDapLineAdjustment:
+    """DAP may adjust breakpoint lines (typical for async state machines)."""
+
+    def test_populates_dap_line_when_adjusted(self):
+        """Preserve the requested line and record the DAP-adjusted line."""
+        reg = BreakpointRegistry()
+        reg.add(Breakpoint(file="C:/src/test.cs", line=10))
+
+        reg.update_from_dap(
+            "C:/src/test.cs",
+            [{"verified": True, "id": 1, "line": 11}],
+        )
+
+        bps = reg.get_for_file("C:/src/test.cs")
+        assert bps[0].line == 10
+        assert bps[0].dap_line == 11
+        assert bps[0].verified is True
+        assert bps[0].id == 1
+
+    def test_clears_dap_line_when_dap_agrees(self):
+        """Clear stale DAP adjustments when the adapter reports the requested line."""
+        reg = BreakpointRegistry()
+        bp = Breakpoint(file="C:/src/test.cs", line=10, dap_line=11)
+        reg.add(bp)
+
+        reg.update_from_dap(
+            "C:/src/test.cs",
+            [{"verified": True, "id": 1, "line": 10}],
+        )
+
+        bps = reg.get_for_file("C:/src/test.cs")
+        assert bps[0].dap_line is None
+
+    def test_remove_by_user_line_after_dap_adjustment(self):
+        """Removing by the requested line still works after DAP line adjustment."""
+        reg = BreakpointRegistry()
+        reg.add(Breakpoint(file="C:/src/test.cs", line=10))
+
+        reg.update_from_dap(
+            "C:/src/test.cs",
+            [{"verified": True, "id": 1, "line": 11}],
+        )
+
+        assert reg.remove("C:/src/test.cs", 10) is True
+        assert reg.get_for_file("C:/src/test.cs") == []

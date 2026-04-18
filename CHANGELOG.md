@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Tracepoints in C# `async` methods (compiler-generated `MoveNext()` state
+  machine frames) silently behaved as stopping breakpoints. Root cause: DAP
+  adjusts the breakpoint line to the first executable IL line after the
+  `await`; the tracepoint kept the original user-requested line and stopped
+  matching. Now both lines are tracked (`line` + `dap_line`) and matching
+  works for either. `add_tracepoint` and `list_breakpoints` responses now
+  expose `dap_line` when the DAP adapter adjusted the line. Fixes engram
+  cross-project issue #96 (blocker for novascript Phase 2).
+- `remove_breakpoint(line=requested)` previously returned `{removed: false}`
+  after DAP adjusted the breakpoint line. `Breakpoint.line` now keeps the
+  user-requested identity and removal works as expected. When called with
+  the DAP-adjusted line, the response includes a `hint` explaining the
+  adjustment.
+
 ## [0.6.1] - 2026-04-07
 
 ### Changed

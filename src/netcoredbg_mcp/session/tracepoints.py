@@ -104,7 +104,9 @@ class TracepointManager:
 
         # Stage 1: full path match
         for tp in self._tracepoints.values():
-            if not tp.active or tp.line != line:
+            if not tp.active:
+                continue
+            if tp.line != line and tp.dap_line != line:
                 continue
             tp_norm = self._normalize_path(tp.file)
             if tp_norm == normalized:
@@ -115,13 +117,16 @@ class TracepointManager:
         # Uses os.path.normcase for platform-correct comparison (case-insensitive
         # on Windows, case-sensitive on Linux/macOS)
         for tp in self._tracepoints.values():
-            if not tp.active or tp.line != line:
+            if not tp.active:
+                continue
+            if tp.line != line and tp.dap_line != line:
                 continue
             tp_filename = os.path.normcase(os.path.basename(tp.file))
             if tp_filename == filename:
                 logger.info(
-                    "Tracepoint %s matched by filename fallback: frame=%s tp=%s line=%d",
-                    tp.id, file, tp.file, line,
+                    "Tracepoint %s matched by filename fallback: frame=%s tp=%s "
+                    "line=%d (requested=%d, dap=%s)",
+                    tp.id, file, tp.file, line, tp.line, tp.dap_line,
                 )
                 return tp
 
@@ -130,6 +135,32 @@ class TracepointManager:
             file, line, len(self._tracepoints), normalized,
         )
         return None
+
+    def set_dap_line(self, tp_id: str, dap_line: int | None) -> bool:
+        """Record the DAP-adjusted line for a tracepoint. Returns True if updated."""
+        tp = self._tracepoints.get(tp_id)
+        if tp is None:
+            return False
+        tp.dap_line = dap_line
+        if dap_line is not None and dap_line != tp.line:
+            logger.info(
+                "Tracepoint %s line adjusted by DAP: requested=%d, actual=%d "
+                "(typical for async state machines)",
+                tp_id, tp.line, dap_line,
+            )
+        return True
+
+    def set_dap_line_for_breakpoint(self, breakpoint_id: int, dap_line: int | None) -> None:
+        """Propagate DAP line change for a tracepoint-owned breakpoint."""
+        for tp in self._tracepoints.values():
+            if tp.breakpoint_id == breakpoint_id:
+                tp.dap_line = dap_line
+                if dap_line is not None and dap_line != tp.line:
+                    logger.info(
+                        "Tracepoint %s line updated via adapter event: requested=%d, actual=%d",
+                        tp.id, tp.line, dap_line,
+                    )
+                return
 
     def _is_rate_limited(self, tp_id: str) -> bool:
         """Check if tracepoint is hitting too frequently."""

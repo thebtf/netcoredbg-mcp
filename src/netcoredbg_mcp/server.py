@@ -304,7 +304,15 @@ def create_server(project_path: str | None = None) -> FastMCP:
         """
         all_bps = session.breakpoints.get_all()
         result = {
-            f: [{"line": bp.line, "condition": bp.condition, "verified": bp.verified} for bp in bps]
+            f: [
+                {
+                    "line": bp.line,
+                    "dap_line": bp.dap_line,
+                    "condition": bp.condition,
+                    "verified": bp.verified,
+                }
+                for bp in bps
+            ]
             for f, bps in all_bps.items()
         }
         return json.dumps(result, indent=2)
