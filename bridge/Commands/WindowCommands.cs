@@ -36,9 +36,15 @@ public static class WindowCommands
         // Only use SW_RESTORE for minimized windows; otherwise SW_SHOW avoids
         // un-maximizing a window that is already maximized.
         var showCmd = IsIconic(hwnd) ? SW_RESTORE : SW_SHOW;
-        if (!ShowWindow(hwnd, showCmd))
-            Program.Log($"EnsureForeground: ShowWindow(cmd={showCmd}) failed, error={Marshal.GetLastWin32Error()}");
+        // ShowWindow return value is NOT an error indicator — it reports the
+        // previous visibility state (nonzero = was visible, zero = was hidden).
+        // Do NOT treat it as success/failure.
+        var prevVisible = ShowWindow(hwnd, showCmd);
+        Program.Log($"EnsureForeground: ShowWindow(cmd={showCmd}) prevVisible={prevVisible}");
 
+        // SetForegroundWindow returns false on failure; check GetLastWin32Error only
+        // when the call reports failure (calling GetLastWin32Error after success is
+        // unreliable — it may return a stale error code from an earlier call).
         if (!SetForegroundWindow(hwnd))
             Program.Log($"EnsureForeground: SetForegroundWindow failed, error={Marshal.GetLastWin32Error()}");
     }

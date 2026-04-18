@@ -46,18 +46,39 @@ internal static class WindowResolver
                 var cf = new ConditionFactory(automation.PropertyLibrary);
                 var desktop = automation.GetDesktop();
                 var windows = desktop.FindAll(TreeScope.Children, cf.ByProcessId(processId));
+
+                var matches = new List<(AutomationElement Element, string Title)>();
                 foreach (var child in windows)
                 {
                     try
                     {
                         var name = child.Name ?? "";
                         if (name.Contains(windowTitle, StringComparison.OrdinalIgnoreCase))
-                            return child;
+                            matches.Add((child, name));
                     }
                     catch
                     {
                         // Ignore inaccessible windows during enumeration
                     }
+                }
+
+                if (matches.Count == 1)
+                    return matches[0].Element;
+
+                if (matches.Count > 1)
+                {
+                    // Ambiguous — multiple windows match the title fragment. List candidates
+                    // so the caller can supply a more precise title or use the process ID directly.
+                    var candidates = string.Join("; ", matches.Select(
+                        m =>
+                        {
+                            var pid = -1;
+                            try { pid = m.Element.Properties.ProcessId.ValueOrDefault; } catch { }
+                            return $"'{m.Title}' (pid={pid})";
+                        }));
+                    throw new InvalidOperationException(
+                        $"Ambiguous window_title '{windowTitle}': {matches.Count} windows match — {candidates}. "
+                        + "Provide a more specific title or omit window_title to use the main window.");
                 }
             }
 

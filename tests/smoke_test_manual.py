@@ -1850,10 +1850,33 @@ async def test_realize_virtualized_item():
             return
 
         try:
-            # WinForms ListBox does not support ItemContainerPattern
+            # PRE-REALIZE VERIFICATION: check whether the row is already accessible.
+            # WinForms ListBox is NOT a truly virtualized container — items are always
+            # realized. We document this explicitly so the test is honest about what
+            # it exercises, and to provide a baseline for future WPF fixtures.
+            pre_realize_found = False
+            try:
+                pre = await backend.find_element(automation_id="VirtList_Row_150")
+                pre_realize_found = pre is not None
+            except Exception:
+                pre_realize_found = False
+
+            if pre_realize_found:
+                # WinForms fixture does NOT exercise true VirtualizedItemPattern —
+                # the element is already accessible before realize is called.
+                # TODO(v0.11.2): replace with a WPF VirtualizingStackPanel fixture
+                # that actually defers item creation (true virtualization).
+                print(
+                    "  [WARNING] VirtList_Row_150 is already accessible before realize — "
+                    "WinForms ListBox is not a true virtualized container. "
+                    "Full VirtualizedItemPattern semantics require a WPF fixture."
+                )
+
+            # WinForms ListBox does not support ItemContainerPattern, so realize
+            # should return realized=False with an explanatory reason.
             result = await backend.realize_virtualized_item(
                 container_automation_id="VirtList",
-                property="AutomationId",
+                prop_name="AutomationId",
                 value="VirtList_Row_150",
             )
             # Expected: realized=false because WinForms ListBox lacks ItemContainerPattern
@@ -1868,10 +1891,29 @@ async def test_realize_virtualized_item():
                 f"reason={result.get('reason')}",
             )
 
+            # POST-REALIZE VERIFICATION: the element must be findable after the call.
+            # Even without true virtualization, the round-trip must not break access.
+            try:
+                post = await backend.find_element(automation_id="VirtList_Row_150")
+                check(
+                    "VirtList_Row_150 accessible after realize call",
+                    post is not None,
+                    f"find_element returned: {post}",
+                )
+                if post is not None:
+                    rect = post.get("bounding_rect") or post.get("BoundingRectangle")
+                    check(
+                        "VirtList_Row_150 has valid bounding_rect after realize",
+                        rect is not None,
+                        f"bounding_rect={rect}",
+                    )
+            except Exception as post_e:
+                check("VirtList_Row_150 accessible after realize call", False, str(post_e))
+
             # Also test item-not-found path on dragList (no ItemContainerPattern either)
             result2 = await backend.realize_virtualized_item(
                 container_automation_id="dragList",
-                property="Name",
+                prop_name="Name",
                 value="NonExistentItem",
             )
             check(
