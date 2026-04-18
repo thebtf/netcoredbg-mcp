@@ -422,9 +422,50 @@ pywinauto is used as fallback — works for most controls.
 | OS theme toggle | ui_send_system_event(event="theme_change", mode="toggle") — fires SystemEvents.UserPreferenceChanged in debuggee |
 | Hold Ctrl across clicks | ui_hold_modifiers(modifiers=["ctrl"]) → multiple ui_click → ui_release_modifiers(modifiers="all") |
 | Inspect held modifiers | ui_get_held_modifiers() — returns the list of currently-held modifier names |
+| Close window | ui_close_window(window_title="Dialog") — close modal by title; omit for main window |
+| Maximize window | ui_maximize_window() — maximize main window via WindowPattern |
+| Minimize window | ui_minimize_window() — minimize main window via WindowPattern |
+| Restore window | ui_restore_window() — restore from maximized/minimized to normal |
+| Move window | ui_move_window(x=100, y=100) — move window; returns {moved: false} if CanMove=false |
+| Resize window | ui_resize_window(width=800, height=600) — resize; returns {resized: false} if CanResize=false |
+| Expand tree node | ui_expand(automation_id="CharactersTreeRoot") — ExpandCollapsePattern; safe on already-expanded |
+| Collapse tree node | ui_collapse(automation_id="CharactersTreeRoot") — ExpandCollapsePattern |
+| Set slider value | ui_set_value(automation_id="DurationSlider", value=75.0) — RangeValuePattern; returns {set: false, reason} on out-of-range |
+| Read clipboard | ui_clipboard_read() — returns {text: "...", has_text: bool} via STA thread |
+| Write clipboard | ui_clipboard_write(text="hello") — writes Unicode text; use before Ctrl+V |
+| Realize virtualized item | ui_realize_virtualized_item(container_automation_id="VirtList", property="AutomationId", value="VirtList_Row_150") — idempotent; safe to re-realize |
 
 PREFER ui_invoke over ui_click for buttons — it works even when the element is off-screen or obscured.
 PREFER ui_toggle over ui_click for checkboxes — it returns the actual state after toggling.
+
+### Worked example A: Realize a virtualized row and click it
+
+```
+# A DataGrid virtualizes rows beyond the visible viewport.
+# Row 150 does not have an AutomationElement until realized.
+result = ui_realize_virtualized_item(
+    container_automation_id="CueDataGrid",
+    property="AutomationId",
+    value="CueDataGrid_Row_150"
+)
+# result: {realized: true, element_id: "CueDataGrid_Row_150", bounding_rect: {...}}
+# Now the item is in the visual tree — click it normally:
+ui_click(automation_id="CueDataGrid_Row_150")
+# ui_realize_virtualized_item is idempotent: calling it again on the same row is safe.
+```
+
+### Worked example B: Set slider value with out-of-range handling
+
+```
+# Set a WPF Slider (Min=0, Max=100) to 75:
+result = ui_set_value(automation_id="DurationSlider", value=75.0)
+# result: {set: true, automation_id: "DurationSlider", value: 75.0, minimum: 0.0, maximum: 100.0}
+
+# Attempt with out-of-range value:
+result = ui_set_value(automation_id="DurationSlider", value=200.0)
+# result: {set: false, reason: "value 200.0 out of range [0.0..100.0]", minimum: 0.0, maximum: 100.0}
+# No exception is raised — check result["set"] to determine success.
+```
 
 ### Ctrl+click multi-select workflow
 
