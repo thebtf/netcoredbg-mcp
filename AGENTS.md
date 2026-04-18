@@ -113,24 +113,20 @@ If solution contains "simple", "quick", "temporary", "workaround" — **STOP and
 Skills are provided by the global `nvmd-platform` plugin and user-scope rules.
 This project keeps **only** project-specific skills locally.
 
+> **Note:** `.agent/` (including `CONTINUITY.md` and `skills/`) is gitignored —
+> paths below are local-only and bootstrapped per clone.
+
 | Task | Source |
 |------|--------|
 | Coding, refactoring, testing | Global `nvmd-platform` + user rules |
 | PR / Integration / Review | Global `nvmd-platform` (`/pr:review`, `/nvmd-platform:pr-reviewer`) |
 | Planning / Design | Global `nvmd-platform` (`/nvmd-specify`, `/nvmd-plan`, `/nvmd-tasks`) |
 | Debugging | Global `nvmd-platform` |
-| After context reset | `.agent/CONTINUITY.md` + global recovery flow |
-| DAP wire protocol (project-specific) | `.agent/skills/dap-protocol/SKILL.md` |
+| After context reset | `.agent/CONTINUITY.md` (local) + global recovery flow |
+| DAP wire protocol (project-specific) | `.agent/skills/dap-protocol/SKILL.md` (local) |
 
 The local `dap-protocol` skill is kept because it encodes netcoredbg-specific
 Debug Adapter Protocol behavior that is not covered by generic platform skills.
-
----
-
-## 🎭 ROLES
-
-Role-based CONTINUITY files (`CONTINUITY-CODER.md`, `-DOCWRITER.md`, `-INTEGRATOR.md`)
-are **deprecated**. Use a single `.agent/CONTINUITY.md` for session state.
 
 ---
 
