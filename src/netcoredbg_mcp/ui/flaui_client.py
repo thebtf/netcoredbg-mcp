@@ -496,3 +496,159 @@ class FlaUIBackend:
                 f"({type(result).__name__}): {result!r}"
             )
         return result
+
+    # -- v0.11.1: Pattern expansion methods --
+
+    async def close_window(self, window_title: str | None = None) -> dict[str, Any]:
+        """Close a top-level window via WindowPattern."""
+        params: dict[str, Any] = {}
+        if window_title:
+            params["window_title"] = window_title
+        result = await self._client.call("close_window", params)
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"close_window: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result
+
+    async def maximize_window(self, window_title: str | None = None) -> dict[str, Any]:
+        """Maximize a top-level window via WindowPattern."""
+        params: dict[str, Any] = {}
+        if window_title:
+            params["window_title"] = window_title
+        result = await self._client.call("maximize_window", params)
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"maximize_window: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result
+
+    async def minimize_window(self, window_title: str | None = None) -> dict[str, Any]:
+        """Minimize a top-level window via WindowPattern."""
+        params: dict[str, Any] = {}
+        if window_title:
+            params["window_title"] = window_title
+        result = await self._client.call("minimize_window", params)
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"minimize_window: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result
+
+    async def restore_window(self, window_title: str | None = None) -> dict[str, Any]:
+        """Restore a top-level window to normal state via WindowPattern."""
+        params: dict[str, Any] = {}
+        if window_title:
+            params["window_title"] = window_title
+        result = await self._client.call("restore_window", params)
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"restore_window: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result
+
+    async def move_window(self, x: int, y: int, window_title: str | None = None) -> dict[str, Any]:
+        """Move a window to (x, y) via TransformPattern."""
+        params: dict[str, Any] = {"x": x, "y": y}
+        if window_title:
+            params["window_title"] = window_title
+        result = await self._client.call("move_window", params)
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"move_window: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result
+
+    async def resize_window(self, width: int, height: int, window_title: str | None = None) -> dict[str, Any]:
+        """Resize a window to width x height via TransformPattern."""
+        params: dict[str, Any] = {"width": width, "height": height}
+        if window_title:
+            params["window_title"] = window_title
+        result = await self._client.call("resize_window", params)
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"resize_window: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result
+
+    async def expand(self, automation_id: str) -> dict[str, Any]:
+        """Expand a TreeView node or ComboBox dropdown via ExpandCollapsePattern."""
+        result = await self._client.call("expand", {"automationId": automation_id})
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"expand: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result
+
+    async def collapse(self, automation_id: str) -> dict[str, Any]:
+        """Collapse a TreeView node or ComboBox dropdown via ExpandCollapsePattern."""
+        result = await self._client.call("collapse", {"automationId": automation_id})
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"collapse: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result
+
+    async def set_value(self, automation_id: str, value: float) -> dict[str, Any]:
+        """Set a slider/spinner value via RangeValuePattern with range validation."""
+        result = await self._client.call("range_set_value", {"automationId": automation_id, "value": value})
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"set_value: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result
+
+    async def clipboard_read(self) -> dict[str, Any]:
+        """Read text from the clipboard (executed on STA thread in bridge)."""
+        result = await self._client.call("clipboard_read", {})
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"clipboard_read: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result
+
+    async def clipboard_write(self, text: str) -> dict[str, Any]:
+        """Write text to the clipboard (executed on STA thread in bridge)."""
+        result = await self._client.call("clipboard_write", {"text": text})
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"clipboard_write: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result
+
+    async def realize_virtualized_item(
+        self,
+        container_automation_id: str,
+        prop_name: str,
+        value: str,
+    ) -> dict[str, Any]:
+        """Realize a virtualized list/grid item so it enters the visual tree.
+
+        Uses ItemContainerPattern.FindItemByProperty + VirtualizedItemPattern.Realize.
+        Re-realizing an already-realized item is safe (idempotent).
+        """
+        result = await self._client.call(
+            "realize_virtualized_item",
+            {
+                "container_automation_id": container_automation_id,
+                "property": prop_name,
+                "value": value,
+            },
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"realize_virtualized_item: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result

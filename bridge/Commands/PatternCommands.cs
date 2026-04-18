@@ -1,5 +1,8 @@
 using System.Text.Json.Nodes;
+using FlaUI.Core;
 using FlaUI.Core.AutomationElements;
+using FlaUI.Core.Conditions;
+using FlaUI.Core.Definitions;
 using FlaUI.Core.Input;
 using FlaUI.UIA3;
 
@@ -88,5 +91,132 @@ public static class PatternCommands
         info["toggled"] = true;
         info["newState"] = newState.ToString();
         return info;
+    }
+
+    public static JsonNode ExpandElement(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
+    {
+        if (mainWindow is null)
+            throw new InvalidOperationException("Not connected. Call 'connect' first.");
+
+        var automationId = @params?["automationId"]?.GetValue<string>()
+            ?? throw new ArgumentException("Missing required parameter: automationId");
+
+        var cf = new ConditionFactory(automation.PropertyLibrary);
+        var element = mainWindow.FindFirstDescendant(cf.ByAutomationId(automationId))
+            ?? throw new InvalidOperationException($"Element not found: {automationId}");
+
+        if (!element.Patterns.ExpandCollapse.TryGetPattern(out var pattern))
+            throw new InvalidOperationException(
+                $"Element '{automationId}' does not support ExpandCollapsePattern");
+
+        var currentState = pattern.ExpandCollapseState.Value;
+        var wasAlready = currentState == ExpandCollapseState.Expanded;
+
+        if (!wasAlready)
+        {
+            pattern.Expand();
+        }
+
+        Program.Log($"expand: '{automationId}' expanded (wasAlready={wasAlready})");
+
+        return new JsonObject
+        {
+            ["expanded"] = true,
+            ["automation_id"] = automationId,
+            ["was_already"] = wasAlready
+        };
+    }
+
+    public static JsonNode CollapseElement(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
+    {
+        if (mainWindow is null)
+            throw new InvalidOperationException("Not connected. Call 'connect' first.");
+
+        var automationId = @params?["automationId"]?.GetValue<string>()
+            ?? throw new ArgumentException("Missing required parameter: automationId");
+
+        var cf = new ConditionFactory(automation.PropertyLibrary);
+        var element = mainWindow.FindFirstDescendant(cf.ByAutomationId(automationId))
+            ?? throw new InvalidOperationException($"Element not found: {automationId}");
+
+        if (!element.Patterns.ExpandCollapse.TryGetPattern(out var pattern))
+            throw new InvalidOperationException(
+                $"Element '{automationId}' does not support ExpandCollapsePattern");
+
+        var currentState = pattern.ExpandCollapseState.Value;
+        var wasAlready = currentState == ExpandCollapseState.Collapsed;
+
+        if (!wasAlready)
+        {
+            pattern.Collapse();
+        }
+
+        Program.Log($"collapse: '{automationId}' collapsed (wasAlready={wasAlready})");
+
+        return new JsonObject
+        {
+            ["collapsed"] = true,
+            ["automation_id"] = automationId,
+            ["was_already"] = wasAlready
+        };
+    }
+
+    public static JsonNode SetRangeValue(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
+    {
+        if (mainWindow is null)
+            throw new InvalidOperationException("Not connected. Call 'connect' first.");
+
+        var automationId = @params?["automationId"]?.GetValue<string>()
+            ?? throw new ArgumentException("Missing required parameter: automationId");
+
+        // Accept value as double; handle both integer and floating-point JSON representations.
+        double value;
+        var valueNode = @params?["value"]
+            ?? throw new ArgumentException("Missing required parameter: value");
+
+        try
+        {
+            value = valueNode.GetValue<double>();
+        }
+        catch
+        {
+            throw new ArgumentException($"Parameter 'value' must be a number, got: {valueNode}");
+        }
+
+        var cf = new ConditionFactory(automation.PropertyLibrary);
+        var element = mainWindow.FindFirstDescendant(cf.ByAutomationId(automationId))
+            ?? throw new InvalidOperationException($"Element not found: {automationId}");
+
+        if (!element.Patterns.RangeValue.TryGetPattern(out var pattern))
+            throw new InvalidOperationException(
+                $"Element '{automationId}' does not support RangeValuePattern");
+
+        var minimum = pattern.Minimum.Value;
+        var maximum = pattern.Maximum.Value;
+
+        if (value < minimum || value > maximum)
+        {
+            Program.Log($"set_value: {value} out of range [{minimum}..{maximum}] for '{automationId}'");
+            return new JsonObject
+            {
+                ["set"] = false,
+                ["reason"] = $"value {value} out of range [{minimum}..{maximum}]",
+                ["automation_id"] = automationId,
+                ["minimum"] = minimum,
+                ["maximum"] = maximum
+            };
+        }
+
+        pattern.SetValue(value);
+        Program.Log($"set_value: '{automationId}' = {value} (range [{minimum}..{maximum}])");
+
+        return new JsonObject
+        {
+            ["set"] = true,
+            ["automation_id"] = automationId,
+            ["value"] = value,
+            ["minimum"] = minimum,
+            ["maximum"] = maximum
+        };
     }
 }

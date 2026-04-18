@@ -476,3 +476,96 @@ class PywinautoBackend:
     def get_cached_rect(self, automation_id: str) -> dict | None:
         """Get cached rectangle for an element by AutomationId."""
         return self._ui.get_cached_rect(automation_id)
+
+    # -- v0.11.1: Pattern expansion fallbacks --
+    # All methods below require the FlaUI bridge and return {unsupported: True}
+    # on the pywinauto backend, consistent with v0.10.0 fallback pattern.
+
+    async def close_window(self, window_title: str | None = None) -> dict[str, Any]:
+        """WindowPattern requires FlaUI bridge backend."""
+        return {
+            "unsupported": True,
+            "reason": "FlaUI bridge required for WindowPattern",
+        }
+
+    async def maximize_window(self, window_title: str | None = None) -> dict[str, Any]:
+        """WindowPattern requires FlaUI bridge backend."""
+        return {
+            "unsupported": True,
+            "reason": "FlaUI bridge required for WindowPattern",
+        }
+
+    async def minimize_window(self, window_title: str | None = None) -> dict[str, Any]:
+        """WindowPattern requires FlaUI bridge backend."""
+        return {
+            "unsupported": True,
+            "reason": "FlaUI bridge required for WindowPattern",
+        }
+
+    async def restore_window(self, window_title: str | None = None) -> dict[str, Any]:
+        """WindowPattern requires FlaUI bridge backend."""
+        return {
+            "unsupported": True,
+            "reason": "FlaUI bridge required for WindowPattern",
+        }
+
+    async def move_window(self, x: int, y: int, window_title: str | None = None) -> dict[str, Any]:
+        """TransformPattern requires FlaUI bridge backend."""
+        return {
+            "unsupported": True,
+            "reason": "FlaUI bridge required for TransformPattern",
+        }
+
+    async def resize_window(self, width: int, height: int, window_title: str | None = None) -> dict[str, Any]:
+        """TransformPattern requires FlaUI bridge backend."""
+        return {
+            "unsupported": True,
+            "reason": "FlaUI bridge required for TransformPattern",
+        }
+
+    async def expand(self, automation_id: str) -> dict[str, Any]:
+        """ExpandCollapsePattern requires FlaUI bridge backend."""
+        return {
+            "unsupported": True,
+            "reason": "FlaUI bridge required for ExpandCollapsePattern",
+        }
+
+    async def collapse(self, automation_id: str) -> dict[str, Any]:
+        """ExpandCollapsePattern requires FlaUI bridge backend."""
+        return {
+            "unsupported": True,
+            "reason": "FlaUI bridge required for ExpandCollapsePattern",
+        }
+
+    async def set_value(self, automation_id: str, value: float) -> dict[str, Any]:
+        """RangeValuePattern requires FlaUI bridge backend."""
+        return {
+            "unsupported": True,
+            "reason": "FlaUI bridge required for RangeValuePattern",
+        }
+
+    async def clipboard_read(self) -> dict[str, Any]:
+        """Clipboard (STA threading) requires FlaUI bridge backend."""
+        return {
+            "unsupported": True,
+            "reason": "FlaUI bridge required for Clipboard (STA threading)",
+        }
+
+    async def clipboard_write(self, text: str) -> dict[str, Any]:
+        """Clipboard (STA threading) requires FlaUI bridge backend."""
+        return {
+            "unsupported": True,
+            "reason": "FlaUI bridge required for Clipboard (STA threading)",
+        }
+
+    async def realize_virtualized_item(
+        self,
+        container_automation_id: str,
+        prop_name: str,
+        value: str,
+    ) -> dict[str, Any]:
+        """VirtualizedItemPattern requires FlaUI bridge backend."""
+        return {
+            "unsupported": True,
+            "reason": "FlaUI bridge required for VirtualizedItemPattern",
+        }
