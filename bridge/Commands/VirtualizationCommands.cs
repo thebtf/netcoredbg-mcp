@@ -86,25 +86,44 @@ public static class VirtualizationCommands
             Program.Log($"realize_virtualized_item: item '{elementId}' was already in visual tree (not virtualized)");
         }
 
-        // After realization, re-read element id and bounding rect
+        // After realization, re-read element id and bounding rect.
+        // BoundingRectangle can throw ElementNotAvailableException for items
+        // that are realized but temporarily outside the viewport — return null
+        // in that case rather than letting the exception escape.
         string finalElementId;
         try { finalElementId = foundItem.AutomationId ?? value; }
         catch { finalElementId = value; }
 
-        var rect = foundItem.BoundingRectangle;
-
-        return new JsonObject
+        JsonObject? boundingRectNode = null;
+        string? boundingRectWarning = null;
+        try
         {
-            ["realized"] = true,
-            ["element_id"] = finalElementId,
-            ["bounding_rect"] = new JsonObject
+            var rect = foundItem.BoundingRectangle;
+            boundingRectNode = new JsonObject
             {
                 ["x"] = (int)rect.X,
                 ["y"] = (int)rect.Y,
                 ["width"] = (int)rect.Width,
                 ["height"] = (int)rect.Height
-            }
+            };
+        }
+        catch (Exception ex)
+        {
+            Program.Log($"realize_virtualized_item: BoundingRectangle unavailable for '{finalElementId}': {ex.Message}");
+            boundingRectWarning = "bounding rect unavailable";
+        }
+
+        var resultNode = new JsonObject
+        {
+            ["realized"] = true,
+            ["element_id"] = finalElementId,
+            ["bounding_rect"] = boundingRectNode
         };
+
+        if (boundingRectWarning is not null)
+            resultNode["warning"] = boundingRectWarning;
+
+        return resultNode;
     }
 
     private static PropertyId? ResolvePropertyId(UIA3Automation automation, string propertyName)

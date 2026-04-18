@@ -360,7 +360,7 @@ class TestVirtualizedItem:
         }
         result = await backend.realize_virtualized_item(
             container_automation_id="VirtList",
-            property="AutomationId",
+            prop_name="AutomationId",
             value="VirtList_Row_150",
         )
         assert result["realized"] is True
@@ -384,7 +384,7 @@ class TestVirtualizedItem:
         }
         result = await backend.realize_virtualized_item(
             container_automation_id="VirtList",
-            property="AutomationId",
+            prop_name="AutomationId",
             value="NonExistent_Row",
         )
         assert result["realized"] is False
@@ -399,7 +399,7 @@ class TestVirtualizedItem:
         }
         result = await backend.realize_virtualized_item(
             container_automation_id="PlainButton",
-            property="AutomationId",
+            prop_name="AutomationId",
             value="anything",
         )
         assert result["realized"] is False

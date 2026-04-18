@@ -1,61 +1,11 @@
 using System.Text.Json.Nodes;
-using FlaUI.Core;
 using FlaUI.Core.AutomationElements;
-using FlaUI.Core.Conditions;
 using FlaUI.UIA3;
 
 namespace FlaUIBridge.Commands;
 
 public static class TransformCommands
 {
-    private static AutomationElement ResolveTargetWindow(
-        JsonNode? @params,
-        UIA3Automation automation,
-        AutomationElement? mainWindow)
-    {
-        var windowTitle = @params?["window_title"]?.GetValue<string>();
-
-        if (windowTitle is not null)
-        {
-            var processId = JsonRpcHandler.ProcessId;
-            if (processId > 0)
-            {
-                var desktop = automation.GetDesktop();
-                var children = desktop.FindAllChildren();
-                foreach (var child in children)
-                {
-                    try
-                    {
-                        if (child.Properties.ProcessId.ValueOrDefault != processId)
-                            continue;
-
-                        var name = child.Name ?? "";
-                        if (name.Contains(windowTitle, StringComparison.OrdinalIgnoreCase))
-                            return child;
-                    }
-                    catch
-                    {
-                        // Ignore inaccessible windows
-                    }
-                }
-            }
-
-            throw new InvalidOperationException(
-                $"No window with title containing '{windowTitle}' found for the connected process.");
-        }
-
-        if (mainWindow is null)
-            throw new InvalidOperationException("Not connected. Call 'connect' first.");
-
-        return mainWindow;
-    }
-
-    private static string SafeGetWindowTitle(AutomationElement element)
-    {
-        try { return element.Name ?? ""; }
-        catch { return ""; }
-    }
-
     public static JsonNode MoveWindow(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
         var x = @params?["x"]?.GetValue<int>()
@@ -63,8 +13,8 @@ public static class TransformCommands
         var y = @params?["y"]?.GetValue<int>()
             ?? throw new ArgumentException("Missing required parameter: y");
 
-        var target = ResolveTargetWindow(@params, automation, mainWindow);
-        var title = SafeGetWindowTitle(target);
+        var target = WindowResolver.Resolve(@params, automation, mainWindow);
+        var title = WindowResolver.SafeGetTitle(target);
 
         if (!target.Patterns.Transform.TryGetPattern(out var pattern))
             throw new InvalidOperationException("Element does not support TransformPattern");
@@ -80,6 +30,9 @@ public static class TransformCommands
             };
         }
 
+        // Foreground the window before invoking TransformPattern so the OS
+        // does not silently ignore the move for background windows.
+        WindowCommands.EnsureForeground(target);
         pattern.Move(x, y);
         Program.Log($"move_window: moved '{title}' to ({x}, {y})");
 
@@ -99,8 +52,8 @@ public static class TransformCommands
         var height = @params?["height"]?.GetValue<int>()
             ?? throw new ArgumentException("Missing required parameter: height");
 
-        var target = ResolveTargetWindow(@params, automation, mainWindow);
-        var title = SafeGetWindowTitle(target);
+        var target = WindowResolver.Resolve(@params, automation, mainWindow);
+        var title = WindowResolver.SafeGetTitle(target);
 
         if (!target.Patterns.Transform.TryGetPattern(out var pattern))
             throw new InvalidOperationException("Element does not support TransformPattern");
@@ -116,6 +69,9 @@ public static class TransformCommands
             };
         }
 
+        // Foreground the window before invoking TransformPattern so the OS
+        // does not silently ignore the resize for background windows.
+        WindowCommands.EnsureForeground(target);
         pattern.Resize(width, height);
         Program.Log($"resize_window: resized '{title}' to {width}x{height}");
 

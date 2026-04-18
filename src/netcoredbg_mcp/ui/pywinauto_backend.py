@@ -561,7 +561,7 @@ class PywinautoBackend:
     async def realize_virtualized_item(
         self,
         container_automation_id: str,
-        property: str,
+        prop_name: str,
         value: str,
     ) -> dict[str, Any]:
         """VirtualizedItemPattern requires FlaUI bridge backend."""

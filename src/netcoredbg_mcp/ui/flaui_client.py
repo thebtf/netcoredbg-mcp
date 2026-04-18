@@ -630,7 +630,7 @@ class FlaUIBackend:
     async def realize_virtualized_item(
         self,
         container_automation_id: str,
-        property: str,
+        prop_name: str,
         value: str,
     ) -> dict[str, Any]:
         """Realize a virtualized list/grid item so it enters the visual tree.
@@ -642,7 +642,7 @@ class FlaUIBackend:
             "realize_virtualized_item",
             {
                 "container_automation_id": container_automation_id,
-                "property": property,
+                "property": prop_name,
                 "value": value,
             },
         )

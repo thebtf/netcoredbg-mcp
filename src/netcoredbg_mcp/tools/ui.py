@@ -2352,9 +2352,6 @@ def register_ui_tools(
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
 
-            if text is None:
-                raise ValueError("text is required")
-
             ui = await _ensure_ui_connected()
             result = await ui.clipboard_write(text=text)
             if not isinstance(result, dict):
@@ -2375,7 +2372,7 @@ def register_ui_tools(
     async def ui_realize_virtualized_item(
         ctx: Context,
         container_automation_id: str,
-        property: str,
+        prop_name: str,
         value: str,
     ) -> dict:
         """Realize a virtualized list or grid item so it enters the visual tree.
@@ -2390,14 +2387,14 @@ def register_ui_tools(
         and returns {realized: true} without error.
 
         Returns:
-            {realized: true, element_id: "...", bounding_rect: {x, y, w, h}} on success.
+            {realized: true, element_id: "...", bounding_rect: {x, y, width, height}} on success.
             {realized: false, reason: "item not found"} if the item is not in the data source.
             {realized: false, reason: "container does not support ItemContainerPattern"} if
             the container is not a virtualizing list.
 
         Args:
             container_automation_id: AutomationId of the list/grid container.
-            property: Property to search by. Supported: "AutomationId", "Name", "ClassName".
+            prop_name: Property to search by. Supported: "AutomationId", "Name", "ClassName".
             value: Value to match against the chosen property.
         """
         try:
@@ -2411,15 +2408,15 @@ def register_ui_tools(
                 raise ValueError("value is required")
 
             supported_props = {"AutomationId", "Name", "ClassName"}
-            if property not in supported_props:
+            if prop_name not in supported_props:
                 raise ValueError(
-                    f"property must be one of: {', '.join(sorted(supported_props))}. Got: {property!r}"
+                    f"prop_name must be one of: {', '.join(sorted(supported_props))}. Got: {prop_name!r}"
                 )
 
             ui = await _ensure_ui_connected()
             result = await ui.realize_virtualized_item(
                 container_automation_id=container_automation_id,
-                property=property,
+                prop_name=prop_name,
                 value=value,
             )
             if not isinstance(result, dict):

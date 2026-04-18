@@ -1731,7 +1731,6 @@ async def test_expand_collapse_tree():
                 result.get("expanded") is True,
                 str(result),
             )
-            was_already_root = result.get("was_already", False)
 
             # Expand again — should be idempotent
             result2 = await backend.expand("CharactersTreeRoot")
