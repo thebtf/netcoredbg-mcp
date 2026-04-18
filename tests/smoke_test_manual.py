@@ -1720,7 +1720,7 @@ async def test_expand_collapse_tree():
             tree_info = await backend.find_element(automation_id="CharactersTree")
             check(
                 "CharactersTree present",
-                isinstance(tree_info, dict) and tree_info.get("found", True),
+                isinstance(tree_info, dict) and tree_info.get("found", False),
                 str(tree_info),
             )
 
@@ -1857,15 +1857,16 @@ async def test_realize_virtualized_item():
             pre_realize_found = False
             try:
                 pre = await backend.find_element(automation_id="VirtList_Row_150")
-                pre_realize_found = pre is not None
-            except Exception:
+                pre_realize_found = isinstance(pre, dict) and pre.get("found", False)
+            except (RuntimeError, asyncio.TimeoutError):  # noqa: BLE001
                 pre_realize_found = False
 
             if pre_realize_found:
                 # WinForms fixture does NOT exercise true VirtualizedItemPattern —
                 # the element is already accessible before realize is called.
-                # TODO(v0.11.2): replace with a WPF VirtualizingStackPanel fixture
-                # that actually defers item creation (true virtualization).
+                # Note: WinForms ListBox is not truly virtualized; for full VirtualizingStackPanel
+                # coverage, a WPF fixture is needed (tracked in .agent/specs/flaui-pattern-expansion/spec.md
+                # under "v0.11.2 deferred scope").
                 print(
                     "  [WARNING] VirtList_Row_150 is already accessible before realize — "
                     "WinForms ListBox is not a true virtualized container. "
@@ -1895,19 +1896,20 @@ async def test_realize_virtualized_item():
             # Even without true virtualization, the round-trip must not break access.
             try:
                 post = await backend.find_element(automation_id="VirtList_Row_150")
+                post_found = isinstance(post, dict) and post.get("found", False)
                 check(
                     "VirtList_Row_150 accessible after realize call",
-                    post is not None,
+                    post_found,
                     f"find_element returned: {post}",
                 )
-                if post is not None:
-                    rect = post.get("bounding_rect") or post.get("BoundingRectangle")
+                if post_found:
+                    rect = post.get("rect") or post.get("bounding_rect") or post.get("BoundingRectangle")
                     check(
                         "VirtList_Row_150 has valid bounding_rect after realize",
                         rect is not None,
                         f"bounding_rect={rect}",
                     )
-            except Exception as post_e:
+            except (RuntimeError, asyncio.TimeoutError) as post_e:  # noqa: BLE001
                 check("VirtList_Row_150 accessible after realize call", False, str(post_e))
 
             # Also test item-not-found path on dragList (no ItemContainerPattern either)
