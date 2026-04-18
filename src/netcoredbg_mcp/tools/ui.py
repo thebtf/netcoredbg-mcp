@@ -2010,3 +2010,428 @@ def register_ui_tools(
             )
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
+
+    # -- v0.11.1: Pattern expansion tools --
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def ui_close_window(ctx: Context, window_title: str | None = None) -> dict:
+        """Close a top-level window via WindowPattern.
+
+        After closing, subsequent ui_* calls return an error if the closed window
+        was the active session window. Use window_title to target a specific window
+        (e.g. a modal dialog); omit to close the main application window.
+
+        Args:
+            window_title: Optional partial title match to target a specific window.
+                          Omit to target the main connected window.
+        """
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            ui = await _ensure_ui_connected()
+            result = await ui.close_window(window_title=window_title)
+            if not isinstance(result, dict):
+                return build_error_response(
+                    f"close_window: backend returned non-dict response ({type(result).__name__})",
+                    state=session.state.state,
+                )
+            if result.get("unsupported") is True:
+                return build_error_response(
+                    result.get("reason", "close_window not supported on current backend"),
+                    state=session.state.state,
+                )
+            return build_response(data=result, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def ui_maximize_window(ctx: Context, window_title: str | None = None) -> dict:
+        """Maximize a top-level window via WindowPattern.
+
+        Args:
+            window_title: Optional partial title match. Omit to target main window.
+        """
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            ui = await _ensure_ui_connected()
+            result = await ui.maximize_window(window_title=window_title)
+            if not isinstance(result, dict):
+                return build_error_response(
+                    f"maximize_window: backend returned non-dict response ({type(result).__name__})",
+                    state=session.state.state,
+                )
+            if result.get("unsupported") is True:
+                return build_error_response(
+                    result.get("reason", "maximize_window not supported on current backend"),
+                    state=session.state.state,
+                )
+            return build_response(data=result, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def ui_minimize_window(ctx: Context, window_title: str | None = None) -> dict:
+        """Minimize a top-level window via WindowPattern.
+
+        Args:
+            window_title: Optional partial title match. Omit to target main window.
+        """
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            ui = await _ensure_ui_connected()
+            result = await ui.minimize_window(window_title=window_title)
+            if not isinstance(result, dict):
+                return build_error_response(
+                    f"minimize_window: backend returned non-dict response ({type(result).__name__})",
+                    state=session.state.state,
+                )
+            if result.get("unsupported") is True:
+                return build_error_response(
+                    result.get("reason", "minimize_window not supported on current backend"),
+                    state=session.state.state,
+                )
+            return build_response(data=result, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def ui_restore_window(ctx: Context, window_title: str | None = None) -> dict:
+        """Restore a minimized or maximized window to normal state via WindowPattern.
+
+        Args:
+            window_title: Optional partial title match. Omit to target main window.
+        """
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            ui = await _ensure_ui_connected()
+            result = await ui.restore_window(window_title=window_title)
+            if not isinstance(result, dict):
+                return build_error_response(
+                    f"restore_window: backend returned non-dict response ({type(result).__name__})",
+                    state=session.state.state,
+                )
+            if result.get("unsupported") is True:
+                return build_error_response(
+                    result.get("reason", "restore_window not supported on current backend"),
+                    state=session.state.state,
+                )
+            return build_response(data=result, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def ui_move_window(ctx: Context, x: int, y: int, window_title: str | None = None) -> dict:
+        """Move a window to screen coordinates (x, y) via TransformPattern.
+
+        Returns {moved: false, reason: "..."} if the window cannot be moved
+        (CanMove = false). Does NOT raise an exception in that case.
+
+        Args:
+            x: Target screen X coordinate for the window's top-left corner.
+            y: Target screen Y coordinate for the window's top-left corner.
+            window_title: Optional partial title match. Omit to target main window.
+        """
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            ui = await _ensure_ui_connected()
+            result = await ui.move_window(x=x, y=y, window_title=window_title)
+            if not isinstance(result, dict):
+                return build_error_response(
+                    f"move_window: backend returned non-dict response ({type(result).__name__})",
+                    state=session.state.state,
+                )
+            if result.get("unsupported") is True:
+                return build_error_response(
+                    result.get("reason", "move_window not supported on current backend"),
+                    state=session.state.state,
+                )
+            return build_response(data=result, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def ui_resize_window(
+        ctx: Context,
+        width: int,
+        height: int,
+        window_title: str | None = None,
+    ) -> dict:
+        """Resize a window to the given dimensions via TransformPattern.
+
+        Returns {resized: false, reason: "..."} if the window cannot be resized
+        (CanResize = false). Does NOT raise an exception in that case.
+
+        Args:
+            width: Target window width in pixels.
+            height: Target window height in pixels.
+            window_title: Optional partial title match. Omit to target main window.
+        """
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            if width <= 0:
+                raise ValueError(f"width must be positive, got {width}")
+            if height <= 0:
+                raise ValueError(f"height must be positive, got {height}")
+
+            ui = await _ensure_ui_connected()
+            result = await ui.resize_window(width=width, height=height, window_title=window_title)
+            if not isinstance(result, dict):
+                return build_error_response(
+                    f"resize_window: backend returned non-dict response ({type(result).__name__})",
+                    state=session.state.state,
+                )
+            if result.get("unsupported") is True:
+                return build_error_response(
+                    result.get("reason", "resize_window not supported on current backend"),
+                    state=session.state.state,
+                )
+            return build_response(data=result, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def ui_expand(ctx: Context, automation_id: str) -> dict:
+        """Expand a TreeView node, ComboBox dropdown, or other collapsible element.
+
+        Uses ExpandCollapsePattern. Expanding an already-expanded element is safe
+        and returns {expanded: true, was_already: true}.
+
+        Args:
+            automation_id: AutomationId of the element to expand.
+        """
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            if not automation_id:
+                raise ValueError("automation_id is required")
+
+            ui = await _ensure_ui_connected()
+            result = await ui.expand(automation_id=automation_id)
+            if not isinstance(result, dict):
+                return build_error_response(
+                    f"expand: backend returned non-dict response ({type(result).__name__})",
+                    state=session.state.state,
+                )
+            if result.get("unsupported") is True:
+                return build_error_response(
+                    result.get("reason", "expand not supported on current backend"),
+                    state=session.state.state,
+                )
+            return build_response(data=result, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def ui_collapse(ctx: Context, automation_id: str) -> dict:
+        """Collapse a TreeView node, ComboBox dropdown, or other collapsible element.
+
+        Uses ExpandCollapsePattern. Collapsing an already-collapsed element is safe
+        and returns {collapsed: true, was_already: true}.
+
+        Args:
+            automation_id: AutomationId of the element to collapse.
+        """
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            if not automation_id:
+                raise ValueError("automation_id is required")
+
+            ui = await _ensure_ui_connected()
+            result = await ui.collapse(automation_id=automation_id)
+            if not isinstance(result, dict):
+                return build_error_response(
+                    f"collapse: backend returned non-dict response ({type(result).__name__})",
+                    state=session.state.state,
+                )
+            if result.get("unsupported") is True:
+                return build_error_response(
+                    result.get("reason", "collapse not supported on current backend"),
+                    state=session.state.state,
+                )
+            return build_response(data=result, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def ui_set_value(ctx: Context, automation_id: str, value: float) -> dict:
+        """Set a numeric value on a slider, spinner, or progress bar via RangeValuePattern.
+
+        Returns {set: false, reason: "value X out of range [min..max]"} if the
+        value is outside the element's Min/Max bounds — does NOT raise an exception.
+
+        Args:
+            automation_id: AutomationId of the RangeValue element (slider, spinner, etc.)
+            value: The numeric value to set. Must be within element's [Minimum, Maximum].
+        """
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            if not automation_id:
+                raise ValueError("automation_id is required")
+
+            ui = await _ensure_ui_connected()
+            result = await ui.set_value(automation_id=automation_id, value=value)
+            if not isinstance(result, dict):
+                return build_error_response(
+                    f"set_value: backend returned non-dict response ({type(result).__name__})",
+                    state=session.state.state,
+                )
+            if result.get("unsupported") is True:
+                return build_error_response(
+                    result.get("reason", "set_value not supported on current backend"),
+                    state=session.state.state,
+                )
+            return build_response(data=result, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+    async def ui_clipboard_read(ctx: Context) -> dict:
+        """Read text content from the system clipboard.
+
+        Executes on an STA thread inside the FlaUI bridge (required by
+        System.Windows.Clipboard). Returns {text: "...", has_text: bool}.
+        """
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            ui = await _ensure_ui_connected()
+            result = await ui.clipboard_read()
+            if not isinstance(result, dict):
+                return build_error_response(
+                    f"clipboard_read: backend returned non-dict response ({type(result).__name__})",
+                    state=session.state.state,
+                )
+            if result.get("unsupported") is True:
+                return build_error_response(
+                    result.get("reason", "clipboard_read not supported on current backend"),
+                    state=session.state.state,
+                )
+            return build_response(data=result, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def ui_clipboard_write(ctx: Context, text: str) -> dict:
+        """Write text to the system clipboard.
+
+        Executes on an STA thread inside the FlaUI bridge (required by
+        System.Windows.Clipboard). Supports full Unicode including emoji and CJK.
+
+        Args:
+            text: The text to write to the clipboard.
+        """
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            if text is None:
+                raise ValueError("text is required")
+
+            ui = await _ensure_ui_connected()
+            result = await ui.clipboard_write(text=text)
+            if not isinstance(result, dict):
+                return build_error_response(
+                    f"clipboard_write: backend returned non-dict response ({type(result).__name__})",
+                    state=session.state.state,
+                )
+            if result.get("unsupported") is True:
+                return build_error_response(
+                    result.get("reason", "clipboard_write not supported on current backend"),
+                    state=session.state.state,
+                )
+            return build_response(data=result, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(idempotentHint=True, openWorldHint=False))
+    async def ui_realize_virtualized_item(
+        ctx: Context,
+        container_automation_id: str,
+        property: str,
+        value: str,
+    ) -> dict:
+        """Realize a virtualized list or grid item so it enters the visual tree.
+
+        Virtualized lists (VirtualizingStackPanel with VirtualizationMode=Recycling)
+        only create UI elements for visible rows. Items outside the viewport are
+        "virtualized" — they exist in the data source but have no AutomationElement.
+        This tool forces the item into the visual tree so subsequent ui_click or
+        ui_find_element calls can reach it.
+
+        Operation is idempotent: re-realizing an already-realized item is safe
+        and returns {realized: true} without error.
+
+        Returns:
+            {realized: true, element_id: "...", bounding_rect: {x, y, w, h}} on success.
+            {realized: false, reason: "item not found"} if the item is not in the data source.
+            {realized: false, reason: "container does not support ItemContainerPattern"} if
+            the container is not a virtualizing list.
+
+        Args:
+            container_automation_id: AutomationId of the list/grid container.
+            property: Property to search by. Supported: "AutomationId", "Name", "ClassName".
+            value: Value to match against the chosen property.
+        """
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            if not container_automation_id:
+                raise ValueError("container_automation_id is required")
+            if not value:
+                raise ValueError("value is required")
+
+            supported_props = {"AutomationId", "Name", "ClassName"}
+            if property not in supported_props:
+                raise ValueError(
+                    f"property must be one of: {', '.join(sorted(supported_props))}. Got: {property!r}"
+                )
+
+            ui = await _ensure_ui_connected()
+            result = await ui.realize_virtualized_item(
+                container_automation_id=container_automation_id,
+                property=property,
+                value=value,
+            )
+            if not isinstance(result, dict):
+                return build_error_response(
+                    f"realize_virtualized_item: backend returned non-dict response ({type(result).__name__})",
+                    state=session.state.state,
+                )
+            if result.get("unsupported") is True:
+                return build_error_response(
+                    result.get("reason", "realize_virtualized_item not supported on current backend"),
+                    state=session.state.state,
+                )
+            return build_response(data=result, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
