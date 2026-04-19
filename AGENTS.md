@@ -79,7 +79,7 @@ If solution contains "simple", "quick", "temporary", "workaround" — **STOP and
 | Status | `.agent/status/CURRENT_STATUS.md` |
 | Reports | `.agent/reports/` |
 | Lessons | `.agent/LESSONS_LEARNED.md` |
-| Skills | `.agent/skills/` |
+| Skills | _N/A (no local skills; see `docs/dap-protocol/` for the only project-specific reference)_ |
 | Testing | `.agent/guides/TESTING_GUIDELINES.md` |
 | Architecture | `.agent/arch/README.md` |
 
@@ -111,10 +111,11 @@ If solution contains "simple", "quick", "temporary", "workaround" — **STOP and
 ## 🎯 SKILLS
 
 Skills are provided by the global `nvmd-platform` plugin and user-scope rules.
-This project keeps **only** project-specific skills locally.
+This project keeps no local skills — DAP protocol details live as versioned
+reference material in [`docs/dap-protocol/`](./docs/dap-protocol/README.md).
 
-> **Note:** `.agent/` (including `CONTINUITY.md` and `skills/`) is gitignored —
-> paths below are local-only and bootstrapped per clone.
+> **Note:** `.agent/` (including `CONTINUITY.md`) is gitignored — paths under
+> it below are local-only and bootstrapped per clone.
 
 | Task | Source |
 |------|--------|
@@ -123,10 +124,7 @@ This project keeps **only** project-specific skills locally.
 | Planning / Design | Global `nvmd-platform` (`/nvmd-specify`, `/nvmd-plan`, `/nvmd-tasks`) |
 | Debugging | Global `nvmd-platform` |
 | After context reset | `.agent/CONTINUITY.md` (local) + global recovery flow |
-| DAP wire protocol (project-specific) | `.agent/skills/dap-protocol/SKILL.md` (local) |
-
-The local `dap-protocol` skill is kept because it encodes netcoredbg-specific
-Debug Adapter Protocol behavior that is not covered by generic platform skills.
+| DAP wire protocol (project-specific) | [`docs/dap-protocol/`](./docs/dap-protocol/README.md) (versioned mirror of the Microsoft DAP spec) |
 
 ---
 
