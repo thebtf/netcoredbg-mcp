@@ -77,9 +77,17 @@ of truth the prose is generated from.
 Run from the repo root when you need to pull a newer snapshot:
 
 ```powershell
+$ErrorActionPreference = "Stop"
 $ghp = "https://raw.githubusercontent.com/microsoft/debug-adapter-protocol/gh-pages"
 $dir = "docs/dap-protocol"
 New-Item -ItemType Directory -Force "$dir/img" | Out-Null
+
+# Optional: set $env:GITHUB_TOKEN before running to raise the anonymous
+# GitHub API rate limit (60/hour) to the authenticated limit (5000/hour).
+$apiHeaders = @{ 'User-Agent' = 'netcoredbg-mcp' }
+if ($env:GITHUB_TOKEN) {
+  $apiHeaders['Authorization'] = "Bearer $($env:GITHUB_TOKEN)"
+}
 
 # Text + schema
 foreach ($f in @(
@@ -88,16 +96,33 @@ foreach ($f in @(
   @{url="$ghp/overview.md";                out="$dir/overview.md"},
   @{url="$ghp/changelog.md";               out="$dir/changelog.md"},
   @{url="$ghp/contributing.md";            out="$dir/contributing.md"}
-)) { Invoke-WebRequest -Uri $f.url -OutFile $f.out -UseBasicParsing }
+)) {
+  try {
+    Invoke-WebRequest -Uri $f.url -OutFile $f.out -UseBasicParsing
+  } catch {
+    Write-Error "Failed to download $($f.url): $_"
+    exit 1
+  }
+}
 
 # Images referenced from overview.md (enumerate via GitHub API so new
 # upstream assets are picked up automatically).
-$imgList = Invoke-RestMethod `
-  -Uri "https://api.github.com/repos/microsoft/debug-adapter-protocol/contents/img?ref=gh-pages" `
-  -Headers @{ 'User-Agent' = 'netcoredbg-mcp' }
+try {
+  $imgList = Invoke-RestMethod `
+    -Uri "https://api.github.com/repos/microsoft/debug-adapter-protocol/contents/img?ref=gh-pages" `
+    -Headers $apiHeaders
+} catch {
+  Write-Error "Failed to list upstream img/: $_"
+  exit 1
+}
 foreach ($asset in $imgList) {
-  Invoke-WebRequest -Uri "$ghp/img/$($asset.name)" `
-    -OutFile "$dir/img/$($asset.name)" -UseBasicParsing
+  try {
+    Invoke-WebRequest -Uri "$ghp/img/$($asset.name)" `
+      -OutFile "$dir/img/$($asset.name)" -UseBasicParsing
+  } catch {
+    Write-Error "Failed to download image $($asset.name): $_"
+    exit 1
+  }
 }
 ```
 
