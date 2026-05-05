@@ -33,7 +33,7 @@ def test_netcoredbg_backend_delegates_capability_flags():
     assert backend.supports_loaded_sources() is False
     assert backend.supports_locations() is True
     assert backend.supports_step_in_targets() is True
-    assert backend.supports_progress_reporting() is False
+    assert backend.supports_progress_reporting() is True
 
 
 def test_netcoredbg_backend_defaults_missing_capabilities_to_false():
@@ -45,7 +45,7 @@ def test_netcoredbg_backend_defaults_missing_capabilities_to_false():
     assert backend.supports_loaded_sources() is False
     assert backend.supports_locations() is False
     assert backend.supports_step_in_targets() is False
-    assert backend.supports_progress_reporting() is False
+    assert backend.supports_progress_reporting() is True
 
 
 def test_netcoredbg_backend_satisfies_protocol_shape():

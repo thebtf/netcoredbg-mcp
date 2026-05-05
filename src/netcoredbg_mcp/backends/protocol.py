@@ -57,7 +57,9 @@ class NetcoredbgBackend:
         return self._supports("supportsStepInTargetsRequest")
 
     def supports_progress_reporting(self) -> bool:
-        return self._supports("supportsProgressReporting")
+        # DAP supportsProgressReporting is a client initialize capability, not
+        # an adapter response capability. This client always advertises it.
+        return True
 
     def _supports(self, capability: str) -> bool:
         return bool(self._client.capabilities.get(capability, False))
