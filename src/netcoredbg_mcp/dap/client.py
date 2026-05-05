@@ -227,6 +227,14 @@ class DAPClient:
             elif isinstance(message, DAPEvent):
                 logger.debug(f"<<< Event {message.event}: {message.body}")
                 handlers = self._event_handlers.get(message.event, [])
+                if not handlers:
+                    body_json = json.dumps(message.body, default=str)
+                    logger.warning(
+                        "Unhandled DAP event '%s' dropped: body_size=%d body_preview=%s",
+                        message.event,
+                        len(body_json.encode("utf-8")),
+                        body_json[:200],
+                    )
                 for handler in handlers:
                     try:
                         handler(message)

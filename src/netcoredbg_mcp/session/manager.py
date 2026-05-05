@@ -13,9 +13,22 @@ from ..build import BuildManager, BuildResult
 from ..dap import DAPClient, DAPEvent
 from ..dap.events import (
     BreakpointEventBody,
+    CapabilitiesEventBody,
+    ContinuedEventBody,
+    ExitedEventBody,
+    InitializedEventBody,
+    InvalidatedEventBody,
+    LoadedSourceEventBody,
+    MemoryEventBody,
     ModuleEventBody,
     OutputEventBody,
+    ProcessEventBody,
+    ProgressEndEventBody,
+    ProgressStartEventBody,
+    ProgressUpdateEventBody,
     StoppedEventBody,
+    TerminatedEventBody,
+    ThreadEventBody,
 )
 from ..dap.protocol import Events
 from ..process_registry import ProcessRegistry
@@ -26,8 +39,10 @@ from .state import (
     BreakpointRegistry,
     DebugState,
     FunctionBreakpoint,
+    LoadedSource,
     ModuleInfo,
     OutputEntry,
+    ProgressEntry,
     SessionState,
     StackFrame,
     StoppedSnapshot,
@@ -372,9 +387,17 @@ class SessionManager:
         self._client.on_event(Events.PROCESS, self._on_process)
         self._client.on_event(Events.BREAKPOINT, self._on_breakpoint)
         self._client.on_event(Events.MODULE, self._on_module)
+        self._client.on_event(Events.CAPABILITIES, self._on_capabilities)
+        self._client.on_event(Events.INVALIDATED, self._on_invalidated)
+        self._client.on_event(Events.LOADED_SOURCE, self._on_loaded_source)
+        self._client.on_event(Events.PROGRESS_START, self._on_progress_start)
+        self._client.on_event(Events.PROGRESS_UPDATE, self._on_progress_update)
+        self._client.on_event(Events.PROGRESS_END, self._on_progress_end)
+        self._client.on_event(Events.MEMORY, self._on_memory)
 
     def _on_initialized(self, event: DAPEvent) -> None:
         """Handle initialized event."""
+        InitializedEventBody.from_dict(event.body)
         logger.info("DAP adapter initialized")
         self._initialized_event.set()
 
@@ -525,8 +548,9 @@ class SessionManager:
 
     def _on_continued(self, event: DAPEvent) -> None:
         """Handle continued event."""
+        body = ContinuedEventBody.from_dict(event.body)
         self._set_state(DebugState.RUNNING)
-        if event.body.get("allThreadsContinued", True):
+        if body.all_threads_continued:
             # All threads resumed — clear all stop-state
             self._state.current_thread_id = None
             self._state.current_frame_id = None
@@ -536,13 +560,18 @@ class SessionManager:
 
     def _on_terminated(self, event: DAPEvent) -> None:
         """Handle terminated event."""
+        body = TerminatedEventBody.from_dict(event.body)
         self._set_state(DebugState.TERMINATED)
         self._execution_event.set()
-        logger.info("Debug session terminated")
+        if body.restart is not None:
+            logger.info("Debug session terminated with restart data")
+        else:
+            logger.info("Debug session terminated")
 
     def _on_exited(self, event: DAPEvent) -> None:
         """Handle exited event."""
-        self._state.exit_code = event.body.get("exitCode", 0)
+        body = ExitedEventBody.from_dict(event.body)
+        self._state.exit_code = body.exit_code
         self._execution_event.set()
         logger.info(f"Process exited with code {self._state.exit_code}")
 
@@ -559,7 +588,7 @@ class SessionManager:
         entry = OutputEntry(text=output, category=body.category.value)
 
         # Capture variablesReference if the adapter attached structured output
-        var_ref = event.body.get("variablesReference", 0)
+        var_ref = body.variables_reference
         if var_ref and var_ref > 0:
             entry.variables_reference = var_ref
 
@@ -573,29 +602,17 @@ class SessionManager:
 
     def _on_thread(self, event: DAPEvent) -> None:
         """Handle thread event."""
-        thread_id = event.body.get("threadId", 0)
-        reason = event.body.get("reason", "started")
+        body = ThreadEventBody.from_dict(event.body)
 
-        if reason == "exited":
-            self._state.threads = [t for t in self._state.threads if t.id != thread_id]
+        if body.reason.value == "exited":
+            self._state.threads = [t for t in self._state.threads if t.id != body.thread_id]
         # Note: "started" events are handled lazily via get_threads()
 
     def _on_process(self, event: DAPEvent) -> None:
         """Handle process event."""
-        pid_raw = event.body.get("systemProcessId")
-        name_raw = event.body.get("name")
-
-        # Normalize PID to int, handle string/invalid values
-        pid = None
-        if pid_raw is not None:
-            try:
-                pid = int(pid_raw)
-            except (TypeError, ValueError):
-                logger.warning(f"Invalid systemProcessId in process event: {pid_raw}")
-                pid = None
-
-        # Normalize name to string
-        name = str(name_raw) if name_raw is not None else None
+        body = ProcessEventBody.from_dict(event.body)
+        pid = body.system_process_id
+        name = body.name
 
         self._state.process_id = pid
         self._state.process_name = name
@@ -607,6 +624,98 @@ class SessionManager:
                 role="debuggee",
                 program=name,
             )
+
+    def _on_capabilities(self, event: DAPEvent) -> None:
+        """Handle dynamic capabilities event."""
+        body = CapabilitiesEventBody.from_dict(event.body)
+        current = dict(getattr(self._client, "_capabilities", {}))
+        before_keys = set(current)
+        changed_keys = {
+            key for key, value in body.capabilities.items() if current.get(key) != value
+        }
+        merged = {**current, **body.capabilities}
+        self._client._capabilities = merged
+        after_keys = set(merged)
+        logger.info(
+            "Capabilities updated: added=%s changed=%s total_before=%d total_after=%d",
+            sorted(after_keys - before_keys),
+            sorted(changed_keys),
+            len(before_keys),
+            len(after_keys),
+        )
+
+    def _on_invalidated(self, event: DAPEvent) -> None:
+        """Handle invalidated event."""
+        body = InvalidatedEventBody.from_dict(event.body)
+        self._state.last_invalidation = body
+        logger.info(
+            "Invalidated: areas=%s threadId=%s stackFrameId=%s",
+            body.areas,
+            body.thread_id,
+            body.stack_frame_id,
+        )
+
+    def _on_loaded_source(self, event: DAPEvent) -> None:
+        """Handle loadedSource event."""
+        body = LoadedSourceEventBody.from_dict(event.body)
+        source = LoadedSource.from_source(body.source)
+        key = self._loaded_source_key(source)
+
+        if body.reason == "removed":
+            if key in self._state.loaded_sources:
+                del self._state.loaded_sources[key]
+                logger.info("Loaded source removed: %s", key)
+            else:
+                logger.warning("Loaded source remove for unknown source: %s", key)
+            return
+
+        self._state.loaded_sources[key] = source
+        logger.info("Loaded source %s: %s", body.reason, key)
+
+    def _on_progress_start(self, event: DAPEvent) -> None:
+        """Handle progressStart event."""
+        body = ProgressStartEventBody.from_dict(event.body)
+        self._state.active_progress[body.progress_id] = ProgressEntry(
+            progress_id=body.progress_id,
+            title=body.title,
+            message=body.message,
+            percentage=body.percentage,
+            cancellable=body.cancellable,
+        )
+        logger.info("Progress started: %s %s", body.progress_id, body.title)
+
+    def _on_progress_update(self, event: DAPEvent) -> None:
+        """Handle progressUpdate event."""
+        body = ProgressUpdateEventBody.from_dict(event.body)
+        entry = self._state.active_progress.get(body.progress_id)
+        if entry is None:
+            logger.warning("Progress update for unknown progressId: %s", body.progress_id)
+            return
+        if body.message is not None:
+            entry.message = body.message
+        if body.percentage is not None:
+            entry.percentage = body.percentage
+        logger.debug("Progress updated: %s %s", body.progress_id, body.percentage)
+
+    def _on_progress_end(self, event: DAPEvent) -> None:
+        """Handle progressEnd event."""
+        body = ProgressEndEventBody.from_dict(event.body)
+        if body.progress_id not in self._state.active_progress:
+            logger.warning("Progress end for unknown progressId: %s", body.progress_id)
+            return
+        del self._state.active_progress[body.progress_id]
+        logger.info("Progress ended: %s", body.progress_id)
+
+    def _on_memory(self, event: DAPEvent) -> None:
+        """Handle memory event."""
+        body = MemoryEventBody.from_dict(event.body)
+        self._state.last_memory_event = body
+        logger.info(
+            "Memory event: memoryReference=%s offset=%d count=%d",
+            body.memory_reference,
+            body.offset,
+            body.count,
+        )
 
     def _on_breakpoint(self, event: DAPEvent) -> None:
         """Handle breakpoint changed/added/removed events from adapter."""
@@ -684,6 +793,16 @@ class SessionManager:
                 m for m in self._state.modules if m.id != body.module_id
             ]
             logger.info(f"Module unloaded: {body.name}")
+
+    @staticmethod
+    def _loaded_source_key(source: LoadedSource) -> str:
+        candidate = source.path or source.name
+        if candidate:
+            key = os.path.normpath(candidate)
+            return key.lower() if os.name == "nt" else key
+        if source.source_reference is not None:
+            return f"sourceReference:{source.source_reference}"
+        return "<unknown-source>"
 
     def prepare_for_execution(self) -> None:
         """Prepare for an execution command by creating a fresh event.
@@ -1486,7 +1605,8 @@ class SessionManager:
 
         Returns exception type, message, inner exception chain, stack frames
         with source locations, and local variables for top N frames.
-        Replaces the manual sequence: get_exception_info + get_call_stack + get_scopes + get_variables.
+        Replaces the manual sequence:
+        get_exception_info + get_call_stack + get_scopes + get_variables.
         """
         if self._state.state != DebugState.STOPPED:
             raise RuntimeError("Program is not stopped")

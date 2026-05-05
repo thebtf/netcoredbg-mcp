@@ -103,6 +103,11 @@ class Commands:
     EXCEPTION_INFO = "exceptionInfo"
     SET_VARIABLE = "setVariable"
     STEP_IN_TARGETS = "stepInTargets"
+    READ_MEMORY = "readMemory"
+    WRITE_MEMORY = "writeMemory"
+    LOADED_SOURCES = "loadedSources"
+    DISASSEMBLE = "disassemble"
+    LOCATIONS = "locations"
 
 
 # Common DAP events
@@ -117,3 +122,10 @@ class Events:
     BREAKPOINT = "breakpoint"
     MODULE = "module"
     PROCESS = "process"
+    CAPABILITIES = "capabilities"
+    INVALIDATED = "invalidated"
+    LOADED_SOURCE = "loadedSource"
+    PROGRESS_START = "progressStart"
+    PROGRESS_UPDATE = "progressUpdate"
+    PROGRESS_END = "progressEnd"
+    MEMORY = "memory"

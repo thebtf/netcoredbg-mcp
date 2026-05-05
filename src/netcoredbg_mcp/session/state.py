@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+
+from ..dap.events import InvalidatedEventBody, MemoryEventBody
 
 
 class DebugState(str, Enum):
@@ -291,6 +294,59 @@ class ModuleInfo:
 
 
 @dataclass
+class LoadedSource:
+    """Loaded source file known to the debug adapter."""
+    name: str | None = None
+    path: str | None = None
+    source_reference: int | None = None
+    origin: str | None = None
+    presentation_hint: str | None = None
+    adapter_data: Any | None = None
+
+    @classmethod
+    def from_source(cls, source: dict[str, Any]) -> LoadedSource:
+        return cls(
+            name=source.get("name"),
+            path=source.get("path"),
+            source_reference=source.get("sourceReference"),
+            origin=source.get("origin"),
+            presentation_hint=source.get("presentationHint"),
+            adapter_data=source.get("adapterData"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "path": self.path,
+            "sourceReference": self.source_reference,
+            "origin": self.origin,
+            "presentationHint": self.presentation_hint,
+            "adapterData": self.adapter_data,
+        }
+
+
+@dataclass
+class ProgressEntry:
+    """Active DAP progress operation."""
+    progress_id: str
+    title: str
+    message: str | None = None
+    percentage: float | None = None
+    cancellable: bool = False
+    started_at: float = field(default_factory=time.monotonic)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "progressId": self.progress_id,
+            "title": self.title,
+            "message": self.message,
+            "percentage": self.percentage,
+            "cancellable": self.cancellable,
+            "startedAt": self.started_at,
+        }
+
+
+@dataclass
 class StoppedSnapshot:
     """Snapshot of state when execution stops (or times out).
 
@@ -322,9 +378,13 @@ class SessionState:
     process_id: int | None = None
     process_name: str | None = None
     modules: list[ModuleInfo] = field(default_factory=list)
+    loaded_sources: dict[str, LoadedSource] = field(default_factory=dict)
+    active_progress: dict[str, ProgressEntry] = field(default_factory=dict)
     hit_counts: dict[tuple[str, int], int] = field(default_factory=dict)
     stop_description: str | None = None
     stop_text: str | None = None
+    last_invalidation: InvalidatedEventBody | None = None
+    last_memory_event: MemoryEventBody | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -339,6 +399,18 @@ class SessionState:
             "processId": self.process_id,
             "processName": self.process_name,
             "modules": [m.to_dict() for m in self.modules],
+            "loadedSources": {
+                key: value.to_dict() for key, value in self.loaded_sources.items()
+            },
+            "activeProgress": {
+                key: value.to_dict() for key, value in self.active_progress.items()
+            },
             "stopDescription": self.stop_description,
             "stopText": self.stop_text,
+            "lastInvalidation": (
+                self.last_invalidation.to_dict() if self.last_invalidation else None
+            ),
+            "lastMemoryEvent": (
+                self.last_memory_event.to_dict() if self.last_memory_event else None
+            ),
         }
