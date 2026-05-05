@@ -1560,6 +1560,63 @@ class SessionManager:
         """Get active adapter progress entries."""
         return [entry.to_dict() for entry in self._state.active_progress.values()]
 
+    async def get_loaded_sources(self) -> list[dict[str, Any]]:
+        """Get loaded sources from the adapter and refresh the live source view."""
+        response = await self._client.loaded_sources()
+        if response.success:
+            loaded: list[LoadedSource] = []
+            for raw_source in response.body.get("sources", []):
+                source = LoadedSource.from_source(raw_source)
+                self._state.loaded_sources[self._loaded_source_key(source)] = source
+                loaded.append(source)
+            return [source.to_dict() for source in loaded]
+        raise RuntimeError(response.message or "Failed to get loaded sources")
+
+    async def disassemble(
+        self,
+        memory_reference: str,
+        offset: int = 0,
+        instruction_offset: int = 0,
+        instruction_count: int = 64,
+        resolve_symbols: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Disassemble machine instructions from a DAP memory reference."""
+        if not memory_reference:
+            raise ValueError("memory_reference is required")
+        if instruction_count <= 0:
+            raise ValueError("instruction_count must be greater than 0")
+
+        response = await self._client.disassemble(
+            memory_reference,
+            offset=offset,
+            instruction_offset=instruction_offset,
+            instruction_count=instruction_count,
+            resolve_symbols=resolve_symbols,
+        )
+        if response.success:
+            return list(response.body.get("instructions", []))
+        raise RuntimeError(response.message or "Failed to disassemble memory")
+
+    async def get_locations(self, location_reference: int) -> dict[str, Any]:
+        """Resolve a DAP locationReference into source coordinates."""
+        if location_reference <= 0:
+            raise ValueError("location_reference must be greater than 0")
+
+        response = await self._client.locations(location_reference)
+        if response.success:
+            body = response.body
+            result = {
+                "source": body.get("source", {}),
+                "line": body.get("line"),
+                "column": body.get("column"),
+                "end_line": body.get("endLine"),
+                "end_column": body.get("endColumn"),
+            }
+            result["endLine"] = result["end_line"]
+            result["endColumn"] = result["end_column"]
+            return result
+        raise RuntimeError(response.message or "Failed to resolve location")
+
     async def read_memory(
         self,
         memory_reference: str,

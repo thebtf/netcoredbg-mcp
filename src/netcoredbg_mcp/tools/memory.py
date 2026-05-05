@@ -37,6 +37,8 @@ def register_memory_tools(
         Capability-gated: current netcoredbg builds usually return an unsupported
         error unless they advertise supportsReadMemoryRequest.
 
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
+
         Args:
             memory_reference: DAP memoryReference from a variable or stack frame
             offset: Byte offset from the memory reference
@@ -74,6 +76,8 @@ def register_memory_tools(
         DESTRUCTIVE: this mutates debuggee memory and can corrupt process state.
         Capability-gated: current netcoredbg builds usually return an unsupported
         error unless they advertise supportsWriteMemoryRequest.
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
 
         Args:
             memory_reference: DAP memoryReference from a variable or stack frame

@@ -119,11 +119,13 @@ def test_get_progress_returns_response_shape():
 
     assert progress == [{
         "progressId": "p1",
+        "progress_id": "p1",
         "title": "Loading",
         "message": None,
         "percentage": 25.0,
         "cancellable": False,
         "startedAt": progress[0]["startedAt"],
+        "started_at": progress[0]["started_at"],
     }]
 
 
@@ -144,3 +146,5 @@ async def test_get_progress_tool_response():
 
     assert response["data"]["count"] == 1
     assert response["data"]["progress"][0]["progressId"] == "p1"
+    assert response["data"]["progress"][0]["progress_id"] == "p1"
+    assert "started_at" in response["data"]["progress"][0]

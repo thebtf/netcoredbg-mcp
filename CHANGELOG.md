@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- CR-002 DAP coverage expansion for v0.12.0: event coverage now includes the
+  7 previously unhandled DAP events, 11 typed event body dataclasses, WARN
+  logging for unhandled future events, `DebuggerBackend` capability scaffolding,
+  progress tracking via `get_progress`, memory inspection via `read_memory` and
+  `write_memory`, inspection surfaces for `get_loaded_sources`, `disassemble`,
+  and `get_locations`, advertised `supportsProgressReporting` and
+  `supportsMemoryReferences`, and a `dap-escape-hatch` prompt documenting 12
+  unwrapped DAP commands reachable through lower-level `send_request` usage.
+
 ### Fixed
 - Tracepoints in C# `async` methods (compiler-generated `MoveNext()` state
   machine frames) silently behaved as stopping breakpoints. Root cause: DAP

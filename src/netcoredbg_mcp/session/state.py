@@ -338,11 +338,13 @@ class ProgressEntry:
     def to_dict(self) -> dict[str, Any]:
         return {
             "progressId": self.progress_id,
+            "progress_id": self.progress_id,
             "title": self.title,
             "message": self.message,
             "percentage": self.percentage,
             "cancellable": self.cancellable,
             "startedAt": self.started_at,
+            "started_at": self.started_at,
         }
 
 

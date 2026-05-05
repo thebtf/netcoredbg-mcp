@@ -448,6 +448,37 @@ class DAPClient:
             },
         )
 
+    async def loaded_sources(self) -> DAPResponse:
+        """Get all sources currently loaded by the debugged process."""
+        return await self.send_request(Commands.LOADED_SOURCES)
+
+    async def disassemble(
+        self,
+        memory_reference: str,
+        offset: int = 0,
+        instruction_offset: int = 0,
+        instruction_count: int = 64,
+        resolve_symbols: bool = True,
+    ) -> DAPResponse:
+        """Disassemble instructions from a memory reference."""
+        return await self.send_request(
+            Commands.DISASSEMBLE,
+            {
+                "memoryReference": memory_reference,
+                "offset": offset,
+                "instructionOffset": instruction_offset,
+                "instructionCount": instruction_count,
+                "resolveSymbols": resolve_symbols,
+            },
+        )
+
+    async def locations(self, location_reference: int) -> DAPResponse:
+        """Resolve a DAP locationReference into source coordinates."""
+        return await self.send_request(
+            Commands.LOCATIONS,
+            {"locationReference": location_reference},
+        )
+
     async def evaluate(
         self, expression: str, frame_id: int | None = None, context: str = "watch"
     ) -> DAPResponse:

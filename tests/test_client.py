@@ -453,6 +453,69 @@ class TestDAPClientVariableInspection:
         }
 
     @pytest.mark.asyncio
+    async def test_loaded_sources_request(self):
+        """Test loadedSources request."""
+        client = DAPClient("/path")
+
+        captured_args = {}
+        async def mock_send(command, arguments=None, timeout=30.0):
+            captured_args["command"] = command
+            captured_args["arguments"] = arguments
+            return DAPResponse(seq=1, request_seq=1, success=True, command=command)
+
+        client.send_request = mock_send
+        await client.loaded_sources()
+
+        assert captured_args["command"] == "loadedSources"
+        assert captured_args["arguments"] is None
+
+    @pytest.mark.asyncio
+    async def test_disassemble_request(self):
+        """Test disassemble request."""
+        client = DAPClient("/path")
+
+        captured_args = {}
+        async def mock_send(command, arguments=None, timeout=30.0):
+            captured_args["command"] = command
+            captured_args["arguments"] = arguments
+            return DAPResponse(seq=1, request_seq=1, success=True, command=command)
+
+        client.send_request = mock_send
+        await client.disassemble(
+            "0x1234",
+            offset=4,
+            instruction_offset=-2,
+            instruction_count=8,
+            resolve_symbols=False,
+        )
+
+        assert captured_args["command"] == "disassemble"
+        assert captured_args["arguments"] == {
+            "memoryReference": "0x1234",
+            "offset": 4,
+            "instructionOffset": -2,
+            "instructionCount": 8,
+            "resolveSymbols": False,
+        }
+
+    @pytest.mark.asyncio
+    async def test_locations_request(self):
+        """Test locations request."""
+        client = DAPClient("/path")
+
+        captured_args = {}
+        async def mock_send(command, arguments=None, timeout=30.0):
+            captured_args["command"] = command
+            captured_args["arguments"] = arguments
+            return DAPResponse(seq=1, request_seq=1, success=True, command=command)
+
+        client.send_request = mock_send
+        await client.locations(42)
+
+        assert captured_args["command"] == "locations"
+        assert captured_args["arguments"] == {"locationReference": 42}
+
+    @pytest.mark.asyncio
     async def test_threads_request(self):
         """Test threads request."""
         client = DAPClient("/path")

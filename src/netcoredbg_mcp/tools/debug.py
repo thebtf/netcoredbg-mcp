@@ -2,14 +2,14 @@
 
 import asyncio
 import logging
-from typing import Any, Callable, Coroutine
+from collections.abc import Callable, Coroutine
+from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
 from ..mux import SessionOwnership
-from ..session import SessionManager
-
 from ..response import build_error_response, build_response
+from ..session import SessionManager
 from ..utils.app_type import detect_app_type
 
 logger = logging.getLogger(__name__)
@@ -77,6 +77,8 @@ def register_debug_tools(
         all warnings — they may reveal the issue.
 
         Use attach_debug only for already-running processes (e.g., ASP.NET services).
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
 
         Args:
             program: Path to the .NET executable or DLL to debug (auto-resolved)
@@ -217,6 +219,8 @@ def register_debug_tools(
         For normal debugging, ALWAYS use start_debug which has full functionality.
         If start_debug fails with build errors, fix the build - don't switch to attach.
 
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
+
         Args:
             process_id: PID of an already-running .NET process (NOT for normal debugging)
         """
@@ -240,7 +244,10 @@ def register_debug_tools(
 
     @mcp.tool(annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
     async def stop_debug(ctx: Context) -> dict:
-        """Stop the current debug session."""
+        """Stop the current debug session.
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
+        """
         try:
             access_error = check_session_access(ctx)
             if access_error:
@@ -259,6 +266,8 @@ def register_debug_tools(
 
         Stops the current session, optionally rebuilds, and relaunches.
         Use this after code changes to debug the updated version.
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
 
         Args:
             rebuild: Whether to rebuild before restarting (default: True)
@@ -310,6 +319,8 @@ def register_debug_tools(
 
         IMPORTANT: While waiting, the program is RUNNING — do not call
         get_variables or get_call_stack until this tool returns with state=stopped.
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
         """
         access_error = check_session_access(ctx)
         if access_error:
@@ -328,6 +339,8 @@ def register_debug_tools(
 
         Unlike continue/step tools, this returns immediately after sending
         the pause command — it does not wait for a stopped event.
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
         """
         try:
             access_error = check_session_access(ctx)
@@ -358,6 +371,8 @@ def register_debug_tools(
 
         IMPORTANT: After this returns with state=stopped, inspect variables
         at the new location before deciding the next action.
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
         """
         access_error = check_session_access(ctx)
         if access_error:
@@ -380,6 +395,8 @@ def register_debug_tools(
 
         Args:
             frame_id: Stack frame ID (uses current frame if omitted)
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
         """
         try:
             access_error = check_session_access(ctx)
@@ -413,6 +430,8 @@ def register_debug_tools(
         Args:
             thread_id: Thread to step (uses current thread if omitted)
             target_id: Specific step-in target ID from get_step_in_targets
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
         """
         access_error = check_session_access(ctx)
         if access_error:
@@ -430,6 +449,8 @@ def register_debug_tools(
 
         Continues execution until the current function returns, then stops
         at the caller. Use this to exit a function you stepped into.
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
         """
         access_error = check_session_access(ctx)
         if access_error:
@@ -450,6 +471,8 @@ def register_debug_tools(
         IMPORTANT: Always check state before asking user to interact with the app GUI!
         If the app is paused at a breakpoint, the user cannot interact with UI.
         Call continue_execution first if state shows stopped/paused.
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
         """
         try:
             return build_response(
@@ -467,6 +490,8 @@ def register_debug_tools(
         forced disconnect if adapter doesn't support terminate.
 
         Use this instead of stop_debug when you want a graceful exit.
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
         """
         try:
             access_error = check_session_access(ctx)
