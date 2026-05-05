@@ -199,7 +199,7 @@ pip install --upgrade netcoredbg-mcp
 resolved project root and apply its environment to the debuggee launch. The build
 process environment is unchanged.
 
-```jsonc
+```json
 {
   "defaultProfile": "default",
   "profiles": {

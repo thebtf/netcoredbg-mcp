@@ -143,27 +143,35 @@ def _profile_env(profile_data: Mapping[str, Any]) -> dict[str, EnvValue]:
     raw_env = profile_data.get("env", {})
     if not isinstance(raw_env, dict):
         raise LaunchProfileError("env must be an object")
-
-    env: dict[str, EnvValue] = {}
-    for name, value in raw_env.items():
-        if not isinstance(name, str):
-            raise LaunchProfileError("env variable names must be strings")
-        if value is not None and not isinstance(value, str):
-            raise LaunchProfileError(f"env.{name} must be string or null")
-        env[name] = value
-    return env
+    return _parse_env_dict(
+        raw_env,
+        name_error_prefix="env",
+        value_error_prefix="env",
+    )
 
 
 def _validate_explicit_env(explicit_env: Mapping[str, EnvValue] | None) -> dict[str, EnvValue]:
     if explicit_env is None:
         return {}
+    return _parse_env_dict(
+        explicit_env,
+        name_error_prefix="Explicit env",
+        value_error_prefix="Explicit env",
+    )
 
+
+def _parse_env_dict(
+    raw_env: Mapping[Any, Any],
+    *,
+    name_error_prefix: str,
+    value_error_prefix: str,
+) -> dict[str, EnvValue]:
     env: dict[str, EnvValue] = {}
-    for name, value in explicit_env.items():
+    for name, value in raw_env.items():
         if not isinstance(name, str):
-            raise LaunchProfileError("Explicit env variable names must be strings")
+            raise LaunchProfileError(f"{name_error_prefix} variable names must be strings")
         if value is not None and not isinstance(value, str):
-            raise LaunchProfileError(f"Explicit env.{name} must be string or null")
+            raise LaunchProfileError(f"{value_error_prefix}.{name} must be string or null")
         env[name] = value
     return env
 
