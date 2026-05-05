@@ -655,7 +655,7 @@ async def test_multi_window_envelope():
     This reproduces the bug path from engram #7 (modal dialogs are sibling
     top-level windows, not descendants) using Form.Show() instead of
     ShowDialog() to avoid WinForms modal-vs-InvokePattern blocking quirks.
-    The novascript WPF scenario uses ShowDialog() directly but gets the
+    The sampleapp WPF scenario uses ShowDialog() directly but gets the
     same UIA representation (sibling top-level window), which this test
     exercises faithfully.
     """

@@ -1,12 +1,13 @@
 """Tests for DAP client."""
 
 import asyncio
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from netcoredbg_mcp.dap.client import DAPClient
-from netcoredbg_mcp.dap.protocol import DAPEvent, DAPResponse
+from netcoredbg_mcp.dap.protocol import Commands, DAPEvent, DAPRequest, DAPResponse
 
 
 class TestDAPClientInit:
@@ -234,6 +235,64 @@ class TestDAPClientRequestBuilding:
         assert captured_args["arguments"]["cwd"] == "/test"
         assert captured_args["arguments"]["args"] == ["--arg1"]
         assert captured_args["arguments"]["stopAtEntry"] is True
+
+    @pytest.mark.asyncio
+    async def test_launch_request_preserves_env_null_values(self):
+        """Test launch env preserves DAP null removal semantics."""
+        client = DAPClient("/path")
+
+        captured_args = {}
+
+        async def mock_send(command, arguments=None, timeout=30.0):
+            captured_args["command"] = command
+            captured_args["arguments"] = arguments
+            return DAPResponse(seq=1, request_seq=1, success=True, command=command)
+
+        client.send_request = mock_send
+        await client.launch(
+            program="test.dll",
+            env={"APP_MODE": "debug", "REMOVE_ME": None},
+        )
+
+        assert captured_args["command"] == "launch"
+        assert captured_args["arguments"]["env"] == {
+            "APP_MODE": "debug",
+            "REMOVE_ME": None,
+        }
+
+    @pytest.mark.asyncio
+    async def test_send_redacts_launch_env_values_in_logs(self, caplog):
+        """Test launch request logging redacts env values without changing the request."""
+
+        class FakeStdin:
+            def __init__(self):
+                self.data = b""
+
+            def write(self, data):
+                self.data += data
+
+            async def drain(self):
+                return None
+
+        client = DAPClient("/path")
+        client._process = MagicMock()
+        client._process.stdin = FakeStdin()
+        request = DAPRequest(
+            seq=1,
+            command=Commands.LAUNCH,
+            arguments={
+                "program": "test.dll",
+                "env": {"APP_SECRET": "secret-value", "REMOVE_ME": None},
+            },
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="netcoredbg_mcp.dap.client"):
+            await client._send(request)
+
+        assert "secret-value" not in caplog.text
+        assert "'APP_SECRET': '<redacted>'" in caplog.text
+        assert "'REMOVE_ME': '<redacted>'" in caplog.text
+        assert request.arguments["env"] == {"APP_SECRET": "secret-value", "REMOVE_ME": None}
 
     @pytest.mark.asyncio
     async def test_set_breakpoints_request_format(self):

@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching. Now both lines are tracked (`line` + `dap_line`) and matching
   works for either. `add_tracepoint` and `list_breakpoints` responses now
   expose `dap_line` when the DAP adapter adjusted the line. Fixes engram
-  cross-project issue #96 (blocker for novascript Phase 2).
+  cross-project issue #96 (blocker for sampleapp Phase 2).
 - `remove_breakpoint(line=requested)` previously returned `{removed: false}`
   after DAP adjusted the breakpoint line. `Breakpoint.line` now keeps the
   user-requested identity and removal works as expected. When called with
