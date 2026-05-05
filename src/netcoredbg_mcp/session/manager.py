@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import logging
 import os
 import time
@@ -1553,6 +1555,61 @@ class SessionManager:
                 for v in response.body.get("variables", [])
             ]
         return []
+
+    def get_progress(self) -> list[dict[str, Any]]:
+        """Get active adapter progress entries."""
+        return [entry.to_dict() for entry in self._state.active_progress.values()]
+
+    async def read_memory(
+        self,
+        memory_reference: str,
+        offset: int = 0,
+        count: int = 0,
+    ) -> dict[str, Any]:
+        """Read bytes from a DAP memory reference."""
+        if not memory_reference:
+            raise ValueError("memory_reference is required")
+        if count < 0:
+            raise ValueError("count must be greater than or equal to 0")
+        if count == 0:
+            return {"address": "", "unreadable_bytes": 0, "data": ""}
+
+        response = await self._client.read_memory(memory_reference, offset=offset, count=count)
+        if response.success:
+            return {
+                "address": response.body.get("address", ""),
+                "unreadable_bytes": response.body.get("unreadableBytes", 0),
+                "data": response.body.get("data", ""),
+            }
+        raise RuntimeError(response.message or "Failed to read memory")
+
+    async def write_memory(
+        self,
+        memory_reference: str,
+        data: str,
+        offset: int = 0,
+        allow_partial: bool = False,
+    ) -> dict[str, Any]:
+        """Write base64-encoded bytes to a DAP memory reference."""
+        if not memory_reference:
+            raise ValueError("memory_reference is required")
+        try:
+            base64.b64decode(data, validate=True)
+        except (binascii.Error, ValueError) as e:
+            raise ValueError("data must be valid base64") from e
+
+        response = await self._client.write_memory(
+            memory_reference,
+            data,
+            offset=offset,
+            allow_partial=allow_partial,
+        )
+        if response.success:
+            return {
+                "bytes_written": response.body.get("bytesWritten", 0),
+                "offset": response.body.get("offset", offset),
+            }
+        raise RuntimeError(response.message or "Failed to write memory")
 
     async def evaluate(
         self, expression: str, frame_id: int | None = None, context: str = "watch"

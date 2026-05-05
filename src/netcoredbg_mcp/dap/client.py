@@ -260,7 +260,8 @@ class DAPClient:
                 "supportsVariableType": True,
                 "supportsVariablePaging": False,
                 "supportsRunInTerminalRequest": False,
-                "supportsProgressReporting": False,
+                "supportsProgressReporting": True,
+                "supportsMemoryReferences": True,
             },
         )
         if response.success:
@@ -412,6 +413,40 @@ class DAPClient:
         if count is not None:
             args["count"] = count
         return await self.send_request(Commands.VARIABLES, args)
+
+    async def read_memory(
+        self,
+        memory_reference: str,
+        offset: int = 0,
+        count: int = 0,
+    ) -> DAPResponse:
+        """Read bytes from a memory reference."""
+        return await self.send_request(
+            Commands.READ_MEMORY,
+            {
+                "memoryReference": memory_reference,
+                "offset": offset,
+                "count": count,
+            },
+        )
+
+    async def write_memory(
+        self,
+        memory_reference: str,
+        data: str,
+        offset: int = 0,
+        allow_partial: bool = False,
+    ) -> DAPResponse:
+        """Write base64-encoded bytes to a memory reference."""
+        return await self.send_request(
+            Commands.WRITE_MEMORY,
+            {
+                "memoryReference": memory_reference,
+                "offset": offset,
+                "data": data,
+                "allowPartial": allow_partial,
+            },
+        )
 
     async def evaluate(
         self, expression: str, frame_id: int | None = None, context: str = "watch"

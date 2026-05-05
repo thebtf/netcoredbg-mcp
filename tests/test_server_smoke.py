@@ -53,6 +53,7 @@ class TestServerSmoke:
             "add_breakpoint", "get_call_stack", "get_variables",
             "ui_take_screenshot", "ui_take_annotated_screenshot",
             "cleanup_processes", "restart_debug",
+            "get_progress", "read_memory", "write_memory",
         ]
         for name in critical:
             assert name in tool_names, f"Critical tool '{name}' missing from server"

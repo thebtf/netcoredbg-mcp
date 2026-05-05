@@ -273,6 +273,26 @@ def register_inspection_tools(
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
+    @mcp.tool(annotations=ToolAnnotations(
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=False,
+    ))
+    async def get_progress() -> dict:
+        """List active debugger progress operations.
+
+        Poll this during long adapter operations to see current progressId,
+        title, message, percentage, cancellability, and start timestamp.
+        """
+        try:
+            progress = session.get_progress()
+            return build_response(
+                data={"progress": progress, "count": len(progress)},
+                state=session.state.state,
+            )
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True, openWorldHint=False))
     async def quick_evaluate(expression: str, frame_id: int | None = None) -> dict:
         """Evaluate an expression while the program is running (atomic pause-eval-resume).

@@ -236,6 +236,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
     from .tools.debug import register_debug_tools
     from .tools.breakpoints import register_breakpoint_tools
     from .tools.inspection import register_inspection_tools
+    from .tools.memory import register_memory_tools
     from .tools.output import register_output_tools
     from .tools.ui import register_ui_tools
     from .tools.process import register_process_tools
@@ -260,6 +261,12 @@ def create_server(project_path: str | None = None) -> FastMCP:
     )
 
     register_inspection_tools(
+        mcp=mcp,
+        session=session,
+        check_session_access=_check_session_access,
+    )
+
+    register_memory_tools(
         mcp=mcp,
         session=session,
         check_session_access=_check_session_access,
