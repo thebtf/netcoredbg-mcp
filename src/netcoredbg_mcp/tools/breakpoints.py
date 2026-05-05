@@ -1,13 +1,13 @@
 """Breakpoint management tools."""
 
 import logging
-from typing import Any, Callable, Coroutine
+from collections.abc import Callable, Coroutine
+from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from ..session import SessionManager
-
 from ..response import build_error_response, build_response
+from ..session import SessionManager
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +39,8 @@ def register_breakpoint_tools(
           AFTER the UI is fully loaded. Otherwise the app may hang during initialization.
         - When debugging UI issues: wait for app to be fully interactive before setting
           breakpoints in event handlers.
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
 
         Args:
             file: Absolute path to source file
@@ -72,7 +74,10 @@ def register_breakpoint_tools(
 
     @mcp.tool(annotations=ToolAnnotations(idempotentHint=True, openWorldHint=False))
     async def remove_breakpoint(ctx: Context, file: str, line: int) -> dict:
-        """Remove a breakpoint from a specific line."""
+        """Remove a breakpoint from a specific line.
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
+        """
         try:
             access_error = check_session_access(ctx)
             if access_error:
@@ -111,7 +116,10 @@ def register_breakpoint_tools(
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def list_breakpoints(ctx: Context, file: str | None = None) -> dict:
-        """List all breakpoints or breakpoints in a specific file."""
+        """List all breakpoints or breakpoints in a specific file.
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
+        """
         try:
             def _bp_dict(file_path: str, bp) -> dict:
                 norm = session.breakpoints._normalize_path(file_path)
@@ -145,7 +153,10 @@ def register_breakpoint_tools(
 
     @mcp.tool(annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
     async def clear_breakpoints(ctx: Context, file: str | None = None) -> dict:
-        """Clear breakpoints from a file or all files."""
+        """Clear breakpoints from a file or all files.
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
+        """
         try:
             access_error = check_session_access(ctx)
             if access_error:
@@ -177,6 +188,8 @@ def register_breakpoint_tools(
 
         Breaks when the named function is entered. This is useful when you know
         the method name but not the exact line number.
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
 
         Args:
             function_name: Full or partial function name to break on
@@ -212,6 +225,8 @@ def register_breakpoint_tools(
         - "user-unhandled": Break on exceptions not handled in user code
 
         Pass an empty list to disable all exception breakpoints.
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
 
         Args:
             filters: List of exception filter names. Pass [] to disable.

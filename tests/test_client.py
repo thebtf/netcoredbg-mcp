@@ -62,6 +62,32 @@ class TestDAPClientProperties:
 
         assert client.is_running
 
+    def test_update_capabilities_shallow_merges_delta(self):
+        """Capabilities event deltas merge through the public client API."""
+        client = DAPClient("/path")
+        client._capabilities = {
+            "supportsDisassembleRequest": False,
+            "supportsStepInTargetsRequest": True,
+        }
+
+        added, changed, total_before, total_after = client.update_capabilities({
+            "supportsDisassembleRequest": True,
+            "supportsLoadedSourcesRequest": True,
+        })
+
+        assert added == ["supportsLoadedSourcesRequest"]
+        assert changed == [
+            "supportsDisassembleRequest",
+            "supportsLoadedSourcesRequest",
+        ]
+        assert total_before == 2
+        assert total_after == 3
+        assert client.capabilities == {
+            "supportsDisassembleRequest": True,
+            "supportsStepInTargetsRequest": True,
+            "supportsLoadedSourcesRequest": True,
+        }
+
 
 class TestDAPClientEventHandlers:
     """Tests for event handler registration."""
@@ -181,6 +207,8 @@ class TestDAPClientRequestBuilding:
         assert "adapterID" in captured_args["arguments"]
         assert captured_args["arguments"]["adapterID"] == "coreclr"
         assert captured_args["arguments"]["clientID"] == "netcoredbg-mcp"
+        assert captured_args["arguments"]["supportsProgressReporting"] is True
+        assert captured_args["arguments"]["supportsMemoryReferences"] is True
 
     @pytest.mark.asyncio
     async def test_launch_request_format(self):
@@ -406,6 +434,112 @@ class TestDAPClientVariableInspection:
 
         assert captured_args["command"] == "variables"
         assert captured_args["arguments"]["variablesReference"] == 1
+
+    @pytest.mark.asyncio
+    async def test_read_memory_request(self):
+        """Test readMemory request."""
+        client = DAPClient("/path")
+
+        captured_args = {}
+        async def mock_send(command, arguments=None, timeout=30.0):
+            captured_args["command"] = command
+            captured_args["arguments"] = arguments
+            return DAPResponse(seq=1, request_seq=1, success=True, command=command)
+
+        client.send_request = mock_send
+        await client.read_memory("0x1234", offset=4, count=16)
+
+        assert captured_args["command"] == "readMemory"
+        assert captured_args["arguments"] == {
+            "memoryReference": "0x1234",
+            "offset": 4,
+            "count": 16,
+        }
+
+    @pytest.mark.asyncio
+    async def test_write_memory_request(self):
+        """Test writeMemory request."""
+        client = DAPClient("/path")
+
+        captured_args = {}
+        async def mock_send(command, arguments=None, timeout=30.0):
+            captured_args["command"] = command
+            captured_args["arguments"] = arguments
+            return DAPResponse(seq=1, request_seq=1, success=True, command=command)
+
+        client.send_request = mock_send
+        await client.write_memory("0x1234", "AQID", offset=2, allow_partial=True)
+
+        assert captured_args["command"] == "writeMemory"
+        assert captured_args["arguments"] == {
+            "memoryReference": "0x1234",
+            "offset": 2,
+            "data": "AQID",
+            "allowPartial": True,
+        }
+
+    @pytest.mark.asyncio
+    async def test_loaded_sources_request(self):
+        """Test loadedSources request."""
+        client = DAPClient("/path")
+
+        captured_args = {}
+        async def mock_send(command, arguments=None, timeout=30.0):
+            captured_args["command"] = command
+            captured_args["arguments"] = arguments
+            return DAPResponse(seq=1, request_seq=1, success=True, command=command)
+
+        client.send_request = mock_send
+        await client.loaded_sources()
+
+        assert captured_args["command"] == "loadedSources"
+        assert captured_args["arguments"] is None
+
+    @pytest.mark.asyncio
+    async def test_disassemble_request(self):
+        """Test disassemble request."""
+        client = DAPClient("/path")
+
+        captured_args = {}
+        async def mock_send(command, arguments=None, timeout=30.0):
+            captured_args["command"] = command
+            captured_args["arguments"] = arguments
+            return DAPResponse(seq=1, request_seq=1, success=True, command=command)
+
+        client.send_request = mock_send
+        await client.disassemble(
+            "0x1234",
+            offset=4,
+            instruction_offset=-2,
+            instruction_count=8,
+            resolve_symbols=False,
+        )
+
+        assert captured_args["command"] == "disassemble"
+        assert captured_args["arguments"] == {
+            "memoryReference": "0x1234",
+            "offset": 4,
+            "instructionOffset": -2,
+            "instructionCount": 8,
+            "resolveSymbols": False,
+        }
+
+    @pytest.mark.asyncio
+    async def test_locations_request(self):
+        """Test locations request."""
+        client = DAPClient("/path")
+
+        captured_args = {}
+        async def mock_send(command, arguments=None, timeout=30.0):
+            captured_args["command"] = command
+            captured_args["arguments"] = arguments
+            return DAPResponse(seq=1, request_seq=1, success=True, command=command)
+
+        client.send_request = mock_send
+        await client.locations(42)
+
+        assert captured_args["command"] == "locations"
+        assert captured_args["arguments"] == {"locationReference": 42}
 
     @pytest.mark.asyncio
     async def test_threads_request(self):

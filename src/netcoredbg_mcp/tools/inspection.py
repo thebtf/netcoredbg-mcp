@@ -3,13 +3,14 @@
 import asyncio
 import logging
 import os
-from typing import Any, Callable, Coroutine
+from collections.abc import Callable
+from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from ..session import SessionManager
-
+from ..backends import NetcoredbgBackend
 from ..response import build_error_response, build_response
+from ..session import SessionManager
 from ..utils.source import read_source_context
 
 logger = logging.getLogger(__name__)
@@ -85,7 +86,10 @@ def register_inspection_tools(
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
     async def get_threads() -> dict:
-        """Get all threads in the debugged process."""
+        """Get all threads in the debugged process.
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
+        """
         try:
             threads = await session.get_threads()
             return build_response(
@@ -104,6 +108,8 @@ def register_inspection_tools(
         Diagnostic: Set NETCOREDBG_STACKTRACE_DELAY_MS env var to add delay before
         stackTrace request. This helps diagnose timing issues with ICorDebugThread3.
         Example: NETCOREDBG_STACKTRACE_DELAY_MS=300
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
         """
         try:
             # Diagnostic test: configurable delay before stackTrace
@@ -148,6 +154,8 @@ def register_inspection_tools(
         """Get variable scopes for a stack frame.
 
         State: STOPPED required. Call get_call_stack() first to get frame_id. Returns variables_reference for get_variables().
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
         """
         try:
             scopes = await session.get_scopes(frame_id)
@@ -182,6 +190,8 @@ def register_inspection_tools(
             filter: Filter to "indexed" (array elements) or "named" (properties only)
             start: Index of first variable to fetch (for paging)
             count: Maximum number of variables to return (for paging)
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
         """
         try:
             variables = await session.get_variables(
@@ -207,6 +217,8 @@ def register_inspection_tools(
         """Evaluate an expression in the current debug context.
 
         State: STOPPED required.
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
         """
         try:
             result = await session.evaluate(expression, frame_id)
@@ -232,6 +244,8 @@ def register_inspection_tools(
             variables_reference: Reference from get_scopes or get_variables
             name: Variable name to modify
             value: New value as a string expression
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
         """
         try:
             access_error = check_session_access(ctx)
@@ -248,6 +262,8 @@ def register_inspection_tools(
         """Get information about the current exception.
 
         State: STOPPED required (stopped on exception).
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
         """
         try:
             info = await session.get_exception_info(thread_id)
@@ -263,6 +279,8 @@ def register_inspection_tools(
         Useful for diagnosing assembly loading failures and version conflicts.
 
         Note: Data comes from module load/unload events tracked during the session.
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
         """
         try:
             modules = [m.to_dict() for m in session.state.modules]
@@ -270,6 +288,115 @@ def register_inspection_tools(
                 data={"modules": modules, "count": len(modules)},
                 state=session.state.state,
             )
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=False,
+    ))
+    async def get_progress() -> dict:
+        """List active debugger progress operations.
+
+        Poll this during long adapter operations to see current progressId,
+        title, message, percentage, cancellability, and start timestamp.
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
+        """
+        try:
+            progress = session.get_progress()
+            return build_response(
+                data={"progress": progress, "count": len(progress)},
+                state=session.state.state,
+            )
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    async def get_loaded_sources() -> dict:
+        """List sources currently loaded by the debug adapter.
+
+        Capability-gated on supportsLoadedSourcesRequest. Also refreshes the
+        session's live loadedSource event view on success.
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
+        """
+        try:
+            backend = NetcoredbgBackend(session.client)
+            if not backend.supports_loaded_sources():
+                return build_error_response(
+                    "Adapter does not support loadedSources. This feature requires "
+                    "supportsLoadedSourcesRequest: true at initialize. Current "
+                    "netcoredbg builds usually do not advertise it.",
+                    state=session.state.state,
+                )
+            sources = await session.get_loaded_sources()
+            return build_response(
+                data={"sources": sources, "count": len(sources)},
+                state=session.state.state,
+            )
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    async def disassemble(
+        memory_reference: str,
+        offset: int = 0,
+        instruction_offset: int = 0,
+        instruction_count: int = 64,
+        resolve_symbols: bool = True,
+    ) -> dict:
+        """Disassemble machine instructions around a memoryReference.
+
+        Capability-gated on supportsDisassembleRequest. Use a stack frame's
+        instructionPointerReference or an executable memoryReference from a variable.
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
+        """
+        try:
+            backend = NetcoredbgBackend(session.client)
+            if not backend.supports_disassemble():
+                return build_error_response(
+                    "Adapter does not support disassemble. This feature requires "
+                    "supportsDisassembleRequest: true; netcoredbg builds may need "
+                    "the --enable-disassembly build flag.",
+                    state=session.state.state,
+                )
+            instructions = await session.disassemble(
+                memory_reference,
+                offset=offset,
+                instruction_offset=instruction_offset,
+                instruction_count=instruction_count,
+                resolve_symbols=resolve_symbols,
+            )
+            return build_response(
+                data={"instructions": instructions},
+                state=session.state.state,
+            )
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    async def get_locations(location_reference: int) -> dict:
+        """Resolve a DAP locationReference into source coordinates.
+
+        Capability-gated on supportsLocationsRequest. A locationReference can be
+        returned by variables or stack frames in adapters that implement DAP 1.68+.
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
+        """
+        try:
+            backend = NetcoredbgBackend(session.client)
+            if not backend.supports_locations():
+                return build_error_response(
+                    "Adapter does not support locations. This feature requires "
+                    "supportsLocationsRequest: true at initialize. Current "
+                    "netcoredbg builds usually do not advertise it.",
+                    state=session.state.state,
+                )
+            location = await session.get_locations(location_reference)
+            return build_response(data=location, state=session.state.state)
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
@@ -285,6 +412,8 @@ def register_inspection_tools(
         Args:
             expression: Expression to evaluate (e.g., "myVariable", "list.Count")
             frame_id: Optional stack frame ID for evaluation context
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
         """
         try:
             result = await session.quick_evaluate(expression, frame_id)
@@ -317,6 +446,8 @@ def register_inspection_tools(
             max_frames: Maximum stack frames to return (default 10)
             include_variables_for_frames: Include locals for top N frames (default 1)
             max_inner_exceptions: Max inner exception chain depth (default 5)
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
         """
         try:
             result = await session.get_exception_context(
@@ -346,6 +477,8 @@ def register_inspection_tools(
         Args:
             include_variables: Include local variables for top frame (default True)
             include_output_tail: Include last N output lines (default 10, 0 to skip)
+
+        Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
         """
         try:
             result = await session.get_stop_context(

@@ -122,6 +122,19 @@ def register_prompts(mcp: FastMCP) -> None:
         plan = _build_scenario_plan(problem, app_type, file_hint)
         return [{"role": "user", "content": plan}]
 
+    # -- DAP escape hatch -------------------------------------------------
+
+    @mcp.prompt(
+        name="dap-escape-hatch",
+        description=(
+            "Unwrapped DAP command reference. Use when a specific DAP command "
+            "has no first-class MCP tool yet."
+        ),
+    )
+    def dap_escape_hatch() -> list[dict]:
+        """Reach DAP commands that are intentionally not wrapped yet."""
+        return [{"role": "user", "content": _DAP_ESCAPE_HATCH}]
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # Prompt content — separated for readability and testability
@@ -335,6 +348,46 @@ Subscribe to these for real-time updates (no polling needed):
 - debug://breakpoints — all active breakpoints (JSON)
 - debug://output — program stdout/stderr (text)
 - debug://threads — active threads (JSON, updates when stopped)
+"""
+
+
+_DAP_ESCAPE_HATCH = """\
+# DAP Escape Hatch
+
+Most debugger workflows should use the typed MCP tools first. When DAP exposes
+a command that netcoredbg-mcp has not wrapped yet, use the lower-level DAP
+client path and call `send_request(command, args)` with the command name and
+arguments from the DAP spec.
+
+## Unwrapped Commands
+
+- `cancel` — ask the adapter to cancel a long-running request.
+  Example: `send_request("cancel", {"requestId": 12})`
+- `restart` — restart the current debuggee when the adapter supports restart.
+  Example: `send_request("restart", {"arguments": {}})`
+- `restartFrame` — restart execution at a stack frame.
+  Example: `send_request("restartFrame", {"frameId": 42})`
+- `goto` — continue execution at a target returned by `gotoTargets`.
+  Example: `send_request("goto", {"threadId": 1, "targetId": 7})`
+- `gotoTargets` — list possible goto targets for a source location.
+  Example: `send_request("gotoTargets", {"source": {"path": "Program.cs"}, "line": 25})`
+- `stepBack` — step backwards when the adapter supports reverse execution.
+  Example: `send_request("stepBack", {"threadId": 1})`
+- `reverseContinue` — continue backwards until the adapter stops again.
+  Example: `send_request("reverseContinue", {"threadId": 1})`
+- `terminateThreads` — terminate selected threads.
+  Example: `send_request("terminateThreads", {"threadIds": [1, 2]})`
+- `setInstructionBreakpoints` — set breakpoints at instruction addresses.
+  Example: `send_request("setInstructionBreakpoints", {"breakpoints": []})`
+- `source` — fetch source contents by `sourceReference`.
+  Example: `send_request("source", {"sourceReference": 7})`
+- `completions` — request expression completions at a frame and cursor position.
+  Example: `send_request("completions", {"frameId": 42, "text": "obj.", "column": 5})`
+- `setExpression` — assign a new value to an expression.
+  Example: `send_request("setExpression", {"expression": "counter", "value": "10"})`
+
+Prefer adding a typed MCP wrapper when a command becomes common in agent
+workflows. The escape hatch is for rare or adapter-version-specific operations.
 """
 
 _DEBUG_GUI = """\
@@ -1225,7 +1278,7 @@ def _build_scenario_plan(problem: str, app_type: str, file_hint: str) -> str:
         steps.append("```\n")
 
     if app_type == "gui":
-        steps.append(f"## Step 4: Trigger the code path")
+        steps.append("## Step 4: Trigger the code path")
         steps.append("```")
         steps.append('ui_click(automation_id="<trigger_element>")')
         steps.append("# Or: ui_send_keys, ui_double_click, etc.")

@@ -42,6 +42,26 @@ class DAPClient:
         """Get the adapter capabilities from initialize response."""
         return dict(self._capabilities)
 
+    def update_capabilities(
+        self,
+        capabilities: dict[str, Any],
+    ) -> tuple[list[str], list[str], int, int]:
+        """Shallow-merge a capabilities event delta into adapter capabilities."""
+        current = dict(self._capabilities)
+        before_keys = set(current)
+        changed_keys = [
+            key for key, value in capabilities.items() if current.get(key) != value
+        ]
+        merged = {**current, **capabilities}
+        self._capabilities = merged
+        after_keys = set(merged)
+        return (
+            sorted(after_keys - before_keys),
+            sorted(changed_keys),
+            len(before_keys),
+            len(after_keys),
+        )
+
     def _find_netcoredbg(self) -> str:
         """Find netcoredbg executable.
 
@@ -227,6 +247,14 @@ class DAPClient:
             elif isinstance(message, DAPEvent):
                 logger.debug(f"<<< Event {message.event}: {message.body}")
                 handlers = self._event_handlers.get(message.event, [])
+                if not handlers:
+                    body_json = json.dumps(message.body, default=str)
+                    logger.warning(
+                        "Unhandled DAP event '%s' dropped: body_size=%d body_preview=%s",
+                        message.event,
+                        len(body_json.encode("utf-8")),
+                        body_json[:200],
+                    )
                 for handler in handlers:
                     try:
                         handler(message)
@@ -252,7 +280,8 @@ class DAPClient:
                 "supportsVariableType": True,
                 "supportsVariablePaging": False,
                 "supportsRunInTerminalRequest": False,
-                "supportsProgressReporting": False,
+                "supportsProgressReporting": True,
+                "supportsMemoryReferences": True,
             },
         )
         if response.success:
@@ -404,6 +433,71 @@ class DAPClient:
         if count is not None:
             args["count"] = count
         return await self.send_request(Commands.VARIABLES, args)
+
+    async def read_memory(
+        self,
+        memory_reference: str,
+        offset: int = 0,
+        count: int = 0,
+    ) -> DAPResponse:
+        """Read bytes from a memory reference."""
+        return await self.send_request(
+            Commands.READ_MEMORY,
+            {
+                "memoryReference": memory_reference,
+                "offset": offset,
+                "count": count,
+            },
+        )
+
+    async def write_memory(
+        self,
+        memory_reference: str,
+        data: str,
+        offset: int = 0,
+        allow_partial: bool = False,
+    ) -> DAPResponse:
+        """Write base64-encoded bytes to a memory reference."""
+        return await self.send_request(
+            Commands.WRITE_MEMORY,
+            {
+                "memoryReference": memory_reference,
+                "offset": offset,
+                "data": data,
+                "allowPartial": allow_partial,
+            },
+        )
+
+    async def loaded_sources(self) -> DAPResponse:
+        """Get all sources currently loaded by the debugged process."""
+        return await self.send_request(Commands.LOADED_SOURCES)
+
+    async def disassemble(
+        self,
+        memory_reference: str,
+        offset: int = 0,
+        instruction_offset: int = 0,
+        instruction_count: int = 64,
+        resolve_symbols: bool = True,
+    ) -> DAPResponse:
+        """Disassemble instructions from a memory reference."""
+        return await self.send_request(
+            Commands.DISASSEMBLE,
+            {
+                "memoryReference": memory_reference,
+                "offset": offset,
+                "instructionOffset": instruction_offset,
+                "instructionCount": instruction_count,
+                "resolveSymbols": resolve_symbols,
+            },
+        )
+
+    async def locations(self, location_reference: int) -> DAPResponse:
+        """Resolve a DAP locationReference into source coordinates."""
+        return await self.send_request(
+            Commands.LOCATIONS,
+            {"locationReference": location_reference},
+        )
 
     async def evaluate(
         self, expression: str, frame_id: int | None = None, context: str = "watch"

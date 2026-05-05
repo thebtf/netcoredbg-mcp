@@ -13,30 +13,33 @@ from .session.state import DebugState
 # Valid actions per state — the agent should only call these tools in the given state.
 VALID_ACTIONS: dict[str, list[str]] = {
     DebugState.IDLE.value: [
-        "start_debug", "attach_debug",
+        "start_debug", "attach_debug", "get_progress",
     ],
     DebugState.INITIALIZING.value: [
-        "get_debug_state", "stop_debug",
+        "get_debug_state", "get_progress", "stop_debug",
     ],
     DebugState.CONFIGURED.value: [
-        "get_debug_state", "stop_debug", "add_breakpoint", "add_function_breakpoint",
+        "get_debug_state", "get_progress", "stop_debug", "add_breakpoint",
+        "add_function_breakpoint", "get_loaded_sources",
     ],
     DebugState.RUNNING.value: [
         "pause_execution", "get_output", "get_output_tail", "search_output",
-        "get_debug_state", "stop_debug", "add_breakpoint", "add_function_breakpoint",
+        "get_debug_state", "get_progress", "stop_debug", "add_breakpoint",
+        "add_function_breakpoint", "get_loaded_sources",
     ],
     DebugState.STOPPED.value: [
         "get_call_stack", "get_scopes", "get_variables", "evaluate_expression",
         "get_exception_info", "step_over", "step_into", "step_out",
         "continue_execution", "add_breakpoint", "add_function_breakpoint",
         "remove_breakpoint", "clear_breakpoints", "list_breakpoints",
-        "set_variable", "stop_debug",
+        "set_variable", "get_progress", "read_memory", "write_memory", "stop_debug",
+        "get_loaded_sources", "disassemble", "get_locations",
         "ui_get_window_tree", "ui_find_element", "ui_click",
         "ui_send_keys", "ui_send_keys_focused", "ui_set_focus",
     ],
     DebugState.TERMINATED.value: [
         "get_output", "get_output_tail", "search_output",
-        "stop_debug", "start_debug",
+        "get_progress", "get_loaded_sources", "stop_debug", "start_debug",
     ],
 }
 

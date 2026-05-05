@@ -107,3 +107,46 @@ class TestModuleEvents:
         assert d["name"] == "MyApp.dll"
         assert d["isOptimized"] is True
         assert d["symbolStatus"] == "loaded"
+
+    @pytest.mark.asyncio
+    async def test_get_modules_returns_all_6_fields(self, manager):
+        """get_modules exposes the complete CR-002 module field set."""
+        from netcoredbg_mcp.session.state import ModuleInfo
+        from netcoredbg_mcp.tools.inspection import register_inspection_tools
+
+        class ToolRegistry:
+            def __init__(self):
+                self.tools = {}
+
+            def tool(self, *args, **kwargs):
+                def decorator(func):
+                    self.tools[func.__name__] = func
+                    return func
+                return decorator
+
+        manager.state.modules = [
+            ModuleInfo(
+                id=1,
+                name="MyApp.dll",
+                path="/app/MyApp.dll",
+                version="1.0.0",
+                is_optimized=False,
+                symbol_status="loaded",
+            ),
+            ModuleInfo(
+                id="System.Private.CoreLib",
+                name="System.Private.CoreLib.dll",
+                path="/shared/System.Private.CoreLib.dll",
+                version="8.0.0",
+                is_optimized=True,
+                symbol_status="symbols skipped",
+            ),
+        ]
+        registry = ToolRegistry()
+        register_inspection_tools(registry, manager, lambda ctx: None)
+
+        response = await registry.tools["get_modules"]()
+
+        required = {"id", "name", "path", "version", "isOptimized", "symbolStatus"}
+        for module in response["data"]["modules"]:
+            assert required <= set(module)

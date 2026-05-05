@@ -53,6 +53,7 @@ class TestServerSmoke:
             "add_breakpoint", "get_call_stack", "get_variables",
             "ui_take_screenshot", "ui_take_annotated_screenshot",
             "cleanup_processes", "restart_debug",
+            "get_progress", "read_memory", "write_memory",
         ]
         for name in critical:
             assert name in tool_names, f"Critical tool '{name}' missing from server"
@@ -66,9 +67,12 @@ class TestServerSmoke:
         prompts = await mcp.list_prompts()
 
         prompt_names = [p.name for p in prompts]
-        assert len(prompt_names) >= 5, f"Expected 5+ prompts, got {len(prompt_names)}"
+        assert len(prompt_names) >= 6, f"Expected 6+ prompts, got {len(prompt_names)}"
 
-        expected = ["debug", "debug-gui", "debug-exception", "investigate", "debug-scenario"]
+        expected = [
+            "debug", "debug-gui", "debug-exception", "investigate",
+            "debug-scenario", "dap-escape-hatch",
+        ]
         for name in expected:
             assert name in prompt_names, f"Prompt '{name}' missing from server"
 
@@ -100,6 +104,7 @@ class TestServerSmoke:
     def test_tool_annotations_present(self):
         """Tools must have ToolAnnotations set."""
         import asyncio
+
         from netcoredbg_mcp.server import create_server
 
         mcp = create_server()
