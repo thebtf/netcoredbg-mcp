@@ -156,7 +156,7 @@ def test_invalid_env_value_returns_clear_error(tmp_path):
         },
     )
 
-    with pytest.raises(LaunchProfileError, match="env.APP_MODE must be string or null"):
+    with pytest.raises(LaunchProfileError, match=r"env\.APP_MODE must be string or null"):
         resolve_launch_environment(project_root=tmp_path)
 
 

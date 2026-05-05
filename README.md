@@ -220,6 +220,13 @@ Precedence is deterministic:
 2. profile `env` values override inherited values.
 3. direct `start_debug(env={...})` values override the profile.
 
+`env` values set to `null` are passed through to DAP as explicit nulls to
+request variable removal/unset semantics where the adapter supports it. This
+applies at both override points: a profile can set an inherited variable to
+`null`, and a direct `start_debug(env={...})` value can set a profile variable to
+`null`. The `launch_environment` summary still reports only variable names and
+counts, never the removed value.
+
 Use `inherit` for sensitive values so secrets stay in the process environment
 instead of the profile file. The repository `.gitignore` excludes
 `.netcoredbg-mcp.launch.json` by default; commit a profile only when it contains
