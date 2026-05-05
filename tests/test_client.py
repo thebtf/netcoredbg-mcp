@@ -320,6 +320,30 @@ class TestDAPClientRequestBuilding:
         assert env["EXTRA"] == "1"
 
     @pytest.mark.asyncio
+    async def test_windows_launch_env_overrides_case_variant_path(self):
+        """Windows env overrides replace inherited keys regardless of casing."""
+        client = DAPClient("/path")
+
+        captured_args = {}
+
+        async def mock_send(command, arguments=None, timeout=30.0):
+            captured_args["arguments"] = arguments
+            return DAPResponse(seq=1, request_seq=1, success=True, command=command)
+
+        client.send_request = mock_send
+        with patch.dict("os.environ", {"Path": "base", "OTHER": "x"}, clear=True):
+            await client.launch(
+                program="test.dll",
+                cwd="/test",
+                env={"PATH": "debug", "EXTRA": "1"},
+            )
+
+        env = captured_args["arguments"]["env"]
+        assert env["PATH"] == "debug"
+        assert env["EXTRA"] == "1"
+        assert "Path" not in env
+
+    @pytest.mark.asyncio
     async def test_windows_launch_env_normalizes_alias_overrides(self):
         """Windows env aliases must not defeat explicit overrides by case/order."""
         client = DAPClient("/path")
