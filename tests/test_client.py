@@ -273,19 +273,20 @@ class TestDAPClientRequestBuilding:
             return DAPResponse(seq=1, request_seq=1, success=True, command=command)
 
         client.send_request = mock_send
-        with patch.dict(
-            "os.environ",
-            {
-                "WINDIR": r"C:\WINDOWS",
-                "SystemRoot": r"C:\WINDOWS",
-                "USERPROFILE": r"C:\Users\tester",
-                "PATH": r"C:\WINDOWS\system32",
-                "TEMP": r"C:\Temp",
-                "TMP": r"C:\Temp",
-            },
-            clear=True,
-        ):
-            await client.launch(program="test.dll", cwd="/test")
+        with patch("netcoredbg_mcp.dap.client.os.name", "nt"):
+            with patch.dict(
+                "os.environ",
+                {
+                    "WINDIR": r"C:\WINDOWS",
+                    "SystemRoot": r"C:\WINDOWS",
+                    "USERPROFILE": r"C:\Users\tester",
+                    "PATH": r"C:\WINDOWS\system32",
+                    "TEMP": r"C:\Temp",
+                    "TMP": r"C:\Temp",
+                },
+                clear=True,
+            ):
+                await client.launch(program="test.dll", cwd="/test")
 
         env = captured_args["arguments"]["env"]
         assert env["WINDIR"] == r"C:\WINDOWS"
@@ -331,12 +332,13 @@ class TestDAPClientRequestBuilding:
             return DAPResponse(seq=1, request_seq=1, success=True, command=command)
 
         client.send_request = mock_send
-        with patch.dict("os.environ", {"Path": "base", "OTHER": "x"}, clear=True):
-            await client.launch(
-                program="test.dll",
-                cwd="/test",
-                env={"PATH": "debug", "EXTRA": "1"},
-            )
+        with patch("netcoredbg_mcp.dap.client.os.name", "nt"):
+            with patch.dict("os.environ", {"Path": "base", "OTHER": "x"}, clear=True):
+                await client.launch(
+                    program="test.dll",
+                    cwd="/test",
+                    env={"PATH": "debug", "EXTRA": "1"},
+                )
 
         env = captured_args["arguments"]["env"]
         assert env["PATH"] == "debug"
@@ -355,15 +357,16 @@ class TestDAPClientRequestBuilding:
             return DAPResponse(seq=1, request_seq=1, success=True, command=command)
 
         client.send_request = mock_send
-        with patch.dict(
-            "os.environ",
-            {
-                "windir": r"C:\WINDOWS",
-                "SystemRoot": r"C:\WINDOWS",
-            },
-            clear=True,
-        ):
-            await client.launch(program="test.dll", env={"WINDIR": r"D:\Windows"})
+        with patch("netcoredbg_mcp.dap.client.os.name", "nt"):
+            with patch.dict(
+                "os.environ",
+                {
+                    "windir": r"C:\WINDOWS",
+                    "SystemRoot": r"C:\WINDOWS",
+                },
+                clear=True,
+            ):
+                await client.launch(program="test.dll", env={"WINDIR": r"D:\Windows"})
 
         env = captured_args["arguments"]["env"]
         assert env["WINDIR"] == r"D:\Windows"
@@ -383,22 +386,50 @@ class TestDAPClientRequestBuilding:
             return DAPResponse(seq=1, request_seq=1, success=True, command=command)
 
         client.send_request = mock_send
-        with patch.dict(
-            "os.environ",
-            {
-                "WINDIR": r"C:\WINDOWS",
-                "SystemRoot": r"C:\WINDOWS",
-            },
-            clear=True,
-        ):
-            await client.launch(
-                program="test.dll",
-                env={"WINDIR": None, "SystemRoot": None},
-            )
+        with patch("netcoredbg_mcp.dap.client.os.name", "nt"):
+            with patch.dict(
+                "os.environ",
+                {
+                    "WINDIR": r"C:\WINDOWS",
+                    "SystemRoot": r"C:\WINDOWS",
+                },
+                clear=True,
+            ):
+                await client.launch(
+                    program="test.dll",
+                    env={"WINDIR": None, "SystemRoot": None},
+                )
 
         env = captured_args["arguments"]["env"]
         assert env["WINDIR"] is None
         assert env["SYSTEMROOT"] is None
+
+    @pytest.mark.asyncio
+    async def test_windows_launch_env_preserves_empty_string_alias_overrides(self):
+        """Windows env alias repair must preserve explicit empty-string overrides."""
+        client = DAPClient("/path")
+
+        captured_args = {}
+
+        async def mock_send(command, arguments=None, timeout=30.0):
+            captured_args["arguments"] = arguments
+            return DAPResponse(seq=1, request_seq=1, success=True, command=command)
+
+        client.send_request = mock_send
+        with patch("netcoredbg_mcp.dap.client.os.name", "nt"):
+            with patch.dict(
+                "os.environ",
+                {
+                    "WINDIR": r"C:\WINDOWS",
+                    "SystemRoot": r"C:\WINDOWS",
+                },
+                clear=True,
+            ):
+                await client.launch(program="test.dll", env={"WINDIR": ""})
+
+        env = captured_args["arguments"]["env"]
+        assert env["WINDIR"] == ""
+        assert env["SYSTEMROOT"] == ""
 
     @pytest.mark.asyncio
     async def test_send_redacts_launch_env_values_in_logs(self, caplog):

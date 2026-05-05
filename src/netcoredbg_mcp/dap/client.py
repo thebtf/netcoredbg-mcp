@@ -93,8 +93,10 @@ def sync_windows_environment_alias_group(
         env,
         *(name for name in names if name in explicit_keys),
     )
-    value = explicit_value or first_env_value(env, *names)
-    if not value:
+    value = explicit_value
+    if value is None:
+        value = first_env_value(env, *names)
+    if value is None:
         return
 
     for name in names:
@@ -104,8 +106,8 @@ def sync_windows_environment_alias_group(
 
 def first_env_value(env: Mapping[str, str | None], *names: str) -> str | None:
     for name in names:
-        value = env.get(name)
-        if value:
+        if name in env and env[name] is not None:
+            value = env[name]
             return value
     return None
 
