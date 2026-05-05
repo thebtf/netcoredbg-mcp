@@ -988,7 +988,7 @@ class SessionManager:
         program: str,
         cwd: str | None = None,
         args: list[str] | None = None,
-        env: dict[str, str] | None = None,
+        env: dict[str, str | None] | None = None,
         stop_at_entry: bool = False,
         pre_build: bool = False,
         build_project: str | None = None,

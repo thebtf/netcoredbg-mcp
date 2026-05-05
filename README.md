@@ -193,6 +193,44 @@ pip install --upgrade netcoredbg-mcp
 
 ## Configuration
 
+### Project Launch Profiles
+
+`start_debug` can read a project-local `.netcoredbg-mcp.launch.json` file from the
+resolved project root and apply its environment to the debuggee launch. The build
+process environment is unchanged.
+
+```jsonc
+{
+  "defaultProfile": "default",
+  "profiles": {
+    "default": {
+      "env": {
+        "DOTNET_ENVIRONMENT": "Development",
+        "APP_MODE": "Debug"
+      },
+      "inherit": ["PATH"]
+    }
+  }
+}
+```
+
+Precedence is deterministic:
+
+1. `inherit` copies only explicitly named variables from the MCP server process.
+2. profile `env` values override inherited values.
+3. direct `start_debug(env={...})` values override the profile.
+
+Use `inherit` for sensitive values so secrets stay in the process environment
+instead of the profile file. The repository `.gitignore` excludes
+`.netcoredbg-mcp.launch.json` by default; commit a profile only when it contains
+non-secret, shareable values.
+
+When a profile or direct env is applied, the tool response includes a redacted
+`launch_environment` summary with source, profile, path, variable names, and
+count. Environment values are not returned and DAP launch logs redact `env`
+values. If no profile exists and no direct `env` is provided, launch behavior is
+unchanged.
+
 ### Environment Variable (Optional)
 
 > **Note:** After `netcoredbg-mcp --setup`, `NETCOREDBG_PATH` is no longer required.

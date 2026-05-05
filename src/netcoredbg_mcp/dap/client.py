@@ -21,6 +21,25 @@ logger = logging.getLogger(__name__)
 
 # Limits for security
 MAX_CONTENT_LENGTH = 10_000_000  # 10MB max DAP message size
+REDACTED_ENV_VALUE = "<redacted>"
+
+
+def format_request_arguments_for_log(
+    command: str,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Return request arguments safe for debug logging."""
+
+    if command != Commands.LAUNCH or "env" not in arguments:
+        return dict(arguments)
+
+    redacted = dict(arguments)
+    env = arguments["env"]
+    if isinstance(env, dict):
+        redacted["env"] = {name: REDACTED_ENV_VALUE for name in env}
+    else:
+        redacted["env"] = REDACTED_ENV_VALUE
+    return redacted
 
 
 class DAPClient:
@@ -173,7 +192,11 @@ class DAPClient:
             raise RuntimeError("Process not running")
 
         data = request.to_bytes()
-        logger.debug(f">>> {request.command}: {request.arguments}")
+        logger.debug(
+            ">>> %s: %s",
+            request.command,
+            format_request_arguments_for_log(request.command, request.arguments),
+        )
         self._process.stdin.write(data)
         await self._process.stdin.drain()
 
@@ -293,7 +316,7 @@ class DAPClient:
         program: str,
         cwd: str | None = None,
         args: list[str] | None = None,
-        env: dict[str, str] | None = None,
+        env: dict[str, str | None] | None = None,
         stop_at_entry: bool = False,
         just_my_code: bool = False,
     ) -> DAPResponse:

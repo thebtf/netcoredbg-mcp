@@ -7,6 +7,7 @@ from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
+from ..launch_profiles import resolve_launch_environment
 from ..mux import SessionOwnership
 from ..response import build_error_response, build_response
 from ..session import SessionManager
@@ -49,7 +50,8 @@ def register_debug_tools(
         program: str,
         cwd: str | None = None,
         args: list[str] | None = None,
-        env: dict[str, str] | None = None,
+        env: dict[str, str | None] | None = None,
+        launch_profile: str | None = None,
         stop_at_entry: bool = False,
         pre_build: bool = True,
         build_project: str | None = None,
@@ -85,6 +87,7 @@ def register_debug_tools(
             cwd: Working directory for the program
             args: Command line arguments
             env: Environment variables
+            launch_profile: Optional project launch profile name
             stop_at_entry: Stop at entry point
             pre_build: Build project before launching (default: True). Requires build_project.
             build_project: Path to .csproj file (required when pre_build=True)
@@ -99,6 +102,11 @@ def register_debug_tools(
             logger.debug("[start_debug] resolving project root...")
             await resolve_project_root(ctx, session)
             logger.debug(f"[start_debug] project root: {session.project_path}")
+            launch_environment = resolve_launch_environment(
+                project_root=session.project_path,
+                launch_profile=launch_profile,
+                explicit_env=env,
+            )
 
             # Validate pre_build requires build_project
             if pre_build and not build_project:
@@ -138,14 +146,14 @@ def register_debug_tools(
             # Build output streaming callback (timeout-protected)
             _notify_failed = False
             _line_count = 0
-            MAX_BUILD_LINES = 500
+            max_build_lines = 500
 
             async def on_build_output(line: str, stream: str) -> None:
                 nonlocal _notify_failed, _line_count
                 if _notify_failed:
                     return
                 _line_count += 1
-                if _line_count <= MAX_BUILD_LINES:
+                if _line_count <= max_build_lines:
                     coro = ctx.warning(line) if stream == "stderr" else ctx.info(line)
                     ok = await _safe_notify(coro)
                     if not ok:
@@ -154,9 +162,12 @@ def register_debug_tools(
                             "MCP notification timed out or failed, "
                             "suppressing further build output notifications"
                         )
-                elif _line_count == MAX_BUILD_LINES + 1:
+                elif _line_count == max_build_lines + 1:
                     ok = await _safe_notify(
-                        ctx.info(f"... ({_line_count}+ build lines, showing first {MAX_BUILD_LINES})")
+                        ctx.info(
+                            f"... ({_line_count}+ build lines, "
+                            f"showing first {max_build_lines})"
+                        )
                     )
                     if not ok:
                         _notify_failed = True
@@ -175,7 +186,7 @@ def register_debug_tools(
                 program=validated_program,
                 cwd=validated_cwd,
                 args=args,
-                env=env,
+                env=launch_environment.env,
                 stop_at_entry=stop_at_entry,
                 pre_build=pre_build,
                 build_project=validated_build_project,
@@ -188,6 +199,8 @@ def register_debug_tools(
             # Detect application type for agent hints
             app_type = detect_app_type(validated_program)
             data = {**result, "app_type": app_type}
+            if launch_environment.metadata is not None:
+                data["launch_environment"] = launch_environment.metadata
 
             message = None
             if app_type == "gui":
@@ -382,7 +395,13 @@ def register_debug_tools(
             ctx, session.step_over(thread_id), "step_over"
         )
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            idempotentHint=True,
+            openWorldHint=False,
+        )
+    )
     async def get_step_in_targets(
         ctx: Context, frame_id: int | None = None
     ) -> dict:
@@ -460,7 +479,13 @@ def register_debug_tools(
             ctx, session.step_out(thread_id), "step_out"
         )
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            idempotentHint=True,
+            openWorldHint=False,
+        )
+    )
     async def get_debug_state() -> dict:
         """
         Get the current debug session state.
