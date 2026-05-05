@@ -289,7 +289,7 @@ class TestDAPClientRequestBuilding:
 
         env = captured_args["arguments"]["env"]
         assert env["WINDIR"] == r"C:\WINDOWS"
-        assert env["SystemRoot"] == r"C:\WINDOWS"
+        assert env["SYSTEMROOT"] == r"C:\WINDOWS"
         assert env["USERPROFILE"] == r"C:\Users\tester"
         assert env["PATH"] == r"C:\WINDOWS\system32"
         assert env["TEMP"] == r"C:\Temp"
@@ -318,6 +318,63 @@ class TestDAPClientRequestBuilding:
         assert env["PATH"] == "base"
         assert env["APP_MODE"] == "debug"
         assert env["EXTRA"] == "1"
+
+    @pytest.mark.asyncio
+    async def test_windows_launch_env_normalizes_alias_overrides(self):
+        """Windows env aliases must not defeat explicit overrides by case/order."""
+        client = DAPClient("/path")
+
+        captured_args = {}
+
+        async def mock_send(command, arguments=None, timeout=30.0):
+            captured_args["arguments"] = arguments
+            return DAPResponse(seq=1, request_seq=1, success=True, command=command)
+
+        client.send_request = mock_send
+        with patch.dict(
+            "os.environ",
+            {
+                "windir": r"C:\WINDOWS",
+                "SystemRoot": r"C:\WINDOWS",
+            },
+            clear=True,
+        ):
+            await client.launch(program="test.dll", env={"WINDIR": r"D:\Windows"})
+
+        env = captured_args["arguments"]["env"]
+        assert env["WINDIR"] == r"D:\Windows"
+        assert env["SYSTEMROOT"] == r"D:\Windows"
+        assert "windir" not in env
+        assert "SystemRoot" not in env
+
+    @pytest.mark.asyncio
+    async def test_windows_launch_env_preserves_alias_unset_overrides(self):
+        """Windows env alias repair must preserve explicit DAP null removals."""
+        client = DAPClient("/path")
+
+        captured_args = {}
+
+        async def mock_send(command, arguments=None, timeout=30.0):
+            captured_args["arguments"] = arguments
+            return DAPResponse(seq=1, request_seq=1, success=True, command=command)
+
+        client.send_request = mock_send
+        with patch.dict(
+            "os.environ",
+            {
+                "WINDIR": r"C:\WINDOWS",
+                "SystemRoot": r"C:\WINDOWS",
+            },
+            clear=True,
+        ):
+            await client.launch(
+                program="test.dll",
+                env={"WINDIR": None, "SystemRoot": None},
+            )
+
+        env = captured_args["arguments"]["env"]
+        assert env["WINDIR"] is None
+        assert env["SYSTEMROOT"] is None
 
     @pytest.mark.asyncio
     async def test_send_redacts_launch_env_values_in_logs(self, caplog):

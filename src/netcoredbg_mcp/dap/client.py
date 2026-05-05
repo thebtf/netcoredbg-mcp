@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from .protocol import (
@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 # Limits for security
 MAX_CONTENT_LENGTH = 10_000_000  # 10MB max DAP message size
 REDACTED_ENV_VALUE = "<redacted>"
-EnvValue = str | None
 
 
 def format_request_arguments_for_log(
@@ -44,35 +43,66 @@ def format_request_arguments_for_log(
 
 
 def build_launch_environment(
-    overrides: dict[str, EnvValue] | None = None,
-) -> dict[str, EnvValue]:
+    overrides: dict[str, str | None] | None = None,
+) -> dict[str, str | None]:
     """Build the DAP launch environment from the server process environment."""
 
-    launch_env: dict[str, EnvValue] = dict(os.environ)
-    add_windows_environment_aliases(launch_env)
+    if os.name == "nt":
+        return build_windows_launch_environment(os.environ, overrides)
+
+    launch_env: dict[str, str | None] = dict(os.environ)
     if overrides:
         launch_env.update(overrides)
     return launch_env
 
 
-def add_windows_environment_aliases(env: dict[str, EnvValue]) -> None:
-    """Populate Windows environment aliases expected by GUI stacks."""
+def build_windows_launch_environment(
+    process_env: Mapping[str, str],
+    overrides: Mapping[str, str | None] | None = None,
+) -> dict[str, str | None]:
+    """Build a Windows launch environment with case-insensitive override semantics."""
 
-    if os.name != "nt":
+    launch_env: dict[str, str | None] = {
+        name.upper(): value for name, value in process_env.items()
+    }
+    explicit_keys: set[str] = set()
+    if overrides:
+        normalized_overrides = {name.upper(): value for name, value in overrides.items()}
+        explicit_keys = set(normalized_overrides)
+        launch_env.update(normalized_overrides)
+
+    sync_windows_environment_aliases(launch_env, explicit_keys)
+    return launch_env
+
+
+def sync_windows_environment_aliases(
+    env: dict[str, str | None],
+    explicit_keys: set[str],
+) -> None:
+    """Populate Windows aliases without overriding explicit caller values."""
+
+    sync_windows_environment_alias_group(env, ("WINDIR", "SYSTEMROOT"), explicit_keys)
+
+
+def sync_windows_environment_alias_group(
+    env: dict[str, str | None],
+    names: tuple[str, ...],
+    explicit_keys: set[str],
+) -> None:
+    explicit_value = first_env_value(
+        env,
+        *(name for name in names if name in explicit_keys),
+    )
+    value = explicit_value or first_env_value(env, *names)
+    if not value:
         return
 
-    windir = first_env_value(env, "WINDIR", "windir", "SystemRoot", "SYSTEMROOT")
-    if windir:
-        for name in ("WINDIR", "windir", "SystemRoot", "SYSTEMROOT"):
-            env.setdefault(name, windir)
-
-    comspec = first_env_value(env, "ComSpec", "COMSPEC")
-    if comspec:
-        for name in ("ComSpec", "COMSPEC"):
-            env.setdefault(name, comspec)
+    for name in names:
+        if name not in explicit_keys:
+            env[name] = value
 
 
-def first_env_value(env: dict[str, EnvValue], *names: str) -> str | None:
+def first_env_value(env: Mapping[str, str | None], *names: str) -> str | None:
     for name in names:
         value = env.get(name)
         if value:
