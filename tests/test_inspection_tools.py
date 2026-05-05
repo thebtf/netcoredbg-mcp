@@ -8,6 +8,7 @@ import pytest
 
 from netcoredbg_mcp.dap.protocol import DAPResponse
 from netcoredbg_mcp.session import SessionManager
+from netcoredbg_mcp.session.state import LoadedSource
 
 
 class ToolRegistry:
@@ -84,6 +85,10 @@ async def test_get_loaded_sources_tool_success_path():
 @pytest.mark.asyncio
 async def test_get_loaded_sources_manager_maps_and_tracks_state():
     manager = make_manager()
+    manager.state.loaded_sources["c:/src/stale.cs"] = LoadedSource(
+        name="Stale.cs",
+        path="C:/src/Stale.cs",
+    )
     manager.client.loaded_sources = AsyncMock(return_value=make_response(body={
         "sources": [{
             "name": "Program.cs",
@@ -99,6 +104,10 @@ async def test_get_loaded_sources_manager_maps_and_tracks_state():
 
     assert sources[0]["sourceReference"] == 7
     assert len(manager.state.loaded_sources) == 1
+    assert all(
+        source.path != "C:/src/Stale.cs"
+        for source in manager.state.loaded_sources.values()
+    )
 
 
 @pytest.mark.asyncio

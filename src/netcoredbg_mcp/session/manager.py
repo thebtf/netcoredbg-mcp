@@ -1559,12 +1559,12 @@ class SessionManager:
         """Get loaded sources from the adapter and refresh the live source view."""
         response = await self._client.loaded_sources()
         if response.success:
-            loaded: list[LoadedSource] = []
+            loaded_by_key: dict[str, LoadedSource] = {}
             for raw_source in response.body.get("sources", []):
                 source = LoadedSource.from_source(raw_source)
-                self._state.loaded_sources[self._loaded_source_key(source)] = source
-                loaded.append(source)
-            return [source.to_dict() for source in loaded]
+                loaded_by_key[self._loaded_source_key(source)] = source
+            self._state.loaded_sources = loaded_by_key
+            return [source.to_dict() for source in loaded_by_key.values()]
         raise RuntimeError(response.message or "Failed to get loaded sources")
 
     async def disassemble(
