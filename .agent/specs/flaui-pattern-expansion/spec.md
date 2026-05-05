@@ -4,7 +4,7 @@
 
 netcoredbg-mcp currently exposes 27 `ui_*` MCP tools backed by the FlaUI bridge. These cover input (click, drag, send_keys, modifier hold), discovery (get_window_tree, find_element), and observation (screenshot, read_text, wait_for). Several UIA patterns that are available in FlaUI are NOT yet exposed — window lifecycle, expand/collapse, range value, clipboard, virtualized items, grid iteration, event subscription.
 
-This feature fills the gap proactively (not reactive to a single consumer request) because novascript is a feature-locked legacy bugfix branch with no roadmap to drive individual requests. We bundle pattern-identical cheap wrappers into a single release to amortize the per-tool overhead (fixture + smoke + unit + pywinauto fallback + docs).
+This feature fills the gap proactively (not reactive to a single consumer request) because sampleapp is a feature-locked legacy bugfix branch with no roadmap to drive individual requests. We bundle pattern-identical cheap wrappers into a single release to amortize the per-tool overhead (fixture + smoke + unit + pywinauto fallback + docs).
 
 ## Scope
 

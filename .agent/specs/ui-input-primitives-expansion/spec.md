@@ -6,7 +6,7 @@
 **Author:** AI Agent (autopilot, reviewed by user)
 
 > **Provenance:** Specified by Claude Opus 4.7 on 2026-04-17.
-> Evidence from: engram issues #79 / #80 / #81 (novascript → netcoredbg-mcp,
+> Evidence from: engram issues #79 / #80 / #81 (sampleapp → netcoredbg-mcp,
 > all HIGH/MEDIUM priority), existing bridge code (`bridge/Commands/InputCommands.cs`,
 > `ClickCommands.cs`), existing Python drag implementation
 > (`src/netcoredbg_mcp/ui/automation.py:_send_drag`, `src/netcoredbg_mcp/tools/ui.py:ui_drag`),
@@ -16,30 +16,30 @@
 ## Overview
 
 Add three missing UI input primitives to the FlaUI bridge + MCP tool surface so that
-the NovaScript WPF agent can reproduce automatically the three bug classes it is
+the SampleApp WPF agent can reproduce automatically the three bug classes it is
 currently blocked on: drag-drop reordering, OS theme-change crashes, and
 Ctrl+click multi-selection edge cases.
 
 ## Context
 
-NovaScript (a WPF application tracked by engram) is executing an autonomous UX
+SampleApp (a WPF application tracked by engram) is executing an autonomous UX
 regression test loop against its own codebase. Three bug reports are CURRENTLY
 BLOCKED because the existing UI automation tools in netcoredbg-mcp lack the
 right primitives:
 
-- **novascript #56 (CRITICAL):** Row drag crashes the app. Cannot be reproduced
+- **sampleapp #56 (CRITICAL):** Row drag crashes the app. Cannot be reproduced
   automatically — `ui_click` is a sub-pixel mouse down+up that never crosses
   WPF's `SystemParameters.MinimumHorizontalDragDistance` /
   `MinimumVerticalDragDistance` thresholds, so `DragDrop.DoDragDrop` is never
   triggered.
 
-- **novascript #75 (CRITICAL):** App silently crashes when switching Windows
+- **sampleapp #75 (CRITICAL):** App silently crashes when switching Windows
   theme from dark to light. Cannot be reproduced automatically — no tool can
   trigger an OS-level personalisation change from inside the debug session,
   so `SystemEvents.UserPreferenceChanged` and
   `SystemParameters.StaticPropertyChanged` never fire in the debuggee.
 
-- **novascript #67:** Batch character replace is intermittent. Cannot be
+- **sampleapp #67:** Batch character replace is intermittent. Cannot be
   reproduced automatically because Ctrl+click multi-selection requires the
   Ctrl modifier to be held across multiple discrete mouse clicks. The existing
   `ui_send_keys_batch` presses and releases modifiers within a single batch;
@@ -137,8 +137,8 @@ All three primitives MUST work on Windows 10 (21H2 and later) and Windows 11 (22
 
 ## User Stories
 
-### US1: Reproduce drag-drop crash in NovaScript (P1)
-**As a** NovaScript autonomous test agent, **I want** a single `ui_drag` call that actually triggers `DragDrop.DoDragDrop`, **so that** I can reproduce novascript#56 (Row drag crashes) without manual intervention.
+### US1: Reproduce drag-drop crash in SampleApp (P1)
+**As a** SampleApp autonomous test agent, **I want** a single `ui_drag` call that actually triggers `DragDrop.DoDragDrop`, **so that** I can reproduce sampleapp#56 (Row drag crashes) without manual intervention.
 
 **Acceptance Criteria:**
 - [ ] `ui_drag(from_automation_id="CueDataGrid_Row_5", to_automation_id="CueDataGrid_Row_9")` on a WPF DataGrid with a `PreviewMouseMove` drag-drop initiator triggers `DragDrop.DoDragDrop` within 500 ms.
@@ -146,8 +146,8 @@ All three primitives MUST work on Windows 10 (21H2 and later) and Windows 11 (22
 - [ ] `hold_modifiers=["ctrl"]` holds Ctrl for the whole gesture (triggers "copy" drag semantics in apps that differentiate).
 - [ ] Failing to cross the drag threshold (e.g., `speed_ms=0` which would skip intermediate points) returns a structured error rather than a silent no-op.
 
-### US2: Reproduce theme-change crash in NovaScript (P1)
-**As a** NovaScript autonomous test agent, **I want** a single `ui_send_system_event(event="theme_change", mode="toggle")` call, **so that** I can trigger the WPF theme-change event pipeline in the debuggee and reproduce novascript#75.
+### US2: Reproduce theme-change crash in SampleApp (P1)
+**As a** SampleApp autonomous test agent, **I want** a single `ui_send_system_event(event="theme_change", mode="toggle")` call, **so that** I can trigger the WPF theme-change event pipeline in the debuggee and reproduce sampleapp#75.
 
 **Acceptance Criteria:**
 - [ ] After calling `ui_send_system_event(event="theme_change", mode="light")` on a host currently in dark mode, the registry value `AppsUseLightTheme` under `HKCU\...\Themes\Personalize` flips to `1`.
@@ -155,8 +155,8 @@ All three primitives MUST work on Windows 10 (21H2 and later) and Windows 11 (22
 - [ ] `mode="toggle"` flips whichever mode is currently active, returning both `{from: "dark", to: "light"}` in the response.
 - [ ] Calling the tool back-to-back 3 times alternates the theme each time with no stuck state.
 
-### US3: Reproduce Ctrl+click multi-select crash in NovaScript (P2)
-**As a** NovaScript autonomous test agent, **I want** to hold Ctrl across multiple `ui_click` calls, **so that** I can reproduce novascript#67 (batch character replace intermittency) using the WPF DataGrid's native Ctrl+click multi-select path.
+### US3: Reproduce Ctrl+click multi-select crash in SampleApp (P2)
+**As a** SampleApp autonomous test agent, **I want** to hold Ctrl across multiple `ui_click` calls, **so that** I can reproduce sampleapp#67 (batch character replace intermittency) using the WPF DataGrid's native Ctrl+click multi-select path.
 
 **Acceptance Criteria:**
 - [ ] The sequence `ui_hold_modifiers(["ctrl"])` → `ui_click(automation_id="Row_3")` → `ui_click(automation_id="Row_5")` → `ui_click(automation_id="Row_7")` → `ui_release_modifiers(["ctrl"])` leaves rows 3, 5, 7 selected on a `SelectionMode=Extended` DataGrid.
@@ -165,7 +165,7 @@ All three primitives MUST work on Windows 10 (21H2 and later) and Windows 11 (22
 - [ ] If the bridge process is killed while a modifier is held, the modifier is released before process exit (no stuck Ctrl across the desktop after an abnormal exit).
 
 ### US4: Smoke coverage for all three primitives (P2)
-**As a** netcoredbg-mcp maintainer, **I want** end-to-end smoke coverage for each primitive, **so that** regressions are caught without relying on the downstream NovaScript test loop.
+**As a** netcoredbg-mcp maintainer, **I want** end-to-end smoke coverage for each primitive, **so that** regressions are caught without relying on the downstream SampleApp test loop.
 
 **Acceptance Criteria:**
 - [ ] The SmokeTestApp fixture (`tests/fixtures/SmokeTestApp`) gains a drag-reorder list that starts `DoDragDrop` only after `MouseMove` crosses `SystemInformation.DragSize`, plus a theme-change tracepoint and a multi-select control. All three fit in the existing `gui` scenario (no new scenario required).
@@ -192,7 +192,7 @@ All three primitives MUST work on Windows 10 (21H2 and later) and Windows 11 (22
 ## Out of Scope
 
 - Non-theme system events. `ui_send_system_event` v1 handles only `event="theme_change"`. A future spec may add `display_scale_change`, `locale_change`, `power_setting_change` — they are NOT in this spec.
-- True click-hold (long press) as a separate primitive. If the novascript agent needs it, it MUST use `ui_hold_modifiers` + `ui_click` + `ui_release_modifiers` with whatever modifier simulates the semantics they want; a dedicated "press and hold mouse button across calls" primitive is deferred.
+- True click-hold (long press) as a separate primitive. If the sampleapp agent needs it, it MUST use `ui_hold_modifiers` + `ui_click` + `ui_release_modifiers` with whatever modifier simulates the semantics they want; a dedicated "press and hold mouse button across calls" primitive is deferred.
 - Extended mouse-button coverage (middle-click drag, X1/X2 mouse buttons). v1 covers left-button drag only.
 - Cross-machine or remote modifier state. `hold_modifiers` operates on the host running the bridge. If the bridge runs remotely (not a supported config today), modifier state would apply to the remote host's desktop, not the caller's.
 
@@ -205,7 +205,7 @@ All three primitives MUST work on Windows 10 (21H2 and later) and Windows 11 (22
 
 ## Success Criteria
 
-- [ ] All three blocker engram issues (#79, #80, #81) transition from `acknowledged` → `resolved`, with a test-pass confirmation comment from novascript's side.
+- [ ] All three blocker engram issues (#79, #80, #81) transition from `acknowledged` → `resolved`, with a test-pass confirmation comment from sampleapp's side.
 - [ ] Smoke suite expands by ≥18 checks (6 per primitive minimum) with zero regressions on existing 112.
 - [ ] Unit suite expands by ≥12 tests (4 per primitive minimum) with zero regressions on existing 578.
 - [ ] PR #48 (or successor) merged to `main` with `/pr:review` completed and all findings resolved.
@@ -227,6 +227,6 @@ Engram issues consulted (as of 2026-04-17 acknowledgement timestamp):
 - #80 HIGH `Need primitive to trigger Windows system events (theme change) from UI automation`
 - #81 MEDIUM `Need persistent modifier-hold primitive (Ctrl-click multi-select, Shift-drag)`
 
-Source project `d219e203` (novascript). All three are feature requests, all three
+Source project `d219e203` (sampleapp). All three are feature requests, all three
 target `netcoredbg-mcp`. All three were acknowledged via the engram REST API prior
 to this spec being written.
