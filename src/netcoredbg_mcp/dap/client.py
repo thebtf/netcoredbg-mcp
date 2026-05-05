@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 # Limits for security
 MAX_CONTENT_LENGTH = 10_000_000  # 10MB max DAP message size
 REDACTED_ENV_VALUE = "<redacted>"
+EnvValue = str | None
 
 
 def format_request_arguments_for_log(
@@ -36,10 +37,47 @@ def format_request_arguments_for_log(
     redacted = dict(arguments)
     env = arguments["env"]
     if isinstance(env, dict):
-        redacted["env"] = {name: REDACTED_ENV_VALUE for name in env}
+        redacted["env"] = f"<{len(env)} environment variables>"
     else:
         redacted["env"] = REDACTED_ENV_VALUE
     return redacted
+
+
+def build_launch_environment(
+    overrides: dict[str, EnvValue] | None = None,
+) -> dict[str, EnvValue]:
+    """Build the DAP launch environment from the server process environment."""
+
+    launch_env: dict[str, EnvValue] = dict(os.environ)
+    add_windows_environment_aliases(launch_env)
+    if overrides:
+        launch_env.update(overrides)
+    return launch_env
+
+
+def add_windows_environment_aliases(env: dict[str, EnvValue]) -> None:
+    """Populate Windows environment aliases expected by GUI stacks."""
+
+    if os.name != "nt":
+        return
+
+    windir = first_env_value(env, "WINDIR", "windir", "SystemRoot", "SYSTEMROOT")
+    if windir:
+        for name in ("WINDIR", "windir", "SystemRoot", "SYSTEMROOT"):
+            env.setdefault(name, windir)
+
+    comspec = first_env_value(env, "ComSpec", "COMSPEC")
+    if comspec:
+        for name in ("ComSpec", "COMSPEC"):
+            env.setdefault(name, comspec)
+
+
+def first_env_value(env: dict[str, EnvValue], *names: str) -> str | None:
+    for name in names:
+        value = env.get(name)
+        if value:
+            return value
+    return None
 
 
 class DAPClient:
@@ -325,7 +363,7 @@ class DAPClient:
             "program": program,
             "cwd": cwd or os.path.dirname(program),
             "args": args or [],
-            "env": env or {},
+            "env": build_launch_environment(env),
             "stopAtEntry": stop_at_entry,
             "justMyCode": just_my_code,
         }

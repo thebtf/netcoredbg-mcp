@@ -249,16 +249,75 @@ class TestDAPClientRequestBuilding:
             return DAPResponse(seq=1, request_seq=1, success=True, command=command)
 
         client.send_request = mock_send
-        await client.launch(
-            program="test.dll",
-            env={"APP_MODE": "debug", "REMOVE_ME": None},
-        )
+        with patch.dict("os.environ", {"PATH": "base-path"}, clear=True):
+            await client.launch(
+                program="test.dll",
+                env={"APP_MODE": "debug", "REMOVE_ME": None},
+            )
 
         assert captured_args["command"] == "launch"
-        assert captured_args["arguments"]["env"] == {
-            "APP_MODE": "debug",
-            "REMOVE_ME": None,
-        }
+        assert captured_args["arguments"]["env"]["PATH"] == "base-path"
+        assert captured_args["arguments"]["env"]["APP_MODE"] == "debug"
+        assert captured_args["arguments"]["env"]["REMOVE_ME"] is None
+
+    @pytest.mark.asyncio
+    async def test_launch_inherits_process_environment_by_default(self):
+        """Launch carries inherited env so Windows GUI apps get system variables."""
+        client = DAPClient("/path")
+
+        captured_args = {}
+
+        async def mock_send(command, arguments=None, timeout=30.0):
+            captured_args["command"] = command
+            captured_args["arguments"] = arguments
+            return DAPResponse(seq=1, request_seq=1, success=True, command=command)
+
+        client.send_request = mock_send
+        with patch.dict(
+            "os.environ",
+            {
+                "WINDIR": r"C:\WINDOWS",
+                "SystemRoot": r"C:\WINDOWS",
+                "USERPROFILE": r"C:\Users\tester",
+                "PATH": r"C:\WINDOWS\system32",
+                "TEMP": r"C:\Temp",
+                "TMP": r"C:\Temp",
+            },
+            clear=True,
+        ):
+            await client.launch(program="test.dll", cwd="/test")
+
+        env = captured_args["arguments"]["env"]
+        assert env["WINDIR"] == r"C:\WINDOWS"
+        assert env["SystemRoot"] == r"C:\WINDOWS"
+        assert env["USERPROFILE"] == r"C:\Users\tester"
+        assert env["PATH"] == r"C:\WINDOWS\system32"
+        assert env["TEMP"] == r"C:\Temp"
+        assert env["TMP"] == r"C:\Temp"
+
+    @pytest.mark.asyncio
+    async def test_launch_env_overrides_inherited_values(self):
+        """Caller env remains an override layer on top of inherited env."""
+        client = DAPClient("/path")
+
+        captured_args = {}
+
+        async def mock_send(command, arguments=None, timeout=30.0):
+            captured_args["arguments"] = arguments
+            return DAPResponse(seq=1, request_seq=1, success=True, command=command)
+
+        client.send_request = mock_send
+        with patch.dict("os.environ", {"APP_MODE": "server", "PATH": "base"}, clear=True):
+            await client.launch(
+                program="test.dll",
+                cwd="/test",
+                env={"APP_MODE": "debug", "EXTRA": "1"},
+            )
+
+        env = captured_args["arguments"]["env"]
+        assert env["PATH"] == "base"
+        assert env["APP_MODE"] == "debug"
+        assert env["EXTRA"] == "1"
 
     @pytest.mark.asyncio
     async def test_send_redacts_launch_env_values_in_logs(self, caplog):
@@ -290,8 +349,9 @@ class TestDAPClientRequestBuilding:
             await client._send(request)
 
         assert "secret-value" not in caplog.text
-        assert "'APP_SECRET': '<redacted>'" in caplog.text
-        assert "'REMOVE_ME': '<redacted>'" in caplog.text
+        assert "APP_SECRET" not in caplog.text
+        assert "REMOVE_ME" not in caplog.text
+        assert "<2 environment variables>" in caplog.text
         assert request.arguments["env"] == {"APP_SECRET": "secret-value", "REMOVE_ME": None}
 
     @pytest.mark.asyncio
