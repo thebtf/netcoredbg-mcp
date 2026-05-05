@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from .protocol import (
@@ -36,10 +36,80 @@ def format_request_arguments_for_log(
     redacted = dict(arguments)
     env = arguments["env"]
     if isinstance(env, dict):
-        redacted["env"] = {name: REDACTED_ENV_VALUE for name in env}
+        redacted["env"] = f"<{len(env)} environment variables>"
     else:
         redacted["env"] = REDACTED_ENV_VALUE
     return redacted
+
+
+def build_launch_environment(
+    overrides: dict[str, str | None] | None = None,
+) -> dict[str, str | None]:
+    """Build the DAP launch environment from the server process environment."""
+
+    if os.name == "nt":
+        return build_windows_launch_environment(os.environ, overrides)
+
+    launch_env: dict[str, str | None] = dict(os.environ)
+    if overrides:
+        launch_env.update(overrides)
+    return launch_env
+
+
+def build_windows_launch_environment(
+    process_env: Mapping[str, str],
+    overrides: Mapping[str, str | None] | None = None,
+) -> dict[str, str | None]:
+    """Build a Windows launch environment with case-insensitive override semantics."""
+
+    launch_env: dict[str, str | None] = {
+        name.upper(): value for name, value in process_env.items()
+    }
+    explicit_keys: set[str] = set()
+    if overrides:
+        normalized_overrides = {name.upper(): value for name, value in overrides.items()}
+        explicit_keys = set(normalized_overrides)
+        launch_env.update(normalized_overrides)
+
+    sync_windows_environment_aliases(launch_env, explicit_keys)
+    return launch_env
+
+
+def sync_windows_environment_aliases(
+    env: dict[str, str | None],
+    explicit_keys: set[str],
+) -> None:
+    """Populate Windows aliases without overriding explicit caller values."""
+
+    sync_windows_environment_alias_group(env, ("WINDIR", "SYSTEMROOT"), explicit_keys)
+
+
+def sync_windows_environment_alias_group(
+    env: dict[str, str | None],
+    names: tuple[str, ...],
+    explicit_keys: set[str],
+) -> None:
+    explicit_value = first_env_value(
+        env,
+        *(name for name in names if name in explicit_keys),
+    )
+    value = explicit_value
+    if value is None:
+        value = first_env_value(env, *names)
+    if value is None:
+        return
+
+    for name in names:
+        if name not in explicit_keys:
+            env[name] = value
+
+
+def first_env_value(env: Mapping[str, str | None], *names: str) -> str | None:
+    for name in names:
+        if name in env and env[name] is not None:
+            value = env[name]
+            return value
+    return None
 
 
 class DAPClient:
@@ -325,7 +395,7 @@ class DAPClient:
             "program": program,
             "cwd": cwd or os.path.dirname(program),
             "args": args or [],
-            "env": env or {},
+            "env": build_launch_environment(env),
             "stopAtEntry": stop_at_entry,
             "justMyCode": just_my_code,
         }
