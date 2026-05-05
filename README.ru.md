@@ -1,938 +1,528 @@
+<!-- synced: 2026-05-05 source-commit: d205037 -->
+[English](README.md) | [Русский](README.ru.md)
+
 # netcoredbg-mcp
 
-🌐 [English](README.md) | **Русский**
+[![PyPI](https://img.shields.io/pypi/v/netcoredbg-mcp?style=flat-square)](https://pypi.org/project/netcoredbg-mcp/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue?style=flat-square)](#требования)
+[![MCP](https://img.shields.io/badge/MCP-Server-6f42c1?style=flat-square)](https://modelcontextprotocol.io/)
+[![Platform](https://img.shields.io/badge/Platform-Windows-2ea44f?style=flat-square)](#ограничения)
 
-[![PyPI](https://img.shields.io/pypi/v/netcoredbg-mcp)](https://pypi.org/project/netcoredbg-mcp/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](#requirements)
-[![MCP](https://img.shields.io/badge/MCP-Server-6f42c1)](https://modelcontextprotocol.io/)
-[![Platform](https://img.shields.io/badge/Platform-Windows-2ea44f)](#limitations)
+`netcoredbg-mcp` даёт AI-агентам полноценный отладчик для .NET-приложений.
+Через Model Context Protocol агент может запускать процесс или подключаться к
+нему, ставить точки останова, выполнять код пошагово, смотреть переменные,
+вычислять выражения, читать вывод отладки и управлять окнами WPF/WinForms без
+IDE.
 
-AI-агенты отлаживают .NET-приложения вслепую. Ни стека вызовов, ни просмотра переменных, ни точек останова (breakpoints) — только «упало». **netcoredbg-mcp** даёт агенту полный контроль над отладчиком через Model Context Protocol: установка точек останова, пошаговое выполнение, просмотр переменных, снимки экрана GUI-приложений и вычисление выражений — без IDE.
-
-**66 инструментов. 4 ресурса. 7 промптов. 546 тестов. Один MCP-сервер.**
-
-## Что нового в v0.6.0
-
-> Выпущено 2026-04-07. [Полный журнал изменений →](CHANGELOG.md)
-
-- **MCP Progress Notifications** — потоковая передача вывода сборки, 9-фазный прогресс start_debug, heartbeat выполнения каждые 5 секунд
-- **Поддержка Git Worktree** — пути в worktree автоматически определяются и принимаются (#31)
-- **Исправление трейспоинтов** — авто-возобновление теперь работает (точки останова трейспоинтов исключены из проверки пользовательских bp)
-- **Изоляция mcp-mux** — каждая CC-сессия получает собственный daemon с правильным контекстом проекта
-- **10 настраиваемых переменных окружения** — все жёстко закодированные лимиты теперь настраиваемы через environment
-- **100 smoke-тестов** — DataGrid select, авто-возобновление трейспоинтов, heartbeat, валидация путей
-- **Screenshot 1568px** — максимальная ширина по умолчанию увеличена до максимума Claude vision
-
----
+**89 MCP-инструментов · 8 промптов · 4 ресурса · 728 собранных тестов · релизная цель v0.12.0**
 
 ## Быстрые ссылки
 
-- **Начало работы:** [Установка](#installation) · [Настройка](#configuration) · [Первая сессия отладки](#first-debug-session)
-- **Справочник:** [Инструменты](#available-tools) · [Ресурсы](#mcp-resources) · [Промпты](#mcp-prompts) · [Архитектура](#architecture)
-- **Руководства:** [Отладка GUI-приложений](#gui-app-debugging) · [Визуальная инспекция](#visual-inspection) · [Решение проблем](#troubleshooting)
+- **Старт:** [Быстрый старт](#быстрый-старт) · [Установка](#установка) · [Настройка клиентов](#настройка-клиентов)
+- **Использование:** [Первая сессия отладки](#первая-сессия-отладки) · [Отладка GUI-приложений](#отладка-gui-приложений) · [Визуальная инспекция](#визуальная-инспекция)
+- **Справочник:** [Доступные инструменты](#доступные-инструменты) · [Ресурсы](#mcp-ресурсы) · [Промпты](#mcp-промпты) · [Архитектура](#обзор-архитектуры)
+- **Проект:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
----
+## Что нового в v0.12.0
+
+- **Профили окружения запуска** — `start_debug` может читать проектный
+  `.netcoredbg-mcp.launch.json`, объединять наследуемые переменные и скрывать
+  чувствительные значения в ответах и логах.
+- **Расширенное покрытие DAP** — типизированные обёртки теперь покрывают
+  progress, memory, loaded sources, disassembly, locations и ранее
+  необработанные события DAP.
+- **Инспекция памяти** — `read_memory` и `write_memory` открывают доступ к DAP
+  memory references, если отладочный адаптер и целевое приложение это
+  поддерживают.
+- **Escape hatch prompt** — `dap-escape-hatch` описывает низкоуровневые команды
+  DAP для продвинутых случаев, пока для них нет отдельного MCP-инструмента.
+- **Документация и очистка чувствительных данных** — отслеживаемые документы
+  больше не используют имена downstream-проектов и локальные приватные пути как
+  примеры.
 
 ## Основные возможности
 
-| Возможность | Описание |
-|-------------|----------|
-| **66 MCP-инструментов** | Управление отладкой, точки останова, трейспоинты, снэпшоты, инспекция, вывод, UI-автоматизация, управление процессами |
-| **Long-Poll выполнение** | `continue` и `step_*` блокируются до остановки — никаких циклов опроса |
-| **Ответы конечного автомата** | Каждый ответ содержит `state`, `next_actions`, `message` — агент всегда знает, что делать дальше |
-| **Agent Intelligence** | ElementResolver с ранжированным поиском, ExtractText с 5 стратегиями, определение CLR-типов |
-| **Клиентские трейспоинты** | Пауза → вычисление → возобновление без поддержки netcoredbg — с rate limiting и asyncio |
-| **Снэпшоты состояния + Diff** | Захват переменных в точке останова, сравнение снэпшотов (FIFO, макс. 20) |
-| **Детектирование GUI** | Автоматическое определение WPF/WinForms/Avalonia из `runtimeconfig.json` с корректировкой подсказок рабочего процесса |
-| **Скриншоты + Set-of-Mark** | Просмотр UI приложения, нумерованные оверлеи элементов, клик по ID аннотации |
-| **stepInTargets** | Выбор конкретной функции для захода на многовызовных строках |
-| **Пагинация переменных** | Параметры `filter`, `start`, `count` для навигации по большим коллекциям |
-| **Предварительная сборка** | Сборка перед отладкой с `pre_build: true` — скрытые предупреждения доступны через `get_build_diagnostics` |
-| **Умное разрешение путей** | Автоматическое преобразование `.exe` в `.dll` для .NET 6+, чтобы избежать конфликтов deps.json |
-| **Проверка версий** | Автоматическое обнаружение несовпадений `dbgshim.dll` при запуске сессии |
-| **Сборщик процессов** | Отслеживание PID-файлов с `cleanup_processes` — никаких потерянных процессов отладчика |
-| **Поддержка mcp-mux** | Защита владения сессией для безопасной работы нескольких агентов через `x-mux` |
-| **ToolAnnotations** | `readOnlyHint`, `destructiveHint`, `idempotentHint` для каждого инструмента — интеллектуальная маршрутизация агентов |
+| Возможность | Что умеют агенты |
+|---|---|
+| Управление отладкой | Запускать, подключаться, перезапускать, продолжать, приостанавливать, завершать и пошагово выполнять .NET-код |
+| Точки останова | Работать с file, function, conditional, hit-count, exception и tracepoint-сценариями |
+| Инспекция | Смотреть threads, stack frames, scopes, variables, modules, expressions, source, disassembly и memory |
+| GUI-автоматизация | Читать дерево окон, искать элементы, кликать, вводить текст, делать screenshots и annotations, работать с clipboard и окнами |
+| Интеграция сборки | Запускать pre-launch `dotnet build`, получать progress notifications и build diagnostics, чистить заблокированные debug-процессы |
+| Безопасность multi-agent | Владение сессией через `mcp-mux`, read-only-наблюдатели, освобождение владения после inactivity timeout |
 
----
+## Быстрый старт
 
-## Быстрый старт (30 секунд)
+```powershell
+# 1. Установите MCP-сервер
+pipx install netcoredbg-mcp
 
-```bash
-# 1. Установка
-pip install netcoredbg-mcp
+# 2. Запустите первичную настройку
+netcoredbg-mcp --setup
 
-# 2. Регистрация в Claude Code
-claude mcp add --scope user netcoredbg -- netcoredbg-mcp --project-from-cwd
-
-# 3. Отладка
-# "Поставь точку останова на строке 42 в Program.cs и запусти моё приложение"
+# 3. Зарегистрируйте сервер в Claude Code
+claude mcp add netcoredbg -- netcoredbg-mcp --project-from-cwd
 ```
 
----
+Затем попросите агента:
+
+```text
+Set a breakpoint in Program.cs, run the app, and inspect local variables when it stops.
+```
 
 ## Важные замечания
 
-> [!WARNING]
-> **Совместимость версий dbgshim.dll**
->
-> `dbgshim.dll` в папке netcoredbg **ДОЛЖНА совпадать по мажорной версии** со средой выполнения .NET, которую вы отлаживаете.
-> Это недокументированное требование Microsoft. Несовпадение приводит к:
-> - Ошибкам `E_NOINTERFACE (0x80004002)`
-> - Пустым стекам вызовов
-> - Неработающему просмотру переменных
-
-| Целевая среда | Источник dbgshim.dll |
-|---------------|----------------------|
-| .NET 6.x | `C:\Program Files\dotnet\shared\Microsoft.NETCore.App\6.0.x\dbgshim.dll` |
-| .NET 7.x | `C:\Program Files\dotnet\shared\Microsoft.NETCore.App\7.0.x\dbgshim.dll` |
-| .NET 8.x | `C:\Program Files\dotnet\shared\Microsoft.NETCore.App\8.0.x\dbgshim.dll` |
-| .NET 9.x | `C:\Program Files\dotnet\shared\Microsoft.NETCore.App\9.0.x\dbgshim.dll` |
-
-```powershell
-# Пример: настройка для отладки .NET 8
-copy "C:\Program Files\dotnet\shared\Microsoft.NETCore.App\8.0.x\dbgshim.dll" "D:\Bin\netcoredbg\"
-```
-
-> [!TIP]
-> Этот MCP-сервер автоматически обнаруживает несовпадения и предупреждает при вызове `start_debug`.
+> [!IMPORTANT]
+> Для отладки .NET Core файл `dbgshim.dll` рядом с `netcoredbg.exe` должен
+> совпадать с major-версией целевого runtime. Setup wizard сканирует
+> установленные runtime и готовит совместимые копии dbgshim.
 
 > [!IMPORTANT]
-> **Предпочитайте `start_debug` вместо `attach_debug`**
->
-> `attach_debug` имеет существенные ограничения в netcoredbg — стеки вызовов и инспекция переменных могут быть неполными или пустыми.
+> `start_debug` — long-poll-инструмент. Если debuggee — GUI-приложение,
+> ответ может вернуться только после остановки на breakpoint, выхода процесса или
+> timeout. Используйте screenshots и UI tools, пока приложение работает;
+> инспекцию переменных запускайте только в состоянии stopped.
 
----
+> [!CAUTION]
+> Не коммитьте `.mcp.json`, `.netcoredbg-mcp.launch.json`, credentials,
+> инвентарь серверов или локальные пути downstream-проектов. Launch profiles
+> поддерживают `inherit`, чтобы секреты оставались в окружении процесса
+> MCP-сервера.
 
 ## Установка
 
 ### Требования
 
-- Python 3.10+
-- [netcoredbg](https://github.com/Samsung/netcoredbg/releases)
-- .NET SDK (для отлаживаемых приложений)
-- [Pillow](https://pypi.org/project/Pillow/) (устанавливается автоматически — необходим для аннотирования скриншотов)
+- Windows для GUI automation и сценариев FlaUI/pywinauto.
+- Python 3.10 или новее.
+- .NET SDK/runtime для целевого приложения.
+- `netcoredbg`; используйте `netcoredbg-mcp --setup`, если не нужна ручная
+  установка.
+- MCP-клиент: Claude Code, Cursor, Cline, Roo Code, Windsurf, Continue или
+  Claude Desktop.
 
-### Установка MCP-сервера
+### Рекомендуемая установка
 
-```bash
-# Установка из PyPI (рекомендуется)
-uv pip install netcoredbg-mcp
+```powershell
+pipx install netcoredbg-mcp
+netcoredbg-mcp --setup
+netcoredbg-mcp --version
+```
 
-# Или через pip
+Мастер настройки скачивает или находит `netcoredbg`, сканирует версии dbgshim,
+собирает FlaUI bridge при необходимости и печатает готовый фрагмент конфигурации
+MCP.
+
+### Ручная установка
+
+```powershell
 pip install netcoredbg-mcp
+$env:NETCOREDBG_PATH = "C:\Tools\netcoredbg\netcoredbg.exe"
+netcoredbg-mcp --project-from-cwd
 ```
 
-<details>
-<summary><strong>Установка из исходников (для разработки)</strong></summary>
+Ручная установка нужна, если вы закрепляете локально управляемую сборку
+`netcoredbg` или корпоративная среда блокирует автоматические загрузки.
 
-```bash
-git clone https://github.com/thebtf/netcoredbg-mcp.git
-cd netcoredbg-mcp
-uv sync
-```
-
-</details>
-
-### Установка netcoredbg
-
-Скачайте с [Samsung/netcoredbg releases](https://github.com/Samsung/netcoredbg/releases) и распакуйте в `D:\Bin\netcoredbg\`
-
----
-
-## Настройка
-
-### Переменная окружения
-
-Установите `NETCOREDBG_PATH` в профиле PowerShell (`%USERPROFILE%\Documents\PowerShell\Microsoft.PowerShell_profile.ps1`):
+### Обновление
 
 ```powershell
-$env:NETCOREDBG_PATH = "D:\Bin\netcoredbg\netcoredbg.exe"
+pipx upgrade netcoredbg-mcp
+netcoredbg-mcp --setup
 ```
 
-### Базовая конфигурация сервера
+Запускайте setup после обновления, если изменился целевой .NET runtime, нужна
+новая сборка FlaUI bridge или фрагменты конфигурации MCP-клиента должны быть
+сгенерированы
+заново.
 
-Все клиенты используют одно и то же определение сервера:
+## Конфигурация
 
-```jsonc
-{
-  "netcoredbg": {
-    "command": "netcoredbg-mcp",
-    "args": ["--project-from-cwd"],
-    "env": {
-      "NETCOREDBG_PATH": "D:\\Bin\\netcoredbg\\netcoredbg.exe"
-    }
-  }
-}
-```
+### Профили окружения запуска
 
-<details>
-<summary><strong>Запуск из исходников (для разработки)</strong></summary>
-
-Если запускаете из клонированного репозитория вместо PyPI:
-
-```jsonc
-{
-  "netcoredbg": {
-    "command": "uv",
-    "args": ["run", "--project", "D:\\Dev\\netcoredbg-mcp", "netcoredbg-mcp", "--project-from-cwd"],
-    "env": {
-      "NETCOREDBG_PATH": "D:\\Bin\\netcoredbg\\netcoredbg.exe"
-    }
-  }
-}
-```
-
-> [!IMPORTANT]
-> Используйте `uv run --project`, а НЕ `uv --directory`. Флаг `--directory` меняет CWD, что ломает `--project-from-cwd`.
-
-</details>
-
----
-
-## Настройка клиентов
-
-### CLI-агенты
-
-<details open>
-<summary><b>Claude Code</b></summary>
-
-```powershell
-claude mcp add --scope user netcoredbg -- netcoredbg-mcp --project-from-cwd
-```
-
-**Проверка:** `claude mcp list`
-
-</details>
-
-<details>
-<summary><b>Codex CLI (OpenAI)</b></summary>
-
-**Конфигурация:** `%USERPROFILE%\.codex\config.toml`
-
-```toml
-[mcp_servers.netcoredbg]
-command = "netcoredbg-mcp"
-args = ["--project-from-cwd"]
-
-[mcp_servers.netcoredbg.env]
-NETCOREDBG_PATH = "D:\\Bin\\netcoredbg\\netcoredbg.exe"
-```
-
-**Или через CLI:** `codex mcp add netcoredbg -- netcoredbg-mcp --project-from-cwd`
-
-</details>
-
-<details>
-<summary><b>Gemini CLI (Google)</b></summary>
-
-**Конфигурация:** `%USERPROFILE%\.gemini\settings.json`
-
-```jsonc
-{
-  "mcpServers": {
-    "netcoredbg": {
-      "command": "netcoredbg-mcp",
-      "args": ["--project-from-cwd"],
-      "env": {
-        "NETCOREDBG_PATH": "D:\\Bin\\netcoredbg\\netcoredbg.exe"
-      }
-    }
-  }
-}
-```
-
-</details>
-
-<details>
-<summary><b>Cline</b></summary>
-
-**Конфигурация:** Откройте Cline → иконка MCP Servers → Configure → "Configure MCP Servers"
-
-```jsonc
-{
-  "mcpServers": {
-    "netcoredbg": {
-      "command": "netcoredbg-mcp",
-      "args": ["--project-from-cwd"],
-      "env": {
-        "NETCOREDBG_PATH": "D:\\Bin\\netcoredbg\\netcoredbg.exe"
-      }
-    }
-  }
-}
-```
-
-</details>
-
-<details>
-<summary><b>Roo Code</b></summary>
-
-**Конфигурация:** `%USERPROFILE%\.roo\mcp.json` или `.roo\mcp.json` в проекте
-
-```jsonc
-{
-  "mcpServers": {
-    "netcoredbg": {
-      "command": "netcoredbg-mcp",
-      "args": ["--project-from-cwd"],
-      "env": {
-        "NETCOREDBG_PATH": "D:\\Bin\\netcoredbg\\netcoredbg.exe"
-      }
-    }
-  }
-}
-```
-
-</details>
-
-### Десктопные приложения
-
-<details>
-<summary><b>Claude Desktop</b></summary>
-
-**Конфигурация:** `%APPDATA%\Claude\claude_desktop_config.json`
-
-```jsonc
-{
-  "mcpServers": {
-    "netcoredbg": {
-      "command": "netcoredbg-mcp",
-      "args": ["--project-from-cwd"],
-      "env": {
-        "NETCOREDBG_PATH": "D:\\Bin\\netcoredbg\\netcoredbg.exe"
-      }
-    }
-  }
-}
-```
-
-</details>
-
-### Расширения для IDE
-
-<details>
-<summary><b>Cursor</b></summary>
-
-**Конфигурация:** `%USERPROFILE%\.cursor\mcp.json`
-
-```jsonc
-{
-  "mcpServers": {
-    "netcoredbg": {
-      "command": "netcoredbg-mcp",
-      "args": ["--project-from-cwd"],
-      "env": {
-        "NETCOREDBG_PATH": "D:\\Bin\\netcoredbg\\netcoredbg.exe"
-      }
-    }
-  }
-}
-```
-
-</details>
-
-<details>
-<summary><b>Windsurf</b></summary>
-
-**Конфигурация:** `%USERPROFILE%\.codeium\windsurf\mcp_config.json`
-
-```jsonc
-{
-  "mcpServers": {
-    "netcoredbg": {
-      "command": "netcoredbg-mcp",
-      "args": ["--project-from-cwd"],
-      "env": {
-        "NETCOREDBG_PATH": "D:\\Bin\\netcoredbg\\netcoredbg.exe"
-      }
-    }
-  }
-}
-```
-
-</details>
-
-<details>
-<summary><b>VS Code + Continue</b></summary>
-
-**Конфигурация:** `%USERPROFILE%\.continue\config.json`
-
-```jsonc
-{
-  "experimental": {
-    "modelContextProtocolServers": [
-      {
-        "transport": {
-          "type": "stdio",
-          "command": "uv",
-          "args": ["run", "--project", "D:\\Dev\\netcoredbg-mcp", "netcoredbg-mcp", "--project-from-cwd"],
-          "env": {
-            "NETCOREDBG_PATH": "D:\\Bin\\netcoredbg\\netcoredbg.exe"
-          }
-        }
-      }
-    ]
-  }
-}
-```
-
-</details>
-
-### Конфигурация на уровне проекта
-
-<details>
-<summary><b>.mcp.json (в корне проекта)</b></summary>
-
-Добавьте в корень .NET-проекта для автоматической загрузки:
-
-```jsonc
-{
-  "mcpServers": {
-    "netcoredbg": {
-      "command": "uv",
-      "args": ["run", "--project", "D:\\Dev\\netcoredbg-mcp", "netcoredbg-mcp"],
-      "env": {
-        "NETCOREDBG_PATH": "D:\\Bin\\netcoredbg\\netcoredbg.exe",
-        "NETCOREDBG_PROJECT_ROOT": "${workspaceFolder}"
-      }
-    }
-  }
-}
-```
-
-> [!NOTE]
-> При конфигурации на уровне проекта используйте `NETCOREDBG_PROJECT_ROOT` вместо `--project-from-cwd`.
-
-</details>
-
----
-
-## Первая сессия отладки
-
-### Паттерн Long-Poll
-
-Инструменты выполнения (`continue_execution`, `step_over`, `step_into`, `step_out`) **блокируются до остановки программы**. Никакого опроса. Один вызов — один ответ.
-
-```
-Agent: continue_execution()
-       ↓ блокируется...
-       ↓ программа выполняется...
-       ↓ достигнута точка останова!
-       ← возвращает: { state: "stopped", reason: "breakpoint", location: {...}, source_context: "..." }
-```
-
-### Типичный рабочий процесс
-
-```
-1. start_debug       → Запуск с предварительной сборкой (сборка + запуск отладчика)
-2. add_breakpoint    → Установка точек останова в исходных файлах
-3. continue          → Блокируется до срабатывания точки останова (возвращает позицию + контекст исходника)
-4. get_call_stack    → Полный стек вызовов (контекст исходника включён в верхний фрейм)
-5. get_variables     → Просмотр локальных переменных, аргументов, замыканий
-6. step_over         → Блокируется до следующей строки (возвращает новую позицию + исходник)
-7. get_output_tail   → Проверка вывода программы (пользователь его не видит)
-8. stop_debug        → Завершение сессии
-```
-
-### Пример: start_debug с предварительной сборкой
-
-```python
-start_debug(
-    program="/path/to/MyApp.exe",      # Автоматически преобразуется в .dll для .NET 6+
-    pre_build=True,                     # Сборка перед запуском (по умолчанию)
-    build_project="/path/to/MyApp.csproj",
-    build_configuration="Debug",
-    stop_at_entry=False
-)
-# Ответ: { state: "running", app_type: "gui", message: "GUI application detected..." }
-```
-
-### Умное преобразование .exe в .dll
-
-Для приложений .NET 6+ (WPF, WinForms, Console) SDK создаёт:
-- `App.exe` — нативный хост-лаунчер
-- `App.dll` — собственно управляемый код
-
-Отладка `.exe` вызывает ошибку «deps.json conflict». Этот MCP-сервер **автоматически преобразует `.exe` в `.dll`**, если рядом существуют соответствующие `.dll` и `.runtimeconfig.json`.
-
----
-
-## Отладка GUI-приложений
-
-GUI-приложения (WPF, WinForms, Avalonia) зависают при паузе отладчика — UI-поток останавливается, окна перестают отрисовываться, кнопки перестают реагировать.
-
-### Золотое правило
-
-**Никогда не ставьте точки останова до того, как окно станет видимым.**
-
-### Правильный рабочий процесс
-
-```
-1. start_debug(program="App.dll", build_project="App.csproj")
-   → Ответ содержит app_type="gui"
-
-2. ui_get_window_tree()
-   → Подтверждение загрузки окна
-
-3. ui_take_annotated_screenshot()
-   → Просмотр UI с пронумерованными интерактивными элементами
-
-4. add_breakpoint(file="MainViewModel.cs", line=42)
-   → ТЕПЕРЬ ставим точки останова (окно видимо)
-
-5. ui_click(automation_id="btnSave")
-   → Запуск пути выполнения через UI-взаимодействие
-
-6. continue_execution()
-   → Блокируется до срабатывания точки останова — инспектируем состояние
-
-7. get_call_stack() → get_variables(ref=...)
-   → Чтение локальных переменных в точке останова
-
-8. continue_execution()
-   → ВОЗОБНОВЛЕНИЕ — приложение заморожено, пока вы инспектируете
-
-9. stop_debug()
-```
-
-### Исключение: отладка запуска
-
-Если баг находится в коде инициализации, используйте `stop_at_entry`:
-
-```
-start_debug(program="App.dll", ..., stop_at_entry=True)
-# Приложение останавливается на Main() — до любого UI
-step_over()  # пошаговый проход по инициализации
-```
-
----
-
-## Визуальная инспекция
-
-### Скриншоты
-
-```
-ui_take_screenshot()
-```
-
-Возвращает base64 PNG окна приложения — вы видите именно то, что видит пользователь. Используйте для проверки макета, обнаружения проблем рендеринга, поиска элементов, отсутствующих в дереве автоматизации.
-
-### Аннотация Set-of-Mark
-
-```
-ui_take_annotated_screenshot(max_depth=3, interactive_only=True)
-```
-
-Возвращает скриншот с **пронумерованными красными рамками** вокруг интерактивных элементов и JSON-индекс элементов:
+`start_debug` может читать `.netcoredbg-mcp.launch.json` из найденного project
+root и применять переменные окружения профиля к debuggee process. Окружение процесса
+сборки при этом не меняется.
 
 ```json
 {
-  "image": "base64_png...",
-  "elements": [
-    {"id": 1, "name": "Save", "type": "Button", "automationId": "btnSave"},
-    {"id": 2, "name": "", "type": "TextBox", "automationId": "txtName"}
-  ]
+  "defaultProfile": "default",
+  "profiles": {
+    "default": {
+      "env": {
+        "DOTNET_ENVIRONMENT": "Development",
+        "APP_MODE": "Debug"
+      },
+      "inherit": ["PATH"]
+    }
+  }
 }
 ```
 
-Затем кликаем по номеру:
+Приоритет детерминированный:
 
+1. `inherit` копирует только явно перечисленные переменные из процесса MCP-сервера.
+2. Значения profile `env` переопределяют унаследованные значения.
+3. Прямые значения `start_debug(env={...})` переопределяют профиль.
+
+Значения `env`, равные `null`, передаются в DAP как явные null, чтобы запросить
+удаление или unset semantics там, где адаптер это поддерживает. Ответы tools
+включают только имена переменных, counts, profile name, source path и redacted
+metadata; значения окружения не возвращаются.
+
+Файл `.gitignore` исключает `.netcoredbg-mcp.launch.json` по умолчанию.
+Коммитьте профиль только тогда, когда он содержит не секреты, а значения,
+которыми можно безопасно делиться.
+
+### Базовая конфигурация сервера
+
+Используйте `--project-from-cwd` для CLI-агентов, которые запускают сервер из
+workspace. Используйте `--project`, когда MCP-клиент стартует из стабильного
+глобального расположения и нужно явно ограничить все debug paths.
+
+```jsonc
+{
+  "mcpServers": {
+    "netcoredbg": {
+      "command": "netcoredbg-mcp",
+      "args": ["--project-from-cwd"]
+    }
+  }
+}
 ```
-ui_click_annotated(element_id=1)   # кликает кнопку "Save"
+
+Если setup не установил managed `netcoredbg`, добавьте `NETCOREDBG_PATH`:
+
+```jsonc
+{
+  "mcpServers": {
+    "netcoredbg": {
+      "command": "netcoredbg-mcp",
+      "args": ["--project-from-cwd"],
+      "env": {
+        "NETCOREDBG_PATH": "C:\\Tools\\netcoredbg\\netcoredbg.exe"
+      }
+    }
+  }
+}
 ```
 
-Используйте, когда у элементов нет AutomationId, когда нужен пространственный контекст или когда есть несколько похожих элементов.
+### Конфигурация на уровне проекта
 
-### Множественный выбор строк
+Используйте project-local MCP config, если клиент это поддерживает. Храните
+machine-specific secrets и пути к бинарным файлам вне git.
 
-Для выбора нескольких строк в DataGrid используйте UIA-паттерны вместо координатных кликов:
-
+```jsonc
+{
+  "mcpServers": {
+    "netcoredbg": {
+      "command": "netcoredbg-mcp",
+      "args": ["--project", "C:\\Work\\MyDotNetApp"]
+    }
+  }
+}
 ```
-ui_select_items(automation_id="dataGrid", indices=[4,5,6,7,8], mode="replace")
+
+## Настройка клиентов
+
+### Claude Code
+
+```powershell
+claude mcp add netcoredbg -- netcoredbg-mcp --project-from-cwd
 ```
 
-Работает для строк за пределами экрана без прокрутки.
+### Cursor, Cline, Roo Code, Windsurf, Continue, Claude Desktop
 
----
+Добавьте тот же server shape в файл конфигурации MCP для вашего клиента:
+
+```jsonc
+{
+  "mcpServers": {
+    "netcoredbg": {
+      "command": "netcoredbg-mcp",
+      "args": ["--project-from-cwd"]
+    }
+  }
+}
+```
+
+Типичные расположения конфигов:
+
+| Клиент | Типичный путь к конфигу |
+|---|---|
+| Cursor | `%USERPROFILE%\.cursor\mcp.json` |
+| Cline | VS Code extension MCP settings |
+| Roo Code | `%USERPROFILE%\.roo\mcp.json` или project `.roo\mcp.json` |
+| Windsurf | `%USERPROFILE%\.codeium\windsurf\mcp_config.json` |
+| Continue | `%USERPROFILE%\.continue\config.json` |
+| Claude Desktop | `%APPDATA%\Claude\claude_desktop_config.json` |
+
+## Первая сессия отладки
+
+### Long-Poll Pattern
+
+Инструменты выполнения ждут значимого debugger event. `start_debug`,
+`continue_execution`, `step_over`, `step_into` и `step_out` возвращаются, когда
+debuggee останавливается, выходит, завершается или достигает timeout.
+
+### Типичный workflow
+
+```text
+1. Поставьте breakpoint в коде, который нужно проверить.
+2. Запустите отладку с pre_build=true.
+3. Дождитесь state=stopped.
+4. Прочитайте call stack, scopes и variables.
+5. Вычислите нужные expressions или перейдите к следующей строке.
+6. Продолжите или завершите session.
+```
+
+### Пример запуска с pre-build
+
+```json
+{
+  "program": "bin/Debug/net8.0/MyApp.dll",
+  "build_project": "MyApp.csproj",
+  "pre_build": true,
+  "stop_at_entry": false
+}
+```
+
+Для приложений .NET 6+ можно передать собранный `.exe`, если рядом есть
+подходящие `.dll` и `.runtimeconfig.json`. Сервер выберет DLL-цель, чтобы
+избежать конфликтов `deps.json`.
+
+## Отладка GUI-приложений
+
+### Правило
+
+Не используйте debugger inspection tools, пока GUI app работает штатно. Сначала
+остановитесь на breakpoint или приостановите process; иначе stack, scopes и
+variables недоступны по устройству отладчика.
+
+### GUI workflow
+
+```text
+1. Запустите приложение.
+2. Используйте ui_take_screenshot или ui_get_window_tree, чтобы наблюдать UI.
+3. Используйте UI tools для кликов, ввода, выбора и ожидания изменений состояния.
+4. Поставьте breakpoint перед кодом, который нужно проверить.
+5. Выполните действие в UI.
+6. Когда state=stopped, проверьте variables и call stack.
+```
+
+### Визуальная инспекция
+
+Screenshots возвращают MCP image content, поэтому vision-capable agents могут
+смотреть layout и state. Annotated screenshots добавляют Set-of-Mark labels к
+элементам, по которым можно кликать через `ui_click_annotated`.
+
+```text
+ui_take_screenshot()
+ui_take_annotated_screenshot()
+ui_click_annotated(element_id=3)
+```
 
 ## Доступные инструменты
 
-### Управление отладкой (11 инструментов)
-
-| Инструмент | Описание |
-|------------|----------|
-| `start_debug` | Запуск программы под отладчиком с опциональной предварительной сборкой. Автодетектирование GUI. |
-| `attach_debug` | Подключение к запущенному процессу. Ограниченная функциональность (ограничение netcoredbg). |
-| `stop_debug` | Остановка сессии отладки и освобождение ресурсов. |
-| `restart_debug` | Перезапуск сессии с той же конфигурацией. Опциональная пересборка. |
-| `continue_execution` | Возобновление выполнения. **Блокируется** до события остановки. |
-| `pause_execution` | Приостановка работающей программы. Возвращает управление немедленно. |
-| `step_over` | Шаг на следующую строку. **Блокируется** до завершения шага. Возвращает контекст исходника. |
-| `step_into` | Шаг внутрь вызова функции. **Блокируется** до завершения шага. |
-| `step_out` | Выход из текущей функции. **Блокируется** до завершения шага. |
-| `get_step_in_targets` | Список вызываемых функций на текущей строке — выбор, в какую именно зайти. |
-| `get_debug_state` | Получение текущего состояния сессии, потоков, позиции. Только чтение. |
-
-<details>
-<summary><b>Параметры start_debug</b></summary>
-
-| Параметр | Тип | Описание |
-|----------|-----|----------|
-| `program` | string | Путь к .exe или .dll (автоматическое преобразование) |
-| `cwd` | string? | Рабочий каталог |
-| `args` | list? | Аргументы командной строки |
-| `env` | dict? | Переменные окружения |
-| `stop_at_entry` | bool | Остановка на точке входа программы |
-| `pre_build` | bool | Сборка перед запуском (по умолчанию: true) |
-| `build_project` | string? | Путь к .csproj (обязателен при pre_build) |
-| `build_configuration` | string | "Debug" или "Release" |
-
-</details>
-
-### Точки останова (6 инструментов)
-
-| Инструмент | Описание |
-|------------|----------|
-| `add_breakpoint` | Установка точки останова на файл:строка с опциональным условием и счётчиком срабатываний. |
-| `remove_breakpoint` | Удаление точки останова по файлу и строке. |
-| `list_breakpoints` | Список всех активных точек останова (с опциональной фильтрацией по файлу). |
-| `clear_breakpoints` | Очистка всех точек останова или всех в конкретном файле. Деструктивная операция. |
-| `add_function_breakpoint` | Остановка при входе в функцию по имени. Полезно, когда номер строки неизвестен. |
-| `configure_exceptions` | Настройка точек останова по исключениям: `["all"]`, `["user-unhandled"]` или `[]`. |
-
-### Инспекция (11 инструментов)
-
-| Инструмент | Описание |
-|------------|----------|
-| `get_threads` | Список всех потоков с ID и именами. |
-| `get_call_stack` | Стек вызовов для потока. Включает контекст исходника для верхнего фрейма. |
-| `get_scopes` | Получение областей видимости переменных для фрейма стека (возвращает ссылки). |
-| `get_variables` | Чтение значений переменных из ссылки на область видимости. Поддерживает пагинацию (`filter`, `start`, `count`). |
-| `evaluate_expression` | Вычисление выражения C# в текущем контексте отладки. |
-| `quick_evaluate` | Быстрое вычисление выражения — одно значение, без предупреждений о побочных эффектах. |
-| `set_variable` | Изменение значения переменной во время отладки (проверка гипотез на лету). |
-| `get_exception_info` | Получение типа исключения, сообщения и внутреннего исключения при остановке на throw. |
-| `get_exception_context` | Полный контекст исключения, включая вложенные исключения и фреймы стека. |
-| `analyze_collection` | Подсчёт, поиск null, дубликатов и статистика по коллекции-переменной. |
-| `summarize_object` | Рекурсивный обзор полей объекта и вложенных объектов с определением циклических ссылок. |
-
-### Вывод (4 инструмента)
-
-| Инструмент | Описание |
-|------------|----------|
-| `get_output` | Полный вывод stdout/stderr отлаживаемого процесса. Опциональная очистка. |
-| `get_output_tail` | Последние N строк вывода. Легковесная проверка недавнего вывода. |
-| `search_output` | Поиск по выводу регулярным выражением с контекстными строками. |
-| `get_build_diagnostics` | Полные предупреждения сборки (скрыты по умолчанию в start_debug). |
-
-### Трейспоинты (4 инструмента)
-
-| Инструмент | Описание |
-|------------|----------|
-| `add_tracepoint` | Добавление клиентского трейспоинта: пауза, вычисление выражения, логирование, возобновление — без поддержки netcoredbg. |
-| `remove_tracepoint` | Удаление трейспоинта по файлу и строке. |
-| `get_trace_log` | Получение лога вычислений трейспоинтов. |
-| `clear_trace_log` | Очистка лога трейспоинтов. |
-
-### Снэпшоты (3 инструмента)
-
-| Инструмент | Описание |
-|------------|----------|
-| `create_snapshot` | Захват всех локальных переменных в текущей точке останова в именованный снэпшот (FIFO, макс. 20). |
-| `diff_snapshots` | Сравнение двух снэпшотов: добавленные, удалённые и изменённые переменные. |
-| `list_snapshots` | Список всех сохранённых снэпшотов с метаданными. |
-
-### UI-автоматизация (17 инструментов)
-
-| Инструмент | Описание |
-|------------|----------|
-| `ui_get_window_tree` | Визуальное дерево окна приложения (AutomationId, тип, имя, enabled). Поддерживает `root_id` и `xpath`. |
-| `ui_find_element` | Поиск элемента по AutomationId, имени или типу. Поддерживает `root_id` и `xpath`. |
-| `ui_set_focus` | Установка фокуса клавиатуры на элемент. |
-| `ui_send_keys` | Отправка клавиатурного ввода конкретному элементу (синтаксис pywinauto). |
-| `ui_send_keys_focused` | Отправка клавиш элементу в фокусе (без повторного поиска). |
-| `ui_click` | Клик по элементу по AutomationId, имени или типу. Поддерживает `root_id` и `xpath`. |
-| `ui_right_click` | Правый клик для открытия контекстного меню. |
-| `ui_double_click` | Двойной клик по элементу. |
-| `ui_invoke` | Вызов действия по умолчанию для элемента (например, нажатие кнопки через UIA InvokePattern). |
-| `ui_toggle` | Переключение чекбокса, радиокнопки или переключателя через UIA TogglePattern. |
-| `ui_file_dialog` | Взаимодействие со стандартными диалогами открытия/сохранения файла — ввод пути и подтверждение. |
-| `ui_select_items` | Множественный выбор элементов по индексу в DataGrid/ListView (UIA-паттерн). |
-| `ui_scroll` | Прокрутка элемента управления (вверх/вниз/влево/вправо). |
-| `ui_drag` | Перетаскивание от одного элемента к другому. |
-| `ui_take_screenshot` | Скриншот окна приложения в формате base64 PNG. |
-| `ui_take_annotated_screenshot` | Скриншот с пронумерованными оверлеями элементов (Set-of-Mark). |
-| `ui_click_annotated` | Клик по элементу по его ID аннотации из последнего аннотированного скриншота. |
-
-### Управление процессами (1 инструмент)
-
-| Инструмент | Описание |
-|------------|----------|
-| `cleanup_processes` | Просмотр или завершение отслеживаемых процессов отладки. Безопасная альтернатива taskkill. |
-
----
+| Категория | Количество | Tools |
+|---|---:|---|
+| Debug control | 12 | `start_debug`, `attach_debug`, `stop_debug`, `restart_debug`, `continue_execution`, `pause_execution`, `step_over`, `get_step_in_targets`, `step_into`, `step_out`, `get_debug_state`, `terminate_debug` |
+| Breakpoints and exceptions | 6 | `add_breakpoint`, `remove_breakpoint`, `list_breakpoints`, `clear_breakpoints`, `add_function_breakpoint`, `configure_exceptions` |
+| Inspection and DAP coverage | 15 | `get_threads`, `get_call_stack`, `get_scopes`, `get_variables`, `evaluate_expression`, `set_variable`, `get_exception_info`, `get_modules`, `get_progress`, `get_loaded_sources`, `disassemble`, `get_locations`, `quick_evaluate`, `get_exception_context`, `get_stop_context` |
+| Tracepoints | 4 | `add_tracepoint`, `remove_tracepoint`, `get_trace_log`, `clear_trace_log` |
+| Snapshots and object analysis | 5 | `create_snapshot`, `diff_snapshots`, `list_snapshots`, `analyze_collection`, `summarize_object` |
+| Memory | 2 | `read_memory`, `write_memory` |
+| Output and build diagnostics | 4 | `get_output`, `search_output`, `get_output_tail`, `get_build_diagnostics` |
+| UI automation | 40 | Дерево окон, поиск элементов, focus, keyboard, mouse, screenshots, annotations, selection, clipboard, управление окнами, expand/collapse, value setting, virtualization |
+| Process management | 1 | `cleanup_processes` |
 
 ## MCP-ресурсы
 
-| URI ресурса | Описание |
-|-------------|----------|
-| `debug://state` | Текущее состояние сессии (JSON): статус, причина остановки, потоки, информация о процессе |
-| `debug://breakpoints` | Все активные точки останова (JSON): пути к файлам, строки, условия, статус верификации |
-| `debug://output` | Вывод консоли отладки (plain text): stdout/stderr отлаживаемого процесса |
-| `debug://threads` | Текущие потоки (JSON): ID потоков и имена для отлаживаемого процесса |
-
-Ресурсы отправляют `notifications/resources/updated` при изменении содержимого, что позволяет подписываться на обновления в реальном времени.
-
----
+| URI | Содержимое |
+|---|---|
+| `debug://state` | Текущее состояние debug session |
+| `debug://breakpoints` | Активные breakpoints и verification state |
+| `debug://output` | Буферизированный вывод debuggee и сборки |
+| `debug://threads` | Текущий thread list |
 
 ## MCP-промпты
 
-Промпты — это встроенные руководства по отладке, которые агент может вызвать для структурированных рабочих процессов.
+| Prompt | Когда использовать |
+|---|---|
+| `debug` | Общий debugging workflow |
+| `debug-gui` | WPF/WinForms debugging и UI automation |
+| `debug-exception` | Exception-first investigation |
+| `debug-visual` | Screenshot и Set-of-Mark workflows |
+| `debug-mistakes` | Частые ошибки агента при отладке и восстановлении после них |
+| `investigate` | Параметризованное расследование symptoms |
+| `debug-scenario` | Debugging plans под конкретный сценарий |
+| `dap-escape-hatch` | Продвинутые DAP commands без first-class MCP wrappers |
 
-| Промпт | Описание |
-|--------|----------|
-| `debug` | Полное руководство по отладке: конечный автомат, использование инструментов, антипаттерны, допустимые действия по состояниям |
-| `debug-gui` | Рабочий процесс WPF/Avalonia/WinForms: тайминг точек останова, UI-взаимодействие при отладке |
-| `debug-exception` | Пошаговый протокол расследования исключений с таблицей типичных исключений .NET |
-| `debug-visual` | Рабочий процесс скриншотов и аннотаций Set-of-Mark для визуальной инспекции UI |
-| `debug-mistakes` | 9 конкретных антипаттернов с примерами НЕПРАВИЛЬНО/ПРАВИЛЬНО |
-| `investigate(symptom)` | Целевой план расследования для конкретного типа исключения или симптома. Включает сценарии для NullReference, InvalidOperation, TaskCanceled, ObjectDisposed, взаимоблокировок (deadlocks), аварийных завершений и проблем производительности. |
-| `debug-scenario(problem)` | Пошаговый план отладки для конкретного описания проблемы. Генерирует точные вызовы инструментов для выполнения. |
+## Безопасность multi-agent
 
----
+При запуске через `mcp-mux` mutating debug tools принадлежат конкретной сессии.
+Один агент может управлять live debug session, а другие сохраняют read-only
+observability через state, output, screenshots и inspection tools. Ownership
+автоматически освобождается после настроенного inactivity timeout.
 
-## Архитектура
+## Обзор архитектуры
 
 ```mermaid
 graph TB
-    subgraph MCP["MCP Server (Python)"]
-        S[server.py<br/>286 lines]
-        subgraph Tools["Tool Modules"]
-            TD[tools/debug.py]
-            TB[tools/breakpoints.py]
-            TI[tools/inspection.py]
-            TO[tools/output.py]
-            TU[tools/ui.py]
-            TP[tools/process.py]
-        end
-        PR[prompts.py]
-        SM[session/manager.py]
-        SS[session/state.py]
-        MX[mux.py]
-        REG[process_registry.py]
-        BM[build/manager.py]
-        BP[build/policy.py]
-        AT[utils/app_type.py]
-        SC[utils/source.py]
-        VC[utils/version.py]
-        UIA[ui/automation.py]
-        USS[ui/screenshot.py]
+    subgraph MCP["MCP Server"]
+        MAIN["__main__.py"]
+        SERVER["server.py"]
+        PROMPTS["prompts.py"]
+        TOOLS["tools/*"]
+        SESSION["session/*"]
+        BUILD["build/*"]
+        UI["ui/*"]
+        SETUP["setup/*"]
     end
 
-    subgraph DAP["DAP Client"]
-        DC[dap/client.py]
-        DP[dap/protocol.py]
-        DE[dap/events.py]
+    subgraph DAP["Debug Adapter Protocol"]
+        CLIENT["dap/client.py"]
+        PROTOCOL["dap/protocol.py"]
+        EVENTS["dap/events.py"]
     end
 
-    S --> Tools
-    S --> PR
-    S --> SM
-    S --> MX
-    Tools --> SM
-    SM --> DC
-    SM --> BM
-    SM --> REG
-    TU --> UIA
-    TU --> USS
-    DC --> DP
-    DC --> DE
-
-    DC <-->|stdio JSON-RPC| NDB[netcoredbg<br/>DAP Server]
-    NDB <-->|CoreCLR Debug API| APP[.NET App]
-
-    style MCP fill:#1a1a2e,stroke:#6f42c1,color:#fff
-    style Tools fill:#16213e,stroke:#0f3460,color:#fff
-    style DAP fill:#16213e,stroke:#0f3460,color:#fff
+    MAIN --> SERVER
+    SERVER --> PROMPTS
+    SERVER --> TOOLS
+    TOOLS --> SESSION
+    TOOLS --> BUILD
+    TOOLS --> UI
+    SESSION --> CLIENT
+    CLIENT --> PROTOCOL
+    CLIENT --> EVENTS
+    CLIENT <-->|stdio JSON-RPC| NETCOREDBG["netcoredbg"]
+    NETCOREDBG --> APP[".NET debuggee"]
+    SETUP --> NETCOREDBG
 ```
 
 ### Как это работает
 
-1. **MCP-слой** — `server.py` регистрирует 66 инструментов, 4 ресурса и 7 промптов через FastMCP
-2. **Модули инструментов** — 6 специализированных модулей (debug, breakpoints, inspection, output, UI, process) делают сервер компактным
-3. **Менеджер сессий** — Управляет жизненным циклом сессии отладки, конечным автоматом, валидацией путей, обработкой событий
-4. **DAP-клиент** — Взаимодействует с netcoredbg через Debug Adapter Protocol (JSON-RPC по stdio)
-5. **Менеджер сборки** — Собирает проекты перед отладкой, фильтрует предупреждения, сохраняет диагностику
-6. **Реестр процессов** — Отслеживание PID-файлов всех запущенных процессов; очистка при запуске и через инструмент
-7. **UI-автоматизация** — Автоматизация Windows UI на базе pywinauto для взаимодействия с WPF/WinForms/Avalonia
-8. **Движок скриншотов** — Захват окна + аннотация Set-of-Mark на базе Pillow
-9. **Интеграция с Mux** — Защита владения сессией для безопасной многоагентной работы через mcp-mux
-10. **Проверка версий** — Валидация совместимости dbgshim.dll с целевой средой выполнения
-
----
+1. `__main__.py` разбирает CLI flags, настраивает project-root policy и запускает
+   FastMCP stdio server.
+2. `server.py` регистрирует tools, prompts, resources, progress notifications и
+   session ownership checks.
+3. Tool modules разделяют debugger control, breakpoints, inspection, memory,
+   output, process cleanup и UI automation.
+4. `SessionManager` владеет debugger state, path validation, event handling,
+   snapshots, tracepoints, output buffers и process cleanup.
+5. `DAPClient` говорит с `netcoredbg` через JSON-RPC over stdio.
+6. UI automation использует FlaUI bridge на Windows и pywinauto fallback там,
+   где он поддерживается.
 
 ## Параметры командной строки
 
-| Параметр | Описание |
-|----------|----------|
-| `--project PATH` | Явное указание корневого каталога проекта |
-| `--project-from-cwd` | Автоматическое определение проекта из текущего каталога |
+```text
+netcoredbg-mcp --help
+netcoredbg-mcp --version
+netcoredbg-mcp --setup
+netcoredbg-mcp --project C:\Work\MyApp
+netcoredbg-mcp --project-from-cwd
+```
+
+| Option | Назначение |
+|---|---|
+| `--version` | Напечатать package version |
+| `--setup` | Запустить первичную настройку и выйти |
+| `--project PATH` | Ограничить debug operations конкретным project root |
+| `--project-from-cwd` | Определить project root из process working directory и MCP roots |
+
+`--project` и `--project-from-cwd` взаимно исключают друг друга.
 
 ## Переменные окружения
 
-| Переменная | Описание |
-|------------|----------|
-| `NETCOREDBG_PATH` | **Обязательная.** Путь к исполняемому файлу netcoredbg |
-| `NETCOREDBG_PROJECT_ROOT` | Корневой каталог проекта (альтернатива `--project`) |
-| `NETCOREDBG_ALLOWED_PATHS` | Дополнительные разрешённые префиксы путей (через запятую) для поддержки worktree |
-| `NETCOREDBG_SCREENSHOT_MAX_WIDTH` | Максимальная ширина скриншота в пикселях (по умолчанию: 1568) |
-| `NETCOREDBG_SCREENSHOT_QUALITY` | Качество WebP/JPEG скриншота 1-100 (по умолчанию: 80) |
-| `NETCOREDBG_MAX_TRACE_ENTRIES` | Максимальное количество записей в логе трейспоинтов (по умолчанию: 1000) |
-| `NETCOREDBG_EVALUATE_TIMEOUT` | Таймаут вычисления выражений в секундах (по умолчанию: 0.5) |
-| `NETCOREDBG_RATE_LIMIT_INTERVAL` | Интервал ограничения частоты трейспоинтов (по умолчанию: 0.1 = макс. 10/сек) |
-| `NETCOREDBG_MAX_SNAPSHOTS` | Максимальное количество снэпшотов состояния за сессию (по умолчанию: 20) |
-| `NETCOREDBG_MAX_VARS_PER_SNAPSHOT` | Максимальное количество переменных в снэпшоте (по умолчанию: 200) |
-| `NETCOREDBG_MAX_OUTPUT_BYTES` | Максимальный размер буфера вывода в байтах (по умолчанию: 10МБ) |
-| `NETCOREDBG_MAX_OUTPUT_ENTRY` | Максимальный размер одной записи вывода (по умолчанию: 100КБ) |
-| `NETCOREDBG_SESSION_TIMEOUT` | Таймаут владения сессией в секундах (по умолчанию: 60) |
-| `NETCOREDBG_STACKTRACE_DELAY_MS` | Диагностическая задержка (мс) перед запросами stackTrace — помогает диагностировать проблемы тайминга |
-| `FLAUI_BRIDGE_PATH` | Путь к FlaUIBridge.exe (определяется автоматически, если не задан) |
-| `LOG_LEVEL` | Уровень логирования: DEBUG, INFO, WARNING, ERROR |
-| `LOG_FILE` | Путь к файлу логов для диагностики |
-
----
+| Variable | Default | Назначение |
+|---|---|---|
+| `NETCOREDBG_PATH` | auto-discovered after setup | Явный путь к `netcoredbg` |
+| `NETCOREDBG_PROJECT_ROOT` | unset | Project root fallback |
+| `MCP_PROJECT_ROOT` | unset | Generic MCP project root fallback |
+| `NETCOREDBG_ALLOWED_PATHS` | empty | Дополнительные allowed path prefixes через запятую |
+| `NETCOREDBG_SCREENSHOT_MAX_WIDTH` | `1568` | Максимальная ширина inline screenshot |
+| `NETCOREDBG_SCREENSHOT_QUALITY` | `80` | Качество сжатия screenshot |
+| `NETCOREDBG_MAX_TRACE_ENTRIES` | `1000` | Вместимость tracepoint log |
+| `NETCOREDBG_EVALUATE_TIMEOUT` | `0.5` | Timeout tracepoint expression в секундах |
+| `NETCOREDBG_RATE_LIMIT_INTERVAL` | `0.1` | Rate-limit interval для tracepoint hits |
+| `NETCOREDBG_MAX_SNAPSHOTS` | `20` | Вместимость snapshots |
+| `NETCOREDBG_MAX_VARS_PER_SNAPSHOT` | `200` | Variables, сохраняемые в одном snapshot |
+| `NETCOREDBG_MAX_OUTPUT_BYTES` | `10000000` | Общий лимит output buffer |
+| `NETCOREDBG_MAX_OUTPUT_ENTRY` | `100000` | Лимит одной output entry |
+| `NETCOREDBG_SESSION_TIMEOUT` | `60.0` | Inactivity timeout для multi-agent ownership |
+| `NETCOREDBG_STACKTRACE_DELAY_MS` | `0` | Diagnostic delay перед stackTrace requests |
+| `FLAUI_BRIDGE_PATH` | auto-discovered | Явный путь к FlaUI bridge executable |
+| `LOG_LEVEL` | `INFO` | Python logging level |
+| `LOG_FILE` | unset | Необязательный diagnostic log file |
 
 ## Решение проблем
 
-<details>
-<summary><b>Пустой стек вызовов / E_NOINTERFACE (0x80004002)</b></summary>
+### `netcoredbg` не найден
 
-**Симптом:** `get_call_stack` возвращает пустой массив или ошибку с `0x80004002`.
+**Симптом:** startup или `start_debug` сообщает, что `netcoredbg` не найден.
 
-**Причина:** Несовпадение версии `dbgshim.dll` между netcoredbg и целевой средой выполнения.
+**Причина:** setup не установил managed debugger, а `NETCOREDBG_PATH` не задан.
 
-**Решение:**
-1. Проверьте предупреждение от `start_debug` — оно показывает точные версии
-2. Скопируйте правильную `dbgshim.dll`:
+**Исправление:** запустите `netcoredbg-mcp --setup` или задайте
+`NETCOREDBG_PATH` как явный путь к `netcoredbg.exe`.
 
-```powershell
-# Найдите установленные версии среды выполнения .NET
-dir "C:\Program Files\dotnet\shared\Microsoft.NETCore.App\"
+**Проверка:** `netcoredbg-mcp --version` выполняется успешно, а MCP-клиент может
+получить список server tools.
 
-# Скопируйте подходящую версию (например, для приложения .NET 8)
-copy "C:\Program Files\dotnet\shared\Microsoft.NETCore.App\8.0.x\dbgshim.dll" "D:\Bin\netcoredbg\"
-```
+### Breakpoints не привязываются
 
-</details>
+**Симптом:** breakpoint остаётся unverified или process не останавливается там,
+где ожидалось.
 
-<details>
-<summary><b>Ошибка конфликта deps.json</b></summary>
+**Причина:** stale build output, wrong target DLL, optimized Release binaries или
+строка без executable IL.
 
-**Симптом:** Запуск завершается с ошибкой «assembly has already been found but with a different file extension».
+**Исправление:** запускайте с `pre_build=True`, отлаживайте `Debug`
+configuration, проверьте, что source file соответствует built assembly, и
+посмотрите `list_breakpoints()` на DAP-adjusted lines.
 
-**Причина:** Отладка `.exe` вместо `.dll` для приложения .NET 6+.
+**Проверка:** breakpoint response сообщает `verified=true` или включает DAP line
+adjustment.
 
-**Решение:** Должно разрешаться автоматически. Если нет, явно укажите путь к `.dll`:
-```
-program: "App.dll"  # вместо "App.exe"
-```
+### GUI выглядит зависшим
 
-</details>
+**Симптом:** окно WPF или WinForms перестаёт перерисовываться после debug command.
 
-<details>
-<summary><b>Программа не найдена при pre_build</b></summary>
+**Причина:** debugger остановил UI thread на breakpoint или pause.
 
-**Симптом:** `start_debug` с `pre_build: true` завершается с ошибкой «программа не существует».
+**Исправление:** инспектируйте variables в состоянии stopped, затем вызовите
+`continue_execution()`, прежде чем ждать реакции GUI на clicks или keystrokes.
 
-**Причина:** Старая версия, валидирующая путь до сборки.
+**Проверка:** `get_debug_state()` сообщает `running`, и screenshots снова
+обновляются.
 
-**Решение:** Обновитесь до последней версии. Валидация пути теперь отложена до завершения сборки.
+### Path rejected в worktree
 
-</details>
+**Симптом:** launch или build падает с path validation error.
 
-<details>
-<summary><b>Точки останова не срабатывают</b></summary>
+**Причина:** project root был resolved в другой checkout или worktree path
+находится вне allowed root set.
 
-**Симптом:** Точки останова установлены, но никогда не срабатывают.
+**Исправление:** используйте `--project-from-cwd` из активного worktree или
+добавьте prefix worktree в `NETCOREDBG_ALLOWED_PATHS`.
 
-**Возможные причины:**
-1. Неправильная конфигурация (Release вместо Debug)
-2. Несовпадение исходников (бинарный файл не соответствует исходному коду)
-3. JIT-оптимизация влияет на маппинг строк
-
-**Решение:** Используйте `pre_build: true` для гарантии свежей Debug-сборки.
-
-</details>
-
-<details>
-<summary><b>Режим attach: пустые стеки вызовов</b></summary>
-
-**Симптом:** После подключения к запущенному процессу `get_call_stack` возвращает пустой результат.
-
-**Причина:** netcoredbg не поддерживает `justMyCode` в режиме attach (ограничение netcoredbg).
-
-**Решение:** Используйте `start_debug` вместо attach. Если подключение необходимо, ожидайте ограниченную функциональность.
-
-</details>
-
-<details>
-<summary><b>Окно GUI-приложения не появляется</b></summary>
-
-**Симптом:** После `start_debug` окно приложения не показывается.
-
-**Причина:** Точка останова была установлена до запуска и сработала во время инициализации окна, заморозив UI-поток.
-
-**Решение:** Удалите все точки останова перед `start_debug`. Устанавливайте их после того, как `ui_get_window_tree()` подтвердит видимость окна.
-
-</details>
-
-<details>
-<summary><b>Потерянные процессы отладчика</b></summary>
-
-**Симптом:** Множественные процессы netcoredbg или dotnet накапливаются после сессий отладки.
-
-**Причина:** Сессии отладки завершены без корректной очистки.
-
-**Решение:**
-```
-cleanup_processes(force=True)   # завершает только процессы, отслеживаемые этим сервером
-```
-
-Сервер также очищает устаревшие PID-файлы при запуске.
-
-</details>
-
-<details>
-<summary><b>Предупреждения сборки вызывают ошибки выполнения</b></summary>
-
-**Симптом:** Сборка проходит успешно, но приложение падает или ведёт себя неожиданно.
-
-**Причина:** Предупреждения сборки (скрытые по умолчанию) часто предсказывают ошибки времени выполнения:
-- CS8602 nullable dereference → NullReferenceException
-- NU1701 совместимость → ошибки загрузки сборок
-- CS4014 неожидаемый async → проглоченные исключения
-
-**Решение:**
-```
-get_build_diagnostics()   # показывает все предупреждения, скрытые при start_debug
-```
-
-</details>
-
----
+**Проверка:** `start_debug` принимает build и program paths внутри worktree.
 
 ## Ограничения
 
-- **Одна сессия** — Одна сессия отладки одновременно (by design для ясности конечного автомата)
-- **Режим attach** — Ограниченная функциональность из-за ограничений netcoredbg
-- **Версия dbgshim** — Необходимо вручную подбирать версию под целевую среду выполнения
-- **Фокус на Windows** — Основная разработка/тестирование на Windows (Linux/macOS: UI-автоматизация недоступна, базовая отладка может работать)
-- **Многоагентность через mcp-mux** — Защита владения сессией предотвращает конфликтующие мутации; только сессия, запустившая отладку, может изменять состояние. Остальные сессии получают доступ только на чтение.
+- GUI automation ориентирована на Windows.
+- `netcoredbg` и DAP capabilities зависят от runtime и целевого приложения.
+- Memory reads и writes требуют поддержки debug adapter и валидных memory
+  references.
+- Native debugging, browser automation и non-.NET runtimes вне scope.
 
----
+## Участие в разработке
+
+См. [CONTRIBUTING.md](CONTRIBUTING.md): setup, tests, PR expectations и правила
+для sensitive data.
 
 ## Лицензия
 
-MIT
+MIT. См. [LICENSE](LICENSE).

@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Launch environment profiles for v0.12.0: `start_debug` can load a
+  project-local `.netcoredbg-mcp.launch.json`, merge inherited process
+  variables, preserve explicit `null` environment values for DAP, and return
+  only redacted launch-environment metadata.
 - CR-002 DAP coverage expansion for v0.12.0: event coverage now includes the
   7 previously unhandled DAP events, 11 typed event body dataclasses, WARN
   logging for unhandled future events, `DebuggerBackend` capability scaffolding,
