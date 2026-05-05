@@ -62,6 +62,32 @@ class TestDAPClientProperties:
 
         assert client.is_running
 
+    def test_update_capabilities_shallow_merges_delta(self):
+        """Capabilities event deltas merge through the public client API."""
+        client = DAPClient("/path")
+        client._capabilities = {
+            "supportsDisassembleRequest": False,
+            "supportsStepInTargetsRequest": True,
+        }
+
+        added, changed, total_before, total_after = client.update_capabilities({
+            "supportsDisassembleRequest": True,
+            "supportsLoadedSourcesRequest": True,
+        })
+
+        assert added == ["supportsLoadedSourcesRequest"]
+        assert changed == [
+            "supportsDisassembleRequest",
+            "supportsLoadedSourcesRequest",
+        ]
+        assert total_before == 2
+        assert total_after == 3
+        assert client.capabilities == {
+            "supportsDisassembleRequest": True,
+            "supportsStepInTargetsRequest": True,
+            "supportsLoadedSourcesRequest": True,
+        }
+
 
 class TestDAPClientEventHandlers:
     """Tests for event handler registration."""

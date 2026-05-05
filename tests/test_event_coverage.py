@@ -61,7 +61,7 @@ def test_capabilities_event_shallow_merges_and_logs(caplog):
         body={"capabilities": {"supportsDisassembleRequest": True}},
     ))
 
-    assert manager.client._capabilities == {
+    assert manager.client.capabilities == {
         "supportsDisassembleRequest": True,
         "supportsStepInTargetsRequest": True,
     }

@@ -42,6 +42,26 @@ class DAPClient:
         """Get the adapter capabilities from initialize response."""
         return dict(self._capabilities)
 
+    def update_capabilities(
+        self,
+        capabilities: dict[str, Any],
+    ) -> tuple[list[str], list[str], int, int]:
+        """Shallow-merge a capabilities event delta into adapter capabilities."""
+        current = dict(self._capabilities)
+        before_keys = set(current)
+        changed_keys = [
+            key for key, value in capabilities.items() if current.get(key) != value
+        ]
+        merged = {**current, **capabilities}
+        self._capabilities = merged
+        after_keys = set(merged)
+        return (
+            sorted(after_keys - before_keys),
+            sorted(changed_keys),
+            len(before_keys),
+            len(after_keys),
+        )
+
     def _find_netcoredbg(self) -> str:
         """Find netcoredbg executable.
 

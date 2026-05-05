@@ -630,20 +630,15 @@ class SessionManager:
     def _on_capabilities(self, event: DAPEvent) -> None:
         """Handle dynamic capabilities event."""
         body = CapabilitiesEventBody.from_dict(event.body)
-        current = dict(getattr(self._client, "_capabilities", {}))
-        before_keys = set(current)
-        changed_keys = {
-            key for key, value in body.capabilities.items() if current.get(key) != value
-        }
-        merged = {**current, **body.capabilities}
-        self._client._capabilities = merged
-        after_keys = set(merged)
+        added, changed, total_before, total_after = self._client.update_capabilities(
+            body.capabilities,
+        )
         logger.info(
             "Capabilities updated: added=%s changed=%s total_before=%d total_after=%d",
-            sorted(after_keys - before_keys),
-            sorted(changed_keys),
-            len(before_keys),
-            len(after_keys),
+            added,
+            changed,
+            total_before,
+            total_after,
         )
 
     def _on_invalidated(self, event: DAPEvent) -> None:
