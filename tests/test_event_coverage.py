@@ -7,7 +7,7 @@ import re
 from netcoredbg_mcp.dap.client import DAPClient
 from netcoredbg_mcp.dap.protocol import DAPEvent, Events
 from netcoredbg_mcp.session import SessionManager
-from netcoredbg_mcp.session.state import DebugState
+from netcoredbg_mcp.session.state import DebugState, ThreadInfo
 
 
 def _handler_name_for_event(event_name: str) -> str:
@@ -119,6 +119,47 @@ def test_loaded_source_event_adds_changes_and_removes_state(caplog):
         body={"reason": "removed", "source": source},
     ))
     assert "unknown source" in caplog.text
+
+
+def test_loaded_source_event_disambiguates_sources_without_paths():
+    manager = SessionManager(netcoredbg_path="/path")
+
+    manager._on_loaded_source(DAPEvent(
+        seq=1,
+        event=Events.LOADED_SOURCE,
+        body={"reason": "new", "source": {"name": "generated.cs", "sourceReference": 1}},
+    ))
+    manager._on_loaded_source(DAPEvent(
+        seq=2,
+        event=Events.LOADED_SOURCE,
+        body={"reason": "new", "source": {"name": "generated.cs", "sourceReference": 2}},
+    ))
+
+    assert len(manager.state.loaded_sources) == 2
+    assert set(manager.state.loaded_sources) == {
+        "sourceReference:1",
+        "sourceReference:2",
+    }
+
+
+def test_thread_exited_clears_current_thread_and_frame():
+    manager = SessionManager(netcoredbg_path="/path")
+    manager.state.threads = [
+        ThreadInfo(id=42, name="Worker"),
+        ThreadInfo(id=99, name="Other"),
+    ]
+    manager.state.current_thread_id = 42
+    manager.state.current_frame_id = 7
+
+    manager._on_thread(DAPEvent(
+        seq=1,
+        event=Events.THREAD,
+        body={"reason": "exited", "threadId": 42},
+    ))
+
+    assert [thread.id for thread in manager.state.threads] == [99]
+    assert manager.state.current_thread_id is None
+    assert manager.state.current_frame_id is None
 
 
 def test_progress_events_update_state_and_unknown_end_warns(caplog):

@@ -608,6 +608,9 @@ class SessionManager:
 
         if body.reason.value == "exited":
             self._state.threads = [t for t in self._state.threads if t.id != body.thread_id]
+            if self._state.current_thread_id == body.thread_id:
+                self._state.current_thread_id = None
+                self._state.current_frame_id = None
         # Note: "started" events are handled lazily via get_threads()
 
     def _on_process(self, event: DAPEvent) -> None:
@@ -793,12 +796,16 @@ class SessionManager:
 
     @staticmethod
     def _loaded_source_key(source: LoadedSource) -> str:
-        candidate = source.path or source.name
-        if candidate:
-            key = os.path.normpath(candidate)
-            return key.lower() if os.name == "nt" else key
+        if source.path:
+            key = os.path.normpath(source.path)
+            key = key.lower() if os.name == "nt" else key
+            return f"path:{key}"
         if source.source_reference is not None:
             return f"sourceReference:{source.source_reference}"
+        if source.name:
+            key = os.path.normpath(source.name)
+            key = key.lower() if os.name == "nt" else key
+            return f"name:{key}"
         return "<unknown-source>"
 
     def prepare_for_execution(self) -> None:
