@@ -17,7 +17,7 @@ import traceback
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from netcoredbg_mcp.session import SessionManager
-from netcoredbg_mcp.session.state import Breakpoint, DebugState
+from netcoredbg_mcp.session.state import Breakpoint, DebugState, OutputEntry, TraceEntry
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DLL = os.path.join(BASE, "tests", "fixtures", "SmokeTestApp", "bin", "Debug", "net8.0-windows", "SmokeTestApp.dll")
@@ -2037,6 +2037,108 @@ async def test_runtime_hygiene_preflight():
         await m.stop()
 
 
+async def test_instrumentation_group_lifecycle():
+    print("\n19. INSTRUMENTATION GROUP LIFECYCLE")
+    import time as _time
+
+    m = await new_session()
+    original_remove_breakpoint = m.remove_breakpoint
+    try:
+        bp_line = _find_line("sum += i")
+        trace_line = _find_line("return sum;")
+        created = (await m.instrumentation.create_group(
+            "manual_flow",
+            breakpoints=[{"file": SOURCE, "line": bp_line}],
+            tracepoints=[{"file": SOURCE, "line": trace_line, "expression": "sum"}],
+        )).to_dict()
+        tracepoint_id = created["tracepoints"][0]["id"]
+        norm = m.breakpoints._normalize_path(SOURCE)
+        m.state.hit_counts[(norm, bp_line)] = 2
+        m._tracepoint_manager._trace_buffer.append(
+            TraceEntry(_time.monotonic(), SOURCE, trace_line, "sum", "3", 1, tracepoint_id)
+        )
+
+        inspected = (await m.instrumentation.inspect_group("manual_flow")).to_dict()
+        print(f"  evidence: {inspected}")
+        check("Instrumentation group created", created["status"] == "PASS", str(created))
+        check(
+            "Instrumentation group inspect has hit evidence",
+            inspected["summary"]["hit_count"] == 2,
+            str(inspected["summary"]),
+        )
+        check(
+            "Instrumentation group inspect has trace evidence",
+            inspected["summary"]["trace_log_count"] == 1,
+            str(inspected["summary"]),
+        )
+
+        cleared = (await m.instrumentation.clear_group("manual_flow")).to_dict()
+        print(f"  clear evidence: {cleared}")
+        check("Instrumentation group clear PASS", cleared["status"] == "PASS", str(cleared))
+
+        await m.instrumentation.create_group(
+            "manual_leak",
+            breakpoints=[{"file": SOURCE, "line": bp_line}],
+        )
+
+        async def leaking_remove_breakpoint(file: str, line: int) -> bool:
+            return False
+
+        m.remove_breakpoint = leaking_remove_breakpoint  # type: ignore[method-assign]
+        leaked = (await m.instrumentation.clear_group("manual_leak")).to_dict()
+        print(f"  leak evidence: {leaked}")
+        check(
+            "Instrumentation group clear FAILS on leak",
+            leaked["status"] == "FAIL" and len(leaked["leaks"]) == 1,
+            str(leaked),
+        )
+    finally:
+        m.remove_breakpoint = original_remove_breakpoint  # type: ignore[method-assign]
+        await m.clear_breakpoints(SOURCE)
+        m.runtime_smoke.instrumentation_groups.clear()
+        await m.stop()
+
+
+async def test_output_checkpoint_assertions():
+    print("\n20. OUTPUT CHECKPOINT ASSERTIONS")
+    m = await new_session()
+    try:
+        m.state.output_buffer.append(OutputEntry("boot\nready\n"))
+        checkpoint = m.output_assertions.create_checkpoint("manual_output").to_dict()
+        m.state.output_buffer.append(OutputEntry("selected row 1\nwarning: slow\n"))
+
+        passed_result = m.output_assertions.assert_since(
+            "manual_output",
+            required=["selected row", "warning"],
+            forbidden=["fatal"],
+        ).to_dict()
+        failed_result = m.output_assertions.assert_since(
+            "manual_output",
+            required=["missing text"],
+            forbidden=["warning"],
+        ).to_dict()
+
+        print(f"  checkpoint evidence: {checkpoint}")
+        print(f"  pass evidence: {passed_result}")
+        print(f"  fail evidence: {failed_result}")
+        check("Output checkpoint created", checkpoint["status"] == "PASS", str(checkpoint))
+        check(
+            "Output assertion PASS has compact evidence",
+            passed_result["status"] == "PASS"
+            and passed_result["summary"]["matched_line_count"] == 2,
+            str(passed_result),
+        )
+        check(
+            "Output assertion FAIL lists missing and forbidden",
+            failed_result["status"] == "FAIL"
+            and failed_result["missing_required"] == ["missing text"]
+            and len(failed_result["forbidden_matches"]) == 1,
+            str(failed_result),
+        )
+    finally:
+        await m.stop()
+
+
 def get_scenarios():
     scenarios = [
         ("Hit Counting", test_hit_counting),
@@ -2057,6 +2159,8 @@ def get_scenarios():
         ("Path Validation", test_path_validation_worktrees),
         ("Heartbeat During Wait", test_heartbeat_during_wait),
         ("Runtime Hygiene Preflight", test_runtime_hygiene_preflight),
+        ("Instrumentation Group Lifecycle", test_instrumentation_group_lifecycle),
+        ("Output Checkpoint Assertions", test_output_checkpoint_assertions),
     ]
 
     if GUI_ENABLED:

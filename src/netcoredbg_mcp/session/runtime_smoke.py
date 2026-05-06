@@ -44,3 +44,37 @@ class RuntimeSmokeSession:
         self._cleanup_callbacks.clear()
         self.last_reset_failures = tuple(failures)
         return self.last_reset_failures
+
+
+def compact_group_evidence(
+    *,
+    group: str,
+    breakpoint_count: int,
+    tracepoint_count: int,
+    hit_count: int = 0,
+    trace_log_count: int = 0,
+) -> dict[str, int | str]:
+    """Return bounded group evidence for pasteable smoke handoffs."""
+    return {
+        "group": group,
+        "breakpoint_count": breakpoint_count,
+        "tracepoint_count": tracepoint_count,
+        "hit_count": hit_count,
+        "trace_log_count": trace_log_count,
+    }
+
+
+def compact_output_evidence(
+    *,
+    checkpoint: str,
+    matched_line_count: int,
+    missing_count: int,
+    forbidden_count: int,
+) -> dict[str, int | str]:
+    """Return bounded output assertion evidence for pasteable smoke handoffs."""
+    return {
+        "checkpoint": checkpoint,
+        "matched_line_count": matched_line_count,
+        "missing_count": missing_count,
+        "forbidden_count": forbidden_count,
+    }

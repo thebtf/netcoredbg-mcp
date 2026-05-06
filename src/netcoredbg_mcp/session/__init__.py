@@ -1,7 +1,9 @@
 """Debug session management."""
 
 from .hygiene import RuntimeHygieneService
+from .instrumentation import InstrumentationGroupService
 from .manager import SessionManager
+from .output_assertions import OutputAssertionService
 from .runtime_smoke import RuntimeSmokeSession
 from .state import (
     Breakpoint,
@@ -16,6 +18,8 @@ __all__ = [
     "BreakpointRegistry",
     "DebugState",
     "FunctionBreakpoint",
+    "InstrumentationGroupService",
+    "OutputAssertionService",
     "RuntimeHygieneService",
     "RuntimeSmokeSession",
     "SessionManager",

@@ -37,6 +37,8 @@ from ..process_registry import ProcessRegistry
 from ..ui.temp_manager import SessionTempManager
 from ..utils.version import check_version_compatibility
 from .hygiene import RuntimeHygieneService
+from .instrumentation import InstrumentationGroupService
+from .output_assertions import OutputAssertionService
 from .runtime_smoke import RuntimeSmokeSession
 from .state import (
     Breakpoint,
@@ -83,6 +85,8 @@ class SessionManager:
         self._quick_eval_lock = asyncio.Lock()
         self._runtime_smoke = RuntimeSmokeSession()
         self._hygiene = RuntimeHygieneService(self)
+        self._instrumentation = InstrumentationGroupService(self)
+        self._output_assertions = OutputAssertionService(self)
 
     @property
     def state(self) -> SessionState:
@@ -113,6 +117,16 @@ class SessionManager:
     def hygiene(self) -> RuntimeHygieneService:
         """Get runtime smoke hygiene service."""
         return self._hygiene
+
+    @property
+    def instrumentation(self) -> InstrumentationGroupService:
+        """Get runtime smoke instrumentation group service."""
+        return self._instrumentation
+
+    @property
+    def output_assertions(self) -> OutputAssertionService:
+        """Get runtime smoke output assertion service."""
+        return self._output_assertions
 
     @property
     def temp_manager(self) -> SessionTempManager:
