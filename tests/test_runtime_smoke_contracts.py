@@ -6,7 +6,9 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
+from netcoredbg_mcp.response import build_response, extend_next_actions
 from netcoredbg_mcp.session.state import (
+    DebugState,
     EvidenceRef,
     SmokeResultSummary,
     TerminalStatus,
@@ -82,3 +84,18 @@ def test_compact_summary_rejects_mutable_boundary_inputs() -> None:
     assert isinstance(summary.failed_assertions, tuple)
     assert isinstance(summary.evidence_refs, tuple)
     assert summary.to_dict()["failed_assertions"] == ["a list should become a tuple"]
+
+
+def test_extend_next_actions_adds_smoke_actions_without_changing_base_actions() -> None:
+    actions = extend_next_actions(
+        DebugState.IDLE,
+        ["debug_hygiene_preflight", "start_debug"],
+    )
+
+    assert actions.count("start_debug") == 1
+    assert "debug_hygiene_preflight" in actions
+    assert build_response(state=DebugState.IDLE)["next_actions"] == [
+        "start_debug",
+        "attach_debug",
+        "get_progress",
+    ]

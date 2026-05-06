@@ -97,6 +97,21 @@ def build_response(
     return result
 
 
+def extend_next_actions(
+    state: DebugState | str,
+    additions: list[str],
+    *,
+    base: list[str] | None = None,
+) -> list[str]:
+    """Return state actions with additive smoke actions and no duplicates."""
+    state_value = state.value if isinstance(state, DebugState) else state
+    actions = list(base) if base is not None else list(VALID_ACTIONS.get(state_value, []))
+    for action in additions:
+        if action not in actions:
+            actions.append(action)
+    return actions
+
+
 def build_error_response(
     error: str,
     *,
@@ -115,7 +130,9 @@ def build_error_response(
     """
     state_value = state.value if isinstance(state, DebugState) else state
 
-    recovery_actions = next_actions or VALID_ACTIONS.get(state_value, ["get_debug_state", "stop_debug"])
+    recovery_actions = next_actions or VALID_ACTIONS.get(
+        state_value, ["get_debug_state", "stop_debug"]
+    )
 
     return {
         "error": error,

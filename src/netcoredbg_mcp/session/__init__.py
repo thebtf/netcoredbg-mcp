@@ -1,6 +1,7 @@
 """Debug session management."""
 
 from .manager import SessionManager
+from .runtime_smoke import RuntimeSmokeSession
 from .state import Breakpoint, BreakpointRegistry, DebugState, FunctionBreakpoint, StoppedSnapshot
 
 __all__ = [
@@ -8,6 +9,7 @@ __all__ = [
     "BreakpointRegistry",
     "DebugState",
     "FunctionBreakpoint",
+    "RuntimeSmokeSession",
     "SessionManager",
     "StoppedSnapshot",
 ]

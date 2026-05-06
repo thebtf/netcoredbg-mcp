@@ -36,6 +36,7 @@ from ..dap.protocol import Events
 from ..process_registry import ProcessRegistry
 from ..ui.temp_manager import SessionTempManager
 from ..utils.version import check_version_compatibility
+from .runtime_smoke import RuntimeSmokeSession
 from .state import (
     Breakpoint,
     BreakpointRegistry,
@@ -79,6 +80,7 @@ class SessionManager:
         self._last_version_warning: str | None = None  # dbgshim version mismatch warning
         self._session_id: str | None = None
         self._quick_eval_lock = asyncio.Lock()
+        self._runtime_smoke = RuntimeSmokeSession()
 
     @property
     def state(self) -> SessionState:
@@ -99,6 +101,11 @@ class SessionManager:
     def process_registry(self) -> ProcessRegistry:
         """Get process registry for tracking spawned processes."""
         return self._process_registry
+
+    @property
+    def runtime_smoke(self) -> RuntimeSmokeSession:
+        """Get runtime smoke state owned by this session."""
+        return self._runtime_smoke
 
     @property
     def temp_manager(self) -> SessionTempManager:
@@ -1181,6 +1188,7 @@ class SessionManager:
         self._set_state(DebugState.IDLE)
         self._initialized_event.clear()
         self._execution_event.clear()
+        self._runtime_smoke.reset()
         self._state = SessionState()
         self._output_bytes = 0  # Reset output tracking for next session
 
