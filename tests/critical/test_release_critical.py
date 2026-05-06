@@ -11,12 +11,29 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
 from netcoredbg_mcp import __version__
 from netcoredbg_mcp.launch_profiles import LAUNCH_PROFILE_FILENAME, resolve_launch_environment
 from netcoredbg_mcp.server import create_server
+
+PUBLISH_WORKFLOW = Path(".github/workflows/publish.yml")
+NODE20_ACTION_PINS = {
+    "actions/checkout@v4",
+    "softprops/action-gh-release@v2",
+    "actions/setup-python@v5",
+    "actions/upload-artifact@v4",
+    "actions/download-artifact@v4",
+}
+NODE24_ACTION_PINS = {
+    "actions/checkout@v6",
+    "softprops/action-gh-release@v3",
+    "actions/setup-python@v6",
+    "actions/upload-artifact@v7",
+    "actions/download-artifact@v8",
+}
 
 
 @pytest.mark.critical
@@ -105,3 +122,17 @@ def test_launch_profile_metadata_never_exposes_environment_values(tmp_path) -> N
     assert "inherited-secret" not in str(result.metadata)
     assert "profile-secret" not in str(result.metadata)
     assert "direct-secret" not in str(result.metadata)
+
+
+@pytest.mark.critical
+def test_publish_workflow_uses_node24_compatible_action_pins() -> None:
+    """@critical category: behavioral — publish workflow avoids Node 20 action pins."""
+
+    assert PUBLISH_WORKFLOW.exists(), "publish workflow is missing"
+    workflow_text = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+
+    old_pins = sorted(pin for pin in NODE20_ACTION_PINS if pin in workflow_text)
+    missing_new_pins = sorted(pin for pin in NODE24_ACTION_PINS if pin not in workflow_text)
+
+    assert old_pins == []
+    assert missing_new_pins == []
