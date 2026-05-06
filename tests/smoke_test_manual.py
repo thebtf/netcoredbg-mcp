@@ -1996,16 +1996,48 @@ async def test_clipboard_roundtrip():
         await m.stop()
 
 
-async def run_all():
-    if not os.path.exists(DLL):
-        print(f"ERROR: Build SmokeTestApp first:")
-        print(f"  dotnet build tests/fixtures/SmokeTestApp -c Debug")
-        return False
+async def test_runtime_hygiene_preflight():
+    print("\n18. RUNTIME HYGIENE PREFLIGHT")
+    m = await new_session()
+    original_clear_breakpoints = m.clear_breakpoints
+    try:
+        bp_line = _find_line("sum += i")
+        m.breakpoints.add(Breakpoint(file=SOURCE, line=bp_line))
 
-    print("=== SMOKE TEST: netcoredbg-mcp v0.6.0 ===")
-    print(f"DLL: {DLL}")
-    print(f"Source: {SOURCE}")
+        result = (await m.hygiene.preflight(file=SOURCE)).to_dict()
+        print(f"  evidence: {result}")
+        check("Hygiene preflight PASS", result["status"] == "PASS", str(result))
+        check(
+            "Hygiene preflight removed scoped breakpoint",
+            result["cleared"]["breakpoints"] == 1,
+            str(result["cleared"]),
+        )
+        check(
+            "Hygiene preflight leaves no targeted breakpoints",
+            result["remaining_breakpoints"] == [],
+            str(result["remaining_breakpoints"]),
+        )
 
+        m.breakpoints.add(Breakpoint(file=SOURCE, line=bp_line))
+
+        async def leaking_clear_breakpoints(file: str | None = None) -> int:
+            return 0
+
+        m.clear_breakpoints = leaking_clear_breakpoints  # type: ignore[method-assign]
+        leaked = (await m.hygiene.preflight(file=SOURCE)).to_dict()
+        print(f"  leak evidence: {leaked}")
+        check(
+            "Hygiene preflight FAILS when breakpoint remains",
+            leaked["status"] == "FAIL" and len(leaked["remaining_breakpoints"]) == 1,
+            str(leaked),
+        )
+    finally:
+        m.clear_breakpoints = original_clear_breakpoints  # type: ignore[method-assign]
+        await m.clear_breakpoints(SOURCE)
+        await m.stop()
+
+
+def get_scenarios():
     scenarios = [
         ("Hit Counting", test_hit_counting),
         ("Stack + Variables", test_stack_and_variables),
@@ -2024,6 +2056,7 @@ async def run_all():
         ("Tracepoint Auto-Resume", test_tracepoint_auto_resume),
         ("Path Validation", test_path_validation_worktrees),
         ("Heartbeat During Wait", test_heartbeat_during_wait),
+        ("Runtime Hygiene Preflight", test_runtime_hygiene_preflight),
     ]
 
     if GUI_ENABLED:
@@ -2041,7 +2074,27 @@ async def run_all():
             ("Realize Virtualized Item", test_realize_virtualized_item),
             ("Clipboard Roundtrip", test_clipboard_roundtrip),
         ])
-    else:
+    return scenarios
+
+
+def list_scenarios():
+    for index, (name, _) in enumerate(get_scenarios(), 1):
+        print(f"{index}. {name}")
+
+
+async def run_all():
+    if not os.path.exists(DLL):
+        print(f"ERROR: Build SmokeTestApp first:")
+        print(f"  dotnet build tests/fixtures/SmokeTestApp -c Debug")
+        return False
+
+    print("=== SMOKE TEST: netcoredbg-mcp v0.6.0 ===")
+    print(f"DLL: {DLL}")
+    print(f"Source: {SOURCE}")
+
+    scenarios = get_scenarios()
+
+    if not GUI_ENABLED:
         print("\n  [SKIP] GUI scenarios — net8.0-windows build not found")
 
     for name, fn in scenarios:
@@ -2060,5 +2113,8 @@ async def run_all():
 
 
 if __name__ == "__main__":
+    if "--list" in sys.argv:
+        list_scenarios()
+        sys.exit(0)
     success = asyncio.run(run_all())
     sys.exit(0 if success else 1)
