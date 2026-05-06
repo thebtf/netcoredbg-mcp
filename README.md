@@ -13,7 +13,7 @@ Through the Model Context Protocol, an agent can launch or attach to a process,
 set breakpoints, step through code, inspect variables, evaluate expressions, read
 debug output, and operate WPF/WinForms windows without opening an IDE.
 
-**89 MCP tools · 8 prompts · 4 resources · 728 collected tests · release target v0.12.0**
+**89 MCP tools · 8 prompts · 4 resources · 737 collected tests · release v0.12.0**
 
 ## Quick Links
 
@@ -25,8 +25,9 @@ debug output, and operate WPF/WinForms windows without opening an IDE.
 ## What's New in v0.12.0
 
 - **Launch environment profiles** — `start_debug` can load project-local
-  `.netcoredbg-mcp.launch.json` profiles, merge inherited variables, and redact
-  sensitive values from responses and logs.
+  `.netcoredbg-mcp.launch.json` profiles, merge inherited variables, inherit
+  the server process environment for DAP launches, and redact sensitive values
+  from responses and logs.
 - **DAP coverage expansion** — typed wrappers now cover progress, memory,
   loaded sources, disassembly, locations, and previously unhandled DAP events.
 - **Memory inspection** — `read_memory` and `write_memory` expose DAP memory

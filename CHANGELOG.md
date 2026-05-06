@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-05-06
+
 ### Added
 - Launch environment profiles for v0.12.0: `start_debug` can load a
   project-local `.netcoredbg-mcp.launch.json`, merge inherited process
@@ -35,6 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user-requested identity and removal works as expected. When called with
   the DAP-adjusted line, the response includes a `hint` explaining the
   adjustment.
+- DAP launch requests now inherit the MCP server process environment by
+  default, preserving Windows GUI variables such as `WINDIR`, `SystemRoot`,
+  `PATH`, `TEMP`, and `TMP` while keeping explicit caller env values as the
+  override layer. Launch env debug logs report only the variable count and do
+  not expose variable names or values.
 
 ## [0.6.1] - 2026-04-07
 
