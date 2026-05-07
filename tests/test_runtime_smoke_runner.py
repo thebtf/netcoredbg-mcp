@@ -637,7 +637,9 @@ async def test_state_changing_ui_operations_return_settle_evidence(
 
     assert result["status"] == "PASS"
     step_result = result["completed_steps"][0]["result"]
-    assert step_result["settled_ms"] == 500
+    assert step_result["settled_ms"] == int(
+        smoke_ops.STATE_CHANGE_SETTLE_SECONDS * 1000,
+    )
     assert slept == [smoke_ops.STATE_CHANGE_SETTLE_SECONDS]
 
 

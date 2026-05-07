@@ -42,15 +42,15 @@ public static class ElementCommands
     private static AutomationElement? SelectPrimaryWindow(AutomationElement[] windows)
     {
         return windows
-            .Select((window, index) => new
+            .Select(window => new
             {
                 Window = window,
-                Index = index,
-                Score = PrimaryWindowScore(window)
+                Score = PrimaryWindowScore(window),
+                StableKey = StableWindowKey(window)
             })
             .Where(candidate => candidate.Score > int.MinValue)
             .OrderByDescending(candidate => candidate.Score)
-            .ThenBy(candidate => candidate.Index)
+            .ThenBy(candidate => candidate.StableKey, StringComparer.Ordinal)
             .FirstOrDefault()
             ?.Window;
     }
@@ -82,6 +82,23 @@ public static class ElementCommands
     {
         try { return element.IsOffscreen; }
         catch { return true; }
+    }
+
+    private static string StableWindowKey(AutomationElement window)
+    {
+        var handle = SafeHandle(window);
+        if (handle != IntPtr.Zero)
+            return $"handle:{handle.ToInt64():D20}";
+
+        var automationId = SafeString(() => window.AutomationId);
+        if (!string.IsNullOrWhiteSpace(automationId))
+            return $"automationId:{automationId}";
+
+        var name = SafeString(() => window.Name);
+        if (!string.IsNullOrWhiteSpace(name))
+            return $"name:{name}";
+
+        return "unknown";
     }
 
     public static JsonNode FindElement(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)

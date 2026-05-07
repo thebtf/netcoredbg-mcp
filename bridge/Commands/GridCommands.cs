@@ -261,15 +261,21 @@ public static class GridCommands
         TimeSpan timeout)
     {
         var deadline = DateTime.UtcNow.Add(timeout);
-        AutomationElement? match;
-        do
+        while (true)
         {
-            match = root.FindFirstDescendant(condition);
+            var match = root.FindFirstDescendant(condition);
             if (match is not null)
                 return match;
-            Thread.Sleep(100);
+
+            var remaining = deadline - DateTime.UtcNow;
+            if (remaining <= TimeSpan.Zero)
+                break;
+
+            Thread.Sleep(
+                remaining < TimeSpan.FromMilliseconds(100)
+                    ? remaining
+                    : TimeSpan.FromMilliseconds(100));
         }
-        while (DateTime.UtcNow < deadline);
 
         return null;
     }
@@ -384,9 +390,27 @@ public static class GridCommands
         List<string> headers)
     {
         var patternCells = BuildPatternCells(row, columns, headers);
-        if (patternCells.Array.Count > 0)
+        if (HasCompleteCellCoverage(patternCells, columns, headers))
             return patternCells;
 
+        var descendantCells = BuildDescendantCells(row, columns, headers);
+        return MergeCellEvidence(patternCells, descendantCells);
+    }
+
+    private static bool HasCompleteCellCoverage(
+        (JsonObject Object, JsonArray Array) cells,
+        List<string> columns,
+        List<string> headers)
+    {
+        var expectedColumns = Math.Max(columns.Count, headers.Count);
+        return expectedColumns > 0 && cells.Object.Count >= expectedColumns;
+    }
+
+    private static (JsonObject Object, JsonArray Array) BuildDescendantCells(
+        AutomationElement row,
+        List<string> columns,
+        List<string> headers)
+    {
         var cellMap = new JsonObject();
         var cellValues = new JsonArray();
         var candidates = row.FindAllChildren()
@@ -422,6 +446,60 @@ public static class GridCommands
         }
 
         return (cellMap, cellValues);
+    }
+
+    private static (JsonObject Object, JsonArray Array) MergeCellEvidence(
+        (JsonObject Object, JsonArray Array) primary,
+        (JsonObject Object, JsonArray Array) fallback)
+    {
+        if (primary.Array.Count == 0)
+            return fallback;
+        if (fallback.Array.Count == 0)
+            return primary;
+
+        var cellMap = new JsonObject();
+        var cellValues = new JsonArray();
+        var seenColumns = new HashSet<string>(StringComparer.Ordinal);
+
+        AppendCellEvidence(primary, cellMap, cellValues, seenColumns);
+        AppendCellEvidence(fallback, cellMap, cellValues, seenColumns);
+
+        return (cellMap, cellValues);
+    }
+
+    private static void AppendCellEvidence(
+        (JsonObject Object, JsonArray Array) source,
+        JsonObject targetObject,
+        JsonArray targetArray,
+        HashSet<string> seenColumns)
+    {
+        foreach (var cell in source.Array)
+        {
+            var column = CellEvidenceColumn(cell);
+            if (!string.IsNullOrWhiteSpace(column) && !seenColumns.Add(column))
+                continue;
+            targetArray.Add(cell?.DeepClone());
+        }
+
+        foreach (var item in source.Object)
+        {
+            if (targetObject.ContainsKey(item.Key))
+                continue;
+            targetObject[item.Key] = item.Value?.DeepClone();
+            seenColumns.Add(item.Key);
+        }
+    }
+
+    private static string CellEvidenceColumn(JsonNode? cell)
+    {
+        try
+        {
+            return cell?["column"]?.GetValue<string>() ?? "";
+        }
+        catch
+        {
+            return "";
+        }
     }
 
     private static (JsonObject Object, JsonArray Array) BuildPatternCells(
