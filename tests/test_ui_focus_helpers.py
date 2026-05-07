@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from netcoredbg_mcp.ui.focus import assert_focus
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 class FakeFocusBackend:
@@ -45,3 +48,13 @@ async def test_focus_assertion_fails_when_focus_is_outside_selector() -> None:
     assert result["status"] == "FAIL"
     assert result["focused"] is False
     assert result["reason"] == "focus outside selector"
+
+
+def test_bridge_focus_assertion_accepts_descendant_focus() -> None:
+    command = (
+        PROJECT_ROOT / "bridge" / "Commands" / "FocusCommands.cs"
+    ).read_text(encoding="utf-8")
+
+    assert "IsSameOrDescendant(expected, focused)" in command
+    assert "SameRuntimeId(expected, current)" in command
+    assert "current = current.Parent" in command
