@@ -208,6 +208,20 @@ class TestFlaUIBridgeClient:
 
         client.stop.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_call_restarts_bridge_after_non_object_response(self):
+        from netcoredbg_mcp.ui.flaui_client import FlaUIBridgeClient
+
+        client = FlaUIBridgeClient("C:/fake/FlaUIBridge.exe")
+        client.ensure_alive = AsyncMock(return_value=True)
+        client.stop = AsyncMock()
+        client._send_and_receive = AsyncMock(return_value=["not", "a", "response"])
+
+        with pytest.raises(RuntimeError, match="expected dict response, got list"):
+            await client.call("grid_snapshot", {"selector": {"automationId": "dataGrid"}})
+
+        client.stop.assert_awaited_once()
+
     def test_bridge_errors_preserve_json_rpc_request_id(self):
         program = (PROJECT_ROOT / "bridge" / "Program.cs").read_text(encoding="utf-8")
 

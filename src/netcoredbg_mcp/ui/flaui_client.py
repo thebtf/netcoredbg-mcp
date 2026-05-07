@@ -170,6 +170,19 @@ class FlaUIBridgeClient:
                 await self.stop()
                 raise
 
+            if not isinstance(response_data, dict):
+                logger.warning(
+                    "FlaUI bridge returned non-object response for '%s': %s; "
+                    "restarting bridge",
+                    method,
+                    type(response_data).__name__,
+                )
+                await self.stop()
+                raise RuntimeError(
+                    "FlaUI bridge protocol error: expected dict response, "
+                    f"got {type(response_data).__name__}"
+                )
+
             actual_id = response_data.get("id")
             if actual_id != expected_id:
                 logger.warning(
