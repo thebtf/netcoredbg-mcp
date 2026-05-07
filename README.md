@@ -11,9 +11,10 @@
 `netcoredbg-mcp` gives AI coding agents a real debugger for .NET applications.
 Through the Model Context Protocol, an agent can launch or attach to a process,
 set breakpoints, step through code, inspect variables, evaluate expressions, read
-debug output, and operate WPF/WinForms windows without opening an IDE.
+debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
+and Avalonia windows without opening an IDE.
 
-**89 MCP tools · 8 prompts · 4 resources · 737 collected tests · release v0.12.0**
+**103 MCP tools · 8 prompts · 4 resources · 818 collected tests · release v0.12.0**
 
 ## Quick Links
 
@@ -44,8 +45,9 @@ debug output, and operate WPF/WinForms windows without opening an IDE.
 | Debug control | Launch, attach, restart, continue, pause, terminate, and step through .NET code |
 | Breakpoints | File, function, conditional, hit-count, exception, and tracepoint workflows |
 | Inspection | Threads, stack frames, scopes, variables, modules, expressions, source, disassembly, memory |
-| GUI automation | Window trees, element search, clicks, keystrokes, screenshots, annotations, clipboard, window management |
+| GUI automation | Window trees, element search, clicks, keystrokes, screenshots, annotations, clipboard, window management, UI evidence |
 | Build integration | Pre-launch `dotnet build`, progress notifications, build diagnostics, cleanup of locked debug processes |
+| Runtime smoke | Hygiene preflight, instrumentation groups, output checkpoints, freshness checks, bounded scenario runner |
 | Multi-agent safety | Session ownership through `mcp-mux`, read-only observers, inactivity release |
 
 ## Quick Start
@@ -313,6 +315,20 @@ ui_take_annotated_screenshot()
 ui_click_annotated(element_id=3)
 ```
 
+### Runtime Smoke Evidence
+
+For repeatable agent-side verification, use the runtime smoke tools together:
+`debug_hygiene_preflight` clears stale debugger state, `output_checkpoint` and
+`output_assert_since` prove output changed after a known point,
+`verify_debug_freshness` checks that the live process still matches the expected
+workspace and artifacts, and `run_runtime_smoke` executes a bounded scenario
+plan with cleanup.
+
+The manual smoke fixtures now cover the baseline console/WinForms app,
+`tests/fixtures/WpfSmokeApp`, and `tests/fixtures/AvaloniaSmokeApp`. Build all
+three fixture projects before claiming full GUI smoke coverage; missing fixture
+binaries intentionally skip their corresponding manual scenarios.
+
 ## Available Tools
 
 | Category | Count | Tools |
@@ -324,7 +340,8 @@ ui_click_annotated(element_id=3)
 | Snapshots and object analysis | 5 | `create_snapshot`, `diff_snapshots`, `list_snapshots`, `analyze_collection`, `summarize_object` |
 | Memory | 2 | `read_memory`, `write_memory` |
 | Output and build diagnostics | 4 | `get_output`, `search_output`, `get_output_tail`, `get_build_diagnostics` |
-| UI automation | 40 | Window tree, element search, focus, keyboard, mouse, screenshots, annotations, selection, clipboard, window management, expand/collapse, value setting, virtualization |
+| Runtime smoke orchestration | 8 | `debug_hygiene_preflight`, `instrumentation_group_create`, `instrumentation_group_inspect`, `instrumentation_group_clear`, `output_checkpoint`, `output_assert_since`, `verify_debug_freshness`, `run_runtime_smoke` |
+| UI automation | 46 | Window tree, element search, focus, keyboard, mouse, screenshots, annotations, selection, clipboard, window management, expand/collapse, value setting, virtualization, grid evidence, UI snapshots, UI events |
 | Process management | 1 | `cleanup_processes` |
 
 ## MCP Resources
@@ -341,7 +358,7 @@ ui_click_annotated(element_id=3)
 | Prompt | Use it for |
 |---|---|
 | `debug` | General debugging workflow guidance |
-| `debug-gui` | WPF/WinForms debugging and UI automation |
+| `debug-gui` | WPF, WinForms, Avalonia, and UI Automation debugging |
 | `debug-exception` | Exception-first investigation |
 | `debug-visual` | Screenshot and Set-of-Mark workflows |
 | `debug-mistakes` | Common agent debugging mistakes and recovery |
@@ -479,7 +496,7 @@ line adjustment.
 
 ### GUI appears frozen
 
-**Symptom:** a WPF or WinForms window stops repainting after a debug command.
+**Symptom:** a WPF, WinForms, or Avalonia window stops repainting after a debug command.
 
 **Cause:** the debugger stopped the UI thread at a breakpoint or pause.
 

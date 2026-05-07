@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Runtime smoke orchestration tools for release and manual verification:
+  `debug_hygiene_preflight`, instrumentation groups, output checkpoints,
+  freshness verification, and `run_runtime_smoke` provide a bounded scenario
+  runner with cleanup and compact evidence.
+- WPF and Avalonia smoke fixtures under `tests/fixtures/` so GUI evidence is
+  covered beyond the baseline WinForms fixture. The manual smoke scenario list
+  now includes WPF Shift/DataGrid evidence and Avalonia UI fixture compatibility
+  when those fixture binaries are built.
+
+### Changed
+- Manual smoke guidance now treats `SmokeTestApp`, `WpfSmokeApp`, and
+  `AvaloniaSmokeApp` as the expected fixture set for full GUI coverage.
+- Publish workflow artifact downloads use `skip-decompress: true` with an
+  explicit single-archive unzip step, avoiding the deprecated `Buffer()`
+  dependency path inside the download action while keeping PyPI uploads strict.
+- TestPyPI release rehearsal uses `skip-existing: true` so repeated rehearsals
+  can verify trusted publishing without hiding real PyPI duplicate upload
+  errors.
+
 ## [0.12.0] - 2026-05-06
 
 ### Added

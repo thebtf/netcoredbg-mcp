@@ -1,5 +1,6 @@
 # Agent workspace (local only)
 .agent/
+.codex/
 .claude/
 .serena/
 .zencoder/

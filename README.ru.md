@@ -1,4 +1,3 @@
-<!-- synced: 2026-05-05 source-commit: d205037 -->
 [English](README.md) | [Русский](README.ru.md)
 
 # netcoredbg-mcp
@@ -12,10 +11,10 @@
 `netcoredbg-mcp` даёт AI-агентам полноценный отладчик для .NET-приложений.
 Через Model Context Protocol агент может запускать процесс или подключаться к
 нему, ставить точки останова, выполнять код пошагово, смотреть переменные,
-вычислять выражения, читать вывод отладки и управлять окнами WPF/WinForms без
-IDE.
+вычислять выражения, читать вывод отладки и управлять поверхностями Windows UI
+Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 
-**89 MCP-инструментов · 8 промптов · 4 ресурса · 737 собранных тестов · релиз v0.12.0**
+**103 MCP-инструмента · 8 промптов · 4 ресурса · 818 собранных тестов · релиз v0.12.0**
 
 ## Быстрые ссылки
 
@@ -49,8 +48,9 @@ IDE.
 | Управление отладкой | Запускать, подключаться, перезапускать, продолжать, приостанавливать, завершать и пошагово выполнять .NET-код |
 | Точки останова | Работать с file, function, conditional, hit-count, exception и tracepoint-сценариями |
 | Инспекция | Смотреть threads, stack frames, scopes, variables, modules, expressions, source, disassembly и memory |
-| GUI-автоматизация | Читать дерево окон, искать элементы, кликать, вводить текст, делать screenshots и annotations, работать с clipboard и окнами |
+| GUI-автоматизация | Читать дерево окон, искать элементы, кликать, вводить текст, делать screenshots и annotations, работать с clipboard, окнами и UI evidence |
 | Интеграция сборки | Запускать pre-launch `dotnet build`, получать progress notifications и build diagnostics, чистить заблокированные debug-процессы |
+| Runtime smoke | Предзапусковая очистка, instrumentation groups, output checkpoints, freshness checks и bounded scenario runner |
 | Безопасность multi-agent | Владение сессией через `mcp-mux`, read-only-наблюдатели, освобождение владения после inactivity timeout |
 
 ## Быстрый старт
@@ -324,6 +324,20 @@ ui_take_annotated_screenshot()
 ui_click_annotated(element_id=3)
 ```
 
+### Доказательства runtime smoke
+
+Для повторяемой проверки агентом используйте runtime smoke-инструменты вместе:
+`debug_hygiene_preflight` очищает устаревшее состояние отладчика,
+`output_checkpoint` и `output_assert_since` подтверждают, что вывод изменился
+после известной точки, `verify_debug_freshness` проверяет, что live process
+соответствует ожидаемым workspace и artifacts, а `run_runtime_smoke` запускает
+bounded scenario plan с cleanup.
+
+Manual smoke fixtures теперь покрывают базовое console/WinForms-приложение,
+`tests/fixtures/WpfSmokeApp` и `tests/fixtures/AvaloniaSmokeApp`. Соберите все
+три fixture projects, прежде чем заявлять полное GUI smoke coverage; если
+binaries отсутствуют, эти manual scenarios намеренно пропускаются.
+
 ## Доступные инструменты
 
 | Категория | Количество | Tools |
@@ -335,7 +349,8 @@ ui_click_annotated(element_id=3)
 | Snapshots and object analysis | 5 | `create_snapshot`, `diff_snapshots`, `list_snapshots`, `analyze_collection`, `summarize_object` |
 | Memory | 2 | `read_memory`, `write_memory` |
 | Output and build diagnostics | 4 | `get_output`, `search_output`, `get_output_tail`, `get_build_diagnostics` |
-| UI automation | 40 | Дерево окон, поиск элементов, focus, keyboard, mouse, screenshots, annotations, selection, clipboard, управление окнами, expand/collapse, value setting, virtualization |
+| Runtime smoke orchestration | 8 | `debug_hygiene_preflight`, `instrumentation_group_create`, `instrumentation_group_inspect`, `instrumentation_group_clear`, `output_checkpoint`, `output_assert_since`, `verify_debug_freshness`, `run_runtime_smoke` |
+| UI automation | 46 | Дерево окон, поиск элементов, focus, keyboard, mouse, screenshots, annotations, selection, clipboard, управление окнами, expand/collapse, value setting, virtualization, grid evidence, UI snapshots, UI events |
 | Process management | 1 | `cleanup_processes` |
 
 ## MCP-ресурсы
@@ -352,7 +367,7 @@ ui_click_annotated(element_id=3)
 | Prompt | Когда использовать |
 |---|---|
 | `debug` | Общий debugging workflow |
-| `debug-gui` | WPF/WinForms debugging и UI automation |
+| `debug-gui` | WPF, WinForms, Avalonia и UI Automation debugging |
 | `debug-exception` | Exception-first investigation |
 | `debug-visual` | Screenshot и Set-of-Mark workflows |
 | `debug-mistakes` | Частые ошибки агента при отладке и восстановлении после них |
@@ -489,7 +504,7 @@ adjustment.
 
 ### GUI выглядит зависшим
 
-**Симптом:** окно WPF или WinForms перестаёт перерисовываться после debug command.
+**Симптом:** окно WPF, WinForms или Avalonia перестаёт перерисовываться после debug command.
 
 **Причина:** debugger остановил UI thread на breakpoint или pause.
 
