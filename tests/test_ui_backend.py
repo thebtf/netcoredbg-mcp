@@ -1,10 +1,13 @@
 """Tests for UI backend abstraction layer."""
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from netcoredbg_mcp.ui.backend import create_backend, find_flaui_bridge
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class TestFindFlauiBridge:
@@ -72,7 +75,8 @@ class TestFlaUIBackendConnect:
         backend._client.call = AsyncMock(
             side_effect=[
                 RuntimeError(
-                    "FlaUI bridge error: Internal error: No window found for process 42"
+                    "FlaUI bridge error: Internal error: "
+                    "No window found for process 42: no usable top-level window yet"
                 ),
                 {"connected": True, "title": "WPF Smoke"},
             ]
@@ -85,6 +89,20 @@ class TestFlaUIBackendConnect:
 
         assert backend.process_id == 42
         assert backend._client.call.await_count == 2
+
+    def test_bridge_connect_selects_usable_primary_window(self):
+        command = (
+            PROJECT_ROOT / "bridge" / "Commands" / "ElementCommands.cs"
+        ).read_text(encoding="utf-8")
+
+        assert "SelectPrimaryWindow(windows)" in command
+        assert "PrimaryWindowScore(window)" in command
+        assert "window.BoundingRectangle" in command
+        assert "rect.Width <= 0 || rect.Height <= 0" in command
+        assert "SafeIsOffscreen(window)" in command
+        assert "catch { return true; }" in command
+        assert "OrderByDescending(candidate => candidate.Score)" in command
+        assert "no usable top-level window yet" in command
 
     @pytest.mark.asyncio
     async def test_logs_connect_retries(self, caplog):

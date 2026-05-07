@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
+import os
+import stat
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -20,6 +23,9 @@ from .state import EvidenceRef
 TERMINAL_STATUSES = {"PASS", "FAIL", "BLOCKED", "IMPASSE"}
 MAX_COMPACT_TEXT_LENGTH = 240
 MAX_COMPACT_LIST_ITEMS = 8
+RESTORE_RETRY_DELAYS_SECONDS = (0.1, 0.2, 0.5, 1.0, 2.0, 4.0)
+UI_OPERATION_PREFIXES = ("ui.",)
+UI_OPERATION_NAMES = {"ui_key_sequence", "ui_grid"}
 
 CleanupCallback = Callable[[], None]
 CleanupFailure = dict[str, str]
@@ -347,7 +353,7 @@ class RuntimeSmokeRunner:
                 )
                 attempted.append(f"restore_file:{raw_path}")
                 try:
-                    restored_files.append(self._restore_file(entry))
+                    restored_files.append(await self._restore_file_with_retries(entry))
                 except Exception as exc:
                     failure = {
                         "operation": "fixture.restore",
@@ -389,6 +395,35 @@ class RuntimeSmokeRunner:
             "remaining_runtime_smoke_state": remaining,
         }
 
+    async def _restore_file_with_retries(self, entry: Any) -> dict[str, Any]:
+        attempts = 0
+        last_error: Exception | None = None
+        for delay in (*RESTORE_RETRY_DELAYS_SECONDS, None):
+            attempts += 1
+            try:
+                result = self._restore_file(entry)
+                if attempts > 1:
+                    result["attempts"] = attempts
+                return result
+            except PermissionError as exc:
+                last_error = exc
+            except OSError as exc:
+                if getattr(exc, "winerror", None) not in {5, 32}:
+                    raise
+                last_error = exc
+
+            if delay is not None:
+                await asyncio.sleep(delay)
+
+        if last_error is not None:
+            matched = self._restore_file_if_already_matches(entry)
+            if matched is not None:
+                matched["attempts"] = attempts
+                matched["already_matched_after_error"] = str(last_error)
+                return matched
+            raise last_error
+        raise RuntimeError("restore failed without an exception")
+
     def _validate_restore_paths(self, plan: dict[str, Any]) -> list[str]:
         errors: list[str] = []
         for prefix, entry in _iter_restore_entries(plan):
@@ -413,6 +448,48 @@ class RuntimeSmokeRunner:
         return str(validate_path(path, must_exist=must_exist))
 
     def _restore_file(self, entry: dict[str, Any]) -> dict[str, Any]:
+        target_path, source, baseline_file, content = self._restore_file_inputs(entry)
+
+        target = Path(target_path)
+        parent = target.parent
+        if not parent.is_dir():
+            raise ValueError(f"Restore parent directory does not exist: {parent}")
+        original_attributes = _clear_windows_hidden_attribute(target)
+        try:
+            target.write_text(content, encoding="utf-8")
+        finally:
+            if original_attributes is not None:
+                _set_windows_file_attributes(target, original_attributes)
+
+        result = self._restore_file_result(
+            target_path,
+            source,
+            baseline_file,
+            content,
+        )
+        return result
+
+    def _restore_file_if_already_matches(
+        self,
+        entry: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        target_path, source, baseline_file, content = self._restore_file_inputs(entry)
+        target = Path(target_path)
+        if not target.is_file() or target.read_text(encoding="utf-8") != content:
+            return None
+        result = self._restore_file_result(
+            target_path,
+            source,
+            baseline_file,
+            content,
+        )
+        result["already_matched"] = True
+        return result
+
+    def _restore_file_inputs(
+        self,
+        entry: dict[str, Any],
+    ) -> tuple[str, str, str | None, str]:
         target_path = self._validate_path(str(entry["path"]), must_exist=False)
         source = "baseline_text"
         baseline_file = None
@@ -423,13 +500,15 @@ class RuntimeSmokeRunner:
             content = Path(baseline_file).read_text(encoding="utf-8")
         if not isinstance(content, str):
             raise ValueError("restore baseline content must be text")
+        return target_path, source, baseline_file, content
 
-        target = Path(target_path)
-        parent = target.parent
-        if not parent.is_dir():
-            raise ValueError(f"Restore parent directory does not exist: {parent}")
-        target.write_text(content, encoding="utf-8")
-
+    @staticmethod
+    def _restore_file_result(
+        target_path: str,
+        source: str,
+        baseline_file: str | None,
+        content: str,
+    ) -> dict[str, Any]:
         result: dict[str, Any] = {
             "status": "PASS",
             "path": target_path,
@@ -496,6 +575,33 @@ class RuntimeSmokeRunner:
         return result
 
 
+def _clear_windows_hidden_attribute(target: Path) -> int | None:
+    if os.name != "nt" or not target.exists():
+        return None
+
+    attributes = getattr(target.stat(), "st_file_attributes", None)
+    if attributes is None or not attributes & stat.FILE_ATTRIBUTE_HIDDEN:
+        return None
+
+    _set_windows_file_attributes(target, attributes & ~stat.FILE_ATTRIBUTE_HIDDEN)
+    return int(attributes)
+
+
+def _set_windows_file_attributes(target: Path, attributes: int) -> None:
+    if os.name != "nt":
+        return
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.SetFileAttributesW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD)
+    kernel32.SetFileAttributesW.restype = wintypes.BOOL
+    if not kernel32.SetFileAttributesW(str(target), attributes):
+        error = ctypes.GetLastError()
+        raise OSError(error, f"SetFileAttributesW failed for {target}")
+
+
 def compact_runtime_smoke_result(result: dict[str, Any]) -> dict[str, Any]:
     """Return a pasteable bounded runtime smoke result."""
     return {
@@ -533,6 +639,8 @@ def _planned_steps(plan: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     launch = plan.get("launch")
     if isinstance(launch, dict):
         steps.append(("launch", _step(launch, "launch")))
+        if _plan_has_ui_operations(plan):
+            steps.append(("ui", {"name": "ui.ensure_connected", "args": {}}))
 
     freshness = plan.get("freshness")
     if isinstance(freshness, dict):
@@ -547,6 +655,22 @@ def _planned_steps(plan: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
 
 def _step(raw: Any, default_name: str | None = None) -> dict[str, Any]:
     return normalize_plan_step(raw, default_name)
+
+
+def _plan_has_ui_operations(plan: dict[str, Any]) -> bool:
+    for section_name in ("steps", "actions", "assertions", "evidence"):
+        for item in plan.get(section_name, []) or []:
+            name = _raw_step_name(item)
+            if name in UI_OPERATION_NAMES or name.startswith(UI_OPERATION_PREFIXES):
+                return True
+    return False
+
+
+def _raw_step_name(raw: Any) -> str:
+    if not isinstance(raw, dict):
+        return ""
+    value = raw.get("name") or raw.get("op") or ""
+    return str(value)
 
 
 async def _call_adapter(adapter: OperationAdapter, args: dict[str, Any]) -> Any:

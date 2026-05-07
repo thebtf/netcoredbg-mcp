@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using System.Threading;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Conditions;
 using FlaUI.Core.Definitions;
@@ -9,6 +10,12 @@ namespace FlaUIBridge.Commands;
 
 public static class GridCommands
 {
+    private static readonly string[] CellPlaceholderSubstrings =
+    {
+        "display column index",
+        "индекс отображения столбца"
+    };
+
     public static JsonNode VisibleRows(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
         var grid = ResolveGrid(@params, automation, mainWindow);
@@ -21,7 +28,7 @@ public static class GridCommands
         {
             ["status"] = "PASS",
             ["row_count"] = gridPattern.RowCount.Value,
-            ["visible_rows"] = BuildRows(rows, columns)
+            ["visible_rows"] = BuildRows(grid, rows, columns)
         };
     }
 
@@ -36,7 +43,7 @@ public static class GridCommands
         return new JsonObject
         {
             ["status"] = "PASS",
-            ["selected_rows"] = BuildSelectedRows(rows, columns)
+            ["selected_rows"] = BuildSelectedRows(grid, rows, columns)
         };
     }
 
@@ -56,7 +63,7 @@ public static class GridCommands
         var columns = ReadColumns(@params);
         if (columns.Count == 0)
             columns = ColumnsFromAssertions(expectedRows);
-        var visibleRows = BuildRows(GridRows(grid, automation), columns);
+        var visibleRows = BuildRows(grid, GridRows(grid, automation), columns);
         var failures = new JsonArray();
         var matched = new JsonArray();
 
@@ -177,7 +184,7 @@ public static class GridCommands
         {
             ["status"] = "PASS",
             ["selected_range"] = new JsonObject { ["start"] = start, ["end"] = end },
-            ["selected_rows"] = BuildSelectedRows(rows, ReadColumns(@params))
+            ["selected_rows"] = BuildSelectedRows(grid, rows, ReadColumns(@params))
         };
     }
 
@@ -207,7 +214,7 @@ public static class GridCommands
             ["asserted"] = passed,
             ["expected_range"] = new JsonObject { ["start"] = start, ["end"] = end },
             ["selected_indices"] = ToJsonArray(selectedRows),
-            ["selected_rows"] = BuildSelectedRows(rows, ReadColumns(@params))
+            ["selected_rows"] = BuildSelectedRows(grid, rows, ReadColumns(@params))
         };
     }
 
@@ -244,8 +251,43 @@ public static class GridCommands
         var condition = conditions.Count == 1
             ? conditions[0]
             : new AndCondition(conditions.ToArray());
-        return root.FindFirstDescendant(condition)
+        return FindGridWithRetry(root, condition, ReadGridFindTimeout(@params))
             ?? throw new InvalidOperationException("DataGrid target not found.");
+    }
+
+    private static AutomationElement? FindGridWithRetry(
+        AutomationElement root,
+        ConditionBase condition,
+        TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow.Add(timeout);
+        while (true)
+        {
+            var match = root.FindFirstDescendant(condition);
+            if (match is not null)
+                return match;
+
+            var remaining = deadline - DateTime.UtcNow;
+            if (remaining <= TimeSpan.Zero)
+                break;
+
+            Thread.Sleep(
+                remaining < TimeSpan.FromMilliseconds(100)
+                    ? remaining
+                    : TimeSpan.FromMilliseconds(100));
+        }
+
+        return null;
+    }
+
+    private static TimeSpan ReadGridFindTimeout(JsonNode? @params)
+    {
+        var timeoutNode = @params?["timeout_ms"];
+        if (timeoutNode is null)
+            return TimeSpan.FromSeconds(5);
+
+        var timeoutMs = Math.Clamp(timeoutNode.GetValue<int>(), 0, 30_000);
+        return TimeSpan.FromMilliseconds(timeoutMs);
     }
 
     private static AutomationElement[] GridRows(AutomationElement grid, UIA3Automation automation)
@@ -288,21 +330,29 @@ public static class GridCommands
                controlType == ControlType.ListItem;
     }
 
-    private static JsonArray BuildRows(AutomationElement[] gridRows, List<string> columns)
+    private static JsonArray BuildRows(
+        AutomationElement grid,
+        AutomationElement[] gridRows,
+        List<string> columns)
     {
+        var headers = ColumnHeaders(grid);
         var rows = new JsonArray();
         var index = 0;
         foreach (var row in gridRows)
         {
-            rows.Add(BuildRow(row, index, columns));
+            rows.Add(BuildRow(row, index, columns, headers));
             index++;
         }
         return rows;
     }
 
-    private static JsonObject BuildRow(AutomationElement row, int index, List<string> columns)
+    private static JsonObject BuildRow(
+        AutomationElement row,
+        int index,
+        List<string> columns,
+        List<string> headers)
     {
-        var cells = BuildCells(row, columns);
+        var cells = BuildCells(row, columns, headers);
         return new JsonObject
         {
             ["index"] = index,
@@ -315,8 +365,12 @@ public static class GridCommands
         };
     }
 
-    private static JsonArray BuildSelectedRows(AutomationElement[] gridRows, List<string> columns)
+    private static JsonArray BuildSelectedRows(
+        AutomationElement grid,
+        AutomationElement[] gridRows,
+        List<string> columns)
     {
+        var headers = ColumnHeaders(grid);
         var rows = new JsonArray();
         for (var index = 0; index < gridRows.Length; index++)
         {
@@ -325,14 +379,37 @@ public static class GridCommands
                 continue;
             if (!itemPattern.IsSelected.Value)
                 continue;
-            rows.Add(BuildRow(row, index, columns));
+            rows.Add(BuildRow(row, index, columns, headers));
         }
         return rows;
     }
 
     private static (JsonObject Object, JsonArray Array) BuildCells(
         AutomationElement row,
-        List<string> columns)
+        List<string> columns,
+        List<string> headers)
+    {
+        var patternCells = BuildPatternCells(row, columns, headers);
+        if (HasCompleteCellCoverage(patternCells, columns, headers))
+            return patternCells;
+
+        var descendantCells = BuildDescendantCells(row, columns, headers);
+        return MergeCellEvidence(patternCells, descendantCells);
+    }
+
+    private static bool HasCompleteCellCoverage(
+        (JsonObject Object, JsonArray Array) cells,
+        List<string> columns,
+        List<string> headers)
+    {
+        var expectedColumns = Math.Max(columns.Count, headers.Count);
+        return expectedColumns > 0 && cells.Object.Count >= expectedColumns;
+    }
+
+    private static (JsonObject Object, JsonArray Array) BuildDescendantCells(
+        AutomationElement row,
+        List<string> columns,
+        List<string> headers)
     {
         var cellMap = new JsonObject();
         var cellValues = new JsonArray();
@@ -352,9 +429,11 @@ public static class GridCommands
             var currentOrdinal = ordinal;
             ordinal++;
             var text = ReadCellText(cell);
-            if (string.IsNullOrWhiteSpace(text) || IsLikelyClrTypeName(text))
+            if (string.IsNullOrWhiteSpace(text) ||
+                IsLikelyClrTypeName(text) ||
+                IsLikelyCellPlaceholder(text))
                 continue;
-            var key = CellKey(cell, currentOrdinal, columns);
+            var key = CellKey(cell, currentOrdinal, columns, headers);
             cellMap[key] = text;
             cellValues.Add(new JsonObject
             {
@@ -367,6 +446,139 @@ public static class GridCommands
         }
 
         return (cellMap, cellValues);
+    }
+
+    private static (JsonObject Object, JsonArray Array) MergeCellEvidence(
+        (JsonObject Object, JsonArray Array) primary,
+        (JsonObject Object, JsonArray Array) fallback)
+    {
+        if (primary.Array.Count == 0)
+            return fallback;
+        if (fallback.Array.Count == 0)
+            return primary;
+
+        var cellMap = new JsonObject();
+        var cellValues = new JsonArray();
+        var seenColumns = new HashSet<string>(StringComparer.Ordinal);
+
+        AppendCellEvidence(primary, cellMap, cellValues, seenColumns);
+        AppendCellEvidence(fallback, cellMap, cellValues, seenColumns);
+
+        return (cellMap, cellValues);
+    }
+
+    private static void AppendCellEvidence(
+        (JsonObject Object, JsonArray Array) source,
+        JsonObject targetObject,
+        JsonArray targetArray,
+        HashSet<string> seenColumns)
+    {
+        foreach (var cell in source.Array)
+        {
+            var column = CellEvidenceColumn(cell);
+            if (!seenColumns.Add(CellEvidenceDedupeKey(column)))
+                continue;
+            targetArray.Add(cell?.DeepClone());
+        }
+
+        foreach (var item in source.Object)
+        {
+            if (targetObject.ContainsKey(item.Key))
+                continue;
+            targetObject[item.Key] = item.Value?.DeepClone();
+            seenColumns.Add(CellEvidenceDedupeKey(item.Key));
+        }
+    }
+
+    private static string CellEvidenceDedupeKey(string column)
+    {
+        return string.IsNullOrWhiteSpace(column) ? "<empty-column>" : column;
+    }
+
+    private static string CellEvidenceColumn(JsonNode? cell)
+    {
+        try
+        {
+            return cell?["column"]?.GetValue<string>() ?? "";
+        }
+        catch
+        {
+            return "";
+        }
+    }
+
+    private static (JsonObject Object, JsonArray Array) BuildPatternCells(
+        AutomationElement row,
+        List<string> columns,
+        List<string> headers)
+    {
+        var cellMap = new JsonObject();
+        var cellValues = new JsonArray();
+
+        try
+        {
+            var gridRow = new GridRow(row.FrameworkAutomationElement);
+            var cells = gridRow.Cells;
+            for (var ordinal = 0; ordinal < cells.Length; ordinal++)
+            {
+                var cell = cells[ordinal];
+                var columnIndex = CellColumnIndex(cell, ordinal);
+                var text = SafeString(() => cell.Value);
+                if (string.IsNullOrWhiteSpace(text) ||
+                    IsLikelyClrTypeName(text) ||
+                    IsLikelyCellPlaceholder(text))
+                    text = ReadCellText(cell);
+                if (string.IsNullOrWhiteSpace(text) ||
+                    IsLikelyClrTypeName(text) ||
+                    IsLikelyCellPlaceholder(text))
+                    continue;
+
+                var key = CellKey(cell, columnIndex, columns, headers);
+                cellMap[key] = text;
+                cellValues.Add(new JsonObject
+                {
+                    ["column"] = key,
+                    ["text"] = text,
+                    ["automation_id"] = SafeString(() => cell.AutomationId),
+                    ["name"] = SafeString(() => cell.Name),
+                    ["control_type"] = SafeString(() => cell.ControlType.ToString())
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine(
+                $"GridCommands.BuildPatternCells fallback after GridRow.Cells failure: {ex}");
+            // Fall back to descendant text evidence for providers that do not
+            // expose GridRow.Cells consistently.
+        }
+
+        return (cellMap, cellValues);
+    }
+
+    private static List<string> ColumnHeaders(AutomationElement grid)
+    {
+        var headers = new List<string>();
+        try
+        {
+            var gridElement = new Grid(grid.FrameworkAutomationElement);
+            foreach (var header in gridElement.ColumnHeaders)
+            {
+                var text = ReadCellText(header);
+                headers.Add(
+                    IsLikelyClrTypeName(text) || IsLikelyCellPlaceholder(text)
+                        ? ""
+                        : text);
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine(
+                $"GridCommands.ColumnHeaders best-effort extraction failed: {ex}");
+            // Header evidence is best-effort; row cell extraction still works
+            // via explicit plan columns or fallback cell names.
+        }
+        return headers;
     }
 
     private static List<int> SelectedRowIndices(AutomationElement[] rows)
@@ -479,20 +691,57 @@ public static class GridCommands
                controlType == ControlType.DataItem;
     }
 
-    private static string CellKey(AutomationElement cell, int ordinal, List<string> columns)
+    private static string CellKey(
+        AutomationElement cell,
+        int columnIndex,
+        List<string> columns,
+        List<string> headers)
     {
-        if (ordinal < columns.Count)
-            return columns[ordinal];
+        if (columnIndex < headers.Count)
+        {
+            var header = headers[columnIndex];
+            if (!string.IsNullOrWhiteSpace(header) && !IsLikelyClrTypeName(header))
+                return header;
+        }
+
+        if (columnIndex < columns.Count)
+            return columns[columnIndex];
         var automationId = SafeString(() => cell.AutomationId);
         if (!string.IsNullOrWhiteSpace(automationId))
             return automationId;
         var name = SafeString(() => cell.Name);
         if (!string.IsNullOrWhiteSpace(name) && !IsLikelyClrTypeName(name))
             return name;
-        return $"column_{ordinal}";
+        return $"column_{columnIndex}";
+    }
+
+    private static int CellColumnIndex(AutomationElement cell, int fallback)
+    {
+        try
+        {
+            if (cell.Patterns.GridItem.TryGetPattern(out var pattern))
+                return pattern.Column.Value;
+        }
+        catch { /* fallback */ }
+
+        return fallback;
     }
 
     private static string ReadCellText(AutomationElement element)
+    {
+        var ownText = ReadOwnCellText(element);
+        if (!string.IsNullOrWhiteSpace(ownText) &&
+            !IsLikelyCellPlaceholder(ownText))
+            return ownText;
+
+        var descendantText = ReadDescendantCellText(element);
+        if (!string.IsNullOrWhiteSpace(descendantText))
+            return descendantText;
+
+        return ownText;
+    }
+
+    private static string ReadOwnCellText(AutomationElement element)
     {
         try
         {
@@ -519,6 +768,25 @@ public static class GridCommands
         return SafeString(() => element.Name);
     }
 
+    private static string ReadDescendantCellText(AutomationElement element)
+    {
+        try
+        {
+            foreach (var descendant in element.FindAllDescendants()
+                         .Where(IsCellTextCandidate))
+            {
+                var text = ReadOwnCellText(descendant);
+                if (!string.IsNullOrWhiteSpace(text) &&
+                    !IsLikelyClrTypeName(text) &&
+                    !IsLikelyCellPlaceholder(text))
+                    return text;
+            }
+        }
+        catch { /* fallback */ }
+
+        return "";
+    }
+
     /// <summary>
     /// Filters CLR type-name fallbacks such as "System.String" from cell text.
     /// Domain-like strings, versioned identifiers, or short codes can match this
@@ -530,6 +798,12 @@ public static class GridCommands
                !value.Contains(' ') &&
                value.Any(char.IsUpper) &&
                value.Any(char.IsLower);
+    }
+
+    private static bool IsLikelyCellPlaceholder(string value)
+    {
+        return CellPlaceholderSubstrings.Any(
+            marker => value.Contains(marker, StringComparison.OrdinalIgnoreCase));
     }
 
     private static string SafeString(Func<string?> read)

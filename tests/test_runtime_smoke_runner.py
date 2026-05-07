@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import ctypes
+import os
+import stat
 from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,10 +12,24 @@ from typing import Any
 
 import pytest
 
+from netcoredbg_mcp.session import runtime_smoke_operations as smoke_ops
 from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner, RuntimeSmokeSession
 from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
 from netcoredbg_mcp.session.state import DebugState, OutputEntry
 from netcoredbg_mcp.tools.runtime_smoke import register_runtime_smoke_tools
+
+
+def _set_windows_file_attributes(path: Path, attributes: int) -> None:
+    if os.name != "nt":
+        return
+    from ctypes import wintypes
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.SetFileAttributesW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD)
+    kernel32.SetFileAttributesW.restype = wintypes.BOOL
+    if not kernel32.SetFileAttributesW(str(path), attributes):
+        error = ctypes.GetLastError()
+        raise OSError(error, f"SetFileAttributesW failed for {path}")
 
 
 class FakeRuntimeSmokeSession:
@@ -35,6 +52,7 @@ class FakeRuntimeSmokeSession:
         self.workflow_calls: list[str] = []
         self.failing_action_calls = 0
         self.stop_calls = 0
+        self.launch_calls = 0
         self.allowed_root: Path | None = None
         self.validation_failure: str | None = None
         self.validated_paths: list[tuple[str, bool]] = []
@@ -66,6 +84,10 @@ class FakeRuntimeSmokeSession:
         self.workflow_calls.append("ui.grid.snapshot")
         return {"status": "PASS", "visible_rows": [{"index": 0, "cells": {"Phrase": "one"}}]}
 
+    async def ui_ensure_connected(self, **_: Any) -> dict[str, Any]:
+        self.workflow_calls.append("ui.ensure_connected")
+        return {"status": "PASS", "reason": "ui backend connected"}
+
     async def list_invoke_item(self, **_: Any) -> dict[str, Any]:
         self.workflow_calls.append("ui.list.invoke_item")
         return {"status": "PASS", "invoked": True}
@@ -89,6 +111,11 @@ class FakeRuntimeSmokeSession:
     async def failing_action(self, **_: Any) -> dict[str, Any]:
         self.failing_action_calls += 1
         raise RuntimeError("adapter exploded")
+
+    async def launch(self, **_: Any) -> dict[str, Any]:
+        self.launch_calls += 1
+        self.state.state = DebugState.RUNNING
+        return {"success": True}
 
     async def stop(self) -> dict[str, Any]:
         self.stop_calls += 1
@@ -137,6 +164,7 @@ def _runner(session: FakeRuntimeSmokeSession) -> RuntimeSmokeRunner:
             "ui_grid": session.grid_action,
             "append_output": session.append_output,
             "failing_action": session.failing_action,
+            "ui.ensure_connected": session.ui_ensure_connected,
             "ui.grid.snapshot": session.grid_snapshot,
             "ui.list.invoke_item": session.list_invoke_item,
             "ui.list.toggle_item_child": session.list_toggle_item_child,
@@ -442,6 +470,29 @@ async def test_runner_executes_op_style_ui_and_output_steps_in_one_plan() -> Non
 
 
 @pytest.mark.asyncio
+async def test_runner_eagerly_connects_ui_after_launch_before_freshness() -> None:
+    session = FakeRuntimeSmokeSession()
+
+    result = await _runner(session).run({
+        "schema": "netcoredbg.runtime_smoke.v1",
+        "launch": {"program": "Smoke.dll"},
+        "freshness": {"expected_process_name": "Smoke"},
+        "steps": [
+            {"op": "ui.grid.snapshot", "selector": {"automation_id": "CueGrid"}},
+        ],
+    })
+
+    assert result["status"] == "PASS"
+    assert [step["name"] for step in result["completed_steps"]] == [
+        "launch",
+        "ui.ensure_connected",
+        "verify_debug_freshness",
+        "ui.grid.snapshot",
+    ]
+    assert session.workflow_calls == ["ui.ensure_connected", "ui.grid.snapshot"]
+
+
+@pytest.mark.asyncio
 async def test_runner_accepted_ui_op_without_backend_returns_blocked_not_schema_error() -> None:
     session = FakeRuntimeSmokeSession()
 
@@ -480,6 +531,122 @@ async def test_ui_operation_adapters_reject_non_object_selector() -> None:
         "type": "TypeError",
         "message": "selector must be an object when provided",
     }
+
+
+@pytest.mark.asyncio
+async def test_ui_invoke_uses_fallback_key_sequence_when_primary_missing() -> None:
+    session = FakeRuntimeSmokeSession()
+
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.key_sequence_calls: list[tuple[dict[str, Any], list[str], list[str]]] = []
+
+        async def invoke_element(self, **_: Any) -> dict[str, Any]:
+            raise RuntimeError("Element not found. Search: automationId='menuItemUndo'")
+
+        async def scoped_key_sequence(
+            self,
+            selector: dict[str, Any],
+            modifiers: list[str],
+            keys: list[str],
+        ) -> dict[str, Any]:
+            self.key_sequence_calls.append((dict(selector), list(modifiers), list(keys)))
+            return {
+                "status": "PASS",
+                "sent_count": len(keys),
+                "final_held_modifiers": [],
+            }
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    result = await RuntimeSmokeRunner(
+        session,
+        service_adapters=ui_operation_adapters(backend_provider),
+    ).run({
+        "schema": "netcoredbg.runtime_smoke.v1",
+        "steps": [
+            {
+                "op": "ui.invoke",
+                "selector": {"automation_id": "menuItemUndo"},
+                "fallback_key_sequence": {
+                    "automation_id": "CueDataGrid",
+                    "modifiers": ["ctrl"],
+                    "keys": ["z"],
+                },
+            }
+        ],
+    })
+
+    assert result["status"] == "PASS"
+    step_result = result["completed_steps"][0]["result"]
+    assert step_result["method"] == "fallback_key_sequence"
+    assert step_result["invoked"] is True
+    assert "menuItemUndo" in step_result["primary_error"]
+    assert backend.key_sequence_calls == [
+        ({"automation_id": "CueDataGrid"}, ["ctrl"], ["z"])
+    ]
+
+
+@pytest.mark.asyncio
+async def test_state_changing_ui_operations_return_settle_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = FakeRuntimeSmokeSession()
+    slept: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        slept.append(delay)
+
+    class FakeBackend:
+        async def list_toggle_item_child(
+            self,
+            selector: dict[str, Any],
+            item: dict[str, Any],
+            child: dict[str, Any],
+            target_state: str | None,
+        ) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "selector": selector,
+                "item": item,
+                "child": child,
+                "target_state": target_state,
+                "toggled": True,
+                "new_state": target_state,
+            }
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    monkeypatch.setattr(smoke_ops.asyncio, "sleep", fake_sleep)
+
+    result = await RuntimeSmokeRunner(
+        session,
+        service_adapters=smoke_ops.ui_operation_adapters(backend_provider),
+    ).run({
+        "schema": "netcoredbg.runtime_smoke.v1",
+        "steps": [
+            {
+                "op": "ui.list.toggle_item_child",
+                "selector": {"automation_id": "CharactersListBox"},
+                "item": {"name": "ALICE"},
+                "child": {"automation_id": "CharGender"},
+                "target_state": "Off",
+            }
+        ],
+    })
+
+    assert result["status"] == "PASS"
+    step_result = result["completed_steps"][0]["result"]
+    assert step_result["settled_ms"] == int(
+        smoke_ops.STATE_CHANGE_SETTLE_SECONDS * 1000,
+    )
+    assert slept == [smoke_ops.STATE_CHANGE_SETTLE_SECONDS]
 
 
 @pytest.mark.asyncio
@@ -627,6 +794,104 @@ async def test_runner_restores_from_validated_baseline_file(tmp_path: Path) -> N
     assert result["cleanup"]["restored_files"][0]["source"] == "baseline_file"
     assert result["cleanup"]["restored_files"][0]["baseline_file"] == str(baseline.resolve())
     assert "restored from file" not in str(result["compact"]["cleanup"])
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows hidden attributes are NT-only")
+@pytest.mark.asyncio
+async def test_runner_restores_hidden_windows_file_and_preserves_attribute(
+    tmp_path: Path,
+) -> None:
+    session = FakeRuntimeSmokeSession()
+    session.allowed_root = tmp_path
+    fixture = tmp_path / "fixture.txt"
+    fixture.write_text("mutated", encoding="utf-8")
+    original_attributes = fixture.stat().st_file_attributes
+    hidden_attributes = original_attributes | stat.FILE_ATTRIBUTE_HIDDEN
+    _set_windows_file_attributes(fixture, hidden_attributes)
+
+    try:
+        result = await _runner(session).run({
+            "name": "restore-hidden-file",
+            "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}],
+            "cleanup": {
+                "restore_files": [{"path": str(fixture), "baseline_text": "baseline"}]
+            },
+        })
+
+        assert result["status"] == "PASS"
+        assert fixture.read_text(encoding="utf-8") == "baseline"
+        assert fixture.stat().st_file_attributes & stat.FILE_ATTRIBUTE_HIDDEN
+    finally:
+        _set_windows_file_attributes(fixture, original_attributes)
+
+
+@pytest.mark.asyncio
+async def test_runner_retries_transient_restore_permission_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = FakeRuntimeSmokeSession()
+    session.allowed_root = tmp_path
+    fixture = tmp_path / "fixture.txt"
+    fixture.write_text("mutated", encoding="utf-8")
+    runner = _runner(session)
+    original_restore = runner._restore_file
+    attempts = 0
+
+    def flaky_restore(entry: Any) -> dict[str, Any]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise PermissionError("fixture is still locked")
+        return original_restore(entry)
+
+    monkeypatch.setattr(runner, "_restore_file", flaky_restore)
+
+    result = await runner.run({
+        "name": "restore-transient-lock",
+        "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}],
+        "cleanup": {
+            "restore_files": [
+                {"path": str(fixture), "baseline_text": "restored after retry"}
+            ]
+        },
+    })
+
+    assert result["status"] == "PASS"
+    assert attempts == 2
+    assert fixture.read_text(encoding="utf-8") == "restored after retry"
+    assert result["cleanup"]["restored_files"][0]["attempts"] == 2
+
+
+@pytest.mark.asyncio
+async def test_runner_accepts_already_matched_file_after_restore_write_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = FakeRuntimeSmokeSession()
+    session.allowed_root = tmp_path
+    fixture = tmp_path / "fixture.txt"
+    fixture.write_text("baseline", encoding="utf-8")
+    original_write_text = Path.write_text
+
+    def fail_fixture_write(path: Path, *args: Any, **kwargs: Any) -> int:
+        if path.resolve() == fixture.resolve():
+            raise PermissionError("fixture is locked for writes")
+        return original_write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_fixture_write)
+
+    result = await _runner(session).run({
+        "name": "restore-already-matched",
+        "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}],
+        "cleanup": {
+            "restore_files": [{"path": str(fixture), "baseline_text": "baseline"}]
+        },
+    })
+
+    assert result["status"] == "PASS"
+    assert result["cleanup"]["status"] == "PASS"
+    assert result["cleanup"]["restored_files"][0]["already_matched"] is True
 
 
 @pytest.mark.asyncio
