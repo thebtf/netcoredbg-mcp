@@ -317,14 +317,31 @@ def test_bridge_grid_builds_cell_text_evidence_for_rows() -> None:
     assert '["grid_assert_rows"] = GridCommands.AssertRows' in handler
     assert '["cells"]' in command
     assert "ReadCellText" in command
+    assert "new Grid(grid.FrameworkAutomationElement)" in command
+    assert "gridElement.ColumnHeaders" in command
+    assert "new GridRow(row.FrameworkAutomationElement)" in command
+    assert "gridRow.Cells" in command
+    assert "CellColumnIndex(cell, ordinal)" in command
+    assert "ReadDescendantCellText" in command
+    assert "IsLikelyCellPlaceholder" in command
+    assert command.count("IsLikelyCellPlaceholder(text)") >= 3
+    assert "FindGridWithRetry" in command
     assert "row cell evidence unavailable" in command
     assert "ColumnsFromAssertions(expectedRows)" in command
-    assert "CellKey(cell, currentOrdinal, columns)" in command
+    assert "actualValue.Contains(expectedValue, StringComparison.Ordinal)" in command
+    assert "CellKey(cell, currentOrdinal, columns, headers)" in command
     direct_children_index = command.index("row.FindAllChildren()")
     descendant_fallback_index = command.index("row.FindAllDescendants()")
     ordinal_index = command.index("var currentOrdinal = ordinal")
     increment_index = command.index("ordinal++;", ordinal_index)
     read_text_index = command.index("ReadCellText(cell)", ordinal_index)
     blank_continue_index = command.index("continue;", read_text_index)
+    pattern_value_index = command.index("var text = SafeString(() => cell.Value);")
+    pattern_read_text_index = command.index("text = ReadCellText(cell)", pattern_value_index)
+    pattern_placeholder_guard_index = command.index(
+        "IsLikelyCellPlaceholder(text)",
+        pattern_value_index,
+    )
     assert direct_children_index < descendant_fallback_index
     assert ordinal_index < increment_index < blank_continue_index
+    assert pattern_value_index < pattern_placeholder_guard_index < pattern_read_text_index

@@ -77,15 +77,15 @@ def _is_pid_alive_windows(pid: int) -> bool:
         kernel32.GetExitCodeProcess.restype = wintypes.BOOL
         kernel32.CloseHandle.restype = wintypes.BOOL
 
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        process_query_limited_information = 0x1000
         handle = kernel32.OpenProcess(
-            PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+            process_query_limited_information, False, pid
         )
         if not handle:
             # Check if process exists but we lack permission
             error = ctypes.GetLastError()
-            ERROR_ACCESS_DENIED = 5
-            if error == ERROR_ACCESS_DENIED:
+            error_access_denied = 5
+            if error == error_access_denied:
                 return True  # Process exists, we just can't open it
             return False
 
@@ -94,8 +94,8 @@ def _is_pid_alive_windows(pid: int) -> bool:
         kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
         kernel32.CloseHandle(handle)
 
-        STILL_ACTIVE = 259
-        return exit_code.value == STILL_ACTIVE
+        still_active = 259
+        return exit_code.value == still_active
     except (OSError, AttributeError):
         return False
 
@@ -137,7 +137,7 @@ def _terminate_pid_unix(pid: int, timeout: float) -> bool:
 
 
 def _terminate_pid_windows(pid: int, timeout: float) -> bool:
-    """Terminate on Windows: TerminateProcess."""
+    """Terminate on Windows and wait until the process exits."""
     try:
         import ctypes
         from ctypes import wintypes
@@ -145,20 +145,33 @@ def _terminate_pid_windows(pid: int, timeout: float) -> bool:
         kernel32 = ctypes.windll.kernel32
         kernel32.OpenProcess.restype = wintypes.HANDLE
         kernel32.TerminateProcess.restype = wintypes.BOOL
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
         kernel32.CloseHandle.restype = wintypes.BOOL
 
-        PROCESS_TERMINATE = 0x0001
-        handle = kernel32.OpenProcess(PROCESS_TERMINATE, False, pid)
+        process_terminate = 0x0001
+        synchronize = 0x00100000
+        wait_object_0 = 0x00000000
+        wait_timeout = 0x00000102
+        timeout_ms = max(0, int(timeout * 1000))
+
+        handle = kernel32.OpenProcess(process_terminate | synchronize, False, pid)
         if not handle:
             return not _is_pid_alive(pid)
 
-        result = kernel32.TerminateProcess(handle, 1)
-        kernel32.CloseHandle(handle)
+        try:
+            result = kernel32.TerminateProcess(handle, 1)
+            if not result:
+                return False
 
-        if result:
-            logger.debug(f"Terminated process PID {pid} via TerminateProcess")
-            return True
-        return False
+            wait_result = kernel32.WaitForSingleObject(handle, timeout_ms)
+            if wait_result == wait_object_0:
+                logger.debug(f"Terminated process PID {pid} via TerminateProcess")
+                return True
+            if wait_result == wait_timeout:
+                return not _is_pid_alive(pid)
+            return False
+        finally:
+            kernel32.CloseHandle(handle)
     except (OSError, AttributeError):
         return False
 

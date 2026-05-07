@@ -22,7 +22,9 @@ public static class ElementCommands
         if (windows.Length == 0)
             throw new InvalidOperationException($"No window found for process {pid}");
 
-        var window = windows[0];
+        var window = SelectPrimaryWindow(windows)
+            ?? throw new InvalidOperationException(
+                $"No window found for process {pid}: no usable top-level window yet");
         JsonRpcHandler.MainWindow = window;
         // Store pid independently so window enumeration still works after
         // set_active_window switches MainWindow to a dialog that later closes.
@@ -35,6 +37,51 @@ public static class ElementCommands
             ["connected"] = true,
             ["title"] = SafeString(() => window.Name)
         };
+    }
+
+    private static AutomationElement? SelectPrimaryWindow(AutomationElement[] windows)
+    {
+        return windows
+            .Select((window, index) => new
+            {
+                Window = window,
+                Index = index,
+                Score = PrimaryWindowScore(window)
+            })
+            .Where(candidate => candidate.Score > int.MinValue)
+            .OrderByDescending(candidate => candidate.Score)
+            .ThenBy(candidate => candidate.Index)
+            .FirstOrDefault()
+            ?.Window;
+    }
+
+    private static int PrimaryWindowScore(AutomationElement window)
+    {
+        try
+        {
+            var rect = window.BoundingRectangle;
+            if (rect.Width <= 0 || rect.Height <= 0)
+                return int.MinValue;
+
+            var score = Math.Min((int)(rect.Width * rect.Height / 10_000), 1_000);
+            if (!string.IsNullOrWhiteSpace(SafeString(() => window.Name)))
+                score += 1_000;
+            if (!string.IsNullOrWhiteSpace(SafeString(() => window.AutomationId)))
+                score += 100;
+            if (!SafeIsOffscreen(window))
+                score += 500;
+            return score;
+        }
+        catch
+        {
+            return int.MinValue;
+        }
+    }
+
+    private static bool SafeIsOffscreen(AutomationElement element)
+    {
+        try { return element.IsOffscreen; }
+        catch { return false; }
     }
 
     public static JsonNode FindElement(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
