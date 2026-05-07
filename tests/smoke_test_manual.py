@@ -2170,8 +2170,71 @@ async def test_output_checkpoint_assertions():
         await m.stop()
 
 
+async def test_runtime_smoke_bounded_runner():
+    print("\n21. RUNTIME SMOKE BOUNDED RUNNER")
+    from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner
+
+    m = await new_session()
+
+    async def append_output(text: str, category: str = "stdout") -> dict:
+        m.state.output_buffer.append(OutputEntry(text, category=category))
+        return {"status": "PASS", "reason": "output appended", "text_length": len(text)}
+
+    try:
+        runner = RuntimeSmokeRunner(
+            m,
+            service_adapters={"append_output": append_output},
+        )
+        passed_result = await runner.run({
+            "name": "manual-bounded-pass",
+            "budgets": {"max_actions": 4, "max_elapsed_seconds": 10},
+            "actions": [
+                {"name": "output_checkpoint", "args": {"name": "manual_runner"}},
+                {"name": "append_output", "args": {"text": "runner ready\n"}},
+            ],
+            "assertions": [
+                {
+                    "name": "output_assert_since",
+                    "args": {"checkpoint": "manual_runner", "required": ["runner ready"]},
+                }
+            ],
+        })
+        failed_result = await runner.run({
+            "name": "manual-bounded-fail",
+            "actions": [
+                {"name": "output_checkpoint", "args": {"name": "manual_runner_fail"}},
+            ],
+            "assertions": [
+                {
+                    "name": "output_assert_since",
+                    "args": {"checkpoint": "manual_runner_fail", "required": ["missing"]},
+                }
+            ],
+        })
+
+        print(f"  pass compact: {passed_result['compact']}")
+        print(f"  fail compact: {failed_result['compact']}")
+        check(
+            "Bounded runner PASS includes cleanup",
+            passed_result["status"] == "PASS" and passed_result["cleanup"]["status"] == "PASS",
+            str(passed_result["compact"]),
+        )
+        check(
+            "Bounded runner FAIL lists failed assertions",
+            failed_result["status"] == "FAIL" and len(failed_result["failed_assertions"]) == 1,
+            str(failed_result["compact"]),
+        )
+        check(
+            "Bounded runner failure prints cleanup outcome",
+            failed_result["cleanup"]["status"] in {"PASS", "FAIL"},
+            str(failed_result["cleanup"]),
+        )
+    finally:
+        await m.stop()
+
+
 async def test_wpf_shift_datagrid_evidence():
-    print("\n21. WPF SHIFT DATAGRID EVIDENCE")
+    print("\n22. WPF SHIFT DATAGRID EVIDENCE")
     from netcoredbg_mcp.ui.backend import create_backend
     from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
     from netcoredbg_mcp.ui.grid import (
@@ -2259,7 +2322,7 @@ async def test_wpf_shift_datagrid_evidence():
 
 
 async def test_avalonia_ui_fixture_compatibility():
-    print("\n22. AVALONIA UI FIXTURE COMPATIBILITY")
+    print("\n23. AVALONIA UI FIXTURE COMPATIBILITY")
     from netcoredbg_mcp.ui.backend import create_backend
     from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
     from netcoredbg_mcp.ui.grid import read_grid_visible_rows
@@ -2379,6 +2442,7 @@ def get_scenarios():
         ("Runtime Hygiene Preflight", test_runtime_hygiene_preflight),
         ("Instrumentation Group Lifecycle", test_instrumentation_group_lifecycle),
         ("Output Checkpoint Assertions", test_output_checkpoint_assertions),
+        ("Runtime Smoke Bounded Runner", test_runtime_smoke_bounded_runner),
     ]
 
     if GUI_ENABLED:

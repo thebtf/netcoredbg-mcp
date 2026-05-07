@@ -10,9 +10,11 @@ from mcp.server.fastmcp import Context, FastMCP
 
 from ..response import build_error_response, build_response, extend_next_actions
 from ..session import SessionManager
+from ..session.freshness import DebugFreshnessVerifier
 from ..session.hygiene import HygienePreflightResult, RuntimeHygieneService
 from ..session.instrumentation import InstrumentationGroupService
 from ..session.output_assertions import OutputAssertionService
+from ..session.runtime_smoke import RuntimeSmokeRunner
 
 _NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
@@ -203,6 +205,59 @@ def register_runtime_smoke_tools(
                 session,
                 result.to_dict(),
                 ["output_checkpoint", "instrumentation_group_inspect"],
+            )
+        except Exception as exc:
+            return build_error_response(str(exc), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+    async def verify_debug_freshness(
+        ctx: Context,
+        expected_process_id: int | None = None,
+        expected_process_name: str | None = None,
+        expected_workspace: str | None = None,
+        expected_sources: list[str] | None = None,
+        expected_modules: list[str] | None = None,
+        expected_artifacts: list[str] | None = None,
+        require_active_process: bool = False,
+    ) -> dict:
+        """Verify that the debug session matches expected runtime evidence."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+            result = DebugFreshnessVerifier(session).verify(
+                expected_process_id=expected_process_id,
+                expected_process_name=expected_process_name,
+                expected_workspace=expected_workspace,
+                expected_sources=expected_sources,
+                expected_modules=expected_modules,
+                expected_artifacts=expected_artifacts,
+                require_active_process=require_active_process,
+            )
+            return _build_runtime_smoke_response(
+                session,
+                result.to_dict(),
+                ["run_runtime_smoke", "output_checkpoint"],
+            )
+        except Exception as exc:
+            return build_error_response(str(exc), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def run_runtime_smoke(ctx: Context, plan: dict[str, Any]) -> dict:
+        """Run a bounded runtime smoke scenario plan with cleanup evidence."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+            if not isinstance(plan, dict):
+                data = await RuntimeSmokeRunner(session).run({"actions": "invalid"})
+                data["validation_errors"] = ["plan must be an object"]
+            else:
+                data = await RuntimeSmokeRunner(session).run(plan)
+            return _build_runtime_smoke_response(
+                session,
+                data,
+                ["verify_debug_freshness", "debug_hygiene_preflight"],
             )
         except Exception as exc:
             return build_error_response(str(exc), state=session.state.state)
