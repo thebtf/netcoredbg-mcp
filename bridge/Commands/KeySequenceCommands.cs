@@ -153,12 +153,8 @@ public static class KeySequenceCommands
         {
             foreach (var modifier in modifierKeys)
             {
-                if (IsTrackedHeldModifier(modifier.Key))
-                    continue;
-
-                SendKeyDown(modifier.Key);
-                TrackHeldModifier(modifier.Key);
-                scopedHeld.Add(modifier);
+                if (TryAcquireScopedModifier(modifier))
+                    scopedHeld.Add(modifier);
             }
             if (scopedHeld.Count > 0)
                 Thread.Sleep(INPUT_SETTLE_MS);
@@ -186,8 +182,7 @@ public static class KeySequenceCommands
                 var modifier = scopedHeld[index];
                 try
                 {
-                    SendKeyUp(modifier.Key);
-                    UntrackHeldModifier(modifier.Key);
+                    ReleaseScopedModifier(modifier.Key);
                 }
                 catch (Exception ex)
                 {
@@ -317,26 +312,24 @@ public static class KeySequenceCommands
             $"Unknown modifier names: {modifier}. Accepted values: alt, ctrl, shift, win");
     }
 
-    private static bool IsTrackedHeldModifier(VirtualKeyShort key)
+    private static bool TryAcquireScopedModifier((string Name, VirtualKeyShort Key) modifier)
     {
         lock (JsonRpcHandler.HeldModifiersLock)
         {
-            return JsonRpcHandler.HeldModifiers.Contains(key);
+            if (JsonRpcHandler.HeldModifiers.Contains(modifier.Key))
+                return false;
+
+            SendKeyDown(modifier.Key);
+            JsonRpcHandler.HeldModifiers.Add(modifier.Key);
+            return true;
         }
     }
 
-    private static void TrackHeldModifier(VirtualKeyShort key)
+    private static void ReleaseScopedModifier(VirtualKeyShort key)
     {
         lock (JsonRpcHandler.HeldModifiersLock)
         {
-            JsonRpcHandler.HeldModifiers.Add(key);
-        }
-    }
-
-    private static void UntrackHeldModifier(VirtualKeyShort key)
-    {
-        lock (JsonRpcHandler.HeldModifiersLock)
-        {
+            SendKeyUp(key);
             JsonRpcHandler.HeldModifiers.Remove(key);
         }
     }

@@ -99,6 +99,7 @@ async def test_scoped_key_sequence_fails_when_cleanup_leaves_shift_held() -> Non
 @pytest.mark.asyncio
 async def test_scoped_key_sequence_blocks_unsupported_backend_without_fake_success() -> None:
     backend = FakeKeySequenceBackend({
+        "status": "UNSUPPORTED",
         "unsupported": True,
         "reason": "FlaUI bridge required for scoped key sequence",
     })
@@ -204,6 +205,8 @@ def test_bridge_router_registers_scoped_key_sequence_and_dispose_cleanup() -> No
     assert "KeySequenceCommands.ScopedKeySequence" in router
     assert "ModifierCommands.ReleaseAllHeldModifiers();" in router
     assert "SendInput(1, [input], Marshal.SizeOf<INPUT>())" in command
+    assert "TryAcquireScopedModifier" in command
+    assert "ReleaseScopedModifier" in command
     assert "releaseFailureNames" in command
 
 

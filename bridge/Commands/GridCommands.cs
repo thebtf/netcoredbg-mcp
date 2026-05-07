@@ -2,6 +2,7 @@ using System.Text.Json.Nodes;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Conditions;
 using FlaUI.Core.Definitions;
+using FlaUI.Core.Patterns;
 using FlaUI.UIA3;
 
 namespace FlaUIBridge.Commands;
@@ -55,14 +56,26 @@ public static class GridCommands
                 ["selection_mutated"] = false
             };
 
+        var itemPatterns = new List<ISelectionItemPattern>();
         for (var i = start; i <= end; i++)
         {
             if (!rows[i].Patterns.SelectionItem.TryGetPattern(out var itemPattern))
                 return Unsupported("SelectionItemPattern");
-            if (i == start)
+            itemPatterns.Add(itemPattern);
+        }
+
+        for (var index = 0; index < itemPatterns.Count; index++)
+        {
+            if (index == 0)
+            {
+                var itemPattern = itemPatterns[index];
                 itemPattern.Select();
+            }
             else
+            {
+                var itemPattern = itemPatterns[index];
                 itemPattern.AddToSelection();
+            }
         }
 
         return new JsonObject
@@ -126,8 +139,9 @@ public static class GridCommands
             conditions.Add(cf.ByName(name));
 
         var controlType = selector["controlType"]?.GetValue<string>() ?? "DataGrid";
-        if (Enum.TryParse<ControlType>(controlType, true, out var ct))
-            conditions.Add(cf.ByControlType(ct));
+        if (!Enum.TryParse<ControlType>(controlType, true, out var ct))
+            throw new ArgumentException($"Unknown DataGrid controlType: {controlType}");
+        conditions.Add(cf.ByControlType(ct));
 
         if (conditions.Count == 0)
             throw new ArgumentException("DataGrid selector requires automationId, name, or controlType");

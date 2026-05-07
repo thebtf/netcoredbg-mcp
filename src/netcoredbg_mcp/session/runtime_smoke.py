@@ -140,7 +140,18 @@ class RuntimeSmokeRunner:
 
             name = str(step["name"])
             args = dict(step.get("args") or {})
-            result = await self._execute_operation(name, args)
+            try:
+                result = await self._execute_operation(name, args)
+            except Exception as exc:
+                result = {
+                    "status": "FAIL",
+                    "reason": "runtime smoke operation raised exception",
+                    "operation": name,
+                    "exception": {
+                        "type": type(exc).__name__,
+                        "message": str(exc),
+                    },
+                }
             status = _terminal_status(result.get("status", "PASS"))
             action_count += 1
             record = {
@@ -349,6 +360,21 @@ def _validate_plan(plan: Any) -> list[str]:
     budgets = plan.get("budgets", {})
     if budgets is not None and not isinstance(budgets, dict):
         errors.append("budgets must be an object")
+    elif isinstance(budgets, dict):
+        if "max_actions" in budgets:
+            try:
+                max_actions = int(budgets["max_actions"])
+                if max_actions < 1:
+                    errors.append("budgets.max_actions must be at least 1")
+            except (TypeError, ValueError):
+                errors.append("budgets.max_actions must be an integer")
+        if "max_elapsed_seconds" in budgets:
+            try:
+                max_elapsed = float(budgets["max_elapsed_seconds"])
+                if max_elapsed <= 0:
+                    errors.append("budgets.max_elapsed_seconds must be positive")
+            except (TypeError, ValueError):
+                errors.append("budgets.max_elapsed_seconds must be a number")
     return errors
 
 

@@ -19,6 +19,8 @@ from netcoredbg_mcp.ui.grid import (
 )
 from netcoredbg_mcp.ui.pywinauto_backend import PywinautoBackend
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
 
 class FakeGridBackend:
     def __init__(self) -> None:
@@ -164,7 +166,21 @@ async def test_ui_grid_tool_is_registered(mock_netcoredbg_path) -> None:
 
 
 def test_bridge_grid_assertion_requires_exact_selected_range() -> None:
-    command = Path("bridge/Commands/GridCommands.cs").read_text(encoding="utf-8")
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "GridCommands.cs").read_text(
+        encoding="utf-8",
+    )
 
     assert "selectedRows.Count == expected.Count" in command
     assert "expected.All(selectedRows.Contains)" not in command
+
+
+def test_bridge_grid_rejects_invalid_control_type_and_prevalidates_selection_range(
+) -> None:
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "GridCommands.cs").read_text(
+        encoding="utf-8",
+    )
+
+    assert "Unknown DataGrid controlType" in command
+    validation_index = command.index("itemPatterns.Add(itemPattern)")
+    mutation_index = command.index("itemPattern.Select()")
+    assert validation_index < mutation_index

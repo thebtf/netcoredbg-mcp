@@ -49,9 +49,9 @@ async def run_scoped_key_sequence(
     )
     if result.get("unsupported") is True:
         return {
-            "status": "BLOCKED",
-            "reason": result.get("reason", "scoped key sequence unsupported"),
             **result,
+            "reason": result.get("reason", "scoped key sequence unsupported"),
+            "status": "BLOCKED",
         }
 
     final_held = list(result.get("final_held_modifiers") or [])

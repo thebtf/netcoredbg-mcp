@@ -30,6 +30,7 @@ class FakeRuntimeSmokeSession:
         self.instrumentation_clears: list[str] = []
         self.key_sequence_calls = 0
         self.grid_calls = 0
+        self.failing_action_calls = 0
 
     async def hygiene_preflight(self, **_: Any) -> dict[str, Any]:
         self.hygiene_calls += 1
@@ -53,6 +54,10 @@ class FakeRuntimeSmokeSession:
     async def grid_action(self, **_: Any) -> dict[str, Any]:
         self.grid_calls += 1
         return {"status": "BLOCKED", "reason": "grid backend unsupported"}
+
+    async def failing_action(self, **_: Any) -> dict[str, Any]:
+        self.failing_action_calls += 1
+        raise RuntimeError("adapter exploded")
 
     async def append_output(self, text: str, category: str = "stdout") -> dict[str, Any]:
         self.state.output_sequence += 1
@@ -80,6 +85,7 @@ def _runner(session: FakeRuntimeSmokeSession) -> RuntimeSmokeRunner:
             "ui_key_sequence": session.scoped_key_sequence,
             "ui_grid": session.grid_action,
             "append_output": session.append_output,
+            "failing_action": session.failing_action,
         },
     )
 
@@ -266,6 +272,48 @@ async def test_runner_invalid_plan_still_attempts_cleanup() -> None:
     assert result["cleanup"]["reset_failures"] == [
         {"name": "release-modifiers", "error": "release failed"}
     ]
+
+
+@pytest.mark.asyncio
+async def test_runner_reports_operation_exception_and_still_tears_down() -> None:
+    session = FakeRuntimeSmokeSession()
+    session.runtime_smoke.instrumentation_groups["flow"] = {"breakpoints": [1]}
+
+    result = await _runner(session).run({
+        "name": "operation-error",
+        "actions": [{"name": "failing_action"}],
+        "teardown": {"instrumentation_groups": ["flow"]},
+    })
+
+    assert result["status"] == "FAIL"
+    assert result["reason"] == "runtime smoke operation raised exception"
+    assert result["completed_steps"][0]["result"]["exception"] == {
+        "type": "RuntimeError",
+        "message": "adapter exploded",
+    }
+    assert session.failing_action_calls == 1
+    assert session.instrumentation_clears == ["flow"]
+    assert result["cleanup"]["status"] == "PASS"
+
+
+@pytest.mark.asyncio
+async def test_runner_rejects_invalid_budget_values_without_raising() -> None:
+    session = FakeRuntimeSmokeSession()
+
+    result = await _runner(session).run({
+        "name": "bad-budgets",
+        "budgets": {"max_actions": "many", "max_elapsed_seconds": []},
+        "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}],
+    })
+
+    assert result["status"] == "FAIL"
+    assert result["reason"] == "invalid plan schema"
+    assert result["validation_errors"] == [
+        "budgets.max_actions must be an integer",
+        "budgets.max_elapsed_seconds must be a number",
+    ]
+    assert result["completed_steps"] == []
+    assert result["cleanup"]["status"] == "PASS"
 
 
 @pytest.mark.asyncio
