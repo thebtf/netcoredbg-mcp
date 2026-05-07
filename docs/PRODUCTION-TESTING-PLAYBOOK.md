@@ -22,6 +22,8 @@ because it is a future migration path for the UI automation surface.
 - Python 3.10 or newer.
 - Development dependencies installed.
 - Commands run from the repository root.
+- `NETCOREDBG_PATH` points at the installed `netcoredbg.exe` for GUI smoke
+  commands.
 - For package installation checks, a local wheel can be built with
   `python -m build`.
 - For full GUI smoke coverage, build all three fixture apps:
@@ -93,9 +95,43 @@ Expected result:
   Compatibility`.
 - Missing GUI fixture binaries are treated as reduced coverage, not as proof
   that the corresponding GUI surface was exercised.
-- Before resolving Engram #196, run `WPF One-Call Runtime Smoke Workflow` on a
-  Windows GUI workstation and record whether the one `run_runtime_smoke` plan
-  returned `PASS`, `BLOCKED`, or `FAIL`.
+- Before release, run the WPF and Avalonia GUI scenarios on a Windows GUI
+  workstation and record whether each scenario returned `PASS`, `BLOCKED`, or
+  `FAIL`.
+
+### 5. WPF One-Call Runtime Smoke Workflow
+
+Command:
+
+```powershell
+$env:NETCOREDBG_PATH = "C:\Tools\netcoredbg\netcoredbg.exe"
+python -c "import asyncio, sys; import tests.smoke_test_manual as s; asyncio.run(s.test_wpf_one_call_runtime_smoke_workflow()); print(f'RESULTS: {s.passed} passed, {s.failed} failed out of {s.passed + s.failed} checks'); sys.exit(0 if s.failed == 0 else 1)"
+```
+
+Expected result:
+
+- Exit code `0`.
+- Output includes `WPF One-Call Runtime Smoke Workflow`.
+- The one `run_runtime_smoke` plan returns `PASS` with cleanup evidence, or an
+  honest `BLOCKED` / `FAIL` result that names the failing operation and cleanup
+  state.
+
+### 6. Avalonia UI Fixture Compatibility
+
+Command:
+
+```powershell
+$env:NETCOREDBG_PATH = "C:\Tools\netcoredbg\netcoredbg.exe"
+python -c "import asyncio, sys; import tests.smoke_test_manual as s; asyncio.run(s.test_avalonia_ui_fixture_compatibility()); print(f'RESULTS: {s.passed} passed, {s.failed} failed out of {s.passed + s.failed} checks'); sys.exit(0 if s.failed == 0 else 1)"
+```
+
+Expected result:
+
+- Exit code `0`.
+- Output includes `Avalonia UI Fixture Compatibility`.
+- The fixture is found through UIA, modifier cleanup succeeds, and incomplete
+  Avalonia UIA grid or key-routing paths are reported as bounded `UNSUPPORTED`
+  or `BLOCKED` evidence rather than being skipped.
 
 ## Failure-Mode Catalog
 
@@ -105,6 +141,9 @@ Expected result:
 - Critical suite discovery finds no `@critical` tests.
 - Manual smoke scenario inventory omits WPF or Avalonia fixture scenarios after
   fixture builds succeeded.
+- WPF one-call smoke does not return cleanup evidence for the bounded plan.
+- Avalonia compatibility is omitted or treated as unsupported without bounded
+  evidence from the fixture.
 
 ## Verdict Template
 
@@ -115,6 +154,7 @@ Expected result:
 | Launch metadata safety | No env values in metadata |  |  |
 | Manual smoke surface inventory | WPF, WPF one-call, and Avalonia scenarios listed |  |  |
 | WPF one-call runtime smoke | One `run_runtime_smoke` plan returns PASS or an honest BLOCKED/FAIL with cleanup evidence |  |  |
+| Avalonia fixture compatibility | Fixture found; key cleanup succeeds; UIA gaps are bounded UNSUPPORTED/BLOCKED evidence |  |  |
 
 Overall verdict: `PRODUCT_WORKS` / `PARTIALLY_WORKS` / `BROKEN`
 

@@ -14,7 +14,7 @@ set breakpoints, step through code, inspect variables, evaluate expressions, rea
 debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
 and Avalonia windows without opening an IDE.
 
-**103 MCP tools · 8 prompts · 4 resources · 818 collected tests · release v0.13.0**
+**103 MCP tools · 8 prompts · 4 resources · 862 collected tests · release v0.13.0**
 
 ## Quick Links
 
@@ -338,6 +338,13 @@ stop. The example launches the WPF fixture DLL through `dotnet`, so freshness
 expects `expected_process_name: "dotnet"` and `expected_modules:
 ["WpfSmokeApp.dll"]`. The matching manual scenario is
 `WPF One-Call Runtime Smoke Workflow`.
+
+The WPF workflow now connects UI automation eagerly after launch, chooses a
+stable usable top-level window, merges structured `GridPattern` cell evidence
+with descendant text fallback, and restores fixture files even when Windows
+briefly holds attributes or locks. Avalonia remains a first-class compatibility
+target: its manual fixture is expected to produce bounded `UNSUPPORTED` or
+`BLOCKED` evidence for UIA gaps instead of being omitted from release checks.
 
 ## Available Tools
 

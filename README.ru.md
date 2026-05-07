@@ -14,7 +14,7 @@
 вычислять выражения, читать вывод отладки и управлять поверхностями Windows UI
 Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 
-**103 MCP-инструмента · 8 промптов · 4 ресурса · 818 собранных тестов · релиз v0.13.0**
+**103 MCP-инструмента · 8 промптов · 4 ресурса · 862 собранных теста · релиз v0.13.0**
 
 ## Быстрые ссылки
 
@@ -344,6 +344,14 @@ debug stop. Пример запускает WPF fixture DLL через `dotnet`,
 ожидает `expected_process_name: "dotnet"` и `expected_modules:
 ["WpfSmokeApp.dll"]`. Соответствующий manual scenario:
 `WPF One-Call Runtime Smoke Workflow`.
+
+Теперь WPF workflow заранее подключает UI Automation после запуска, выбирает
+стабильное пригодное top-level window, объединяет cell evidence из
+`GridPattern` с descendant text fallback и восстанавливает fixture files, даже
+если Windows недолго удерживает attributes или locks. Avalonia остаётся
+first-class compatibility target: её manual fixture должна давать ограниченное
+`UNSUPPORTED` или `BLOCKED` evidence для UIA gaps, а не выпадать из release
+checks.
 
 ## Доступные инструменты
 
