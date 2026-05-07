@@ -42,7 +42,12 @@ def ui_operation_adapters(ensure_ui_connected: BackendProvider) -> OperationAdap
         backend = await _backend_or_blocked(ensure_ui_connected)
         if isinstance(backend, dict):
             return backend
-        return await assert_grid_rows(backend, _selector(args), list(args["rows"]))
+        return await assert_grid_rows(
+            backend,
+            _selector(args),
+            list(args["rows"]),
+            columns=args.get("columns"),
+        )
 
     async def list_invoke(**args: Any) -> dict[str, Any]:
         backend = await _backend_or_blocked(ensure_ui_connected)
@@ -79,6 +84,19 @@ def ui_operation_adapters(ensure_ui_connected: BackendProvider) -> OperationAdap
             return backend
         selector = _selector(args)
         text_result = await backend.extract_text(**_selector_kwargs(selector))
+        if not isinstance(text_result, dict):
+            return {
+                "status": "FAIL",
+                "matched": False,
+                "reason": "text backend returned non-object result",
+                "result": text_result,
+            }
+        backend_status = str(text_result.get("status", "PASS")).upper()
+        if backend_status not in {"PASS", "OK", "SUCCESS"}:
+            result = dict(text_result)
+            result.setdefault("matched", False)
+            result.setdefault("result", text_result)
+            return result
         text = str(text_result.get("text", ""))
         contains = args.get("contains")
         equals = args.get("equals")

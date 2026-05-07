@@ -168,6 +168,7 @@ class UIBackend(Protocol):
         self,
         selector: dict[str, Any],
         rows: list[dict[str, Any]],
+        columns: list[str] | None = None,
     ) -> dict[str, Any]:
         """Assert visible DataGrid row cell values."""
         ...

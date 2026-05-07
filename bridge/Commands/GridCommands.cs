@@ -349,10 +349,12 @@ public static class GridCommands
 
         foreach (var cell in candidates)
         {
+            var currentOrdinal = ordinal;
+            ordinal++;
             var text = ReadCellText(cell);
             if (string.IsNullOrWhiteSpace(text) || IsLikelyClrTypeName(text))
                 continue;
-            var key = CellKey(cell, ordinal, columns);
+            var key = CellKey(cell, currentOrdinal, columns);
             cellMap[key] = text;
             cellValues.Add(new JsonObject
             {
@@ -362,7 +364,6 @@ public static class GridCommands
                 ["name"] = SafeString(() => cell.Name),
                 ["control_type"] = SafeString(() => cell.ControlType.ToString())
             });
-            ordinal++;
         }
 
         return (cellMap, cellValues);

@@ -483,6 +483,58 @@ async def test_ui_operation_adapters_reject_non_object_selector() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ui_operation_adapters_forward_grid_columns_and_backend_text_status() -> None:
+    session = FakeRuntimeSmokeSession()
+
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.grid_columns: list[str] = []
+
+        async def grid_assert_rows(
+            self,
+            selector: dict[str, Any],
+            rows: list[dict[str, Any]],
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            self.grid_columns = list(columns or [])
+            return {"status": "PASS", "selector": selector, "rows": rows}
+
+        async def extract_text(self, **_: Any) -> dict[str, Any]:
+            return {"status": "BLOCKED", "reason": "text backend unavailable"}
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    result = await RuntimeSmokeRunner(
+        session,
+        service_adapters=ui_operation_adapters(backend_provider),
+    ).run({
+        "schema": "netcoredbg.runtime_smoke.v1",
+        "steps": [
+            {
+                "op": "ui.grid.assert_rows",
+                "selector": {"automation_id": "CueGrid"},
+                "columns": ["Start", "Phrase"],
+                "rows": [{"index": 0, "contains": {"Phrase": "Fixture cue one"}}],
+            },
+            {
+                "op": "ui.text.assert",
+                "selector": {"automation_id": "status"},
+                "contains": "ready",
+            },
+        ],
+    })
+
+    assert backend.grid_columns == ["Start", "Phrase"]
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "text backend unavailable"
+    assert result["completed_steps"][1]["result"]["status"] == "BLOCKED"
+    assert result["completed_steps"][1]["result"]["matched"] is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("case", "expected_status"),
     [

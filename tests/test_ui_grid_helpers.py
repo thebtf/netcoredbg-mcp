@@ -258,6 +258,7 @@ async def test_flaui_backend_forwards_grid_helpers_to_bridge() -> None:
     await assert_grid_rows(
         backend,
         selector,
+        columns=["Start"],
         rows=[{"index": 0, "contains": {"Start": "00:00:01.0"}}],
     )
 
@@ -271,6 +272,7 @@ async def test_flaui_backend_forwards_grid_helpers_to_bridge() -> None:
     assert calls[4].args[0] == "grid_snapshot"
     assert calls[4].args[1]["columns"] == ["Start"]
     assert calls[5].args[0] == "grid_assert_rows"
+    assert calls[5].args[1]["columns"] == ["Start"]
 
 
 @pytest.mark.asyncio
@@ -317,6 +319,12 @@ def test_bridge_grid_builds_cell_text_evidence_for_rows() -> None:
     assert "ReadCellText" in command
     assert "row cell evidence unavailable" in command
     assert "ColumnsFromAssertions(expectedRows)" in command
+    assert "CellKey(cell, currentOrdinal, columns)" in command
     direct_children_index = command.index("row.FindAllChildren()")
     descendant_fallback_index = command.index("row.FindAllDescendants()")
+    ordinal_index = command.index("var currentOrdinal = ordinal")
+    increment_index = command.index("ordinal++;", ordinal_index)
+    read_text_index = command.index("ReadCellText(cell)", ordinal_index)
+    blank_continue_index = command.index("continue;", read_text_index)
     assert direct_children_index < descendant_fallback_index
+    assert ordinal_index < increment_index < blank_continue_index

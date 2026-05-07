@@ -509,9 +509,15 @@ class FlaUIBackend:
         self,
         selector: dict[str, Any],
         rows: list[dict[str, Any]],
+        columns: list[str] | None = None,
     ) -> dict[str, Any]:
         """Assert DataGrid rows with cell evidence via FlaUI bridge."""
-        return await self._call_grid("grid_assert_rows", selector, rows=rows)
+        return await self._call_grid(
+            "grid_assert_rows",
+            selector,
+            rows=rows,
+            columns=columns or [],
+        )
 
     async def grid_select_range(
         self,

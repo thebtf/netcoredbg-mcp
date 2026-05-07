@@ -2522,143 +2522,153 @@ async def test_wpf_one_call_runtime_smoke_workflow():
             await backend.connect(pid)
         return backend
 
-    smoke_tmp_root = os.path.join(BASE, ".agent", "tmp", "wpf-runtime-smoke")
-    os.makedirs(smoke_tmp_root, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="workflow-", dir=smoke_tmp_root) as temp_dir:
-        mutable_file = os.path.join(temp_dir, "wpf-workflow-state.txt")
-        with open(mutable_file, "w", encoding="utf-8") as handle:
-            handle.write(baseline_state)
+    mutable_file: str | None = None
+    try:
+        smoke_tmp_root = os.path.join(BASE, ".agent", "tmp", "wpf-runtime-smoke")
+        os.makedirs(smoke_tmp_root, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="workflow-", dir=smoke_tmp_root) as temp_dir:
+            mutable_file = os.path.join(temp_dir, "wpf-workflow-state.txt")
+            with open(mutable_file, "w", encoding="utf-8") as handle:
+                handle.write(baseline_state)
 
-        plan = {
-            "schema": "netcoredbg.runtime_smoke.v1",
-            "name": "wpf one-call assignment toggle undo",
-            "launch": {
-                "program": WPF_DLL,
-                "cwd": os.path.dirname(WPF_DLL),
-                "pre_build": True,
-                "build_project": os.path.join(
-                    BASE,
-                    "tests",
-                    "fixtures",
-                    "WpfSmokeApp",
-                    "WpfSmokeApp.csproj",
-                ),
-                "build_configuration": "Debug",
-                "env": {"WPF_SMOKE_MUTABLE_FILE": mutable_file},
-            },
-            "freshness": {
-                "expected_process_name": "dotnet",
-                "expected_modules": ["WpfSmokeApp.dll"],
-            },
-            "steps": [
-                {
-                    "id": "baseline_grid",
-                    "op": "ui.grid.snapshot",
-                    "selector": {"automation_id": "dataGrid"},
-                    "rows": {"visible_only": True, "max": 5},
-                    "columns": ["Start", "End", "Character", "Phrase"],
+            plan = {
+                "schema": "netcoredbg.runtime_smoke.v1",
+                "name": "wpf one-call assignment toggle undo",
+                "launch": {
+                    "program": WPF_DLL,
+                    "cwd": os.path.dirname(WPF_DLL),
+                    "pre_build": True,
+                    "build_project": os.path.join(
+                        BASE,
+                        "tests",
+                        "fixtures",
+                        "WpfSmokeApp",
+                        "WpfSmokeApp.csproj",
+                    ),
+                    "build_configuration": "Debug",
+                    "env": {"WPF_SMOKE_MUTABLE_FILE": mutable_file},
                 },
-                {
-                    "id": "select_rows",
-                    "op": "ui.grid.select_range",
-                    "selector": {"automation_id": "dataGrid"},
-                    "start_index": 0,
-                    "end_index": 1,
+                "freshness": {
+                    "expected_process_name": "dotnet",
+                    "expected_modules": ["WpfSmokeApp.dll"],
                 },
-                {"id": "before_assign", "op": "debug.output_checkpoint", "name": "before_assign"},
-                {
-                    "id": "assign_character",
-                    "op": "ui.list.invoke_item",
-                    "selector": {"automation_id": "CharactersListBox"},
-                    "item": {"name": "ALICE"},
-                    "invoke": "enter",
-                },
-                {
-                    "id": "assign_output",
-                    "op": "debug.output_assert_since",
-                    "checkpoint": "before_assign",
-                    "required": ["WpfWorkflow AssignCharacter route=ListInvoke selectedCount=2"],
-                    "forbidden": ["manual primitive fallback"],
-                },
-                {
-                    "id": "assign_grid_assert",
-                    "op": "ui.grid.assert_rows",
-                    "selector": {"automation_id": "dataGrid"},
-                    "rows": [
-                        {
-                            "index": 0,
-                            "contains": {
-                                "Start": "00:00:01.0",
-                                "End": "00:00:03.0",
-                                "Character": "ALICE",
-                                "Phrase": "Fixture cue one",
+                "steps": [
+                    {
+                        "id": "baseline_grid",
+                        "op": "ui.grid.snapshot",
+                        "selector": {"automation_id": "dataGrid"},
+                        "rows": {"visible_only": True, "max": 5},
+                        "columns": ["Start", "End", "Character", "Phrase"],
+                    },
+                    {
+                        "id": "select_rows",
+                        "op": "ui.grid.select_range",
+                        "selector": {"automation_id": "dataGrid"},
+                        "start_index": 0,
+                        "end_index": 1,
+                    },
+                    {"id": "before_assign", "op": "debug.output_checkpoint", "name": "before_assign"},
+                    {
+                        "id": "assign_character",
+                        "op": "ui.list.invoke_item",
+                        "selector": {"automation_id": "CharactersListBox"},
+                        "item": {"name": "ALICE"},
+                        "invoke": "enter",
+                    },
+                    {
+                        "id": "assign_output",
+                        "op": "debug.output_assert_since",
+                        "checkpoint": "before_assign",
+                        "required": ["WpfWorkflow AssignCharacter route=ListInvoke selectedCount=2"],
+                        "forbidden": ["manual primitive fallback"],
+                    },
+                    {
+                        "id": "assign_grid_assert",
+                        "op": "ui.grid.assert_rows",
+                        "selector": {"automation_id": "dataGrid"},
+                        "columns": ["Start", "End", "Character", "Phrase"],
+                        "rows": [
+                            {
+                                "index": 0,
+                                "contains": {
+                                    "Start": "00:00:01.0",
+                                    "End": "00:00:03.0",
+                                    "Character": "ALICE",
+                                    "Phrase": "Fixture cue one",
+                                },
                             },
-                        },
-                        {
-                            "index": 1,
-                            "contains": {
-                                "Start": "00:00:04.0",
-                                "End": "00:00:06.0",
-                                "Character": "ALICE",
-                                "Phrase": "Fixture cue two",
+                            {
+                                "index": 1,
+                                "contains": {
+                                    "Start": "00:00:04.0",
+                                    "End": "00:00:06.0",
+                                    "Character": "ALICE",
+                                    "Phrase": "Fixture cue two",
+                                },
                             },
-                        },
-                    ],
-                },
-                {"id": "before_gender", "op": "debug.output_checkpoint", "name": "before_gender"},
-                {
-                    "id": "toggle_gender",
-                    "op": "ui.list.toggle_item_child",
-                    "selector": {"automation_id": "CharactersListBox"},
-                    "item": {"name": "ALICE"},
-                    "child": {"automation_id": "CharGender", "control_type": "CheckBox"},
-                    "target_state": "On",
-                },
-                {
-                    "id": "gender_assert",
-                    "op": "ui.text.assert",
-                    "selector": {"automation_id": "genderStatus"},
-                    "contains": "ALICE female",
-                },
-                {
-                    "id": "undo_gender",
-                    "op": "ui.invoke",
-                    "selector": {"automation_id": "menuItemUndo"},
-                },
-                {
-                    "id": "undo_gender_assert",
-                    "op": "ui.text.assert",
-                    "selector": {"automation_id": "genderStatus"},
-                    "contains": "ALICE male",
-                },
-                {
-                    "id": "undo_focus_assert",
-                    "op": "ui.focus.assert",
-                    "selector": {"automation_id": "dataGrid"},
-                },
-            ],
-            "cleanup": {
-                "restore_files": [
-                    {"path": mutable_file, "baseline_text": baseline_state},
+                        ],
+                    },
+                    {"id": "before_gender", "op": "debug.output_checkpoint", "name": "before_gender"},
+                    {
+                        "id": "toggle_gender",
+                        "op": "ui.list.toggle_item_child",
+                        "selector": {"automation_id": "CharactersListBox"},
+                        "item": {"name": "ALICE"},
+                        "child": {"automation_id": "CharGender", "control_type": "CheckBox"},
+                        "target_state": "On",
+                    },
+                    {
+                        "id": "gender_assert",
+                        "op": "ui.text.assert",
+                        "selector": {"automation_id": "genderStatus"},
+                        "contains": "ALICE female",
+                    },
+                    {
+                        "id": "undo_gender",
+                        "op": "ui.invoke",
+                        "selector": {"automation_id": "menuItemUndo"},
+                    },
+                    {
+                        "id": "undo_gender_assert",
+                        "op": "ui.text.assert",
+                        "selector": {"automation_id": "genderStatus"},
+                        "contains": "ALICE male",
+                    },
+                    {
+                        "id": "undo_focus_assert",
+                        "op": "ui.focus.assert",
+                        "selector": {"automation_id": "dataGrid"},
+                    },
                 ],
-                "stop_debug": "graceful",
-                "debug_hygiene": True,
-            },
-            "budgets": {"max_actions": 20, "max_elapsed_seconds": 60},
-        }
+                "cleanup": {
+                    "restore_files": [
+                        {"path": mutable_file, "baseline_text": baseline_state},
+                    ],
+                    "stop_debug": "graceful",
+                    "debug_hygiene": True,
+                },
+                "budgets": {"max_actions": 20, "max_elapsed_seconds": 60},
+            }
 
-        result = await RuntimeSmokeRunner(
-            m,
-            service_adapters=ui_operation_adapters(ensure_ui_connected),
-        ).run(plan)
-        with open(mutable_file, encoding="utf-8") as handle:
-            restored_state = handle.read()
-
-    if backend_holder["backend"] is not None:
-        try:
-            await backend_holder["backend"].disconnect()
-        except Exception as exc:
-            print(f"  [DEBUG] backend.disconnect() failed: {exc}")
+            result = await RuntimeSmokeRunner(
+                m,
+                service_adapters=ui_operation_adapters(ensure_ui_connected),
+            ).run(plan)
+            with open(mutable_file, encoding="utf-8") as handle:
+                restored_state = handle.read()
+    finally:
+        if mutable_file is not None and os.path.exists(mutable_file):
+            try:
+                with open(mutable_file, "w", encoding="utf-8") as handle:
+                    handle.write(baseline_state)
+            except OSError as exc:
+                print(f"  [DEBUG] mutable state restore failed: {exc}")
+        if backend_holder["backend"] is not None:
+            try:
+                await backend_holder["backend"].disconnect()
+            except Exception as exc:
+                print(f"  [DEBUG] backend.disconnect() failed: {exc}")
+        await m.stop()
 
     evidence = {
         "status": result.get("status"),

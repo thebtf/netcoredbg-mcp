@@ -62,12 +62,17 @@ async def assert_grid_rows(
     backend: Any,
     selector: dict[str, Any],
     rows: list[dict[str, Any]],
+    columns: list[str] | None = None,
 ) -> dict[str, Any]:
     """Assert visible DataGrid row cell values from snapshot evidence."""
     if hasattr(backend, "grid_assert_rows"):
-        return await backend.grid_assert_rows(dict(selector), list(rows))
+        return await backend.grid_assert_rows(
+            dict(selector),
+            list(rows),
+            columns=list(columns or []),
+        )
 
-    snapshot = await snapshot_grid(backend, selector)
+    snapshot = await snapshot_grid(backend, selector, columns=columns)
     if snapshot.get("status") in {"UNSUPPORTED", "BLOCKED"}:
         return dict(snapshot)
 
