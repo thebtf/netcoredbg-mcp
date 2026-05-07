@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 from collections import deque
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -280,6 +281,13 @@ def test_diff_unknown_snapshot_fails_with_available_names() -> None:
     assert result["available_snapshots"] == ["before"]
 
 
+def test_snapshot_store_missing_name_raises_clear_keyerror() -> None:
+    store = UISnapshotStore()
+
+    with pytest.raises(KeyError, match="UI snapshot not found: missing"):
+        store.get("missing")
+
+
 @pytest.mark.asyncio
 async def test_event_buffer_polls_diff_and_enforces_max_size() -> None:
     backend = FakeEvidenceBackend()
@@ -366,3 +374,10 @@ def test_manual_smoke_list_includes_focused_ui_evidence_scenario() -> None:
 
     assert result.returncode == 0, result.stderr
     assert "UI Focused Evidence" in result.stdout
+
+
+def test_bridge_snapshot_query_uses_bounded_child_scan() -> None:
+    command = Path("bridge/Commands/SnapshotCommands.cs").read_text(encoding="utf-8")
+
+    assert "root.FindAllChildren().Take" in command
+    assert "root.FindAllDescendants().Take" not in command

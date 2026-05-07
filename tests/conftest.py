@@ -36,7 +36,7 @@ class FakeSmokeSession:
     loaded_sources: dict[str, object] = field(default_factory=dict)
     process_id: int | None = None
     state: SimpleNamespace = field(
-        default_factory=lambda: SimpleNamespace(state="idle", output_buffer=deque())
+        default_factory=lambda: SimpleNamespace(state="idle")
     )
 
 

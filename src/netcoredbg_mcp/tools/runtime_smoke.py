@@ -250,8 +250,19 @@ def register_runtime_smoke_tools(
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
             if not isinstance(plan, dict):
-                data = await RuntimeSmokeRunner(session).run({"actions": "invalid"})
-                data["validation_errors"] = ["plan must be an object"]
+                data = {
+                    "status": "FAIL",
+                    "reason": "invalid plan schema",
+                    "validation_errors": ["plan must be an object"],
+                    "action_count": 0,
+                    "completed_steps": [],
+                    "failed_assertions": [],
+                    "cleanup": {
+                        "status": "PASS",
+                        "attempted": [],
+                        "failures": [],
+                    },
+                }
             else:
                 data = await RuntimeSmokeRunner(session).run(plan)
             return _build_runtime_smoke_response(

@@ -201,6 +201,25 @@ async def test_runner_unsupported_backend_action_returns_blocked_and_teardown() 
 
 
 @pytest.mark.asyncio
+async def test_runner_treats_freshness_warning_as_non_terminal_failure() -> None:
+    session = FakeRuntimeSmokeSession()
+
+    result = await _runner(session).run({
+        "name": "freshness-warn",
+        "actions": [
+            {
+                "name": "verify_debug_freshness",
+                "args": {"expected_workspace": "C:/repo"},
+            },
+        ],
+    })
+
+    assert result["status"] == "PASS"
+    assert result["completed_steps"][0]["status"] == "PASS"
+    assert result["completed_steps"][0]["result"]["status"] == "WARN"
+
+
+@pytest.mark.asyncio
 async def test_runner_cleanup_failure_changes_success_to_fail_with_residue_evidence() -> None:
     session = FakeRuntimeSmokeSession()
     session.runtime_smoke.instrumentation_groups["leak"] = {"breakpoints": [1]}
@@ -283,6 +302,10 @@ async def test_runtime_smoke_tools_register_freshness_and_runner() -> None:
         ctx=None,
         plan={"name": "invalid", "actions": "not-a-list"},
     )
+    non_object = await mcp.tools["run_runtime_smoke"](
+        ctx=None,
+        plan=["not-a-dict"],
+    )
     failed = await mcp.tools["run_runtime_smoke"](
         ctx=None,
         plan={
@@ -300,5 +323,9 @@ async def test_runtime_smoke_tools_register_freshness_and_runner() -> None:
     assert invalid["data"]["status"] == "FAIL"
     assert invalid["data"]["reason"] == "invalid plan schema"
     assert invalid["data"]["cleanup"]["status"] == "PASS"
+    assert non_object["data"]["status"] == "FAIL"
+    assert non_object["data"]["reason"] == "invalid plan schema"
+    assert non_object["data"]["validation_errors"] == ["plan must be an object"]
+    assert non_object["data"]["completed_steps"] == []
     assert failed["data"]["status"] == "FAIL"
     assert failed["data"]["cleanup"]["status"] == "PASS"

@@ -39,7 +39,7 @@ class CapturingMCP:
 
 
 async def _noop_resolve_project_root(ctx: Any, session: Any) -> None:
-    return None
+    pass
 
 
 def test_checkpoint_then_assert_since_returns_bounded_match_evidence() -> None:

@@ -14,11 +14,12 @@ public static class GridCommands
         if (!grid.Patterns.Grid.TryGetPattern(out var gridPattern))
             return Unsupported("GridPattern");
 
+        var rows = GridRows(grid);
         return new JsonObject
         {
             ["status"] = "PASS",
             ["row_count"] = gridPattern.RowCount.Value,
-            ["visible_rows"] = BuildRows(grid)
+            ["visible_rows"] = BuildRows(rows)
         };
     }
 
@@ -28,10 +29,11 @@ public static class GridCommands
         if (!grid.Patterns.Selection.TryGetPattern(out _))
             return Unsupported("SelectionPattern");
 
+        var rows = GridRows(grid);
         return new JsonObject
         {
             ["status"] = "PASS",
-            ["selected_rows"] = BuildSelectedRows(grid)
+            ["selected_rows"] = BuildSelectedRows(rows)
         };
     }
 
@@ -67,7 +69,7 @@ public static class GridCommands
         {
             ["status"] = "PASS",
             ["selected_range"] = new JsonObject { ["start"] = start, ["end"] = end },
-            ["selected_rows"] = BuildSelectedRows(grid)
+            ["selected_rows"] = BuildSelectedRows(rows)
         };
     }
 
@@ -78,9 +80,10 @@ public static class GridCommands
             return Unsupported("SelectionPattern");
 
         var (start, end) = ReadRange(@params);
-        var selectedRows = SelectedRowIndices(grid);
+        var rows = GridRows(grid);
+        var selectedRows = SelectedRowIndices(rows);
         var expected = Enumerable.Range(start, end - start + 1).ToList();
-        var passed = expected.All(selectedRows.Contains);
+        var passed = selectedRows.Count == expected.Count && !expected.Except(selectedRows).Any();
 
         return new JsonObject
         {
@@ -88,7 +91,7 @@ public static class GridCommands
             ["asserted"] = passed,
             ["expected_range"] = new JsonObject { ["start"] = start, ["end"] = end },
             ["selected_indices"] = ToJsonArray(selectedRows),
-            ["selected_rows"] = BuildSelectedRows(grid)
+            ["selected_rows"] = BuildSelectedRows(rows)
         };
     }
 
@@ -130,22 +133,19 @@ public static class GridCommands
 
     private static AutomationElement[] GridRows(AutomationElement grid)
     {
-        var descendants = grid.FindAllDescendants();
-        var selectableRows = descendants
-            .Where(IsSelectableRow)
-            .ToArray();
-        if (selectableRows.Length > 0)
-            return selectableRows;
-
         var directRows = grid.FindAllChildren()
             .Where(IsRowLike)
             .ToArray();
         if (directRows.Length > 0)
             return directRows;
 
-        return descendants
+        var descendants = grid.FindAllDescendants()
             .Where(IsRowLike)
             .ToArray();
+        var selectableRows = descendants
+            .Where(IsSelectableRow)
+            .ToArray();
+        return selectableRows.Length > 0 ? selectableRows : descendants;
     }
 
     private static bool IsSelectableRow(AutomationElement element)
@@ -161,11 +161,11 @@ public static class GridCommands
                controlType == ControlType.ListItem;
     }
 
-    private static JsonArray BuildRows(AutomationElement grid)
+    private static JsonArray BuildRows(AutomationElement[] gridRows)
     {
         var rows = new JsonArray();
         var index = 0;
-        foreach (var row in GridRows(grid))
+        foreach (var row in gridRows)
         {
             rows.Add(new JsonObject
             {
@@ -179,10 +179,9 @@ public static class GridCommands
         return rows;
     }
 
-    private static JsonArray BuildSelectedRows(AutomationElement grid)
+    private static JsonArray BuildSelectedRows(AutomationElement[] gridRows)
     {
         var rows = new JsonArray();
-        var gridRows = GridRows(grid);
         for (var index = 0; index < gridRows.Length; index++)
         {
             var row = gridRows[index];
@@ -200,10 +199,9 @@ public static class GridCommands
         return rows;
     }
 
-    private static List<int> SelectedRowIndices(AutomationElement grid)
+    private static List<int> SelectedRowIndices(AutomationElement[] rows)
     {
         var selected = new List<int>();
-        var rows = GridRows(grid);
         for (var index = 0; index < rows.Length; index++)
         {
             if (rows[index].Patterns.SelectionItem.TryGetPattern(out var itemPattern) &&

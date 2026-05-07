@@ -129,6 +129,23 @@ async def test_unknown_key_fails_before_backend_call() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unknown_modifier_fails_before_backend_call() -> None:
+    backend = FakeKeySequenceBackend({"status": "PASS"})
+
+    result = await run_scoped_key_sequence(
+        backend,
+        {},
+        modifiers=["meta"],
+        keys=["Down"],
+    )
+
+    assert result["status"] == "FAIL"
+    assert result["reason"] == "unknown modifier"
+    assert result["invalid_modifier"] == "meta"
+    assert backend.calls == []
+
+
+@pytest.mark.asyncio
 async def test_flaui_backend_forwards_scoped_key_sequence_to_bridge() -> None:
     backend = _make_flaui()
     backend._client.call.return_value = {
@@ -160,6 +177,7 @@ async def test_pywinauto_backend_returns_unsupported_for_scoped_key_sequence() -
 
     result = await backend.scoped_key_sequence({}, ["shift"], ["Down"])
 
+    assert result["status"] == "UNSUPPORTED"
     assert result["unsupported"] is True
     assert "FlaUI bridge" in result["reason"]
 
@@ -181,6 +199,7 @@ def test_bridge_router_registers_scoped_key_sequence_and_dispose_cleanup() -> No
     assert "KeySequenceCommands.ScopedKeySequence" in router
     assert "ModifierCommands.ReleaseAllHeldModifiers();" in router
     assert "SendInput(1, [input], Marshal.SizeOf<INPUT>())" in command
+    assert "releaseFailureNames" in command
 
 
 def test_wpf_and_avalonia_fixtures_expose_shift_datagrid_routes() -> None:

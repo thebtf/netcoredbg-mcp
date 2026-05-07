@@ -2334,14 +2334,14 @@ async def test_ui_focused_evidence():
         selector,
         fields=["text", "focus", "selection"],
     )
-    before = await capture_ui_snapshot(
+    await capture_ui_snapshot(
         backend,
         snapshot_store,
         name="before",
         selector=selector,
         fields=["text", "focus", "selection"],
     )
-    after = await capture_ui_snapshot(
+    await capture_ui_snapshot(
         backend,
         snapshot_store,
         name="after",
@@ -2643,8 +2643,8 @@ def list_scenarios():
 
 async def run_all():
     if not os.path.exists(DLL):
-        print(f"ERROR: Build SmokeTestApp first:")
-        print(f"  dotnet build tests/fixtures/SmokeTestApp -c Debug")
+        print("ERROR: Build SmokeTestApp first:")
+        print("  dotnet build tests/fixtures/SmokeTestApp -c Debug")
         return False
 
     print("=== SMOKE TEST: netcoredbg-mcp v0.6.0 ===")

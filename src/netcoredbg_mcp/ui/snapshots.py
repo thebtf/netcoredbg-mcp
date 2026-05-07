@@ -28,6 +28,8 @@ class UISnapshotStore:
         self.snapshots[str(snapshot["snapshot"])] = dict(snapshot)
 
     def get(self, name: str) -> dict[str, Any]:
+        if name not in self.snapshots:
+            raise KeyError(f"UI snapshot not found: {name}")
         return self.snapshots[name]
 
     def has(self, name: str) -> bool:
@@ -218,7 +220,8 @@ def _by_id(elements: Any) -> dict[str, dict[str, Any]]:
 
 
 def _project(element: dict[str, Any], fields: list[str]) -> dict[str, Any]:
+    element_id = str(element.get("element_id") or "unknown")
     return {
-        "element_id": element["element_id"],
+        "element_id": element_id,
         **{field: element[field] for field in fields if field in element},
     }

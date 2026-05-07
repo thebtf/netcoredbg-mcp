@@ -416,6 +416,8 @@ def _blocked(name: str, reason: str) -> dict[str, Any]:
 
 def _terminal_status(value: Any) -> str:
     status = str(value)
+    if status == "WARN":
+        return "PASS"
     return status if status in TERMINAL_STATUSES else "FAIL"
 
 

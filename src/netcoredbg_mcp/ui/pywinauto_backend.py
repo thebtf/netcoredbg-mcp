@@ -443,7 +443,9 @@ class PywinautoBackend:
     ) -> dict[str, Any]:
         """Scoped held-modifier key sequences require the FlaUI bridge backend."""
         return {
+            "status": "UNSUPPORTED",
             "unsupported": True,
+            "backend": "pywinauto",
             "reason": (
                 "FlaUI bridge required for scoped key sequence. "
                 "The pywinauto backend cannot prove held modifiers across keys."
@@ -484,7 +486,7 @@ class PywinautoBackend:
     ) -> dict[str, Any]:
         """Focused field-limited UI evidence requires the FlaUI bridge backend."""
         return {
-            "status": "BLOCKED",
+            "status": "UNSUPPORTED",
             "unsupported": True,
             "backend": "pywinauto",
             "reason": (

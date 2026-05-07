@@ -36,6 +36,8 @@ async def run_scoped_key_sequence(
 ) -> dict[str, Any]:
     """Run a backend scoped key sequence and normalize terminal evidence."""
     normalized_modifiers = _normalize_modifiers(modifiers)
+    if isinstance(normalized_modifiers, dict):
+        return normalized_modifiers
     normalized_keys = _normalize_keys(keys)
     if isinstance(normalized_keys, dict):
         return normalized_keys
@@ -65,15 +67,18 @@ async def run_scoped_key_sequence(
     return {"status": status, **result, "final_held_modifiers": final_held}
 
 
-def _normalize_modifiers(modifiers: list[str]) -> list[str]:
+def _normalize_modifiers(modifiers: list[str]) -> list[str] | dict[str, Any]:
     normalized = []
     for modifier in modifiers:
         value = modifier.strip().lower()
         if value not in _SUPPORTED_MODIFIERS:
-            raise ValueError(
-                "Unknown modifier names: "
-                f"{modifier}. Accepted values: alt, ctrl, shift, win"
-            )
+            return {
+                "status": "FAIL",
+                "reason": "unknown modifier",
+                "invalid_modifier": modifier,
+                "sent_count": 0,
+                "final_held_modifiers": [],
+            }
         if value not in normalized:
             normalized.append(value)
     return normalized
@@ -95,5 +100,5 @@ def _normalize_keys(keys: list[str]) -> list[str] | dict[str, Any]:
                 "sent_count": 0,
                 "final_held_modifiers": [],
             }
-        normalized.append(lookup.title() if lookup.lower().startswith("f") else lookup.title())
+        normalized.append(lookup.title())
     return normalized

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -160,3 +161,10 @@ async def test_ui_grid_tool_is_registered(mock_netcoredbg_path) -> None:
     tool_names = {tool.name for tool in await server.list_tools()}
 
     assert "ui_grid" in tool_names
+
+
+def test_bridge_grid_assertion_requires_exact_selected_range() -> None:
+    command = Path("bridge/Commands/GridCommands.cs").read_text(encoding="utf-8")
+
+    assert "selectedRows.Count == expected.Count" in command
+    assert "expected.All(selectedRows.Contains)" not in command

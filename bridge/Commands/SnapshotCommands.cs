@@ -57,7 +57,7 @@ public static class SnapshotCommands
             };
 
         var elements = new List<AutomationElement> { root };
-        foreach (var child in root.FindAllDescendants().Take(Math.Max(0, maxResults - 1)))
+        foreach (var child in root.FindAllChildren().Take(Math.Max(0, maxResults - 1)))
             elements.Add(child);
         return elements;
     }
@@ -176,12 +176,22 @@ public static class SnapshotCommands
             var focused = automation.FocusedElement();
             if (focused is null)
                 return false;
-            return ElementId(focused) == ElementId(element);
+            var focusedRuntimeId = RuntimeId(focused);
+            var elementRuntimeId = RuntimeId(element);
+            return focusedRuntimeId is not null &&
+                   elementRuntimeId is not null &&
+                   focusedRuntimeId.SequenceEqual(elementRuntimeId);
         }
         catch
         {
             return false;
         }
+    }
+
+    private static int[]? RuntimeId(AutomationElement element)
+    {
+        try { return element.Properties.RuntimeId.ValueOrDefault; }
+        catch { return null; }
     }
 
     private static string ElementId(AutomationElement element)

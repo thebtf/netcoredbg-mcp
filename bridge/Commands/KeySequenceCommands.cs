@@ -180,6 +180,7 @@ public static class KeySequenceCommands
         finally
         {
             var releaseFailures = new JsonArray();
+            var releaseFailureNames = new List<string>();
             for (var index = scopedHeld.Count - 1; index >= 0; index--)
             {
                 var modifier = scopedHeld[index];
@@ -190,6 +191,7 @@ public static class KeySequenceCommands
                 }
                 catch (Exception ex)
                 {
+                    releaseFailureNames.Add(modifier.Name);
                     releaseFailures.Add($"{modifier.Name}: {ex.Message}");
                 }
             }
@@ -197,7 +199,7 @@ public static class KeySequenceCommands
             var released = releaseFailures.Count == 0;
             finalHeld = released
                 ? new JsonArray()
-                : ToJsonArray(scopedHeld.Select(static modifier => modifier.Name));
+                : ToJsonArray(releaseFailureNames);
             releaseResult = new JsonObject
             {
                 ["released"] = released,

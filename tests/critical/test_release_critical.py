@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -153,18 +154,14 @@ async def test_runtime_smoke_runner_surface_is_release_critical() -> None:
     class FakeSession:
         def __init__(self) -> None:
             self.runtime_smoke = RuntimeSmokeSession()
-            self.state = type(
-                "State",
-                (),
-                {
-                    "state": DebugState.STOPPED,
-                    "output_buffer": [],
-                    "process_id": None,
-                    "process_name": None,
-                    "modules": [],
-                    "loaded_sources": {},
-                },
-            )()
+            self.state = SimpleNamespace(
+                state=DebugState.STOPPED,
+                output_buffer=[],
+                process_id=None,
+                process_name=None,
+                modules=[],
+                loaded_sources={},
+            )
 
     assert TERMINAL_STATUSES == {"PASS", "FAIL", "BLOCKED", "IMPASSE"}
     result = await RuntimeSmokeRunner(FakeSession()).run({"name": "release-critical"})

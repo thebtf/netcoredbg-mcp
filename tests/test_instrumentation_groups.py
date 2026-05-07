@@ -45,7 +45,7 @@ class FakeInstrumentationSession:
         hit_condition: str | None = None,
     ) -> Breakpoint:
         self._next_breakpoint_id += 1
-        breakpoint = Breakpoint(
+        bp = Breakpoint(
             file=file,
             line=line,
             condition=condition,
@@ -54,8 +54,8 @@ class FakeInstrumentationSession:
             id=self._next_breakpoint_id,
             dap_line=line + 1,
         )
-        self.breakpoints.add(breakpoint)
-        return breakpoint
+        self.breakpoints.add(bp)
+        return bp
 
     async def remove_breakpoint(self, file: str, line: int) -> bool:
         if self.leak_breakpoint_removal:

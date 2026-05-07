@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Pattern
+from hashlib import sha256
+from re import Pattern
+from typing import Any
 
 from .runtime_smoke import RuntimeSmokeSession, compact_output_evidence
 from .state import OutputEntry, TerminalStatus
@@ -32,7 +34,7 @@ class OutputAssertionService:
             "name": name,
             "entry_count": len(entries),
             "byte_offset": self._byte_length(entries),
-            "first_entry_id": id(entries[0]) if entries else None,
+            "first_entry_hash": self._entry_hash(entries[0]) if entries else None,
         }
         self._checkpoints[name] = checkpoint
         return self._pass(
@@ -148,8 +150,22 @@ class OutputAssertionService:
         entry_count = int(saved["entry_count"])
         if entry_count > len(entries):
             return True
-        first_entry_id = saved.get("first_entry_id")
-        return bool(entry_count and entries and first_entry_id != id(entries[0]))
+        first_entry_hash = saved.get("first_entry_hash")
+        return bool(
+            entry_count
+            and entries
+            and first_entry_hash != OutputAssertionService._entry_hash(entries[0])
+        )
+
+    @staticmethod
+    def _entry_hash(entry: OutputEntry) -> str:
+        digest = sha256()
+        digest.update(entry.category.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(entry.text.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(entry.variables_reference).encode("ascii"))
+        return digest.hexdigest()
 
     def _compile_patterns(
         self,

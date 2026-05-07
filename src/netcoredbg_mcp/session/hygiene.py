@@ -47,14 +47,14 @@ class BreakpointEvidence:
     verified: bool
 
     @classmethod
-    def from_breakpoint(cls, file_hint: str, breakpoint: Any) -> BreakpointEvidence:
-        file_path = getattr(breakpoint, "file", file_hint)
+    def from_breakpoint(cls, file_hint: str, bp: Any) -> BreakpointEvidence:
+        file_path = getattr(bp, "file", file_hint)
         return cls(
             file=os.path.normpath(str(file_path)),
-            line=int(getattr(breakpoint, "line", 0)),
-            dap_line=getattr(breakpoint, "dap_line", None),
-            condition=getattr(breakpoint, "condition", None),
-            verified=bool(getattr(breakpoint, "verified", False)),
+            line=int(getattr(bp, "line", 0)),
+            dap_line=getattr(bp, "dap_line", None),
+            condition=getattr(bp, "condition", None),
+            verified=bool(getattr(bp, "verified", False)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -99,7 +99,7 @@ class HygienePreflightResult:
             "reason": self.reason,
             "cleared": dict(self.cleared),
             "remaining_breakpoints": [
-                breakpoint.to_dict() for breakpoint in self.remaining_breakpoints
+                bp.to_dict() for bp in self.remaining_breakpoints
             ],
             "cleanup_errors": [error.to_dict() for error in self.cleanup_errors],
         }
@@ -190,14 +190,14 @@ class RuntimeHygieneService:
     def _remaining_breakpoints(self, file: str | None) -> list[BreakpointEvidence]:
         if file is not None:
             return [
-                BreakpointEvidence.from_breakpoint(file, breakpoint)
-                for breakpoint in self._session.breakpoints.get_for_file(file)
+                BreakpointEvidence.from_breakpoint(file, bp)
+                for bp in self._session.breakpoints.get_for_file(file)
             ]
 
         remaining: list[BreakpointEvidence] = []
         for file_path, breakpoints in self._session.breakpoints.get_all().items():
             remaining.extend(
-                BreakpointEvidence.from_breakpoint(file_path, breakpoint)
-                for breakpoint in breakpoints
+                BreakpointEvidence.from_breakpoint(file_path, bp)
+                for bp in breakpoints
             )
         return remaining

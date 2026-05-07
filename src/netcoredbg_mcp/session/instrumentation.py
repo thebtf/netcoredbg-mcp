@@ -159,7 +159,7 @@ class InstrumentationGroupService:
     async def _add_breakpoint_ref(self, spec: dict[str, Any]) -> dict[str, Any]:
         file = str(spec["file"])
         line = int(spec["line"])
-        breakpoint = await self._session.add_breakpoint(
+        bp = await self._session.add_breakpoint(
             file,
             line,
             spec.get("condition"),
@@ -171,9 +171,9 @@ class InstrumentationGroupService:
             "line": line,
             "condition": spec.get("condition"),
             "hit_condition": spec.get("hit_condition"),
-            "verified": bool(getattr(breakpoint, "verified", False)),
-            "id": getattr(breakpoint, "id", None),
-            "dap_line": getattr(breakpoint, "dap_line", None),
+            "verified": bool(getattr(bp, "verified", False)),
+            "id": getattr(bp, "id", None),
+            "dap_line": getattr(bp, "dap_line", None),
         }
 
     async def _add_tracepoint_ref(self, spec: dict[str, Any]) -> dict[str, Any]:
@@ -182,9 +182,9 @@ class InstrumentationGroupService:
         expression = str(spec["expression"])
         manager = self._tracepoint_manager(create=True)
         tracepoint = manager.add(file, line, expression)
-        breakpoint = await self._session.add_breakpoint(file, line)
-        tracepoint.breakpoint_id = getattr(breakpoint, "id", None)
-        tracepoint.dap_line = getattr(breakpoint, "dap_line", None)
+        bp = await self._session.add_breakpoint(file, line)
+        tracepoint.breakpoint_id = getattr(bp, "id", None)
+        tracepoint.dap_line = getattr(bp, "dap_line", None)
         return {
             "kind": "tracepoint",
             "id": tracepoint.id,
@@ -236,8 +236,8 @@ class InstrumentationGroupService:
         leaks = []
         manager = self._tracepoint_manager(create=False)
         for ref in [*record["breakpoints"], *record["tracepoints"]]:
-            for breakpoint in self._session.breakpoints.get_for_file(str(ref["file"])):
-                if int(getattr(breakpoint, "line", -1)) == int(ref["line"]):
+            for bp in self._session.breakpoints.get_for_file(str(ref["file"])):
+                if int(getattr(bp, "line", -1)) == int(ref["line"]):
                     leaks.append({
                         "kind": "breakpoint",
                         "file": os.path.normpath(str(ref["file"])),
