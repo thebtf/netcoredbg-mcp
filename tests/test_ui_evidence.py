@@ -93,18 +93,6 @@ class FakeUiSession:
         self.process_registry = None
 
 
-class CapturingMCP:
-    def __init__(self) -> None:
-        self.tools: dict[str, Any] = {}
-
-    def tool(self, *args: Any, **kwargs: Any) -> Any:
-        def decorator(fn: Any) -> Any:
-            self.tools[fn.__name__] = fn
-            return fn
-
-        return decorator
-
-
 @pytest.mark.asyncio
 async def test_query_ui_returns_only_requested_fields_and_bounded_counts() -> None:
     backend = FakeEvidenceBackend()
@@ -340,13 +328,14 @@ async def test_event_unknown_buffer_fails() -> None:
 @pytest.mark.asyncio
 async def test_ui_evidence_tools_register_and_reject_invalid_fields_before_backend(
     mock_netcoredbg_path,
+    capturing_mcp,
 ) -> None:
     server = create_server(str(os.getcwd()))
     tool_names = {tool.name for tool in await server.list_tools()}
 
     assert {"ui_query", "ui_snapshot", "ui_diff", "ui_events"}.issubset(tool_names)
 
-    mcp = CapturingMCP()
+    mcp = capturing_mcp
     session = FakeUiSession()
     register_ui_evidence_tools(
         mcp=mcp,

@@ -43,18 +43,6 @@ class FakeOutputSession:
         )
 
 
-class CapturingMCP:
-    def __init__(self) -> None:
-        self.tools: dict[str, Any] = {}
-
-    def tool(self, *args: Any, **kwargs: Any) -> Any:
-        def decorator(fn: Any) -> Any:
-            self.tools[fn.__name__] = fn
-            return fn
-
-        return decorator
-
-
 async def _noop_resolve_project_root(ctx: Any, session: Any) -> None:
     pass
 
@@ -182,8 +170,10 @@ def test_empty_checkpoint_detects_post_checkpoint_output_trimmed_from_buffer() -
 
 
 @pytest.mark.asyncio
-async def test_output_tools_return_standard_failures_for_missing_checkpoint() -> None:
-    mcp = CapturingMCP()
+async def test_output_tools_return_standard_failures_for_missing_checkpoint(
+    capturing_mcp,
+) -> None:
+    mcp = capturing_mcp
     session = FakeOutputSession()
     register_runtime_smoke_tools(
         mcp=mcp,

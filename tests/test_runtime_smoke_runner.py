@@ -90,20 +90,8 @@ def _runner(session: FakeRuntimeSmokeSession) -> RuntimeSmokeRunner:
     )
 
 
-class CapturingMCP:
-    def __init__(self) -> None:
-        self.tools: dict[str, Any] = {}
-
-    def tool(self, *args: Any, **kwargs: Any) -> Any:
-        def decorator(fn: Any) -> Any:
-            self.tools[fn.__name__] = fn
-            return fn
-
-        return decorator
-
-
 async def _noop_resolve_project_root(ctx: Any, session: Any) -> None:
-    return None
+    pass
 
 
 @pytest.mark.asyncio
@@ -337,8 +325,8 @@ async def test_runner_compact_export_truncates_large_step_evidence() -> None:
 
 
 @pytest.mark.asyncio
-async def test_runtime_smoke_tools_register_freshness_and_runner() -> None:
-    mcp = CapturingMCP()
+async def test_runtime_smoke_tools_register_freshness_and_runner(capturing_mcp) -> None:
+    mcp = capturing_mcp
     session = FakeRuntimeSmokeSession()
     register_runtime_smoke_tools(
         mcp=mcp,

@@ -85,20 +85,8 @@ class FailingAddInstrumentationSession(FakeInstrumentationSession):
         return await super().add_breakpoint(file, line, condition, hit_condition)
 
 
-class CapturingMCP:
-    def __init__(self) -> None:
-        self.tools: dict[str, Any] = {}
-
-    def tool(self, *args: Any, **kwargs: Any) -> Any:
-        def decorator(fn: Any) -> Any:
-            self.tools[fn.__name__] = fn
-            return fn
-
-        return decorator
-
-
 async def _noop_resolve_project_root(ctx: Any, session: Any) -> None:
-    return None
+    pass
 
 
 @pytest.mark.asyncio
@@ -231,6 +219,7 @@ async def test_runtime_smoke_reset_clears_groups_idempotently() -> None:
 @pytest.mark.asyncio
 async def test_instrumentation_group_tools_validate_names_and_register(
     mock_netcoredbg_path,
+    capturing_mcp,
 ) -> None:
     server = create_server(str(os.getcwd()))
     tools = await server.list_tools()
@@ -242,7 +231,7 @@ async def test_instrumentation_group_tools_validate_names_and_register(
         "instrumentation_group_clear",
     }.issubset(tool_names)
 
-    mcp = CapturingMCP()
+    mcp = capturing_mcp
     session = FakeInstrumentationSession()
     register_runtime_smoke_tools(
         mcp=mcp,
