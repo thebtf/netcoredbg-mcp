@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-05-07
+
 ### Fixed
 - Hardened the WPF one-call runtime smoke workflow: UI automation connects
   eagerly after launch, primary-window selection uses a stable deterministic
