@@ -73,11 +73,26 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Download build artifacts
+      - name: Download build artifact archive
         uses: actions/download-artifact@v8
         with:
           name: dist
-          path: dist/
+          path: artifact-download/
+          skip-decompress: true
+
+      - name: Extract build artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist
+          mapfile -t archives < <(find artifact-download -type f -print)
+          if [ "${#archives[@]}" -ne 1 ]; then
+            echo "Expected exactly one downloaded artifact archive, found ${#archives[@]}" >&2
+            find artifact-download -maxdepth 2 -type f -print >&2
+            exit 1
+          fi
+          unzip -q "${archives[0]}" -d dist
 
       - name: Install package from wheel
         run: pip install dist/*.whl
@@ -96,16 +111,32 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - name: Download build artifacts
+      - name: Download build artifact archive
         uses: actions/download-artifact@v8
         with:
           name: dist
-          path: dist/
+          path: artifact-download/
+          skip-decompress: true
+
+      - name: Extract build artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist
+          mapfile -t archives < <(find artifact-download -type f -print)
+          if [ "${#archives[@]}" -ne 1 ]; then
+            echo "Expected exactly one downloaded artifact archive, found ${#archives[@]}" >&2
+            find artifact-download -maxdepth 2 -type f -print >&2
+            exit 1
+          fi
+          unzip -q "${archives[0]}" -d dist
 
       - name: Publish to TestPyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
 
   publish-pypi:
     name: Publish to PyPI
@@ -116,11 +147,26 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - name: Download build artifacts
+      - name: Download build artifact archive
         uses: actions/download-artifact@v8
         with:
           name: dist
-          path: dist/
+          path: artifact-download/
+          skip-decompress: true
+
+      - name: Extract build artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist
+          mapfile -t archives < <(find artifact-download -type f -print)
+          if [ "${#archives[@]}" -ne 1 ]; then
+            echo "Expected exactly one downloaded artifact archive, found ${#archives[@]}" >&2
+            find artifact-download -maxdepth 2 -type f -print >&2
+            exit 1
+          fi
+          unzip -q "${archives[0]}" -d dist
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
