@@ -67,7 +67,10 @@
                   AutomationProperties.AutomationId="dataGrid"
                   AutoGenerateColumns="False"
                   SelectionMode="Extended"
+                  SelectionUnit="FullRow"
+                  SelectedIndex="0"
                   IsReadOnly="True"
+                  PreviewKeyDown="DataGrid_PreviewKeyDown"
                   ItemsSource="{Binding People}">
             <DataGrid.Columns>
                 <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="*"/>

@@ -249,6 +249,17 @@ class FlaUIBackend:
             params["xpath"] = xpath
         return params
 
+    @staticmethod
+    def _build_selector_params(selector: dict[str, Any]) -> dict[str, str]:
+        """Build bridge selector params from Python snake_case selector keys."""
+        return FlaUIBackend._build_search_params(
+            automation_id=selector.get("automation_id") or selector.get("automationId"),
+            name=selector.get("name"),
+            control_type=selector.get("control_type") or selector.get("controlType"),
+            root_id=selector.get("root_id") or selector.get("rootAutomationId"),
+            xpath=selector.get("xpath"),
+        )
+
     async def find_element(
         self,
         automation_id: str | None = None,
@@ -412,6 +423,81 @@ class FlaUIBackend:
             )
         return result
 
+    async def scoped_key_sequence(
+        self,
+        selector: dict[str, Any],
+        modifiers: list[str],
+        keys: list[str],
+    ) -> dict[str, Any]:
+        """Run a scoped held-modifier key sequence via FlaUI bridge."""
+        result = await self._client.call(
+            "scoped_key_sequence",
+            {
+                "selector": self._build_selector_params(selector),
+                "modifiers": modifiers,
+                "keys": keys,
+            },
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"scoped_key_sequence: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result
+
+    async def grid_visible_rows(self, selector: dict[str, Any]) -> dict[str, Any]:
+        """Read visible DataGrid rows via FlaUI bridge."""
+        return await self._call_grid("grid_visible_rows", selector)
+
+    async def grid_selected_rows(self, selector: dict[str, Any]) -> dict[str, Any]:
+        """Read selected DataGrid rows via FlaUI bridge."""
+        return await self._call_grid("grid_selected_rows", selector)
+
+    async def grid_select_range(
+        self,
+        selector: dict[str, Any],
+        start_index: int,
+        end_index: int,
+    ) -> dict[str, Any]:
+        """Select a DataGrid row range via FlaUI bridge."""
+        return await self._call_grid(
+            "grid_select_range",
+            selector,
+            start_index=start_index,
+            end_index=end_index,
+        )
+
+    async def grid_assert_range(
+        self,
+        selector: dict[str, Any],
+        start_index: int,
+        end_index: int,
+    ) -> dict[str, Any]:
+        """Assert a DataGrid row range via FlaUI bridge."""
+        return await self._call_grid(
+            "grid_assert_range",
+            selector,
+            start_index=start_index,
+            end_index=end_index,
+        )
+
+    async def _call_grid(
+        self,
+        method: str,
+        selector: dict[str, Any],
+        **extra: Any,
+    ) -> dict[str, Any]:
+        result = await self._client.call(
+            method,
+            {"selector": self._build_selector_params(selector), **extra},
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"{method}: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result
+
     async def multi_select(self, container_id: str, indices: list[int]) -> int:
         """Multi-select via FlaUI bridge."""
         result = await self._client.call("multi_select", {
@@ -564,7 +650,12 @@ class FlaUIBackend:
             )
         return result
 
-    async def resize_window(self, width: int, height: int, window_title: str | None = None) -> dict[str, Any]:
+    async def resize_window(
+        self,
+        width: int,
+        height: int,
+        window_title: str | None = None,
+    ) -> dict[str, Any]:
         """Resize a window to width x height via TransformPattern."""
         params: dict[str, Any] = {"width": width, "height": height}
         if window_title:
@@ -599,7 +690,10 @@ class FlaUIBackend:
 
     async def set_value(self, automation_id: str, value: float) -> dict[str, Any]:
         """Set a slider/spinner value via RangeValuePattern with range validation."""
-        result = await self._client.call("range_set_value", {"automationId": automation_id, "value": value})
+        result = await self._client.call(
+            "range_set_value",
+            {"automationId": automation_id, "value": value},
+        )
         if not isinstance(result, dict):
             raise RuntimeError(
                 f"set_value: bridge returned a non-dict response "

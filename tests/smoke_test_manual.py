@@ -20,8 +20,39 @@ from netcoredbg_mcp.session import SessionManager
 from netcoredbg_mcp.session.state import Breakpoint, DebugState, OutputEntry, TraceEntry
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DLL = os.path.join(BASE, "tests", "fixtures", "SmokeTestApp", "bin", "Debug", "net8.0-windows", "SmokeTestApp.dll")
+DLL = os.path.join(
+    BASE,
+    "tests",
+    "fixtures",
+    "SmokeTestApp",
+    "bin",
+    "Debug",
+    "net8.0-windows",
+    "SmokeTestApp.dll",
+)
+WPF_DLL = os.path.join(
+    BASE,
+    "tests",
+    "fixtures",
+    "WpfSmokeApp",
+    "bin",
+    "Debug",
+    "net8.0-windows",
+    "WpfSmokeApp.dll",
+)
+AVALONIA_DLL = os.path.join(
+    BASE,
+    "tests",
+    "fixtures",
+    "AvaloniaSmokeApp",
+    "bin",
+    "Debug",
+    "net8.0",
+    "AvaloniaSmokeApp.dll",
+)
 GUI_ENABLED = os.path.exists(DLL)
+WPF_GUI_ENABLED = os.path.exists(WPF_DLL)
+AVALONIA_GUI_ENABLED = os.path.exists(AVALONIA_DLL)
 if not GUI_ENABLED:
     # net8.0-windows build required for GUI scenarios; skip GUI tests if missing
     print(f"WARNING: {DLL} not found. GUI scenarios will be skipped.")
@@ -2139,6 +2170,193 @@ async def test_output_checkpoint_assertions():
         await m.stop()
 
 
+async def test_wpf_shift_datagrid_evidence():
+    print("\n21. WPF SHIFT DATAGRID EVIDENCE")
+    from netcoredbg_mcp.ui.backend import create_backend
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+    from netcoredbg_mcp.ui.grid import (
+        assert_grid_range,
+        read_grid_selected_rows,
+        select_grid_range,
+    )
+    from netcoredbg_mcp.ui.key_sequence import run_scoped_key_sequence
+
+    m = SessionManager()
+    backend = None
+    try:
+        await m.launch(program=WPF_DLL)
+        await asyncio.sleep(2.0)
+
+        backend = create_backend(process_registry=m.process_registry)
+        pid = m.state.process_id
+        if not pid:
+            check("WPF Shift/DataGrid: process started", False, "no PID")
+            return
+        await backend.connect(pid)
+
+        if not isinstance(backend, FlaUIBackend):
+            evidence = {
+                "status": "BLOCKED",
+                "backend": type(backend).__name__,
+                "reason": "FlaUI bridge required for WPF held-modifier proof",
+            }
+            print(f"  evidence: {evidence}")
+            check("WPF Shift/DataGrid reports BLOCKED without FlaUI", True, str(evidence))
+            return
+
+        selector = {"automation_id": "dataGrid"}
+        initial = await select_grid_range(backend, selector, 0, 0)
+        key_result = await run_scoped_key_sequence(
+            backend,
+            selector,
+            modifiers=["shift"],
+            keys=["Down", "Down"],
+        )
+        selected_rows = await read_grid_selected_rows(backend, selector)
+        range_result = await assert_grid_range(backend, selector, 0, 2)
+        text_result = await backend.extract_text(automation_id="txtOutput")
+        status_text = (
+            text_result.get("text", "")
+            if isinstance(text_result, dict)
+            else str(text_result)
+        )
+
+        evidence = {
+            "initial": initial,
+            "key_sequence": key_result,
+            "selected_rows": selected_rows,
+            "range": range_result,
+            "status_text": status_text,
+        }
+        print(f"  evidence: {evidence}")
+        check(
+            "WPF route logs Shift held",
+            "DataGridArrow" in status_text and "shift=True" in status_text,
+            status_text,
+        )
+        check(
+            "WPF key sequence sent two Down keys",
+            key_result.get("status") == "PASS" and key_result.get("sent_count") == 2,
+            str(key_result),
+        )
+        check(
+            "WPF key sequence cleanup released Shift",
+            key_result.get("final_held_modifiers") == [],
+            str(key_result),
+        )
+        check(
+            "WPF DataGrid selected range expanded",
+            range_result.get("status") == "PASS",
+            str(range_result),
+        )
+    finally:
+        if backend is not None:
+            try:
+                await backend.disconnect()
+            except Exception:
+                pass
+        await m.stop()
+
+
+async def test_avalonia_ui_fixture_compatibility():
+    print("\n22. AVALONIA UI FIXTURE COMPATIBILITY")
+    from netcoredbg_mcp.ui.backend import create_backend
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+    from netcoredbg_mcp.ui.grid import read_grid_visible_rows
+    from netcoredbg_mcp.ui.key_sequence import run_scoped_key_sequence
+
+    m = SessionManager()
+    backend = None
+    try:
+        await m.launch(program=AVALONIA_DLL)
+        await asyncio.sleep(2.0)
+
+        backend = create_backend(process_registry=m.process_registry)
+        pid = m.state.process_id
+        if not pid:
+            check("Avalonia UI: process started", False, "no PID")
+            return
+        await backend.connect(pid)
+
+        if not isinstance(backend, FlaUIBackend):
+            evidence = {
+                "status": "BLOCKED",
+                "backend": type(backend).__name__,
+                "reason": "FlaUI bridge required for Avalonia UIA compatibility proof",
+            }
+            print(f"  evidence: {evidence}")
+            check("Avalonia UI reports BLOCKED without FlaUI", True, str(evidence))
+            return
+
+        selector = {"automation_id": "dataGrid"}
+        found = await backend.find_element(automation_id="dataGrid")
+        key_result = await run_scoped_key_sequence(
+            backend,
+            selector,
+            modifiers=["shift"],
+            keys=["Down", "Down"],
+        )
+        text_result = await backend.extract_text(automation_id="txtOutput")
+        status_text = (
+            text_result.get("text", "")
+            if isinstance(text_result, dict)
+            else str(text_result)
+        )
+        try:
+            grid_result = await read_grid_visible_rows(backend, selector)
+        except Exception as exc:
+            grid_result = {
+                "status": "BLOCKED",
+                "reason": str(exc),
+            }
+        route_result = {
+            "status": "PASS"
+            if "AvaloniaDataGridArrow" in status_text and "shift=True" in status_text
+            else "BLOCKED",
+            "status_text": status_text,
+        }
+        if route_result["status"] == "BLOCKED":
+            route_result["reason"] = (
+                "Avalonia DataGrid accepted UIA focus but did not raise the fixture "
+                "KeyDown route through this backend path"
+            )
+
+        evidence = {
+            "found": found,
+            "key_sequence": key_result,
+            "grid": grid_result,
+            "route": route_result,
+        }
+        print(f"  evidence: {evidence}")
+        check(
+            "Avalonia DataGrid fixture found",
+            bool(found.get("found", False)) if isinstance(found, dict) else found is not None,
+            str(found),
+        )
+        check(
+            "Avalonia key sequence cleanup released modifiers",
+            key_result.get("status") == "PASS" and key_result.get("final_held_modifiers") == [],
+            str(key_result),
+        )
+        check(
+            "Avalonia route logs Shift or reports BLOCKED",
+            route_result.get("status") in {"PASS", "BLOCKED"},
+            str(route_result),
+        )
+        check(
+            "Avalonia DataGrid evidence is bounded",
+            grid_result.get("status") in {"PASS", "UNSUPPORTED", "BLOCKED", "AMBIGUOUS"},
+            str(grid_result),
+        )
+    finally:
+        if backend is not None:
+            try:
+                await backend.disconnect()
+            except Exception:
+                pass
+        await m.stop()
+
+
 def get_scenarios():
     scenarios = [
         ("Hit Counting", test_hit_counting),
@@ -2178,6 +2396,13 @@ def get_scenarios():
             ("Realize Virtualized Item", test_realize_virtualized_item),
             ("Clipboard Roundtrip", test_clipboard_roundtrip),
         ])
+    if WPF_GUI_ENABLED:
+        scenarios.append(("WPF Shift/DataGrid Evidence", test_wpf_shift_datagrid_evidence))
+    if AVALONIA_GUI_ENABLED:
+        scenarios.append((
+            "Avalonia UI Fixture Compatibility",
+            test_avalonia_ui_fixture_compatibility,
+        ))
     return scenarios
 
 

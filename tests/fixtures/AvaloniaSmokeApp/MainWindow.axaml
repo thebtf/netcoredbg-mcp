@@ -64,7 +64,9 @@
                   AutomationProperties.AutomationId="dataGrid"
                   SelectionMode="Extended"
                   IsReadOnly="True"
-                  Name="DataGrid">
+                  Name="DataGrid"
+                  Focusable="True"
+                  KeyDown="DataGrid_KeyDown">
             <DataGrid.Columns>
                 <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="*"/>
                 <DataGridTextColumn Header="Role" Binding="{Binding Role}" Width="*"/>
