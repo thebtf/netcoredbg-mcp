@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -65,12 +66,16 @@ class InstrumentationGroupService:
         if not breakpoint_specs and not tracepoint_specs:
             return self._fail("instrumentation group requires at least one item", group=name)
 
-        breakpoint_refs = []
-        tracepoint_refs = []
-        for spec in breakpoint_specs:
-            breakpoint_refs.append(await self._add_breakpoint_ref(spec))
-        for spec in tracepoint_specs:
-            tracepoint_refs.append(await self._add_tracepoint_ref(spec))
+        breakpoint_refs: list[dict[str, Any]] = []
+        tracepoint_refs: list[dict[str, Any]] = []
+        try:
+            for spec in breakpoint_specs:
+                breakpoint_refs.append(await self._add_breakpoint_ref(spec))
+            for spec in tracepoint_specs:
+                tracepoint_refs.append(await self._add_tracepoint_ref(spec))
+        except Exception:
+            await self._rollback_refs(breakpoint_refs, tracepoint_refs)
+            raise
 
         record = {
             "name": name,
@@ -182,7 +187,11 @@ class InstrumentationGroupService:
         expression = str(spec["expression"])
         manager = self._tracepoint_manager(create=True)
         tracepoint = manager.add(file, line, expression)
-        bp = await self._session.add_breakpoint(file, line)
+        try:
+            bp = await self._session.add_breakpoint(file, line)
+        except Exception:
+            manager.remove(tracepoint.id)
+            raise
         tracepoint.breakpoint_id = getattr(bp, "id", None)
         tracepoint.dap_line = getattr(bp, "dap_line", None)
         return {
@@ -194,6 +203,22 @@ class InstrumentationGroupService:
             "breakpoint_id": tracepoint.breakpoint_id,
             "dap_line": tracepoint.dap_line,
         }
+
+    async def _rollback_refs(
+        self,
+        breakpoint_refs: list[dict[str, Any]],
+        tracepoint_refs: list[dict[str, Any]],
+    ) -> None:
+        manager = self._tracepoint_manager(create=False)
+        for ref in reversed(tracepoint_refs):
+            if manager is not None:
+                with suppress(Exception):
+                    manager.remove(str(ref["id"]))
+            with suppress(Exception):
+                await self._session.remove_breakpoint(ref["file"], int(ref["line"]))
+        for ref in reversed(breakpoint_refs):
+            with suppress(Exception):
+                await self._session.remove_breakpoint(ref["file"], int(ref["line"]))
 
     def _tracepoint_manager(self, *, create: bool) -> TracepointManager | None:
         manager = getattr(self._session, "_tracepoint_manager", None)

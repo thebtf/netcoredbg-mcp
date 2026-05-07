@@ -326,6 +326,7 @@ class OutputEntry:
     text: str
     category: str = "console"  # stdout, stderr, console
     variables_reference: int = 0  # Non-zero when adapter attaches structured data
+    sequence: int = 0  # Monotonic output sequence, assigned by SessionManager.
 
 
 @dataclass
@@ -431,6 +432,8 @@ class SessionState:
     threads: list[ThreadInfo] = field(default_factory=list)
     current_frame_id: int | None = None
     output_buffer: deque[OutputEntry] = field(default_factory=deque)
+    output_sequence: int = 0
+    output_trimmed_before: int = 0
     exit_code: int | None = None
     exception_info: dict[str, Any] | None = None
     process_id: int | None = None

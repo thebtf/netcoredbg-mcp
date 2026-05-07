@@ -14,6 +14,9 @@ from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
 from netcoredbg_mcp.ui.key_sequence import run_scoped_key_sequence
 from netcoredbg_mcp.ui.pywinauto_backend import PywinautoBackend
 
+TEST_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = TEST_ROOT.parent
+
 
 class FakeKeySequenceBackend:
     def __init__(self, response: dict[str, Any]) -> None:
@@ -192,8 +195,10 @@ async def test_ui_key_sequence_tool_is_registered(mock_netcoredbg_path) -> None:
 
 
 def test_bridge_router_registers_scoped_key_sequence_and_dispose_cleanup() -> None:
-    router = Path("bridge/JsonRpcHandler.cs").read_text(encoding="utf-8")
-    command = Path("bridge/Commands/KeySequenceCommands.cs").read_text(encoding="utf-8")
+    router = (PROJECT_ROOT / "bridge" / "JsonRpcHandler.cs").read_text(encoding="utf-8")
+    command = (
+        PROJECT_ROOT / "bridge" / "Commands" / "KeySequenceCommands.cs"
+    ).read_text(encoding="utf-8")
 
     assert '["scoped_key_sequence"]' in router
     assert "KeySequenceCommands.ScopedKeySequence" in router
@@ -203,12 +208,19 @@ def test_bridge_router_registers_scoped_key_sequence_and_dispose_cleanup() -> No
 
 
 def test_wpf_and_avalonia_fixtures_expose_shift_datagrid_routes() -> None:
-    wpf_xaml = Path("tests/fixtures/WpfSmokeApp/MainWindow.xaml").read_text(encoding="utf-8")
-    wpf_code = Path("tests/fixtures/WpfSmokeApp/MainWindow.xaml.cs").read_text(encoding="utf-8")
-    avalonia_xaml = Path("tests/fixtures/AvaloniaSmokeApp/MainWindow.axaml").read_text(
+    fixture_root = TEST_ROOT / "fixtures"
+    wpf_xaml = (fixture_root / "WpfSmokeApp" / "MainWindow.xaml").read_text(
         encoding="utf-8",
     )
-    avalonia_code = Path("tests/fixtures/AvaloniaSmokeApp/MainWindow.axaml.cs").read_text(
+    wpf_code = (fixture_root / "WpfSmokeApp" / "MainWindow.xaml.cs").read_text(
+        encoding="utf-8",
+    )
+    avalonia_xaml = (fixture_root / "AvaloniaSmokeApp" / "MainWindow.axaml").read_text(
+        encoding="utf-8",
+    )
+    avalonia_code = (
+        fixture_root / "AvaloniaSmokeApp" / "MainWindow.axaml.cs"
+    ).read_text(
         encoding="utf-8",
     )
 

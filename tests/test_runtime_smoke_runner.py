@@ -19,6 +19,8 @@ class FakeRuntimeSmokeSession:
         self.state = SimpleNamespace(
             state=DebugState.STOPPED,
             output_buffer=deque(),
+            output_sequence=0,
+            output_trimmed_before=0,
             process_id=1234,
             process_name="Smoke",
             modules=[],
@@ -53,7 +55,14 @@ class FakeRuntimeSmokeSession:
         return {"status": "BLOCKED", "reason": "grid backend unsupported"}
 
     async def append_output(self, text: str, category: str = "stdout") -> dict[str, Any]:
-        self.state.output_buffer.append(OutputEntry(text, category=category))
+        self.state.output_sequence += 1
+        self.state.output_buffer.append(
+            OutputEntry(
+                text,
+                category=category,
+                sequence=self.state.output_sequence,
+            )
+        )
         return {
             "status": "PASS",
             "reason": "output appended",

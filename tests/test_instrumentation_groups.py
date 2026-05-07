@@ -68,6 +68,23 @@ class FakeInstrumentationSession:
         return file
 
 
+class FailingAddInstrumentationSession(FakeInstrumentationSession):
+    def __init__(self, failing_line: int) -> None:
+        super().__init__()
+        self.failing_line = failing_line
+
+    async def add_breakpoint(
+        self,
+        file: str,
+        line: int,
+        condition: str | None = None,
+        hit_condition: str | None = None,
+    ) -> Breakpoint:
+        if line == self.failing_line:
+            raise RuntimeError("breakpoint setup failed")
+        return await super().add_breakpoint(file, line, condition, hit_condition)
+
+
 class CapturingMCP:
     def __init__(self) -> None:
         self.tools: dict[str, Any] = {}
@@ -176,6 +193,24 @@ async def test_unknown_group_clear_fails_without_mutating_other_groups() -> None
     assert unknown["status"] == "FAIL"
     assert unknown["reason"] == "instrumentation group not found"
     assert (await service.inspect_group("flow")).to_dict()["status"] == "PASS"
+
+
+@pytest.mark.asyncio
+async def test_create_group_rolls_back_partial_breakpoints_and_tracepoints() -> None:
+    session = FailingAddInstrumentationSession(failing_line=20)
+    service = InstrumentationGroupService(session)
+    source = "C:/repo/Program.cs"
+
+    with pytest.raises(RuntimeError, match="breakpoint setup failed"):
+        await service.create_group(
+            "flow",
+            breakpoints=[{"file": source, "line": 10}],
+            tracepoints=[{"file": source, "line": 20, "expression": "i"}],
+        )
+
+    assert session.runtime_smoke.instrumentation_groups == {}
+    assert session.breakpoints.get_for_file(source) == []
+    assert session._tracepoint_manager.tracepoints == {}
 
 
 @pytest.mark.asyncio

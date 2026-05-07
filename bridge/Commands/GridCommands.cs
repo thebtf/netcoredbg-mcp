@@ -14,7 +14,7 @@ public static class GridCommands
         if (!grid.Patterns.Grid.TryGetPattern(out var gridPattern))
             return Unsupported("GridPattern");
 
-        var rows = GridRows(grid);
+        var rows = GridRows(grid, automation);
         return new JsonObject
         {
             ["status"] = "PASS",
@@ -29,7 +29,7 @@ public static class GridCommands
         if (!grid.Patterns.Selection.TryGetPattern(out _))
             return Unsupported("SelectionPattern");
 
-        var rows = GridRows(grid);
+        var rows = GridRows(grid, automation);
         return new JsonObject
         {
             ["status"] = "PASS",
@@ -46,7 +46,7 @@ public static class GridCommands
             return Unsupported("SelectionPattern");
 
         var (start, end) = ReadRange(@params);
-        var rows = GridRows(grid);
+        var rows = GridRows(grid, automation);
         if (start < 0 || end < start || end >= rows.Length)
             return new JsonObject
             {
@@ -80,7 +80,7 @@ public static class GridCommands
             return Unsupported("SelectionPattern");
 
         var (start, end) = ReadRange(@params);
-        var rows = GridRows(grid);
+        var rows = GridRows(grid, automation);
         if (start < 0 || end < start || end >= rows.Length)
             return new JsonObject
             {
@@ -139,21 +139,31 @@ public static class GridCommands
             ?? throw new InvalidOperationException("DataGrid target not found.");
     }
 
-    private static AutomationElement[] GridRows(AutomationElement grid)
+    private static AutomationElement[] GridRows(AutomationElement grid, UIA3Automation automation)
     {
-        var directRows = grid.FindAllChildren()
+        var rowCondition = RowCondition(automation);
+        var directRows = grid.FindAllChildren(rowCondition)
             .Where(IsRowLike)
             .ToArray();
         if (directRows.Length > 0)
             return directRows;
 
-        var descendants = grid.FindAllDescendants()
+        var descendants = grid.FindAllDescendants(rowCondition)
             .Where(IsRowLike)
             .ToArray();
         var selectableRows = descendants
             .Where(IsSelectableRow)
             .ToArray();
         return selectableRows.Length > 0 ? selectableRows : descendants;
+    }
+
+    private static ConditionBase RowCondition(UIA3Automation automation)
+    {
+        var cf = new ConditionFactory(automation.PropertyLibrary);
+        return new OrCondition(
+            cf.ByControlType(ControlType.DataItem),
+            cf.ByControlType(ControlType.Custom),
+            cf.ByControlType(ControlType.ListItem));
     }
 
     private static bool IsSelectableRow(AutomationElement element)

@@ -20,10 +20,27 @@ class FakeOutputSession:
         self.state = SimpleNamespace(
             state=DebugState.STOPPED,
             output_buffer=deque(maxlen=max_entries),
+            output_sequence=0,
+            output_trimmed_before=0,
         )
 
     def append_output(self, text: str, category: str = "stdout") -> None:
-        self.state.output_buffer.append(OutputEntry(text=text, category=category))
+        if (
+            self.state.output_buffer.maxlen is not None
+            and len(self.state.output_buffer) == self.state.output_buffer.maxlen
+        ):
+            self.state.output_trimmed_before = max(
+                self.state.output_trimmed_before,
+                self.state.output_buffer[0].sequence,
+            )
+        self.state.output_sequence += 1
+        self.state.output_buffer.append(
+            OutputEntry(
+                text=text,
+                category=category,
+                sequence=self.state.output_sequence,
+            )
+        )
 
 
 class CapturingMCP:
@@ -145,6 +162,20 @@ def test_missing_checkpoint_and_trimmed_range_fail_with_named_reasons() -> None:
     trimmed_session.append_output("fourth\n")
 
     trimmed = trimmed_service.assert_since("start", required=["fourth"]).to_dict()
+
+    assert trimmed["status"] == "FAIL"
+    assert trimmed["reason"] == "output checkpoint range trimmed"
+
+
+def test_empty_checkpoint_detects_post_checkpoint_output_trimmed_from_buffer() -> None:
+    session = FakeOutputSession(max_entries=2)
+    service = OutputAssertionService(session)
+    service.create_checkpoint("start")
+    session.append_output("first\n")
+    session.append_output("second\n")
+    session.append_output("third\n")
+
+    trimmed = service.assert_since("start", required=["third"]).to_dict()
 
     assert trimmed["status"] == "FAIL"
     assert trimmed["reason"] == "output checkpoint range trimmed"

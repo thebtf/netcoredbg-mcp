@@ -42,6 +42,7 @@ class OutputAssertionService:
             "entry_count": len(entries),
             "byte_offset": self._byte_length(entries),
             "first_entry_hash": self._entry_hash(entries[0]) if entries else None,
+            "next_sequence": self._next_sequence(),
         }
         self._checkpoints[name] = checkpoint
         return self._pass(
@@ -79,7 +80,7 @@ class OutputAssertionService:
         if isinstance(compiled, OutputAssertionResult):
             return compiled
 
-        searched_entries = entries[int(saved["entry_count"]):]
+        searched_entries = self._searched_entries(saved, entries)
         searched_text = "".join(entry.text for entry in searched_entries)
         lines = searched_text.splitlines()
 
@@ -122,6 +123,8 @@ class OutputAssertionService:
                 "end_entry": len(entries),
                 "start_byte": int(saved["byte_offset"]),
                 "end_byte": self._byte_length(entries),
+                "start_sequence": saved.get("next_sequence"),
+                "end_sequence": self._last_sequence(entries),
                 "line_count": len(lines),
             },
             "matches": matches,
@@ -152,8 +155,22 @@ class OutputAssertionService:
     def _byte_length(entries: list[OutputEntry]) -> int:
         return sum(len(entry.text.encode("utf-8")) for entry in entries)
 
-    @staticmethod
-    def _is_trimmed(saved: dict[str, Any], entries: list[OutputEntry]) -> bool:
+    def _is_trimmed(self, saved: dict[str, Any], entries: list[OutputEntry]) -> bool:
+        if self._uses_sequence_tracking(saved, entries):
+            next_sequence = int(saved["next_sequence"])
+            trimmed_before = int(
+                getattr(self._session.state, "output_trimmed_before", 0) or 0
+            )
+            if trimmed_before >= next_sequence:
+                return True
+
+            visible_sequences = [
+                int(getattr(entry, "sequence", 0) or 0)
+                for entry in entries
+                if int(getattr(entry, "sequence", 0) or 0) > 0
+            ]
+            return bool(visible_sequences and min(visible_sequences) > next_sequence)
+
         entry_count = int(saved["entry_count"])
         if entry_count > len(entries):
             return True
@@ -163,6 +180,48 @@ class OutputAssertionService:
             and entries
             and first_entry_hash != OutputAssertionService._entry_hash(entries[0])
         )
+
+    def _searched_entries(
+        self,
+        saved: dict[str, Any],
+        entries: list[OutputEntry],
+    ) -> list[OutputEntry]:
+        if self._uses_sequence_tracking(saved, entries):
+            next_sequence = int(saved["next_sequence"])
+            return [
+                entry
+                for entry in entries
+                if int(getattr(entry, "sequence", 0) or 0) >= next_sequence
+            ]
+        return entries[int(saved["entry_count"]):]
+
+    def _uses_sequence_tracking(
+        self,
+        saved: dict[str, Any],
+        entries: list[OutputEntry],
+    ) -> bool:
+        if saved.get("next_sequence") is None:
+            return False
+        state = self._session.state
+        return bool(
+            int(getattr(state, "output_sequence", 0) or 0) > 0
+            or int(getattr(state, "output_trimmed_before", 0) or 0) > 0
+            or any(int(getattr(entry, "sequence", 0) or 0) > 0 for entry in entries)
+        )
+
+    def _next_sequence(self) -> int | None:
+        if not hasattr(self._session.state, "output_sequence"):
+            return None
+        return int(getattr(self._session.state, "output_sequence", 0) or 0) + 1
+
+    @staticmethod
+    def _last_sequence(entries: list[OutputEntry]) -> int | None:
+        sequences = [
+            int(getattr(entry, "sequence", 0) or 0)
+            for entry in entries
+            if int(getattr(entry, "sequence", 0) or 0) > 0
+        ]
+        return max(sequences) if sequences else None
 
     @staticmethod
     def _entry_hash(entry: OutputEntry) -> str:

@@ -615,7 +615,12 @@ class SessionManager:
         if len(output) > MAX_OUTPUT_ENTRY:
             output = output[:MAX_OUTPUT_ENTRY] + "... [truncated]"
 
-        entry = OutputEntry(text=output, category=body.category.value)
+        self._state.output_sequence += 1
+        entry = OutputEntry(
+            text=output,
+            category=body.category.value,
+            sequence=self._state.output_sequence,
+        )
 
         # Capture variablesReference if the adapter attached structured output
         var_ref = body.variables_reference
@@ -628,6 +633,10 @@ class SessionManager:
         # Trim buffer by byte size (security: prevent DoS)
         while self._output_bytes > MAX_OUTPUT_BYTES and self._state.output_buffer:
             removed = self._state.output_buffer.popleft()
+            self._state.output_trimmed_before = max(
+                self._state.output_trimmed_before,
+                removed.sequence,
+            )
             self._output_bytes -= len(removed.text)
 
     def _on_thread(self, event: DAPEvent) -> None:
