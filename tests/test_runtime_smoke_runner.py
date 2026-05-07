@@ -22,8 +22,14 @@ from netcoredbg_mcp.tools.runtime_smoke import register_runtime_smoke_tools
 def _set_windows_file_attributes(path: Path, attributes: int) -> None:
     if os.name != "nt":
         return
+    from ctypes import wintypes
+
     kernel32 = ctypes.windll.kernel32
-    kernel32.SetFileAttributesW(str(path), attributes)
+    kernel32.SetFileAttributesW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD)
+    kernel32.SetFileAttributesW.restype = wintypes.BOOL
+    if not kernel32.SetFileAttributesW(str(path), attributes):
+        error = ctypes.GetLastError()
+        raise OSError(error, f"SetFileAttributesW failed for {path}")
 
 
 class FakeRuntimeSmokeSession:

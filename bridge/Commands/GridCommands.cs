@@ -476,7 +476,7 @@ public static class GridCommands
         foreach (var cell in source.Array)
         {
             var column = CellEvidenceColumn(cell);
-            if (!string.IsNullOrWhiteSpace(column) && !seenColumns.Add(column))
+            if (!seenColumns.Add(CellEvidenceDedupeKey(column)))
                 continue;
             targetArray.Add(cell?.DeepClone());
         }
@@ -486,8 +486,13 @@ public static class GridCommands
             if (targetObject.ContainsKey(item.Key))
                 continue;
             targetObject[item.Key] = item.Value?.DeepClone();
-            seenColumns.Add(item.Key);
+            seenColumns.Add(CellEvidenceDedupeKey(item.Key));
         }
+    }
+
+    private static string CellEvidenceDedupeKey(string column)
+    {
+        return string.IsNullOrWhiteSpace(column) ? "<empty-column>" : column;
     }
 
     private static string CellEvidenceColumn(JsonNode? cell)
