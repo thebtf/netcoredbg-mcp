@@ -324,11 +324,13 @@ def test_bridge_grid_builds_cell_text_evidence_for_rows() -> None:
     assert "CellColumnIndex(cell, ordinal)" in command
     assert "ReadDescendantCellText" in command
     assert "IsLikelyCellPlaceholder" in command
+    assert "CellPlaceholderSubstrings" in command
+    assert "ReadGridFindTimeout" in command
     assert command.count("IsLikelyCellPlaceholder(text)") >= 3
     assert "FindGridWithRetry" in command
     assert "row cell evidence unavailable" in command
     assert "ColumnsFromAssertions(expectedRows)" in command
-    assert "actualValue.Contains(expectedValue, StringComparison.Ordinal)" in command
+    assert "string.Equals(actualValue, expectedValue, StringComparison.Ordinal)" in command
     assert "CellKey(cell, currentOrdinal, columns, headers)" in command
     direct_children_index = command.index("row.FindAllChildren()")
     descendant_fallback_index = command.index("row.FindAllDescendants()")

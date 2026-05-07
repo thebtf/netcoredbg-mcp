@@ -73,8 +73,18 @@ def _is_pid_alive_windows(pid: int) -> bool:
         from ctypes import wintypes
 
         kernel32 = ctypes.windll.kernel32
+        kernel32.OpenProcess.argtypes = (
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD,
+        )
         kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = (
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.DWORD),
+        )
         kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
         kernel32.CloseHandle.restype = wintypes.BOOL
 
         process_query_limited_information = 0x1000
@@ -143,9 +153,17 @@ def _terminate_pid_windows(pid: int, timeout: float) -> bool:
         from ctypes import wintypes
 
         kernel32 = ctypes.windll.kernel32
+        kernel32.OpenProcess.argtypes = (
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD,
+        )
         kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.TerminateProcess.argtypes = (wintypes.HANDLE, wintypes.UINT)
         kernel32.TerminateProcess.restype = wintypes.BOOL
+        kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
         kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
         kernel32.CloseHandle.restype = wintypes.BOOL
 
         process_terminate = 0x0001
@@ -161,7 +179,7 @@ def _terminate_pid_windows(pid: int, timeout: float) -> bool:
         try:
             result = kernel32.TerminateProcess(handle, 1)
             if not result:
-                return False
+                return not _is_pid_alive(pid)
 
             wait_result = kernel32.WaitForSingleObject(handle, timeout_ms)
             if wait_result == wait_object_0:

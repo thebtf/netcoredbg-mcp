@@ -100,6 +100,7 @@ class TestFlaUIBackendConnect:
         assert "window.BoundingRectangle" in command
         assert "rect.Width <= 0 || rect.Height <= 0" in command
         assert "SafeIsOffscreen(window)" in command
+        assert "catch { return true; }" in command
         assert "OrderByDescending(candidate => candidate.Score)" in command
         assert "no usable top-level window yet" in command
 

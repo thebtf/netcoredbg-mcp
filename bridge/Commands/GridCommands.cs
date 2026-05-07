@@ -10,6 +10,12 @@ namespace FlaUIBridge.Commands;
 
 public static class GridCommands
 {
+    private static readonly string[] CellPlaceholderSubstrings =
+    {
+        "display column index",
+        "индекс отображения столбца"
+    };
+
     public static JsonNode VisibleRows(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
         var grid = ResolveGrid(@params, automation, mainWindow);
@@ -97,7 +103,7 @@ public static class GridCommands
                 var key = expectedCell.Key;
                 var expectedValue = expectedCell.Value?.GetValue<string>() ?? "";
                 var actualValue = cells[key]?.GetValue<string>() ?? "";
-                if (!actualValue.Contains(expectedValue, StringComparison.Ordinal))
+                if (!string.Equals(actualValue, expectedValue, StringComparison.Ordinal))
                     missing[key] = expectedValue;
             }
 
@@ -245,15 +251,16 @@ public static class GridCommands
         var condition = conditions.Count == 1
             ? conditions[0]
             : new AndCondition(conditions.ToArray());
-        return FindGridWithRetry(root, condition)
+        return FindGridWithRetry(root, condition, ReadGridFindTimeout(@params))
             ?? throw new InvalidOperationException("DataGrid target not found.");
     }
 
     private static AutomationElement? FindGridWithRetry(
         AutomationElement root,
-        ConditionBase condition)
+        ConditionBase condition,
+        TimeSpan timeout)
     {
-        var deadline = DateTime.UtcNow.AddSeconds(5);
+        var deadline = DateTime.UtcNow.Add(timeout);
         AutomationElement? match;
         do
         {
@@ -265,6 +272,16 @@ public static class GridCommands
         while (DateTime.UtcNow < deadline);
 
         return null;
+    }
+
+    private static TimeSpan ReadGridFindTimeout(JsonNode? @params)
+    {
+        var timeoutNode = @params?["timeout_ms"];
+        if (timeoutNode is null)
+            return TimeSpan.FromSeconds(5);
+
+        var timeoutMs = Math.Clamp(timeoutNode.GetValue<int>(), 0, 30_000);
+        return TimeSpan.FromMilliseconds(timeoutMs);
     }
 
     private static AutomationElement[] GridRows(AutomationElement grid, UIA3Automation automation)
@@ -445,8 +462,10 @@ public static class GridCommands
                 });
             }
         }
-        catch
+        catch (Exception ex)
         {
+            System.Diagnostics.Debug.WriteLine(
+                $"GridCommands.BuildPatternCells fallback after GridRow.Cells failure: {ex}");
             // Fall back to descendant text evidence for providers that do not
             // expose GridRow.Cells consistently.
         }
@@ -463,11 +482,16 @@ public static class GridCommands
             foreach (var header in gridElement.ColumnHeaders)
             {
                 var text = ReadCellText(header);
-                headers.Add(IsLikelyClrTypeName(text) ? "" : text);
+                headers.Add(
+                    IsLikelyClrTypeName(text) || IsLikelyCellPlaceholder(text)
+                        ? ""
+                        : text);
             }
         }
-        catch
+        catch (Exception ex)
         {
+            System.Diagnostics.Debug.WriteLine(
+                $"GridCommands.ColumnHeaders best-effort extraction failed: {ex}");
             // Header evidence is best-effort; row cell extraction still works
             // via explicit plan columns or fallback cell names.
         }
@@ -695,8 +719,8 @@ public static class GridCommands
 
     private static bool IsLikelyCellPlaceholder(string value)
     {
-        return value.Contains("display column index", StringComparison.OrdinalIgnoreCase) ||
-               value.Contains("индекс отображения столбца", StringComparison.OrdinalIgnoreCase);
+        return CellPlaceholderSubstrings.Any(
+            marker => value.Contains(marker, StringComparison.OrdinalIgnoreCase));
     }
 
     private static string SafeString(Func<string?> read)

@@ -20,6 +20,8 @@ from netcoredbg_mcp.tools.runtime_smoke import register_runtime_smoke_tools
 
 
 def _set_windows_file_attributes(path: Path, attributes: int) -> None:
+    if os.name != "nt":
+        return
     kernel32 = ctypes.windll.kernel32
     kernel32.SetFileAttributesW(str(path), attributes)
 

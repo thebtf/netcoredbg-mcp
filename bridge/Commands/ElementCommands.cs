@@ -81,7 +81,7 @@ public static class ElementCommands
     private static bool SafeIsOffscreen(AutomationElement element)
     {
         try { return element.IsOffscreen; }
-        catch { return false; }
+        catch { return true; }
     }
 
     public static JsonNode FindElement(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
