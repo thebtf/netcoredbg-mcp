@@ -134,8 +134,52 @@ class UIBackend(Protocol):
         """Inspect currently held modifiers."""
         ...
 
+    async def scoped_key_sequence(
+        self,
+        selector: dict[str, Any],
+        modifiers: list[str],
+        keys: list[str],
+    ) -> dict[str, Any]:
+        """Focus a target, hold modifiers across keys, and release them."""
+        ...
+
     async def send_keys(self, keys: str) -> None:
         """Send keyboard input."""
+        ...
+
+    async def grid_visible_rows(self, selector: dict[str, Any]) -> dict[str, Any]:
+        """Read visible DataGrid rows."""
+        ...
+
+    async def grid_selected_rows(self, selector: dict[str, Any]) -> dict[str, Any]:
+        """Read selected DataGrid rows."""
+        ...
+
+    async def grid_select_range(
+        self,
+        selector: dict[str, Any],
+        start_index: int,
+        end_index: int,
+    ) -> dict[str, Any]:
+        """Select a DataGrid row range."""
+        ...
+
+    async def grid_assert_range(
+        self,
+        selector: dict[str, Any],
+        start_index: int,
+        end_index: int,
+    ) -> dict[str, Any]:
+        """Assert a DataGrid row range."""
+        ...
+
+    async def query_ui(
+        self,
+        selector: dict[str, Any],
+        fields: list[str],
+        max_results: int = 20,
+    ) -> dict[str, Any]:
+        """Read focused field-limited UI evidence."""
         ...
 
     async def multi_select(self, container_id: str, indices: list[int]) -> int:

@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using Avalonia.Controls;
+using Avalonia.Input;
 using Avalonia.Interactivity;
 
 namespace AvaloniaSmokeApp;
@@ -38,5 +39,17 @@ public partial class MainWindow : Window
     private void BtnScoped_Click(object? sender, RoutedEventArgs e)
     {
         TxtOutput.Text = "Scoped button clicked";
+    }
+
+    private void DataGrid_KeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.Key is not (Key.Down or Key.Up))
+        {
+            return;
+        }
+
+        var shiftHeld = e.KeyModifiers.HasFlag(KeyModifiers.Shift);
+        TxtOutput.Text = $"AvaloniaDataGridArrow key={e.Key} shift={shiftHeld}";
+        Console.WriteLine(TxtOutput.Text);
     }
 }

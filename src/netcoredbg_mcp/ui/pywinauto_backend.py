@@ -435,6 +435,78 @@ class PywinautoBackend:
         """The pywinauto backend has no persistent modifier hold state."""
         return {"modifiers": []}
 
+    async def scoped_key_sequence(
+        self,
+        selector: dict[str, Any],
+        modifiers: list[str],
+        keys: list[str],
+    ) -> dict[str, Any]:
+        """Scoped held-modifier key sequences require the FlaUI bridge backend."""
+        return {
+            "status": "UNSUPPORTED",
+            "unsupported": True,
+            "backend": "pywinauto",
+            "reason": (
+                "FlaUI bridge required for scoped key sequence. "
+                "The pywinauto backend cannot prove held modifiers across keys."
+            ),
+        }
+
+    async def grid_visible_rows(self, selector: dict[str, Any]) -> dict[str, Any]:
+        """DataGrid evidence requires the FlaUI bridge backend."""
+        return self._unsupported_grid()
+
+    async def grid_selected_rows(self, selector: dict[str, Any]) -> dict[str, Any]:
+        """DataGrid evidence requires the FlaUI bridge backend."""
+        return self._unsupported_grid()
+
+    async def grid_select_range(
+        self,
+        selector: dict[str, Any],
+        start_index: int,
+        end_index: int,
+    ) -> dict[str, Any]:
+        """DataGrid selection evidence requires the FlaUI bridge backend."""
+        return self._unsupported_grid()
+
+    async def grid_assert_range(
+        self,
+        selector: dict[str, Any],
+        start_index: int,
+        end_index: int,
+    ) -> dict[str, Any]:
+        """DataGrid range assertion evidence requires the FlaUI bridge backend."""
+        return self._unsupported_grid()
+
+    async def query_ui(
+        self,
+        selector: dict[str, Any],
+        fields: list[str],
+        max_results: int = 20,
+    ) -> dict[str, Any]:
+        """Focused field-limited UI evidence requires the FlaUI bridge backend."""
+        return {
+            "status": "UNSUPPORTED",
+            "unsupported": True,
+            "backend": "pywinauto",
+            "reason": (
+                "FlaUI bridge required for focused UI evidence. "
+                "The pywinauto backend cannot provide bounded field proof."
+            ),
+        }
+
+    @staticmethod
+    def _unsupported_grid() -> dict[str, Any]:
+        return {
+            "status": "UNSUPPORTED",
+            "unsupported": True,
+            "backend": "pywinauto",
+            "reason": (
+                "FlaUI bridge required for DataGrid evidence. "
+                "The pywinauto backend cannot provide UIA Grid/Selection proof."
+            ),
+        }
+
     async def multi_select(self, container_id: str, indices: list[int]) -> int:
         """Multi-select items. Returns count selected.
 
@@ -516,7 +588,12 @@ class PywinautoBackend:
             "reason": "FlaUI bridge required for TransformPattern",
         }
 
-    async def resize_window(self, width: int, height: int, window_title: str | None = None) -> dict[str, Any]:
+    async def resize_window(
+        self,
+        width: int,
+        height: int,
+        window_title: str | None = None,
+    ) -> dict[str, Any]:
         """TransformPattern requires FlaUI bridge backend."""
         return {
             "unsupported": True,

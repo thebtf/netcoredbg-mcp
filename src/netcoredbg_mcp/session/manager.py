@@ -36,6 +36,10 @@ from ..dap.protocol import Events
 from ..process_registry import ProcessRegistry
 from ..ui.temp_manager import SessionTempManager
 from ..utils.version import check_version_compatibility
+from .hygiene import RuntimeHygieneService
+from .instrumentation import InstrumentationGroupService
+from .output_assertions import OutputAssertionService
+from .runtime_smoke import RuntimeSmokeSession
 from .state import (
     Breakpoint,
     BreakpointRegistry,
@@ -79,6 +83,10 @@ class SessionManager:
         self._last_version_warning: str | None = None  # dbgshim version mismatch warning
         self._session_id: str | None = None
         self._quick_eval_lock = asyncio.Lock()
+        self._runtime_smoke = RuntimeSmokeSession()
+        self._hygiene = RuntimeHygieneService(self)
+        self._instrumentation = InstrumentationGroupService(self)
+        self._output_assertions = OutputAssertionService(self)
 
     @property
     def state(self) -> SessionState:
@@ -99,6 +107,26 @@ class SessionManager:
     def process_registry(self) -> ProcessRegistry:
         """Get process registry for tracking spawned processes."""
         return self._process_registry
+
+    @property
+    def runtime_smoke(self) -> RuntimeSmokeSession:
+        """Get runtime smoke state owned by this session."""
+        return self._runtime_smoke
+
+    @property
+    def hygiene(self) -> RuntimeHygieneService:
+        """Get runtime smoke hygiene service."""
+        return self._hygiene
+
+    @property
+    def instrumentation(self) -> InstrumentationGroupService:
+        """Get runtime smoke instrumentation group service."""
+        return self._instrumentation
+
+    @property
+    def output_assertions(self) -> OutputAssertionService:
+        """Get runtime smoke output assertion service."""
+        return self._output_assertions
 
     @property
     def temp_manager(self) -> SessionTempManager:
@@ -587,7 +615,12 @@ class SessionManager:
         if len(output) > MAX_OUTPUT_ENTRY:
             output = output[:MAX_OUTPUT_ENTRY] + "... [truncated]"
 
-        entry = OutputEntry(text=output, category=body.category.value)
+        self._state.output_sequence += 1
+        entry = OutputEntry(
+            text=output,
+            category=body.category.value,
+            sequence=self._state.output_sequence,
+        )
 
         # Capture variablesReference if the adapter attached structured output
         var_ref = body.variables_reference
@@ -600,6 +633,10 @@ class SessionManager:
         # Trim buffer by byte size (security: prevent DoS)
         while self._output_bytes > MAX_OUTPUT_BYTES and self._state.output_buffer:
             removed = self._state.output_buffer.popleft()
+            self._state.output_trimmed_before = max(
+                self._state.output_trimmed_before,
+                removed.sequence,
+            )
             self._output_bytes -= len(removed.text)
 
     def _on_thread(self, event: DAPEvent) -> None:
@@ -1181,6 +1218,7 @@ class SessionManager:
         self._set_state(DebugState.IDLE)
         self._initialized_event.clear()
         self._execution_event.clear()
+        self._runtime_smoke.reset()
         self._state = SessionState()
         self._output_bytes = 0  # Reset output tracking for next session
 

@@ -11,12 +11,37 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from netcoredbg_mcp import __version__
 from netcoredbg_mcp.launch_profiles import LAUNCH_PROFILE_FILENAME, resolve_launch_environment
 from netcoredbg_mcp.server import create_server
+from netcoredbg_mcp.session.runtime_smoke import (
+    TERMINAL_STATUSES,
+    RuntimeSmokeRunner,
+    RuntimeSmokeSession,
+)
+from netcoredbg_mcp.session.state import DebugState
+
+PUBLISH_WORKFLOW = Path(".github/workflows/publish.yml")
+NODE20_ACTION_PINS = {
+    "actions/checkout@v4",
+    "softprops/action-gh-release@v2",
+    "actions/setup-python@v5",
+    "actions/upload-artifact@v4",
+    "actions/download-artifact@v4",
+}
+# Keep this set in lockstep with .github/workflows/publish.yml action upgrades.
+NODE24_ACTION_PINS = {
+    "actions/checkout@v6",
+    "softprops/action-gh-release@v3",
+    "actions/setup-python@v6",
+    "actions/upload-artifact@v7",
+    "actions/download-artifact@v8",
+}
 
 
 @pytest.mark.critical
@@ -57,6 +82,7 @@ async def test_mcp_server_registers_core_surfaces() -> None:
     resource_uris = {str(resource.uri) for resource in resources}
 
     assert {"start_debug", "add_breakpoint", "get_call_stack"}.issubset(tool_names)
+    assert {"verify_debug_freshness", "run_runtime_smoke"}.issubset(tool_names)
     assert {"debug", "dap-escape-hatch"}.issubset(prompt_names)
     assert {"debug://state", "debug://breakpoints", "debug://output"}.issubset(
         resource_uris
@@ -105,3 +131,43 @@ def test_launch_profile_metadata_never_exposes_environment_values(tmp_path) -> N
     assert "inherited-secret" not in str(result.metadata)
     assert "profile-secret" not in str(result.metadata)
     assert "direct-secret" not in str(result.metadata)
+
+
+@pytest.mark.critical
+def test_publish_workflow_uses_node24_compatible_action_pins() -> None:
+    """@critical category: behavioral — publish workflow avoids Node 20 action pins."""
+
+    assert PUBLISH_WORKFLOW.exists(), "publish workflow is missing"
+    workflow_text = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+
+    old_pins = sorted(pin for pin in NODE20_ACTION_PINS if pin in workflow_text)
+    missing_new_pins = sorted(pin for pin in NODE24_ACTION_PINS if pin not in workflow_text)
+
+    assert old_pins == []
+    assert missing_new_pins == []
+
+
+@pytest.mark.critical
+@pytest.mark.asyncio
+async def test_runtime_smoke_runner_surface_is_release_critical() -> None:
+    """@critical category: behavioral — bounded smoke runner keeps release contract."""
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.runtime_smoke = RuntimeSmokeSession()
+            self.state = SimpleNamespace(
+                state=DebugState.STOPPED,
+                output_buffer=[],
+                process_id=None,
+                process_name=None,
+                modules=[],
+                loaded_sources={},
+            )
+
+    assert TERMINAL_STATUSES == {"PASS", "FAIL", "BLOCKED", "IMPASSE"}
+    result = await RuntimeSmokeRunner(FakeSession()).run({"name": "release-critical"})
+
+    assert result["status"] in TERMINAL_STATUSES
+    assert "cleanup" in result
+    assert result["cleanup"]["status"] in {"PASS", "FAIL"}
+    assert result["compact"]["cleanup"]["status"] == result["cleanup"]["status"]

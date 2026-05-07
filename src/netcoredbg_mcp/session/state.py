@@ -21,6 +21,62 @@ class DebugState(str, Enum):
     TERMINATED = "terminated"  # Program ended
 
 
+class TerminalStatus(str, Enum):
+    """Terminal runtime smoke result states."""
+    PASS = "PASS"
+    FAIL = "FAIL"
+    BLOCKED = "BLOCKED"
+    IMPASSE = "IMPASSE"
+
+
+@dataclass(frozen=True)
+class EvidenceRef:
+    """Compact reference to bounded runtime smoke evidence."""
+    kind: str
+    ref: str
+    summary: str
+    count: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "kind": self.kind,
+            "ref": self.ref,
+            "summary": self.summary,
+        }
+        if self.count is not None:
+            result["count"] = self.count
+        return result
+
+
+@dataclass(frozen=True)
+class SmokeResultSummary:
+    """Serializable compact terminal result for runtime smoke scenarios."""
+    status: TerminalStatus
+    reason: str
+    elapsed: float
+    action_count: int
+    failed_assertions: tuple[str, ...] = field(default_factory=tuple)
+    cleanup: dict[str, Any] = field(default_factory=dict)
+    evidence_refs: tuple[EvidenceRef, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "status", TerminalStatus(self.status))
+        object.__setattr__(self, "failed_assertions", tuple(self.failed_assertions))
+        object.__setattr__(self, "cleanup", dict(self.cleanup))
+        object.__setattr__(self, "evidence_refs", tuple(self.evidence_refs))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status.value,
+            "reason": self.reason,
+            "elapsed": self.elapsed,
+            "action_count": self.action_count,
+            "failed_assertions": list(self.failed_assertions),
+            "cleanup": dict(self.cleanup),
+            "evidence_refs": [ref.to_dict() for ref in self.evidence_refs],
+        }
+
+
 @dataclass
 class Breakpoint:
     """Represents a breakpoint."""
@@ -270,6 +326,7 @@ class OutputEntry:
     text: str
     category: str = "console"  # stdout, stderr, console
     variables_reference: int = 0  # Non-zero when adapter attaches structured data
+    sequence: int = 0  # Monotonic output sequence, assigned by SessionManager.
 
 
 @dataclass
@@ -375,6 +432,8 @@ class SessionState:
     threads: list[ThreadInfo] = field(default_factory=list)
     current_frame_id: int | None = None
     output_buffer: deque[OutputEntry] = field(default_factory=deque)
+    output_sequence: int = 0
+    output_trimmed_before: int = 0
     exit_code: int | None = None
     exception_info: dict[str, Any] | None = None
     process_id: int | None = None

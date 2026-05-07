@@ -96,7 +96,10 @@ def create_server(project_path: str | None = None) -> FastMCP:
             if ctx.session:
                 await ctx.session.send_resource_updated(AnyUrl("debug://breakpoints"))
         except Exception as e:
-            logger.warning(f"Failed to send resource update notification for debug://breakpoints: {e}")
+            logger.warning(
+                "Failed to send resource update notification for debug://breakpoints: %s",
+                e,
+            )
 
     # ============== Mux Session Ownership ==============
 
@@ -179,7 +182,11 @@ def create_server(project_path: str | None = None) -> FastMCP:
 
             # Phase 2: Report waiting
             try:
-                await ctx.report_progress(progress=30, total=100, message="Waiting for stop event...")
+                await ctx.report_progress(
+                    progress=30,
+                    total=100,
+                    message="Waiting for stop event...",
+                )
             except Exception:
                 pass
 
@@ -233,14 +240,16 @@ def create_server(project_path: str | None = None) -> FastMCP:
 
     # ============== Register Tool Modules ==============
 
-    from .tools.debug import register_debug_tools
+    from .prompts import register_prompts
     from .tools.breakpoints import register_breakpoint_tools
+    from .tools.debug import register_debug_tools
     from .tools.inspection import register_inspection_tools
     from .tools.memory import register_memory_tools
     from .tools.output import register_output_tools
-    from .tools.ui import register_ui_tools
     from .tools.process import register_process_tools
-    from .prompts import register_prompts
+    from .tools.runtime_smoke import register_runtime_smoke_tools
+    from .tools.ui import register_ui_tools
+    from .tools.ui_evidence import register_ui_evidence_tools
 
     register_debug_tools(
         mcp=mcp,
@@ -277,7 +286,20 @@ def create_server(project_path: str | None = None) -> FastMCP:
         session=session,
     )
 
+    register_runtime_smoke_tools(
+        mcp=mcp,
+        session=session,
+        check_session_access=_check_session_access,
+        resolve_project_root=resolve_project_root,
+    )
+
     register_ui_tools(
+        mcp=mcp,
+        session=session,
+        check_session_access=_check_session_access,
+    )
+
+    register_ui_evidence_tools(
         mcp=mcp,
         session=session,
         check_session_access=_check_session_access,
