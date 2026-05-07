@@ -36,20 +36,29 @@ uv run ruff check <changed-python-files>
 ```
 
 Before writing or changing tests, read `.agent/guides/TESTING_GUIDELINES.md` if
-it exists in your local clone. The repository has historical tracked
-`.agent/specs/` files; do not introduce new `.agent/` content or modify tracked
-`.agent/` files unless the maintainer explicitly asks for that spec update.
+it exists in your local clone. `.agent/` and `.codex/` are local agent working
+state, not repository artifacts; keep them out of commits unless the maintainer
+explicitly asks for a tracked project instruction update.
 
 ## Manual Smoke Tests
 
-The manual smoke suite exercises the real MCP tools against a debug fixture.
-Build the fixture first when GUI checks are involved.
+The manual smoke suite exercises the real MCP tools against fixture apps. Build
+the baseline fixture first for general DAP and WinForms coverage, and build the
+WPF and Avalonia fixtures before claiming full GUI smoke coverage.
 
 ```powershell
 dotnet build tests/fixtures/SmokeTestApp -c Debug
+dotnet build tests/fixtures/WpfSmokeApp -c Debug
+dotnet build tests/fixtures/AvaloniaSmokeApp -c Debug
 $env:NETCOREDBG_PATH = "C:\Tools\netcoredbg\netcoredbg.exe"
+uv run python tests/smoke_test_manual.py --list
 uv run python tests/smoke_test_manual.py
 ```
+
+`tests/fixtures/WpfSmokeApp` enables the WPF Shift/DataGrid evidence scenario.
+`tests/fixtures/AvaloniaSmokeApp` enables the Avalonia UI fixture compatibility
+scenario. Missing fixture binaries intentionally skip those scenarios, so the
+scenario list is part of the evidence for what was actually exercised.
 
 When fixing a bug found during live debugging, add or update a smoke scenario so
 the same failure is observable before the fix and passing afterward.
