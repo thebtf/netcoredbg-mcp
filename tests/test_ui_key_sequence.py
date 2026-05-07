@@ -214,7 +214,9 @@ def test_wpf_and_avalonia_fixtures_expose_shift_datagrid_routes() -> None:
 
     assert 'AutomationProperties.AutomationId="dataGrid"' in wpf_xaml
     assert 'PreviewKeyDown="DataGrid_PreviewKeyDown"' in wpf_xaml
+    assert 'SelectionChanged="DataGrid_SelectionChanged"' in wpf_xaml
     assert "DataGridArrow key=" in wpf_code
+    assert "_suppressSelectionSync" in wpf_code
     assert 'AutomationProperties.AutomationId="dataGrid"' in avalonia_xaml
     assert 'KeyDown="DataGrid_KeyDown"' in avalonia_xaml
     assert "AvaloniaDataGridArrow key=" in avalonia_code

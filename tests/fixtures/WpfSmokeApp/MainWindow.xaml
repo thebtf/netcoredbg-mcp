@@ -70,6 +70,7 @@
                   SelectionUnit="FullRow"
                   SelectedIndex="0"
                   IsReadOnly="True"
+                  SelectionChanged="DataGrid_SelectionChanged"
                   PreviewKeyDown="DataGrid_PreviewKeyDown"
                   ItemsSource="{Binding People}">
             <DataGrid.Columns>

@@ -14,6 +14,7 @@ public partial class MainWindow : Window
     private readonly MainViewModel _viewModel = new();
     private int _dataGridAnchorIndex;
     private int _dataGridCurrentIndex;
+    private bool _suppressSelectionSync;
 
     public MainWindow()
     {
@@ -43,6 +44,17 @@ public partial class MainWindow : Window
         {
             _viewModel.StatusText = $"Selected: {dialog.FileName}";
         }
+    }
+
+    private void DataGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressSelectionSync || sender is not DataGrid grid || grid.SelectedIndex < 0)
+        {
+            return;
+        }
+
+        _dataGridAnchorIndex = grid.SelectedIndex;
+        _dataGridCurrentIndex = grid.SelectedIndex;
     }
 
     private void DataGrid_PreviewKeyDown(object sender, KeyEventArgs e)
@@ -83,21 +95,29 @@ public partial class MainWindow : Window
         Console.WriteLine(_viewModel.StatusText);
     }
 
-    private static void ApplySelectionRange(DataGrid grid, int startIndex, int endIndex)
+    private void ApplySelectionRange(DataGrid grid, int startIndex, int endIndex)
     {
-        grid.SelectedItems.Clear();
         var start = Math.Min(startIndex, endIndex);
         var end = Math.Max(startIndex, endIndex);
-        for (var index = start; index <= end; index++)
+        _suppressSelectionSync = true;
+        try
         {
-            grid.SelectedItems.Add(grid.Items[index]);
-        }
+            grid.SelectedItems.Clear();
+            for (var index = start; index <= end; index++)
+            {
+                grid.SelectedItems.Add(grid.Items[index]);
+            }
 
-        if (grid.Columns.Count > 0)
-        {
-            grid.CurrentCell = new DataGridCellInfo(grid.Items[endIndex], grid.Columns[0]);
+            if (grid.Columns.Count > 0)
+            {
+                grid.CurrentCell = new DataGridCellInfo(grid.Items[endIndex], grid.Columns[0]);
+            }
+            grid.ScrollIntoView(grid.Items[endIndex]);
         }
-        grid.ScrollIntoView(grid.Items[endIndex]);
+        finally
+        {
+            _suppressSelectionSync = false;
+        }
     }
 }
 
