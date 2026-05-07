@@ -403,7 +403,8 @@ public static class GridCommands
         List<string> headers)
     {
         var expectedColumns = Math.Max(columns.Count, headers.Count);
-        return expectedColumns > 0 && cells.Object.Count >= expectedColumns;
+        return expectedColumns > 0 &&
+               (cells.Object.Count >= expectedColumns || cells.Array.Count >= expectedColumns);
     }
 
     private static (JsonObject Object, JsonArray Array) BuildDescendantCells(

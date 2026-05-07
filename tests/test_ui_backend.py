@@ -90,6 +90,28 @@ class TestFlaUIBackendConnect:
         assert backend.process_id == 42
         assert backend._client.call.await_count == 2
 
+    @pytest.mark.asyncio
+    async def test_connect_uses_bounded_cold_uia_timeout(self):
+        from netcoredbg_mcp.ui.flaui_client import (
+            CONNECT_CALL_TIMEOUT_SECONDS,
+            FlaUIBackend,
+        )
+
+        backend = FlaUIBackend.__new__(FlaUIBackend)
+        backend._client = MagicMock()
+        backend._client.ensure_alive = AsyncMock(return_value=True)
+        backend._client.call = AsyncMock(return_value={"connected": True, "title": "WPF Smoke"})
+        backend._element_cache = {}
+        backend._process_id = None
+
+        await backend.connect(42)
+
+        backend._client.call.assert_awaited_once_with(
+            "connect",
+            {"pid": 42},
+            timeout=CONNECT_CALL_TIMEOUT_SECONDS,
+        )
+
     def test_bridge_connect_selects_usable_primary_window(self):
         command = (
             PROJECT_ROOT / "bridge" / "Commands" / "ElementCommands.cs"
@@ -146,6 +168,51 @@ class TestFlaUIBackendConnect:
             await backend.connect(42)
 
         assert backend._client.call.await_count == 1
+
+
+class TestFlaUIBridgeClient:
+    @pytest.mark.asyncio
+    async def test_call_restarts_bridge_after_timeout(self):
+        import asyncio
+
+        from netcoredbg_mcp.ui.flaui_client import FlaUIBridgeClient
+
+        client = FlaUIBridgeClient("C:/fake/FlaUIBridge.exe")
+        client.ensure_alive = AsyncMock(return_value=True)
+        client.stop = AsyncMock()
+
+        async def slow_response(_request):
+            await asyncio.sleep(1.0)
+            return {"jsonrpc": "2.0", "id": 1, "result": {"ok": True}}
+
+        client._send_and_receive = slow_response
+
+        with pytest.raises(asyncio.TimeoutError):
+            await client.call("connect", {"pid": 42}, timeout=0.01)
+
+        client.stop.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_call_restarts_bridge_after_response_id_mismatch(self):
+        from netcoredbg_mcp.ui.flaui_client import FlaUIBridgeClient
+
+        client = FlaUIBridgeClient("C:/fake/FlaUIBridge.exe")
+        client.ensure_alive = AsyncMock(return_value=True)
+        client.stop = AsyncMock()
+        client._send_and_receive = AsyncMock(
+            return_value={"jsonrpc": "2.0", "id": 99, "result": {"ok": True}}
+        )
+
+        with pytest.raises(RuntimeError, match="response id 99 did not match request id 1"):
+            await client.call("grid_snapshot", {"selector": {"automationId": "dataGrid"}})
+
+        client.stop.assert_awaited_once()
+
+    def test_bridge_errors_preserve_json_rpc_request_id(self):
+        program = (PROJECT_ROOT / "bridge" / "Program.cs").read_text(encoding="utf-8")
+
+        assert "JsonNode? id = null;" in program
+        assert "return CreateErrorResponse(id, -32603" in program
 
 
 class TestPywinautoBackend:

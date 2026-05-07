@@ -13,8 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hardened the WPF one-call runtime smoke workflow: UI automation connects
   eagerly after launch, primary-window selection uses a stable deterministic
   tie-breaker, DataGrid cell evidence merges structured `GridPattern` cells with
-  descendant fallback text, and short grid retry timeouts no longer sleep longer
-  than requested.
+  descendant fallback text without scanning expensive fallback trees when row
+  coverage is already complete, short grid retry timeouts no longer sleep longer
+  than requested, and the FlaUI bridge client restarts after timed-out or
+  mismatched JSON-RPC responses so stale bridge output cannot poison the next UI
+  operation.
 - Windows runtime-smoke cleanup and tests now fail fast on WinAPI attribute
   failures instead of silently ignoring `SetFileAttributesW` errors.
 
