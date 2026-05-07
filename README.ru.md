@@ -14,7 +14,7 @@
 вычислять выражения, читать вывод отладки и управлять поверхностями Windows UI
 Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 
-**103 MCP-инструмента · 8 промптов · 4 ресурса · 818 собранных тестов · релиз v0.12.0**
+**103 MCP-инструмента · 8 промптов · 4 ресурса · 818 собранных тестов · релиз v0.13.0**
 
 ## Быстрые ссылки
 
@@ -23,23 +23,21 @@ Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 - **Справочник:** [Доступные инструменты](#доступные-инструменты) · [Ресурсы](#mcp-ресурсы) · [Промпты](#mcp-промпты) · [Архитектура](#обзор-архитектуры)
 - **Проект:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## Что нового в v0.12.0
+## Что нового в v0.13.0
 
-- **Профили окружения запуска** — `start_debug` может читать проектный
-  `.netcoredbg-mcp.launch.json`, объединять наследуемые переменные, наследовать
-  process environment сервера для DAP launch и скрывать чувствительные значения
-  в ответах и логах.
-- **Расширенное покрытие DAP** — типизированные обёртки теперь покрывают
-  progress, memory, loaded sources, disassembly, locations и ранее
-  необработанные события DAP.
-- **Инспекция памяти** — `read_memory` и `write_memory` открывают доступ к DAP
-  memory references, если отладочный адаптер и целевое приложение это
-  поддерживают.
-- **Escape hatch prompt** — `dap-escape-hatch` описывает низкоуровневые команды
-  DAP для продвинутых случаев, пока для них нет отдельного MCP-инструмента.
-- **Документация и очистка чувствительных данных** — отслеживаемые документы
-  больше не используют имена downstream-проектов и локальные приватные пути как
-  примеры.
+- **Runtime smoke orchestration** — `debug_hygiene_preflight`,
+  instrumentation groups, output checkpoints, freshness verification и
+  `run_runtime_smoke` превращают повторные live-debug checks в bounded scenario
+  evidence с cleanup.
+- **WPF и Avalonia как first-class fixtures** — manual smoke coverage теперь
+  включает WPF Shift/DataGrid evidence и Avalonia UI fixture compatibility
+  вместе с baseline console/WinForms fixture.
+- **Гигиена release workflow** — publish workflows используют Node
+  24-compatible action pins, явную распаковку artifacts и повторяемые TestPyPI
+  rehearsals, не скрывая duplicate upload errors на настоящем PyPI.
+- **Документация и очистка agent state** — release docs теперь отражают
+  текущий MCP surface, а локальный state `.agent/` / `.codex/` не попадает
+  в git.
 
 ## Основные возможности
 

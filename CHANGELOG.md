@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-05-07
+
 ### Added
 - Runtime smoke orchestration tools for release and manual verification:
   `debug_hygiene_preflight`, instrumentation groups, output checkpoints,
