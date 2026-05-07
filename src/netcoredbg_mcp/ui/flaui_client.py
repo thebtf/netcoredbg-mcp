@@ -481,6 +481,28 @@ class FlaUIBackend:
             end_index=end_index,
         )
 
+    async def query_ui(
+        self,
+        selector: dict[str, Any],
+        fields: list[str],
+        max_results: int = 20,
+    ) -> dict[str, Any]:
+        """Read field-limited UI evidence via FlaUI bridge."""
+        result = await self._client.call(
+            "ui_query",
+            {
+                "selector": self._build_selector_params(selector),
+                "fields": list(fields),
+                "maxResults": max_results,
+            },
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"ui_query: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result
+
     async def _call_grid(
         self,
         method: str,

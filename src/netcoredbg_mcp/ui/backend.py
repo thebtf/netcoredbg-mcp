@@ -173,6 +173,15 @@ class UIBackend(Protocol):
         """Assert a DataGrid row range."""
         ...
 
+    async def query_ui(
+        self,
+        selector: dict[str, Any],
+        fields: list[str],
+        max_results: int = 20,
+    ) -> dict[str, Any]:
+        """Read focused field-limited UI evidence."""
+        ...
+
     async def multi_select(self, container_id: str, indices: list[int]) -> int:
         """Select multiple items in a container. Returns count selected."""
         ...

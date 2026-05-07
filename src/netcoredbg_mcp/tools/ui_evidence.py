@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
 from ..response import build_error_response, build_response
 from ..session import SessionManager
 from ..session.state import DebugState
+from ..ui.events import UIEventBufferStore
 from ..ui.grid import (
     assert_grid_range,
     read_grid_selected_rows,
@@ -16,6 +18,14 @@ from ..ui.grid import (
     select_grid_range,
 )
 from ..ui.key_sequence import run_scoped_key_sequence
+from ..ui.snapshots import (
+    ALLOWED_UI_FIELDS,
+    UISnapshotStore,
+    capture_ui_snapshot,
+    diff_ui_snapshots,
+    invalid_ui_fields,
+    query_ui_fields,
+)
 
 
 def register_ui_evidence_tools(
@@ -136,6 +146,167 @@ def register_ui_evidence_tools(
             )
         except Exception as exc:
             return build_error_response(str(exc), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+    async def ui_query(
+        ctx: Context,
+        fields: list[str],
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+        max_results: int = 20,
+    ) -> dict:
+        """Read selected UI fields without dumping the full tree."""
+        try:
+            invalid = invalid_ui_fields(fields)
+            if invalid:
+                return build_response(
+                    data={
+                        "status": "FAIL",
+                        "reason": "unknown UI fields",
+                        "invalid_fields": invalid,
+                        "allowed_fields": list(ALLOWED_UI_FIELDS),
+                    },
+                    state=session.state.state,
+                )
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+            backend = await _ensure_ui_connected()
+            result = await query_ui_fields(
+                backend,
+                _selector(automation_id, name, control_type, root_id, xpath),
+                fields=fields,
+                max_results=max_results,
+            )
+            return build_response(data=result, state=session.state.state)
+        except Exception as exc:
+            return build_error_response(str(exc), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+    async def ui_snapshot(
+        ctx: Context,
+        snapshot: str,
+        fields: list[str],
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+        max_results: int = 20,
+    ) -> dict:
+        """Capture a named field-limited UI snapshot."""
+        try:
+            invalid = invalid_ui_fields(fields)
+            if invalid:
+                return build_response(
+                    data={
+                        "status": "FAIL",
+                        "reason": "unknown UI fields",
+                        "invalid_fields": invalid,
+                        "allowed_fields": list(ALLOWED_UI_FIELDS),
+                    },
+                    state=session.state.state,
+                )
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+            backend = await _ensure_ui_connected()
+            result = await capture_ui_snapshot(
+                backend,
+                _snapshot_store(),
+                name=snapshot,
+                selector=_selector(automation_id, name, control_type, root_id, xpath),
+                fields=fields,
+                max_results=max_results,
+            )
+            return build_response(data=result, state=session.state.state)
+        except Exception as exc:
+            return build_error_response(str(exc), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+    async def ui_diff(
+        ctx: Context,
+        before: str,
+        after: str,
+        fields: list[str],
+    ) -> dict:
+        """Diff two named UI snapshots."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+            result = diff_ui_snapshots(
+                _snapshot_store(),
+                before,
+                after,
+                fields=fields,
+            )
+            return build_response(data=result, state=session.state.state)
+        except Exception as exc:
+            return build_error_response(str(exc), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def ui_events(
+        ctx: Context,
+        action: str,
+        buffer_id: str,
+        fields: list[str] | None = None,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+        max_events: int = 20,
+    ) -> dict:
+        """Start, read, or stop a bounded selector-scoped UI event buffer."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+            store = _event_store()
+            if action == "start":
+                requested_fields = list(fields or ["focus", "selection", "text"])
+                invalid = invalid_ui_fields(requested_fields)
+                if invalid:
+                    return build_response(
+                        data={
+                            "status": "FAIL",
+                            "reason": "unknown UI fields",
+                            "invalid_fields": invalid,
+                            "allowed_fields": list(ALLOWED_UI_FIELDS),
+                        },
+                        state=session.state.state,
+                    )
+                backend = await _ensure_ui_connected()
+                result = await store.start(
+                    backend,
+                    buffer_id=buffer_id,
+                    selector=_selector(automation_id, name, control_type, root_id, xpath),
+                    fields=requested_fields,
+                    max_events=max_events,
+                )
+            elif action == "read":
+                result = await store.read(buffer_id)
+            elif action == "stop":
+                result = store.stop(buffer_id)
+            else:
+                result = {
+                    "status": "FAIL",
+                    "reason": "unknown UI events action",
+                    "action": action,
+                }
+            return build_response(data=result, state=session.state.state)
+        except Exception as exc:
+            return build_error_response(str(exc), state=session.state.state)
+
+    def _snapshot_store() -> UISnapshotStore:
+        return UISnapshotStore(session.runtime_smoke.ui_snapshots)
+
+    def _event_store() -> UIEventBufferStore:
+        return UIEventBufferStore(session.runtime_smoke.ui_event_buffers)
 
 
 def _selector(

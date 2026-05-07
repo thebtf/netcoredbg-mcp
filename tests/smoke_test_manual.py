@@ -2233,8 +2233,173 @@ async def test_runtime_smoke_bounded_runner():
         await m.stop()
 
 
+async def test_ui_focused_evidence():
+    print("\n22. UI FOCUSED EVIDENCE")
+    from netcoredbg_mcp.ui.events import UIEventBufferStore
+    from netcoredbg_mcp.ui.snapshots import (
+        UISnapshotStore,
+        capture_ui_snapshot,
+        diff_ui_snapshots,
+        query_ui_fields,
+    )
+
+    class ManualBackend:
+        def __init__(self):
+            self.responses = [
+                {
+                    "status": "PASS",
+                    "elements": [
+                        {
+                            "element_id": "txtOutput",
+                            "text": "Initial",
+                            "focus": False,
+                            "selection": {"selected": False},
+                            "enabled": True,
+                            "visible": True,
+                            "window": {"title": "Manual"},
+                            "full_tree": {"must": "not leak"},
+                        }
+                    ],
+                    "element_count": 1,
+                },
+                {
+                    "status": "PASS",
+                    "elements": [
+                        {
+                            "element_id": "txtOutput",
+                            "text": "Initial",
+                            "focus": False,
+                            "selection": {"selected": False},
+                        }
+                    ],
+                    "element_count": 1,
+                },
+                {
+                    "status": "PASS",
+                    "elements": [
+                        {
+                            "element_id": "txtOutput",
+                            "text": "Changed",
+                            "focus": True,
+                            "selection": {"selected": False},
+                        }
+                    ],
+                    "element_count": 1,
+                },
+                {
+                    "status": "PASS",
+                    "elements": [
+                        {
+                            "element_id": "txtOutput",
+                            "text": "Changed again",
+                            "focus": True,
+                            "selection": {"selected": False},
+                        }
+                    ],
+                    "element_count": 1,
+                },
+                {
+                    "status": "PASS",
+                    "elements": [
+                        {
+                            "element_id": "txtOutput",
+                            "text": "Changed final",
+                            "focus": False,
+                            "selection": {"selected": False},
+                        }
+                    ],
+                    "element_count": 1,
+                },
+            ]
+
+        async def query_ui(self, selector, fields, max_results=20):
+            return self.responses.pop(0)
+
+    class UnsupportedBackend:
+        async def query_ui(self, selector, fields, max_results=20):
+            return {
+                "status": "BLOCKED",
+                "unsupported": True,
+                "backend": "manual-unsupported",
+                "reason": "focused UI evidence unsupported in this backend",
+            }
+
+    backend = ManualBackend()
+    snapshot_store = UISnapshotStore()
+    event_store = UIEventBufferStore()
+    selector = {"automation_id": "txtOutput"}
+
+    query = await query_ui_fields(
+        backend,
+        selector,
+        fields=["text", "focus", "selection"],
+    )
+    before = await capture_ui_snapshot(
+        backend,
+        snapshot_store,
+        name="before",
+        selector=selector,
+        fields=["text", "focus", "selection"],
+    )
+    after = await capture_ui_snapshot(
+        backend,
+        snapshot_store,
+        name="after",
+        selector=selector,
+        fields=["text", "focus", "selection"],
+    )
+    diff = diff_ui_snapshots(
+        snapshot_store,
+        "before",
+        "after",
+        fields=["text", "focus", "selection"],
+    )
+    started = await event_store.start(
+        backend,
+        buffer_id="manual",
+        selector=selector,
+        fields=["text", "focus", "selection"],
+        max_events=2,
+    )
+    events = await event_store.read("manual")
+    unsupported = await query_ui_fields(
+        UnsupportedBackend(),
+        selector,
+        fields=["text"],
+    )
+
+    print(f"  query evidence: {query}")
+    print(f"  diff evidence: {diff}")
+    print(f"  event start evidence: {started}")
+    print(f"  event read evidence: {events}")
+    print(f"  unsupported evidence: {unsupported}")
+    check(
+        "UI query is field-limited",
+        query["status"] == "PASS" and "full_tree" not in str(query),
+        str(query),
+    )
+    check(
+        "UI snapshot diff reports changed text/focus",
+        diff["status"] == "PASS" and len(diff["changed"]) == 1,
+        str(diff),
+    )
+    check(
+        "UI event buffer reports bounded polling events",
+        started["status"] == "PASS"
+        and events["status"] == "PASS"
+        and events["source"] == "polling"
+        and events["event_count"] == 1,
+        str(events),
+    )
+    check(
+        "UI focused evidence reports BLOCKED on unsupported backend",
+        unsupported["status"] == "BLOCKED",
+        str(unsupported),
+    )
+
+
 async def test_wpf_shift_datagrid_evidence():
-    print("\n22. WPF SHIFT DATAGRID EVIDENCE")
+    print("\n23. WPF SHIFT DATAGRID EVIDENCE")
     from netcoredbg_mcp.ui.backend import create_backend
     from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
     from netcoredbg_mcp.ui.grid import (
@@ -2322,7 +2487,7 @@ async def test_wpf_shift_datagrid_evidence():
 
 
 async def test_avalonia_ui_fixture_compatibility():
-    print("\n23. AVALONIA UI FIXTURE COMPATIBILITY")
+    print("\n24. AVALONIA UI FIXTURE COMPATIBILITY")
     from netcoredbg_mcp.ui.backend import create_backend
     from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
     from netcoredbg_mcp.ui.grid import read_grid_visible_rows
@@ -2443,6 +2608,7 @@ def get_scenarios():
         ("Instrumentation Group Lifecycle", test_instrumentation_group_lifecycle),
         ("Output Checkpoint Assertions", test_output_checkpoint_assertions),
         ("Runtime Smoke Bounded Runner", test_runtime_smoke_bounded_runner),
+        ("UI Focused Evidence", test_ui_focused_evidence),
     ]
 
     if GUI_ENABLED:

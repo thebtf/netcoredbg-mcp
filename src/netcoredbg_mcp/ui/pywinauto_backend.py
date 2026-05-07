@@ -476,6 +476,23 @@ class PywinautoBackend:
         """DataGrid range assertion evidence requires the FlaUI bridge backend."""
         return self._unsupported_grid()
 
+    async def query_ui(
+        self,
+        selector: dict[str, Any],
+        fields: list[str],
+        max_results: int = 20,
+    ) -> dict[str, Any]:
+        """Focused field-limited UI evidence requires the FlaUI bridge backend."""
+        return {
+            "status": "BLOCKED",
+            "unsupported": True,
+            "backend": "pywinauto",
+            "reason": (
+                "FlaUI bridge required for focused UI evidence. "
+                "The pywinauto backend cannot provide bounded field proof."
+            ),
+        }
+
     @staticmethod
     def _unsupported_grid() -> dict[str, Any]:
         return {

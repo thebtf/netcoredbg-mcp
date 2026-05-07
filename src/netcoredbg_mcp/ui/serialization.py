@@ -11,6 +11,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+MAX_UI_ELEMENTS = 20
+
 
 @dataclass
 class ElementInfo:
@@ -189,3 +191,54 @@ def serialize_element(
             child_count=0,
             children=[],
         )
+
+
+def bound_elements(
+    elements: list[dict[str, Any]],
+    *,
+    fields: list[str],
+    max_results: int = MAX_UI_ELEMENTS,
+) -> dict[str, Any]:
+    """Return field-limited, bounded UI element records."""
+    limit = max(1, min(max_results, MAX_UI_ELEMENTS))
+    bounded = [_filter_element(element, fields) for element in elements[:limit]]
+    return {
+        "elements": bounded,
+        "element_count": len(elements),
+        "returned_count": len(bounded),
+        "omitted_count": max(0, len(elements) - len(bounded)),
+    }
+
+
+def selector_ref(selector: dict[str, Any]) -> str:
+    """Create a compact selector reference for evidence refs."""
+    for key in ("automation_id", "automationId", "name", "control_type", "controlType", "xpath"):
+        value = selector.get(key)
+        if value:
+            return str(value)
+    return "root"
+
+
+def _filter_element(element: dict[str, Any], fields: list[str]) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "element_id": str(
+            element.get("element_id")
+            or element.get("automation_id")
+            or element.get("automationId")
+            or element.get("name")
+            or "element"
+        )
+    }
+    for field in fields:
+        if field in element:
+            result[field] = element[field]
+            continue
+        camel = _camel(field)
+        if camel in element:
+            result[field] = element[camel]
+    return result
+
+
+def _camel(value: str) -> str:
+    parts = value.split("_")
+    return parts[0] + "".join(part.title() for part in parts[1:])
