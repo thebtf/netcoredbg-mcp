@@ -89,9 +89,13 @@ Expected result:
 
 - The fixture builds exit `0`.
 - The scenario list includes `Runtime Smoke Bounded Runner`, `WPF Shift/DataGrid
-  Evidence`, and `Avalonia UI Fixture Compatibility`.
+  Evidence`, `WPF One-Call Runtime Smoke Workflow`, and `Avalonia UI Fixture
+  Compatibility`.
 - Missing GUI fixture binaries are treated as reduced coverage, not as proof
   that the corresponding GUI surface was exercised.
+- Before resolving Engram #196, run `WPF One-Call Runtime Smoke Workflow` on a
+  Windows GUI workstation and record whether the one `run_runtime_smoke` plan
+  returned `PASS`, `BLOCKED`, or `FAIL`.
 
 ## Failure-Mode Catalog
 
@@ -109,7 +113,8 @@ Expected result:
 | CLI version smoke | Exit 0; version printed |  |  |
 | MCP surface registration | Critical suite passes |  |  |
 | Launch metadata safety | No env values in metadata |  |  |
-| Manual smoke surface inventory | WPF and Avalonia scenarios listed |  |  |
+| Manual smoke surface inventory | WPF, WPF one-call, and Avalonia scenarios listed |  |  |
+| WPF one-call runtime smoke | One `run_runtime_smoke` plan returns PASS or an honest BLOCKED/FAIL with cleanup evidence |  |  |
 
 Overall verdict: `PRODUCT_WORKS` / `PARTIALLY_WORKS` / `BROKEN`
 

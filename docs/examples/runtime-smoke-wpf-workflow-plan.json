@@ -1,0 +1,128 @@
+{
+  "schema": "netcoredbg.runtime_smoke.v1",
+  "name": "wpf character assignment gender undo",
+  "launch": {
+    "program": "D:/path/to/WpfSmokeApp/bin/Debug/net8.0-windows/WpfSmokeApp.dll",
+    "cwd": "D:/path/to/WpfSmokeApp/bin/Debug/net8.0-windows",
+    "pre_build": true,
+    "build_project": "D:/path/to/WpfSmokeApp/WpfSmokeApp.csproj",
+    "build_configuration": "Debug",
+    "env": {
+      "WPF_SMOKE_MUTABLE_FILE": "D:/path/to/runtime-evidence/wpf-state.txt"
+    }
+  },
+  "freshness": {
+    "expected_process_name": "dotnet",
+    "expected_modules": ["WpfSmokeApp.dll"]
+  },
+  "steps": [
+    {
+      "id": "baseline_grid",
+      "op": "ui.grid.snapshot",
+      "selector": {"automation_id": "dataGrid"},
+      "rows": {"visible_only": true, "max": 5},
+      "columns": ["Start", "End", "Character", "Phrase"]
+    },
+    {
+      "id": "select_rows",
+      "op": "ui.grid.select_range",
+      "selector": {"automation_id": "dataGrid"},
+      "start_index": 0,
+      "end_index": 1
+    },
+    {
+      "id": "before_assign",
+      "op": "debug.output_checkpoint",
+      "name": "before_assign"
+    },
+    {
+      "id": "assign_character",
+      "op": "ui.list.invoke_item",
+      "selector": {"automation_id": "CharactersListBox"},
+      "item": {"name": "ALICE"},
+      "invoke": "enter"
+    },
+    {
+      "id": "assign_output",
+      "op": "debug.output_assert_since",
+      "checkpoint": "before_assign",
+      "required": ["WpfWorkflow AssignCharacter route=ListInvoke selectedCount=2"],
+      "forbidden": ["manual primitive fallback"]
+    },
+    {
+      "id": "assign_grid_assert",
+      "op": "ui.grid.assert_rows",
+      "selector": {"automation_id": "dataGrid"},
+      "rows": [
+        {
+          "index": 0,
+          "contains": {
+            "Start": "00:00:01.0",
+            "End": "00:00:03.0",
+            "Character": "ALICE",
+            "Phrase": "Fixture cue one"
+          }
+        },
+        {
+          "index": 1,
+          "contains": {
+            "Start": "00:00:04.0",
+            "End": "00:00:06.0",
+            "Character": "ALICE",
+            "Phrase": "Fixture cue two"
+          }
+        }
+      ]
+    },
+    {
+      "id": "before_gender",
+      "op": "debug.output_checkpoint",
+      "name": "before_gender"
+    },
+    {
+      "id": "toggle_gender",
+      "op": "ui.list.toggle_item_child",
+      "selector": {"automation_id": "CharactersListBox"},
+      "item": {"name": "ALICE"},
+      "child": {"automation_id": "CharGender", "control_type": "CheckBox"},
+      "target_state": "On"
+    },
+    {
+      "id": "gender_assert",
+      "op": "ui.text.assert",
+      "selector": {"automation_id": "genderStatus"},
+      "contains": "ALICE female"
+    },
+    {
+      "id": "undo_gender",
+      "op": "ui.invoke",
+      "selector": {"automation_id": "menuItemUndo"}
+    },
+    {
+      "id": "undo_gender_assert",
+      "op": "ui.text.assert",
+      "selector": {"automation_id": "genderStatus"},
+      "contains": "ALICE male"
+    },
+    {
+      "id": "undo_focus_assert",
+      "op": "ui.focus.assert",
+      "selector": {"automation_id": "dataGrid"}
+    }
+  ],
+  "cleanup": {
+    "restore_files": [
+      {
+        "path": "D:/path/to/runtime-evidence/wpf-state.txt",
+        "baseline_text": "baseline"
+      }
+    ],
+    "stop_debug": "graceful",
+    "debug_hygiene": true
+  },
+  "budgets": {
+    "max_actions": 20,
+    "max_elapsed_seconds": 60
+  },
+  "stop_on_first_failed_assertion": true
+}

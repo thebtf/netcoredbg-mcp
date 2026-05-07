@@ -1,8 +1,10 @@
 """Tests for UI backend abstraction layer."""
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from netcoredbg_mcp.ui.backend import find_flaui_bridge, create_backend
+import pytest
+
+from netcoredbg_mcp.ui.backend import create_backend, find_flaui_bridge
 
 
 class TestFindFlauiBridge:
@@ -57,6 +59,50 @@ class TestCreateBackend:
             from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
             assert isinstance(backend, FlaUIBackend)
             assert backend.client._process_registry is mock_registry
+
+
+class TestFlaUIBackendConnect:
+    @pytest.mark.asyncio
+    async def test_retries_until_gui_window_is_ready(self):
+        from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+        backend = FlaUIBackend.__new__(FlaUIBackend)
+        backend._client = MagicMock()
+        backend._client.ensure_alive = AsyncMock(return_value=True)
+        backend._client.call = AsyncMock(
+            side_effect=[
+                RuntimeError(
+                    "FlaUI bridge error: Internal error: No window found for process 42"
+                ),
+                {"connected": True, "title": "WPF Smoke"},
+            ]
+        )
+        backend._element_cache = {}
+        backend._process_id = None
+
+        with patch("netcoredbg_mcp.ui.flaui_client.CONNECT_RETRY_INTERVAL_SECONDS", 0):
+            await backend.connect(42)
+
+        assert backend.process_id == 42
+        assert backend._client.call.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_connect_does_not_retry_non_readiness_errors(self):
+        from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+        backend = FlaUIBackend.__new__(FlaUIBackend)
+        backend._client = MagicMock()
+        backend._client.ensure_alive = AsyncMock(return_value=True)
+        backend._client.call = AsyncMock(
+            side_effect=RuntimeError("FlaUI bridge error: access denied")
+        )
+        backend._element_cache = {}
+        backend._process_id = None
+
+        with pytest.raises(RuntimeError, match="access denied"):
+            await backend.connect(42)
+
+        assert backend._client.call.await_count == 1
 
 
 class TestPywinautoBackend:

@@ -82,4 +82,42 @@ public static class FocusCommands
                 $"Element not found: automationId={automationId}, name={name}");
         }
     }
+
+    public static JsonNode AssertFocus(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
+    {
+        if (mainWindow is null)
+            throw new InvalidOperationException("Not connected. Call 'connect' first.");
+
+        var selector = @params?["selector"] as JsonObject
+            ?? throw new ArgumentException("Missing required parameter: selector");
+        var root = ElementCommands.ResolveSearchRoot(mainWindow, selector, automation);
+        var expected = ElementCommands.FindElementCascade(root, selector, automation);
+        var focused = automation.FocusedElement();
+        var matched = focused is not null && SameRuntimeId(expected, focused);
+
+        return new JsonObject
+        {
+            ["status"] = matched ? "PASS" : "FAIL",
+            ["focused"] = matched,
+            ["reason"] = matched ? "focus matched" : "focus outside selector",
+            ["expected"] = ElementCommands.BuildElementInfo(expected, includePatterns: false),
+            ["actual"] = focused is null
+                ? null
+                : ElementCommands.BuildElementInfo(focused, includePatterns: false)
+        };
+    }
+
+    private static bool SameRuntimeId(AutomationElement left, AutomationElement right)
+    {
+        try
+        {
+            var leftId = left.Properties.RuntimeId.ValueOrDefault;
+            var rightId = right.Properties.RuntimeId.ValueOrDefault;
+            return leftId is not null && rightId is not null && leftId.SequenceEqual(rightId);
+        }
+        catch
+        {
+            return false;
+        }
+    }
 }

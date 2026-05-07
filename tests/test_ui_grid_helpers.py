@@ -13,9 +13,11 @@ from netcoredbg_mcp.server import create_server
 from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
 from netcoredbg_mcp.ui.grid import (
     assert_grid_range,
+    assert_grid_rows,
     read_grid_selected_rows,
     read_grid_visible_rows,
     select_grid_range,
+    snapshot_grid,
 )
 from netcoredbg_mcp.ui.pywinauto_backend import PywinautoBackend
 
@@ -32,10 +34,44 @@ class FakeGridBackend:
             "status": "PASS",
             "row_count": 3,
             "visible_rows": [
-                {"index": 0, "automation_id": "Row_0", "name": "A"},
-                {"index": 1, "automation_id": "Row_1", "name": "B"},
+                {
+                    "index": 0,
+                    "automation_id": "Row_0",
+                    "name": "CueRow",
+                    "selected": False,
+                    "cells": {
+                        "Start": "00:00:01.0",
+                        "End": "00:00:03.0",
+                        "Character": "Narrator",
+                        "Phrase": "Fixture cue one",
+                    },
+                },
+                {
+                    "index": 1,
+                    "automation_id": "Row_1",
+                    "name": "CueRow",
+                    "selected": True,
+                    "cells": {
+                        "Start": "00:00:04.0",
+                        "End": "00:00:06.0",
+                        "Character": "ALICE",
+                        "Phrase": "Fixture cue two",
+                    },
+                },
             ],
         }
+
+    async def grid_snapshot(
+        self,
+        selector: dict[str, Any],
+        rows: dict[str, Any] | None = None,
+        columns: list[str] | None = None,
+    ) -> dict[str, Any]:
+        self.calls.append(("snapshot", dict(selector)))
+        result = await self.grid_visible_rows(selector)
+        result["requested_rows"] = dict(rows or {})
+        result["requested_columns"] = list(columns or [])
+        return result
 
     async def grid_selected_rows(self, selector: dict[str, Any]) -> dict[str, Any]:
         self.calls.append(("selected", dict(selector)))
@@ -106,6 +142,72 @@ async def test_grid_helpers_return_visible_selected_and_range_evidence_without_m
 
 
 @pytest.mark.asyncio
+async def test_grid_snapshot_and_assert_rows_require_cell_text_evidence() -> None:
+    backend = FakeGridBackend()
+    selector = {"automation_id": "CueGrid"}
+
+    snapshot = await snapshot_grid(
+        backend,
+        selector,
+        columns=["Start", "End", "Character", "Phrase"],
+    )
+    asserted = await assert_grid_rows(
+        backend,
+        selector,
+        rows=[
+            {
+                "index": 0,
+                "contains": {
+                    "Start": "00:00:01.0",
+                    "End": "00:00:03.0",
+                    "Character": "Narrator",
+                    "Phrase": "Fixture cue one",
+                },
+            },
+            {
+                "index": 1,
+                "contains": {
+                    "Start": "00:00:04.0",
+                    "End": "00:00:06.0",
+                    "Character": "ALICE",
+                    "Phrase": "Fixture cue two",
+                },
+            },
+        ],
+    )
+
+    assert snapshot["visible_rows"][1]["selected"] is True
+    assert snapshot["visible_rows"][0]["cells"]["Phrase"] == "Fixture cue one"
+    assert asserted["status"] == "PASS"
+    assert asserted["asserted"] is True
+    assert asserted["matched_rows"] == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_grid_assert_rows_fails_without_cells_even_when_row_count_exists() -> None:
+    class RowCountOnlyBackend:
+        async def grid_visible_rows(self, selector: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "row_count": 2,
+                "visible_rows": [
+                    {"index": 0, "name": "CueViewModel"},
+                    {"index": 1, "name": "CueViewModel"},
+                ],
+            }
+
+    result = await assert_grid_rows(
+        RowCountOnlyBackend(),
+        {"automation_id": "CueGrid"},
+        rows=[{"index": 0, "contains": {"Phrase": "Fixture cue one"}}],
+    )
+
+    assert result["status"] == "FAIL"
+    assert result["reason"] == "row cell evidence unavailable"
+    assert result["failed_rows"][0]["index"] == 0
+
+
+@pytest.mark.asyncio
 async def test_grid_helpers_pass_through_ambiguous_without_mutating_selection() -> None:
     class AmbiguousBackend(FakeGridBackend):
         async def grid_select_range(
@@ -147,13 +249,28 @@ async def test_flaui_backend_forwards_grid_helpers_to_bridge() -> None:
     backend = _make_flaui()
     backend._client.call.return_value = {"status": "PASS", "visible_rows": []}
 
-    result = await backend.grid_visible_rows({"automation_id": "CueGrid"})
+    selector = {"automation_id": "CueGrid"}
+    result = await backend.grid_visible_rows(selector)
+    await backend.grid_selected_rows(selector)
+    await backend.grid_select_range(selector, 0, 2)
+    await backend.grid_assert_range(selector, 0, 2)
+    await snapshot_grid(backend, selector, columns=["Start"])
+    await assert_grid_rows(
+        backend,
+        selector,
+        rows=[{"index": 0, "contains": {"Start": "00:00:01.0"}}],
+    )
 
     assert result["status"] == "PASS"
-    backend._client.call.assert_awaited_once_with(
-        "grid_visible_rows",
-        {"selector": {"automationId": "CueGrid"}},
-    )
+    calls = backend._client.call.await_args_list
+    assert calls[0].args[0] == "grid_visible_rows"
+    assert calls[0].args[1]["selector"]["automationId"] == "CueGrid"
+    assert calls[2].args[0] == "grid_select_range"
+    assert calls[2].args[1]["start_index"] == 0
+    assert calls[2].args[1]["end_index"] == 2
+    assert calls[4].args[0] == "grid_snapshot"
+    assert calls[4].args[1]["columns"] == ["Start"]
+    assert calls[5].args[0] == "grid_assert_rows"
 
 
 @pytest.mark.asyncio
@@ -184,3 +301,22 @@ def test_bridge_grid_rejects_invalid_control_type_and_prevalidates_selection_ran
     validation_index = command.index("itemPatterns.Add(itemPattern)")
     mutation_index = command.index("itemPattern.Select()")
     assert validation_index < mutation_index
+
+
+def test_bridge_grid_builds_cell_text_evidence_for_rows() -> None:
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "GridCommands.cs").read_text(
+        encoding="utf-8",
+    )
+    handler = (PROJECT_ROOT / "bridge" / "JsonRpcHandler.cs").read_text(
+        encoding="utf-8",
+    )
+
+    assert '["grid_snapshot"] = GridCommands.Snapshot' in handler
+    assert '["grid_assert_rows"] = GridCommands.AssertRows' in handler
+    assert '["cells"]' in command
+    assert "ReadCellText" in command
+    assert "row cell evidence unavailable" in command
+    assert "ColumnsFromAssertions(expectedRows)" in command
+    direct_children_index = command.index("row.FindAllChildren()")
+    descendant_fallback_index = command.index("row.FindAllDescendants()")
+    assert direct_children_index < descendant_fallback_index

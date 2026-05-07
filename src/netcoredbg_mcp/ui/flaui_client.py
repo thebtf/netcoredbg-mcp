@@ -17,6 +17,13 @@ logger = logging.getLogger(__name__)
 # Restart limits
 MAX_RESTARTS = 3
 RESTART_WINDOW_SECONDS = 60.0
+CONNECT_RETRY_TIMEOUT_SECONDS = 5.0
+CONNECT_RETRY_INTERVAL_SECONDS = 0.2
+WINDOW_NOT_READY_ERROR = "No window found for process"
+
+
+def _is_window_not_ready(exc: RuntimeError) -> bool:
+    return WINDOW_NOT_READY_ERROR in str(exc)
 
 
 class FlaUIBridgeClient:
@@ -214,11 +221,24 @@ class FlaUIBackend:
     async def connect(self, pid: int) -> None:
         """Connect to process via FlaUI bridge."""
         await self._client.ensure_alive()
-        result = await self._client.call("connect", {"pid": pid})
-        if result.get("connected"):
-            self._process_id = pid
-            logger.info("FlaUI backend connected to PID %d", pid)
-        else:
+        deadline = time.monotonic() + CONNECT_RETRY_TIMEOUT_SECONDS
+        while True:
+            try:
+                result = await self._client.call("connect", {"pid": pid})
+            except RuntimeError as exc:
+                if _is_window_not_ready(exc) and time.monotonic() < deadline:
+                    await asyncio.sleep(CONNECT_RETRY_INTERVAL_SECONDS)
+                    continue
+                raise
+
+            if result.get("connected"):
+                self._process_id = pid
+                logger.info("FlaUI backend connected to PID %d", pid)
+                return
+
+            if time.monotonic() < deadline:
+                await asyncio.sleep(CONNECT_RETRY_INTERVAL_SECONDS)
+                continue
             raise RuntimeError(f"FlaUI bridge failed to connect to PID {pid}")
 
     async def disconnect(self) -> None:
@@ -453,6 +473,28 @@ class FlaUIBackend:
         """Read selected DataGrid rows via FlaUI bridge."""
         return await self._call_grid("grid_selected_rows", selector)
 
+    async def grid_snapshot(
+        self,
+        selector: dict[str, Any],
+        rows: dict[str, Any] | None = None,
+        columns: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Read visible DataGrid rows with cell evidence via FlaUI bridge."""
+        return await self._call_grid(
+            "grid_snapshot",
+            selector,
+            rows=rows or {},
+            columns=columns or [],
+        )
+
+    async def grid_assert_rows(
+        self,
+        selector: dict[str, Any],
+        rows: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Assert DataGrid rows with cell evidence via FlaUI bridge."""
+        return await self._call_grid("grid_assert_rows", selector, rows=rows)
+
     async def grid_select_range(
         self,
         selector: dict[str, Any],
@@ -499,6 +541,67 @@ class FlaUIBackend:
         if not isinstance(result, dict):
             raise RuntimeError(
                 f"ui_query: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result
+
+    async def list_invoke_item(
+        self,
+        selector: dict[str, Any],
+        item: dict[str, Any],
+        invoke: str = "default",
+    ) -> dict[str, Any]:
+        """Invoke a ListBox/ListView item via FlaUI bridge."""
+        result = await self._client.call(
+            "list_invoke_item",
+            {
+                "selector": self._build_selector_params(selector),
+                "item": self._build_selector_params(item),
+                "itemIndex": item.get("index"),
+                "invoke": invoke,
+            },
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"list_invoke_item: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result
+
+    async def list_toggle_item_child(
+        self,
+        selector: dict[str, Any],
+        item: dict[str, Any],
+        child: dict[str, Any],
+        target_state: str | None = None,
+    ) -> dict[str, Any]:
+        """Toggle a child control scoped to a resolved list item."""
+        result = await self._client.call(
+            "list_toggle_item_child",
+            {
+                "selector": self._build_selector_params(selector),
+                "item": self._build_selector_params(item),
+                "itemIndex": item.get("index"),
+                "child": self._build_selector_params(child),
+                "targetState": target_state,
+            },
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"list_toggle_item_child: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result
+
+    async def assert_focus(self, selector: dict[str, Any]) -> dict[str, Any]:
+        """Assert focus is on or inside a selector via FlaUI bridge."""
+        result = await self._client.call(
+            "assert_focus",
+            {"selector": self._build_selector_params(selector)},
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"assert_focus: bridge returned a non-dict response "
                 f"({type(result).__name__}): {result!r}"
             )
         return result

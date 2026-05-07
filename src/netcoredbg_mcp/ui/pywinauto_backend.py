@@ -460,6 +460,23 @@ class PywinautoBackend:
         """DataGrid evidence requires the FlaUI bridge backend."""
         return self._unsupported_grid()
 
+    async def grid_snapshot(
+        self,
+        selector: dict[str, Any],
+        rows: dict[str, Any] | None = None,
+        columns: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """DataGrid cell evidence requires the FlaUI bridge backend."""
+        return self._unsupported_grid()
+
+    async def grid_assert_rows(
+        self,
+        selector: dict[str, Any],
+        rows: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """DataGrid row-cell assertions require the FlaUI bridge backend."""
+        return self._unsupported_grid()
+
     async def grid_select_range(
         self,
         selector: dict[str, Any],
@@ -495,6 +512,37 @@ class PywinautoBackend:
             ),
         }
 
+    async def list_invoke_item(
+        self,
+        selector: dict[str, Any],
+        item: dict[str, Any],
+        invoke: str = "default",
+    ) -> dict[str, Any]:
+        """Scoped list item invocation requires the FlaUI bridge backend."""
+        return self._unsupported_scoped_list()
+
+    async def list_toggle_item_child(
+        self,
+        selector: dict[str, Any],
+        item: dict[str, Any],
+        child: dict[str, Any],
+        target_state: str | None = None,
+    ) -> dict[str, Any]:
+        """Scoped list item child toggles require the FlaUI bridge backend."""
+        return self._unsupported_scoped_list()
+
+    async def assert_focus(self, selector: dict[str, Any]) -> dict[str, Any]:
+        """Focus proof requires the FlaUI bridge backend."""
+        return {
+            "status": "UNSUPPORTED",
+            "unsupported": True,
+            "backend": "pywinauto",
+            "reason": (
+                "FlaUI bridge required for focus assertion evidence. "
+                "The pywinauto backend cannot prove focus containment safely."
+            ),
+        }
+
     @staticmethod
     def _unsupported_grid() -> dict[str, Any]:
         return {
@@ -504,6 +552,18 @@ class PywinautoBackend:
             "reason": (
                 "FlaUI bridge required for DataGrid evidence. "
                 "The pywinauto backend cannot provide UIA Grid/Selection proof."
+            ),
+        }
+
+    @staticmethod
+    def _unsupported_scoped_list() -> dict[str, Any]:
+        return {
+            "status": "UNSUPPORTED",
+            "unsupported": True,
+            "backend": "pywinauto",
+            "reason": (
+                "FlaUI bridge required for scoped list item evidence. "
+                "The pywinauto backend cannot prove item-scoped child operations."
             ),
         }
 

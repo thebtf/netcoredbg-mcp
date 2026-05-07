@@ -329,6 +329,16 @@ The manual smoke fixtures now cover the baseline console/WinForms app,
 three fixture projects before claiming full GUI smoke coverage; missing fixture
 binaries intentionally skip their corresponding manual scenarios.
 
+For WPF product-smoke workflows, start from
+[`docs/examples/runtime-smoke-wpf-workflow-plan.json`](docs/examples/runtime-smoke-wpf-workflow-plan.json).
+It shows the accepted `netcoredbg.runtime_smoke.v1` schema, `steps` operations
+for DataGrid snapshots/assertions, scoped ListBox item actions, output
+checkpoints, focus assertions, and `cleanup.restore_files` with graceful debug
+stop. The example launches the WPF fixture DLL through `dotnet`, so freshness
+expects `expected_process_name: "dotnet"` and `expected_modules:
+["WpfSmokeApp.dll"]`. The matching manual scenario is
+`WPF One-Call Runtime Smoke Workflow`.
+
 ## Available Tools
 
 | Category | Count | Tools |
