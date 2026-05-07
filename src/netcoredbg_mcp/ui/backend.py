@@ -155,6 +155,24 @@ class UIBackend(Protocol):
         """Read selected DataGrid rows."""
         ...
 
+    async def grid_snapshot(
+        self,
+        selector: dict[str, Any],
+        rows: dict[str, Any] | None = None,
+        columns: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Read visible DataGrid rows with cell text/value evidence."""
+        ...
+
+    async def grid_assert_rows(
+        self,
+        selector: dict[str, Any],
+        rows: list[dict[str, Any]],
+        columns: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Assert visible DataGrid row cell values."""
+        ...
+
     async def grid_select_range(
         self,
         selector: dict[str, Any],
@@ -180,6 +198,29 @@ class UIBackend(Protocol):
         max_results: int = 20,
     ) -> dict[str, Any]:
         """Read focused field-limited UI evidence."""
+        ...
+
+    async def list_invoke_item(
+        self,
+        selector: dict[str, Any],
+        item: dict[str, Any],
+        invoke: str = "default",
+    ) -> dict[str, Any]:
+        """Invoke a list item by name or index."""
+        ...
+
+    async def list_toggle_item_child(
+        self,
+        selector: dict[str, Any],
+        item: dict[str, Any],
+        child: dict[str, Any],
+        target_state: str | None = None,
+    ) -> dict[str, Any]:
+        """Toggle a child element scoped to a resolved list item."""
+        ...
+
+    async def assert_focus(self, selector: dict[str, Any]) -> dict[str, Any]:
+        """Assert keyboard focus is on or inside a selector."""
         ...
 
     async def multi_select(self, container_id: str, indices: list[int]) -> int:

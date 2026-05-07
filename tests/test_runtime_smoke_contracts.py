@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+from pathlib import Path
 
 import pytest
 
@@ -13,6 +14,8 @@ from netcoredbg_mcp.session.state import (
     SmokeResultSummary,
     TerminalStatus,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_terminal_status_accepts_only_smoke_result_vocabulary() -> None:
@@ -99,3 +102,42 @@ def test_extend_next_actions_adds_smoke_actions_without_changing_base_actions() 
         "attach_debug",
         "get_progress",
     ]
+
+
+def test_wpf_one_call_runtime_smoke_scenario_is_inventory_visible() -> None:
+    smoke = (REPO_ROOT / "tests" / "smoke_test_manual.py").read_text(encoding="utf-8")
+
+    assert "WPF ONE-CALL RUNTIME SMOKE WORKFLOW" in smoke
+    assert "run_runtime_smoke" in smoke
+    forbidden_manual_fallbacks = (
+        "ui_grid(",
+        "ui_toggle(",
+        "ui_get_window_tree(",
+        "output_checkpoint(",
+        "ui_focus",
+    )
+    scenario_start = smoke.index("WPF ONE-CALL RUNTIME SMOKE WORKFLOW")
+    scenario_end = smoke.index("async def test_avalonia_ui_fixture_compatibility", scenario_start)
+    scenario_body = smoke[scenario_start:scenario_end]
+    assert all(token not in scenario_body for token in forbidden_manual_fallbacks)
+    assert 'terminal_status == "PASS"' in scenario_body
+    assert 'getattr(backend, "process_id", None) != pid' in scenario_body
+    assert "WPF one-call reports BLOCKED without FlaUI" in scenario_body
+    assert "WPF one-call did not claim false PASS" not in scenario_body
+
+
+def test_wpf_workflow_example_is_one_call_and_contains_required_evidence_sections() -> None:
+    example_path = REPO_ROOT / "docs" / "examples" / "runtime-smoke-wpf-workflow-plan.json"
+    example = example_path.read_text(encoding="utf-8")
+
+    assert '"schema": "netcoredbg.runtime_smoke.v1"' in example
+    assert '"op": "ui.grid.snapshot"' in example
+    assert '"op": "ui.list.toggle_item_child"' in example
+    assert '"op": "ui.invoke"' in example
+    assert '"op": "ui.focus.assert"' in example
+    assert '"restore_files"' in example
+    assert '"stop_debug": "graceful"' in example
+    assert '"debug_hygiene": true' in example
+    assert "coordinate" not in example.lower()
+    assert "ui_grid" not in example
+    assert "ui_toggle" not in example

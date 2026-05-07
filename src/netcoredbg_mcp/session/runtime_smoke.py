@@ -6,9 +6,15 @@ import inspect
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .freshness import DebugFreshnessVerifier
+from .runtime_smoke_schema import (
+    normalize_plan_step,
+    schema_help_fields,
+    validate_plan,
+)
 from .state import EvidenceRef
 
 TERMINAL_STATUSES = {"PASS", "FAIL", "BLOCKED", "IMPASSE"}
@@ -107,13 +113,19 @@ class RuntimeSmokeRunner:
         self._service_adapters = dict(service_adapters or {})
         self._clock = clock
 
-    async def run(self, plan: dict[str, Any]) -> dict[str, Any]:
+    async def run(self, plan: Any) -> dict[str, Any]:
         started = self._clock()
         completed_steps: list[dict[str, Any]] = []
         failed_assertions: list[dict[str, Any]] = []
-        validation_errors = _validate_plan(plan)
+        validation_errors = validate_plan(plan)
+        if not validation_errors and isinstance(plan, dict):
+            validation_errors.extend(self._validate_restore_paths(plan))
         if validation_errors:
-            cleanup = await self._teardown(plan if isinstance(plan, dict) else {})
+            cleanup = await self._teardown(
+                plan if isinstance(plan, dict) else {},
+                allow_restore=False,
+                allow_plan_cleanup=False,
+            )
             return self._finalize(
                 status="FAIL",
                 reason="invalid plan schema",
@@ -122,7 +134,10 @@ class RuntimeSmokeRunner:
                 completed_steps=completed_steps,
                 failed_assertions=failed_assertions,
                 cleanup=cleanup,
-                extra={"validation_errors": validation_errors},
+                extra={
+                    "validation_errors": validation_errors,
+                    **schema_help_fields(),
+                },
             )
 
         budgets = _budgets(plan)
@@ -244,18 +259,39 @@ class RuntimeSmokeRunner:
                 return _blocked(name, "launch service unavailable")
             return {"status": "PASS", "reason": "launch completed", "result": await launch(**args)}
 
+        if name == "fixture.restore":
+            return self._restore_file(args)
+
         if name in {"ui_key_sequence", "ui_grid"}:
             return _blocked(name, "ui backend unsupported")
 
         return _blocked(name, "unsupported runtime smoke operation")
 
-    async def _teardown(self, plan: dict[str, Any]) -> dict[str, Any]:
-        teardown = plan.get("teardown") if isinstance(plan, dict) else None
-        teardown_config = teardown if isinstance(teardown, dict) else {}
-        group_names = [str(name) for name in teardown_config.get("instrumentation_groups", [])]
-        reset_runtime_smoke = bool(teardown_config.get("reset_runtime_smoke", True))
+    async def _teardown(
+        self,
+        plan: dict[str, Any],
+        *,
+        allow_restore: bool = True,
+        allow_plan_cleanup: bool = True,
+    ) -> dict[str, Any]:
+        cleanup_config = (
+            _merged_cleanup_config(plan)
+            if allow_plan_cleanup
+            else {
+                "instrumentation_groups": [],
+                "restore_files": [],
+                "reset_runtime_smoke": True,
+            }
+        )
+        group_names = [str(name) for name in cleanup_config.get("instrumentation_groups", [])]
+        restore_entries = list(cleanup_config.get("restore_files") or [])
+        reset_runtime_smoke = bool(cleanup_config.get("reset_runtime_smoke", True))
+        stop_debug_mode = cleanup_config.get("stop_debug")
+        debug_hygiene = bool(cleanup_config.get("debug_hygiene", False))
         attempted: list[str] = []
         failures: list[dict[str, Any]] = []
+        restored_files: list[dict[str, Any]] = []
+        debug_stop: dict[str, Any] | None = None
 
         for group_name in group_names:
             attempted.append(f"instrumentation_group_clear:{group_name}")
@@ -271,13 +307,64 @@ class RuntimeSmokeRunner:
                     "result": result,
                 })
 
-        remaining = _remaining_runtime_smoke_state(self._session)
-        if remaining["instrumentation_groups"]:
+        pre_reset_state = _remaining_runtime_smoke_state(self._session)
+        if pre_reset_state["instrumentation_groups"]:
             failures.append({
                 "operation": "runtime_smoke_residue",
                 "reason": "runtime smoke state still owns instrumentation groups",
-                "remaining_runtime_smoke_state": remaining,
+                "remaining_runtime_smoke_state": pre_reset_state,
             })
+
+        if stop_debug_mode:
+            mode = "graceful" if stop_debug_mode is True else str(stop_debug_mode)
+            attempted.append(f"stop_debug:{mode}")
+            try:
+                stop_result = await self._stop_debug(mode)
+                debug_stop = {
+                    "status": "PASS",
+                    "mode": mode,
+                    "result": stop_result,
+                }
+            except Exception as exc:
+                debug_stop = {
+                    "status": "FAIL",
+                    "mode": mode,
+                    "reason": str(exc),
+                }
+                failures.append({
+                    "operation": "stop_debug",
+                    "mode": mode,
+                    "reason": str(exc),
+                    "result": dict(debug_stop),
+                })
+
+        if allow_restore:
+            for entry in restore_entries:
+                raw_path = (
+                    str(entry.get("path", "<missing>"))
+                    if isinstance(entry, dict)
+                    else "<invalid>"
+                )
+                attempted.append(f"restore_file:{raw_path}")
+                try:
+                    restored_files.append(self._restore_file(entry))
+                except Exception as exc:
+                    failure = {
+                        "operation": "fixture.restore",
+                        "path": _safe_validated_path(self._session, raw_path),
+                        "reason": str(exc),
+                    }
+                    failures.append(failure)
+
+        if debug_hygiene:
+            attempted.append("debug_hygiene_preflight")
+            result = await self._execute_operation("debug_hygiene_preflight", {})
+            if _terminal_status(result.get("status", "PASS")) != "PASS":
+                failures.append({
+                    "operation": "debug_hygiene_preflight",
+                    "reason": result.get("reason", "debug hygiene cleanup failed"),
+                    "result": result,
+                })
 
         reset_failures: tuple[CleanupFailure, ...] = ()
         runtime_smoke = getattr(self._session, "runtime_smoke", None)
@@ -290,14 +377,91 @@ class RuntimeSmokeRunner:
                     "reason": failure.get("error", "runtime smoke reset failed"),
                     "result": dict(failure),
                 })
+        remaining = _remaining_runtime_smoke_state(self._session)
 
         return {
             "status": "FAIL" if failures else "PASS",
             "attempted": attempted,
             "failures": failures,
+            "restored_files": restored_files,
+            "debug_stop": debug_stop,
             "reset_failures": [dict(failure) for failure in reset_failures],
             "remaining_runtime_smoke_state": remaining,
         }
+
+    def _validate_restore_paths(self, plan: dict[str, Any]) -> list[str]:
+        errors: list[str] = []
+        for prefix, entry in _iter_restore_entries(plan):
+            if not isinstance(entry, dict):
+                continue
+            try:
+                self._validate_restore_entry_paths(entry)
+            except Exception as exc:
+                errors.append(f"{prefix}.path validation failed: {exc}")
+        return errors
+
+    def _validate_restore_entry_paths(self, entry: dict[str, Any]) -> None:
+        self._validate_path(str(entry["path"]), must_exist=False)
+        baseline_file = entry.get("baseline_file")
+        if baseline_file is not None:
+            self._validate_path(str(baseline_file), must_exist=True)
+
+    def _validate_path(self, path: str, *, must_exist: bool) -> str:
+        validate_path = getattr(self._session, "validate_path", None)
+        if validate_path is None:
+            raise RuntimeError("path validation service unavailable")
+        return str(validate_path(path, must_exist=must_exist))
+
+    def _restore_file(self, entry: dict[str, Any]) -> dict[str, Any]:
+        target_path = self._validate_path(str(entry["path"]), must_exist=False)
+        source = "baseline_text"
+        baseline_file = None
+        content = entry.get("baseline_text")
+        if content is None:
+            source = "baseline_file"
+            baseline_file = self._validate_path(str(entry["baseline_file"]), must_exist=True)
+            content = Path(baseline_file).read_text(encoding="utf-8")
+        if not isinstance(content, str):
+            raise ValueError("restore baseline content must be text")
+
+        target = Path(target_path)
+        parent = target.parent
+        if not parent.is_dir():
+            raise ValueError(f"Restore parent directory does not exist: {parent}")
+        target.write_text(content, encoding="utf-8")
+
+        result: dict[str, Any] = {
+            "status": "PASS",
+            "path": target_path,
+            "source": source,
+            "char_count": len(content),
+            "byte_count": len(content.encode("utf-8")),
+        }
+        if baseline_file is not None:
+            result["baseline_file"] = baseline_file
+        return result
+
+    async def _stop_debug(self, mode: str) -> dict[str, Any]:
+        if mode != "graceful":
+            raise ValueError(f"Unsupported stop_debug mode: {mode}")
+
+        client = getattr(self._session, "client", None)
+        capabilities = getattr(client, "capabilities", {}) if client is not None else {}
+        if capabilities.get("supportsTerminateRequest", False):
+            await client.terminate()
+            wait_for_stopped = getattr(self._session, "wait_for_stopped", None)
+            if wait_for_stopped is not None:
+                snapshot = await wait_for_stopped(timeout=10.0)
+                if getattr(snapshot, "timed_out", False):
+                    raise RuntimeError("Terminate sent but program did not exit within 10s")
+
+        stop = getattr(self._session, "stop", None)
+        if stop is None:
+            raise RuntimeError("debug stop service unavailable")
+        result = stop()
+        if inspect.isawaitable(result):
+            result = await result
+        return _result_dict(result)
 
     def _finalize(
         self,
@@ -346,38 +510,6 @@ def compact_runtime_smoke_result(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _validate_plan(plan: Any) -> list[str]:
-    if not isinstance(plan, dict):
-        return ["plan must be an object"]
-    errors: list[str] = []
-    for field_name in ("actions", "assertions", "evidence"):
-        if field_name in plan and not isinstance(plan[field_name], list):
-            errors.append(f"{field_name} must be a list")
-    if "preflight" in plan and not isinstance(plan["preflight"], (bool, dict, list)):
-        errors.append("preflight must be a boolean, object, or list")
-    if "launch" in plan and not isinstance(plan["launch"], dict):
-        errors.append("launch must be an object")
-    budgets = plan.get("budgets", {})
-    if budgets is not None and not isinstance(budgets, dict):
-        errors.append("budgets must be an object")
-    elif isinstance(budgets, dict):
-        if "max_actions" in budgets:
-            try:
-                max_actions = int(budgets["max_actions"])
-                if max_actions < 1:
-                    errors.append("budgets.max_actions must be at least 1")
-            except (TypeError, ValueError):
-                errors.append("budgets.max_actions must be an integer")
-        if "max_elapsed_seconds" in budgets:
-            try:
-                max_elapsed = float(budgets["max_elapsed_seconds"])
-                if max_elapsed <= 0:
-                    errors.append("budgets.max_elapsed_seconds must be positive")
-            except (TypeError, ValueError):
-                errors.append("budgets.max_elapsed_seconds must be a number")
-    return errors
-
-
 def _budgets(plan: dict[str, Any]) -> dict[str, float | int]:
     budgets = dict(plan.get("budgets") or {})
     max_actions = int(budgets.get("max_actions", 25))
@@ -402,6 +534,11 @@ def _planned_steps(plan: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     if isinstance(launch, dict):
         steps.append(("launch", _step(launch, "launch")))
 
+    freshness = plan.get("freshness")
+    if isinstance(freshness, dict):
+        steps.append(("freshness", _step(freshness, "verify_debug_freshness")))
+
+    steps.extend(("step", _step(item)) for item in plan.get("steps", []))
     steps.extend(("action", _step(item)) for item in plan.get("actions", []))
     steps.extend(("assertion", _step(item)) for item in plan.get("assertions", []))
     steps.extend(("evidence", _step(item)) for item in plan.get("evidence", []))
@@ -409,11 +546,7 @@ def _planned_steps(plan: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
 
 
 def _step(raw: Any, default_name: str | None = None) -> dict[str, Any]:
-    if not isinstance(raw, dict):
-        return {"name": default_name or "invalid_step", "args": {}}
-    if "name" in raw:
-        return {"name": str(raw["name"]), "args": dict(raw.get("args") or {})}
-    return {"name": default_name or "invalid_step", "args": dict(raw)}
+    return normalize_plan_step(raw, default_name)
 
 
 async def _call_adapter(adapter: OperationAdapter, args: dict[str, Any]) -> Any:
@@ -456,6 +589,68 @@ def _remaining_runtime_smoke_state(session: Any) -> dict[str, Any]:
         "instrumentation_groups": sorted(runtime_smoke.instrumentation_groups),
         "output_checkpoints": sorted(runtime_smoke.output_checkpoints),
     }
+
+
+def _merged_cleanup_config(plan: dict[str, Any]) -> dict[str, Any]:
+    teardown = plan.get("teardown") if isinstance(plan, dict) else None
+    cleanup = plan.get("cleanup") if isinstance(plan, dict) else None
+    configs = [config for config in (teardown, cleanup) if isinstance(config, dict)]
+    merged: dict[str, Any] = {
+        "instrumentation_groups": [],
+        "restore_files": [],
+        "reset_runtime_smoke": True,
+    }
+    for config in configs:
+        merged["instrumentation_groups"].extend(config.get("instrumentation_groups", []))
+        merged["restore_files"].extend(config.get("restore_files", []))
+        if "reset_runtime_smoke" in config:
+            merged["reset_runtime_smoke"] = bool(config["reset_runtime_smoke"])
+        if "stop_debug" in config:
+            merged["stop_debug"] = config["stop_debug"]
+        if "debug_hygiene" in config:
+            merged["debug_hygiene"] = config["debug_hygiene"]
+    return merged
+
+
+def _iter_restore_entries(plan: dict[str, Any]) -> list[tuple[str, Any]]:
+    entries: list[tuple[str, Any]] = []
+    for config_name in ("teardown", "cleanup"):
+        config = plan.get(config_name)
+        if not isinstance(config, dict):
+            continue
+        restore_files = config.get("restore_files")
+        if not isinstance(restore_files, list):
+            continue
+        entries.extend(
+            (f"{config_name}.restore_files[{index}]", entry)
+            for index, entry in enumerate(restore_files)
+        )
+    for collection_name in ("steps", "actions", "assertions", "evidence"):
+        raw_items = plan.get(collection_name, [])
+        if not isinstance(raw_items, list):
+            continue
+        for index, raw in enumerate(raw_items):
+            if isinstance(raw, dict) and raw.get("op") == "fixture.restore":
+                entries.append((f"{collection_name}[{index}]", _public_operation_args(raw)))
+    return entries
+
+
+def _public_operation_args(raw: dict[str, Any]) -> dict[str, Any]:
+    args = dict(raw.get("args") or {})
+    for key, value in raw.items():
+        if key not in {"id", "op", "args"}:
+            args[key] = value
+    return args
+
+
+def _safe_validated_path(session: Any, path: str) -> str:
+    validate_path = getattr(session, "validate_path", None)
+    if validate_path is None:
+        return path
+    try:
+        return str(validate_path(path, must_exist=False))
+    except Exception:
+        return path
 
 
 def _collect_evidence_refs(completed_steps: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -2486,6 +2486,230 @@ async def test_wpf_shift_datagrid_evidence():
         await m.stop()
 
 
+async def test_wpf_one_call_runtime_smoke_workflow():
+    print("\nWPF ONE-CALL RUNTIME SMOKE WORKFLOW")
+    import tempfile
+
+    from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner
+    from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
+    from netcoredbg_mcp.ui.backend import create_backend
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    m = SessionManager(project_path=BASE)
+    backend_holder: dict[str, object | None] = {"backend": None}
+    baseline_state = "baseline"
+
+    backend_holder["backend"] = create_backend(process_registry=m.process_registry)
+    if not isinstance(backend_holder["backend"], FlaUIBackend):
+        evidence = {
+            "status": "BLOCKED",
+            "backend": type(backend_holder["backend"]).__name__,
+            "reason": "FlaUI bridge required for WPF one-call workflow smoke",
+        }
+        print(f"  evidence: {evidence}")
+        check("WPF one-call reports BLOCKED without FlaUI", True, str(evidence))
+        return
+
+    async def ensure_ui_connected():
+        backend = backend_holder["backend"]
+        if backend is None:
+            backend = create_backend(process_registry=m.process_registry)
+            backend_holder["backend"] = backend
+        pid = m.state.process_id
+        if not pid:
+            raise RuntimeError("Process ID not available for WPF workflow smoke")
+        if getattr(backend, "process_id", None) != pid:
+            await backend.connect(pid)
+        return backend
+
+    mutable_file: str | None = None
+    try:
+        smoke_tmp_root = os.path.join(BASE, ".agent", "tmp", "wpf-runtime-smoke")
+        os.makedirs(smoke_tmp_root, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="workflow-", dir=smoke_tmp_root) as temp_dir:
+            mutable_file = os.path.join(temp_dir, "wpf-workflow-state.txt")
+            with open(mutable_file, "w", encoding="utf-8") as handle:
+                handle.write(baseline_state)
+
+            plan = {
+                "schema": "netcoredbg.runtime_smoke.v1",
+                "name": "wpf one-call assignment toggle undo",
+                "launch": {
+                    "program": WPF_DLL,
+                    "cwd": os.path.dirname(WPF_DLL),
+                    "pre_build": True,
+                    "build_project": os.path.join(
+                        BASE,
+                        "tests",
+                        "fixtures",
+                        "WpfSmokeApp",
+                        "WpfSmokeApp.csproj",
+                    ),
+                    "build_configuration": "Debug",
+                    "env": {"WPF_SMOKE_MUTABLE_FILE": mutable_file},
+                },
+                "freshness": {
+                    "expected_process_name": "dotnet",
+                    "expected_modules": ["WpfSmokeApp.dll"],
+                },
+                "steps": [
+                    {
+                        "id": "baseline_grid",
+                        "op": "ui.grid.snapshot",
+                        "selector": {"automation_id": "dataGrid"},
+                        "rows": {"visible_only": True, "max": 5},
+                        "columns": ["Start", "End", "Character", "Phrase"],
+                    },
+                    {
+                        "id": "select_rows",
+                        "op": "ui.grid.select_range",
+                        "selector": {"automation_id": "dataGrid"},
+                        "start_index": 0,
+                        "end_index": 1,
+                    },
+                    {"id": "before_assign", "op": "debug.output_checkpoint", "name": "before_assign"},
+                    {
+                        "id": "assign_character",
+                        "op": "ui.list.invoke_item",
+                        "selector": {"automation_id": "CharactersListBox"},
+                        "item": {"name": "ALICE"},
+                        "invoke": "enter",
+                    },
+                    {
+                        "id": "assign_output",
+                        "op": "debug.output_assert_since",
+                        "checkpoint": "before_assign",
+                        "required": ["WpfWorkflow AssignCharacter route=ListInvoke selectedCount=2"],
+                        "forbidden": ["manual primitive fallback"],
+                    },
+                    {
+                        "id": "assign_grid_assert",
+                        "op": "ui.grid.assert_rows",
+                        "selector": {"automation_id": "dataGrid"},
+                        "columns": ["Start", "End", "Character", "Phrase"],
+                        "rows": [
+                            {
+                                "index": 0,
+                                "contains": {
+                                    "Start": "00:00:01.0",
+                                    "End": "00:00:03.0",
+                                    "Character": "ALICE",
+                                    "Phrase": "Fixture cue one",
+                                },
+                            },
+                            {
+                                "index": 1,
+                                "contains": {
+                                    "Start": "00:00:04.0",
+                                    "End": "00:00:06.0",
+                                    "Character": "ALICE",
+                                    "Phrase": "Fixture cue two",
+                                },
+                            },
+                        ],
+                    },
+                    {"id": "before_gender", "op": "debug.output_checkpoint", "name": "before_gender"},
+                    {
+                        "id": "toggle_gender",
+                        "op": "ui.list.toggle_item_child",
+                        "selector": {"automation_id": "CharactersListBox"},
+                        "item": {"name": "ALICE"},
+                        "child": {"automation_id": "CharGender", "control_type": "CheckBox"},
+                        "target_state": "On",
+                    },
+                    {
+                        "id": "gender_assert",
+                        "op": "ui.text.assert",
+                        "selector": {"automation_id": "genderStatus"},
+                        "contains": "ALICE female",
+                    },
+                    {
+                        "id": "undo_gender",
+                        "op": "ui.invoke",
+                        "selector": {"automation_id": "menuItemUndo"},
+                    },
+                    {
+                        "id": "undo_gender_assert",
+                        "op": "ui.text.assert",
+                        "selector": {"automation_id": "genderStatus"},
+                        "contains": "ALICE male",
+                    },
+                    {
+                        "id": "undo_focus_assert",
+                        "op": "ui.focus.assert",
+                        "selector": {"automation_id": "dataGrid"},
+                    },
+                ],
+                "cleanup": {
+                    "restore_files": [
+                        {"path": mutable_file, "baseline_text": baseline_state},
+                    ],
+                    "stop_debug": "graceful",
+                    "debug_hygiene": True,
+                },
+                "budgets": {"max_actions": 20, "max_elapsed_seconds": 60},
+            }
+
+            result = await RuntimeSmokeRunner(
+                m,
+                service_adapters=ui_operation_adapters(ensure_ui_connected),
+            ).run(plan)
+            with open(mutable_file, encoding="utf-8") as handle:
+                restored_state = handle.read()
+    finally:
+        if mutable_file is not None and os.path.exists(mutable_file):
+            try:
+                with open(mutable_file, "w", encoding="utf-8") as handle:
+                    handle.write(baseline_state)
+            except OSError as exc:
+                print(f"  [DEBUG] mutable state restore failed: {exc}")
+        if backend_holder["backend"] is not None:
+            try:
+                await backend_holder["backend"].disconnect()
+            except Exception as exc:
+                print(f"  [DEBUG] backend.disconnect() failed: {exc}")
+        await m.stop()
+
+    evidence = {
+        "status": result.get("status"),
+        "reason": result.get("reason"),
+        "action_count": result.get("action_count"),
+        "cleanup": result.get("cleanup"),
+        "restored_state": restored_state,
+        "completed_steps": [
+            {
+                "name": step.get("name"),
+                "status": step.get("status"),
+            }
+            for step in result.get("completed_steps", [])
+        ],
+    }
+    print(f"  evidence: {evidence}")
+    terminal_status = result.get("status")
+    check(
+        "WPF one-call run_runtime_smoke returned PASS",
+        terminal_status == "PASS",
+        str(evidence),
+    )
+    result_text = str(result)
+    check(
+        "WPF one-call assigned selected rows with invariants",
+        "Fixture cue one" in result_text and "ALICE" in result_text,
+        result_text[:400],
+    )
+    check(
+        "WPF one-call scoped toggle and undo evidence present",
+        "ALICE female" in result_text and "ALICE male" in result_text,
+        result_text[:400],
+    )
+    cleanup = result.get("cleanup", {})
+    check(
+        "WPF one-call focus and cleanup restored",
+        restored_state == baseline_state and cleanup.get("status") == "PASS",
+        str(evidence),
+    )
+
+
 async def test_avalonia_ui_fixture_compatibility():
     print("\n24. AVALONIA UI FIXTURE COMPATIBILITY")
     from netcoredbg_mcp.ui.backend import create_backend
@@ -2628,6 +2852,10 @@ def get_scenarios():
         ])
     if WPF_GUI_ENABLED:
         scenarios.append(("WPF Shift/DataGrid Evidence", test_wpf_shift_datagrid_evidence))
+        scenarios.append((
+            "WPF One-Call Runtime Smoke Workflow",
+            test_wpf_one_call_runtime_smoke_workflow,
+        ))
     if AVALONIA_GUI_ENABLED:
         scenarios.append((
             "Avalonia UI Fixture Compatibility",

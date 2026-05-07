@@ -15,6 +15,8 @@ from ..session.hygiene import HygienePreflightResult, RuntimeHygieneService
 from ..session.instrumentation import InstrumentationGroupService
 from ..session.output_assertions import OutputAssertionService
 from ..session.runtime_smoke import RuntimeSmokeRunner
+from ..session.runtime_smoke_operations import ui_operation_adapters
+from ..session.state import DebugState
 
 _NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
@@ -27,6 +29,33 @@ def register_runtime_smoke_tools(
 ) -> None:
     """Register runtime smoke composite tools on the MCP server."""
     from mcp.types import ToolAnnotations
+
+    backend_holder: dict[str, Any] = {"instance": None}
+
+    def _get_backend() -> Any:
+        if backend_holder["instance"] is None:
+            from ..ui.backend import create_backend
+            backend_holder["instance"] = create_backend(
+                process_registry=session.process_registry,
+            )
+        return backend_holder["instance"]
+
+    async def _ensure_ui_connected() -> Any:
+        from ..ui import NoActiveSessionError, NoProcessIdError
+
+        if session.state.state == DebugState.IDLE:
+            raise NoActiveSessionError("No debug session is active. Start debugging first.")
+
+        process_id = session.state.process_id
+        if not process_id:
+            raise NoProcessIdError(
+                "Process ID not available. Debug session may not have started the process yet."
+            )
+
+        backend = _get_backend()
+        if backend.process_id != process_id:
+            await backend.connect(process_id)
+        return backend
 
     @mcp.tool(annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
     async def debug_hygiene_preflight(
@@ -249,22 +278,10 @@ def register_runtime_smoke_tools(
             access_error = check_session_access(ctx)
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
-            if not isinstance(plan, dict):
-                data = {
-                    "status": "FAIL",
-                    "reason": "invalid plan schema",
-                    "validation_errors": ["plan must be an object"],
-                    "action_count": 0,
-                    "completed_steps": [],
-                    "failed_assertions": [],
-                    "cleanup": {
-                        "status": "PASS",
-                        "attempted": [],
-                        "failures": [],
-                    },
-                }
-            else:
-                data = await RuntimeSmokeRunner(session).run(plan)
+            data = await RuntimeSmokeRunner(
+                session,
+                service_adapters=ui_operation_adapters(_ensure_ui_connected),
+            ).run(plan)
             return _build_runtime_smoke_response(
                 session,
                 data,
