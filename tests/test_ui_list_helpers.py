@@ -88,6 +88,16 @@ def test_bridge_list_toggle_searches_child_from_resolved_item_not_main_window() 
 
     assert '["list_invoke_item"] = ListCommands.InvokeItem' in handler
     assert '["list_toggle_item_child"] = ListCommands.ToggleItemChild' in handler
-    assert "ResolveListItem" in command
-    assert "itemElement.FindFirstDescendant" in command
-    assert "mainWindow.FindFirstDescendant" not in command
+    start = command.index("ToggleItemChild")
+    end = command.find("private static", start + 1)
+    method_body = command[start:end if end != -1 else len(command)]
+    assert "ResolveListItem" in method_body
+    assert "ResolveChild(itemElement" in method_body
+    assert "mainWindow.FindFirstDescendant" not in method_body
+    assert "maxAttempts = 10" in method_body
+    assert 'info["status"] = string.IsNullOrWhiteSpace(targetState)' in method_body
+
+    child_start = command.index("private static AutomationElement ResolveChild")
+    child_end = command.find("private static", child_start + 1)
+    child_body = command[child_start:child_end if child_end != -1 else len(command)]
+    assert "itemElement.FindFirstDescendant" in child_body

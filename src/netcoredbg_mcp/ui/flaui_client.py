@@ -227,6 +227,15 @@ class FlaUIBackend:
                 result = await self._client.call("connect", {"pid": pid})
             except RuntimeError as exc:
                 if _is_window_not_ready(exc) and time.monotonic() < deadline:
+                    remaining = max(0.0, deadline - time.monotonic())
+                    logger.debug(
+                        "FlaUI connect: window not ready for PID %d; retrying in %.2fs "
+                        "(%.2fs remaining): %s",
+                        pid,
+                        CONNECT_RETRY_INTERVAL_SECONDS,
+                        remaining,
+                        exc,
+                    )
                     await asyncio.sleep(CONNECT_RETRY_INTERVAL_SECONDS)
                     continue
                 raise
@@ -237,6 +246,15 @@ class FlaUIBackend:
                 return
 
             if time.monotonic() < deadline:
+                remaining = max(0.0, deadline - time.monotonic())
+                logger.debug(
+                    "FlaUI connect: bridge returned not connected for PID %d; "
+                    "retrying in %.2fs (%.2fs remaining): %s",
+                    pid,
+                    CONNECT_RETRY_INTERVAL_SECONDS,
+                    remaining,
+                    result,
+                )
                 await asyncio.sleep(CONNECT_RETRY_INTERVAL_SECONDS)
                 continue
             raise RuntimeError(f"FlaUI bridge failed to connect to PID {pid}")

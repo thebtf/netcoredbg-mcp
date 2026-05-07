@@ -43,17 +43,36 @@ public static class ListCommands
 
         var targetState = @params?["targetState"]?.GetValue<string>();
         var before = togglePattern.ToggleState.ValueOrDefault.ToString();
-        if (string.IsNullOrWhiteSpace(targetState) ||
-            !string.Equals(before, targetState, StringComparison.OrdinalIgnoreCase))
+        var after = before;
+        var attempts = 0;
+        const int maxAttempts = 10;
+
+        if (string.IsNullOrWhiteSpace(targetState))
         {
             togglePattern.Toggle();
+            attempts = 1;
+            after = togglePattern.ToggleState.ValueOrDefault.ToString();
         }
-        var after = togglePattern.ToggleState.ValueOrDefault.ToString();
+        else
+        {
+            while (!string.Equals(after, targetState, StringComparison.OrdinalIgnoreCase) &&
+                   attempts < maxAttempts)
+            {
+                togglePattern.Toggle();
+                attempts += 1;
+                after = togglePattern.ToggleState.ValueOrDefault.ToString();
+            }
+        }
         var info = ElementCommands.BuildElementInfo(childElement, includePatterns: false);
-        info["status"] = "PASS";
+        info["status"] = string.IsNullOrWhiteSpace(targetState) ||
+            string.Equals(after, targetState, StringComparison.OrdinalIgnoreCase)
+                ? "PASS"
+                : "FAIL";
         info["toggled"] = !string.Equals(before, after, StringComparison.Ordinal);
         info["old_state"] = before;
         info["new_state"] = after;
+        info["target_state"] = targetState;
+        info["attempts"] = attempts;
         info["item"] = ElementCommands.BuildElementInfo(itemElement, includePatterns: false);
         return info;
     }

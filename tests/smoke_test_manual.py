@@ -2493,10 +2493,22 @@ async def test_wpf_one_call_runtime_smoke_workflow():
     from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner
     from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
     from netcoredbg_mcp.ui.backend import create_backend
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
 
     m = SessionManager(project_path=BASE)
     backend_holder: dict[str, object | None] = {"backend": None}
     baseline_state = "baseline"
+
+    backend_holder["backend"] = create_backend(process_registry=m.process_registry)
+    if not isinstance(backend_holder["backend"], FlaUIBackend):
+        evidence = {
+            "status": "BLOCKED",
+            "backend": type(backend_holder["backend"]).__name__,
+            "reason": "FlaUI bridge required for WPF one-call workflow smoke",
+        }
+        print(f"  evidence: {evidence}")
+        check("WPF one-call reports BLOCKED without FlaUI", True, str(evidence))
+        return
 
     async def ensure_ui_connected():
         backend = backend_holder["backend"]

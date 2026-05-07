@@ -137,8 +137,12 @@ async def _backend_or_blocked(ensure_ui_connected: BackendProvider) -> Any:
 
 
 def _selector(args: dict[str, Any]) -> dict[str, Any]:
-    selector = args.get("selector")
-    return dict(selector) if isinstance(selector, dict) else {}
+    if "selector" not in args:
+        return {}
+    selector = args["selector"]
+    if not isinstance(selector, dict):
+        raise TypeError("selector must be an object when provided")
+    return dict(selector)
 
 
 def _selector_kwargs(selector: dict[str, Any]) -> dict[str, Any]:

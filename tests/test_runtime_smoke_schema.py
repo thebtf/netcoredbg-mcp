@@ -116,3 +116,45 @@ def test_fixture_restore_step_uses_same_restore_validation() -> None:
     }) == [
         "steps[0] requires exactly one of baseline_text or baseline_file"
     ]
+
+
+def test_validate_plan_rejects_unexpected_top_level_keys() -> None:
+    errors = validate_plan({
+        "schema": "netcoredbg.runtime_smoke.v1",
+        "stepps": [],
+    })
+
+    assert errors == [
+        "unexpected top-level key: stepps; expected one of: "
+        "schema, name, description, preflight, launch, freshness, steps, actions, "
+        "assertions, evidence, cleanup, teardown, budgets, "
+        "stop_on_first_failed_assertion"
+    ]
+
+
+def test_validate_plan_rejects_nested_operation_argument_type_errors() -> None:
+    errors = validate_plan({
+        "steps": [
+            {"op": "ui.invoke", "selector": []},
+            {
+                "op": "ui.grid.assert_rows",
+                "selector": {"automation_id": "dataGrid"},
+                "rows": {"index": 0},
+            },
+            {
+                "op": "ui.list.toggle_item_child",
+                "selector": {"automation_id": "CharactersListBox"},
+                "item": "ALICE",
+                "child": [],
+                "target_state": 1,
+            },
+        ],
+    })
+
+    assert errors == [
+        "steps[0].selector must be an object for op ui.invoke",
+        "steps[1].rows must be a list for op ui.grid.assert_rows",
+        "steps[2].item must be an object for op ui.list.toggle_item_child",
+        "steps[2].child must be an object for op ui.list.toggle_item_child",
+        "steps[2].target_state must be a string for op ui.list.toggle_item_child",
+    ]

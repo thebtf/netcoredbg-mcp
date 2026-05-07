@@ -42,18 +42,7 @@ public static class GridCommands
 
     public static JsonNode Snapshot(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
-        var grid = ResolveGrid(@params, automation, mainWindow);
-        if (!grid.Patterns.Grid.TryGetPattern(out var gridPattern))
-            return Unsupported("GridPattern");
-
-        var rows = GridRows(grid, automation);
-        var columns = ReadColumns(@params);
-        return new JsonObject
-        {
-            ["status"] = "PASS",
-            ["row_count"] = gridPattern.RowCount.Value,
-            ["visible_rows"] = BuildRows(rows, columns)
-        };
+        return VisibleRows(@params, automation, mainWindow);
     }
 
     public static JsonNode AssertRows(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
@@ -529,6 +518,11 @@ public static class GridCommands
         return SafeString(() => element.Name);
     }
 
+    /// <summary>
+    /// Filters CLR type-name fallbacks such as "System.String" from cell text.
+    /// Domain-like strings, versioned identifiers, or short codes can match this
+    /// heuristic; that tradeoff is acceptable for the DataGrid smoke fixtures.
+    /// </summary>
     private static bool IsLikelyClrTypeName(string value)
     {
         return value.Contains('.') &&

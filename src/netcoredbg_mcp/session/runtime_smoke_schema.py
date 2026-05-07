@@ -115,6 +115,7 @@ def validate_plan(plan: Any) -> list[str]:
         return ["plan must be an object"]
 
     errors: list[str] = []
+    _validate_top_level_keys(plan, errors)
     _validate_schema_value(plan, errors)
     _validate_list_fields(plan, errors)
     _validate_object_fields(plan, errors)
@@ -122,6 +123,14 @@ def validate_plan(plan: Any) -> list[str]:
     _validate_step_collections(plan, errors)
     _validate_restore_configs(plan, errors)
     return errors
+
+
+def _validate_top_level_keys(plan: dict[str, Any], errors: list[str]) -> None:
+    accepted = set(ACCEPTED_TOP_LEVEL_KEYS)
+    for key in plan:
+        if key not in accepted:
+            expected = ", ".join(ACCEPTED_TOP_LEVEL_KEYS)
+            errors.append(f"unexpected top-level key: {key}; expected one of: {expected}")
 
 
 def normalize_plan_step(raw: Any, default_name: str | None = None) -> dict[str, Any]:
@@ -228,8 +237,70 @@ def _validate_step(
     for field_name in schema.required_fields:
         if args.get(field_name) is None:
             errors.append(f"{prefix}.{field_name} is required for op {op_name}")
+    _validate_op_args(prefix, op_name, args, errors)
     if op_name == "fixture.restore":
         _validate_restore_entry(prefix, args, errors)
+
+
+def _validate_op_args(
+    prefix: str,
+    op_name: str,
+    args: dict[str, Any],
+    errors: list[str],
+) -> None:
+    if "selector" in args and not isinstance(args["selector"], dict):
+        errors.append(f"{prefix}.selector must be an object for op {op_name}")
+
+    if op_name == "ui.grid.snapshot":
+        if "rows" in args and not isinstance(args["rows"], dict):
+            errors.append(f"{prefix}.rows must be an object for op {op_name}")
+        _validate_optional_string_list(prefix, op_name, args, "columns", errors)
+    elif op_name == "ui.grid.select_range":
+        _validate_int_arg(prefix, op_name, args, "start_index", errors)
+        _validate_int_arg(prefix, op_name, args, "end_index", errors)
+    elif op_name == "ui.grid.assert_rows":
+        if "rows" in args and not isinstance(args["rows"], list):
+            errors.append(f"{prefix}.rows must be a list for op {op_name}")
+    elif op_name in {"ui.list.invoke_item", "ui.list.toggle_item_child"}:
+        if "item" in args and not isinstance(args["item"], dict):
+            errors.append(f"{prefix}.item must be an object for op {op_name}")
+        if op_name == "ui.list.toggle_item_child":
+            if "child" in args and not isinstance(args["child"], dict):
+                errors.append(f"{prefix}.child must be an object for op {op_name}")
+            if (
+                "target_state" in args
+                and args["target_state"] is not None
+                and not isinstance(args["target_state"], str)
+            ):
+                errors.append(f"{prefix}.target_state must be a string for op {op_name}")
+    elif op_name == "ui.key_sequence":
+        if "keys" in args and not isinstance(args["keys"], list):
+            errors.append(f"{prefix}.keys must be a list for op {op_name}")
+
+
+def _validate_int_arg(
+    prefix: str,
+    op_name: str,
+    args: dict[str, Any],
+    field_name: str,
+    errors: list[str],
+) -> None:
+    if field_name in args and not isinstance(args[field_name], int):
+        errors.append(f"{prefix}.{field_name} must be an integer for op {op_name}")
+
+
+def _validate_optional_string_list(
+    prefix: str,
+    op_name: str,
+    args: dict[str, Any],
+    field_name: str,
+    errors: list[str],
+) -> None:
+    if field_name not in args:
+        return
+    value = args[field_name]
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        errors.append(f"{prefix}.{field_name} must be a list of strings for op {op_name}")
 
 
 def _operation_args(raw: dict[str, Any]) -> dict[str, Any]:

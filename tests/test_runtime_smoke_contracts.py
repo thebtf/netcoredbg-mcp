@@ -122,6 +122,7 @@ def test_wpf_one_call_runtime_smoke_scenario_is_inventory_visible() -> None:
     assert all(token not in scenario_body for token in forbidden_manual_fallbacks)
     assert 'terminal_status == "PASS"' in scenario_body
     assert 'getattr(backend, "process_id", None) != pid' in scenario_body
+    assert "WPF one-call reports BLOCKED without FlaUI" in scenario_body
     assert "WPF one-call did not claim false PASS" not in scenario_body
 
 

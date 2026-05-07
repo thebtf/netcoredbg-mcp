@@ -87,6 +87,31 @@ class TestFlaUIBackendConnect:
         assert backend._client.call.await_count == 2
 
     @pytest.mark.asyncio
+    async def test_logs_connect_retries(self, caplog):
+        from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+        backend = FlaUIBackend.__new__(FlaUIBackend)
+        backend._client = MagicMock()
+        backend._client.ensure_alive = AsyncMock(return_value=True)
+        backend._client.call = AsyncMock(
+            side_effect=[
+                {"connected": False, "title": ""},
+                {"connected": True, "title": "WPF Smoke"},
+            ]
+        )
+        backend._element_cache = {}
+        backend._process_id = None
+
+        with (
+            patch("netcoredbg_mcp.ui.flaui_client.CONNECT_RETRY_INTERVAL_SECONDS", 0),
+            caplog.at_level("DEBUG", logger="netcoredbg_mcp.ui.flaui_client"),
+        ):
+            await backend.connect(42)
+
+        assert backend.process_id == 42
+        assert "bridge returned not connected for PID 42" in caplog.text
+
+    @pytest.mark.asyncio
     async def test_connect_does_not_retry_non_readiness_errors(self):
         from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
 

@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner, RuntimeSmokeSession
+from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
 from netcoredbg_mcp.session.state import DebugState, OutputEntry
 from netcoredbg_mcp.tools.runtime_smoke import register_runtime_smoke_tools
 
@@ -453,6 +454,32 @@ async def test_runner_accepted_ui_op_without_backend_returns_blocked_not_schema_
     assert result["reason"] == "unsupported runtime smoke operation"
     assert "validation_errors" not in result
     assert result["completed_steps"][0]["name"] == "ui.grid.snapshot"
+
+
+@pytest.mark.asyncio
+async def test_ui_operation_adapters_reject_non_object_selector() -> None:
+    session = FakeRuntimeSmokeSession()
+
+    async def backend_provider() -> object:
+        class FakeBackend:
+            async def invoke_element(self, **_: Any) -> dict[str, Any]:
+                return {"status": "PASS"}
+
+        return FakeBackend()
+
+    result = await RuntimeSmokeRunner(
+        session,
+        service_adapters=ui_operation_adapters(backend_provider),
+    ).run({
+        "actions": [{"name": "ui.invoke", "args": {"selector": []}}],
+    })
+
+    assert result["status"] == "FAIL"
+    assert result["reason"] == "runtime smoke operation raised exception"
+    assert result["completed_steps"][0]["result"]["exception"] == {
+        "type": "TypeError",
+        "message": "selector must be an object when provided",
+    }
 
 
 @pytest.mark.asyncio
