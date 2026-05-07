@@ -38,13 +38,14 @@ public static class Program
 
     private static JsonNode? ProcessRequest(string line)
     {
+        JsonNode? id = null;
         try
         {
             var request = JsonNode.Parse(line);
             if (request is null)
                 return CreateErrorResponse(null, -32700, "Parse error: null result");
 
-            var id = request["id"];
+            id = request["id"];
             var method = request["method"]?.GetValue<string>();
             var @params = request["params"];
 
@@ -75,7 +76,7 @@ public static class Program
         catch (Exception ex)
         {
             Log($"Unhandled error: {ex}");
-            return CreateErrorResponse(null, -32603, $"Internal error: {ex.Message}");
+            return CreateErrorResponse(id, -32603, $"Internal error: {ex.Message}");
         }
     }
 

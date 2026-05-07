@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 # Restart limits
 MAX_RESTARTS = 3
 RESTART_WINDOW_SECONDS = 60.0
-CONNECT_RETRY_TIMEOUT_SECONDS = 5.0
+CONNECT_RETRY_TIMEOUT_SECONDS = 30.0
+CONNECT_CALL_TIMEOUT_SECONDS = 30.0
 CONNECT_RETRY_INTERVAL_SECONDS = 0.2
 WINDOW_NOT_READY_ERROR = "No window found for process"
 
@@ -154,10 +155,48 @@ class FlaUIBridgeClient:
                 "params": params or {},
             }
 
-            response_data = await asyncio.wait_for(
-                self._send_and_receive(request),
-                timeout=timeout,
-            )
+            expected_id = request["id"]
+            try:
+                response_data = await asyncio.wait_for(
+                    self._send_and_receive(request),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "FlaUI bridge call '%s' timed out after %.1fs; restarting bridge",
+                    method,
+                    timeout,
+                )
+                await self.stop()
+                raise
+
+            if not isinstance(response_data, dict):
+                logger.warning(
+                    "FlaUI bridge returned non-object response for '%s': %s; "
+                    "restarting bridge",
+                    method,
+                    type(response_data).__name__,
+                )
+                await self.stop()
+                raise RuntimeError(
+                    "FlaUI bridge protocol error: expected dict response, "
+                    f"got {type(response_data).__name__}"
+                )
+
+            actual_id = response_data.get("id")
+            if actual_id != expected_id:
+                logger.warning(
+                    "FlaUI bridge response id mismatch for '%s': expected %r, got %r; "
+                    "restarting bridge",
+                    method,
+                    expected_id,
+                    actual_id,
+                )
+                await self.stop()
+                raise RuntimeError(
+                    f"FlaUI bridge protocol error: response id {actual_id!r} "
+                    f"did not match request id {expected_id!r}"
+                )
 
         if "error" in response_data:
             error = response_data["error"]
@@ -224,7 +263,11 @@ class FlaUIBackend:
         deadline = time.monotonic() + CONNECT_RETRY_TIMEOUT_SECONDS
         while True:
             try:
-                result = await self._client.call("connect", {"pid": pid})
+                result = await self._client.call(
+                    "connect",
+                    {"pid": pid},
+                    timeout=CONNECT_CALL_TIMEOUT_SECONDS,
+                )
             except RuntimeError as exc:
                 if _is_window_not_ready(exc) and time.monotonic() < deadline:
                     remaining = max(0.0, deadline - time.monotonic())

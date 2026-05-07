@@ -14,7 +14,7 @@ set breakpoints, step through code, inspect variables, evaluate expressions, rea
 debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
 and Avalonia windows without opening an IDE.
 
-**103 MCP tools · 8 prompts · 4 resources · 818 collected tests · release v0.13.0**
+**103 MCP tools · 8 prompts · 4 resources · 870 collected tests · release v0.13.1**
 
 ## Quick Links
 
@@ -23,20 +23,19 @@ and Avalonia windows without opening an IDE.
 - **Reference:** [Available Tools](#available-tools) · [Resources](#mcp-resources) · [Prompts](#mcp-prompts) · [Architecture](#architecture-overview)
 - **Project:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## What's New in v0.13.0
+## What's New in v0.13.1
 
-- **Runtime smoke orchestration** — `debug_hygiene_preflight`,
-  instrumentation groups, output checkpoints, freshness verification, and
-  `run_runtime_smoke` turn repeated live-debug checks into bounded scenario
-  evidence with cleanup.
-- **First-class WPF and Avalonia fixtures** — manual smoke coverage now includes
-  WPF Shift/DataGrid evidence and Avalonia UI fixture compatibility alongside
-  the baseline console/WinForms fixture.
-- **Release workflow hygiene** — publish workflows use Node 24-compatible action
-  pins, explicit artifact extraction, and repeatable TestPyPI rehearsals without
-  hiding duplicate upload errors on real PyPI.
-- **Documentation and agent-state cleanup** — release docs now reflect the
-  current MCP surface, and local `.agent/` / `.codex/` state stays out of git.
+- **Hardened WPF one-call smoke** — `run_runtime_smoke` now connects UI
+  automation eagerly after launch and keeps bounded cleanup evidence for the
+  15-step WPF fixture workflow.
+- **More reliable DataGrid evidence** — WPF grid rows merge structured
+  `GridPattern` cells with descendant text fallback, and short grid retry
+  timeouts no longer sleep longer than requested.
+- **Stable window and cleanup behavior** — primary-window selection uses a
+  deterministic tie-breaker, and Windows file-attribute restoration fails fast
+  instead of silently hiding WinAPI errors.
+- **Release playbook coverage** — customer-mode verification now explicitly
+  includes WPF one-call runtime smoke and Avalonia fixture compatibility.
 
 ## Highlights
 
@@ -338,6 +337,13 @@ stop. The example launches the WPF fixture DLL through `dotnet`, so freshness
 expects `expected_process_name: "dotnet"` and `expected_modules:
 ["WpfSmokeApp.dll"]`. The matching manual scenario is
 `WPF One-Call Runtime Smoke Workflow`.
+
+The WPF workflow now connects UI automation eagerly after launch, chooses a
+stable usable top-level window, merges structured `GridPattern` cell evidence
+with descendant text fallback, and restores fixture files even when Windows
+briefly holds attributes or locks. Avalonia remains a first-class compatibility
+target: its manual fixture is expected to produce bounded `UNSUPPORTED` or
+`BLOCKED` evidence for UIA gaps instead of being omitted from release checks.
 
 ## Available Tools
 

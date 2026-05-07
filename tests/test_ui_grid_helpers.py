@@ -325,6 +325,7 @@ def test_bridge_grid_builds_cell_text_evidence_for_rows() -> None:
     assert "ReadDescendantCellText" in command
     assert "IsLikelyCellPlaceholder" in command
     assert "CellPlaceholderSubstrings" in command
+    assert "cells.Array.Count >= expectedColumns" in command
     assert "ReadGridFindTimeout" in command
     assert command.count("IsLikelyCellPlaceholder(text)") >= 3
     assert "FindGridWithRetry" in command
