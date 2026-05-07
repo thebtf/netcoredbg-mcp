@@ -66,7 +66,7 @@ async def test_scoped_key_sequence_reports_shift_held_for_two_down_keys() -> Non
     assert backend.calls == [{
         "selector": {"automation_id": "CueGrid"},
         "modifiers": ["shift"],
-        "keys": ["Down", "Down"],
+        "keys": ["DOWN", "DOWN"],
     }]
 
 

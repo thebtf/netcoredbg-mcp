@@ -111,6 +111,22 @@ def test_invalid_regex_fails_and_skips_later_assertions() -> None:
     assert result["forbidden_matches"] == []
 
 
+def test_duplicate_checkpoint_name_fails_without_overwriting_existing_range() -> None:
+    session = FakeOutputSession()
+    service = OutputAssertionService(session)
+    session.append_output("boot\n")
+
+    first = service.create_checkpoint("start").to_dict()
+    session.append_output("ready\n")
+    duplicate = service.create_checkpoint("start").to_dict()
+    result = service.assert_since("start", required=["ready"]).to_dict()
+
+    assert first["status"] == "PASS"
+    assert duplicate["status"] == "FAIL"
+    assert duplicate["reason"] == "output checkpoint already exists"
+    assert result["status"] == "PASS"
+
+
 def test_missing_checkpoint_and_trimmed_range_fail_with_named_reasons() -> None:
     missing_session = FakeOutputSession()
     missing = OutputAssertionService(missing_session).assert_since(

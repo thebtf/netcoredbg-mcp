@@ -100,5 +100,5 @@ def _normalize_keys(keys: list[str]) -> list[str] | dict[str, Any]:
                 "sent_count": 0,
                 "final_held_modifiers": [],
             }
-        normalized.append(lookup.title())
+        normalized.append(lookup.upper())
     return normalized

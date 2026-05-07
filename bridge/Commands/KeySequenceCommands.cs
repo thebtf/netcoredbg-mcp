@@ -293,7 +293,18 @@ public static class KeySequenceCommands
         if (SpecialKeys.TryGetValue(normalized, out var special))
             return (normalized.ToUpperInvariant(), special);
         if (normalized.Length == 1)
-            return (normalized, (VirtualKeyShort)char.ToUpperInvariant(normalized[0]));
+        {
+            var character = normalized[0];
+            var isAsciiLetter =
+                (character >= 'a' && character <= 'z') ||
+                (character >= 'A' && character <= 'Z');
+            var isAsciiDigit = character >= '0' && character <= '9';
+            if (isAsciiLetter || isAsciiDigit)
+            {
+                var upper = char.ToUpperInvariant(character);
+                return (upper.ToString(), (VirtualKeyShort)upper);
+            }
+        }
         throw new ArgumentException($"Unknown key: {key}");
     }
 

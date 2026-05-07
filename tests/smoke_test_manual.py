@@ -2481,8 +2481,8 @@ async def test_wpf_shift_datagrid_evidence():
         if backend is not None:
             try:
                 await backend.disconnect()
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"  [DEBUG] backend.disconnect() failed: {exc}")
         await m.stop()
 
 

@@ -45,6 +45,7 @@ class RuntimeSmokeSession:
             try:
                 callback()
             except Exception as exc:
+                # Continue teardown so one failed cleanup cannot hide later failures.
                 failures.append({"name": name, "error": str(exc)})
 
         self.instrumentation_groups.clear()

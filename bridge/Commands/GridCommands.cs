@@ -81,6 +81,14 @@ public static class GridCommands
 
         var (start, end) = ReadRange(@params);
         var rows = GridRows(grid);
+        if (start < 0 || end < start || end >= rows.Length)
+            return new JsonObject
+            {
+                ["status"] = "AMBIGUOUS",
+                ["reason"] = "row range is outside visible rows",
+                ["selection_mutated"] = false
+            };
+
         var selectedRows = SelectedRowIndices(rows);
         var expected = Enumerable.Range(start, end - start + 1).ToList();
         var passed = selectedRows.Count == expected.Count && !expected.Except(selectedRows).Any();

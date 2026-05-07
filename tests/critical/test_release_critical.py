@@ -34,6 +34,7 @@ NODE20_ACTION_PINS = {
     "actions/upload-artifact@v4",
     "actions/download-artifact@v4",
 }
+# Keep this set in lockstep with .github/workflows/publish.yml action upgrades.
 NODE24_ACTION_PINS = {
     "actions/checkout@v6",
     "softprops/action-gh-release@v3",

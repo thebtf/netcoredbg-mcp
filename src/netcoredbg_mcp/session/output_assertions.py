@@ -29,6 +29,13 @@ class OutputAssertionService:
         self._session = session
 
     def create_checkpoint(self, name: str) -> OutputAssertionResult:
+        if name in self._checkpoints:
+            return self._fail(
+                "output checkpoint already exists",
+                checkpoint=name,
+                existing_checkpoint=name,
+            )
+
         entries = self._entries()
         checkpoint = {
             "name": name,
