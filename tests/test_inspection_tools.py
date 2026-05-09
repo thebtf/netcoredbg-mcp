@@ -19,6 +19,7 @@ class ToolRegistry:
         def decorator(func):
             self.tools[func.__name__] = func
             return func
+
         return decorator
 
 
@@ -65,14 +66,18 @@ async def test_get_loaded_sources_tool_capability_gate():
 async def test_get_loaded_sources_tool_success_path():
     manager = make_manager()
     manager.client._capabilities = {"supportsLoadedSourcesRequest": True}
-    manager.get_loaded_sources = AsyncMock(return_value=[{
-        "name": "Program.cs",
-        "path": "C:/src/Program.cs",
-        "sourceReference": 7,
-        "origin": None,
-        "presentationHint": "normal",
-        "adapterData": {"kind": "source"},
-    }])
+    manager.get_loaded_sources = AsyncMock(
+        return_value=[
+            {
+                "name": "Program.cs",
+                "path": "C:/src/Program.cs",
+                "sourceReference": 7,
+                "origin": None,
+                "presentationHint": "normal",
+                "adapterData": {"kind": "source"},
+            }
+        ]
+    )
     tools = register_tools(manager)
 
     response = await tools["get_loaded_sources"]()
@@ -89,25 +94,28 @@ async def test_get_loaded_sources_manager_maps_and_tracks_state():
         name="Stale.cs",
         path="C:/src/Stale.cs",
     )
-    manager.client.loaded_sources = AsyncMock(return_value=make_response(body={
-        "sources": [{
-            "name": "Program.cs",
-            "path": "C:/src/Program.cs",
-            "sourceReference": 7,
-            "origin": "generated",
-            "presentationHint": "normal",
-            "adapterData": {"kind": "source"},
-        }],
-    }))
+    manager.client.loaded_sources = AsyncMock(
+        return_value=make_response(
+            body={
+                "sources": [
+                    {
+                        "name": "Program.cs",
+                        "path": "C:/src/Program.cs",
+                        "sourceReference": 7,
+                        "origin": "generated",
+                        "presentationHint": "normal",
+                        "adapterData": {"kind": "source"},
+                    }
+                ],
+            }
+        )
+    )
 
     sources = await manager.get_loaded_sources()
 
     assert sources[0]["sourceReference"] == 7
     assert len(manager.state.loaded_sources) == 1
-    assert all(
-        source.path != "C:/src/Stale.cs"
-        for source in manager.state.loaded_sources.values()
-    )
+    assert all(source.path != "C:/src/Stale.cs" for source in manager.state.loaded_sources.values())
 
 
 @pytest.mark.asyncio
@@ -129,13 +137,17 @@ async def test_disassemble_tool_capability_gate():
 async def test_disassemble_tool_success_path():
     manager = make_manager()
     manager.client._capabilities = {"supportsDisassembleRequest": True}
-    manager.disassemble = AsyncMock(return_value=[{
-        "address": "0x1234",
-        "instructionBytes": "55",
-        "instruction": "push rbp",
-        "symbol": "main",
-        "presentationHint": "normal",
-    }])
+    manager.disassemble = AsyncMock(
+        return_value=[
+            {
+                "address": "0x1234",
+                "instructionBytes": "55",
+                "instruction": "push rbp",
+                "symbol": "main",
+                "presentationHint": "normal",
+            }
+        ]
+    )
     tools = register_tools(manager)
 
     response = await tools["disassemble"](
@@ -185,15 +197,17 @@ async def test_get_locations_tool_capability_gate():
 async def test_get_locations_tool_success_path():
     manager = make_manager()
     manager.client._capabilities = {"supportsLocationsRequest": True}
-    manager.get_locations = AsyncMock(return_value={
-        "source": {"path": "C:/src/Program.cs"},
-        "line": 12,
-        "column": 3,
-        "end_line": 12,
-        "end_column": 8,
-        "endLine": 12,
-        "endColumn": 8,
-    })
+    manager.get_locations = AsyncMock(
+        return_value={
+            "source": {"path": "C:/src/Program.cs"},
+            "line": 12,
+            "column": 3,
+            "end_line": 12,
+            "end_column": 8,
+            "endLine": 12,
+            "endColumn": 8,
+        }
+    )
     tools = register_tools(manager)
 
     response = await tools["get_locations"](42)
@@ -214,21 +228,31 @@ async def test_get_locations_rejects_invalid_args():
 @pytest.mark.asyncio
 async def test_manager_disassemble_and_locations_map_dap_fields():
     manager = make_manager()
-    manager.client.disassemble = AsyncMock(return_value=make_response(body={
-        "instructions": [{
-            "address": "0x1234",
-            "instructionBytes": "55",
-            "instruction": "push rbp",
-            "presentationHint": "normal",
-        }],
-    }))
-    manager.client.locations = AsyncMock(return_value=make_response(body={
-        "source": {"path": "C:/src/Program.cs"},
-        "line": 20,
-        "column": 1,
-        "endLine": 20,
-        "endColumn": 5,
-    }))
+    manager.client.disassemble = AsyncMock(
+        return_value=make_response(
+            body={
+                "instructions": [
+                    {
+                        "address": "0x1234",
+                        "instructionBytes": "55",
+                        "instruction": "push rbp",
+                        "presentationHint": "normal",
+                    }
+                ],
+            }
+        )
+    )
+    manager.client.locations = AsyncMock(
+        return_value=make_response(
+            body={
+                "source": {"path": "C:/src/Program.cs"},
+                "line": 20,
+                "column": 1,
+                "endLine": 20,
+                "endColumn": 5,
+            }
+        )
+    )
 
     instructions = await manager.disassemble("0x1234", instruction_count=1)
     location = await manager.get_locations(99)

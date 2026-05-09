@@ -17,6 +17,7 @@ class TestBreakpointEvents:
     def manager(self):
         with patch("netcoredbg_mcp.session.manager.DAPClient"):
             from netcoredbg_mcp.session import SessionManager
+
             m = SessionManager()
             return m
 
@@ -25,10 +26,14 @@ class TestBreakpointEvents:
         bp = Breakpoint(file="test.cs", line=10, verified=False, id=42)
         manager.breakpoints.add(bp)
 
-        event = DAPEvent(seq=1, event="breakpoint", body={
-            "reason": "changed",
-            "breakpoint": {"id": 42, "verified": True, "line": 10},
-        })
+        event = DAPEvent(
+            seq=1,
+            event="breakpoint",
+            body={
+                "reason": "changed",
+                "breakpoint": {"id": 42, "verified": True, "line": 10},
+            },
+        )
         manager._on_breakpoint(event)
 
         bps = manager.breakpoints.get_for_file("test.cs")
@@ -40,10 +45,14 @@ class TestBreakpointEvents:
         bp = Breakpoint(file="test.cs", line=10, verified=False, id=42)
         manager.breakpoints.add(bp)
 
-        event = DAPEvent(seq=1, event="breakpoint", body={
-            "reason": "changed",
-            "breakpoint": {"id": 42, "verified": True, "line": 12},
-        })
+        event = DAPEvent(
+            seq=1,
+            event="breakpoint",
+            body={
+                "reason": "changed",
+                "breakpoint": {"id": 42, "verified": True, "line": 12},
+            },
+        )
         manager._on_breakpoint(event)
 
         bps = manager.breakpoints.get_for_file("test.cs")
@@ -55,10 +64,14 @@ class TestBreakpointEvents:
         bp = Breakpoint(file="test.cs", line=10, verified=True, id=42, dap_line=12)
         manager.breakpoints.add(bp)
 
-        event = DAPEvent(seq=1, event="breakpoint", body={
-            "reason": "changed",
-            "breakpoint": {"id": 42, "verified": True, "line": 10},
-        })
+        event = DAPEvent(
+            seq=1,
+            event="breakpoint",
+            body={
+                "reason": "changed",
+                "breakpoint": {"id": 42, "verified": True, "line": 10},
+            },
+        )
         manager._on_breakpoint(event)
 
         bps = manager.breakpoints.get_for_file("test.cs")
@@ -77,10 +90,14 @@ class TestBreakpointEvents:
         tp.breakpoint_id = 42
         tp.dap_line = 12
 
-        event = DAPEvent(seq=1, event="breakpoint", body={
-            "reason": "changed",
-            "breakpoint": {"id": 42, "verified": True, "line": 10},
-        })
+        event = DAPEvent(
+            seq=1,
+            event="breakpoint",
+            body={
+                "reason": "changed",
+                "breakpoint": {"id": 42, "verified": True, "line": 10},
+            },
+        )
         manager._on_breakpoint(event)
 
         assert manager.breakpoints.get_for_file("test.cs")[0].dap_line is None
@@ -91,10 +108,14 @@ class TestBreakpointEvents:
         bp = Breakpoint(file="test.cs", line=10, verified=True, id=42)
         manager.breakpoints.add(bp)
 
-        event = DAPEvent(seq=1, event="breakpoint", body={
-            "reason": "removed",
-            "breakpoint": {"id": 42},
-        })
+        event = DAPEvent(
+            seq=1,
+            event="breakpoint",
+            body={
+                "reason": "removed",
+                "breakpoint": {"id": 42},
+            },
+        )
         manager._on_breakpoint(event)
 
         bps = manager.breakpoints.get_for_file("test.cs")
@@ -102,19 +123,27 @@ class TestBreakpointEvents:
 
     def test_breakpoint_unknown_id_ignored(self, manager):
         """Changed event for unknown breakpoint ID is ignored."""
-        event = DAPEvent(seq=1, event="breakpoint", body={
-            "reason": "changed",
-            "breakpoint": {"id": 999, "verified": True},
-        })
+        event = DAPEvent(
+            seq=1,
+            event="breakpoint",
+            body={
+                "reason": "changed",
+                "breakpoint": {"id": 999, "verified": True},
+            },
+        )
         # Should not raise
         manager._on_breakpoint(event)
 
     def test_breakpoint_new_unknown_logged(self, manager):
         """New event for unknown breakpoint logs but doesn't crash."""
-        event = DAPEvent(seq=1, event="breakpoint", body={
-            "reason": "new",
-            "breakpoint": {"id": 100, "verified": True, "line": 5},
-        })
+        event = DAPEvent(
+            seq=1,
+            event="breakpoint",
+            body={
+                "reason": "new",
+                "breakpoint": {"id": 100, "verified": True, "line": 5},
+            },
+        )
         # Should not raise
         manager._on_breakpoint(event)
 
@@ -126,6 +155,7 @@ class TestResolveHitCountKey:
     def manager(self):
         with patch("netcoredbg_mcp.session.manager.DAPClient"):
             from netcoredbg_mcp.session import SessionManager
+
             m = SessionManager()
             return m
 
@@ -158,8 +188,6 @@ class TestResolveHitCountKey:
         the same resolved key. DAP-adjusted bps must see the incremented count."""
         bp = Breakpoint(file="C:/src/test.cs", line=10, id=1, dap_line=12)
         manager.breakpoints.add(bp)
-        norm = manager.breakpoints._normalize_path("C:/src/test.cs")
-
         # Simulate _update_hit_count writing by runtime line 12 -> resolved to 10
         write_key = manager._resolve_hit_count_key("C:/src/test.cs", 12)
         manager._state.hit_counts[write_key] = 5

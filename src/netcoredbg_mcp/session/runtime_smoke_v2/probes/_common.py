@@ -81,4 +81,4 @@ def attach_expected_and_status(
 def _matches(value: Any, expected: Any) -> bool:
     if isinstance(expected, str) and expected.startswith("contains:"):
         return expected.removeprefix("contains:") in str(value)
-    return value == expected
+    return bool(value == expected)

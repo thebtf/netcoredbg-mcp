@@ -51,9 +51,9 @@ async def test_focus_assertion_fails_when_focus_is_outside_selector() -> None:
 
 
 def test_bridge_focus_assertion_accepts_descendant_focus() -> None:
-    command = (
-        PROJECT_ROOT / "bridge" / "Commands" / "FocusCommands.cs"
-    ).read_text(encoding="utf-8")
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "FocusCommands.cs").read_text(
+        encoding="utf-8"
+    )
 
     assert "IsSameOrDescendant(expected, focused)" in command
     assert "SameRuntimeId(expected, current)" in command

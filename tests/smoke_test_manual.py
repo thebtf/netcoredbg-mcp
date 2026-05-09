@@ -136,7 +136,9 @@ async def test_stack_and_variables():
     print("\n2. STACK TRACE + EVALUATE + VARIABLES (existing functionality)")
     m = await new_session()
     try:
-        m.breakpoints.add(Breakpoint(file=SOURCE, line=_find_line("int={intVar}")))  # VariableInspection println
+        m.breakpoints.add(
+            Breakpoint(file=SOURCE, line=_find_line("int={intVar}"))
+        )  # VariableInspection println
         await m.launch(program=DLL, args=["variables"])
         snapshot = await m.wait_for_stopped(timeout=10)
 
@@ -145,27 +147,35 @@ async def test_stack_and_variables():
         # Stack trace
         frames = await m.get_stack_trace(levels=5)
         check("Stack trace has frames", len(frames) > 0, f"count={len(frames)}")
-        check("Top frame is VariableInspection",
-              frames[0].name.endswith("VariableInspection()") if frames else False,
-              f"got: {frames[0].name if frames else 'none'}")
+        check(
+            "Top frame is VariableInspection",
+            frames[0].name.endswith("VariableInspection()") if frames else False,
+            f"got: {frames[0].name if frames else 'none'}",
+        )
 
         fid = frames[0].id if frames else None
 
         # Evaluate expressions
         r = await m.evaluate("intVar", fid)
-        check("Evaluate intVar = 42",
-              r.get("result") == "42" if isinstance(r, dict) else False,
-              f"got: {r}")
+        check(
+            "Evaluate intVar = 42",
+            r.get("result") == "42" if isinstance(r, dict) else False,
+            f"got: {r}",
+        )
 
         r = await m.evaluate("stringVar", fid)
-        check("Evaluate stringVar = hello world",
-              "hello world" in str(r.get("result", "")) if isinstance(r, dict) else False,
-              f"got: {r}")
+        check(
+            "Evaluate stringVar = hello world",
+            "hello world" in str(r.get("result", "")) if isinstance(r, dict) else False,
+            f"got: {r}",
+        )
 
         r = await m.evaluate("listVar.Count", fid)
-        check("Evaluate listVar.Count = 5",
-              r.get("result") == "5" if isinstance(r, dict) else False,
-              f"got: {r}")
+        check(
+            "Evaluate listVar.Count = 5",
+            r.get("result") == "5" if isinstance(r, dict) else False,
+            f"got: {r}",
+        )
 
         # Get scopes + variables
         scopes = await m.get_scopes(fid)
@@ -176,16 +186,22 @@ async def test_stack_and_variables():
             if locals_ref:
                 variables = await m.get_variables(locals_ref)
                 var_names = [v.name for v in variables]
-                check("Local variables include intVar", "intVar" in var_names, f"vars: {var_names[:8]}")
+                check(
+                    "Local variables include intVar",
+                    "intVar" in var_names,
+                    f"vars: {var_names[:8]}",
+                )
                 check("Local variables include dictVar", "dictVar" in var_names)
 
         # Set variable
         try:
             await m.set_variable(locals_ref, "intVar", "99")
             r = await m.evaluate("intVar", fid)
-            check("Set variable changes value",
-                  r.get("result") == "99" if isinstance(r, dict) else False,
-                  f"got: {r}")
+            check(
+                "Set variable changes value",
+                r.get("result") == "99" if isinstance(r, dict) else False,
+                f"got: {r}",
+            )
         except Exception as e:
             check("Set variable", False, f"error: {e}")
 
@@ -200,7 +216,9 @@ async def test_stepping():
     print("\n3. STEPPING (step_over, step_into, step_out)")
     m = await new_session()
     try:
-        m.breakpoints.add(Breakpoint(file=SOURCE, line=_find_line("var mid = Middle(x + 1)")))  # Outer
+        m.breakpoints.add(
+            Breakpoint(file=SOURCE, line=_find_line("var mid = Middle(x + 1)"))
+        )  # Outer
         await m.launch(program=DLL, args=["stepping"])
         snapshot = await m.wait_for_stopped(timeout=10)
 
@@ -216,26 +234,33 @@ async def test_stepping():
             if frames and "Middle" in frames[0].name:
                 entered_middle = True
                 break
-        check("Step into enters Middle", entered_middle,
-              f"top: {frames[0].name if frames else 'none'}")
+        check(
+            "Step into enters Middle",
+            entered_middle,
+            f"top: {frames[0].name if frames else 'none'}",
+        )
 
         # Step over → stay in Middle (advance one line)
         m.prepare_for_execution()
         await m._client.step_over(m.state.current_thread_id)
         snapshot = await m.wait_for_stopped(timeout=5)
         frames = await m.get_stack_trace(levels=3)
-        check("Step over stays in Middle",
-              "Middle" in (frames[0].name if frames else ""),
-              f"top: {frames[0].name if frames else 'none'}")
+        check(
+            "Step over stays in Middle",
+            "Middle" in (frames[0].name if frames else ""),
+            f"top: {frames[0].name if frames else 'none'}",
+        )
 
         # Step out → back to Outer
         m.prepare_for_execution()
         await m._client.step_out(m.state.current_thread_id)
         snapshot = await m.wait_for_stopped(timeout=5)
         frames = await m.get_stack_trace(levels=3)
-        check("Step out returns to Outer",
-              "Outer" in (frames[0].name if frames else ""),
-              f"top: {frames[0].name if frames else 'none'}")
+        check(
+            "Step out returns to Outer",
+            "Outer" in (frames[0].name if frames else ""),
+            f"top: {frames[0].name if frames else 'none'}",
+        )
 
     finally:
         await m.stop()
@@ -250,7 +275,7 @@ async def test_output_categories():
     try:
         # Run "output" scenario to completion (no breakpoints)
         await m.launch(program=DLL, args=["output"])
-        snapshot = await m.wait_for_stopped(timeout=10)  # will terminate
+        await m.wait_for_stopped(timeout=10)  # will terminate
         # Give output events time to arrive
         await asyncio.sleep(0.5)
 
@@ -261,9 +286,11 @@ async def test_output_categories():
         check("Has stdout entries", len(stdout) > 0, f"count={len(stdout)}")
         check("Has stderr entries", len(stderr) > 0, f"count={len(stderr)}")
         check("Stdout contains expected text", "This is stdout output" in all_text)
-        check("Stderr contains expected text",
-              any("This is stderr output" in e.text for e in stderr),
-              f"stderr texts: {[e.text.strip() for e in stderr[:3]]}")
+        check(
+            "Stderr contains expected text",
+            any("This is stderr output" in e.text for e in stderr),
+            f"stderr texts: {[e.text.strip() for e in stderr[:3]]}",
+        )
 
         # Verify category filter logic
         stdout_text = "".join(e.text for e in stdout)
@@ -281,23 +308,30 @@ async def test_modules():
     m = await new_session()
     try:
         await m.launch(program=DLL, args=["hitcount"], stop_at_entry=True)
-        snapshot = await m.wait_for_stopped(timeout=10)
+        await m.wait_for_stopped(timeout=10)
         await asyncio.sleep(0.3)
 
-        check("Modules populated by events", len(m.state.modules) > 0, f"count={len(m.state.modules)}")
+        check(
+            "Modules populated by events", len(m.state.modules) > 0, f"count={len(m.state.modules)}"
+        )
 
         app_mod = [mod for mod in m.state.modules if "SmokeTestApp" in mod.name]
         check("SmokeTestApp module found", len(app_mod) > 0)
         if app_mod:
             check("Module has name", app_mod[0].name != "")
-            check("Module has symbol_status", app_mod[0].symbol_status is not None,
-                  f"status={app_mod[0].symbol_status}")
+            check(
+                "Module has symbol_status",
+                app_mod[0].symbol_status is not None,
+                f"status={app_mod[0].symbol_status}",
+            )
 
         # ModuleInfo.to_dict()
         if m.state.modules:
             d = m.state.modules[0].to_dict()
-            check("ModuleInfo.to_dict has expected keys",
-                  all(k in d for k in ("name", "path", "isOptimized", "symbolStatus")))
+            check(
+                "ModuleInfo.to_dict has expected keys",
+                all(k in d for k in ("name", "path", "isOptimized", "symbolStatus")),
+            )
 
     finally:
         await m.stop()
@@ -315,8 +349,11 @@ async def test_quick_evaluate():
         # Wait a bit for program to start running
         await asyncio.sleep(1.5)
 
-        check("Program is running", m.state.state == DebugState.RUNNING,
-              f"state={m.state.state.value}")
+        check(
+            "Program is running",
+            m.state.state == DebugState.RUNNING,
+            f"state={m.state.state.value}",
+        )
 
         if m.state.state != DebugState.RUNNING:
             print("  Skipping quick_evaluate — program not running")
@@ -328,31 +365,44 @@ async def test_quick_evaluate():
         if "error" in result and "0x8" in str(result.get("error", "")):
             # dbgshim version mismatch — evaluate fails at infrastructure level
             # This is NOT a code bug, but a known netcoredbg/dbgshim incompatibility
-            check("quick_evaluate: dbgshim mismatch detected (infra issue, not code bug)", True,
-                  f"error={result['error']}")
+            check(
+                "quick_evaluate: dbgshim mismatch detected (infra issue, not code bug)",
+                True,
+                f"error={result['error']}",
+            )
             print("    NOTE: Copy dbgshim.dll from .NET 8 SDK to fix. Skipping eval checks.")
         else:
-            check("quick_evaluate returns result",
-                  "result" in result and "error" not in result,
-                  f"result={result}")
-            check("quick_evaluate result correct",
-                  result.get("result") == "2",
-                  f"got: {result.get('result')}")
-            check("quick_evaluate type returned",
-                  result.get("type") == "int",
-                  f"got: {result.get('type')}")
+            check(
+                "quick_evaluate returns result",
+                "result" in result and "error" not in result,
+                f"result={result}",
+            )
+            check(
+                "quick_evaluate result correct",
+                result.get("result") == "2",
+                f"got: {result.get('result')}",
+            )
+            check(
+                "quick_evaluate type returned",
+                result.get("type") == "int",
+                f"got: {result.get('type')}",
+            )
 
             # Program should be running again after quick_evaluate
             await asyncio.sleep(0.2)
-            check("Program resumed after quick_evaluate",
-                  m.state.state == DebugState.RUNNING,
-                  f"state={m.state.state.value}")
+            check(
+                "Program resumed after quick_evaluate",
+                m.state.state == DebugState.RUNNING,
+                f"state={m.state.state.value}",
+            )
 
             # quick_evaluate with error expression
             result = await m.quick_evaluate("nonexistent_variable_xyz")
-            check("quick_evaluate returns error for bad expression",
-                  "error" in result,
-                  f"result={result}")
+            check(
+                "quick_evaluate returns error for bad expression",
+                "error" in result,
+                f"result={result}",
+            )
 
     finally:
         await m.stop()
@@ -377,17 +427,25 @@ async def test_exception_handling():
         await m._client.continue_execution(m.state.current_thread_id)
         snapshot = await m.wait_for_stopped(timeout=10)
 
-        check("Stopped on exception", snapshot.stop_reason == "exception",
-              f"reason={snapshot.stop_reason}")
+        check(
+            "Stopped on exception",
+            snapshot.stop_reason == "exception",
+            f"reason={snapshot.stop_reason}",
+        )
 
         # Get exception info
         try:
             info = await m.get_exception_info()
-            check("Exception info returned", isinstance(info, dict) and len(info) > 0,
-                  f"keys={list(info.keys())[:5] if isinstance(info, dict) else 'not dict'}")
-            check("Exception id contains IndexOutOfRange",
-                  "IndexOutOfRange" in str(info.get("exceptionId", "")),
-                  f"id={info.get('exceptionId', '')}")
+            check(
+                "Exception info returned",
+                isinstance(info, dict) and len(info) > 0,
+                f"keys={list(info.keys())[:5] if isinstance(info, dict) else 'not dict'}",
+            )
+            check(
+                "Exception id contains IndexOutOfRange",
+                "IndexOutOfRange" in str(info.get("exceptionId", "")),
+                f"id={info.get('exceptionId', '')}",
+            )
         except Exception as e:
             check("Exception info", False, f"error: {e}")
 
@@ -408,19 +466,26 @@ async def test_capabilities_and_terminate():
         caps = m.client.capabilities
         check("Capabilities is dict", isinstance(caps, dict))
         check("Has multiple capabilities", len(caps) > 3, f"count={len(caps)}")
-        check("supportsTerminateRequest = True",
-              caps.get("supportsTerminateRequest", False) is True)
-        check("supportsConditionalBreakpoints = True",
-              caps.get("supportsConditionalBreakpoints", False) is True)
-        check("supportsFunctionBreakpoints = True",
-              caps.get("supportsFunctionBreakpoints", False) is True)
+        check(
+            "supportsTerminateRequest = True", caps.get("supportsTerminateRequest", False) is True
+        )
+        check(
+            "supportsConditionalBreakpoints = True",
+            caps.get("supportsConditionalBreakpoints", False) is True,
+        )
+        check(
+            "supportsFunctionBreakpoints = True",
+            caps.get("supportsFunctionBreakpoints", False) is True,
+        )
 
         # Terminate gracefully
         await m.client.terminate()
         snapshot = await m.wait_for_stopped(timeout=5)
-        check("Graceful terminate succeeds",
-              snapshot.state == DebugState.TERMINATED,
-              f"state={snapshot.state.value}")
+        check(
+            "Graceful terminate succeeds",
+            snapshot.state == DebugState.TERMINATED,
+            f"state={snapshot.state.value}",
+        )
 
     finally:
         await m.stop()
@@ -474,15 +539,17 @@ async def test_threads_and_pause():
         m.prepare_for_execution()
         await m._client.pause(m.state.current_thread_id or threads[0].id)
         snapshot = await m.wait_for_stopped(timeout=5)
-        check("Pause succeeds", snapshot.state == DebugState.STOPPED,
-              f"reason={snapshot.stop_reason}")
+        check(
+            "Pause succeeds", snapshot.state == DebugState.STOPPED, f"reason={snapshot.stop_reason}"
+        )
 
         # Continue
         m.prepare_for_execution()
         await m._client.continue_execution(m.state.current_thread_id)
         await asyncio.sleep(0.3)
-        check("Continue resumes", m.state.state == DebugState.RUNNING,
-              f"state={m.state.state.value}")
+        check(
+            "Continue resumes", m.state.state == DebugState.RUNNING, f"state={m.state.state.value}"
+        )
 
     finally:
         await m.stop()
@@ -515,48 +582,60 @@ async def test_ui_invoke_toggle():
         # WinForms: AccessibleName maps to UIA Name (not AutomationId).
         # Try automation_id first (WPF/Avalonia), fall back to name (WinForms).
         # Narrow exception: element-not-found raises RuntimeError from backends.
-        _NOT_FOUND = (RuntimeError, LookupError)
+        not_found = (RuntimeError, LookupError)
 
         async def _with_name_fallback(method, element_id, **kwargs):
             """Call backend method by automation_id, fall back to name on not-found."""
             try:
                 return await method(automation_id=element_id, **kwargs)
-            except _NOT_FOUND:
+            except not_found:
                 return await method(name=element_id, **kwargs)
 
         # Test ui_invoke
         try:
             result = await _with_name_fallback(backend.invoke_element, "btnInvoke")
-            check("ui_invoke (btnInvoke)", result.get("invoked", False),
-                  f"method={result.get('method')}")
+            check(
+                "ui_invoke (btnInvoke)",
+                result.get("invoked", False),
+                f"method={result.get('method')}",
+            )
         except Exception as e:
             check("ui_invoke (btnInvoke)", False, str(e))
 
         # Test ui_toggle
         try:
             result = await _with_name_fallback(backend.toggle_element, "chkEnabled")
-            check("ui_toggle (chkEnabled)", result.get("toggled", False),
-                  f"newState={result.get('newState')}")
-            check("ui_toggle returns On", result.get("newState") == "On",
-                  f"got {result.get('newState')}")
+            check(
+                "ui_toggle (chkEnabled)",
+                result.get("toggled", False),
+                f"newState={result.get('newState')}",
+            )
+            check(
+                "ui_toggle returns On",
+                result.get("newState") == "On",
+                f"got {result.get('newState')}",
+            )
         except Exception as e:
             check("ui_toggle (chkEnabled)", False, str(e))
 
         # Test ui_toggle again to verify state cycle
         try:
             result = await _with_name_fallback(backend.toggle_element, "chkEnabled")
-            check("ui_toggle cycle Off", result.get("newState") == "Off",
-                  f"got {result.get('newState')}")
+            check(
+                "ui_toggle cycle Off",
+                result.get("newState") == "Off",
+                f"got {result.get('newState')}",
+            )
         except Exception as e:
             check("ui_toggle cycle", False, str(e))
 
         # Test scoped search: find_element with root_id
         try:
             result = await backend.find_element(
-                automation_id="btnScoped", root_id="settingsPanel",
+                automation_id="btnScoped",
+                root_id="settingsPanel",
             )
-            check("find_element with root_id", result.get("found", False),
-                  "found in settingsPanel")
+            check("find_element with root_id", result.get("found", False), "found in settingsPanel")
         except Exception as e:
             check("find_element with root_id", False, str(e))
 
@@ -564,11 +643,15 @@ async def test_ui_invoke_toggle():
         # WinForms: AccessibleName overrides UIA Name property
         # outerBtn has AccessibleName="btnOuter", so UIA Name="btnOuter"
         from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
         if isinstance(backend, FlaUIBackend):
             try:
                 result = await backend.find_by_xpath("//Button[@Name='btnOuter']")
-                check("find_by_xpath (Button)", result.get("found", False),
-                      f"matchCount={result.get('matchCount')}")
+                check(
+                    "find_by_xpath (Button)",
+                    result.get("found", False),
+                    f"matchCount={result.get('matchCount')}",
+                )
             except Exception as e:
                 check("find_by_xpath", False, str(e))
         else:
@@ -594,8 +677,11 @@ async def test_ui_invoke_toggle():
                 await asyncio.sleep(1.5)
                 await backend.send_keys("{ESCAPE}")
                 await asyncio.sleep(0.5)
-            check("ui_file_dialog", True,
-                  "opened and canceled" if opened else "button not in UIA tree — WinForms limitation")
+            check(
+                "ui_file_dialog",
+                True,
+                "opened and canceled" if opened else "button not in UIA tree — WinForms limitation",
+            )
         except Exception as e:
             check("ui_file_dialog", True, f"skipped — {e}")
 
@@ -632,7 +718,10 @@ async def test_datagrid_select():
                 result = await backend.find_element(automation_id="dataGrid")
             except (RuntimeError, LookupError):
                 result = await backend.find_element(name="dataGrid")
-            check("DataGrid found", result.get("found", False) if isinstance(result, dict) else result is not None)
+            check(
+                "DataGrid found",
+                result.get("found", False) if isinstance(result, dict) else result is not None,
+            )
         except Exception as e:
             check("DataGrid found", False, str(e))
             await backend.disconnect()
@@ -640,6 +729,7 @@ async def test_datagrid_select():
 
         # Select rows 0 and 2 (Alice and Charlie) via FlaUI multi_select
         from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
         if isinstance(backend, FlaUIBackend):
             try:
                 count = await backend.multi_select("dataGrid", [0, 2])
@@ -658,8 +748,11 @@ async def test_datagrid_select():
             # Find element by XPath within DataGrid
             try:
                 result = await backend.find_by_xpath("//DataItem")
-                check("DataGrid XPath DataItem", result.get("found", False),
-                      f"matchCount={result.get('matchCount')}")
+                check(
+                    "DataGrid XPath DataItem",
+                    result.get("found", False),
+                    f"matchCount={result.get('matchCount')}",
+                )
             except Exception as e:
                 check("DataGrid XPath DataItem", True, f"xpath not available: {e}")
         else:
@@ -709,8 +802,7 @@ async def test_multi_window_envelope():
         await backend.connect(pid)
 
         if not isinstance(backend, FlaUIBackend):
-            check("MultiWindow (skipped)", True,
-                  "pywinauto -- multi-window requires FlaUI bridge")
+            check("MultiWindow (skipped)", True, "pywinauto -- multi-window requires FlaUI bridge")
             await backend.disconnect()
             return
 
@@ -722,20 +814,26 @@ async def test_multi_window_envelope():
             windows = tree.get("windows")
             assert isinstance(windows, list)
 
-            check("MultiWindow: baseline envelope has main window only",
-                  len(windows) == 1,
-                  f"count={tree.get('count')}")
+            check(
+                "MultiWindow: baseline envelope has main window only",
+                len(windows) == 1,
+                f"count={tree.get('count')}",
+            )
 
             primary_val = tree.get("primary")
             primary = primary_val if isinstance(primary_val, str) else ""
-            check("MultiWindow: primary is main window name",
-                  isinstance(primary_val, str) and len(primary) > 0,
-                  f"primary={primary_val}")
+            check(
+                "MultiWindow: primary is main window name",
+                isinstance(primary_val, str) and len(primary) > 0,
+                f"primary={primary_val}",
+            )
 
             first = windows[0]
-            check("MultiWindow: main window has className field (Fix A guard)",
-                  isinstance(first, dict) and "className" in first,
-                  "className key missing -- BuildElementInfo Fix A regression")
+            check(
+                "MultiWindow: main window has className field (Fix A guard)",
+                isinstance(first, dict) and "className" in first,
+                "className key missing -- BuildElementInfo Fix A regression",
+            )
         except Exception as e:
             check("MultiWindow: baseline envelope", False, str(e))
             await backend.disconnect()
@@ -743,9 +841,7 @@ async def test_multi_window_envelope():
 
         # 2. Element cache populated from the walk
         cache_size = len(backend.element_cache)
-        check("MultiWindow: element cache populated",
-              cache_size > 0,
-              f"entries={cache_size}")
+        check("MultiWindow: element cache populated", cache_size > 0, f"entries={cache_size}")
 
         # 3. Open the second top-level window
         try:
@@ -762,16 +858,18 @@ async def test_multi_window_envelope():
             tree2 = await backend.get_window_tree(max_depth=3, max_children=50)
             assert isinstance(tree2, dict)
             windows2 = tree2.get("windows") or []
-            window_names = [
-                w.get("name", "") for w in windows2 if isinstance(w, dict)
-            ]
+            window_names = [w.get("name", "") for w in windows2 if isinstance(w, dict)]
             second_visible = any("Create collection" in n for n in window_names)
-            check("MultiWindow: second window visible as sibling",
-                  second_visible,
-                  f"names={window_names}")
-            check("MultiWindow: envelope reports count>=2",
-                  len(windows2) >= 2,
-                  f"count={tree2.get('count')}")
+            check(
+                "MultiWindow: second window visible as sibling",
+                second_visible,
+                f"names={window_names}",
+            )
+            check(
+                "MultiWindow: envelope reports count>=2",
+                len(windows2) >= 2,
+                f"count={tree2.get('count')}",
+            )
         except Exception as e:
             check("MultiWindow: envelope after open", False, str(e))
             await backend.disconnect()
@@ -780,18 +878,22 @@ async def test_multi_window_envelope():
         # 5. Switch into the second window
         try:
             result = await backend.switch_window(name="Create collection")
-            check("MultiWindow: switch_window to second window",
-                  isinstance(result, dict) and result.get("switched") is True,
-                  f"title={result.get('title') if isinstance(result, dict) else '?'}")
+            check(
+                "MultiWindow: switch_window to second window",
+                isinstance(result, dict) and result.get("switched") is True,
+                f"title={result.get('title') if isinstance(result, dict) else '?'}",
+            )
         except Exception as e:
             check("MultiWindow: switch_window to second window", False, str(e))
 
         # 6. Find an element inside the second window that doesn't exist in main
         try:
             found = await backend.find_element(automation_id="dlgInput")
-            check("MultiWindow: find TextBox in second window",
-                  isinstance(found, dict) and found.get("found", False),
-                  f"found={found.get('found') if isinstance(found, dict) else '?'}")
+            check(
+                "MultiWindow: find TextBox in second window",
+                isinstance(found, dict) and found.get("found", False),
+                f"found={found.get('found') if isinstance(found, dict) else '?'}",
+            )
         except Exception as e:
             check("MultiWindow: find TextBox in second window", False, str(e))
 
@@ -806,9 +908,11 @@ async def test_multi_window_envelope():
         # 8. Switch back to the main window
         try:
             result = await backend.switch_window(name=primary)
-            check("MultiWindow: switch back to main window",
-                  isinstance(result, dict) and result.get("switched") is True,
-                  f"title={result.get('title') if isinstance(result, dict) else '?'}")
+            check(
+                "MultiWindow: switch back to main window",
+                isinstance(result, dict) and result.get("switched") is True,
+                f"title={result.get('title') if isinstance(result, dict) else '?'}",
+            )
         except Exception as e:
             check("MultiWindow: switch back to main", False, str(e))
 
@@ -819,9 +923,11 @@ async def test_multi_window_envelope():
                 await backend.switch_window(name="___no_such_window_xyzzy___")
             except Exception as err:
                 unknown_error = str(err)
-            check("MultiWindow: switch_window rejects unknown window",
-                  unknown_error is not None and "No top-level window" in (unknown_error or ""),
-                  f"error={unknown_error}")
+            check(
+                "MultiWindow: switch_window rejects unknown window",
+                unknown_error is not None and "No top-level window" in (unknown_error or ""),
+                f"error={unknown_error}",
+            )
         except Exception as e:
             check("MultiWindow: switch_window rejects unknown window", False, str(e))
 
@@ -870,9 +976,11 @@ async def test_drag_primitive():
         try:
             info = await backend.find_element(automation_id="dragList")
             rect = info.get("rect") if isinstance(info, dict) else None
-            check("Drag: dragList present",
-                  isinstance(rect, dict) and rect.get("width", 0) > 0,
-                  f"rect={rect}")
+            check(
+                "Drag: dragList present",
+                isinstance(rect, dict) and rect.get("width", 0) > 0,
+                f"rect={rect}",
+            )
             if not rect or not rect.get("width"):
                 await backend.disconnect()
                 return
@@ -884,7 +992,7 @@ async def test_drag_primitive():
         # Compute coordinates for row 0 and row 3 (approximate via item height
         # ≈ 15 px; WinForms ListBox default font).
         x0 = rect["x"] + rect["width"] // 2
-        y0 = rect["y"] + 10          # first item centre
+        y0 = rect["y"] + 10  # first item centre
         y3 = rect["y"] + 10 + 15 * 3  # fourth item centre
 
         drag_item_names = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"]
@@ -900,11 +1008,16 @@ async def test_drag_primitive():
 
         def _duration_matches_requested_speed(result: dict, requested_speed_ms: int) -> bool:
             duration_ms = result.get("duration_ms")
-            return isinstance(duration_ms, (int, float)) and abs(duration_ms - requested_speed_ms) <= requested_speed_ms * 0.20
+            return (
+                isinstance(duration_ms, (int, float))
+                and abs(duration_ms - requested_speed_ms) <= requested_speed_ms * 0.20
+            )
 
         async def _read_drag_order() -> tuple[list[str] | None, str]:
             try:
-                extract_result = await backend.client.call("extract_text", {"automationId": "dragList"})
+                extract_result = await backend.client.call(
+                    "extract_text", {"automationId": "dragList"}
+                )
             except Exception as e:
                 return None, str(e)
 
@@ -917,20 +1030,23 @@ async def test_drag_primitive():
 
             order = _parse_drag_order(extracted_text)
             if len(order) < len(drag_item_names):
-                return None, f"partial order from {extract_result.get('source')}: {extracted_text!r}"
+                return (
+                    None,
+                    f"partial order from {extract_result.get('source')}: {extracted_text!r}",
+                )
 
             return order, f"source={extract_result.get('source')}, order={order}"
 
         current_order, order_detail = await _read_drag_order()
         readback_available = current_order is not None
         if readback_available:
-            check("Drag: initial order readable",
-                  current_order[0] == "Alpha",
-                  order_detail)
+            check("Drag: initial order readable", current_order[0] == "Alpha", order_detail)
         else:
-            check("Drag: initial order readback unavailable",
-                  True,
-                  f"falling back to duration checks ({order_detail})")
+            check(
+                "Drag: initial order readback unavailable",
+                True,
+                f"falling back to duration checks ({order_detail})",
+            )
 
         drag_results: list[tuple[str, int, dict]] = []
         drag_cases = [
@@ -943,9 +1059,11 @@ async def test_drag_primitive():
             try:
                 result = await backend.drag(x0, y0, x0, y3, speed_ms=requested_speed)
                 drag_results.append((label, requested_speed, result))
-                check(f"Drag: {label} speed_ms={requested_speed} returns structured response",
-                      isinstance(result, dict) and result.get("dragged") is True,
-                      f"result={result}")
+                check(
+                    f"Drag: {label} speed_ms={requested_speed} returns structured response",
+                    isinstance(result, dict) and result.get("dragged") is True,
+                    f"result={result}",
+                )
             except Exception as e:
                 check(f"Drag: {label} speed_ms={requested_speed}", False, str(e))
                 continue
@@ -956,30 +1074,41 @@ async def test_drag_primitive():
             next_order, next_order_detail = await _read_drag_order()
             if previous_order is not None and next_order is not None:
                 if label == "default":
-                    check("Drag: default drag reorders list",
-                          next_order != previous_order and next_order[0] != "Alpha",
-                          f"before={previous_order}, after={next_order}")
+                    check(
+                        "Drag: default drag reorders list",
+                        next_order != previous_order and next_order[0] != "Alpha",
+                        f"before={previous_order}, after={next_order}",
+                    )
                 else:
-                    check(f"Drag: {label} drag reorders list",
-                          next_order != previous_order,
-                          f"before={previous_order}, after={next_order}")
+                    check(
+                        f"Drag: {label} drag reorders list",
+                        next_order != previous_order,
+                        f"before={previous_order}, after={next_order}",
+                    )
                 current_order = next_order
                 continue
 
             readback_available = False
             current_order = next_order or current_order
-            check(f"Drag: {label} reorder readback unavailable",
-                  True,
-                  f"falling back to duration checks ({next_order_detail})")
+            check(
+                f"Drag: {label} reorder readback unavailable",
+                True,
+                f"falling back to duration checks ({next_order_detail})",
+            )
 
         if not readback_available:
-            check("Drag: fallback has 3 successful drags",
-                  len(drag_results) == 3 and all(result.get("dragged") is True for _, _, result in drag_results),
-                  f"results={drag_results}")
+            check(
+                "Drag: fallback has 3 successful drags",
+                len(drag_results) == 3
+                and all(result.get("dragged") is True for _, _, result in drag_results),
+                f"results={drag_results}",
+            )
             for label, requested_speed, result in drag_results:
-                check(f"Drag: {label} duration stays within ±20%",
-                      _duration_matches_requested_speed(result, requested_speed),
-                      f"requested={requested_speed}, duration={result.get('duration_ms')}")
+                check(
+                    f"Drag: {label} duration stays within ±20%",
+                    _duration_matches_requested_speed(result, requested_speed),
+                    f"requested={requested_speed}, duration={result.get('duration_ms')}",
+                )
 
         # Below safety floor — must error out
         try:
@@ -988,10 +1117,12 @@ async def test_drag_primitive():
                 await backend.drag(x0, y0, x0, y3, speed_ms=10)
             except Exception as inner:
                 below_floor_error = str(inner)
-            check("Drag: speed_ms=10 rejected below safety floor",
-                  below_floor_error is not None and
-                  ("drag-threshold" in below_floor_error or "speed_ms" in below_floor_error),
-                  f"error={below_floor_error}")
+            check(
+                "Drag: speed_ms=10 rejected below safety floor",
+                below_floor_error is not None
+                and ("drag-threshold" in below_floor_error or "speed_ms" in below_floor_error),
+                f"error={below_floor_error}",
+            )
         except Exception as e:
             check("Drag: speed_ms=10 rejected below safety floor", False, str(e))
 
@@ -1002,9 +1133,11 @@ async def test_drag_primitive():
                 await backend.drag(x0, y0, x0, y0, speed_ms=200)
             except Exception as inner:
                 same_point_error = str(inner)
-            check("Drag: identical from/to coords rejected",
-                  same_point_error is not None and "identical" in same_point_error.lower(),
-                  f"error={same_point_error}")
+            check(
+                "Drag: identical from/to coords rejected",
+                same_point_error is not None and "identical" in same_point_error.lower(),
+                f"error={same_point_error}",
+            )
         except Exception as e:
             check("Drag: identical from/to coords rejected", False, str(e))
 
@@ -1050,7 +1183,9 @@ async def test_system_event_theme():
 
         # Read current theme from HKCU registry
         import winreg
+
         key_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+
         def _read_theme() -> int:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
                 val, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
@@ -1059,8 +1194,9 @@ async def test_system_event_theme():
         try:
             initial = _read_theme()
             initial_name = "light" if initial == 1 else "dark"
-            check("SystemEvent: initial theme readable", True,
-                  f"initial={initial_name} ({initial})")
+            check(
+                "SystemEvent: initial theme readable", True, f"initial={initial_name} ({initial})"
+            )
         except Exception as e:
             check("SystemEvent: initial theme readable", False, str(e))
             await backend.disconnect()
@@ -1070,18 +1206,22 @@ async def test_system_event_theme():
             # First toggle — flip
             try:
                 result = await backend.send_system_event("theme_change", mode="toggle")
-                check("SystemEvent: toggle returns {event, from, to}",
-                      isinstance(result, dict)
-                      and result.get("event") == "theme_change"
-                      and result.get("from") == initial_name
-                      and result.get("to") != initial_name,
-                      f"result={result}")
+                check(
+                    "SystemEvent: toggle returns {event, from, to}",
+                    isinstance(result, dict)
+                    and result.get("event") == "theme_change"
+                    and result.get("from") == initial_name
+                    and result.get("to") != initial_name,
+                    f"result={result}",
+                )
 
                 await asyncio.sleep(0.3)
                 after_first = _read_theme()
-                check("SystemEvent: registry flipped",
-                      after_first != initial,
-                      f"{initial} -> {after_first}")
+                check(
+                    "SystemEvent: registry flipped",
+                    after_first != initial,
+                    f"{initial} -> {after_first}",
+                )
             except Exception as e:
                 check("SystemEvent: first toggle", False, str(e))
                 return
@@ -1089,13 +1229,17 @@ async def test_system_event_theme():
             # Second toggle — flip back to initial
             try:
                 result = await backend.send_system_event("theme_change", mode="toggle")
-                check("SystemEvent: second toggle restores",
-                      isinstance(result, dict) and result.get("to") == initial_name)
+                check(
+                    "SystemEvent: second toggle restores",
+                    isinstance(result, dict) and result.get("to") == initial_name,
+                )
                 await asyncio.sleep(0.3)
                 restored = _read_theme()
-                check("SystemEvent: registry restored to initial",
-                      restored == initial,
-                      f"expected={initial}, got={restored}")
+                check(
+                    "SystemEvent: registry restored to initial",
+                    restored == initial,
+                    f"expected={initial}, got={restored}",
+                )
             except Exception as e:
                 check("SystemEvent: second toggle / restore", False, str(e))
 
@@ -1106,9 +1250,11 @@ async def test_system_event_theme():
                     await backend.send_system_event("unknown_event", mode="toggle")
                 except Exception as inner:
                     unsupported_error = str(inner)
-                check("SystemEvent: unknown event rejected",
-                      unsupported_error is not None,
-                      f"error={unsupported_error}")
+                check(
+                    "SystemEvent: unknown event rejected",
+                    unsupported_error is not None,
+                    f"error={unsupported_error}",
+                )
             except Exception as e:
                 check("SystemEvent: unknown event rejected", False, str(e))
         finally:
@@ -1166,21 +1312,24 @@ async def test_persistent_modifier_hold():
         # Baseline: no held modifiers
         try:
             held = await backend.get_held_modifiers()
-            check("ModHold: baseline empty",
-                  isinstance(held, dict) and held.get("modifiers") == [],
-                  f"held={held}")
+            check(
+                "ModHold: baseline empty",
+                isinstance(held, dict) and held.get("modifiers") == [],
+                f"held={held}",
+            )
         except Exception as e:
             check("ModHold: baseline empty", False, str(e))
 
         # Hold Ctrl
         try:
             result = await backend.hold_modifiers(["ctrl"])
-            check("ModHold: hold_modifiers([\"ctrl\"]) succeeds",
-                  isinstance(result, dict))
+            check('ModHold: hold_modifiers(["ctrl"]) succeeds', isinstance(result, dict))
             held = await backend.get_held_modifiers()
-            check("ModHold: ctrl held after hold_modifiers",
-                  isinstance(held, dict) and "ctrl" in held.get("modifiers", []),
-                  f"held={held}")
+            check(
+                "ModHold: ctrl held after hold_modifiers",
+                isinstance(held, dict) and "ctrl" in held.get("modifiers", []),
+                f"held={held}",
+            )
         except Exception as e:
             check("ModHold: hold_modifiers ctrl", False, str(e))
             # Defensive release if mid-hold failure
@@ -1204,8 +1353,7 @@ async def test_persistent_modifier_hold():
                 for y in ys:
                     await backend.client.call("click", {"x": x, "y": y})
                     await asyncio.sleep(0.15)
-                check("ModHold: 3 Ctrl+clicks dispatched", True,
-                      f"ys={ys}")
+                check("ModHold: 3 Ctrl+clicks dispatched", True, f"ys={ys}")
         except Exception as e:
             check("ModHold: 3 Ctrl+clicks dispatched", False, str(e))
 
@@ -1234,23 +1382,31 @@ async def test_persistent_modifier_hold():
 
             selected_names = await loop.run_in_executor(None, _read_selected_multi_items)
             if selected_names:
-                check("ModHold: Ctrl+click leaves multiple items selected",
-                      len(selected_names) >= 2,
-                      f"selected={selected_names}")
+                check(
+                    "ModHold: Ctrl+click leaves multiple items selected",
+                    len(selected_names) >= 2,
+                    f"selected={selected_names}",
+                )
             else:
-                check("ModHold: selection readback unavailable",
-                      True,
-                      "falling back to held-modifier assertions")
+                check(
+                    "ModHold: selection readback unavailable",
+                    True,
+                    "falling back to held-modifier assertions",
+                )
         except Exception as e:
-            check("ModHold: selection readback unavailable",
-                  True,
-                  f"falling back to held-modifier assertions ({e})")
+            check(
+                "ModHold: selection readback unavailable",
+                True,
+                f"falling back to held-modifier assertions ({e})",
+            )
 
         try:
             held = await backend.get_held_modifiers()
-            check("ModHold: ctrl still held before release",
-                  isinstance(held, dict) and "ctrl" in held.get("modifiers", []),
-                  f"held={held}")
+            check(
+                "ModHold: ctrl still held before release",
+                isinstance(held, dict) and "ctrl" in held.get("modifiers", []),
+                f"held={held}",
+            )
         except Exception as e:
             check("ModHold: ctrl still held before release", False, str(e))
 
@@ -1259,9 +1415,11 @@ async def test_persistent_modifier_hold():
             await backend.hold_modifiers(["shift"])
             held = await backend.get_held_modifiers()
             mods = set(held.get("modifiers", [])) if isinstance(held, dict) else set()
-            check("ModHold: nested hold composes ctrl + shift",
-                  {"ctrl", "shift"}.issubset(mods),
-                  f"held={sorted(mods)}")
+            check(
+                "ModHold: nested hold composes ctrl + shift",
+                {"ctrl", "shift"}.issubset(mods),
+                f"held={sorted(mods)}",
+            )
         except Exception as e:
             check("ModHold: nested hold composes ctrl + shift", False, str(e))
 
@@ -1269,11 +1427,13 @@ async def test_persistent_modifier_hold():
         try:
             await backend.release_modifiers("all")
             held = await backend.get_held_modifiers()
-            check("ModHold: release_modifiers(\"all\") clears set",
-                  isinstance(held, dict) and held.get("modifiers") == [],
-                  f"held={held}")
+            check(
+                'ModHold: release_modifiers("all") clears set',
+                isinstance(held, dict) and held.get("modifiers") == [],
+                f"held={held}",
+            )
         except Exception as e:
-            check("ModHold: release_modifiers(\"all\") clears set", False, str(e))
+            check('ModHold: release_modifiers("all") clears set', False, str(e))
 
         # Unknown modifier name
         try:
@@ -1282,9 +1442,11 @@ async def test_persistent_modifier_hold():
                 await backend.hold_modifiers(["super"])
             except Exception as inner:
                 unknown_error = str(inner)
-            check("ModHold: unknown modifier rejected",
-                  unknown_error is not None,
-                  f"error={unknown_error}")
+            check(
+                "ModHold: unknown modifier rejected",
+                unknown_error is not None,
+                f"error={unknown_error}",
+            )
         except Exception as e:
             check("ModHold: unknown modifier rejected", False, str(e))
 
@@ -1308,6 +1470,7 @@ async def test_scoped_search_performance():
     print("\n--- Scoped Search Performance (NFR-2) ---")
 
     import time as _time
+
     from netcoredbg_mcp.ui.backend import create_backend
 
     m = SessionManager()
@@ -1344,8 +1507,10 @@ async def test_scoped_search_performance():
         check(
             "Scoped search timing",
             True,
-            f"full={avg_full*1000:.1f}ms, scoped={avg_scoped*1000:.1f}ms, "
-            f"ratio={avg_full/avg_scoped:.1f}x" if avg_scoped > 0 else "scoped=0ms",
+            f"full={avg_full * 1000:.1f}ms, scoped={avg_scoped * 1000:.1f}ms, "
+            f"ratio={avg_full / avg_scoped:.1f}x"
+            if avg_scoped > 0
+            else "scoped=0ms",
         )
         # NFR-2: scoped should be measurably faster for trees with 100+ elements
         # SmokeTestApp has ~15 elements, so the difference may be small
@@ -1353,9 +1518,11 @@ async def test_scoped_search_performance():
         # Performance comparison is informational on small trees (< 100 elements)
         # Hard assert would flake due to measurement noise
         is_faster = avg_scoped <= avg_full * 1.5
-        print(f"  [INFO] Scoped search not slower than full: "
-              f"{'PASS' if is_faster else 'WARN'} — "
-              f"scoped={avg_scoped*1000:.1f}ms <= full*1.5={avg_full*1.5*1000:.1f}ms")
+        print(
+            f"  [INFO] Scoped search not slower than full: "
+            f"{'PASS' if is_faster else 'WARN'} — "
+            f"scoped={avg_scoped * 1000:.1f}ms <= full*1.5={avg_full * 1.5 * 1000:.1f}ms"
+        )
 
         await backend.disconnect()
 
@@ -1370,8 +1537,8 @@ async def test_tracepoints():
     """Scenario 13: Tracepoints — unit test TracepointManager directly."""
     print("\n--- Tracepoints ---")
 
-    from netcoredbg_mcp.session.tracepoints import TracepointManager
     from netcoredbg_mcp.session.state import TraceEntry
+    from netcoredbg_mcp.session.tracepoints import TracepointManager
 
     mgr = TracepointManager()
 
@@ -1384,6 +1551,7 @@ async def test_tracepoints():
 
     # Simulate trace entries
     import time
+
     mgr._trace_buffer.append(TraceEntry(time.monotonic(), "Program.cs", 15, "i", "1", 1, "tp-1"))
     mgr._trace_buffer.append(TraceEntry(time.monotonic(), "Program.cs", 15, "i", "2", 1, "tp-1"))
     mgr._trace_buffer.append(TraceEntry(time.monotonic(), "Program.cs", 20, "sum", "3", 1, "tp-2"))
@@ -1421,14 +1589,26 @@ async def test_snapshots():
 
     # Manually create snapshots (avoid needing real debug session)
     import time
-    snap1 = Snapshot(name="before", timestamp=time.monotonic(), frame_name="Main",
-                     variables={"x": SnapshotVar("42", "int"), "name": SnapshotVar("hello", "string")})
+
+    snap1 = Snapshot(
+        name="before",
+        timestamp=time.monotonic(),
+        frame_name="Main",
+        variables={"x": SnapshotVar("42", "int"), "name": SnapshotVar("hello", "string")},
+    )
     mgr._snapshots["before"] = snap1
     check("Snapshot stored", "before" in mgr.snapshots)
 
-    snap2 = Snapshot(name="after", timestamp=time.monotonic(), frame_name="Main",
-                     variables={"x": SnapshotVar("100", "int"), "name": SnapshotVar("hello", "string"),
-                                "y": SnapshotVar("new", "string")})
+    snap2 = Snapshot(
+        name="after",
+        timestamp=time.monotonic(),
+        frame_name="Main",
+        variables={
+            "x": SnapshotVar("100", "int"),
+            "name": SnapshotVar("hello", "string"),
+            "y": SnapshotVar("new", "string"),
+        },
+    )
     mgr._snapshots["after"] = snap2
 
     # Diff
@@ -1455,7 +1635,9 @@ async def test_collection_and_object():
 
     m = await new_session()
     try:
-        m.breakpoints.add(Breakpoint(file=SOURCE, line=_find_line("int={intVar}")))  # VariableInspection println
+        m.breakpoints.add(
+            Breakpoint(file=SOURCE, line=_find_line("int={intVar}"))
+        )  # VariableInspection println
         await m.launch(program=DLL, args=["variables"])
         snapshot = await m.wait_for_stopped(timeout=10.0)
         check("Stopped at variables", snapshot is not None)
@@ -1514,11 +1696,14 @@ async def test_tracepoint_performance():
     print("\n--- Tracepoint Performance (NFR-1) ---")
 
     import time as _time
+
     from netcoredbg_mcp.session.tracepoints import TracepointManager
 
     m = await new_session()
     try:
-        m.breakpoints.add(Breakpoint(file=SOURCE, line=_find_line("Tick {i}/30")))  # Tick line in LongRunning
+        m.breakpoints.add(
+            Breakpoint(file=SOURCE, line=_find_line("Tick {i}/30"))
+        )  # Tick line in LongRunning
         await m.launch(program=DLL, args=["longrun"])
 
         mgr = TracepointManager()
@@ -1536,7 +1721,9 @@ async def test_tracepoint_performance():
         cycle_ms = (_time.monotonic() - t0) * 1000
 
         check("Tracepoint cycle time measured", True, f"actual={cycle_ms:.1f}ms")
-        check("Tracepoint cycle < 500ms", cycle_ms < 500, f"actual={cycle_ms:.1f}ms (500ms timeout)")
+        check(
+            "Tracepoint cycle < 500ms", cycle_ms < 500, f"actual={cycle_ms:.1f}ms (500ms timeout)"
+        )
         check("Trace entry logged", len(mgr.get_log()) >= 1)
 
         if mgr.get_log():
@@ -1561,7 +1748,7 @@ async def test_tracepoint_auto_resume():
         mgr = TracepointManager()
         m._tracepoint_manager = mgr
         tp_line = _find_line("sum += i")
-        tp = mgr.add(SOURCE, tp_line, "i")
+        mgr.add(SOURCE, tp_line, "i")
 
         # Set real DAP breakpoint for the tracepoint
         await m.add_breakpoint(SOURCE, tp_line)
@@ -1580,7 +1767,11 @@ async def test_tracepoint_auto_resume():
         check("Trace log has entries", len(mgr.get_log()) > 0, f"entries={len(mgr.get_log())}")
 
         if mgr.get_log():
-            check("Tracepoint logged values", mgr.get_log()[0].value != "", f"value={mgr.get_log()[0].value}")
+            check(
+                "Tracepoint logged values",
+                mgr.get_log()[0].value != "",
+                f"value={mgr.get_log()[0].value}",
+            )
 
     finally:
         await m.stop()
@@ -1603,6 +1794,7 @@ async def test_path_validation_worktrees():
     old = os.environ.get("NETCOREDBG_ALLOWED_PATHS", "")
     try:
         import tempfile
+
         tmp = tempfile.mkdtemp()
         os.environ["NETCOREDBG_ALLOWED_PATHS"] = tmp
         validated = m.validate_path(os.path.join(tmp, "test.cs"))
@@ -1620,14 +1812,16 @@ async def test_path_validation_worktrees():
         except ValueError:
             check("Outside path rejected", True)
     else:
-        check("Outside path rejected (skipped — no project_path)", True, "scope check requires project_path")
+        check(
+            "Outside path rejected (skipped — no project_path)",
+            True,
+            "scope check requires project_path",
+        )
 
 
 async def test_heartbeat_during_wait():
     """Scenario 19: Heartbeat fires during long wait_for_stopped."""
     print("\n--- Heartbeat During Wait ---")
-
-    import time as _time
 
     m = await new_session()
     try:
@@ -1643,14 +1837,15 @@ async def test_heartbeat_during_wait():
         m.prepare_for_execution()
         await m._client.continue_execution(m.state.current_thread_id or 1)
 
-        t0 = _time.monotonic()
         snapshot = await m.wait_for_stopped(timeout=15.0, heartbeat_callback=on_heartbeat)
-        elapsed = _time.monotonic() - t0
 
         check("Long run completed", snapshot is not None)
         check("Heartbeat fired", len(heartbeats) >= 1, f"count={len(heartbeats)}")
-        check("Heartbeat timing reasonable", heartbeats[0] >= 4.0 if heartbeats else False,
-              f"first={heartbeats[0]:.1f}s" if heartbeats else "none")
+        check(
+            "Heartbeat timing reasonable",
+            heartbeats[0] >= 4.0 if heartbeats else False,
+            f"first={heartbeats[0]:.1f}s" if heartbeats else "none",
+        )
 
     finally:
         await m.stop()
@@ -1659,6 +1854,7 @@ async def test_heartbeat_during_wait():
 # ─────────────────────────────────────────────────────────────
 # v0.11.1 scenarios
 # ─────────────────────────────────────────────────────────────
+
 
 async def test_window_lifecycle():
     """Scenario: maximize → minimize → restore → close (via WindowPattern)."""
@@ -1897,7 +2093,8 @@ async def test_realize_virtualized_item():
                 # WinForms fixture does NOT exercise true VirtualizedItemPattern —
                 # the element is already accessible before realize is called.
                 # Note: WinForms ListBox is not truly virtualized; for full VirtualizingStackPanel
-                # coverage, a WPF fixture is needed (tracked in .agent/specs/flaui-pattern-expansion/spec.md
+                # coverage, a WPF fixture is needed (tracked in the local
+                # flaui-pattern-expansion spec under .agent/specs/).
                 # under "v0.11.2 deferred scope").
                 print(
                     "  [WARNING] VirtList_Row_150 is already accessible before realize — "
@@ -1935,7 +2132,11 @@ async def test_realize_virtualized_item():
                     f"find_element returned: {post}",
                 )
                 if post_found:
-                    rect = post.get("rect") or post.get("bounding_rect") or post.get("BoundingRectangle")
+                    rect = (
+                        post.get("rect")
+                        or post.get("bounding_rect")
+                        or post.get("BoundingRectangle")
+                    )
                     check(
                         "VirtList_Row_150 has valid bounding_rect after realize",
                         rect is not None,
@@ -2003,9 +2204,11 @@ async def test_clipboard_roundtrip():
             )
 
             # Unicode round-trip
-            unicode_text = "emoji \U0001F389 \u00fcnic\u00f6de"
+            unicode_text = "emoji \U0001f389 \u00fcnic\u00f6de"
             write_result2 = await backend.clipboard_write(unicode_text)
-            check("Clipboard write unicode", write_result2.get("written") is True, str(write_result2))
+            check(
+                "Clipboard write unicode", write_result2.get("written") is True, str(write_result2)
+            )
 
             read_result2 = await backend.clipboard_read()
             check(
@@ -2078,11 +2281,13 @@ async def test_instrumentation_group_lifecycle():
     try:
         bp_line = _find_line("sum += i")
         trace_line = _find_line("return sum;")
-        created = (await m.instrumentation.create_group(
-            "manual_flow",
-            breakpoints=[{"file": SOURCE, "line": bp_line}],
-            tracepoints=[{"file": SOURCE, "line": trace_line, "expression": "sum"}],
-        )).to_dict()
+        created = (
+            await m.instrumentation.create_group(
+                "manual_flow",
+                breakpoints=[{"file": SOURCE, "line": bp_line}],
+                tracepoints=[{"file": SOURCE, "line": trace_line, "expression": "sum"}],
+            )
+        ).to_dict()
         tracepoint_id = created["tracepoints"][0]["id"]
         norm = m.breakpoints._normalize_path(SOURCE)
         m.state.hit_counts[(norm, bp_line)] = 2
@@ -2186,32 +2391,36 @@ async def test_runtime_smoke_bounded_runner():
             m,
             service_adapters={"append_output": append_output},
         )
-        passed_result = await runner.run({
-            "name": "manual-bounded-pass",
-            "budgets": {"max_actions": 4, "max_elapsed_seconds": 10},
-            "actions": [
-                {"name": "output_checkpoint", "args": {"name": "manual_runner"}},
-                {"name": "append_output", "args": {"text": "runner ready\n"}},
-            ],
-            "assertions": [
-                {
-                    "name": "output_assert_since",
-                    "args": {"checkpoint": "manual_runner", "required": ["runner ready"]},
-                }
-            ],
-        })
-        failed_result = await runner.run({
-            "name": "manual-bounded-fail",
-            "actions": [
-                {"name": "output_checkpoint", "args": {"name": "manual_runner_fail"}},
-            ],
-            "assertions": [
-                {
-                    "name": "output_assert_since",
-                    "args": {"checkpoint": "manual_runner_fail", "required": ["missing"]},
-                }
-            ],
-        })
+        passed_result = await runner.run(
+            {
+                "name": "manual-bounded-pass",
+                "budgets": {"max_actions": 4, "max_elapsed_seconds": 10},
+                "actions": [
+                    {"name": "output_checkpoint", "args": {"name": "manual_runner"}},
+                    {"name": "append_output", "args": {"text": "runner ready\n"}},
+                ],
+                "assertions": [
+                    {
+                        "name": "output_assert_since",
+                        "args": {"checkpoint": "manual_runner", "required": ["runner ready"]},
+                    }
+                ],
+            }
+        )
+        failed_result = await runner.run(
+            {
+                "name": "manual-bounded-fail",
+                "actions": [
+                    {"name": "output_checkpoint", "args": {"name": "manual_runner_fail"}},
+                ],
+                "assertions": [
+                    {
+                        "name": "output_assert_since",
+                        "args": {"checkpoint": "manual_runner_fail", "required": ["missing"]},
+                    }
+                ],
+            }
+        )
 
         print(f"  pass compact: {passed_result['compact']}")
         print(f"  fail compact: {failed_result['compact']}")
@@ -2445,9 +2654,7 @@ async def test_wpf_shift_datagrid_evidence():
         range_result = await assert_grid_range(backend, selector, 0, 2)
         text_result = await backend.extract_text(automation_id="txtOutput")
         status_text = (
-            text_result.get("text", "")
-            if isinstance(text_result, dict)
-            else str(text_result)
+            text_result.get("text", "") if isinstance(text_result, dict) else str(text_result)
         )
 
         evidence = {
@@ -2568,7 +2775,11 @@ async def test_wpf_one_call_runtime_smoke_workflow():
                         "start_index": 0,
                         "end_index": 1,
                     },
-                    {"id": "before_assign", "op": "debug.output_checkpoint", "name": "before_assign"},
+                    {
+                        "id": "before_assign",
+                        "op": "debug.output_checkpoint",
+                        "name": "before_assign",
+                    },
                     {
                         "id": "assign_character",
                         "op": "ui.list.invoke_item",
@@ -2580,7 +2791,9 @@ async def test_wpf_one_call_runtime_smoke_workflow():
                         "id": "assign_output",
                         "op": "debug.output_assert_since",
                         "checkpoint": "before_assign",
-                        "required": ["WpfWorkflow AssignCharacter route=ListInvoke selectedCount=2"],
+                        "required": [
+                            "WpfWorkflow AssignCharacter route=ListInvoke selectedCount=2"
+                        ],
                         "forbidden": ["manual primitive fallback"],
                     },
                     {
@@ -2609,7 +2822,11 @@ async def test_wpf_one_call_runtime_smoke_workflow():
                             },
                         ],
                     },
-                    {"id": "before_gender", "op": "debug.output_checkpoint", "name": "before_gender"},
+                    {
+                        "id": "before_gender",
+                        "op": "debug.output_checkpoint",
+                        "name": "before_gender",
+                    },
                     {
                         "id": "toggle_gender",
                         "op": "ui.list.toggle_item_child",
@@ -2963,9 +3180,7 @@ async def test_avalonia_ui_fixture_compatibility():
         )
         text_result = await backend.extract_text(automation_id="txtOutput")
         status_text = (
-            text_result.get("text", "")
-            if isinstance(text_result, dict)
-            else str(text_result)
+            text_result.get("text", "") if isinstance(text_result, dict) else str(text_result)
         )
         try:
             grid_result = await read_grid_visible_rows(backend, selector)
@@ -3054,31 +3269,37 @@ def get_scenarios():
     ]
 
     if GUI_ENABLED:
-        scenarios.extend([
-            ("UI Invoke + Toggle + Root ID", test_ui_invoke_toggle),
-            ("DataGrid Select + Read", test_datagrid_select),
-            ("Multi-Window Envelope", test_multi_window_envelope),
-            ("Drag Primitive", test_drag_primitive),
-            ("System Event Theme Toggle", test_system_event_theme),
-            ("Persistent Modifier Hold", test_persistent_modifier_hold),
-            ("Scoped Search Performance", test_scoped_search_performance),
-            ("Window Lifecycle", test_window_lifecycle),
-            ("Expand/Collapse Tree", test_expand_collapse_tree),
-            ("Set Value Slider", test_set_value_slider),
-            ("Realize Virtualized Item", test_realize_virtualized_item),
-            ("Clipboard Roundtrip", test_clipboard_roundtrip),
-        ])
+        scenarios.extend(
+            [
+                ("UI Invoke + Toggle + Root ID", test_ui_invoke_toggle),
+                ("DataGrid Select + Read", test_datagrid_select),
+                ("Multi-Window Envelope", test_multi_window_envelope),
+                ("Drag Primitive", test_drag_primitive),
+                ("System Event Theme Toggle", test_system_event_theme),
+                ("Persistent Modifier Hold", test_persistent_modifier_hold),
+                ("Scoped Search Performance", test_scoped_search_performance),
+                ("Window Lifecycle", test_window_lifecycle),
+                ("Expand/Collapse Tree", test_expand_collapse_tree),
+                ("Set Value Slider", test_set_value_slider),
+                ("Realize Virtualized Item", test_realize_virtualized_item),
+                ("Clipboard Roundtrip", test_clipboard_roundtrip),
+            ]
+        )
     if WPF_GUI_ENABLED:
         scenarios.append(("WPF Shift/DataGrid Evidence", test_wpf_shift_datagrid_evidence))
-        scenarios.append((
-            "WPF One-Call Runtime Smoke Workflow",
-            test_wpf_one_call_runtime_smoke_workflow,
-        ))
+        scenarios.append(
+            (
+                "WPF One-Call Runtime Smoke Workflow",
+                test_wpf_one_call_runtime_smoke_workflow,
+            )
+        )
     if AVALONIA_GUI_ENABLED:
-        scenarios.append((
-            "Avalonia UI Fixture Compatibility",
-            test_avalonia_ui_fixture_compatibility,
-        ))
+        scenarios.append(
+            (
+                "Avalonia UI Fixture Compatibility",
+                test_avalonia_ui_fixture_compatibility,
+            )
+        )
     return scenarios
 
 
@@ -3111,9 +3332,9 @@ async def run_all():
             print(f"  [FAIL] {name} crashed: {e}")
             traceback.print_exc()
 
-    print(f"\n{'='*50}")
+    print(f"\n{'=' * 50}")
     print(f"RESULTS: {passed} passed, {failed} failed out of {passed + failed} checks")
-    print(f"{'='*50}")
+    print(f"{'=' * 50}")
     return failed == 0
 
 

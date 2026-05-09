@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -10,13 +11,16 @@ from .state import TerminalStatus
 
 
 class _BreakpointRegistry(Protocol):
-    def get_all(self) -> dict[str, list[Any]]: ...
-    def get_for_file(self, file: str) -> list[Any]: ...
+    def get_all(self) -> Mapping[str, Sequence[Any]]: ...
+    def get_for_file(self, file: str) -> Sequence[Any]: ...
 
 
 class _HygieneSession(Protocol):
-    breakpoints: _BreakpointRegistry
-    state: Any
+    @property
+    def breakpoints(self) -> _BreakpointRegistry: ...
+
+    @property
+    def state(self) -> Any: ...
 
     @property
     def is_active(self) -> bool: ...
@@ -98,9 +102,7 @@ class HygienePreflightResult:
             "status": self.status.value,
             "reason": self.reason,
             "cleared": dict(self.cleared),
-            "remaining_breakpoints": [
-                bp.to_dict() for bp in self.remaining_breakpoints
-            ],
+            "remaining_breakpoints": [bp.to_dict() for bp in self.remaining_breakpoints],
             "cleanup_errors": [error.to_dict() for error in self.cleanup_errors],
         }
         if self.validation_error is not None:
@@ -197,7 +199,6 @@ class RuntimeHygieneService:
         remaining: list[BreakpointEvidence] = []
         for file_path, breakpoints in self._session.breakpoints.get_all().items():
             remaining.extend(
-                BreakpointEvidence.from_breakpoint(file_path, bp)
-                for bp in breakpoints
+                BreakpointEvidence.from_breakpoint(file_path, bp) for bp in breakpoints
             )
         return remaining

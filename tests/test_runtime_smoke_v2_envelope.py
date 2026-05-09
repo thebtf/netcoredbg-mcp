@@ -22,15 +22,17 @@ class EnvelopeSmokeSession:
 async def test_v2_plan_rejects_mixed_legacy_execution_keys_before_launch() -> None:
     session = EnvelopeSmokeSession()
 
-    result = await RuntimeSmokeRunner(session).run({
-        "schema": "netcoredbg.runtime_smoke.v2",
-        "name": "mixed schema plan",
-        "launch": {"program": "must-not-run.exe"},
-        "cases": [],
-        "steps": [],
-        "actions": [],
-        "assertions": [],
-    })
+    result = await RuntimeSmokeRunner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "mixed schema plan",
+            "launch": {"program": "must-not-run.exe"},
+            "cases": [],
+            "steps": [],
+            "actions": [],
+            "assertions": [],
+        }
+    )
 
     assert result["status"] == "FAIL"
     assert result["reason"] == "invalid plan schema"

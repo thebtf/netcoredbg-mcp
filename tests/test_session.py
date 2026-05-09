@@ -24,7 +24,7 @@ class TestSessionManagerInit:
     def test_init_with_path(self):
         """Test initialization with netcoredbg path."""
         with patch("netcoredbg_mcp.session.manager.DAPClient") as mock_client:
-            manager = SessionManager(netcoredbg_path="/custom/path")
+            SessionManager(netcoredbg_path="/custom/path")
 
             mock_client.assert_called_once_with("/custom/path")
 
@@ -535,9 +535,7 @@ class TestExecutionControl:
         with patch("netcoredbg_mcp.session.manager.DAPClient") as mock_client_class:
             mock_client = MagicMock()
             mock_client.continue_execution = AsyncMock(
-                return_value=DAPResponse(
-                    seq=1, request_seq=1, success=True, command="continue"
-                )
+                return_value=DAPResponse(seq=1, request_seq=1, success=True, command="continue")
             )
             mock_client_class.return_value = mock_client
 
@@ -567,9 +565,7 @@ class TestExecutionControl:
         with patch("netcoredbg_mcp.session.manager.DAPClient") as mock_client_class:
             mock_client = MagicMock()
             mock_client.step_over = AsyncMock(
-                return_value=DAPResponse(
-                    seq=1, request_seq=1, success=True, command="next"
-                )
+                return_value=DAPResponse(seq=1, request_seq=1, success=True, command="next")
             )
             mock_client_class.return_value = mock_client
 
@@ -587,9 +583,7 @@ class TestExecutionControl:
         with patch("netcoredbg_mcp.session.manager.DAPClient") as mock_client_class:
             mock_client = MagicMock()
             mock_client.step_in = AsyncMock(
-                return_value=DAPResponse(
-                    seq=1, request_seq=1, success=True, command="stepIn"
-                )
+                return_value=DAPResponse(seq=1, request_seq=1, success=True, command="stepIn")
             )
             mock_client_class.return_value = mock_client
 
@@ -607,9 +601,7 @@ class TestExecutionControl:
         with patch("netcoredbg_mcp.session.manager.DAPClient") as mock_client_class:
             mock_client = MagicMock()
             mock_client.step_out = AsyncMock(
-                return_value=DAPResponse(
-                    seq=1, request_seq=1, success=True, command="stepOut"
-                )
+                return_value=DAPResponse(seq=1, request_seq=1, success=True, command="stepOut")
             )
             mock_client_class.return_value = mock_client
 
@@ -627,9 +619,7 @@ class TestExecutionControl:
         with patch("netcoredbg_mcp.session.manager.DAPClient") as mock_client_class:
             mock_client = MagicMock()
             mock_client.pause = AsyncMock(
-                return_value=DAPResponse(
-                    seq=1, request_seq=1, success=True, command="pause"
-                )
+                return_value=DAPResponse(seq=1, request_seq=1, success=True, command="pause")
             )
             mock_client_class.return_value = mock_client
 

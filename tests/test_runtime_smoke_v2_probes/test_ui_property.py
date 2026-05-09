@@ -25,26 +25,32 @@ class UiPropertyProbeSession(ProbeSmokeSession):
 @pytest.mark.asyncio
 async def test_ui_property_preserves_adapter_blocked_reason() -> None:
     session = UiPropertyProbeSession()
-    session.property_results.extend([
-        {"status": "PASS", "value": "before"},
-        {
-            "status": "BLOCKED",
-            "reason": "backend bridge disconnected",
-            "requested": {"adapter": "ui.get_property"},
-            "accepted": {"adapter_names": ["ui.get_property"]},
-            "next_step": "Reconnect UI bridge.",
-        },
-    ])
+    session.property_results.extend(
+        [
+            {"status": "PASS", "value": "before"},
+            {
+                "status": "BLOCKED",
+                "reason": "backend bridge disconnected",
+                "requested": {"adapter": "ui.get_property"},
+                "accepted": {"adapter_names": ["ui.get_property"]},
+                "next_step": "Reconnect UI bridge.",
+            },
+        ]
+    )
 
     result = await runner(
         session,
         {"ui.get_property": session.get_property},
-    ).run(one_probe_plan({
-        "kind": "ui.property",
-        "name": "status_text",
-        "selector": {"automation_id": "statusText"},
-        "property": "Name",
-    }))
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "ui.property",
+                "name": "status_text",
+                "selector": {"automation_id": "statusText"},
+                "property": "Name",
+            }
+        )
+    )
 
     probe = after_probe(result)
     assert result["status"] == "BLOCKED"

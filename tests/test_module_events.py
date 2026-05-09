@@ -16,22 +16,27 @@ class TestModuleEvents:
     def manager(self):
         with patch("netcoredbg_mcp.session.manager.DAPClient"):
             from netcoredbg_mcp.session import SessionManager
+
             m = SessionManager()
             return m
 
     def test_module_new_adds_to_list(self, manager):
         """New module event adds module to state."""
-        event = DAPEvent(seq=1, event="module", body={
-            "reason": "new",
-            "module": {
-                "id": 1,
-                "name": "MyApp.dll",
-                "path": "/app/MyApp.dll",
-                "version": "1.0.0",
-                "isOptimized": False,
-                "symbolStatus": "loaded",
+        event = DAPEvent(
+            seq=1,
+            event="module",
+            body={
+                "reason": "new",
+                "module": {
+                    "id": 1,
+                    "name": "MyApp.dll",
+                    "path": "/app/MyApp.dll",
+                    "version": "1.0.0",
+                    "isOptimized": False,
+                    "symbolStatus": "loaded",
+                },
             },
-        })
+        )
         manager._on_module(event)
 
         assert len(manager.state.modules) == 1
@@ -43,17 +48,25 @@ class TestModuleEvents:
     def test_module_changed_updates(self, manager):
         """Changed module event updates existing module."""
         # Add initial
-        event_new = DAPEvent(seq=1, event="module", body={
-            "reason": "new",
-            "module": {"id": 1, "name": "MyApp.dll", "symbolStatus": "not loaded"},
-        })
+        event_new = DAPEvent(
+            seq=1,
+            event="module",
+            body={
+                "reason": "new",
+                "module": {"id": 1, "name": "MyApp.dll", "symbolStatus": "not loaded"},
+            },
+        )
         manager._on_module(event_new)
 
         # Update
-        event_changed = DAPEvent(seq=2, event="module", body={
-            "reason": "changed",
-            "module": {"id": 1, "name": "MyApp.dll", "symbolStatus": "loaded"},
-        })
+        event_changed = DAPEvent(
+            seq=2,
+            event="module",
+            body={
+                "reason": "changed",
+                "module": {"id": 1, "name": "MyApp.dll", "symbolStatus": "loaded"},
+            },
+        )
         manager._on_module(event_changed)
 
         assert len(manager.state.modules) == 1
@@ -61,26 +74,38 @@ class TestModuleEvents:
 
     def test_module_removed(self, manager):
         """Removed module event removes from list."""
-        event_new = DAPEvent(seq=1, event="module", body={
-            "reason": "new",
-            "module": {"id": 1, "name": "MyApp.dll"},
-        })
+        event_new = DAPEvent(
+            seq=1,
+            event="module",
+            body={
+                "reason": "new",
+                "module": {"id": 1, "name": "MyApp.dll"},
+            },
+        )
         manager._on_module(event_new)
         assert len(manager.state.modules) == 1
 
-        event_removed = DAPEvent(seq=2, event="module", body={
-            "reason": "removed",
-            "module": {"id": 1, "name": "MyApp.dll"},
-        })
+        event_removed = DAPEvent(
+            seq=2,
+            event="module",
+            body={
+                "reason": "removed",
+                "module": {"id": 1, "name": "MyApp.dll"},
+            },
+        )
         manager._on_module(event_removed)
         assert len(manager.state.modules) == 0
 
     def test_module_duplicate_prevented(self, manager):
         """Duplicate module events don't create duplicates."""
-        event = DAPEvent(seq=1, event="module", body={
-            "reason": "new",
-            "module": {"id": 1, "name": "MyApp.dll"},
-        })
+        event = DAPEvent(
+            seq=1,
+            event="module",
+            body={
+                "reason": "new",
+                "module": {"id": 1, "name": "MyApp.dll"},
+            },
+        )
         manager._on_module(event)
         manager._on_module(event)
 
@@ -88,10 +113,14 @@ class TestModuleEvents:
 
     def test_module_before_initialize(self, manager):
         """Module event before initialize doesn't crash."""
-        event = DAPEvent(seq=1, event="module", body={
-            "reason": "new",
-            "module": {"id": 1, "name": "System.dll"},
-        })
+        event = DAPEvent(
+            seq=1,
+            event="module",
+            body={
+                "reason": "new",
+                "module": {"id": 1, "name": "System.dll"},
+            },
+        )
         # Should not raise even without initialization
         manager._on_module(event)
         assert len(manager.state.modules) == 1
@@ -99,9 +128,14 @@ class TestModuleEvents:
     def test_module_to_dict(self):
         """ModuleInfo.to_dict() returns correct format."""
         from netcoredbg_mcp.session.state import ModuleInfo
+
         m = ModuleInfo(
-            id=1, name="MyApp.dll", path="/app/MyApp.dll",
-            version="1.0.0", is_optimized=True, symbol_status="loaded",
+            id=1,
+            name="MyApp.dll",
+            path="/app/MyApp.dll",
+            version="1.0.0",
+            is_optimized=True,
+            symbol_status="loaded",
         )
         d = m.to_dict()
         assert d["name"] == "MyApp.dll"
@@ -122,6 +156,7 @@ class TestModuleEvents:
                 def decorator(func):
                     self.tools[func.__name__] = func
                     return func
+
                 return decorator
 
         manager.state.modules = [

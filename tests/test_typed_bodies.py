@@ -41,13 +41,15 @@ def test_terminated_body_populates_restart_and_defaults():
 
 
 def test_process_body_populates_fields_and_defaults():
-    body = ProcessEventBody.from_dict({
-        "name": "App",
-        "systemProcessId": "123",
-        "isLocalProcess": False,
-        "startMethod": "attach",
-        "pointerSize": 8,
-    })
+    body = ProcessEventBody.from_dict(
+        {
+            "name": "App",
+            "systemProcessId": "123",
+            "isLocalProcess": False,
+            "startMethod": "attach",
+            "pointerSize": 8,
+        }
+    )
 
     assert body.name == "App"
     assert body.system_process_id == 123
@@ -59,9 +61,11 @@ def test_process_body_populates_fields_and_defaults():
 
 
 def test_capabilities_body_populates_fields_and_defaults():
-    body = CapabilitiesEventBody.from_dict({
-        "capabilities": {"supportsDisassembleRequest": True},
-    })
+    body = CapabilitiesEventBody.from_dict(
+        {
+            "capabilities": {"supportsDisassembleRequest": True},
+        }
+    )
 
     assert body.capabilities == {"supportsDisassembleRequest": True}
     assert body.to_dict() == {"capabilities": {"supportsDisassembleRequest": True}}
@@ -69,11 +73,13 @@ def test_capabilities_body_populates_fields_and_defaults():
 
 
 def test_invalidated_body_populates_fields_and_defaults():
-    body = InvalidatedEventBody.from_dict({
-        "areas": ["variables", "threads"],
-        "threadId": 3,
-        "stackFrameId": 9,
-    })
+    body = InvalidatedEventBody.from_dict(
+        {
+            "areas": ["variables", "threads"],
+            "threadId": 3,
+            "stackFrameId": 9,
+        }
+    )
 
     assert body.areas == ["variables", "threads"]
     assert body.thread_id == 3
@@ -87,10 +93,12 @@ def test_invalidated_body_populates_fields_and_defaults():
 
 
 def test_loaded_source_body_populates_fields_and_defaults():
-    body = LoadedSourceEventBody.from_dict({
-        "reason": "changed",
-        "source": {"name": "Program.cs", "path": "C:/src/Program.cs"},
-    })
+    body = LoadedSourceEventBody.from_dict(
+        {
+            "reason": "changed",
+            "source": {"name": "Program.cs", "path": "C:/src/Program.cs"},
+        }
+    )
 
     assert body.reason == "changed"
     assert body.source["path"] == "C:/src/Program.cs"
@@ -99,14 +107,16 @@ def test_loaded_source_body_populates_fields_and_defaults():
 
 
 def test_progress_start_body_populates_fields_and_defaults():
-    body = ProgressStartEventBody.from_dict({
-        "progressId": "p1",
-        "title": "Loading symbols",
-        "requestId": 5,
-        "cancellable": True,
-        "message": "halfway",
-        "percentage": 50,
-    })
+    body = ProgressStartEventBody.from_dict(
+        {
+            "progressId": "p1",
+            "title": "Loading symbols",
+            "requestId": 5,
+            "cancellable": True,
+            "message": "halfway",
+            "percentage": 50,
+        }
+    )
 
     assert body.progress_id == "p1"
     assert body.title == "Loading symbols"
@@ -119,11 +129,13 @@ def test_progress_start_body_populates_fields_and_defaults():
 
 
 def test_progress_update_body_populates_fields_and_defaults():
-    body = ProgressUpdateEventBody.from_dict({
-        "progressId": "p1",
-        "message": "almost done",
-        "percentage": "90.5",
-    })
+    body = ProgressUpdateEventBody.from_dict(
+        {
+            "progressId": "p1",
+            "message": "almost done",
+            "percentage": "90.5",
+        }
+    )
 
     assert body.progress_id == "p1"
     assert body.message == "almost done"
@@ -146,11 +158,13 @@ def test_progress_end_body_populates_fields_and_defaults():
 
 
 def test_memory_body_populates_fields_and_defaults():
-    body = MemoryEventBody.from_dict({
-        "memoryReference": "0x1234",
-        "offset": 4,
-        "count": 16,
-    })
+    body = MemoryEventBody.from_dict(
+        {
+            "memoryReference": "0x1234",
+            "offset": 4,
+            "count": 16,
+        }
+    )
 
     assert body.memory_reference == "0x1234"
     assert body.offset == 4

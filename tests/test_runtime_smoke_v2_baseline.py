@@ -115,9 +115,7 @@ async def test_v2_baseline_failure_blocks_cases_and_runs_cleanup() -> None:
     assert result["baseline"]["status"] == "BLOCKED"
     assert result["baseline"]["failed_step_id"] == "launch-isolated"
     assert result["baseline"]["cleanup"]["status"] == "PASS"
-    assert result["baseline"]["cleanup"]["attempted"] == [
-        "fixture.restore:work/settings.json"
-    ]
+    assert result["baseline"]["cleanup"]["attempted"] == ["fixture.restore:work/settings.json"]
     assert ("ui.invoke", {"automation_id": "caseToggle"}) not in [
         call[1:] for call in session.calls
     ]

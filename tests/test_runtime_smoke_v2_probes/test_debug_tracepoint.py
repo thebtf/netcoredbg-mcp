@@ -28,27 +28,33 @@ class TracepointProbeSession(ProbeSmokeSession):
 @pytest.mark.asyncio
 async def test_debug_tracepoint_probe_reports_hit_count_and_evidence_ref() -> None:
     session = TracepointProbeSession()
-    session.tracepoint_results.extend([
-        {"status": "PASS", "hit_count": 0, "logs": []},
-        {
-            "status": "PASS",
-            "hit_count": 2,
-            "logs": [{"value": "enabled"}],
-            "evidence_ref": "tracepoint:settings-route",
-        },
-    ])
+    session.tracepoint_results.extend(
+        [
+            {"status": "PASS", "hit_count": 0, "logs": []},
+            {
+                "status": "PASS",
+                "hit_count": 2,
+                "logs": [{"value": "enabled"}],
+                "evidence_ref": "tracepoint:settings-route",
+            },
+        ]
+    )
 
     result = await runner(
         session,
         {"debug.tracepoint": session.tracepoint_probe},
-    ).run(one_probe_plan({
-        "kind": "debug.tracepoint",
-        "name": "settings_route",
-        "file": "SettingsViewModel.cs",
-        "line": 42,
-        "expression": "Mode.SpellCheckInput",
-        "expected_hit_count": 2,
-    }))
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "debug.tracepoint",
+                "name": "settings_route",
+                "file": "SettingsViewModel.cs",
+                "line": 42,
+                "expression": "Mode.SpellCheckInput",
+                "expected_hit_count": 2,
+            }
+        )
+    )
 
     probe = after_probe(result)
     assert result["status"] == "PASS"
@@ -67,13 +73,17 @@ async def test_debug_tracepoint_probe_reports_hit_count_and_evidence_ref() -> No
 async def test_debug_tracepoint_probe_blocks_when_execution_is_unavailable() -> None:
     session = TracepointProbeSession()
 
-    result = await runner(session).run(one_probe_plan({
-        "kind": "debug.tracepoint",
-        "name": "settings_route",
-        "file": "SettingsViewModel.cs",
-        "line": 42,
-        "expression": "Mode.SpellCheckInput",
-    }))
+    result = await runner(session).run(
+        one_probe_plan(
+            {
+                "kind": "debug.tracepoint",
+                "name": "settings_route",
+                "file": "SettingsViewModel.cs",
+                "line": 42,
+                "expression": "Mode.SpellCheckInput",
+            }
+        )
+    )
 
     probe = after_probe(result)
     assert result["status"] == "BLOCKED"
@@ -86,21 +96,27 @@ async def test_debug_tracepoint_probe_blocks_when_execution_is_unavailable() -> 
 @pytest.mark.asyncio
 async def test_debug_tracepoint_probe_rejects_invalid_numeric_fields() -> None:
     session = TracepointProbeSession()
-    session.tracepoint_results.extend([
-        {"status": "PASS", "hit_count": 0, "logs": []},
-        {"status": "PASS", "hit_count": 0, "logs": []},
-    ])
+    session.tracepoint_results.extend(
+        [
+            {"status": "PASS", "hit_count": 0, "logs": []},
+            {"status": "PASS", "hit_count": 0, "logs": []},
+        ]
+    )
 
     invalid_line = await runner(
         session,
         {"debug.tracepoint": session.tracepoint_probe},
-    ).run(one_probe_plan({
-        "kind": "debug.tracepoint",
-        "name": "bad_line",
-        "file": "SettingsViewModel.cs",
-        "line": "not-a-line",
-        "expression": "Mode.SpellCheckInput",
-    }))
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "debug.tracepoint",
+                "name": "bad_line",
+                "file": "SettingsViewModel.cs",
+                "line": "not-a-line",
+                "expression": "Mode.SpellCheckInput",
+            }
+        )
+    )
 
     line_probe = after_probe(invalid_line)
     assert invalid_line["status"] == "FAIL"
@@ -111,14 +127,18 @@ async def test_debug_tracepoint_probe_rejects_invalid_numeric_fields() -> None:
     invalid_expected = await runner(
         session,
         {"debug.tracepoint": session.tracepoint_probe},
-    ).run(one_probe_plan({
-        "kind": "debug.tracepoint",
-        "name": "bad_expected",
-        "file": "SettingsViewModel.cs",
-        "line": 42,
-        "expression": "Mode.SpellCheckInput",
-        "expected_hit_count": "not-a-count",
-    }))
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "debug.tracepoint",
+                "name": "bad_expected",
+                "file": "SettingsViewModel.cs",
+                "line": 42,
+                "expression": "Mode.SpellCheckInput",
+                "expected_hit_count": "not-a-count",
+            }
+        )
+    )
 
     expected_probe = after_probe(invalid_expected)
     assert invalid_expected["status"] == "FAIL"

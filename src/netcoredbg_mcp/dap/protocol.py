@@ -10,6 +10,7 @@ from typing import Any
 @dataclass
 class DAPRequest:
     """DAP request message."""
+
     seq: int
     command: str
     arguments: dict[str, Any] = field(default_factory=dict)
@@ -33,6 +34,7 @@ class DAPRequest:
 @dataclass
 class DAPResponse:
     """DAP response message."""
+
     seq: int
     request_seq: int
     success: bool
@@ -55,6 +57,7 @@ class DAPResponse:
 @dataclass
 class DAPEvent:
     """DAP event message."""
+
     seq: int
     event: str
     body: dict[str, Any] = field(default_factory=dict)

@@ -30,6 +30,7 @@ def get_session() -> SessionManager:
     global _session
     if _session is None:
         import atexit
+
         netcoredbg_path = os.environ.get("NETCOREDBG_PATH")
         _session = SessionManager(netcoredbg_path, _initial_project_path)
         # Register temp dir cleanup on server exit
@@ -125,13 +126,17 @@ def create_server(project_path: str | None = None) -> FastMCP:
         if snapshot.timed_out:
             next_actions = ["get_output", "pause_execution", "get_debug_state", "stop_debug"]
             message = (
-                "Program is still running after timeout. "
-                "Breakpoint may not have been reached."
+                "Program is still running after timeout. Breakpoint may not have been reached."
             )
         elif state_value == "stopped":
             next_actions = [
-                "get_call_stack", "get_variables", "evaluate_expression",
-                "step_over", "step_into", "step_out", "continue_execution",
+                "get_call_stack",
+                "get_variables",
+                "evaluate_expression",
+                "step_over",
+                "step_into",
+                "step_out",
+                "continue_execution",
             ]
             reason = snapshot.stop_reason or "unknown"
             message = f"Program is PAUSED (reason: {reason}). Inspect state, then resume."
@@ -194,7 +199,8 @@ def create_server(project_path: str | None = None) -> FastMCP:
             async def heartbeat(elapsed: float) -> None:
                 try:
                     await ctx.report_progress(
-                        progress=30, total=100,
+                        progress=30,
+                        total=100,
                         message=f"Still waiting... ({elapsed:.0f}s)",
                     )
                 except Exception:
@@ -227,7 +233,8 @@ def create_server(project_path: str | None = None) -> FastMCP:
                             "line": frames[0].line,
                             "function": frames[0].name,
                             "source_context": read_source_context(
-                                frames[0].source, frames[0].line,
+                                frames[0].source,
+                                frames[0].line,
                             ),
                         }
                 except Exception:

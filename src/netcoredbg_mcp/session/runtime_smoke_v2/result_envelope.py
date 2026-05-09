@@ -74,9 +74,11 @@ def compact_value(value: Any) -> Any:
     if isinstance(value, list):
         compact_items = [compact_value(item) for item in value[:MAX_COMPACT_LIST_ITEMS]]
         if len(value) > MAX_COMPACT_LIST_ITEMS:
-            compact_items.append({
-                "omitted_count": len(value) - MAX_COMPACT_LIST_ITEMS,
-            })
+            compact_items.append(
+                {
+                    "omitted_count": len(value) - MAX_COMPACT_LIST_ITEMS,
+                }
+            )
         return compact_items
     if isinstance(value, str) and len(value) > MAX_COMPACT_TEXT_LENGTH:
         return {

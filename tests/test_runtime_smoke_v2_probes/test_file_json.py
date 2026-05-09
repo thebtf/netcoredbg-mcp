@@ -34,13 +34,17 @@ async def test_file_json_probe_reads_jsonpath_value(tmp_path: Path) -> None:
     )
     session = FileJsonProbeSession(tmp_path)
 
-    result = await runner(session).run(one_probe_plan({
-        "kind": "file.json",
-        "name": "spellcheck_diagnostic",
-        "path": str(path),
-        "jsonpath": "$.settings.spellcheck.enabled",
-        "expected": True,
-    }))
+    result = await runner(session).run(
+        one_probe_plan(
+            {
+                "kind": "file.json",
+                "name": "spellcheck_diagnostic",
+                "path": str(path),
+                "jsonpath": "$.settings.spellcheck.enabled",
+                "expected": True,
+            }
+        )
+    )
 
     probe = after_probe(result)
     assert result["status"] == "PASS"
@@ -55,12 +59,16 @@ async def test_file_json_probe_blocks_path_outside_project(tmp_path: Path) -> No
     session = FileJsonProbeSession(tmp_path / "project")
     outside_path = tmp_path / "outside.json"
 
-    result = await runner(session).run(one_probe_plan({
-        "kind": "file.json",
-        "name": "outside_file",
-        "path": str(outside_path),
-        "jsonpath": "$.value",
-    }))
+    result = await runner(session).run(
+        one_probe_plan(
+            {
+                "kind": "file.json",
+                "name": "outside_file",
+                "path": str(outside_path),
+                "jsonpath": "$.value",
+            }
+        )
+    )
 
     probe = after_probe(result)
     assert result["status"] == "BLOCKED"
@@ -74,11 +82,15 @@ async def test_file_json_probe_blocks_path_outside_project(tmp_path: Path) -> No
 async def test_file_json_probe_blocks_missing_required_path() -> None:
     session = ProbeSmokeSession()
 
-    result = await runner(session).run(one_probe_plan({
-        "kind": "file.json",
-        "name": "missing_path",
-        "jsonpath": "$.value",
-    }))
+    result = await runner(session).run(
+        one_probe_plan(
+            {
+                "kind": "file.json",
+                "name": "missing_path",
+                "jsonpath": "$.value",
+            }
+        )
+    )
 
     probe = after_probe(result)
     assert result["status"] == "BLOCKED"
@@ -93,11 +105,15 @@ async def test_file_json_probe_blocks_missing_required_jsonpath(tmp_path: Path) 
     path.write_text(json.dumps({"value": True}), encoding="utf-8")
     session = FileJsonProbeSession(tmp_path)
 
-    result = await runner(session).run(one_probe_plan({
-        "kind": "file.json",
-        "name": "missing_jsonpath",
-        "path": str(path),
-    }))
+    result = await runner(session).run(
+        one_probe_plan(
+            {
+                "kind": "file.json",
+                "name": "missing_jsonpath",
+                "path": str(path),
+            }
+        )
+    )
 
     probe = after_probe(result)
     assert result["status"] == "BLOCKED"
@@ -160,12 +176,16 @@ async def test_file_json_probe_fails_when_file_is_missing(tmp_path: Path) -> Non
     missing_path = tmp_path / "missing.json"
     session = FileJsonProbeSession(tmp_path)
 
-    result = await runner(session).run(one_probe_plan({
-        "kind": "file.json",
-        "name": "missing_file",
-        "path": str(missing_path),
-        "jsonpath": "$.value",
-    }))
+    result = await runner(session).run(
+        one_probe_plan(
+            {
+                "kind": "file.json",
+                "name": "missing_file",
+                "path": str(missing_path),
+                "jsonpath": "$.value",
+            }
+        )
+    )
 
     probe = after_probe(result)
     assert result["status"] == "FAIL"
@@ -179,12 +199,16 @@ async def test_file_json_probe_fails_when_file_is_missing(tmp_path: Path) -> Non
 async def test_file_json_probe_fails_when_path_is_directory(tmp_path: Path) -> None:
     session = FileJsonProbeSession(tmp_path)
 
-    result = await runner(session).run(one_probe_plan({
-        "kind": "file.json",
-        "name": "directory_path",
-        "path": str(tmp_path),
-        "jsonpath": "$.value",
-    }))
+    result = await runner(session).run(
+        one_probe_plan(
+            {
+                "kind": "file.json",
+                "name": "directory_path",
+                "path": str(tmp_path),
+                "jsonpath": "$.value",
+            }
+        )
+    )
 
     probe = after_probe(result)
     assert result["status"] == "FAIL"

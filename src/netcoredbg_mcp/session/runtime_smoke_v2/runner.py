@@ -46,10 +46,9 @@ class RuntimeStateOracleRunner:
     async def run(self, plan: dict[str, Any]) -> dict[str, Any]:
         started = self._clock()
         cleanup = {"status": "PASS", "attempted": [], "failures": []}
+        raw_metrics_thresholds = plan.get("metrics_thresholds")
         metrics_thresholds = (
-            dict(plan.get("metrics_thresholds"))
-            if isinstance(plan.get("metrics_thresholds"), dict)
-            else None
+            dict(raw_metrics_thresholds) if isinstance(raw_metrics_thresholds, dict) else None
         )
         cases, generated_case_count, generation_errors = _cases_for_execution(plan)
         validation_errors = [
@@ -100,7 +99,7 @@ class RuntimeStateOracleRunner:
             context,
         )
         if baseline_result is not None and baseline_result.get("status") != "PASS":
-            blocked_payload = baseline_result.get("blocked")
+            baseline_blocked_payload = baseline_result.get("blocked")
             plan_cleanup = await run_cleanup(cleanup_steps_from_plan(plan), context)
             cleanup = merge_cleanup_results(plan_cleanup, [])
             return self._finalize(
@@ -113,7 +112,7 @@ class RuntimeStateOracleRunner:
                 metrics_thresholds=metrics_thresholds,
                 baseline=baseline_result,
                 cleanup=cleanup,
-                extra={"blocked": blocked_payload} if blocked_payload else None,
+                extra=({"blocked": baseline_blocked_payload} if baseline_blocked_payload else None),
             )
 
         case_results: list[dict[str, Any]] = []
@@ -142,9 +141,8 @@ class RuntimeStateOracleRunner:
                 terminal_status = "FAIL"
                 terminal_reason = case_result["reason"]
                 break
-            if (
-                case_result.get("cleanup", {}).get("status") == "FAIL"
-                and bool(plan.get("stop_on_first_failed_assertion"))
+            if case_result.get("cleanup", {}).get("status") == "FAIL" and bool(
+                plan.get("stop_on_first_failed_assertion")
             ):
                 terminal_status = "FAIL"
                 terminal_reason = "case cleanup failed"
@@ -299,10 +297,12 @@ def _collect_v2_evidence_refs(cases: list[dict[str, Any]]) -> list[dict[str, Any
                         continue
                     evidence_ref = probe.get("evidence_ref")
                     if evidence_ref:
-                        refs.append({
-                            "case_id": case_id,
-                            "phase": phase,
-                            "probe": probe.get("name"),
-                            "evidence_ref": evidence_ref,
-                        })
+                        refs.append(
+                            {
+                                "case_id": case_id,
+                                "phase": phase,
+                                "probe": probe.get("name"),
+                                "evidence_ref": evidence_ref,
+                            }
+                        )
     return refs

@@ -83,11 +83,13 @@ async def run_cleanup(
                 "step": step,
             }
         if str(result.get("status", "PASS")) != "PASS":
-            failures.append({
-                "kind": kind,
-                "reason": result.get("reason", "cleanup failed"),
-                "result": result,
-            })
+            failures.append(
+                {
+                    "kind": kind,
+                    "reason": result.get("reason", "cleanup failed"),
+                    "result": result,
+                }
+            )
 
     cleanup = {
         "status": "FAIL" if failures else "PASS",
@@ -107,19 +109,11 @@ def cleanup_steps_from_plan(plan: dict[str, Any]) -> list[dict[str, Any]]:
     cleanup = plan.get("cleanup")
     if not isinstance(cleanup, dict):
         return []
-    return [
-        dict(step)
-        for step in cleanup.get("steps", [])
-        if isinstance(step, dict)
-    ]
+    return [dict(step) for step in cleanup.get("steps", []) if isinstance(step, dict)]
 
 
 def cleanup_steps_from_case(case: dict[str, Any]) -> list[dict[str, Any]]:
-    return [
-        dict(step)
-        for step in case.get("cleanup", [])
-        if isinstance(step, dict)
-    ]
+    return [dict(step) for step in case.get("cleanup", []) if isinstance(step, dict)]
 
 
 def merge_cleanup_results(
@@ -160,13 +154,8 @@ def merge_cleanup_results(
         "failed_case_cleanups": failed_case_cleanups,
         "tracepoints_removed": int(plan_cleanup.get("tracepoints_removed", 0))
         + sum(int(cleanup.get("tracepoints_removed", 0)) for cleanup in case_cleanups),
-        "isolated_profiles_torn_down": int(
-            plan_cleanup.get("isolated_profiles_torn_down", 0)
-        )
-        + sum(
-            int(cleanup.get("isolated_profiles_torn_down", 0))
-            for cleanup in case_cleanups
-        ),
+        "isolated_profiles_torn_down": int(plan_cleanup.get("isolated_profiles_torn_down", 0))
+        + sum(int(cleanup.get("isolated_profiles_torn_down", 0)) for cleanup in case_cleanups),
         "debug_stop": plan_cleanup.get("debug_stop"),
         "process_registry_after": plan_cleanup.get("process_registry_after"),
     }

@@ -118,18 +118,22 @@ async def test_preflight_fails_with_file_line_evidence_when_targeted_breakpoint_
 async def test_trace_log_and_exception_filter_flags_are_independently_applied() -> None:
     session = FakeHygieneSession(active=True, trace_entries=3)
 
-    skipped = _as_dict(await RuntimeHygieneService(session).preflight(
-        clear_trace_log=False,
-        clear_exception_filters=False,
-    ))
+    skipped = _as_dict(
+        await RuntimeHygieneService(session).preflight(
+            clear_trace_log=False,
+            clear_exception_filters=False,
+        )
+    )
     assert skipped["cleared"]["trace_log_entries"] == 0
     assert skipped["cleared"]["exception_filters"] == 0
     assert session.exception_calls == []
 
-    applied = _as_dict(await RuntimeHygieneService(session).preflight(
-        clear_trace_log=True,
-        clear_exception_filters=True,
-    ))
+    applied = _as_dict(
+        await RuntimeHygieneService(session).preflight(
+            clear_trace_log=True,
+            clear_exception_filters=True,
+        )
+    )
     assert applied["status"] == "PASS"
     assert applied["cleared"]["trace_log_entries"] == 3
     assert applied["cleared"]["exception_filters"] == 1

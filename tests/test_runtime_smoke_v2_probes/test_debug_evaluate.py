@@ -21,16 +21,22 @@ class DebugEvaluateProbeSession(ProbeSmokeSession):
 @pytest.mark.asyncio
 async def test_debug_evaluate_session_fallback_blocks_error_payload() -> None:
     session = DebugEvaluateProbeSession()
-    session.evaluate_results.extend([
-        {"error": "frame not stopped"},
-        {"error": "frame not stopped"},
-    ])
+    session.evaluate_results.extend(
+        [
+            {"error": "frame not stopped"},
+            {"error": "frame not stopped"},
+        ]
+    )
 
-    result = await runner(session).run(one_probe_plan({
-        "kind": "debug.evaluate",
-        "name": "selected_value",
-        "expression": "ViewModel.Mode",
-    }))
+    result = await runner(session).run(
+        one_probe_plan(
+            {
+                "kind": "debug.evaluate",
+                "name": "selected_value",
+                "expression": "ViewModel.Mode",
+            }
+        )
+    )
 
     probe = after_probe(result)
     assert result["status"] == "BLOCKED"

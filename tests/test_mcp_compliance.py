@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 
 class TestProgressCallback:
@@ -60,7 +61,6 @@ class TestResourceMimeTypes:
         """Test that resources are defined with mime_type."""
         # This is a static check - we verify the decorator usage
         # by importing and checking the module doesn't error
-        import netcoredbg_mcp.server
         # Import succeeds means decorators are valid
 
 

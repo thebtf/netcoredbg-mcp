@@ -26,7 +26,7 @@ def selector_from_record(
 
 
 def keyboard_action(record: dict[str, Any], selector: dict[str, Any]) -> dict[str, Any]:
-    action = {
+    action: dict[str, Any] = {
         "kind": "ui.key_sequence",
         "selector": deepcopy(selector),
         "keys": str(record.get("keys") or "{SPACE}"),

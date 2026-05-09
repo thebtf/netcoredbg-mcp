@@ -38,7 +38,5 @@ def test_matrix_expansion_is_deterministic_across_runs() -> None:
     assert first == second
     assert [case["id"] for case in first] == ["alpha.true", "beta.false"]
     assert [
-        transition["action"]["selector"]
-        for case in first
-        for transition in case["transitions"]
+        transition["action"]["selector"] for case in first for transition in case["transitions"]
     ] == [{"automation_id": "checkBoxAlpha"}, {"automation_id": "checkBoxBeta"}]

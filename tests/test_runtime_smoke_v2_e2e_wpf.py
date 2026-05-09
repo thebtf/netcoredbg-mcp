@@ -93,14 +93,16 @@ async def test_v2_wpf_state_oracle_runs_five_ab_cases_with_diffs() -> None:
     assert (FIXTURE_ROOT / "WpfSmokeApp.csproj").exists()
     session = WpfStateOracleSession()
 
-    result = await _runner(session).run({
-        "schema": "netcoredbg.runtime_smoke.v2",
-        "name": "wpf fixture state oracle",
-        "cases": [_case(index) for index in range(5)],
-        "cleanup": {
-            "steps": [{"kind": "process.registry.assert_empty"}],
-        },
-    })
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "wpf fixture state oracle",
+            "cases": [_case(index) for index in range(5)],
+            "cleanup": {
+                "steps": [{"kind": "process.registry.assert_empty"}],
+            },
+        }
+    )
 
     assert result["status"] == "PASS"
     assert len(result["cases"]) == 5
@@ -110,6 +112,5 @@ async def test_v2_wpf_state_oracle_runs_five_ab_cases_with_diffs() -> None:
         for case in result["cases"]
     )
     assert any(
-        any(path.startswith("ui.property.") for path in case["before"])
-        for case in result["cases"]
+        any(path.startswith("ui.property.") for path in case["before"]) for case in result["cases"]
     )

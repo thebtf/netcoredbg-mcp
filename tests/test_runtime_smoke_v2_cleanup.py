@@ -61,50 +61,52 @@ async def test_v2_cleanup_aggregates_plan_and_case_cleanup_without_stopping_next
         "reason": "restore denied",
     }
 
-    result = await _runner(session).run({
-        "schema": "netcoredbg.runtime_smoke.v2",
-        "cleanup": {
-            "steps": [
-                {"kind": "isolated_profile.teardown", "profile": "isolated"},
-                {"kind": "debug.stop"},
-                {"kind": "process.registry.assert_empty"},
-            ]
-        },
-        "cases": [
-            {
-                "id": "case_a",
-                "transitions": [
-                    {
-                        "action": {
-                            "kind": "ui.invoke",
-                            "selector": {"automation_id": "caseA"},
-                        },
-                        "probes": [],
-                    }
-                ],
-                "cleanup": [
-                    {
-                        "kind": "fixture.restore",
-                        "path": "case-a.txt",
-                        "baseline_file": "baseline-a.txt",
-                    },
-                    {"kind": "debug.tracepoint.remove", "id": "tp-a"},
-                ],
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "cleanup": {
+                "steps": [
+                    {"kind": "isolated_profile.teardown", "profile": "isolated"},
+                    {"kind": "debug.stop"},
+                    {"kind": "process.registry.assert_empty"},
+                ]
             },
-            {
-                "id": "case_b",
-                "transitions": [
-                    {
-                        "action": {
-                            "kind": "ui.invoke",
-                            "selector": {"automation_id": "caseB"},
+            "cases": [
+                {
+                    "id": "case_a",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.invoke",
+                                "selector": {"automation_id": "caseA"},
+                            },
+                            "probes": [],
+                        }
+                    ],
+                    "cleanup": [
+                        {
+                            "kind": "fixture.restore",
+                            "path": "case-a.txt",
+                            "baseline_file": "baseline-a.txt",
                         },
-                        "probes": [],
-                    }
-                ],
-            },
-        ],
-    })
+                        {"kind": "debug.tracepoint.remove", "id": "tp-a"},
+                    ],
+                },
+                {
+                    "id": "case_b",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.invoke",
+                                "selector": {"automation_id": "caseB"},
+                            },
+                            "probes": [],
+                        }
+                    ],
+                },
+            ],
+        }
+    )
 
     assert [case["id"] for case in result["cases"]] == ["case_a", "case_b"]
     assert result["cases"][0]["cleanup"]["status"] == "FAIL"
@@ -133,24 +135,26 @@ async def test_v2_cleanup_reports_invalid_process_registry_count() -> None:
     session = CleanupSmokeSession()
     session.process_registry_result = {"status": "PASS", "count": "not-a-number"}
 
-    result = await _runner(session).run({
-        "schema": "netcoredbg.runtime_smoke.v2",
-        "cleanup": {"steps": [{"kind": "process.registry.assert_empty"}]},
-        "cases": [
-            {
-                "id": "case_a",
-                "transitions": [
-                    {
-                        "action": {
-                            "kind": "ui.invoke",
-                            "selector": {"automation_id": "caseA"},
-                        },
-                        "probes": [],
-                    }
-                ],
-            }
-        ],
-    })
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "cleanup": {"steps": [{"kind": "process.registry.assert_empty"}]},
+            "cases": [
+                {
+                    "id": "case_a",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.invoke",
+                                "selector": {"automation_id": "caseA"},
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
 
     assert result["status"] == "FAIL"
     assert result["cleanup"]["status"] == "FAIL"

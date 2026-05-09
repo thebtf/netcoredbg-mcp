@@ -49,31 +49,39 @@ class DebugFreshnessVerifier:
 
         if expected_process_id is not None or require_active_process:
             if process_id is None:
-                warnings.append({
-                    "kind": "process_id_unavailable",
-                    "expected": expected_process_id,
-                })
+                warnings.append(
+                    {
+                        "kind": "process_id_unavailable",
+                        "expected": expected_process_id,
+                    }
+                )
             elif expected_process_id is not None and process_id != expected_process_id:
-                mismatches.append({
-                    "kind": "process_id_mismatch",
-                    "expected": expected_process_id,
-                    "actual": process_id,
-                })
+                mismatches.append(
+                    {
+                        "kind": "process_id_mismatch",
+                        "expected": expected_process_id,
+                        "actual": process_id,
+                    }
+                )
 
         if expected_process_name:
             if not process_name:
-                warnings.append({
-                    "kind": "process_name_unavailable",
-                    "expected": expected_process_name,
-                })
+                warnings.append(
+                    {
+                        "kind": "process_name_unavailable",
+                        "expected": expected_process_name,
+                    }
+                )
             elif process_name.casefold() != expected_process_name.casefold():
-                mismatches.append({
-                    "kind": "process_name_mismatch",
-                    "expected": expected_process_name,
-                    "actual": process_name,
-                })
+                mismatches.append(
+                    {
+                        "kind": "process_name_mismatch",
+                        "expected": expected_process_name,
+                        "actual": process_name,
+                    }
+                )
 
-        workspace_payload = {
+        workspace_payload: dict[str, Any] = {
             "expected": workspace,
             "session_project_path": _display_path(project_path) if project_path else None,
             "matched": None,
@@ -82,41 +90,49 @@ class DebugFreshnessVerifier:
             if project_path:
                 workspace_payload["matched"] = _same_path(project_path, workspace)
                 if not workspace_payload["matched"]:
-                    mismatches.append({
-                        "kind": "workspace_mismatch",
-                        "expected": workspace,
-                        "actual": _display_path(project_path),
-                    })
+                    mismatches.append(
+                        {
+                            "kind": "workspace_mismatch",
+                            "expected": workspace,
+                            "actual": _display_path(project_path),
+                        }
+                    )
             else:
                 warnings.append({"kind": "workspace_unavailable", "expected": workspace})
 
         source_paths = [record["path"] for record in loaded_sources if record.get("path")]
         normalized_sources = {_normalize_path(path) for path in source_paths}
         if expected_source_paths and not source_paths:
-            warnings.append({
-                "kind": "loaded_sources_unavailable",
-                "expected": expected_source_paths,
-            })
+            warnings.append(
+                {
+                    "kind": "loaded_sources_unavailable",
+                    "expected": expected_source_paths,
+                }
+            )
         for path in expected_source_paths:
             if source_paths and _normalize_path(path) not in normalized_sources:
                 mismatches.append({"kind": "expected_source_missing", "expected": path})
         if workspace and source_paths:
             for path in source_paths:
                 if not _is_within(path, workspace):
-                    mismatches.append({
-                        "kind": "source_workspace_mismatch",
-                        "expected_workspace": workspace,
-                        "actual": path,
-                    })
+                    mismatches.append(
+                        {
+                            "kind": "source_workspace_mismatch",
+                            "expected_workspace": workspace,
+                            "actual": path,
+                        }
+                    )
 
         module_paths = [record["path"] for record in modules if record.get("path")]
         module_names = {str(record.get("name") or "").casefold() for record in modules}
         normalized_modules = {_normalize_path(path) for path in module_paths}
         if expected_module_paths and not modules:
-            warnings.append({
-                "kind": "modules_unavailable",
-                "expected": expected_module_paths,
-            })
+            warnings.append(
+                {
+                    "kind": "modules_unavailable",
+                    "expected": expected_module_paths,
+                }
+            )
         for path in expected_module_paths:
             normalized = _normalize_path(path)
             expected_name = os.path.basename(path).casefold()

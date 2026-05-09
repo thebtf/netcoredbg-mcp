@@ -50,8 +50,7 @@ async def handle_file_json(
             requested={"path": raw_path},
             accepted={"path": "project-relative or NETCOREDBG_ALLOWED_PATHS path"},
             next_step=(
-                "Use project-relative paths or add the directory to "
-                "NETCOREDBG_ALLOWED_PATHS."
+                "Use project-relative paths or add the directory to NETCOREDBG_ALLOWED_PATHS."
             ),
         ) | {"validation_error": str(exc)}
 
@@ -78,8 +77,11 @@ async def handle_file_json(
         }
 
     try:
-        from jsonpath_ng import parse
-        from jsonpath_ng.exceptions import JsonPathLexerError, JsonPathParserError
+        from jsonpath_ng import parse  # type: ignore[import-untyped]
+        from jsonpath_ng.exceptions import (  # type: ignore[import-untyped]
+            JsonPathLexerError,
+            JsonPathParserError,
+        )
     except ImportError:
         return blocked_probe(
             probe,

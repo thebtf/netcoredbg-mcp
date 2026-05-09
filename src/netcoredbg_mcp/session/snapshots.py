@@ -135,12 +135,14 @@ class SnapshotManager:
             v1 = s1.variables[k]
             v2 = s2.variables[k]
             if v1.value != v2.value or v1.type != v2.type:
-                changed.append({
-                    "name": k,
-                    "old_value": v1.value,
-                    "new_value": v2.value,
-                    "type": v2.type,
-                })
+                changed.append(
+                    {
+                        "name": k,
+                        "old_value": v1.value,
+                        "new_value": v2.value,
+                        "type": v2.type,
+                    }
+                )
             else:
                 unchanged_count += 1
 

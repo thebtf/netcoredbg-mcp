@@ -30,15 +30,14 @@ def mock_netcoredbg_path():
 @dataclass
 class FakeSmokeSession:
     """Minimal shared fake for runtime smoke service tests."""
+
     breakpoints: dict[str, list[object]] = field(default_factory=dict)
     tracepoints: dict[str, object] = field(default_factory=dict)
     output_buffer: deque[object] = field(default_factory=deque)
     modules: list[object] = field(default_factory=list)
     loaded_sources: dict[str, object] = field(default_factory=dict)
     process_id: int | None = None
-    state: SimpleNamespace = field(
-        default_factory=lambda: SimpleNamespace(state="idle")
-    )
+    state: SimpleNamespace = field(default_factory=lambda: SimpleNamespace(state="idle"))
 
 
 @pytest.fixture

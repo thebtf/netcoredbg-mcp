@@ -62,9 +62,7 @@ def build_windows_launch_environment(
 ) -> dict[str, str | None]:
     """Build a Windows launch environment with case-insensitive override semantics."""
 
-    launch_env: dict[str, str | None] = {
-        name.upper(): value for name, value in process_env.items()
-    }
+    launch_env: dict[str, str | None] = {name.upper(): value for name, value in process_env.items()}
     explicit_keys: set[str] = set()
     if overrides:
         normalized_overrides = {name.upper(): value for name, value in overrides.items()}
@@ -138,9 +136,7 @@ class DAPClient:
         """Shallow-merge a capabilities event delta into adapter capabilities."""
         current = dict(self._capabilities)
         before_keys = set(current)
-        changed_keys = [
-            key for key, value in capabilities.items() if current.get(key) != value
-        ]
+        changed_keys = [key for key, value in capabilities.items() if current.get(key) != value]
         merged = {**current, **capabilities}
         self._capabilities = merged
         after_keys = set(merged)
@@ -158,6 +154,7 @@ class DAPClient:
         NETCOREDBG_PATH → ~/.netcoredbg-mcp/netcoredbg/ → PATH → auto-download
         """
         from ..setup.netcoredbg import find_netcoredbg
+
         return find_netcoredbg()
 
     @property
@@ -413,9 +410,7 @@ class DAPClient:
 
     async def disconnect(self, terminate: bool = True) -> DAPResponse:
         """Disconnect from debuggee."""
-        return await self.send_request(
-            Commands.DISCONNECT, {"terminateDebuggee": terminate}
-        )
+        return await self.send_request(Commands.DISCONNECT, {"terminateDebuggee": terminate})
 
     async def set_breakpoints(
         self, source_path: str, breakpoints: list[dict[str, Any]]
@@ -429,18 +424,14 @@ class DAPClient:
             },
         )
 
-    async def set_function_breakpoints(
-        self, breakpoints: list[dict[str, Any]]
-    ) -> DAPResponse:
+    async def set_function_breakpoints(self, breakpoints: list[dict[str, Any]]) -> DAPResponse:
         """Set function breakpoints."""
         return await self.send_request(
             Commands.SET_FUNCTION_BREAKPOINTS,
             {"breakpoints": breakpoints},
         )
 
-    async def set_variable(
-        self, variables_reference: int, name: str, value: str
-    ) -> DAPResponse:
+    async def set_variable(self, variables_reference: int, name: str, value: str) -> DAPResponse:
         """Set a variable's value."""
         return await self.send_request(
             Commands.SET_VARIABLE,
@@ -451,9 +442,7 @@ class DAPClient:
             },
         )
 
-    async def set_exception_breakpoints(
-        self, filters: list[str] | None = None
-    ) -> DAPResponse:
+    async def set_exception_breakpoints(self, filters: list[str] | None = None) -> DAPResponse:
         """Set exception breakpoints."""
         return await self.send_request(
             Commands.SET_EXCEPTION_BREAKPOINTS,
@@ -477,9 +466,7 @@ class DAPClient:
 
     async def step_in_targets(self, frame_id: int) -> DAPResponse:
         """Get possible step-in targets for a frame."""
-        return await self.send_request(
-            Commands.STEP_IN_TARGETS, {"frameId": frame_id}
-        )
+        return await self.send_request(Commands.STEP_IN_TARGETS, {"frameId": frame_id})
 
     async def step_out(self, thread_id: int) -> DAPResponse:
         """Step out of function."""

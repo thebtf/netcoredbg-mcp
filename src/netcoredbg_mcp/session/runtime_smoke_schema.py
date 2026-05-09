@@ -107,8 +107,7 @@ def schema_help_fields(plan: dict[str, Any] | None = None) -> dict[str, Any]:
         "accepted_top_level_keys": list(ACCEPTED_TOP_LEVEL_KEYS),
         "accepted_operation_names": sorted(OPERATION_SCHEMAS),
         "operation_aliases": {
-            op_name: schema.internal_name
-            for op_name, schema in sorted(OPERATION_SCHEMAS.items())
+            op_name: schema.internal_name for op_name, schema in sorted(OPERATION_SCHEMAS.items())
         },
         "operation_required_fields": {
             op_name: list(schema.required_fields)
@@ -153,9 +152,8 @@ def _validate_top_level_keys(plan: dict[str, Any], errors: list[str]) -> None:
 def _is_v2_shaped(plan: dict[str, Any] | None) -> bool:
     if not isinstance(plan, dict):
         return False
-    return (
-        plan.get("schema") == SCHEMA_VERSION_V2
-        or bool(set(plan).intersection(V2_ONLY_TOP_LEVEL_KEYS))
+    return plan.get("schema") == SCHEMA_VERSION_V2 or bool(
+        set(plan).intersection(V2_ONLY_TOP_LEVEL_KEYS)
     )
 
 
@@ -181,9 +179,7 @@ def _validate_schema_value(plan: dict[str, Any], errors: list[str]) -> None:
     schema = plan.get("schema")
     v2_keys = sorted(set(plan).intersection(V2_ONLY_TOP_LEVEL_KEYS))
     if schema is None and v2_keys:
-        errors.append(
-            "schema is required when using v2-only keys: " + ", ".join(v2_keys)
-        )
+        errors.append("schema is required when using v2-only keys: " + ", ".join(v2_keys))
     if schema is not None and schema not in ACCEPTED_SCHEMA_VALUES:
         accepted = ", ".join(ACCEPTED_SCHEMA_VALUES)
         errors.append(f"schema must be one of: {accepted}")
@@ -390,9 +386,7 @@ def _validate_restore_entry(
     has_baseline_text = "baseline_text" in entry
     has_baseline_file = "baseline_file" in entry
     if (1 if has_baseline_text else 0) + (1 if has_baseline_file else 0) != 1:
-        errors.append(
-            f"{prefix} requires exactly one of baseline_text or baseline_file"
-        )
+        errors.append(f"{prefix} requires exactly one of baseline_text or baseline_file")
         return
 
     if has_baseline_text and not isinstance(entry.get("baseline_text"), str):

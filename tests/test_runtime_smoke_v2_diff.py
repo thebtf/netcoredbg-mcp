@@ -84,9 +84,7 @@ def _single_case_plan() -> dict[str, Any]:
 async def test_v2_case_records_before_after_and_diff_maps() -> None:
     session = DiffSmokeSession()
     session.debug_values["_settings.SpellCheckInput"].extend([False, True])
-    session.property_values["spellcheckIndicator:Visibility"].extend(
-        ["Collapsed", "Visible"]
-    )
+    session.property_values["spellcheckIndicator:Visibility"].extend(["Collapsed", "Visible"])
 
     result = await _runner(session).run(_single_case_plan())
 
@@ -118,16 +116,18 @@ async def test_v2_case_records_before_after_and_diff_maps() -> None:
 async def test_v2_transition_blocked_payload_comes_from_blocked_probe() -> None:
     session = DiffSmokeSession()
     session.debug_values["_settings.SpellCheckInput"].extend([False, True])
-    session.property_values["spellcheckIndicator:Visibility"].extend([
-        "Collapsed",
-        {
-            "status": "BLOCKED",
-            "reason": "backend bridge disconnected",
-            "requested": {"adapter": "ui.get_property"},
-            "accepted": {"adapter_names": ["ui.get_property"]},
-            "next_step": "Reconnect UI bridge.",
-        },
-    ])
+    session.property_values["spellcheckIndicator:Visibility"].extend(
+        [
+            "Collapsed",
+            {
+                "status": "BLOCKED",
+                "reason": "backend bridge disconnected",
+                "requested": {"adapter": "ui.get_property"},
+                "accepted": {"adapter_names": ["ui.get_property"]},
+                "next_step": "Reconnect UI bridge.",
+            },
+        ]
+    )
 
     async def get_property(
         selector: dict[str, Any],
@@ -196,7 +196,6 @@ async def test_v2_probe_key_collision_fails_prelaunch() -> None:
     assert result["status"] == "FAIL"
     assert result["reason"] == "invalid plan schema"
     assert result["validation_errors"] == [
-        "cases[0].transitions[0] has duplicate probe path: "
-        "debug.evaluate.spellcheck_setting"
+        "cases[0].transitions[0] has duplicate probe path: debug.evaluate.spellcheck_setting"
     ]
     assert session.calls == []

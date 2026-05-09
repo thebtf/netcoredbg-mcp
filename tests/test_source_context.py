@@ -1,7 +1,5 @@
 """Tests for source context reading utility."""
 
-import os
-
 from netcoredbg_mcp.utils.source import read_source_context
 
 
@@ -18,7 +16,7 @@ class TestReadSourceContext:
             "{",
             "    static void Main()",
             "    {",
-            "        Console.WriteLine(\"Hello\");",
+            '        Console.WriteLine("Hello");',
             "    }",
             "}",
         ]

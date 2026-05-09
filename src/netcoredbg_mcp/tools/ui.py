@@ -2,13 +2,13 @@
 
 import asyncio
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from ..session import SessionManager
-
 from ..response import build_error_response, build_response
+from ..session import SessionManager
 from ..session.state import DebugState
 
 logger = logging.getLogger(__name__)
@@ -40,9 +40,7 @@ def _normalize_modifier_list(modifiers: list[str] | None) -> list[str]:
     if invalid:
         accepted = ", ".join(sorted(_SUPPORTED_MODIFIERS))
         invalid_names = ", ".join(sorted(str(value) for value in invalid))
-        raise ValueError(
-            f"Unknown modifier names: {invalid_names}. Accepted values: {accepted}"
-        )
+        raise ValueError(f"Unknown modifier names: {invalid_names}. Accepted values: {accepted}")
 
     return normalized
 
@@ -79,6 +77,7 @@ def register_ui_tools(
         """Get or create UI backend (FlaUI preferred, pywinauto fallback)."""
         if _backend_holder["instance"] is None:
             from ..ui.backend import create_backend
+
             _backend_holder["instance"] = create_backend(
                 process_registry=session.process_registry,
             )
@@ -127,6 +126,7 @@ def register_ui_tools(
         """
         ui = await _ensure_ui_connected()
         from ..ui.pywinauto_backend import PywinautoBackend
+
         if isinstance(ui, PywinautoBackend):
             element = await ui._find_element_scoped(
                 automation_id=automation_id,
@@ -142,7 +142,10 @@ def register_ui_tools(
         if not automation_id and not xpath and (name or control_type):
             try:
                 ranked = await ui.find_all_cascade(
-                    name=name, control_type=control_type, root_id=root_id, max_results=5,
+                    name=name,
+                    control_type=control_type,
+                    root_id=root_id,
+                    max_results=5,
                 )
                 results = ranked.get("results", [])
                 total = ranked.get("totalMatches", 0)
@@ -200,7 +203,9 @@ def register_ui_tools(
 
         return ui, element, ambiguity_info
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def ui_get_window_tree(max_depth: int = 3, max_children: int = 50) -> dict:
         """
         Get the visual tree of the debugged application — ALL top-level windows.
@@ -286,8 +291,7 @@ def register_ui_tools(
             result = await ui.switch_window(name=name, automation_id=automation_id)
             if not isinstance(result, dict):
                 return build_error_response(
-                    f"switch_window: backend returned non-dict response "
-                    f"({type(result).__name__})",
+                    f"switch_window: backend returned non-dict response ({type(result).__name__})",
                     state=session.state.state,
                 )
             if result.get("unsupported") is True:
@@ -299,7 +303,9 @@ def register_ui_tools(
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def ui_find_element(
         automation_id: str | None = None,
         name: str | None = None,
@@ -371,6 +377,7 @@ def register_ui_tools(
 
             # Use UIA-based focus via bridge (DPI/monitor-agnostic)
             from ..ui.flaui_client import FlaUIBackend
+
             if isinstance(ui, FlaUIBackend):
                 params: dict = {}
                 if automation_id:
@@ -379,14 +386,19 @@ def register_ui_tools(
                     params["name"] = name
                 result = await ui.client.call("set_focus", params)
                 return build_response(
-                    data=result if isinstance(result, dict) else {"focused": True, "method": "UIA.Focus"},
+                    data=result
+                    if isinstance(result, dict)
+                    else {"focused": True, "method": "UIA.Focus"},
                     state=session.state.state,
                 )
 
             # Pywinauto fallback: find element and set focus
             from ..ui.pywinauto_backend import PywinautoBackend
+
             if isinstance(ui, PywinautoBackend):
-                _, element, _ = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
+                _, element, _ = await _find_ui_element(
+                    automation_id, name, control_type, root_id, xpath
+                )
                 await ui.inner.set_focus(element)
                 return build_response(
                     data={"focused": True, "method": "pywinauto"},
@@ -410,7 +422,7 @@ def register_ui_tools(
         """
         Send keyboard input to a UI element.
 
-        Note: If app is STOPPED at breakpoint, the UI is frozen. Resume with continue_execution() first.
+        Note: If app is STOPPED at breakpoint, resume with continue_execution() first.
 
         Tries cached coordinates first (click to focus, then send keys),
         then falls back to pywinauto element search.
@@ -446,27 +458,37 @@ def register_ui_tools(
             # FlaUI backend: route through bridge send_keys (handles
             # SetForegroundWindow + optional UIA element focus)
             from ..ui.flaui_client import FlaUIBackend
+
             if isinstance(ui, FlaUIBackend):
                 params: dict = {"keys": keys}
                 if automation_id:
                     params["automationId"] = automation_id
                 result = await ui.client.call("send_keys", params)
                 return build_response(
-                    data={"sent": keys, "method": "bridge", **(result if isinstance(result, dict) else {})},
+                    data={
+                        "sent": keys,
+                        "method": "bridge",
+                        **(result if isinstance(result, dict) else {}),
+                    },
                     state=session.state.state,
                 )
 
             # Pywinauto fallback: find element, then send keys
             from ..ui.pywinauto_backend import PywinautoBackend
+
             if isinstance(ui, PywinautoBackend):
                 if automation_id or name or control_type:
-                    _, element, _ = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
+                    _, element, _ = await _find_ui_element(
+                        automation_id, name, control_type, root_id, xpath
+                    )
                     await ui.inner.send_keys(element, keys)
                 else:
                     await ui.send_keys(keys)
             else:
                 await ui.send_keys(keys)
-            return build_response(data={"sent": keys, "method": "element_search"}, state=session.state.state)
+            return build_response(
+                data={"sent": keys, "method": "element_search"}, state=session.state.state
+            )
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
@@ -504,6 +526,7 @@ def register_ui_tools(
 
             # FlaUI backend: route through bridge (handles SetForegroundWindow)
             from ..ui.flaui_client import FlaUIBackend
+
             if isinstance(ui, FlaUIBackend):
                 await ui.client.call("send_keys", {"keys": keys})
                 return build_response(
@@ -513,7 +536,8 @@ def register_ui_tools(
 
             await ui.send_keys(keys)
             return build_response(
-                data={"sent": keys, "target": "focused"}, state=session.state.state,
+                data={"sent": keys, "target": "focused"},
+                state=session.state.state,
             )
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
@@ -548,6 +572,7 @@ def register_ui_tools(
             ui = await _ensure_ui_connected()
 
             from ..ui.flaui_client import FlaUIBackend
+
             if isinstance(ui, FlaUIBackend):
                 params: dict = {"keys": keys, "delay_ms": delay_ms}
                 if automation_id:
@@ -565,6 +590,7 @@ def register_ui_tools(
 
             # Pywinauto fallback: send one by one (no focus hold guarantee)
             import asyncio
+
             for key in keys:
                 await ui.send_keys(key)
                 if delay_ms > 0:
@@ -588,7 +614,7 @@ def register_ui_tools(
         """
         Click on a UI element.
 
-        Note: If app is STOPPED at breakpoint, the UI is frozen. Resume with continue_execution() first.
+        Note: If app is STOPPED at breakpoint, resume with continue_execution() first.
 
         Tries cached coordinates first (from last ui_get_window_tree call),
         then falls back to pywinauto element search.
@@ -608,6 +634,7 @@ def register_ui_tools(
             # FlaUI backend: use bridge click (automationId → InvokePattern,
             # coords → SetForegroundWindow + Mouse.Click)
             from ..ui.flaui_client import FlaUIBackend
+
             if isinstance(ui, FlaUIBackend):
                 params: dict = {}
                 if automation_id:
@@ -625,14 +652,21 @@ def register_ui_tools(
                 if params:
                     result = await ui.client.call("click", params)
                     return build_response(
-                        data={"clicked": True, "method": "bridge", **(result if isinstance(result, dict) else {})},
+                        data={
+                            "clicked": True,
+                            "method": "bridge",
+                            **(result if isinstance(result, dict) else {}),
+                        },
                         state=session.state.state,
                     )
 
             # Fallback to element search
             try:
-                ui, element, _ = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
+                ui, element, _ = await _find_ui_element(
+                    automation_id, name, control_type, root_id, xpath
+                )
                 from ..ui.pywinauto_backend import PywinautoBackend
+
                 if isinstance(ui, PywinautoBackend):
                     await ui.inner.click(element)
                 else:
@@ -642,9 +676,12 @@ def register_ui_tools(
                         cx = int(rect.get("x", 0) + rect.get("width", 0) / 2)
                         cy = int(rect.get("y", 0) + rect.get("height", 0) / 2)
                         await ui.click_at(cx, cy)
-                return build_response(data={"clicked": True, "method": "element_search"}, state=session.state.state)
+                return build_response(
+                    data={"clicked": True, "method": "element_search"}, state=session.state.state
+                )
             except Exception:
-                # Last resort: if element found but click fails (e.g., DataGrid has no click wrapper),
+                # Last resort: if element found but click fails
+                # (for example, DataGrid has no click wrapper),
                 # try coordinate click from element's bounding rectangle
                 if automation_id:
                     ui = await _ensure_ui_connected()
@@ -654,7 +691,11 @@ def register_ui_tools(
                         cy = (rect["top"] + rect["bottom"]) // 2
                         await ui.click_at(cx, cy)
                         return build_response(
-                            data={"clicked": True, "method": "coord_fallback", "position": {"x": cx, "y": cy}},
+                            data={
+                                "clicked": True,
+                                "method": "coord_fallback",
+                                "position": {"x": cx, "y": cy},
+                            },
                             state=session.state.state,
                         )
                 raise  # re-raise if no fallback possible
@@ -673,7 +714,7 @@ def register_ui_tools(
         """
         Invoke a UI element using UIA InvokePattern (no mouse movement).
 
-        Note: If app is STOPPED at breakpoint, the UI is frozen. Resume with continue_execution() first.
+        Note: If app is STOPPED at breakpoint, resume with continue_execution() first.
 
         Preferred over ui_click for buttons, menu items, and hyperlinks because
         it works reliably even when the element is off-screen or partially obscured.
@@ -719,7 +760,7 @@ def register_ui_tools(
         "Indeterminate". Use this instead of ui_click for checkboxes to get
         reliable state feedback.
 
-        Note: If app is STOPPED at breakpoint, the UI is frozen. Resume with continue_execution() first.
+        Note: If app is STOPPED at breakpoint, resume with continue_execution() first.
 
         Args:
             automation_id: AutomationId property
@@ -789,11 +830,15 @@ def register_ui_tools(
                 if combo.get("found"):
                     # Set value via the ComboBox (bridge handles ValuePattern)
                     from ..ui.flaui_client import FlaUIBackend
+
                     if isinstance(ui, FlaUIBackend):
-                        await ui.client.call("set_value", {
-                            "automationId": "1148",
-                            "value": path,
-                        })
+                        await ui.client.call(
+                            "set_value",
+                            {
+                                "automationId": "1148",
+                                "value": path,
+                            },
+                        )
                         edit_method = "set_value(id=1148)"
                     else:
                         # pywinauto fallback: type the path
@@ -842,7 +887,8 @@ def register_ui_tools(
                     button_method = "keyboard(Enter)"
                 except Exception as e:
                     return build_error_response(
-                        f"File path entered via {edit_method} but could not click accept button: {e}",
+                        "File path entered via "
+                        f"{edit_method} but could not click accept button: {e}",
                         state=session.state.state,
                     )
 
@@ -886,7 +932,9 @@ def register_ui_tools(
 
     # -- Screenshot & annotation tools --
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def ui_take_screenshot(
         ctx: Context,
         max_width: int = 1568,
@@ -905,27 +953,36 @@ def register_ui_tools(
         - Understanding visual layout and spacing
         - Debugging rendering issues
 
-        Note: If app is STOPPED at breakpoint, the UI is frozen. Resume with continue_execution() first.
+        Note: If app is STOPPED at breakpoint, resume with continue_execution() first.
 
         Args:
-            max_width: Maximum image width (default 1280 — optimal for Claude vision, max useful is 1568)
+            max_width: Maximum image width. Default 1280; max useful is 1568.
             format: Image format: "webp" (smallest), "jpeg", "png"
         """
-        _VALID_FORMATS = {"webp", "jpeg", "png"}
+        valid_formats = {"webp", "jpeg", "png"}
 
         try:
             import base64
             import json
             import time as _time
-            from mcp.types import TextContent, ImageContent
-            from ..ui.screenshot import get_hwnd_for_pid, capture_window, _process_screenshot, create_preview
+
+            from mcp.types import ImageContent, TextContent
+
+            from ..ui.screenshot import (
+                _process_screenshot,
+                capture_window,
+                create_preview,
+                get_hwnd_for_pid,
+            )
 
             # Validate format against allow-list
-            safe_format = format if format in _VALID_FORMATS else "webp"
+            safe_format = format if format in valid_formats else "webp"
 
             pid = session.state.process_id
             if not pid:
-                return build_error_response("No debug process. Start debugging first.", state=session.state.state)
+                return build_error_response(
+                    "No debug process. Start debugging first.", state=session.state.state
+                )
 
             hwnd = get_hwnd_for_pid(pid)
             if not hwnd:
@@ -938,17 +995,20 @@ def register_ui_tools(
 
             # Capture raw screenshot
             png_bytes, _, _ = await loop.run_in_executor(
-                None, lambda: capture_window(hwnd),
+                None,
+                lambda: capture_window(hwnd),
             )
 
             # Create HD version in requested format
             hd_bytes, hd_w, hd_h, _ = await loop.run_in_executor(
-                None, lambda: _process_screenshot(png_bytes, max_width=max_width, format=safe_format),
+                None,
+                lambda: _process_screenshot(png_bytes, max_width=max_width, format=safe_format),
             )
 
             # Create inline preview (≤1280px WebP — Claude vision optimal)
             preview_bytes, preview_w, _ = await loop.run_in_executor(
-                None, lambda: create_preview(png_bytes, max_width=max_width, quality=80),
+                None,
+                lambda: create_preview(png_bytes, max_width=max_width, quality=80),
             )
 
             # Save HD to session temp dir
@@ -957,14 +1017,18 @@ def register_ui_tools(
                 "height": hd_h,
                 "preview_width": preview_w,
                 "format": safe_format,
-                "state": session.state.state.value if hasattr(session.state.state, "value") else str(session.state.state),
+                "state": session.state.state.value
+                if hasattr(session.state.state, "value")
+                else str(session.state.state),
             }
 
             sid = session.session_id
             if sid:
                 ts = int(_time.time() * 1000) & 0xFFFFFFFF
                 hd_path = session.temp_manager.save_screenshot(
-                    sid, hd_bytes, f"screenshot_{ts:08x}.{safe_format}",
+                    sid,
+                    hd_bytes,
+                    f"screenshot_{ts:08x}.{safe_format}",
                 )
                 if hd_path:
                     metadata["hd_path"] = str(hd_path)
@@ -984,7 +1048,9 @@ def register_ui_tools(
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def ui_take_annotated_screenshot(
         ctx: Context,
         max_depth: int = 3,
@@ -1010,11 +1076,15 @@ def register_ui_tools(
         nonlocal _last_annotation, _annotation_generation
 
         try:
-            from ..ui.screenshot import (
-                get_hwnd_for_pid, capture_window, collect_visible_elements, annotate_screenshot,
-            )
             import ctypes
             from ctypes import wintypes
+
+            from ..ui.screenshot import (
+                annotate_screenshot,
+                capture_window,
+                collect_visible_elements,
+                get_hwnd_for_pid,
+            )
 
             pid = session.state.process_id
             if not pid:
@@ -1033,22 +1103,26 @@ def register_ui_tools(
 
             # Capture screenshot
             png_bytes, _, _ = await loop.run_in_executor(
-                None, lambda: capture_window(hwnd),
+                None,
+                lambda: capture_window(hwnd),
             )
 
             # Collect elements — needs pywinauto _app access
             from ..ui.pywinauto_backend import PywinautoBackend
+
             if isinstance(backend, PywinautoBackend):
                 app = backend.inner._app
             else:
                 # FlaUI backend: fall back to connecting pywinauto just for element collection
                 from ..ui import UIAutomation
+
                 _fallback_ui = UIAutomation()
                 await _fallback_ui.connect(pid)
                 app = _fallback_ui._app
 
             elements = await loop.run_in_executor(
-                None, lambda: collect_visible_elements(app, max_depth, interactive_only),
+                None,
+                lambda: collect_visible_elements(app, max_depth, interactive_only),
             )
 
             # Get window screen position for coordinate conversion
@@ -1058,7 +1132,8 @@ def register_ui_tools(
 
             # Annotate screenshot (with optional downsampling)
             annotated_bytes = await loop.run_in_executor(
-                None, lambda: annotate_screenshot(png_bytes, elements, window_rect, max_width),
+                None,
+                lambda: annotate_screenshot(png_bytes, elements, window_rect, max_width),
             )
 
             # Cache elements for ui_click_annotated
@@ -1071,28 +1146,33 @@ def register_ui_tools(
             }
 
             # Convert to optimal format
-            from ..ui.screenshot import _process_screenshot, create_preview
             import base64
             import json
-            from mcp.types import TextContent, ImageContent
 
-            _VALID_FORMATS = {"webp", "jpeg", "png"}
-            safe_format = format if format in _VALID_FORMATS else "webp"
+            from mcp.types import ImageContent, TextContent
+
+            from ..ui.screenshot import _process_screenshot, create_preview
+
+            valid_formats = {"webp", "jpeg", "png"}
+            safe_format = format if format in valid_formats else "webp"
 
             hd_bytes, hd_w, hd_h, _ = await loop.run_in_executor(
-                None, lambda: _process_screenshot(annotated_bytes, max_width=max_width, format=safe_format),
+                None,
+                lambda: _process_screenshot(
+                    annotated_bytes, max_width=max_width, format=safe_format
+                ),
             )
 
             # Create inline preview (≤max_width WebP) — in executor to avoid blocking loop
             preview_bytes, preview_w, _ = await loop.run_in_executor(
-                None, lambda: create_preview(annotated_bytes, max_width=max_width, quality=80),
+                None,
+                lambda: create_preview(annotated_bytes, max_width=max_width, quality=80),
             )
 
             # Build element index — compact (id+name) or full (id+name+type+automationId)
             if compact:
-                elem_index = [
-                    f"{e['id']}: {e['name'] or e['automationId'] or e['type']}"
-                    for e in elements
+                elem_index: list[Any] = [
+                    f"{e['id']}: {e['name'] or e['automationId'] or e['type']}" for e in elements
                 ]
             else:
                 elem_index = [
@@ -1114,13 +1194,17 @@ def register_ui_tools(
                 "element_count": len(elements),
                 "generation": _annotation_generation,
                 "format": safe_format,
-                "state": session.state.state.value if hasattr(session.state.state, "value") else str(session.state.state),
+                "state": session.state.state.value
+                if hasattr(session.state.state, "value")
+                else str(session.state.state),
             }
 
             sid = session.session_id
             if sid:
                 hd_path = session.temp_manager.save_screenshot(
-                    sid, hd_bytes, f"annotated_{_annotation_generation:04d}.{safe_format}",
+                    sid,
+                    hd_bytes,
+                    f"annotated_{_annotation_generation:04d}.{safe_format}",
                 )
                 if hd_path:
                     metadata["hd_path"] = str(hd_path)
@@ -1141,7 +1225,9 @@ def register_ui_tools(
             return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
-    async def ui_click_annotated(ctx: Context, element_id: int, generation: int | None = None) -> dict:
+    async def ui_click_annotated(
+        ctx: Context, element_id: int, generation: int | None = None
+    ) -> dict:
         """Click an element by its ID from ui_take_annotated_screenshot.
 
         Uses the numbered element from the last annotated screenshot.
@@ -1244,16 +1330,20 @@ def register_ui_tools(
             ct = data.get("control_type", "")
             if not r or ct not in ("ListItem", "DataItem", "TreeItem", "ListBoxItem"):
                 continue
-            if (pr["left"] <= r["left"] and r["right"] <= pr["right"]
-                    and pr["top"] <= r["top"] and r["bottom"] <= pr["bottom"]):
+            if (
+                pr["left"] <= r["left"]
+                and r["right"] <= pr["right"]
+                and pr["top"] <= r["top"]
+                and r["bottom"] <= pr["bottom"]
+            ):
                 child_items.append(r)
 
         # Sort by vertical position (top to bottom)
         child_items.sort(key=lambda r: r["top"])
 
         selected = 0
-        VK_CONTROL = 0x11
-        KEYEVENTF_KEYUP = 0x0002
+        vk_control = 0x11
+        keyeventf_keyup = 0x0002
 
         # Click first item (plain click to set initial selection)
         first_done = False
@@ -1272,7 +1362,7 @@ def register_ui_tools(
         remaining = [i for i in indices if i != indices[0] and i < len(child_items)]
         if remaining and first_done:
             # Press Ctrl ONCE before all remaining clicks
-            ctypes.windll.user32.keybd_event(VK_CONTROL, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(vk_control, 0, 0, 0)
             try:
                 for target_idx in remaining:
                     rect = child_items[target_idx]
@@ -1283,7 +1373,7 @@ def register_ui_tools(
                     selected += 1
             finally:
                 # ALWAYS release Ctrl
-                ctypes.windll.user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+                ctypes.windll.user32.keybd_event(vk_control, 0, keyeventf_keyup, 0)
 
         return selected
 
@@ -1350,7 +1440,8 @@ def register_ui_tools(
             loop = asyncio.get_running_loop()
             try:
                 selected = await asyncio.wait_for(
-                    loop.run_in_executor(None, _select_via_pattern), timeout=10.0,
+                    loop.run_in_executor(None, _select_via_pattern),
+                    timeout=10.0,
                 )
             except Exception:
                 # Strategy 1 failed (e.g., add_to_selection error on Extended ListBox)
@@ -1381,7 +1472,7 @@ def register_ui_tools(
 
         Tries cached coordinates first, then falls back to pywinauto element search.
 
-        Note: If app is STOPPED at breakpoint, the UI is frozen. Resume with continue_execution() first.
+        Note: If app is STOPPED at breakpoint, resume with continue_execution() first.
 
         Args:
             automation_id: AutomationId property
@@ -1402,22 +1493,31 @@ def register_ui_tools(
                     cy = (rect["top"] + rect["bottom"]) // 2
                     await ui.right_click_at(cx, cy)
                     return build_response(
-                        data={"right_clicked": True, "method": "cache", "position": {"x": cx, "y": cy}},
+                        data={
+                            "right_clicked": True,
+                            "method": "cache",
+                            "position": {"x": cx, "y": cy},
+                        },
                         state=session.state.state,
                     )
 
             # Fallback to element search
-            ui, element, _ = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
+            ui, element, _ = await _find_ui_element(
+                automation_id, name, control_type, root_id, xpath
+            )
 
             def _right_click() -> None:
                 element.click_input(button="right")
 
             loop = asyncio.get_running_loop()
             await asyncio.wait_for(
-                loop.run_in_executor(None, _right_click), timeout=5.0,
+                loop.run_in_executor(None, _right_click),
+                timeout=5.0,
             )
 
-            return build_response(data={"right_clicked": True, "method": "element_search"}, state=session.state.state)
+            return build_response(
+                data={"right_clicked": True, "method": "element_search"}, state=session.state.state
+            )
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
@@ -1434,7 +1534,7 @@ def register_ui_tools(
 
         Tries cached coordinates first, then falls back to pywinauto element search.
 
-        Note: If app is STOPPED at breakpoint, the UI is frozen. Resume with continue_execution() first.
+        Note: If app is STOPPED at breakpoint, resume with continue_execution() first.
 
         Args:
             automation_id: AutomationId property
@@ -1455,22 +1555,31 @@ def register_ui_tools(
                     cy = (rect["top"] + rect["bottom"]) // 2
                     await ui.double_click_at(cx, cy)
                     return build_response(
-                        data={"double_clicked": True, "method": "cache", "position": {"x": cx, "y": cy}},
+                        data={
+                            "double_clicked": True,
+                            "method": "cache",
+                            "position": {"x": cx, "y": cy},
+                        },
                         state=session.state.state,
                     )
 
             # Fallback to element search
-            ui, element, _ = await _find_ui_element(automation_id, name, control_type, root_id, xpath)
+            ui, element, _ = await _find_ui_element(
+                automation_id, name, control_type, root_id, xpath
+            )
 
             def _double_click() -> None:
                 element.double_click_input()
 
             loop = asyncio.get_running_loop()
             await asyncio.wait_for(
-                loop.run_in_executor(None, _double_click), timeout=5.0,
+                loop.run_in_executor(None, _double_click),
+                timeout=5.0,
             )
 
-            return build_response(data={"double_clicked": True, "method": "element_search"}, state=session.state.state)
+            return build_response(
+                data={"double_clicked": True, "method": "element_search"}, state=session.state.state
+            )
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
@@ -1483,7 +1592,7 @@ def register_ui_tools(
     ) -> dict:
         """Scroll a UI control.
 
-        Note: If app is STOPPED at breakpoint, the UI is frozen. Resume with continue_execution() first.
+        Note: If app is STOPPED at breakpoint, resume with continue_execution() first.
 
         Args:
             automation_id: AutomationId of the scrollable control
@@ -1505,7 +1614,8 @@ def register_ui_tools(
 
             loop = asyncio.get_running_loop()
             await asyncio.wait_for(
-                loop.run_in_executor(None, _scroll), timeout=5.0,
+                loop.run_in_executor(None, _scroll),
+                timeout=5.0,
             )
 
             return build_response(
@@ -1577,7 +1687,8 @@ def register_ui_tools(
                     fy = (from_rect["top"] + from_rect["bottom"]) // 2
                 else:
                     return build_error_response(
-                        f"Element '{from_automation_id}' not in cache. Call ui_get_window_tree first.",
+                        f"Element '{from_automation_id}' not in cache. "
+                        "Call ui_get_window_tree first.",
                         state=session.state.state,
                     )
 
@@ -1588,7 +1699,8 @@ def register_ui_tools(
                     ty = (to_rect["top"] + to_rect["bottom"]) // 2
                 else:
                     return build_error_response(
-                        f"Element '{to_automation_id}' not in cache. Call ui_get_window_tree first.",
+                        f"Element '{to_automation_id}' not in cache. "
+                        "Call ui_get_window_tree first.",
                         state=session.state.state,
                     )
 
@@ -1657,7 +1769,8 @@ def register_ui_tools(
             result = await ui.send_system_event(normalized_event, mode=normalized_mode)
             if not isinstance(result, dict):
                 return build_error_response(
-                    f"send_system_event: backend returned non-dict response ({type(result).__name__})",
+                    "send_system_event: backend returned non-dict response "
+                    f"({type(result).__name__})",
                     state=session.state.state,
                 )
             if result.get("unsupported") is True:
@@ -1710,7 +1823,8 @@ def register_ui_tools(
             result = await ui.release_modifiers(normalized_modifiers)
             if not isinstance(result, dict):
                 return build_error_response(
-                    f"release_modifiers: backend returned non-dict response ({type(result).__name__})",
+                    "release_modifiers: backend returned non-dict response "
+                    f"({type(result).__name__})",
                     state=session.state.state,
                 )
             if result.get("unsupported") is True:
@@ -1722,7 +1836,9 @@ def register_ui_tools(
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def ui_get_held_modifiers(ctx: Context) -> dict:
         """Inspect currently held modifiers."""
         try:
@@ -1734,7 +1850,8 @@ def register_ui_tools(
             result = await ui.get_held_modifiers()
             if not isinstance(result, dict):
                 return build_error_response(
-                    f"get_held_modifiers: backend returned non-dict response ({type(result).__name__})",
+                    "get_held_modifiers: backend returned non-dict response "
+                    f"({type(result).__name__})",
                     state=session.state.state,
                 )
             if result.get("unsupported") is True:
@@ -1748,7 +1865,9 @@ def register_ui_tools(
 
     # -- Read / query tools --
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def ui_get_selected_item(
         automation_id: str,
         root_id: str | None = None,
@@ -1759,7 +1878,8 @@ def register_ui_tools(
         Returns the selected item's name, index, and properties.
         Useful for verifying selection state after clicks or keyboard navigation.
 
-        Note: FlaUI backend returns selection for the first item only. For full multi-selection state, use ui_find_element to inspect individual items.
+        Note: FlaUI backend returns selection for the first item only.
+        Use ui_find_element to inspect individual items for full multi-selection state.
 
         Args:
             automation_id: AutomationId of the list/grid/combobox control
@@ -1771,6 +1891,7 @@ def register_ui_tools(
 
             def _get_selected() -> dict[str, Any]:
                 from ..ui.pywinauto_backend import PywinautoBackend
+
                 if isinstance(ui, PywinautoBackend):
                     window = ui.inner._app.top_window()
                     search_root = window
@@ -1786,14 +1907,19 @@ def register_ui_tools(
                         if selection and selection.Length > 0:
                             selected_elem = selection.GetElement(0)
                             from pywinauto.uia_element_info import UIAElementInfo
+
                             elem_info = UIAElementInfo(selected_elem)
                             from pywinauto.controls.uiawrapper import UIAWrapper
+
                             wrapper = UIAWrapper(elem_info)
                             children = control.children()
                             idx = -1
                             for i, child in enumerate(children):
                                 try:
-                                    if child.element_info.runtime_id == wrapper.element_info.runtime_id:
+                                    if (
+                                        child.element_info.runtime_id
+                                        == wrapper.element_info.runtime_id
+                                    ):
                                         idx = i
                                         break
                                 except Exception:
@@ -1801,7 +1927,8 @@ def register_ui_tools(
                             return {
                                 "index": idx,
                                 "name": wrapper.element_info.name or "",
-                                "automationId": getattr(wrapper.element_info, "automation_id", "") or "",
+                                "automationId": getattr(wrapper.element_info, "automation_id", "")
+                                or "",
                                 "controlType": wrapper.element_info.control_type or "",
                             }
                     except Exception:
@@ -1816,7 +1943,8 @@ def register_ui_tools(
                                 return {
                                     "index": i,
                                     "name": child.element_info.name or "",
-                                    "automationId": getattr(child.element_info, "automation_id", "") or "",
+                                    "automationId": getattr(child.element_info, "automation_id", "")
+                                    or "",
                                     "controlType": child.element_info.control_type or "",
                                 }
                         except Exception:
@@ -1834,13 +1962,16 @@ def register_ui_tools(
 
             loop = asyncio.get_running_loop()
             result = await asyncio.wait_for(
-                loop.run_in_executor(None, _get_selected), timeout=10.0,
+                loop.run_in_executor(None, _get_selected),
+                timeout=10.0,
             )
             return build_response(data=result, state=session.state.state)
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def ui_read_text(
         automation_id: str | None = None,
         name: str | None = None,
@@ -1874,20 +2005,23 @@ def register_ui_tools(
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def ui_get_focused_element() -> dict:
         """Get information about the currently focused UI element.
 
         Returns the focused element's automationId, name, controlType, and value.
         Useful for verifying focus state after ui_set_focus or tab navigation.
 
-        Note: Returns the focused element within the app window. May not detect focus in OS-level dialogs.
+        Note: Returns focus within the app window, not always OS-level dialogs.
         """
         try:
             ui = await _ensure_ui_connected()
 
             def _get_focused() -> dict[str, Any]:
                 from ..ui.pywinauto_backend import PywinautoBackend
+
                 if isinstance(ui, PywinautoBackend):
                     import comtypes.client  # noqa: F401
                     from pywinauto.uia_defines import IUIA
@@ -1898,8 +2032,10 @@ def register_ui_tools(
                         return {"name": "", "automationId": "", "controlType": "", "value": ""}
 
                     from pywinauto.uia_element_info import UIAElementInfo
+
                     elem_info = UIAElementInfo(focused)
                     from pywinauto.controls.uiawrapper import UIAWrapper
+
                     wrapper = UIAWrapper(elem_info)
                     info = wrapper.element_info
 
@@ -1926,13 +2062,16 @@ def register_ui_tools(
 
             loop = asyncio.get_running_loop()
             result = await asyncio.wait_for(
-                loop.run_in_executor(None, _get_focused), timeout=5.0,
+                loop.run_in_executor(None, _get_focused),
+                timeout=5.0,
             )
             return build_response(data=result, state=session.state.state)
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def ui_wait_for(
         automation_id: str | None = None,
         name: str | None = None,
@@ -1967,6 +2106,7 @@ def register_ui_tools(
             ui = await _ensure_ui_connected()
 
             import time as _time
+
             from ..ui import ElementNotFoundError
 
             start = _time.monotonic()
@@ -2062,7 +2202,8 @@ def register_ui_tools(
             result = await ui.maximize_window(window_title=window_title)
             if not isinstance(result, dict):
                 return build_error_response(
-                    f"maximize_window: backend returned non-dict response ({type(result).__name__})",
+                    "maximize_window: backend returned non-dict response "
+                    f"({type(result).__name__})",
                     state=session.state.state,
                 )
             if result.get("unsupported") is True:
@@ -2090,7 +2231,8 @@ def register_ui_tools(
             result = await ui.minimize_window(window_title=window_title)
             if not isinstance(result, dict):
                 return build_error_response(
-                    f"minimize_window: backend returned non-dict response ({type(result).__name__})",
+                    "minimize_window: backend returned non-dict response "
+                    f"({type(result).__name__})",
                     state=session.state.state,
                 )
             if result.get("unsupported") is True:
@@ -2356,7 +2498,8 @@ def register_ui_tools(
             result = await ui.clipboard_write(text=text)
             if not isinstance(result, dict):
                 return build_error_response(
-                    f"clipboard_write: backend returned non-dict response ({type(result).__name__})",
+                    "clipboard_write: backend returned non-dict response "
+                    f"({type(result).__name__})",
                     state=session.state.state,
                 )
             if result.get("unsupported") is True:
@@ -2410,7 +2553,8 @@ def register_ui_tools(
             supported_props = {"AutomationId", "Name", "ClassName"}
             if prop_name not in supported_props:
                 raise ValueError(
-                    f"prop_name must be one of: {', '.join(sorted(supported_props))}. Got: {prop_name!r}"
+                    "prop_name must be one of: "
+                    f"{', '.join(sorted(supported_props))}. Got: {prop_name!r}"
                 )
 
             ui = await _ensure_ui_connected()
@@ -2421,12 +2565,15 @@ def register_ui_tools(
             )
             if not isinstance(result, dict):
                 return build_error_response(
-                    f"realize_virtualized_item: backend returned non-dict response ({type(result).__name__})",
+                    "realize_virtualized_item: backend returned non-dict response "
+                    f"({type(result).__name__})",
                     state=session.state.state,
                 )
             if result.get("unsupported") is True:
                 return build_error_response(
-                    result.get("reason", "realize_virtualized_item not supported on current backend"),
+                    result.get(
+                        "reason", "realize_virtualized_item not supported on current backend"
+                    ),
                     state=session.state.state,
                 )
             return build_response(data=result, state=session.state.state)

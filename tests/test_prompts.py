@@ -97,7 +97,6 @@ async def test_every_wrapping_tool_mentions_escape_hatch(mcp_server):
     assert missing_tools == []
 
     missing_pointer = [
-        name for name in DAP_WRAPPING_TOOLS
-        if "dap-escape-hatch" not in descriptions[name]
+        name for name in DAP_WRAPPING_TOOLS if "dap-escape-hatch" not in descriptions[name]
     ]
     assert missing_pointer == []

@@ -23,8 +23,9 @@ logger = logging.getLogger(__name__)
 
 MAX_TRACE_ENTRIES = int(os.environ.get("NETCOREDBG_MAX_TRACE_ENTRIES", "1000"))
 EVALUATE_TIMEOUT_SECONDS = float(os.environ.get("NETCOREDBG_EVALUATE_TIMEOUT", "0.5"))
-RATE_LIMIT_INTERVAL_SECONDS = float(os.environ.get("NETCOREDBG_RATE_LIMIT_INTERVAL", "0.1"))  # Max 10 hits/sec
-
+RATE_LIMIT_INTERVAL_SECONDS = float(
+    os.environ.get("NETCOREDBG_RATE_LIMIT_INTERVAL", "0.1")
+)  # Max 10 hits/sec
 
 
 class TracepointManager:
@@ -126,13 +127,21 @@ class TracepointManager:
                 logger.info(
                     "Tracepoint %s matched by filename fallback: frame=%s tp=%s "
                     "line=%d (requested=%d, dap=%s)",
-                    tp.id, file, tp.file, line, tp.line, tp.dap_line,
+                    tp.id,
+                    file,
+                    tp.file,
+                    line,
+                    tp.line,
+                    tp.dap_line,
                 )
                 return tp
 
         logger.debug(
             "No tracepoint match for %s:%d (checked %d tracepoints, normalized=%s)",
-            file, line, len(self._tracepoints), normalized,
+            file,
+            line,
+            len(self._tracepoints),
+            normalized,
         )
         return None
 
@@ -146,7 +155,9 @@ class TracepointManager:
             logger.info(
                 "Tracepoint %s line adjusted by DAP: requested=%d, actual=%d "
                 "(typical for async state machines)",
-                tp_id, tp.line, dap_line,
+                tp_id,
+                tp.line,
+                dap_line,
             )
         return True
 
@@ -158,7 +169,9 @@ class TracepointManager:
                 if dap_line is not None and dap_line != tp.line:
                     logger.info(
                         "Tracepoint %s line updated via adapter event: requested=%d, actual=%d",
-                        tp.id, tp.line, dap_line,
+                        tp.id,
+                        tp.line,
+                        dap_line,
                     )
                 return
 
@@ -198,15 +211,17 @@ class TracepointManager:
 
             # Rate limiting
             if self._is_rate_limited(tp.id):
-                self._trace_buffer.append(TraceEntry(
-                    timestamp=time.monotonic(),
-                    file=tp.file,
-                    line=tp.line,
-                    expression=tp.expression,
-                    value="<rate limited>",
-                    thread_id=thread_id,
-                    tracepoint_id=tp.id,
-                ))
+                self._trace_buffer.append(
+                    TraceEntry(
+                        timestamp=time.monotonic(),
+                        file=tp.file,
+                        line=tp.line,
+                        expression=tp.expression,
+                        value="<rate limited>",
+                        thread_id=thread_id,
+                        tracepoint_id=tp.id,
+                    )
+                )
                 if not has_user_breakpoint:
                     try:
                         session.prepare_for_execution()
@@ -237,15 +252,17 @@ class TracepointManager:
                 value = f"<error: {type(e).__name__}>"
 
             # Log entry
-            self._trace_buffer.append(TraceEntry(
-                timestamp=time.monotonic(),
-                file=tp.file,
-                line=tp.line,
-                expression=tp.expression,
-                value=value,
-                thread_id=thread_id,
-                tracepoint_id=tp.id,
-            ))
+            self._trace_buffer.append(
+                TraceEntry(
+                    timestamp=time.monotonic(),
+                    file=tp.file,
+                    line=tp.line,
+                    expression=tp.expression,
+                    value=value,
+                    thread_id=thread_id,
+                    tracepoint_id=tp.id,
+                )
+            )
 
             # Resume only if no user breakpoint at this location
             if not has_user_breakpoint:

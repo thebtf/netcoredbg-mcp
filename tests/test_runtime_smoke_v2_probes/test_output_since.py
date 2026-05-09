@@ -26,43 +26,51 @@ class OutputSinceProbeSession(ProbeSmokeSession):
         regex: bool,
         max_matches: int,
     ) -> dict[str, Any]:
-        self.calls.append((
-            "output_assert_since",
-            checkpoint,
-            tuple(required),
-            tuple(forbidden),
-            regex,
-            max_matches,
-        ))
+        self.calls.append(
+            (
+                "output_assert_since",
+                checkpoint,
+                tuple(required),
+                tuple(forbidden),
+                regex,
+                max_matches,
+            )
+        )
         return self.assertion_results.popleft()
 
 
 @pytest.mark.asyncio
 async def test_output_since_probe_wraps_output_assertion() -> None:
     session = OutputSinceProbeSession()
-    session.assertion_results.extend([
-        {"status": "PASS", "matches": [], "missing_required": [], "forbidden_matches": []},
-        {
-            "status": "PASS",
-            "matches": [{"text": "SettingsOracle reason=spellcheck"}],
-            "missing_required": [],
-            "forbidden_matches": [],
-            "evidence_refs": [{"ref": "output:after-spellcheck"}],
-        },
-    ])
+    session.assertion_results.extend(
+        [
+            {"status": "PASS", "matches": [], "missing_required": [], "forbidden_matches": []},
+            {
+                "status": "PASS",
+                "matches": [{"text": "SettingsOracle reason=spellcheck"}],
+                "missing_required": [],
+                "forbidden_matches": [],
+                "evidence_refs": [{"ref": "output:after-spellcheck"}],
+            },
+        ]
+    )
 
     result = await runner(
         session,
         {"output_assert_since": session.output_assert_since},
-    ).run(one_probe_plan({
-        "kind": "output.since",
-        "name": "spellcheck_output",
-        "checkpoint": "before-spellcheck",
-        "required": ["SettingsOracle"],
-        "forbidden": ["exception"],
-        "regex": False,
-        "max_matches": 5,
-    }))
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "output.since",
+                "name": "spellcheck_output",
+                "checkpoint": "before-spellcheck",
+                "required": ["SettingsOracle"],
+                "forbidden": ["exception"],
+                "regex": False,
+                "max_matches": 5,
+            }
+        )
+    )
 
     probe = after_probe(result)
     assert result["status"] == "PASS"
@@ -82,12 +90,16 @@ async def test_output_since_probe_reuses_session_output_assertion_service() -> N
     OutputAssertionService(session).create_checkpoint("before-spellcheck")
     session.state.output_buffer.append(OutputEntry("SettingsOracle reason=spellcheck\n"))
 
-    result = await runner(session).run(one_probe_plan({
-        "kind": "output.since",
-        "name": "spellcheck_output",
-        "checkpoint": "before-spellcheck",
-        "required": ["SettingsOracle"],
-    }))
+    result = await runner(session).run(
+        one_probe_plan(
+            {
+                "kind": "output.since",
+                "name": "spellcheck_output",
+                "checkpoint": "before-spellcheck",
+                "required": ["SettingsOracle"],
+            }
+        )
+    )
 
     probe = after_probe(result)
     assert result["status"] == "PASS"
@@ -99,12 +111,16 @@ async def test_output_since_probe_reuses_session_output_assertion_service() -> N
 async def test_output_since_probe_blocks_when_execution_is_unavailable() -> None:
     session = OutputSinceProbeSession()
 
-    result = await runner(session).run(one_probe_plan({
-        "kind": "output.since",
-        "name": "spellcheck_output",
-        "checkpoint": "before-spellcheck",
-        "required": ["SettingsOracle"],
-    }))
+    result = await runner(session).run(
+        one_probe_plan(
+            {
+                "kind": "output.since",
+                "name": "spellcheck_output",
+                "checkpoint": "before-spellcheck",
+                "required": ["SettingsOracle"],
+            }
+        )
+    )
 
     probe = after_probe(result)
     assert result["status"] == "BLOCKED"

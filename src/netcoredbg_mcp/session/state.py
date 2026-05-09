@@ -13,6 +13,7 @@ from ..dap.events import InvalidatedEventBody, MemoryEventBody
 
 class DebugState(str, Enum):
     """Debug session states."""
+
     IDLE = "idle"  # No active session
     INITIALIZING = "initializing"  # DAP initializing
     CONFIGURED = "configured"  # Breakpoints set, ready to run
@@ -23,6 +24,7 @@ class DebugState(str, Enum):
 
 class TerminalStatus(str, Enum):
     """Terminal runtime smoke result states."""
+
     PASS = "PASS"
     FAIL = "FAIL"
     BLOCKED = "BLOCKED"
@@ -32,6 +34,7 @@ class TerminalStatus(str, Enum):
 @dataclass(frozen=True)
 class EvidenceRef:
     """Compact reference to bounded runtime smoke evidence."""
+
     kind: str
     ref: str
     summary: str
@@ -51,6 +54,7 @@ class EvidenceRef:
 @dataclass(frozen=True)
 class SmokeResultSummary:
     """Serializable compact terminal result for runtime smoke scenarios."""
+
     status: TerminalStatus
     reason: str
     elapsed: float
@@ -80,6 +84,7 @@ class SmokeResultSummary:
 @dataclass
 class Breakpoint:
     """Represents a breakpoint."""
+
     file: str
     line: int
     condition: str | None = None
@@ -104,6 +109,7 @@ class Breakpoint:
 @dataclass
 class FunctionBreakpoint:
     """Represents a function breakpoint."""
+
     name: str
     condition: str | None = None
     hit_condition: str | None = None
@@ -122,7 +128,7 @@ class FunctionBreakpoint:
 class BreakpointRegistry:
     """Manages breakpoints across files."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._breakpoints: dict[str, list[Breakpoint]] = {}  # file -> breakpoints
         self._function_breakpoints: list[FunctionBreakpoint] = []
 
@@ -226,9 +232,7 @@ class BreakpointRegistry:
     def remove_function_breakpoint(self, name: str) -> bool:
         """Remove a function breakpoint by name. Returns True if found."""
         original_count = len(self._function_breakpoints)
-        self._function_breakpoints = [
-            bp for bp in self._function_breakpoints if bp.name != name
-        ]
+        self._function_breakpoints = [bp for bp in self._function_breakpoints if bp.name != name]
         return len(self._function_breakpoints) < original_count
 
     def get_function_breakpoints(self) -> list[FunctionBreakpoint]:
@@ -245,6 +249,7 @@ class BreakpointRegistry:
         """Normalize file path for consistent lookup."""
         # Convert backslashes to forward slashes and lowercase on Windows
         import os
+
         normalized = os.path.normpath(path)
         if os.name == "nt":
             normalized = normalized.lower()
@@ -254,6 +259,7 @@ class BreakpointRegistry:
 @dataclass
 class ThreadInfo:
     """Thread information."""
+
     id: int
     name: str
 
@@ -261,6 +267,7 @@ class ThreadInfo:
 @dataclass
 class StackFrame:
     """Stack frame information."""
+
     id: int
     name: str
     source: str | None
@@ -271,6 +278,7 @@ class StackFrame:
 @dataclass
 class Variable:
     """Variable information."""
+
     name: str
     value: str
     type: str | None
@@ -282,6 +290,7 @@ class Variable:
 @dataclass
 class TraceEntry:
     """Single tracepoint evaluation result."""
+
     timestamp: float
     file: str
     line: int
@@ -294,6 +303,7 @@ class TraceEntry:
 @dataclass
 class Tracepoint:
     """Client-side tracepoint definition."""
+
     id: str  # "tp-{counter}"
     file: str  # Normalized source path
     line: int
@@ -307,6 +317,7 @@ class Tracepoint:
 @dataclass
 class SnapshotVar:
     """Variable captured in a snapshot."""
+
     value: str
     type: str
 
@@ -314,6 +325,7 @@ class SnapshotVar:
 @dataclass
 class Snapshot:
     """Captured variable state at a point in time."""
+
     name: str
     timestamp: float
     frame_name: str
@@ -323,6 +335,7 @@ class Snapshot:
 @dataclass
 class OutputEntry:
     """Single output buffer entry with category metadata."""
+
     text: str
     category: str = "console"  # stdout, stderr, console
     variables_reference: int = 0  # Non-zero when adapter attaches structured data
@@ -332,6 +345,7 @@ class OutputEntry:
 @dataclass
 class ModuleInfo:
     """Loaded module/assembly information from DAP module events."""
+
     id: int | str = 0
     name: str = ""
     path: str | None = None
@@ -353,6 +367,7 @@ class ModuleInfo:
 @dataclass
 class LoadedSource:
     """Loaded source file known to the debug adapter."""
+
     name: str | None = None
     path: str | None = None
     source_reference: int | None = None
@@ -385,6 +400,7 @@ class LoadedSource:
 @dataclass
 class ProgressEntry:
     """Active DAP progress operation."""
+
     progress_id: str
     title: str
     message: str | None = None
@@ -412,6 +428,7 @@ class StoppedSnapshot:
     Returned by SessionManager.wait_for_stopped() to give the agent
     a complete picture of what happened after an execution command.
     """
+
     state: DebugState
     stop_reason: str | None = None
     thread_id: int | None = None
@@ -426,6 +443,7 @@ class StoppedSnapshot:
 @dataclass
 class SessionState:
     """Complete debug session state."""
+
     state: DebugState = DebugState.IDLE
     current_thread_id: int | None = None
     stop_reason: str | None = None
@@ -460,12 +478,8 @@ class SessionState:
             "processId": self.process_id,
             "processName": self.process_name,
             "modules": [m.to_dict() for m in self.modules],
-            "loadedSources": {
-                key: value.to_dict() for key, value in self.loaded_sources.items()
-            },
-            "activeProgress": {
-                key: value.to_dict() for key, value in self.active_progress.items()
-            },
+            "loadedSources": {key: value.to_dict() for key, value in self.loaded_sources.items()},
+            "activeProgress": {key: value.to_dict() for key, value in self.active_progress.items()},
             "stopDescription": self.stop_description,
             "stopText": self.stop_text,
             "lastInvalidation": (

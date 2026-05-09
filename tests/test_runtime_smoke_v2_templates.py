@@ -19,15 +19,17 @@ def test_template_registry_exposes_three_builtin_templates() -> None:
 
 
 def test_toggle_setting_template_generates_different_keyboard_cases() -> None:
-    generated, errors = expand_generated_cases({
-        "generate": {
-            "template": "toggle-setting-ab",
-            "matrix": [
-                {"id": "spellcheck", "control": "spellCheck", "value": True},
-                {"id": "spellcheck", "control": "spellCheck", "value": False},
-            ],
+    generated, errors = expand_generated_cases(
+        {
+            "generate": {
+                "template": "toggle-setting-ab",
+                "matrix": [
+                    {"id": "spellcheck", "control": "spellCheck", "value": True},
+                    {"id": "spellcheck", "control": "spellCheck", "value": False},
+                ],
+            }
         }
-    })
+    )
 
     assert errors == []
     assert [case["id"] for case in generated] == [
@@ -43,22 +45,24 @@ def test_toggle_setting_template_generates_different_keyboard_cases() -> None:
 
 
 def test_setting_row_effect_template_supports_realize_rows() -> None:
-    generated, errors = expand_generated_cases({
-        "generate": {
-            "template": "setting-ab-row-effect",
-            "matrix": [
-                {
-                    "id": "media_enabled",
-                    "control": "mediaToggle",
-                    "value": True,
-                    "row_index": 750,
-                    "row_expected": {"Title": "Clip 750", "Enabled": True},
-                    "grid": "mediaGrid",
-                    "realize": True,
-                }
-            ],
+    generated, errors = expand_generated_cases(
+        {
+            "generate": {
+                "template": "setting-ab-row-effect",
+                "matrix": [
+                    {
+                        "id": "media_enabled",
+                        "control": "mediaToggle",
+                        "value": True,
+                        "row_index": 750,
+                        "row_expected": {"Title": "Clip 750", "Enabled": True},
+                        "grid": "mediaGrid",
+                        "realize": True,
+                    }
+                ],
+            }
         }
-    })
+    )
 
     assert errors == []
     case = generated[0]
@@ -74,44 +78,48 @@ def test_setting_row_effect_template_supports_realize_rows() -> None:
 
 
 def test_setting_row_effect_template_normalizes_scalar_columns() -> None:
-    generated, errors = expand_generated_cases({
-        "generate": {
-            "template": "setting-ab-row-effect",
-            "matrix": [
-                {
-                    "id": "media_enabled",
-                    "control": "mediaToggle",
-                    "value": True,
-                    "row_index": 750,
-                    "grid": "mediaGrid",
-                    "columns": "Title",
-                }
-            ],
+    generated, errors = expand_generated_cases(
+        {
+            "generate": {
+                "template": "setting-ab-row-effect",
+                "matrix": [
+                    {
+                        "id": "media_enabled",
+                        "control": "mediaToggle",
+                        "value": True,
+                        "row_index": 750,
+                        "grid": "mediaGrid",
+                        "columns": "Title",
+                    }
+                ],
+            }
         }
-    })
+    )
 
     assert errors == []
     assert generated[0]["transitions"][0]["probes"][1]["columns"] == ["Title"]
 
 
 def test_radio_group_template_asserts_siblings_by_default() -> None:
-    generated, errors = expand_generated_cases({
-        "generate": {
-            "template": "radio-group-set",
-            "matrix": [
-                {
-                    "id": "mode_generic",
-                    "value": "generic",
-                    "expression": "ViewModel.Mode",
-                    "controls": [
-                        {"value": "generic", "automation_id": "checkBoxGeneric"},
-                        {"value": "scanning", "automation_id": "checkBoxScanning"},
-                        {"value": "transcribe", "automation_id": "checkBoxTranscribe"},
-                    ],
-                }
-            ],
+    generated, errors = expand_generated_cases(
+        {
+            "generate": {
+                "template": "radio-group-set",
+                "matrix": [
+                    {
+                        "id": "mode_generic",
+                        "value": "generic",
+                        "expression": "ViewModel.Mode",
+                        "controls": [
+                            {"value": "generic", "automation_id": "checkBoxGeneric"},
+                            {"value": "scanning", "automation_id": "checkBoxScanning"},
+                            {"value": "transcribe", "automation_id": "checkBoxTranscribe"},
+                        ],
+                    }
+                ],
+            }
         }
-    })
+    )
 
     assert errors == []
     probes = generated[0]["transitions"][0]["probes"]
@@ -124,23 +132,25 @@ def test_radio_group_template_asserts_siblings_by_default() -> None:
 
 
 def test_radio_group_template_uses_target_as_debug_expected_value() -> None:
-    generated, errors = expand_generated_cases({
-        "generate": {
-            "template": "radio-group-set",
-            "matrix": [
-                {
-                    "id": "mode_scanning",
-                    "value": "generic",
-                    "target": "scanning",
-                    "expression": "ViewModel.Mode",
-                    "controls": [
-                        {"value": "generic", "automation_id": "checkBoxGeneric"},
-                        {"value": "scanning", "automation_id": "checkBoxScanning"},
-                    ],
-                }
-            ],
+    generated, errors = expand_generated_cases(
+        {
+            "generate": {
+                "template": "radio-group-set",
+                "matrix": [
+                    {
+                        "id": "mode_scanning",
+                        "value": "generic",
+                        "target": "scanning",
+                        "expression": "ViewModel.Mode",
+                        "controls": [
+                            {"value": "generic", "automation_id": "checkBoxGeneric"},
+                            {"value": "scanning", "automation_id": "checkBoxScanning"},
+                        ],
+                    }
+                ],
+            }
         }
-    })
+    )
 
     assert errors == []
     probes = generated[0]["transitions"][0]["probes"]
@@ -148,12 +158,8 @@ def test_radio_group_template_uses_target_as_debug_expected_value() -> None:
 
 
 def test_placeholder_substituter_rejects_unknown_without_recursive_rendering() -> None:
-    assert render_template_value("case-{id}-{value}", {"id": "a", "value": True}) == (
-        "case-a-true"
-    )
-    assert render_template_value("{value}", {"value": "{not_recursive}"}) == (
-        "{not_recursive}"
-    )
+    assert render_template_value("case-{id}-{value}", {"id": "a", "value": True}) == ("case-a-true")
+    assert render_template_value("{value}", {"value": "{not_recursive}"}) == ("{not_recursive}")
     with pytest.raises(TemplateRenderError, match="unknown placeholder"):
         render_template_value("{missing}", {"id": "a"})
 

@@ -10,11 +10,11 @@ from netcoredbg_mcp.dap.protocol import DAPResponse
 
 
 class TestTerminate:
-
     @pytest.fixture
     def manager(self):
         with patch("netcoredbg_mcp.session.manager.DAPClient"):
             from netcoredbg_mcp.session import SessionManager
+
             m = SessionManager()
             return m
 
@@ -24,8 +24,11 @@ class TestTerminate:
 
     def test_capabilities_property(self):
         """DAPClient exposes capabilities property."""
-        with patch("netcoredbg_mcp.dap.client.DAPClient._find_netcoredbg", return_value="netcoredbg"):
+        with patch(
+            "netcoredbg_mcp.dap.client.DAPClient._find_netcoredbg", return_value="netcoredbg"
+        ):
             from netcoredbg_mcp.dap.client import DAPClient
+
             real_client = DAPClient()
             caps = real_client.capabilities
             assert isinstance(caps, dict)
@@ -38,7 +41,8 @@ class TestTerminate:
     @pytest.mark.asyncio
     async def test_client_terminate(self, manager):
         """Client terminate sends request."""
-        manager._client.terminate = AsyncMock(return_value=DAPResponse(
-            seq=1, request_seq=1, success=True, command="terminate"))
+        manager._client.terminate = AsyncMock(
+            return_value=DAPResponse(seq=1, request_seq=1, success=True, command="terminate")
+        )
         response = await manager._client.terminate()
         assert response.success

@@ -42,10 +42,12 @@ def read_source_context(
 
     result = []
     for i in range(start, end):
-        result.append({
-            "line": i + 1,
-            "text": all_lines[i].rstrip("\n\r"),
-            "current": (i + 1) == line,
-        })
+        result.append(
+            {
+                "line": i + 1,
+                "text": all_lines[i].rstrip("\n\r"),
+                "current": (i + 1) == line,
+            }
+        )
 
     return result

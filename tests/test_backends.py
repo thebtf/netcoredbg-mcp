@@ -17,15 +17,19 @@ class FakeClient:
 
 
 def test_netcoredbg_backend_delegates_capability_flags():
-    backend = NetcoredbgBackend(FakeClient({
-        "supportsReadMemoryRequest": True,
-        "supportsWriteMemoryRequest": False,
-        "supportsDisassembleRequest": True,
-        "supportsLoadedSourcesRequest": False,
-        "supportsLocationsRequest": True,
-        "supportsStepInTargetsRequest": True,
-        "supportsProgressReporting": False,
-    }))
+    backend = NetcoredbgBackend(
+        FakeClient(
+            {
+                "supportsReadMemoryRequest": True,
+                "supportsWriteMemoryRequest": False,
+                "supportsDisassembleRequest": True,
+                "supportsLoadedSourcesRequest": False,
+                "supportsLocationsRequest": True,
+                "supportsStepInTargetsRequest": True,
+                "supportsProgressReporting": False,
+            }
+        )
+    )
 
     assert backend.supports_read_memory() is True
     assert backend.supports_write_memory() is False
@@ -49,8 +53,12 @@ def test_netcoredbg_backend_defaults_missing_capabilities_to_false():
 
 
 def test_netcoredbg_backend_satisfies_protocol_shape():
-    backend: DebuggerBackend = NetcoredbgBackend(FakeClient({
-        "supportsReadMemoryRequest": True,
-    }))
+    backend: DebuggerBackend = NetcoredbgBackend(
+        FakeClient(
+            {
+                "supportsReadMemoryRequest": True,
+            }
+        )
+    )
 
     assert backend.supports_read_memory() is True

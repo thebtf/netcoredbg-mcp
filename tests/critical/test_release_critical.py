@@ -84,9 +84,7 @@ async def test_mcp_server_registers_core_surfaces() -> None:
     assert {"start_debug", "add_breakpoint", "get_call_stack"}.issubset(tool_names)
     assert {"verify_debug_freshness", "run_runtime_smoke"}.issubset(tool_names)
     assert {"debug", "dap-escape-hatch"}.issubset(prompt_names)
-    assert {"debug://state", "debug://breakpoints", "debug://output"}.issubset(
-        resource_uris
-    )
+    assert {"debug://state", "debug://breakpoints", "debug://output"}.issubset(resource_uris)
 
 
 @pytest.mark.critical

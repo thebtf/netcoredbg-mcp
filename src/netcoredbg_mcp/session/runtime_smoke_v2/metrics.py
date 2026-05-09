@@ -59,9 +59,7 @@ def capture_metric_snapshot(context: Any) -> MetricSnapshot:
 
     private_bytes = getattr(memory_info, "private", None)
     private_bytes_status = (
-        _blocked_field("private bytes unavailable")
-        if private_bytes is None
-        else {"status": "PASS"}
+        _blocked_field("private bytes unavailable") if private_bytes is None else {"status": "PASS"}
     )
     return MetricSnapshot(
         timestamp=timestamp,
@@ -79,7 +77,7 @@ def finish_transition_metrics(
     context: Any,
 ) -> dict[str, Any]:
     ended = capture_metric_snapshot(context)
-    metrics = {
+    metrics: dict[str, Any] = {
         "action_latency_ms": int(round(max(0.0, ended.timestamp - started.timestamp) * 1000)),
         "working_set_delta_mb": _delta_mb(
             started.working_set_mb,
@@ -103,8 +101,7 @@ def finish_transition_metrics(
         },
     }
     metrics["partial"] = any(
-        field.get("status") == "BLOCKED"
-        for field in metrics["field_status"].values()
+        field.get("status") == "BLOCKED" for field in metrics["field_status"].values()
     )
     return metrics
 
@@ -123,7 +120,7 @@ def merge_case_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
             },
         }
 
-    metrics = {
+    metrics: dict[str, Any] = {
         "action_latency_ms": sum(int(record.get("action_latency_ms", 0)) for record in records),
         "working_set_delta_mb": _sum_delta(records, "working_set_delta_mb"),
         "private_bytes_delta_mb": _sum_delta(records, "private_bytes_delta_mb"),
@@ -135,8 +132,7 @@ def merge_case_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
         },
     }
     metrics["partial"] = metrics["partial"] or any(
-        field.get("status") == "BLOCKED"
-        for field in metrics["field_status"].values()
+        field.get("status") == "BLOCKED" for field in metrics["field_status"].values()
     )
     return metrics
 
@@ -157,19 +153,23 @@ def evaluate_metric_thresholds(
         max_threshold = rule.get("max")
         min_threshold = rule.get("min")
         if isinstance(max_threshold, (int, float)) and value > max_threshold:
-            failures.append({
-                "kind": "metric_threshold",
-                "metric": metric_name,
-                "value": value,
-                "threshold": {"max": max_threshold},
-            })
+            failures.append(
+                {
+                    "kind": "metric_threshold",
+                    "metric": metric_name,
+                    "value": value,
+                    "threshold": {"max": max_threshold},
+                }
+            )
         if isinstance(min_threshold, (int, float)) and value < min_threshold:
-            failures.append({
-                "kind": "metric_threshold",
-                "metric": metric_name,
-                "value": value,
-                "threshold": {"min": min_threshold},
-            })
+            failures.append(
+                {
+                    "kind": "metric_threshold",
+                    "metric": metric_name,
+                    "value": value,
+                    "threshold": {"min": min_threshold},
+                }
+            )
     return failures
 
 

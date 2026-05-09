@@ -115,7 +115,8 @@ class FlaUIBridgeClient:
         if len(self._restart_times) >= MAX_RESTARTS:
             logger.warning(
                 "FlaUI bridge restart limit reached (%d in %.0fs)",
-                MAX_RESTARTS, RESTART_WINDOW_SECONDS,
+                MAX_RESTARTS,
+                RESTART_WINDOW_SECONDS,
             )
             return False
 
@@ -172,8 +173,7 @@ class FlaUIBridgeClient:
 
             if not isinstance(response_data, dict):
                 logger.warning(
-                    "FlaUI bridge returned non-object response for '%s': %s; "
-                    "restarting bridge",
+                    "FlaUI bridge returned non-object response for '%s': %s; restarting bridge",
                     method,
                     type(response_data).__name__,
                 )
@@ -452,8 +452,7 @@ class FlaUIBackend:
         )
         if not isinstance(result, dict):
             raise RuntimeError(
-                f"drag: bridge returned a non-dict response "
-                f"({type(result).__name__}): {result!r}"
+                f"drag: bridge returned a non-dict response ({type(result).__name__}): {result!r}"
             )
         return result
 
@@ -692,10 +691,13 @@ class FlaUIBackend:
 
     async def multi_select(self, container_id: str, indices: list[int]) -> int:
         """Multi-select via FlaUI bridge."""
-        result = await self._client.call("multi_select", {
-            "automationId": container_id,
-            "indices": indices,
-        })
+        result = await self._client.call(
+            "multi_select",
+            {
+                "automationId": container_id,
+                "indices": indices,
+            },
+        )
         return len(result.get("indices", []))
 
     async def get_window_tree(self, max_depth: int = 3, max_children: int = 50) -> Any:
@@ -707,10 +709,13 @@ class FlaUIBackend:
         Caching walks every window so ui_click / ui_send_keys can resolve
         elements inside any of them.
         """
-        result = await self._client.call("get_tree", {
-            "maxDepth": max_depth,
-            "maxChildren": max_children,
-        })
+        result = await self._client.call(
+            "get_tree",
+            {
+                "maxDepth": max_depth,
+                "maxChildren": max_children,
+            },
+        )
         self._element_cache.clear()
         for window_tree in self._iter_windows(result):
             self._cache_from_tree(window_tree)
@@ -865,8 +870,7 @@ class FlaUIBackend:
         result = await self._client.call("expand", {"automationId": automation_id})
         if not isinstance(result, dict):
             raise RuntimeError(
-                f"expand: bridge returned a non-dict response "
-                f"({type(result).__name__}): {result!r}"
+                f"expand: bridge returned a non-dict response ({type(result).__name__}): {result!r}"
             )
         return result
 

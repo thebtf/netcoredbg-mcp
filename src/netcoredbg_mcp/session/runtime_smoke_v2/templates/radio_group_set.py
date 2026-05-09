@@ -12,9 +12,7 @@ def render_radio_group_set(
     id_pattern: str,
 ) -> dict[str, Any]:
     controls = [
-        dict(control)
-        for control in record.get("controls") or []
-        if isinstance(control, dict)
+        dict(control) for control in record.get("controls") or [] if isinstance(control, dict)
     ]
     target_value = record.get("target", record.get("value"))
     target = _target_control(controls, target_value)

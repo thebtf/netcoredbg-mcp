@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import Context
@@ -61,7 +61,7 @@ class SessionOwnership:
     Ownership auto-releases after SESSION_OWNERSHIP_TIMEOUT of inactivity.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._owner_session_id: str | None = None
         self._last_activity: float = 0.0
 

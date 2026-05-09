@@ -10,18 +10,31 @@ from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
 
 
 class TestFlaUIFindAllCascade:
-
     @pytest.mark.asyncio
     async def test_delegates_to_bridge(self):
         backend = FlaUIBackend.__new__(FlaUIBackend)
         backend._client = AsyncMock()
-        backend._client.call = AsyncMock(return_value={
-            "results": [
-                {"found": True, "automationId": "btn1", "name": "Open", "score": 120, "depth": 1},
-                {"found": True, "automationId": "btn2", "name": "Open", "score": 30, "depth": 5},
-            ],
-            "totalMatches": 2,
-        })
+        backend._client.call = AsyncMock(
+            return_value={
+                "results": [
+                    {
+                        "found": True,
+                        "automationId": "btn1",
+                        "name": "Open",
+                        "score": 120,
+                        "depth": 1,
+                    },
+                    {
+                        "found": True,
+                        "automationId": "btn2",
+                        "name": "Open",
+                        "score": 30,
+                        "depth": 5,
+                    },
+                ],
+                "totalMatches": 2,
+            }
+        )
         backend._element_cache = {}
         backend._process_id = 1234
 
@@ -56,15 +69,16 @@ class TestFlaUIFindAllCascade:
 
 
 class TestFlaUIExtractText:
-
     @pytest.mark.asyncio
     async def test_delegates_to_bridge(self):
         backend = FlaUIBackend.__new__(FlaUIBackend)
         backend._client = AsyncMock()
-        backend._client.call = AsyncMock(return_value={
-            "text": "Hello World",
-            "source": "ValuePattern",
-        })
+        backend._client.call = AsyncMock(
+            return_value={
+                "text": "Hello World",
+                "source": "ValuePattern",
+            }
+        )
         backend._element_cache = {}
         backend._process_id = 1234
 
@@ -93,12 +107,14 @@ class TestFlaUIFindAllCascadeSingleResult:
     async def test_single_result_returned(self):
         backend = FlaUIBackend.__new__(FlaUIBackend)
         backend._client = AsyncMock()
-        backend._client.call = AsyncMock(return_value={
-            "results": [
-                {"found": True, "automationId": "btn1", "name": "OK", "score": 100, "depth": 2},
-            ],
-            "totalMatches": 1,
-        })
+        backend._client.call = AsyncMock(
+            return_value={
+                "results": [
+                    {"found": True, "automationId": "btn1", "name": "OK", "score": 100, "depth": 2},
+                ],
+                "totalMatches": 1,
+            }
+        )
         backend._element_cache = {}
         backend._process_id = 1234
 
@@ -154,11 +170,13 @@ class TestFlaUIExtractTextXpath:
 
 
 class TestBuildSearchParams:
-
     def test_includes_all_fields(self):
         params = FlaUIBackend._build_search_params(
-            automation_id="btn1", name="Save", control_type="Button",
-            root_id="panel1", xpath="//Button",
+            automation_id="btn1",
+            name="Save",
+            control_type="Button",
+            root_id="panel1",
+            xpath="//Button",
         )
         assert params == {
             "automationId": "btn1",

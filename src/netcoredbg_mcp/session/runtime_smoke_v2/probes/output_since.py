@@ -87,13 +87,17 @@ def _assert_since_session(
 
     if getattr(session, "runtime_smoke", None) is None or getattr(session, "state", None) is None:
         return {"status": "BLOCKED", "reason": "output assertion service unavailable"}
-    return OutputAssertionService(session).assert_since(
-        checkpoint,
-        required=required,
-        forbidden=forbidden,
-        regex=regex,
-        max_matches=max_matches,
-    ).to_dict()
+    return (
+        OutputAssertionService(session)
+        .assert_since(
+            checkpoint,
+            required=required,
+            forbidden=forbidden,
+            regex=regex,
+            max_matches=max_matches,
+        )
+        .to_dict()
+    )
 
 
 def _next_step_for_blocked_output(reason: str, result: dict[str, Any]) -> str:

@@ -74,11 +74,7 @@ async def handle_process_metric(
         }
     else:
         baseline = context.scratch.get(cache_key)
-        if (
-            isinstance(baseline, dict)
-            and "sample" in baseline
-            and "clock" in baseline
-        ):
+        if isinstance(baseline, dict) and "sample" in baseline and "clock" in baseline:
             before = baseline["sample"]
             started = float(baseline["clock"])
             private_delta = (
@@ -87,9 +83,7 @@ async def handle_process_metric(
                 else round(sample["private_mb"] - before["private_mb"], 3)
             )
             value = {
-                "action_latency_ms": int(
-                    max(0.0, context.action_context.clock() - started) * 1000
-                ),
+                "action_latency_ms": int(max(0.0, context.action_context.clock() - started) * 1000),
                 "working_set_delta_mb": round(sample["rss_mb"] - before["rss_mb"], 3),
                 "private_bytes_delta_mb": private_delta,
             }
@@ -139,7 +133,5 @@ def _memory_sample(process: Any) -> dict[str, float | None]:
     private_bytes = getattr(info, "private", None) if os.name == "nt" else None
     return {
         "rss_mb": round(float(getattr(info, "rss", 0)) / _MB, 3),
-        "private_mb": (
-            None if private_bytes is None else round(float(private_bytes) / _MB, 3)
-        ),
+        "private_mb": (None if private_bytes is None else round(float(private_bytes) / _MB, 3)),
     }

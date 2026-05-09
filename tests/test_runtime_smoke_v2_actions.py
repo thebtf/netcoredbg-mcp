@@ -84,25 +84,27 @@ def _runner_with_clock(
 async def test_v2_ui_key_sequence_focuses_before_sending_keys() -> None:
     session = ActionSmokeSession()
 
-    result = await _runner(session).run({
-        "schema": "netcoredbg.runtime_smoke.v2",
-        "name": "key sequence route",
-        "cases": [
-            {
-                "id": "spellcheck_input",
-                "transitions": [
-                    {
-                        "action": {
-                            "kind": "ui.key_sequence",
-                            "selector": {"automation_id": "checkBoxSpellCheckInput"},
-                            "keys": "{SPACE}",
-                        },
-                        "probes": [],
-                    }
-                ],
-            }
-        ],
-    })
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "key sequence route",
+            "cases": [
+                {
+                    "id": "spellcheck_input",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.key_sequence",
+                                "selector": {"automation_id": "checkBoxSpellCheckInput"},
+                                "keys": "{SPACE}",
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
 
     assert result["status"] == "PASS"
     assert session.calls == [
@@ -118,24 +120,26 @@ async def test_v2_ui_key_sequence_focuses_before_sending_keys() -> None:
 async def test_v2_ui_invoke_route_does_not_focus_before_invoke() -> None:
     session = ActionSmokeSession()
 
-    result = await _runner(session).run({
-        "schema": "netcoredbg.runtime_smoke.v2",
-        "name": "invoke route",
-        "cases": [
-            {
-                "id": "invoke_checkbox",
-                "transitions": [
-                    {
-                        "action": {
-                            "kind": "ui.invoke",
-                            "selector": {"automation_id": "checkBoxSpellCheckInput"},
-                        },
-                        "probes": [],
-                    }
-                ],
-            }
-        ],
-    })
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "invoke route",
+            "cases": [
+                {
+                    "id": "invoke_checkbox",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.invoke",
+                                "selector": {"automation_id": "checkBoxSpellCheckInput"},
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
 
     assert result["status"] == "PASS"
     assert session.calls == [
@@ -148,24 +152,26 @@ async def test_v2_ui_invoke_route_does_not_focus_before_invoke() -> None:
 async def test_v2_ui_invoke_invalid_selector_returns_blocked() -> None:
     session = ActionSmokeSession()
 
-    result = await _runner(session).run({
-        "schema": "netcoredbg.runtime_smoke.v2",
-        "name": "invalid selector",
-        "cases": [
-            {
-                "id": "invoke_checkbox",
-                "transitions": [
-                    {
-                        "action": {
-                            "kind": "ui.invoke",
-                            "selector": ["not", "a", "mapping"],
-                        },
-                        "probes": [],
-                    }
-                ],
-            }
-        ],
-    })
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "invalid selector",
+            "cases": [
+                {
+                    "id": "invoke_checkbox",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.invoke",
+                                "selector": ["not", "a", "mapping"],
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
 
     action = result["cases"][0]["actions"][0]
     assert result["status"] == "BLOCKED"
@@ -179,25 +185,27 @@ async def test_v2_ui_key_sequence_propagates_focus_failure() -> None:
     session = ActionSmokeSession()
     session.focus_result = {"status": "BLOCKED", "reason": "focus backend offline"}
 
-    result = await _runner(session).run({
-        "schema": "netcoredbg.runtime_smoke.v2",
-        "name": "focus failure",
-        "cases": [
-            {
-                "id": "spellcheck_input",
-                "transitions": [
-                    {
-                        "action": {
-                            "kind": "ui.key_sequence",
-                            "selector": {"automation_id": "checkBoxSpellCheckInput"},
-                            "keys": "{SPACE}",
-                        },
-                        "probes": [],
-                    }
-                ],
-            }
-        ],
-    })
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "focus failure",
+            "cases": [
+                {
+                    "id": "spellcheck_input",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.key_sequence",
+                                "selector": {"automation_id": "checkBoxSpellCheckInput"},
+                                "keys": "{SPACE}",
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
 
     action = result["cases"][0]["actions"][0]
     assert result["status"] == "BLOCKED"
@@ -214,23 +222,25 @@ async def test_v2_transition_observes_default_idle_settle() -> None:
     session = ActionSmokeSession()
     clock = ManualClock()
 
-    result = await _runner_with_clock(session, clock).run({
-        "schema": "netcoredbg.runtime_smoke.v2",
-        "cases": [
-            {
-                "id": "idle_settle",
-                "transitions": [
-                    {
-                        "action": {
-                            "kind": "ui.invoke",
-                            "selector": {"automation_id": "checkBoxSpellCheckInput"},
-                        },
-                        "probes": [],
-                    }
-                ],
-            }
-        ],
-    })
+    result = await _runner_with_clock(session, clock).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "cases": [
+                {
+                    "id": "idle_settle",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.invoke",
+                                "selector": {"automation_id": "checkBoxSpellCheckInput"},
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
 
     assert result["status"] == "PASS"
     assert clock.sleeps_ms == [250]
@@ -246,24 +256,26 @@ async def test_v2_transition_waits_for_tracepoint_settle() -> None:
     session.tracepoint_hits = [False, True]
     clock = ManualClock()
 
-    result = await _runner_with_clock(session, clock).run({
-        "schema": "netcoredbg.runtime_smoke.v2",
-        "cases": [
-            {
-                "id": "tracepoint_settle",
-                "transitions": [
-                    {
-                        "action": {
-                            "kind": "ui.invoke",
-                            "selector": {"automation_id": "checkBoxSpellCheckInput"},
-                        },
-                        "settle": {"await_tracepoint_id": "tp-ready"},
-                        "probes": [],
-                    }
-                ],
-            }
-        ],
-    })
+    result = await _runner_with_clock(session, clock).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "cases": [
+                {
+                    "id": "tracepoint_settle",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.invoke",
+                                "selector": {"automation_id": "checkBoxSpellCheckInput"},
+                            },
+                            "settle": {"await_tracepoint_id": "tp-ready"},
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
 
     assert result["status"] == "PASS"
     assert session.calls == [
@@ -284,24 +296,26 @@ async def test_v2_tracepoint_settle_timeout_returns_blocked() -> None:
     session = ActionSmokeSession()
     clock = ManualClock()
 
-    result = await _runner_with_clock(session, clock).run({
-        "schema": "netcoredbg.runtime_smoke.v2",
-        "cases": [
-            {
-                "id": "tracepoint_timeout",
-                "transitions": [
-                    {
-                        "action": {
-                            "kind": "ui.invoke",
-                            "selector": {"automation_id": "checkBoxSpellCheckInput"},
-                        },
-                        "settle": {"await_tracepoint_id": "never-hit"},
-                        "probes": [],
-                    }
-                ],
-            }
-        ],
-    })
+    result = await _runner_with_clock(session, clock).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "cases": [
+                {
+                    "id": "tracepoint_timeout",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.invoke",
+                                "selector": {"automation_id": "checkBoxSpellCheckInput"},
+                            },
+                            "settle": {"await_tracepoint_id": "never-hit"},
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
 
     assert result["status"] == "BLOCKED"
     assert result["reason"] == "settle condition not met"

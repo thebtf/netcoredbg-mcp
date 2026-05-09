@@ -1256,7 +1256,9 @@ def _build_scenario_plan(problem: str, app_type: str, file_hint: str) -> str:
 
     steps.append("## Step 1: Start debug session")
     steps.append("```")
-    steps.append('start_debug(program="bin/Debug/<framework>/App.dll", build_project="App.csproj", pre_build=True)')
+    steps.append(
+        'start_debug(program="bin/Debug/<framework>/App.dll", build_project="App.csproj", pre_build=True)'
+    )
     steps.append("```\n")
 
     if app_type == "gui":
@@ -1268,7 +1270,7 @@ def _build_scenario_plan(problem: str, app_type: str, file_hint: str) -> str:
 
     steps.append(f"## Step {'3' if app_type == 'gui' else '2'}: Set breakpoints")
     if file_hint:
-        steps.append(f"```\nadd_breakpoint(file=\"{file_hint}\", line=<suspected_line>)\n```\n")
+        steps.append(f'```\nadd_breakpoint(file="{file_hint}", line=<suspected_line>)\n```\n')
     else:
         steps.append("```")
         steps.append("# If you know the method name:")

@@ -266,6 +266,7 @@ def find_flaui_bridge() -> str | None:
         Absolute path to FlaUIBridge.exe, or None if not found.
     """
     from ..setup.bridge import find_or_build_bridge
+
     return find_or_build_bridge()
 
 
@@ -285,8 +286,10 @@ def create_backend(process_registry: Any = None) -> UIBackend:
     if bridge_path:
         logger.info("Using FlaUI backend (bridge: %s)", bridge_path)
         from .flaui_client import FlaUIBackend
+
         return FlaUIBackend(bridge_path, process_registry)
 
     logger.info("FlaUIBridge.exe not found, using pywinauto backend")
     from .pywinauto_backend import PywinautoBackend
+
     return PywinautoBackend()

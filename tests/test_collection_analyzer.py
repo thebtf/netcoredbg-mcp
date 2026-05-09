@@ -14,7 +14,6 @@ def _make_vars(*value_type_pairs: tuple[str, str]) -> list[Variable]:
 
 
 class TestCollectionAnalysis:
-
     def test_numeric_stats(self):
         """Verify numeric stats via actual compute_collection_stats."""
         items = _make_vars(("10", "int"), ("20", "int"), ("30", "int"), ("10", "int"))
@@ -33,20 +32,28 @@ class TestCollectionAnalysis:
 
     def test_nothing_and_none_sentinels(self):
         """Verify all null sentinels are counted."""
-        items = _make_vars(("Nothing", "object"), ("None", "object"), ("", "string"), ("x", "string"))
+        items = _make_vars(
+            ("Nothing", "object"), ("None", "object"), ("", "string"), ("x", "string")
+        )
         result = compute_collection_stats(items, sample_size=5)
         assert result["null_count"] == 3
 
     def test_duplicate_count(self):
         items = _make_vars(
-            ("a", "string"), ("b", "string"), ("a", "string"),
-            ("c", "string"), ("a", "string"),
+            ("a", "string"),
+            ("b", "string"),
+            ("a", "string"),
+            ("c", "string"),
+            ("a", "string"),
         )
         result = compute_collection_stats(items, sample_size=5)
         assert result["duplicate_count"] == 2  # "a" appears 3 times → 2 duplicates
 
     def test_first_last_items(self):
-        items = [Variable(name=f"[{i}]", value=str(i), type="int", variables_reference=0) for i in range(20)]
+        items = [
+            Variable(name=f"[{i}]", value=str(i), type="int", variables_reference=0)
+            for i in range(20)
+        ]
         result = compute_collection_stats(items, sample_size=5)
 
         assert len(result["first_items"]) == 5
@@ -83,11 +90,10 @@ class TestCollectionAnalysis:
 
 
 class TestObjectSummarizer:
-
     def test_depth_clamping(self):
         """Verify depth is clamped to 1-5 range (same formula as summarize_object)."""
-        assert max(1, min(0, 5)) == 1   # 0 → 1
-        assert max(1, min(3, 5)) == 3   # 3 → 3
+        assert max(1, min(0, 5)) == 1  # 0 → 1
+        assert max(1, min(3, 5)) == 3  # 3 → 3
         assert max(1, min(10, 5)) == 5  # 10 → 5
 
     def test_ancestor_cycle_detection(self):
@@ -123,7 +129,10 @@ class TestObjectSummarizer:
 
     def test_max_properties_cap(self):
         """Verify compute_collection_stats respects sample_size for first/last."""
-        items = [Variable(name=f"[{i}]", value=str(i), type="int", variables_reference=0) for i in range(100)]
+        items = [
+            Variable(name=f"[{i}]", value=str(i), type="int", variables_reference=0)
+            for i in range(100)
+        ]
         result = compute_collection_stats(items, sample_size=5)
         assert len(result["first_items"]) == 5
         assert len(result["last_items"]) == 5

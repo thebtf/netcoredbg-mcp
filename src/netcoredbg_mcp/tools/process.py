@@ -1,13 +1,13 @@
 """Process management tools."""
 
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from ..session import SessionManager
-
 from ..response import build_error_response, build_response
+from ..session import SessionManager
 
 logger = logging.getLogger(__name__)
 

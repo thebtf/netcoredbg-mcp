@@ -48,12 +48,22 @@ class TestServerSmoke:
 
         # Critical tools must be present
         critical = [
-            "start_debug", "stop_debug", "continue_execution",
-            "step_over", "step_into", "step_out",
-            "add_breakpoint", "get_call_stack", "get_variables",
-            "ui_take_screenshot", "ui_take_annotated_screenshot",
-            "cleanup_processes", "restart_debug",
-            "get_progress", "read_memory", "write_memory",
+            "start_debug",
+            "stop_debug",
+            "continue_execution",
+            "step_over",
+            "step_into",
+            "step_out",
+            "add_breakpoint",
+            "get_call_stack",
+            "get_variables",
+            "ui_take_screenshot",
+            "ui_take_annotated_screenshot",
+            "cleanup_processes",
+            "restart_debug",
+            "get_progress",
+            "read_memory",
+            "write_memory",
         ]
         for name in critical:
             assert name in tool_names, f"Critical tool '{name}' missing from server"
@@ -70,8 +80,12 @@ class TestServerSmoke:
         assert len(prompt_names) >= 6, f"Expected 6+ prompts, got {len(prompt_names)}"
 
         expected = [
-            "debug", "debug-gui", "debug-exception", "investigate",
-            "debug-scenario", "dap-escape-hatch",
+            "debug",
+            "debug-gui",
+            "debug-exception",
+            "investigate",
+            "debug-scenario",
+            "dap-escape-hatch",
         ]
         for name in expected:
             assert name in prompt_names, f"Prompt '{name}' missing from server"

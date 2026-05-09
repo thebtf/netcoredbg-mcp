@@ -27,29 +27,35 @@ class GridProbeSession(ProbeSmokeSession):
 @pytest.mark.asyncio
 async def test_ui_grid_probe_asserts_rows_and_returns_snapshot_value() -> None:
     session = GridProbeSession()
-    session.grid_results.extend([
-        {
-            "status": "PASS",
-            "snapshot": {"visible_rows": [{"index": 0, "cells": {"Phrase": "before"}}]},
-        },
-        {
-            "status": "PASS",
-            "matched_rows": [0],
-            "snapshot": {"visible_rows": [{"index": 0, "cells": {"Phrase": "after"}}]},
-            "evidence_ref": "ui-grid:settings-row",
-        },
-    ])
+    session.grid_results.extend(
+        [
+            {
+                "status": "PASS",
+                "snapshot": {"visible_rows": [{"index": 0, "cells": {"Phrase": "before"}}]},
+            },
+            {
+                "status": "PASS",
+                "matched_rows": [0],
+                "snapshot": {"visible_rows": [{"index": 0, "cells": {"Phrase": "after"}}]},
+                "evidence_ref": "ui-grid:settings-row",
+            },
+        ]
+    )
 
     result = await runner(
         session,
         {"ui.grid.assert_rows": session.grid_assert_rows},
-    ).run(one_probe_plan({
-        "kind": "ui.grid",
-        "name": "cue_row",
-        "selector": {"automation_id": "CueGrid"},
-        "rows": [{"index": 0, "contains": {"Phrase": "after"}}],
-        "columns": ["Phrase"],
-    }))
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "ui.grid",
+                "name": "cue_row",
+                "selector": {"automation_id": "CueGrid"},
+                "rows": [{"index": 0, "contains": {"Phrase": "after"}}],
+                "columns": ["Phrase"],
+            }
+        )
+    )
 
     probe = after_probe(result)
     assert result["status"] == "PASS"
@@ -63,12 +69,16 @@ async def test_ui_grid_probe_asserts_rows_and_returns_snapshot_value() -> None:
 async def test_ui_grid_probe_blocks_when_execution_is_unavailable() -> None:
     session = GridProbeSession()
 
-    result = await runner(session).run(one_probe_plan({
-        "kind": "ui.grid",
-        "name": "cue_row",
-        "selector": {"automation_id": "CueGrid"},
-        "rows": [{"index": 0, "contains": {"Phrase": "after"}}],
-    }))
+    result = await runner(session).run(
+        one_probe_plan(
+            {
+                "kind": "ui.grid",
+                "name": "cue_row",
+                "selector": {"automation_id": "CueGrid"},
+                "rows": [{"index": 0, "contains": {"Phrase": "after"}}],
+            }
+        )
+    )
 
     probe = after_probe(result)
     assert result["status"] == "BLOCKED"

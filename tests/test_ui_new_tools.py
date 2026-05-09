@@ -17,19 +17,22 @@ class TestFlaUIBackendInvoke:
 
         backend = FlaUIBackend.__new__(FlaUIBackend)
         backend._client = AsyncMock()
-        backend._client.call = AsyncMock(return_value={
-            "invoked": True,
-            "method": "InvokePattern",
-            "automationId": "btn1",
-            "name": "Save",
-            "controlType": "Button",
-        })
+        backend._client.call = AsyncMock(
+            return_value={
+                "invoked": True,
+                "method": "InvokePattern",
+                "automationId": "btn1",
+                "name": "Save",
+                "controlType": "Button",
+            }
+        )
         backend._element_cache = {}
         backend._process_id = 1234
 
         result = await backend.invoke_element(automation_id="btn1")
         backend._client.call.assert_called_once_with(
-            "invoke_element", {"automationId": "btn1"},
+            "invoke_element",
+            {"automationId": "btn1"},
         )
         assert result["invoked"] is True
         assert result["method"] == "InvokePattern"
@@ -75,13 +78,15 @@ class TestFlaUIBackendToggle:
 
         backend = FlaUIBackend.__new__(FlaUIBackend)
         backend._client = AsyncMock()
-        backend._client.call = AsyncMock(return_value={
-            "toggled": True,
-            "newState": "On",
-            "automationId": "chk1",
-            "name": "Enabled",
-            "controlType": "CheckBox",
-        })
+        backend._client.call = AsyncMock(
+            return_value={
+                "toggled": True,
+                "newState": "On",
+                "automationId": "chk1",
+                "name": "Enabled",
+                "controlType": "CheckBox",
+            }
+        )
         backend._element_cache = {}
         backend._process_id = 1234
 
@@ -115,19 +120,22 @@ class TestFlaUIBackendXPath:
 
         backend = FlaUIBackend.__new__(FlaUIBackend)
         backend._client = AsyncMock()
-        backend._client.call = AsyncMock(return_value={
-            "found": True,
-            "automationId": "btn1",
-            "name": "Save",
-            "controlType": "Button",
-            "matchCount": 1,
-        })
+        backend._client.call = AsyncMock(
+            return_value={
+                "found": True,
+                "automationId": "btn1",
+                "name": "Save",
+                "controlType": "Button",
+                "matchCount": 1,
+            }
+        )
         backend._element_cache = {}
         backend._process_id = 1234
 
         result = await backend.find_by_xpath("//Button[@Name='Save']")
         backend._client.call.assert_called_once_with(
-            "find_by_xpath", {"xpath": "//Button[@Name='Save']"},
+            "find_by_xpath",
+            {"xpath": "//Button[@Name='Save']"},
         )
         assert result["found"] is True
         assert result["matchCount"] == 1
@@ -166,9 +174,13 @@ class TestPywinautoBackendInvoke:
         mock_element.element_info.control_type = "Button"
 
         mock_ui.find_element = AsyncMock(return_value=mock_element)
-        mock_ui.get_element_info = AsyncMock(return_value=MagicMock(
-            automation_id="btn1", name="Save", control_type="Button",
-        ))
+        mock_ui.get_element_info = AsyncMock(
+            return_value=MagicMock(
+                automation_id="btn1",
+                name="Save",
+                control_type="Button",
+            )
+        )
         mock_ui._executor = None
         backend._ui = mock_ui
 
@@ -188,9 +200,13 @@ class TestPywinautoBackendInvoke:
         mock_element.click = MagicMock()
 
         mock_ui.find_element = AsyncMock(return_value=mock_element)
-        mock_ui.get_element_info = AsyncMock(return_value=MagicMock(
-            automation_id="div1", name="Panel", control_type="Pane",
-        ))
+        mock_ui.get_element_info = AsyncMock(
+            return_value=MagicMock(
+                automation_id="div1",
+                name="Panel",
+                control_type="Pane",
+            )
+        )
         mock_ui._executor = None
         backend._ui = mock_ui
 
@@ -211,9 +227,13 @@ class TestPywinautoBackendInvoke:
         mock_element.iface_toggle = mock_toggle
 
         mock_ui.find_element = AsyncMock(return_value=mock_element)
-        mock_ui.get_element_info = AsyncMock(return_value=MagicMock(
-            automation_id="chk1", name="Enabled", control_type="CheckBox",
-        ))
+        mock_ui.get_element_info = AsyncMock(
+            return_value=MagicMock(
+                automation_id="chk1",
+                name="Enabled",
+                control_type="CheckBox",
+            )
+        )
         mock_ui._executor = None
         backend._ui = mock_ui
 
@@ -284,6 +304,7 @@ class TestBackendProtocol:
     def test_find_element_accepts_root_id_xpath(self):
         """find_element signature includes root_id and xpath params."""
         import inspect
+
         from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
 
         sig = inspect.signature(FlaUIBackend.find_element)

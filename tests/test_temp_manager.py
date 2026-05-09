@@ -1,12 +1,9 @@
 """Tests for SessionTempManager."""
 
 import time
-from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
-from netcoredbg_mcp.ui.temp_manager import SessionTempManager, TEMP_PREFIX
+from netcoredbg_mcp.ui.temp_manager import TEMP_PREFIX, SessionTempManager
 
 
 class TestSessionTempManager:
@@ -35,7 +32,9 @@ class TestSessionTempManager:
                 mgr.get_session_dir(None)
 
                 call_args = mock_tf.mkdtemp.call_args
-                assert "abcdef123456" in call_args.kwargs.get("prefix", call_args[1].get("prefix", ""))
+                assert "abcdef123456" in call_args.kwargs.get(
+                    "prefix", call_args[1].get("prefix", "")
+                )
 
     def test_get_session_dir_returns_cached(self, tmp_path):
         mgr = SessionTempManager()
@@ -121,6 +120,7 @@ class TestSessionTempManager:
         # Set mtime to 2 hours ago
         old_time = time.time() - 7200
         import os
+
         os.utime(stale_dir, (old_time, old_time))
 
         # Create a recent dir

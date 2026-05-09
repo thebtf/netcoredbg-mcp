@@ -1,6 +1,5 @@
 """Tests for build state and result types."""
 
-
 from netcoredbg_mcp.build.state import (
     BuildDiagnostic,
     BuildError,
@@ -96,7 +95,10 @@ class TestParseMsbuildOutput:
 
     def test_parse_detailed_error(self):
         """Test parsing detailed error format."""
-        output = "C:\\Project\\Test.cs(10,5): error CS0103: The name 'x' does not exist [C:\\Project\\Test.csproj]"
+        output = (
+            "C:\\Project\\Test.cs(10,5): error CS0103: "
+            "The name 'x' does not exist [C:\\Project\\Test.csproj]"
+        )
 
         diagnostics = parse_msbuild_output(output)
 
@@ -110,7 +112,10 @@ class TestParseMsbuildOutput:
 
     def test_parse_warning(self):
         """Test parsing warning."""
-        output = "C:\\Project\\Test.cs(15,1): warning CS0168: The variable 'x' is declared but never used [C:\\Project\\Test.csproj]"
+        output = (
+            "C:\\Project\\Test.cs(15,1): warning CS0168: "
+            "The variable 'x' is declared but never used [C:\\Project\\Test.csproj]"
+        )
 
         diagnostics = parse_msbuild_output(output)
 

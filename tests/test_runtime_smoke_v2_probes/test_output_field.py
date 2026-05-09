@@ -21,32 +21,38 @@ class OutputFieldProbeSession(ProbeSmokeSession):
 @pytest.mark.asyncio
 async def test_output_field_probe_extracts_structured_field() -> None:
     session = OutputFieldProbeSession()
-    session.lines_results.extend([
-        {
-            "status": "PASS",
-            "lines": ["source=SettingsOracle reason=audio-filter-chain audioFilter="],
-        },
-        {
-            "status": "PASS",
-            "lines": [
-                "source=SettingsOracle reason=audio-filter-chain audioFilter=custom-audio"
-            ],
-            "evidence_ref": "output:after-audio",
-        },
-    ])
+    session.lines_results.extend(
+        [
+            {
+                "status": "PASS",
+                "lines": ["source=SettingsOracle reason=audio-filter-chain audioFilter="],
+            },
+            {
+                "status": "PASS",
+                "lines": [
+                    "source=SettingsOracle reason=audio-filter-chain audioFilter=custom-audio"
+                ],
+                "evidence_ref": "output:after-audio",
+            },
+        ]
+    )
 
     result = await runner(
         session,
         {"output.lines_since": session.output_lines_since},
-    ).run(one_probe_plan({
-        "kind": "output.field",
-        "name": "audio_filter",
-        "checkpoint": "before-audio",
-        "source": "SettingsOracle",
-        "reason": "audio-filter-chain",
-        "field": "audioFilter",
-        "expected": "contains:audio",
-    }))
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "output.field",
+                "name": "audio_filter",
+                "checkpoint": "before-audio",
+                "source": "SettingsOracle",
+                "reason": "audio-filter-chain",
+                "field": "audioFilter",
+                "expected": "contains:audio",
+            }
+        )
+    )
 
     probe = after_probe(result)
     assert result["status"] == "PASS"
@@ -59,22 +65,28 @@ async def test_output_field_probe_extracts_structured_field() -> None:
 @pytest.mark.asyncio
 async def test_output_field_probe_fails_when_locator_has_no_match() -> None:
     session = OutputFieldProbeSession()
-    session.lines_results.extend([
-        {"status": "PASS", "lines": []},
-        {"status": "PASS", "lines": ["source=Other reason=audio-filter-chain audioFilter=on"]},
-    ])
+    session.lines_results.extend(
+        [
+            {"status": "PASS", "lines": []},
+            {"status": "PASS", "lines": ["source=Other reason=audio-filter-chain audioFilter=on"]},
+        ]
+    )
 
     result = await runner(
         session,
         {"output.lines_since": session.output_lines_since},
-    ).run(one_probe_plan({
-        "kind": "output.field",
-        "name": "audio_filter",
-        "checkpoint": "before-audio",
-        "source": "SettingsOracle",
-        "reason": "audio-filter-chain",
-        "field": "audioFilter",
-    }))
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "output.field",
+                "name": "audio_filter",
+                "checkpoint": "before-audio",
+                "source": "SettingsOracle",
+                "reason": "audio-filter-chain",
+                "field": "audioFilter",
+            }
+        )
+    )
 
     probe = after_probe(result)
     assert result["status"] == "FAIL"
@@ -86,14 +98,18 @@ async def test_output_field_probe_fails_when_locator_has_no_match() -> None:
 async def test_output_field_probe_blocks_when_execution_is_unavailable() -> None:
     session = OutputFieldProbeSession()
 
-    result = await runner(session).run(one_probe_plan({
-        "kind": "output.field",
-        "name": "audio_filter",
-        "checkpoint": "before-audio",
-        "source": "SettingsOracle",
-        "reason": "audio-filter-chain",
-        "field": "audioFilter",
-    }))
+    result = await runner(session).run(
+        one_probe_plan(
+            {
+                "kind": "output.field",
+                "name": "audio_filter",
+                "checkpoint": "before-audio",
+                "source": "SettingsOracle",
+                "reason": "audio-filter-chain",
+                "field": "audioFilter",
+            }
+        )
+    )
 
     probe = after_probe(result)
     assert result["status"] == "BLOCKED"

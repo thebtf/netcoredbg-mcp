@@ -54,16 +54,22 @@ class FakeEvidenceBackend:
         fields: list[str],
         max_results: int = 20,
     ) -> dict[str, Any]:
-        self.calls.append({
-            "selector": dict(selector),
-            "fields": list(fields),
-            "max_results": max_results,
-        })
-        response = self.responses.pop(0) if self.responses else {
-            "status": "PASS",
-            "elements": [],
-            "element_count": 0,
-        }
+        self.calls.append(
+            {
+                "selector": dict(selector),
+                "fields": list(fields),
+                "max_results": max_results,
+            }
+        )
+        response = (
+            self.responses.pop(0)
+            if self.responses
+            else {
+                "status": "PASS",
+                "elements": [],
+                "element_count": 0,
+            }
+        )
         return response
 
 
@@ -218,22 +224,26 @@ async def test_unsupported_backend_returns_blocked_without_false_positive() -> N
 
 def test_diff_ui_snapshots_reports_added_removed_and_changed_records() -> None:
     store = UISnapshotStore()
-    store.save({
-        "snapshot": "before",
-        "fields": ["text", "selection"],
-        "elements": [
-            {"element_id": "row-1", "text": "Alice", "selection": {"selected": False}},
-            {"element_id": "row-2", "text": "Bob", "selection": {"selected": False}},
-        ],
-    })
-    store.save({
-        "snapshot": "after",
-        "fields": ["text", "selection"],
-        "elements": [
-            {"element_id": "row-1", "text": "Alice", "selection": {"selected": True}},
-            {"element_id": "row-3", "text": "Charlie", "selection": {"selected": False}},
-        ],
-    })
+    store.save(
+        {
+            "snapshot": "before",
+            "fields": ["text", "selection"],
+            "elements": [
+                {"element_id": "row-1", "text": "Alice", "selection": {"selected": False}},
+                {"element_id": "row-2", "text": "Bob", "selection": {"selected": False}},
+            ],
+        }
+    )
+    store.save(
+        {
+            "snapshot": "after",
+            "fields": ["text", "selection"],
+            "elements": [
+                {"element_id": "row-1", "text": "Alice", "selection": {"selected": True}},
+                {"element_id": "row-3", "text": "Charlie", "selection": {"selected": False}},
+            ],
+        }
+    )
 
     result = diff_ui_snapshots(store, "before", "after", fields=["selection", "text"])
 

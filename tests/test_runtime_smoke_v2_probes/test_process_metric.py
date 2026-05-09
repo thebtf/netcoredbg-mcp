@@ -65,11 +65,15 @@ async def test_process_metric_probe_records_memory_deltas(monkeypatch: pytest.Mo
     monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
     session = ProcessMetricSession()
 
-    result = await runner(session).run(one_probe_plan({
-        "kind": "process.metric",
-        "name": "process_memory",
-        "pid": 4242,
-    }))
+    result = await runner(session).run(
+        one_probe_plan(
+            {
+                "kind": "process.metric",
+                "name": "process_memory",
+                "pid": 4242,
+            }
+        )
+    )
 
     probe = after_probe(result)
     assert result["status"] == "PASS"
@@ -87,11 +91,15 @@ async def test_process_metric_probe_blocks_when_psutil_is_missing(
     monkeypatch.setitem(sys.modules, "psutil", None)
     session = ProcessMetricSession()
 
-    result = await runner(session).run(one_probe_plan({
-        "kind": "process.metric",
-        "name": "process_memory",
-        "pid": 4242,
-    }))
+    result = await runner(session).run(
+        one_probe_plan(
+            {
+                "kind": "process.metric",
+                "name": "process_memory",
+                "pid": 4242,
+            }
+        )
+    )
 
     probe = after_probe(result)
     assert result["status"] == "BLOCKED"
@@ -108,11 +116,15 @@ async def test_process_metric_probe_blocks_invalid_pid(
     monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
     session = ProcessMetricSession()
 
-    result = await runner(session).run(one_probe_plan({
-        "kind": "process.metric",
-        "name": "process_memory",
-        "pid": "not-a-pid",
-    }))
+    result = await runner(session).run(
+        one_probe_plan(
+            {
+                "kind": "process.metric",
+                "name": "process_memory",
+                "pid": "not-a-pid",
+            }
+        )
+    )
 
     probe = after_probe(result)
     assert result["status"] == "BLOCKED"
@@ -129,11 +141,15 @@ async def test_process_metric_probe_preserves_explicit_zero_pid(
     monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
     session = ProcessMetricSession()
 
-    result = await runner(session).run(one_probe_plan({
-        "kind": "process.metric",
-        "name": "process_memory",
-        "pid": 0,
-    }))
+    result = await runner(session).run(
+        one_probe_plan(
+            {
+                "kind": "process.metric",
+                "name": "process_memory",
+                "pid": 0,
+            }
+        )
+    )
 
     probe = after_probe(result)
     assert result["status"] == "BLOCKED"
@@ -151,11 +167,15 @@ async def test_process_metric_probe_blocks_boolean_pid(
     monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
     session = ProcessMetricSession()
 
-    result = await runner(session).run(one_probe_plan({
-        "kind": "process.metric",
-        "name": "process_memory",
-        "pid": True,
-    }))
+    result = await runner(session).run(
+        one_probe_plan(
+            {
+                "kind": "process.metric",
+                "name": "process_memory",
+                "pid": True,
+            }
+        )
+    )
 
     probe = after_probe(result)
     assert result["status"] == "BLOCKED"
@@ -174,11 +194,15 @@ async def test_process_metric_probe_blocks_inaccessible_process(
     monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
     session = ProcessMetricSession()
 
-    result = await runner(session).run(one_probe_plan({
-        "kind": "process.metric",
-        "name": "process_memory",
-        "pid": 4242,
-    }))
+    result = await runner(session).run(
+        one_probe_plan(
+            {
+                "kind": "process.metric",
+                "name": "process_memory",
+                "pid": 4242,
+            }
+        )
+    )
 
     probe = after_probe(result)
     assert result["status"] == "BLOCKED"

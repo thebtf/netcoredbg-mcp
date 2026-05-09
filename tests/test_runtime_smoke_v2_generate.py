@@ -92,9 +92,7 @@ def test_generate_matrix_expands_in_declaration_order_and_preserves_records() ->
         "line_numbers.true",
         "autosave.true",
     ]
-    assert [case["rendered_from"] for case in generated] == _generate_plan()["generate"][
-        "matrix"
-    ]
+    assert [case["rendered_from"] for case in generated] == _generate_plan()["generate"]["matrix"]
     assert [case["transitions"][0]["action"]["selector"] for case in generated] == [
         {"automation_id": "checkBoxSpellCheckInput"},
         {"automation_id": "checkBoxLineNumbers"},

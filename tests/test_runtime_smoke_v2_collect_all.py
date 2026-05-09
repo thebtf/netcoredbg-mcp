@@ -61,10 +61,12 @@ def _plan(*expressions: str) -> dict[str, Any]:
 
 @pytest.mark.asyncio
 async def test_collect_all_blocked_plus_pass_aggregates_blocked() -> None:
-    session = CollectAllSession({
-        "blocked": {"status": "BLOCKED", "reason": "no stop frame"},
-        "passed": {"status": "PASS", "value": 1},
-    })
+    session = CollectAllSession(
+        {
+            "blocked": {"status": "BLOCKED", "reason": "no stop frame"},
+            "passed": {"status": "PASS", "value": 1},
+        }
+    )
 
     result = await _runner(session).run(_plan("blocked", "passed"))
 
@@ -75,10 +77,12 @@ async def test_collect_all_blocked_plus_pass_aggregates_blocked() -> None:
 
 @pytest.mark.asyncio
 async def test_collect_all_fail_plus_blocked_aggregates_fail() -> None:
-    session = CollectAllSession({
-        "failed": {"status": "FAIL", "reason": "wrong value", "value": 0},
-        "blocked": {"status": "BLOCKED", "reason": "no stop frame"},
-    })
+    session = CollectAllSession(
+        {
+            "failed": {"status": "FAIL", "reason": "wrong value", "value": 0},
+            "blocked": {"status": "BLOCKED", "reason": "no stop frame"},
+        }
+    )
 
     result = await _runner(session).run(_plan("failed", "blocked"))
 
@@ -89,10 +93,12 @@ async def test_collect_all_fail_plus_blocked_aggregates_fail() -> None:
 
 @pytest.mark.asyncio
 async def test_collect_all_passes_when_all_probes_pass() -> None:
-    session = CollectAllSession({
-        "one": {"status": "PASS", "value": 1},
-        "two": {"status": "PASS", "value": 2},
-    })
+    session = CollectAllSession(
+        {
+            "one": {"status": "PASS", "value": 1},
+            "two": {"status": "PASS", "value": 2},
+        }
+    )
 
     result = await _runner(session).run(_plan("one", "two"))
 

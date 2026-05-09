@@ -19,10 +19,7 @@ def render_template_value(value: Any, record: dict[str, Any]) -> Any:
     if isinstance(value, list):
         return [render_template_value(item, record) for item in value]
     if isinstance(value, dict):
-        return {
-            key: render_template_value(item, record)
-            for key, item in value.items()
-        }
+        return {key: render_template_value(item, record) for key, item in value.items()}
     return deepcopy(value)
 
 
@@ -43,7 +40,7 @@ def _render_string(template: str, record: dict[str, Any]) -> Any:
         rendered.append(literal)
         if field_name is None:
             continue
-        _validate_field_syntax(field_name, format_spec, conversion)
+        _validate_field_syntax(field_name, format_spec or "", conversion)
         _validate_known_field(field_name, record)
         rendered.append(_stringify(record[field_name]))
     return "".join(rendered)

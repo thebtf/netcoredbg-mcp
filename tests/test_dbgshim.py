@@ -6,8 +6,6 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from netcoredbg_mcp.setup.dbgshim import (
     _DBGSHIM_FILENAME,
     _get_runtime_scan_paths,
@@ -110,12 +108,15 @@ class TestExtractDbgshimVersions:
         _create_fake_runtime(runtime_base, "8.0.10", size=4096)
         cache_dir = tmp_path / "cache"
 
-        with patch(
-            "netcoredbg_mcp.setup.dbgshim._get_runtime_scan_paths",
-            return_value=[runtime_base],
-        ), patch(
-            "netcoredbg_mcp.setup.dbgshim.get_home_dir",
-            return_value=tmp_path / "home",
+        with (
+            patch(
+                "netcoredbg_mcp.setup.dbgshim._get_runtime_scan_paths",
+                return_value=[runtime_base],
+            ),
+            patch(
+                "netcoredbg_mcp.setup.dbgshim.get_home_dir",
+                return_value=tmp_path / "home",
+            ),
         ):
             versions = extract_dbgshim_versions(cache_dir)
 
@@ -254,11 +255,15 @@ class TestSelectAndSwap:
         cache_dir.mkdir(parents=True)
         (cache_dir / _DBGSHIM_FILENAME).write_bytes(b"correct-dbgshim")
 
-        with patch(
-            "netcoredbg_mcp.setup.dbgshim.get_home_dir",
-            return_value=tmp_path,
-        ), patch.dict(
-            os.environ, {"DOTNET_ROOT": str(tmp_path / "nonexistent")},
+        with (
+            patch(
+                "netcoredbg_mcp.setup.dbgshim.get_home_dir",
+                return_value=tmp_path,
+            ),
+            patch.dict(
+                os.environ,
+                {"DOTNET_ROOT": str(tmp_path / "nonexistent")},
+            ),
         ):
             # Point cache to our test dir
             result = select_and_swap_dbgshim(str(program), str(netcoredbg))

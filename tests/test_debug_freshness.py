@@ -45,14 +45,18 @@ def test_freshness_passes_for_matching_process_workspace_sources_modules_and_art
         ModuleInfo(id=1, name="App.dll", path=str(artifact)),
     ]
 
-    result = DebugFreshnessVerifier(session).verify(
-        expected_process_id=1234,
-        expected_process_name="App",
-        expected_workspace=str(workspace),
-        expected_sources=[str(source)],
-        expected_modules=[str(artifact)],
-        expected_artifacts=[str(artifact)],
-    ).to_dict()
+    result = (
+        DebugFreshnessVerifier(session)
+        .verify(
+            expected_process_id=1234,
+            expected_process_name="App",
+            expected_workspace=str(workspace),
+            expected_sources=[str(source)],
+            expected_modules=[str(artifact)],
+            expected_artifacts=[str(artifact)],
+        )
+        .to_dict()
+    )
 
     assert result["status"] == "PASS"
     assert result["process"]["process_id"] == 1234
@@ -71,13 +75,17 @@ def test_freshness_warns_when_evidence_is_incomplete_but_not_contradictory(
     artifact.write_text("binary", encoding="utf-8")
     session = FakeFreshnessSession()
 
-    result = DebugFreshnessVerifier(session).verify(
-        expected_process_id=1234,
-        expected_workspace=str(tmp_path),
-        expected_sources=[str(tmp_path / "Program.cs")],
-        expected_modules=[str(artifact)],
-        expected_artifacts=[str(artifact)],
-    ).to_dict()
+    result = (
+        DebugFreshnessVerifier(session)
+        .verify(
+            expected_process_id=1234,
+            expected_workspace=str(tmp_path),
+            expected_sources=[str(tmp_path / "Program.cs")],
+            expected_modules=[str(artifact)],
+            expected_artifacts=[str(artifact)],
+        )
+        .to_dict()
+    )
 
     assert result["status"] == "WARN"
     assert result["mismatches"] == []
@@ -114,14 +122,18 @@ def test_freshness_fails_for_concrete_process_path_and_artifact_mismatches(
         ModuleInfo(id=1, name="Other.dll", path=str(module)),
     ]
 
-    result = DebugFreshnessVerifier(session).verify(
-        expected_process_id=1234,
-        expected_process_name="App",
-        expected_workspace=str(workspace),
-        expected_sources=[str(workspace / "Program.cs")],
-        expected_modules=[str(workspace / "bin" / "Debug" / "App.dll")],
-        expected_artifacts=[str(missing_artifact)],
-    ).to_dict()
+    result = (
+        DebugFreshnessVerifier(session)
+        .verify(
+            expected_process_id=1234,
+            expected_process_name="App",
+            expected_workspace=str(workspace),
+            expected_sources=[str(workspace / "Program.cs")],
+            expected_modules=[str(workspace / "bin" / "Debug" / "App.dll")],
+            expected_artifacts=[str(missing_artifact)],
+        )
+        .to_dict()
+    )
 
     assert result["status"] == "FAIL"
     mismatch_kinds = {mismatch["kind"] for mismatch in result["mismatches"]}

@@ -21,6 +21,7 @@ class PywinautoBackend:
 
     def __init__(self) -> None:
         from .automation import UIAutomation
+
         self._ui = UIAutomation()
 
     @property
@@ -214,7 +215,7 @@ class PywinautoBackend:
         """Find all matching elements with basic ranking on pywinauto."""
         loop = asyncio.get_running_loop()
 
-        def _find_all():
+        def _find_all() -> dict[str, Any]:
             if self._ui._app is None:
                 return {"results": [], "totalMatches": 0}
 
@@ -246,7 +247,7 @@ class PywinautoBackend:
             total = len(matches)
             # Simple ranking: prefer enabled, visible, shallower elements
             scored = []
-            for el in matches[:max_results * 2]:  # Over-sample for ranking
+            for el in matches[: max_results * 2]:  # Over-sample for ranking
                 try:
                     info = el.element_info
                     score = 0
@@ -260,15 +261,17 @@ class PywinautoBackend:
                             score += 10
                     except Exception:
                         pass
-                    scored.append({
-                        "found": True,
-                        "automationId": getattr(info, "automation_id", "") or "",
-                        "name": getattr(info, "name", "") or "",
-                        "controlType": getattr(info, "control_type", "") or "",
-                        "score": score,
-                        "depth": 0,  # pywinauto doesn't expose depth easily
-                        "parentDesc": "",
-                    })
+                    scored.append(
+                        {
+                            "found": True,
+                            "automationId": getattr(info, "automation_id", "") or "",
+                            "name": getattr(info, "name", "") or "",
+                            "controlType": getattr(info, "control_type", "") or "",
+                            "score": score,
+                            "depth": 0,  # pywinauto doesn't expose depth easily
+                            "parentDesc": "",
+                        }
+                    )
                 except Exception:
                     continue
 

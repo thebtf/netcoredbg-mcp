@@ -91,9 +91,7 @@ def test_missing_required_and_matched_forbidden_patterns_are_both_listed() -> No
 
     assert result["status"] == "FAIL"
     assert result["missing_required"] == ["missing text"]
-    assert result["forbidden_matches"] == [
-        {"pattern": "fatal", "line": 2, "text": "fatal error"}
-    ]
+    assert result["forbidden_matches"] == [{"pattern": "fatal", "line": 2, "text": "fatal error"}]
 
 
 def test_invalid_regex_fails_and_skips_later_assertions() -> None:
@@ -134,10 +132,14 @@ def test_duplicate_checkpoint_name_fails_without_overwriting_existing_range() ->
 
 def test_missing_checkpoint_and_trimmed_range_fail_with_named_reasons() -> None:
     missing_session = FakeOutputSession()
-    missing = OutputAssertionService(missing_session).assert_since(
-        "missing",
-        required=["anything"],
-    ).to_dict()
+    missing = (
+        OutputAssertionService(missing_session)
+        .assert_since(
+            "missing",
+            required=["anything"],
+        )
+        .to_dict()
+    )
     assert missing["status"] == "FAIL"
     assert missing["reason"] == "output checkpoint not found"
 

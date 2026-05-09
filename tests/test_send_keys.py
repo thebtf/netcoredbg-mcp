@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -12,6 +12,7 @@ import pytest
 def mock_user32():
     """Mock ctypes.windll.user32 for testing on any platform."""
     mock = MagicMock()
+
     # VkKeyScanW: return vk_code in low byte, shift flag in high byte
     # Default: 'a' -> 0x41, no shift
     def vk_scan(char_code):
@@ -20,11 +21,12 @@ def mock_user32():
             return ord(ch) | 0x100  # needs shift
         if ch.isalpha():
             return ord(ch.upper())
-        if ch == '!':
+        if ch == "!":
             return 0x31 | 0x100  # '1' + shift
         if ch.isdigit():
             return ord(ch)
         return -1  # unmapped
+
     mock.VkKeyScanW.side_effect = vk_scan
     mock.SendInput.return_value = 1
     return mock
@@ -40,11 +42,13 @@ def send_keys(mock_user32):
 
     with patch.dict(sys.modules, {}):
         import ctypes
-        original_windll = getattr(ctypes, 'windll', None)
+
+        original_windll = getattr(ctypes, "windll", None)
         try:
             ctypes.windll = windll_mock
             # Re-import to pick up mock
             from netcoredbg_mcp.ui.automation import _send_keys_via_input
+
             yield _send_keys_via_input
         finally:
             if original_windll is not None:

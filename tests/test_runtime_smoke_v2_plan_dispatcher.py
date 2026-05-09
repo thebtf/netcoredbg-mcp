@@ -18,10 +18,12 @@ class DispatcherSmokeSession:
 
 @pytest.mark.asyncio
 async def test_v2_schema_dispatches_to_v2_result_envelope() -> None:
-    result = await RuntimeSmokeRunner(DispatcherSmokeSession()).run({
-        "schema": "netcoredbg.runtime_smoke.v2",
-        "name": "state oracle smoke",
-    })
+    result = await RuntimeSmokeRunner(DispatcherSmokeSession()).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "state oracle smoke",
+        }
+    )
 
     assert result["status"] == "BLOCKED"
     assert result["generated_case_count"] == 0
@@ -32,10 +34,12 @@ async def test_v2_schema_dispatches_to_v2_result_envelope() -> None:
 
 @pytest.mark.asyncio
 async def test_v1_schema_keeps_legacy_result_envelope() -> None:
-    result = await RuntimeSmokeRunner(DispatcherSmokeSession()).run({
-        "schema": "netcoredbg.runtime_smoke.v1",
-        "name": "legacy smoke",
-    })
+    result = await RuntimeSmokeRunner(DispatcherSmokeSession()).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v1",
+            "name": "legacy smoke",
+        }
+    )
 
     assert result["status"] == "PASS"
     assert result["reason"] == "runtime smoke scenario passed"
@@ -47,10 +51,12 @@ async def test_v1_schema_keeps_legacy_result_envelope() -> None:
 
 @pytest.mark.asyncio
 async def test_missing_schema_with_v2_only_keys_returns_schema_help() -> None:
-    result = await RuntimeSmokeRunner(DispatcherSmokeSession()).run({
-        "name": "missing schema but v2 shaped",
-        "cases": [],
-    })
+    result = await RuntimeSmokeRunner(DispatcherSmokeSession()).run(
+        {
+            "name": "missing schema but v2 shaped",
+            "cases": [],
+        }
+    )
 
     assert result["status"] == "FAIL"
     assert result["reason"] == "invalid plan schema"

@@ -16,7 +16,6 @@ from netcoredbg_mcp.session.tracepoints import (
 
 
 class TestTracepointAdd:
-
     def test_add_creates_tracepoint(self):
         mgr = TracepointManager()
         tp = mgr.add("test.cs", 10, "x + y")
@@ -47,7 +46,6 @@ class TestTracepointAdd:
 
 
 class TestTracepointLog:
-
     def test_get_log_empty(self):
         mgr = TracepointManager()
         assert mgr.get_log() == []
@@ -55,8 +53,13 @@ class TestTracepointLog:
     def test_get_log_returns_entries(self):
         mgr = TracepointManager()
         entry = TraceEntry(
-            timestamp=1.0, file="test.cs", line=10, expression="x",
-            value="42", thread_id=1, tracepoint_id="tp-1",
+            timestamp=1.0,
+            file="test.cs",
+            line=10,
+            expression="x",
+            value="42",
+            thread_id=1,
+            tracepoint_id="tp-1",
         )
         mgr._trace_buffer.append(entry)
         log = mgr.get_log()
@@ -92,21 +95,17 @@ class TestTracepointLog:
 
 
 class TestTracepointBufferFIFO:
-
     def test_buffer_evicts_oldest_at_limit(self):
         mgr = TracepointManager()
         # Fill buffer to max
         for i in range(MAX_TRACE_ENTRIES + 10):
-            mgr._trace_buffer.append(
-                TraceEntry(float(i), "a.cs", 1, "a", str(i), 1, "tp-1")
-            )
+            mgr._trace_buffer.append(TraceEntry(float(i), "a.cs", 1, "a", str(i), 1, "tp-1"))
         assert len(mgr._trace_buffer) == MAX_TRACE_ENTRIES
         # Oldest should be entry 10 (first 10 evicted)
         assert mgr._trace_buffer[0].value == "10"
 
 
 class TestTracepointRateLimit:
-
     def test_rate_limited_when_too_fast(self):
         mgr = TracepointManager()
         tp = mgr.add("test.cs", 10, "x")
@@ -127,7 +126,6 @@ class TestTracepointRateLimit:
 
 
 class TestTracepointFindLocation:
-
     def test_find_by_file_line(self):
         mgr = TracepointManager()
         tp = mgr.add("C:/src/test.cs", 10, "x")
@@ -163,7 +161,6 @@ def _make_session(evaluate_result: str = "42", *, success: bool = True) -> Magic
 
 
 class TestOnTracepointHit:
-
     @pytest.mark.asyncio
     async def test_hit_logs_evaluation_result(self):
         mgr = TracepointManager()
@@ -242,7 +239,6 @@ class TestOnTracepointHit:
 
 
 class TestTracepointDapLine:
-
     def test_find_by_dap_line(self):
         mgr = TracepointManager()
         tp = mgr.add("test.cs", 10, "x")

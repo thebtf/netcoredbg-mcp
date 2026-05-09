@@ -9,7 +9,7 @@ import logging
 import os
 import time
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..build import BuildManager, BuildResult
 from ..dap import DAPClient, DAPEvent
@@ -56,6 +56,10 @@ from .state import (
     Variable,
 )
 
+if TYPE_CHECKING:
+    from .snapshots import SnapshotManager
+    from .tracepoints import TracepointManager
+
 logger = logging.getLogger(__name__)
 
 # Output buffer limits (security: prevent DoS). Configurable via env vars.
@@ -87,6 +91,8 @@ class SessionManager:
         self._hygiene = RuntimeHygieneService(self)
         self._instrumentation = InstrumentationGroupService(self)
         self._output_assertions = OutputAssertionService(self)
+        self._tracepoint_manager: TracepointManager | None = None
+        self._snapshot_manager: SnapshotManager | None = None
 
     @property
     def state(self) -> SessionState:
@@ -266,7 +272,7 @@ class SessionManager:
         git subprocess. This avoids hangs when running inside daemon processes
         where inherited stdin/env causes git to block on prompts.
         """
-        if not hasattr(self, '_worktree_cache'):
+        if not hasattr(self, "_worktree_cache"):
             self._worktree_cache: list[str] = []
             if self._project_path:
                 try:
@@ -278,7 +284,7 @@ class SessionManager:
                             content = f.read().strip()
                         if content.startswith("gitdir: "):
                             real_git_dir = os.path.abspath(
-                                os.path.join(self._project_path, content[len("gitdir: "):])
+                                os.path.join(self._project_path, content[len("gitdir: ") :])
                             )
                             # Navigate up to the main .git directory
                             # e.g., /main/.git/worktrees/wt-name → /main/.git
@@ -447,7 +453,7 @@ class SessionManager:
         if (
             body.reason.value == "breakpoint"
             and body.thread_id is not None
-            and getattr(self, '_tracepoint_manager', None) is not None
+            and getattr(self, "_tracepoint_manager", None) is not None
         ):
             try:
                 loop = asyncio.get_running_loop()
@@ -492,7 +498,7 @@ class SessionManager:
 
     async def _check_tracepoint_inner(self, thread_id: int) -> None:
         """Inner tracepoint check logic (called with timeout wrapper)."""
-        mgr = getattr(self, '_tracepoint_manager', None)
+        mgr = getattr(self, "_tracepoint_manager", None)
         if mgr is None:
             self._set_state(DebugState.STOPPED)
             self._execution_event.set()
@@ -530,8 +536,7 @@ class SessionManager:
                     tracepoint_lines.add(t.dap_line)
         user_bps = self._breakpoints.get_for_file(top.source)
         has_user_breakpoint = any(
-            bp.line == top.line and bp.line not in tracepoint_lines
-            for bp in user_bps
+            bp.line == top.line and bp.line not in tracepoint_lines for bp in user_bps
         )
 
         if has_user_breakpoint:
@@ -561,7 +566,8 @@ class SessionManager:
         """Fetch top frame and increment hit count for matching breakpoint."""
         try:
             frames = await asyncio.wait_for(
-                self.get_stack_trace(thread_id=thread_id, levels=1), timeout=3.0,
+                self.get_stack_trace(thread_id=thread_id, levels=1),
+                timeout=3.0,
             )
             if not frames:
                 return
@@ -792,8 +798,7 @@ class SessionManager:
             # New breakpoint from adapter — log but don't create (we don't know the file)
             if body.reason == "new":
                 logger.info(
-                    f"Adapter reported new breakpoint {body.breakpoint_id} "
-                    f"(not in our registry)"
+                    f"Adapter reported new breakpoint {body.breakpoint_id} (not in our registry)"
                 )
 
     def _on_module(self, event: DAPEvent) -> None:
@@ -806,14 +811,16 @@ class SessionManager:
             # Add new module — avoid duplicates by ID
             existing_ids = {m.id for m in self._state.modules}
             if body.module_id not in existing_ids:
-                self._state.modules.append(ModuleInfo(
-                    id=body.module_id,
-                    name=body.name,
-                    path=body.path,
-                    version=body.version,
-                    is_optimized=body.is_optimized,
-                    symbol_status=body.symbol_status,
-                ))
+                self._state.modules.append(
+                    ModuleInfo(
+                        id=body.module_id,
+                        name=body.name,
+                        path=body.path,
+                        version=body.version,
+                        is_optimized=body.is_optimized,
+                        symbol_status=body.symbol_status,
+                    )
+                )
                 logger.info(f"Module loaded: {body.name}")
         elif body.reason == "changed":
             for m in self._state.modules:
@@ -826,9 +833,7 @@ class SessionManager:
                     logger.debug(f"Module updated: {body.name}")
                     break
         elif body.reason == "removed":
-            self._state.modules = [
-                m for m in self._state.modules if m.id != body.module_id
-            ]
+            self._state.modules = [m for m in self._state.modules if m.id != body.module_id]
             logger.info(f"Module unloaded: {body.name}")
 
     @staticmethod
@@ -882,10 +887,7 @@ class SessionManager:
         while True:
             remaining = timeout - (time.monotonic() - start_time)
             if remaining <= 0:
-                process_alive = (
-                    self._client.is_running
-                    and self._state.process_id is not None
-                )
+                process_alive = self._client.is_running and self._state.process_id is not None
                 logger.warning(
                     f"wait_for_stopped timed out after {timeout}s "
                     f"(state={self._state.state.value}, process_alive={process_alive})"
@@ -1053,6 +1055,7 @@ class SessionManager:
             RuntimeError: If launch fails
             BuildError: If pre-build fails
         """
+
         # Helper to report progress (safely handles None callback)
         async def report(progress: float, total: float, message: str) -> None:
             if progress_callback:
@@ -1094,6 +1097,7 @@ class SessionManager:
         logger.info("[launch] phase 4/9: dbgshim version management")
         try:
             from ..setup.dbgshim import select_and_swap_dbgshim
+
             swapped = select_and_swap_dbgshim(program, self.netcoredbg_path)
             if swapped:
                 logger.info("[launch] dbgshim swapped to match target runtime")
@@ -1150,6 +1154,7 @@ class SessionManager:
 
         # Generate session ID for temp dir isolation
         import uuid
+
         self._session_id = uuid.uuid4().hex[:12]
 
         # Save launch config for restart
@@ -1194,6 +1199,7 @@ class SessionManager:
 
         # Generate session ID for temp dir isolation
         import uuid
+
         self._session_id = uuid.uuid4().hex[:12]
 
         return {"success": True, "processId": process_id}
@@ -1247,9 +1253,7 @@ class SessionManager:
 
         # Validate rebuild request - cannot rebuild without build_project
         if rebuild and not config.get("build_project"):
-            raise RuntimeError(
-                "Cannot rebuild on restart: no build_project in saved configuration"
-            )
+            raise RuntimeError("Cannot rebuild on restart: no build_project in saved configuration")
 
         # Always stop existing session first to ensure clean state
         # This is needed even when pre_build=False to avoid relaunch issues
@@ -1306,9 +1310,7 @@ class SessionManager:
 
         response = await self._client.set_breakpoints(file_path, dap_breakpoints)
         if response.success:
-            self._breakpoints.update_from_dap(
-                file_path, response.body.get("breakpoints", [])
-            )
+            self._breakpoints.update_from_dap(file_path, response.body.get("breakpoints", []))
 
     # Breakpoint operations
 
@@ -1368,9 +1370,7 @@ class SessionManager:
         if self.is_active:
             caps = self._client.capabilities
             if not caps.get("supportsFunctionBreakpoints", False):
-                raise RuntimeError(
-                    "DAP adapter does not support function breakpoints"
-                )
+                raise RuntimeError("DAP adapter does not support function breakpoints")
 
         bp = FunctionBreakpoint(name=name, condition=condition, hit_condition=hit_condition)
         self._breakpoints.add_function_breakpoint(bp)
@@ -1390,9 +1390,7 @@ class SessionManager:
             await self._sync_function_breakpoints()
         return removed
 
-    async def set_variable(
-        self, variables_reference: int, name: str, value: str
-    ) -> dict[str, Any]:
+    async def set_variable(self, variables_reference: int, name: str, value: str) -> dict[str, Any]:
         """Set a variable's value."""
         response = await self._client.set_variable(variables_reference, name, value)
         if response.success:
@@ -1473,9 +1471,7 @@ class SessionManager:
                 tid = threads[0].id
                 logger.debug(f"pause: no thread_id provided, using first thread {tid}")
             else:
-                raise RuntimeError(
-                    "No threads available to pause. The program may not be running."
-                )
+                raise RuntimeError("No threads available to pause. The program may not be running.")
 
         response = await self._client.pause(tid)
         return {"success": response.success, "threadId": tid}
@@ -1516,12 +1512,15 @@ class SessionManager:
             if "0x80131302" in (response.message or "") and attempt < max_retries:
                 logger.debug(
                     "stack_trace: PROCESS_NOT_SYNCHRONIZED, retry %d/%d after %.0fms",
-                    attempt + 1, max_retries, retry_delay * 1000,
+                    attempt + 1,
+                    max_retries,
+                    retry_delay * 1000,
                 )
                 await asyncio.sleep(retry_delay)
                 continue
             break
 
+        assert response is not None
         logger.debug(
             f"stack_trace response for thread {tid}: success={response.success}, "
             f"body={response.body}, message={response.message}"
@@ -1545,9 +1544,7 @@ class SessionManager:
                 self._state.current_frame_id = frames[0].id
             return frames
         else:
-            logger.warning(
-                f"stack_trace failed for thread {tid}: {response.message}"
-            )
+            logger.warning(f"stack_trace failed for thread {tid}: {response.message}")
             return []
 
     async def get_scopes(self, frame_id: int | None = None) -> list[dict[str, Any]]:
@@ -1735,9 +1732,7 @@ class SessionManager:
         response = await self._client.set_exception_breakpoints(filters)
         return response.success
 
-    async def get_exception_info(
-        self, thread_id: int | None = None
-    ) -> dict[str, Any] | None:
+    async def get_exception_info(self, thread_id: int | None = None) -> dict[str, Any] | None:
         """Get exception info for thread."""
         tid = thread_id or self._state.current_thread_id
         if tid is None:
@@ -1824,11 +1819,13 @@ class SessionManager:
                 if "error" in type_result:
                     break
                 msg_result = await self.evaluate(f"{prefix}.Message")
-                inner_exceptions.append({
-                    "type": type_result.get("result", "Unknown"),
-                    "message": msg_result.get("result", ""),
-                    "depth": depth,
-                })
+                inner_exceptions.append(
+                    {
+                        "type": type_result.get("result", "Unknown"),
+                        "message": msg_result.get("result", ""),
+                        "depth": depth,
+                    }
+                )
                 prefix = f"{prefix}.InnerException"
             except Exception:
                 break
@@ -1883,11 +1880,13 @@ class SessionManager:
                         if ref:
                             variables = await self.get_variables(ref)
                             for v in variables[:15]:
-                                local_vars.append({
-                                    "name": v.name,
-                                    "value": v.value,
-                                    "type": v.type,
-                                })
+                                local_vars.append(
+                                    {
+                                        "name": v.name,
+                                        "value": v.value,
+                                        "type": v.type,
+                                    }
+                                )
                             break  # Only first scope (Locals)
                     result["locals"] = local_vars
                 except Exception as e:

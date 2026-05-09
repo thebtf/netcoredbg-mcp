@@ -122,9 +122,7 @@ async def _settle(
 ) -> dict[str, Any]:
     tracepoint_id = settle.get("await_tracepoint_id")
     if tracepoint_id:
-        timeout_ms = int(
-            settle.get("tracepoint_timeout_ms", DEFAULT_TRACEPOINT_TIMEOUT_MS)
-        )
+        timeout_ms = int(settle.get("tracepoint_timeout_ms", DEFAULT_TRACEPOINT_TIMEOUT_MS))
         deadline = context.clock() + (timeout_ms / 1000)
         while context.clock() <= deadline:
             result = await context.call_adapter(

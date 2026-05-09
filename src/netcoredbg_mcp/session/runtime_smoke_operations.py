@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from ..ui.focus import assert_focus
 from ..ui.grid import assert_grid_rows, select_grid_range, snapshot_grid
@@ -145,7 +145,7 @@ def ui_operation_adapters(
         if isinstance(backend, dict):
             return backend
         selector = _selector(args)
-        return await backend.find_element(**_selector_kwargs(selector))
+        return cast(dict[str, Any], await backend.find_element(**_selector_kwargs(selector)))
 
     async def set_focus(**args: Any) -> dict[str, Any]:
         backend = await _backend_or_blocked(ensure_ui_connected)
@@ -179,7 +179,7 @@ def ui_operation_adapters(
         if asyncio.iscoroutine(result) or isinstance(result, Awaitable):
             result = await result
         if _is_non_pass_result(result):
-            return result
+            return cast(dict[str, Any], result)
         return {"status": "PASS", "keys": keys, "result": result}
 
     async def text_assert(**args: Any) -> dict[str, Any]:
@@ -305,7 +305,7 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
         except Exception as exc:
             return _adapter_blocked("launch", str(exc))
         if _is_non_pass_result(result):
-            return result
+            return cast(dict[str, Any], result)
         return {"status": "PASS", "reason": "launch completed", "result": result}
 
     async def debug_evaluate(**args: Any) -> dict[str, Any]:
@@ -361,7 +361,7 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
         except Exception as exc:
             return {"status": "FAIL", "mode": mode, "reason": str(exc)}
         if _is_non_pass_result(result):
-            return result
+            return cast(dict[str, Any], result)
         return {"status": "PASS", "mode": mode, "result": result}
 
     async def process_registry_count(**_: Any) -> dict[str, Any]:
@@ -376,11 +376,7 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
             status = registry.status()
         except Exception as exc:
             return _adapter_blocked("process.registry.count", str(exc))
-        alive = [
-            entry
-            for entry in status
-            if bool(entry.get("alive"))
-        ]
+        alive = [entry for entry in status if bool(entry.get("alive"))]
         return {"status": "PASS", "count": len(alive), "alive": alive}
 
     async def fixture_restore(**args: Any) -> dict[str, Any]:

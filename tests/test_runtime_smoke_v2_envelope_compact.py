@@ -65,21 +65,23 @@ def _runner(session: EnvelopeSmokeSession) -> RuntimeSmokeRunner:
 @pytest.mark.asyncio
 async def test_v2_compact_section_stays_under_four_kb_for_generated_cases() -> None:
     session = EnvelopeSmokeSession()
-    result = await _runner(session).run({
-        "schema": "netcoredbg.runtime_smoke.v2",
-        "generate": {
-            "template": "toggle-setting-ab",
-            "matrix": [
-                {
-                    "id": f"setting_{index}",
-                    "control": f"checkBox{index}",
-                    "value": True,
-                    "setting_expression": f"Settings.Flag{index}.true",
-                }
-                for index in range(18)
-            ],
-        },
-    })
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "generate": {
+                "template": "toggle-setting-ab",
+                "matrix": [
+                    {
+                        "id": f"setting_{index}",
+                        "control": f"checkBox{index}",
+                        "value": True,
+                        "setting_expression": f"Settings.Flag{index}.true",
+                    }
+                    for index in range(18)
+                ],
+            },
+        }
+    )
 
     compact_json = json.dumps(result["compact"], sort_keys=True, separators=(",", ":"))
     assert result["status"] == "PASS"

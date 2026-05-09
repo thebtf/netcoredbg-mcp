@@ -35,6 +35,7 @@ def register_runtime_smoke_tools(
     def _get_backend() -> Any:
         if backend_holder["instance"] is None:
             from ..ui.backend import create_backend
+
             backend_holder["instance"] = create_backend(
                 process_registry=session.process_registry,
             )

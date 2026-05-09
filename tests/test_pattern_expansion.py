@@ -29,6 +29,7 @@ def _make_flaui() -> FlaUIBackend:
 # TestWindowControl
 # ─────────────────────────────────────────────────────────────
 
+
 class TestWindowControl:
     @pytest.mark.asyncio
     async def test_close_window_happy(self):
@@ -43,9 +44,7 @@ class TestWindowControl:
         backend = _make_flaui()
         backend._client.call.return_value = {"closed": True, "window_title": "Dialog"}
         await backend.close_window(window_title="Dialog")
-        backend._client.call.assert_awaited_once_with(
-            "close_window", {"window_title": "Dialog"}
-        )
+        backend._client.call.assert_awaited_once_with("close_window", {"window_title": "Dialog"})
 
     @pytest.mark.asyncio
     async def test_maximize_window_happy(self):
@@ -106,11 +105,17 @@ class TestWindowControl:
 # TestTransform
 # ─────────────────────────────────────────────────────────────
 
+
 class TestTransform:
     @pytest.mark.asyncio
     async def test_move_window_happy(self):
         backend = _make_flaui()
-        backend._client.call.return_value = {"moved": True, "x": 100, "y": 200, "window_title": "App"}
+        backend._client.call.return_value = {
+            "moved": True,
+            "x": 100,
+            "y": 200,
+            "window_title": "App",
+        }
         result = await backend.move_window(100, 200)
         assert result["moved"] is True
         backend._client.call.assert_awaited_once_with("move_window", {"x": 100, "y": 200})
@@ -133,7 +138,9 @@ class TestTransform:
         backend._client.call.return_value = {"resized": True, "width": 800, "height": 600}
         result = await backend.resize_window(800, 600)
         assert result["resized"] is True
-        backend._client.call.assert_awaited_once_with("resize_window", {"width": 800, "height": 600})
+        backend._client.call.assert_awaited_once_with(
+            "resize_window", {"width": 800, "height": 600}
+        )
 
     @pytest.mark.asyncio
     async def test_resize_window_not_resizable(self):
@@ -164,6 +171,7 @@ class TestTransform:
 # ─────────────────────────────────────────────────────────────
 # TestExpandCollapse
 # ─────────────────────────────────────────────────────────────
+
 
 class TestExpandCollapse:
     @pytest.mark.asyncio
@@ -228,6 +236,7 @@ class TestExpandCollapse:
 # TestSetValue (RangeValue)
 # ─────────────────────────────────────────────────────────────
 
+
 class TestSetValue:
     @pytest.mark.asyncio
     async def test_set_value_happy(self):
@@ -280,6 +289,7 @@ class TestSetValue:
 # TestClipboard
 # ─────────────────────────────────────────────────────────────
 
+
 class TestClipboard:
     @pytest.mark.asyncio
     async def test_clipboard_read_with_text(self):
@@ -310,7 +320,7 @@ class TestClipboard:
     @pytest.mark.asyncio
     async def test_clipboard_write_unicode(self):
         backend = _make_flaui()
-        text = "emoji \U0001F389 \u00fcnic\u00f6de"
+        text = "emoji \U0001f389 \u00fcnic\u00f6de"
         backend._client.call.return_value = {"written": True, "length": len(text)}
         result = await backend.clipboard_write(text)
         assert result["length"] == len(text)
@@ -348,6 +358,7 @@ class TestClipboard:
 # ─────────────────────────────────────────────────────────────
 # TestVirtualizedItem
 # ─────────────────────────────────────────────────────────────
+
 
 class TestVirtualizedItem:
     @pytest.mark.asyncio
@@ -423,6 +434,7 @@ class TestVirtualizedItem:
 # ─────────────────────────────────────────────────────────────
 # TestPywinautoUnsupported — all 12 new methods
 # ─────────────────────────────────────────────────────────────
+
 
 class TestPywinautoUnsupported:
     """All 12 v0.11.1 methods must return {unsupported: True} on PywinautoBackend."""

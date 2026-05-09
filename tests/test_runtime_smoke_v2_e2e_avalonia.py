@@ -11,43 +11,45 @@ FIXTURE_ROOT = Path(__file__).parent / "fixtures"
 def test_v2_radio_group_set_renders_wpf_mode_triple() -> None:
     assert (FIXTURE_ROOT / "WpfSmokeApp" / "WpfSmokeApp.csproj").exists()
 
-    generated, errors = expand_generated_cases({
-        "generate": {
-            "template": "radio-group-set",
-            "matrix": [
-                {
-                    "id": "mode_generic",
-                    "value": "generic",
-                    "expression": "ViewModel.Mode",
-                    "controls": [
-                        {"value": "generic", "automation_id": "checkBoxGeneric"},
-                        {"value": "scanning", "automation_id": "checkBoxScanning"},
-                        {"value": "transcribe", "automation_id": "checkBoxTranscribe"},
-                    ],
-                },
-                {
-                    "id": "mode_scanning",
-                    "value": "scanning",
-                    "expression": "ViewModel.Mode",
-                    "controls": [
-                        {"value": "generic", "automation_id": "checkBoxGeneric"},
-                        {"value": "scanning", "automation_id": "checkBoxScanning"},
-                        {"value": "transcribe", "automation_id": "checkBoxTranscribe"},
-                    ],
-                },
-                {
-                    "id": "mode_transcribe",
-                    "value": "transcribe",
-                    "expression": "ViewModel.Mode",
-                    "controls": [
-                        {"value": "generic", "automation_id": "checkBoxGeneric"},
-                        {"value": "scanning", "automation_id": "checkBoxScanning"},
-                        {"value": "transcribe", "automation_id": "checkBoxTranscribe"},
-                    ],
-                },
-            ],
+    generated, errors = expand_generated_cases(
+        {
+            "generate": {
+                "template": "radio-group-set",
+                "matrix": [
+                    {
+                        "id": "mode_generic",
+                        "value": "generic",
+                        "expression": "ViewModel.Mode",
+                        "controls": [
+                            {"value": "generic", "automation_id": "checkBoxGeneric"},
+                            {"value": "scanning", "automation_id": "checkBoxScanning"},
+                            {"value": "transcribe", "automation_id": "checkBoxTranscribe"},
+                        ],
+                    },
+                    {
+                        "id": "mode_scanning",
+                        "value": "scanning",
+                        "expression": "ViewModel.Mode",
+                        "controls": [
+                            {"value": "generic", "automation_id": "checkBoxGeneric"},
+                            {"value": "scanning", "automation_id": "checkBoxScanning"},
+                            {"value": "transcribe", "automation_id": "checkBoxTranscribe"},
+                        ],
+                    },
+                    {
+                        "id": "mode_transcribe",
+                        "value": "transcribe",
+                        "expression": "ViewModel.Mode",
+                        "controls": [
+                            {"value": "generic", "automation_id": "checkBoxGeneric"},
+                            {"value": "scanning", "automation_id": "checkBoxScanning"},
+                            {"value": "transcribe", "automation_id": "checkBoxTranscribe"},
+                        ],
+                    },
+                ],
+            }
         }
-    })
+    )
 
     assert errors == []
     assert len(generated) == 3
