@@ -153,6 +153,7 @@ class RuntimeSmokeRunner:
 
             return await RuntimeStateOracleRunner(
                 self._session,
+                service_adapters=self._service_adapters,
                 clock=self._clock,
             ).run(plan)
 
