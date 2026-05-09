@@ -1,0 +1,60 @@
+{
+  "schema": "netcoredbg.runtime_smoke.v2",
+  "name": "WpfSmokeApp handwritten state oracle",
+  "baseline": {
+    "steps": [
+      {
+        "id": "launch_wpf_fixture",
+        "kind": "isolated_profile.launch",
+        "launch": {
+          "program": "tests/fixtures/WpfSmokeApp/bin/Debug/net8.0-windows/WpfSmokeApp.dll",
+          "cwd": "tests/fixtures/WpfSmokeApp/bin/Debug/net8.0-windows",
+          "pre_build": true,
+          "build_project": "tests/fixtures/WpfSmokeApp/WpfSmokeApp.csproj",
+          "build_configuration": "Debug"
+        }
+      }
+    ]
+  },
+  "cases": [
+    {
+      "id": "invoke_button_changes_output",
+      "transitions": [
+        {
+          "action": {
+            "kind": "ui.invoke",
+            "selector": {
+              "automation_id": "btnInvoke"
+            }
+          },
+          "probes": [
+            {
+              "kind": "debug.evaluate",
+              "name": "debugger_quick_eval",
+              "expression": "1 + 1",
+              "expected": "2"
+            },
+            {
+              "kind": "ui.property",
+              "name": "output_text",
+              "selector": {
+                "automation_id": "txtOutput"
+              },
+              "property": "Name"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "cleanup": {
+    "steps": [
+      {
+        "kind": "process.registry.assert_empty"
+      },
+      {
+        "kind": "debug.stop"
+      }
+    ]
+  }
+}

@@ -67,6 +67,33 @@ def capturing_mcp() -> CapturingMCP:
     return CapturingMCP()
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--critical-only",
+        action="store_true",
+        default=False,
+        help="Run only tests marked with @pytest.mark.critical.",
+    )
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config,
+    items: list[pytest.Item],
+) -> None:
+    if not config.getoption("--critical-only"):
+        return
+    selected: list[pytest.Item] = []
+    deselected: list[pytest.Item] = []
+    for item in items:
+        if item.get_closest_marker("critical") is not None:
+            selected.append(item)
+        else:
+            deselected.append(item)
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+    items[:] = selected
+
+
 @pytest.fixture
 def sample_breakpoint_data():
     """Sample breakpoint data for testing."""

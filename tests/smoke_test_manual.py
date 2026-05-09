@@ -13,6 +13,7 @@ import asyncio
 import os
 import sys
 import traceback
+from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -2710,6 +2711,218 @@ async def test_wpf_one_call_runtime_smoke_workflow():
     )
 
 
+async def run_wpf_v2_state_oracle_runtime_smoke() -> dict[str, Any]:
+    return await _run_v2_state_oracle_runtime_smoke(
+        label="WPF",
+        program=WPF_DLL,
+        build_project=os.path.join(
+            BASE,
+            "tests",
+            "fixtures",
+            "WpfSmokeApp",
+            "WpfSmokeApp.csproj",
+        ),
+    )
+
+
+async def run_avalonia_v2_state_oracle_runtime_smoke() -> dict[str, Any]:
+    return await _run_v2_state_oracle_runtime_smoke(
+        label="Avalonia",
+        program=AVALONIA_DLL,
+        build_project=os.path.join(
+            BASE,
+            "tests",
+            "fixtures",
+            "AvaloniaSmokeApp",
+            "AvaloniaSmokeApp.csproj",
+        ),
+    )
+
+
+async def _run_v2_state_oracle_runtime_smoke(
+    *,
+    label: str,
+    program: str,
+    build_project: str,
+) -> dict[str, Any]:
+    from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner
+    from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
+    from netcoredbg_mcp.ui.backend import create_backend
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    if sys.platform != "win32":
+        return {
+            "status": "BLOCKED",
+            "reason": f"{label} v2 state oracle smoke requires Windows UI automation",
+        }
+
+    m = SessionManager(project_path=BASE)
+    backend_holder: dict[str, object | None] = {"backend": None}
+    backend_holder["backend"] = create_backend(process_registry=m.process_registry)
+    if not isinstance(backend_holder["backend"], FlaUIBackend):
+        return {
+            "status": "BLOCKED",
+            "backend": type(backend_holder["backend"]).__name__,
+            "reason": f"FlaUI bridge required for {label} v2 state oracle smoke",
+        }
+
+    async def ensure_ui_connected():
+        backend = backend_holder["backend"]
+        if backend is None:
+            backend = create_backend(process_registry=m.process_registry)
+            backend_holder["backend"] = backend
+        pid = m.state.process_id
+        if not pid:
+            raise RuntimeError(f"Process ID not available for {label} v2 smoke")
+        if getattr(backend, "process_id", None) != pid:
+            await backend.connect(pid)
+        return backend
+
+    adapters = ui_operation_adapters(ensure_ui_connected, session=m)
+    happy_plan = _v2_state_oracle_plan(
+        name=f"{label.lower()} v2 state oracle happy path",
+        program=program,
+        build_project=build_project,
+        selector={"automation_id": "btnInvoke"},
+    )
+    blocked_plan = _v2_state_oracle_plan(
+        name=f"{label.lower()} v2 state oracle selector miss",
+        program=program,
+        build_project=build_project,
+        selector={"automation_id": "missingV2Button"},
+    )
+
+    try:
+        happy = await RuntimeSmokeRunner(m, service_adapters=adapters).run(happy_plan)
+        if backend_holder["backend"] is not None:
+            await backend_holder["backend"].disconnect()
+            backend_holder["backend"] = None
+        blocked = await RuntimeSmokeRunner(m, service_adapters=adapters).run(blocked_plan)
+        return {
+            "status": "PASS"
+            if (
+                happy.get("status") == "PASS"
+                and blocked.get("status") == "BLOCKED"
+                and happy.get("cleanup", {}).get("process_registry_after") == 0
+                and blocked.get("cleanup", {}).get("process_registry_after") == 0
+            )
+            else "FAIL",
+            "happy": _v2_smoke_summary(happy),
+            "blocked": _v2_smoke_summary(blocked),
+        }
+    finally:
+        if backend_holder["backend"] is not None:
+            try:
+                await backend_holder["backend"].disconnect()
+            except Exception as exc:
+                print(f"  [DEBUG] {label} v2 backend.disconnect() failed: {exc}")
+        await m.stop()
+
+
+def _v2_state_oracle_plan(
+    *,
+    name: str,
+    program: str,
+    build_project: str,
+    selector: dict[str, str],
+) -> dict[str, Any]:
+    return {
+        "schema": "netcoredbg.runtime_smoke.v2",
+        "name": name,
+        "baseline": {
+            "steps": [
+                {
+                    "id": "launch_fixture",
+                    "kind": "isolated_profile.launch",
+                    "launch": {
+                        "program": program,
+                        "cwd": os.path.dirname(program),
+                        "pre_build": True,
+                        "build_project": build_project,
+                        "build_configuration": "Debug",
+                    },
+                }
+            ]
+        },
+        "cases": [
+            {
+                "id": "invoke_button_state_ab",
+                "transitions": [
+                    {
+                        "action": {
+                            "kind": "ui.invoke",
+                            "selector": selector,
+                        },
+                        "probes": [
+                            {
+                                "kind": "process.metric",
+                                "name": "debuggee_memory",
+                            },
+                            {
+                                "kind": "ui.property",
+                                "name": "output_text",
+                                "selector": {"automation_id": "txtOutput"},
+                                "property": "Name",
+                            },
+                        ],
+                    }
+                ],
+            }
+        ],
+        "cleanup": {
+            "steps": [
+                {"kind": "process.registry.assert_empty"},
+                {"kind": "debug.stop"},
+            ]
+        },
+    }
+
+
+def _v2_smoke_summary(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": result.get("status"),
+        "reason": result.get("reason"),
+        "action_count": result.get("action_count"),
+        "case_count": len(result.get("cases", [])),
+        "cleanup": result.get("cleanup"),
+        "blocked": result.get("blocked"),
+    }
+
+
+async def test_wpf_v2_state_oracle_runtime_smoke():
+    print("\nWPF V2 STATE ORACLE RUNTIME SMOKE")
+    evidence = await run_wpf_v2_state_oracle_runtime_smoke()
+    print(f"  evidence: {evidence}")
+    if evidence.get("status") == "BLOCKED":
+        check("WPF v2 state oracle reports actionable BLOCKED", True, str(evidence))
+        return
+    check(
+        "WPF v2 state oracle happy path and selector miss are classified",
+        evidence.get("status") == "PASS",
+        str(evidence),
+    )
+    check(
+        "WPF v2 state oracle cleanup proof has zero leaked processes",
+        evidence.get("happy", {}).get("cleanup", {}).get("process_registry_after") == 0
+        and evidence.get("blocked", {}).get("cleanup", {}).get("process_registry_after") == 0,
+        str(evidence),
+    )
+
+
+async def test_avalonia_v2_state_oracle_runtime_smoke():
+    print("\nAVALONIA V2 STATE ORACLE RUNTIME SMOKE")
+    evidence = await run_avalonia_v2_state_oracle_runtime_smoke()
+    print(f"  evidence: {evidence}")
+    if evidence.get("status") == "BLOCKED":
+        check("Avalonia v2 state oracle reports actionable BLOCKED", True, str(evidence))
+        return
+    check(
+        "Avalonia v2 state oracle happy path and selector miss are classified",
+        evidence.get("status") == "PASS",
+        str(evidence),
+    )
+
+
 async def test_avalonia_ui_fixture_compatibility():
     print("\n24. AVALONIA UI FIXTURE COMPATIBILITY")
     from netcoredbg_mcp.ui.backend import create_backend
@@ -2833,6 +3046,11 @@ def get_scenarios():
         ("Output Checkpoint Assertions", test_output_checkpoint_assertions),
         ("Runtime Smoke Bounded Runner", test_runtime_smoke_bounded_runner),
         ("UI Focused Evidence", test_ui_focused_evidence),
+        ("WPF V2 State Oracle Runtime Smoke", test_wpf_v2_state_oracle_runtime_smoke),
+        (
+            "Avalonia V2 State Oracle Runtime Smoke",
+            test_avalonia_v2_state_oracle_runtime_smoke,
+        ),
     ]
 
     if GUI_ENABLED:

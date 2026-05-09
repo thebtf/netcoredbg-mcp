@@ -69,26 +69,36 @@ async def _handle_ui_invoke(action: dict[str, Any], context: ActionContext) -> d
     started = context.clock()
     selector = dict(action.get("selector") or {})
     result = await context.call_adapter("ui.invoke", selector=selector)
-    return {
-        "status": result.get("status", "PASS"),
-        "route": "invoke",
-        "selector": selector,
-        "duration_ms": context.elapsed_ms(started),
-        "result": result,
-    }
+    return _action_result(
+        status=result.get("status", "PASS"),
+        route="invoke",
+        selector=selector,
+        duration_ms=context.elapsed_ms(started),
+        result=result,
+    )
 
 
 async def _handle_ui_click(action: dict[str, Any], context: ActionContext) -> dict[str, Any]:
     started = context.clock()
     selector = dict(action.get("selector") or {})
     result = await context.call_adapter("ui.click", selector=selector)
-    return {
-        "status": result.get("status", "PASS"),
-        "route": "click",
-        "selector": selector,
-        "duration_ms": context.elapsed_ms(started),
-        "result": result,
-    }
+    return _action_result(
+        status=result.get("status", "PASS"),
+        route="click",
+        selector=selector,
+        duration_ms=context.elapsed_ms(started),
+        result=result,
+    )
+
+
+def _action_result(**payload: Any) -> dict[str, Any]:
+    result = dict(payload.get("result") or {})
+    action = dict(payload)
+    if str(action.get("status", "PASS")) != "PASS":
+        for key in ("reason", "requested", "accepted", "next_step"):
+            if key in result:
+                action[key] = result[key]
+    return action
 
 
 register_action("ui.click", _handle_ui_click)
