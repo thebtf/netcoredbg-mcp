@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .actions import ActionContext
+from .cleanup import cleanup_steps_from_case, run_cleanup
 from .metrics import evaluate_metric_thresholds, merge_case_metrics
 from .transition_executor import execute_transition
 
@@ -56,6 +57,12 @@ async def execute_case(
         status = "FAIL"
         reason = "metric threshold exceeded"
 
+    cleanup = await run_cleanup(
+        cleanup_steps_from_case(case),
+        context,
+        case_id=str(case.get("id") or ""),
+    )
+
     result = {
         "id": case.get("id"),
         "status": status,
@@ -67,6 +74,7 @@ async def execute_case(
         "diff": diff,
         "metrics": metrics,
         "failed_assertions": failed_assertions,
+        "cleanup": cleanup,
     }
     if "rendered_from" in case:
         result["rendered_from"] = dict(case["rendered_from"])

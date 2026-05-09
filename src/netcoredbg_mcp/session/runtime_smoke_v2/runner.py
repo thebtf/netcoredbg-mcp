@@ -11,10 +11,11 @@ from ..runtime_smoke_schema import (
 from .actions import ActionContext, accepted_action_kinds
 from .baseline import execute_baseline
 from .case_executor import execute_case
+from .cleanup import cleanup_steps_from_plan, merge_cleanup_results, run_cleanup
 from .generate import expand_generated_cases
 from .probe_dispatcher import probe_path
 from .probes import accepted_probe_kinds
-from .result_envelope import finalize_result
+from .result_envelope import compact_value, finalize_result
 
 
 def compact_v2_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -25,7 +26,8 @@ def compact_v2_result(result: dict[str, Any]) -> dict[str, Any]:
         "action_count": result.get("action_count", 0),
         "generated_case_count": result.get("generated_case_count", 0),
         "case_count": len(result.get("cases", [])),
-        "cleanup": result.get("cleanup", {}),
+        "cleanup": compact_value(result.get("cleanup", {})),
+        "evidence_refs": compact_value(result.get("evidence_refs", [])),
     }
 
 
@@ -99,6 +101,8 @@ class RuntimeStateOracleRunner:
         )
         if baseline_result is not None and baseline_result.get("status") != "PASS":
             blocked_payload = baseline_result.get("blocked")
+            plan_cleanup = await run_cleanup(cleanup_steps_from_plan(plan), context)
+            cleanup = merge_cleanup_results(plan_cleanup, [])
             return self._finalize(
                 status="BLOCKED",
                 reason="baseline setup failed",
@@ -113,6 +117,7 @@ class RuntimeStateOracleRunner:
             )
 
         case_results: list[dict[str, Any]] = []
+        case_cleanups: list[dict[str, Any]] = []
         action_count = 0
         terminal_status = "PASS"
         terminal_reason = "runtime smoke v2 scenario passed"
@@ -126,6 +131,8 @@ class RuntimeStateOracleRunner:
             )
             action_count += executed_actions
             case_results.append(case_result)
+            if isinstance(case_result.get("cleanup"), dict):
+                case_cleanups.append(case_result["cleanup"])
             if case_result["status"] == "BLOCKED":
                 terminal_status = "BLOCKED"
                 terminal_reason = case_result["reason"]
@@ -135,6 +142,16 @@ class RuntimeStateOracleRunner:
                 terminal_status = "FAIL"
                 terminal_reason = case_result["reason"]
                 break
+            if (
+                case_result.get("cleanup", {}).get("status") == "FAIL"
+                and bool(plan.get("stop_on_first_failed_assertion"))
+            ):
+                terminal_status = "FAIL"
+                terminal_reason = "case cleanup failed"
+                break
+
+        plan_cleanup = await run_cleanup(cleanup_steps_from_plan(plan), context)
+        cleanup = merge_cleanup_results(plan_cleanup, case_cleanups)
 
         return self._finalize(
             status=terminal_status,
@@ -183,7 +200,7 @@ class RuntimeStateOracleRunner:
             completed_steps=[],
             failed_assertions=[],
             cleanup=cleanup,
-            evidence_refs=[],
+            evidence_refs=_collect_v2_evidence_refs(cases),
             compact_builder=compact_v2_result,
             extra=result_extra,
         )
@@ -266,3 +283,26 @@ def _validate_v2_plan(
                     )
                 seen_probe_paths.add(path)
     return errors
+
+
+def _collect_v2_evidence_refs(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+    for case in cases:
+        case_id = case.get("id")
+        for transition in case.get("transitions", []):
+            probes = transition.get("probes", {})
+            if not isinstance(probes, dict):
+                continue
+            for phase in ("before", "after"):
+                for probe in probes.get(phase, []):
+                    if not isinstance(probe, dict):
+                        continue
+                    evidence_ref = probe.get("evidence_ref")
+                    if evidence_ref:
+                        refs.append({
+                            "case_id": case_id,
+                            "phase": phase,
+                            "probe": probe.get("name"),
+                            "evidence_ref": evidence_ref,
+                        })
+    return refs
