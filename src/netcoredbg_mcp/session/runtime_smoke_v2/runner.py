@@ -9,6 +9,7 @@ from ..runtime_smoke_schema import (
     ACCEPTED_TOP_LEVEL_KEYS_V2,
 )
 from .actions import ActionContext, accepted_action_kinds
+from .baseline import execute_baseline
 from .case_executor import execute_case
 from .probe_dispatcher import probe_path
 from .probes import accepted_probe_kinds
@@ -50,6 +51,7 @@ class RuntimeStateOracleRunner:
                 started=started,
                 action_count=0,
                 cases=[],
+                baseline=None,
                 cleanup=cleanup,
                 extra={"validation_errors": validation_errors},
             )
@@ -60,6 +62,7 @@ class RuntimeStateOracleRunner:
                 started=started,
                 action_count=0,
                 cases=[],
+                baseline=None,
                 cleanup=cleanup,
                 extra={
                     "blocked": {
@@ -76,6 +79,23 @@ class RuntimeStateOracleRunner:
             clock=self._clock,
             session=self._session,
         )
+        baseline_result = await execute_baseline(
+            plan.get("baseline") if isinstance(plan.get("baseline"), dict) else None,
+            context,
+        )
+        if baseline_result is not None and baseline_result.get("status") != "PASS":
+            blocked_payload = baseline_result.get("blocked")
+            return self._finalize(
+                status="BLOCKED",
+                reason="baseline setup failed",
+                started=started,
+                action_count=0,
+                cases=[],
+                baseline=baseline_result,
+                cleanup=cleanup,
+                extra={"blocked": blocked_payload} if blocked_payload else None,
+            )
+
         case_results: list[dict[str, Any]] = []
         action_count = 0
         terminal_status = "PASS"
@@ -102,6 +122,7 @@ class RuntimeStateOracleRunner:
             started=started,
             action_count=action_count,
             cases=case_results,
+            baseline=baseline_result,
             cleanup=cleanup,
             extra={"blocked": blocked_payload} if blocked_payload else None,
         )
@@ -114,13 +135,14 @@ class RuntimeStateOracleRunner:
         started: float,
         action_count: int,
         cases: list[dict[str, Any]],
+        baseline: dict[str, Any] | None,
         cleanup: dict[str, Any],
         extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         result_extra = {
             "generated_case_count": 0,
             "cases": cases,
-            "baseline": None,
+            "baseline": baseline,
             "metrics_thresholds": None,
             "accepted_schema_values": list(ACCEPTED_SCHEMA_VALUES),
             "accepted_top_level_keys_v2": list(ACCEPTED_TOP_LEVEL_KEYS_V2),
