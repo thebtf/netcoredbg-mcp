@@ -79,6 +79,7 @@ async def handle_file_json(
 
     try:
         from jsonpath_ng import parse
+        from jsonpath_ng.exceptions import JsonPathLexerError, JsonPathParserError
     except ImportError:
         return blocked_probe(
             probe,
@@ -92,7 +93,7 @@ async def handle_file_json(
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         matches = [match.value for match in parse(jsonpath).find(data)]
-    except Exception as exc:
+    except (json.JSONDecodeError, JsonPathLexerError, JsonPathParserError) as exc:
         return {
             "name": probe_name(probe, kind),
             "kind": kind,

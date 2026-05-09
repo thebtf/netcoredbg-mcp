@@ -104,7 +104,7 @@ def ui_operation_adapters(
             return backend
         selector = _selector(args)
         property_name = str(args.get("property_name") or args.get("property") or "")
-        text_properties = {"name", "text", "value", "valuetext"}
+        text_properties = {"text", "value", "valuetext"}
         if property_name.lower() in text_properties:
             result = await backend.extract_text(**_selector_kwargs(selector))
             if _is_selector_miss(result):
@@ -482,7 +482,18 @@ def _is_selector_miss(result: Any) -> bool:
     if result.get("found") is False:
         return True
     reason = str(result.get("reason") or result.get("error") or "").lower()
-    return "not found" in reason or "no element" in reason or "selector" in reason
+    return any(
+        marker in reason
+        for marker in (
+            "not found",
+            "not_found",
+            "no element",
+            "no such element",
+            "no matching element",
+            "selector not found",
+            "unable to find",
+        )
+    )
 
 
 def _is_non_pass_result(result: Any) -> bool:

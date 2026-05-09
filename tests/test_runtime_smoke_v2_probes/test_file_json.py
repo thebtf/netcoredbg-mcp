@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import jsonpath_ng
 import pytest
 
 from netcoredbg_mcp.session.runtime_smoke_v2.probes.file_json import handle_file_json
@@ -125,6 +126,33 @@ async def test_file_json_probe_without_session_uses_resolved_path(tmp_path: Path
     assert result["status"] == "PASS"
     assert result["value"] is True
     assert result["resolved_path"] == str(path.resolve())
+
+
+@pytest.mark.asyncio
+async def test_file_json_probe_propagates_unexpected_jsonpath_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "diagnostics.json"
+    path.write_text(json.dumps({"value": True}), encoding="utf-8")
+    session = FileJsonProbeSession(tmp_path)
+
+    def fail_parse(_: str) -> None:
+        raise RuntimeError("internal jsonpath adapter bug")
+
+    monkeypatch.setattr(jsonpath_ng, "parse", fail_parse)
+
+    with pytest.raises(RuntimeError, match="internal jsonpath adapter bug"):
+        await handle_file_json(
+            {
+                "kind": "file.json",
+                "name": "unexpected_jsonpath_error",
+                "path": str(path),
+                "jsonpath": "$.value",
+            },
+            SimpleNamespace(session=session),
+            phase="after",
+        )
 
 
 @pytest.mark.asyncio

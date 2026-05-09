@@ -52,7 +52,7 @@ async def handle_process_metric(
         )
     try:
         sample = _memory_sample(psutil.Process(pid))
-    except Exception as exc:  # pragma: no cover - psutil/platform dependent
+    except (psutil.Error, OSError) as exc:  # pragma: no cover - psutil/platform dependent
         _LOG.warning("process.metric memory read failed for pid %s: %s", pid, exc)
         return blocked_probe(
             probe,
@@ -74,7 +74,11 @@ async def handle_process_metric(
         }
     else:
         baseline = context.scratch.get(cache_key)
-        if isinstance(baseline, dict):
+        if (
+            isinstance(baseline, dict)
+            and "sample" in baseline
+            and "clock" in baseline
+        ):
             before = baseline["sample"]
             started = float(baseline["clock"])
             private_delta = (
@@ -90,11 +94,14 @@ async def handle_process_metric(
                 "private_bytes_delta_mb": private_delta,
             }
         else:
-            value = {
-                "action_latency_ms": 0,
-                "working_set_delta_mb": 0.0,
-                "private_bytes_delta_mb": None,
-            }
+            return blocked_probe(
+                probe,
+                kind=kind,
+                reason="process.metric baseline is missing",
+                requested={"phase": phase, "pid": pid},
+                accepted={"baseline": "matching before-phase sample"},
+                next_step="Run the probe in the before phase before requesting after deltas.",
+            )
     return {
         "name": probe_name(probe, kind),
         "kind": kind,
@@ -113,6 +120,8 @@ def _resolve_pid(probe: dict[str, Any], session: Any) -> int | None:
         raw_pid = getattr(state, "process_id", None)
     if raw_pid is None:
         return None
+    if isinstance(raw_pid, bool):
+        raise ValueError("pid must be positive")
     pid = int(raw_pid)
     if pid <= 0:
         raise ValueError("pid must be positive")

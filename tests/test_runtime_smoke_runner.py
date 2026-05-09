@@ -631,11 +631,61 @@ async def test_ui_get_property_propagates_backend_failure_status() -> None:
 
     result = await ui_operation_adapters(backend_provider)["ui.get_property"](
         selector={"automation_id": "statusText"},
-        property_name="Name",
+        property_name="Text",
     )
 
     assert result["status"] == "BLOCKED"
     assert result["reason"] == "backend not connected"
+
+
+@pytest.mark.asyncio
+async def test_ui_get_property_name_reads_element_property_not_text() -> None:
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.extract_text_calls = 0
+            self.find_element_calls = 0
+
+        async def extract_text(self, **_: Any) -> dict[str, Any]:
+            self.extract_text_calls += 1
+            return {"status": "PASS", "text": "visible caption"}
+
+        async def find_element(self, **_: Any) -> dict[str, Any]:
+            self.find_element_calls += 1
+            return {"status": "PASS", "name": "accessible name", "text": "visible caption"}
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    result = await ui_operation_adapters(backend_provider)["ui.get_property"](
+        selector={"automation_id": "statusText"},
+        property_name="name",
+    )
+
+    assert result["status"] == "PASS"
+    assert result["value"] == "accessible name"
+    assert backend.extract_text_calls == 0
+    assert backend.find_element_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_ui_get_property_preserves_selector_backend_errors() -> None:
+    class FakeBackend:
+        async def find_element(self, **_: Any) -> dict[str, Any]:
+            return {"status": "BLOCKED", "reason": "selector schema unsupported"}
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.get_property"](
+        selector={"automation_id": "statusText"},
+        property_name="name",
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "selector schema unsupported"
+    assert "requested" not in result
 
 
 @pytest.mark.asyncio
