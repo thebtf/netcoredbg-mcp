@@ -714,6 +714,43 @@ async def test_ui_get_property_preserves_selector_backend_errors() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ui_get_property_blocks_backend_find_exceptions() -> None:
+    class FakeBackend:
+        async def find_element(self, **_: Any) -> dict[str, Any]:
+            raise RuntimeError("bridge transport unavailable")
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.get_property"](
+        selector={"automation_id": "statusText"},
+        property_name="name",
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "bridge transport unavailable"
+    assert result["requested"] == {"adapter": "ui.get_property"}
+
+
+@pytest.mark.asyncio
+async def test_ui_find_element_blocks_backend_exceptions() -> None:
+    class FakeBackend:
+        async def find_element(self, **_: Any) -> dict[str, Any]:
+            raise RuntimeError("bridge transport unavailable")
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.find_element"](
+        selector={"automation_id": "statusText"},
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "bridge transport unavailable"
+    assert result["requested"] == {"adapter": "ui.find_element"}
+
+
+@pytest.mark.asyncio
 async def test_ui_send_keys_focused_preserves_backend_failure_status() -> None:
     class FakeBackend:
         async def send_keys(self, keys: str) -> dict[str, Any]:

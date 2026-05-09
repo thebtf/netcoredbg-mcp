@@ -106,7 +106,10 @@ def ui_operation_adapters(
         property_name = str(args.get("property_name") or args.get("property") or "")
         text_properties = {"text", "value", "valuetext"}
         if property_name.lower() in text_properties:
-            result = await backend.extract_text(**_selector_kwargs(selector))
+            try:
+                result = await backend.extract_text(**_selector_kwargs(selector))
+            except Exception as exc:
+                return _adapter_blocked("ui.get_property", str(exc))
             if _is_selector_miss(result):
                 return _selector_blocked(selector, result=result)
             if not _is_backend_success(result):
@@ -118,7 +121,10 @@ def ui_operation_adapters(
                 "result": result,
             }
 
-        result = await backend.find_element(**_selector_kwargs(selector))
+        try:
+            result = await backend.find_element(**_selector_kwargs(selector))
+        except Exception as exc:
+            return _adapter_blocked("ui.get_property", str(exc))
         if _is_selector_miss(result):
             return _selector_blocked(selector, result=result)
         if not _is_backend_success(result):
@@ -145,7 +151,10 @@ def ui_operation_adapters(
         if isinstance(backend, dict):
             return backend
         selector = _selector(args)
-        return cast(dict[str, Any], await backend.find_element(**_selector_kwargs(selector)))
+        try:
+            return cast(dict[str, Any], await backend.find_element(**_selector_kwargs(selector)))
+        except Exception as exc:
+            return _adapter_blocked("ui.find_element", str(exc))
 
     async def set_focus(**args: Any) -> dict[str, Any]:
         backend = await _backend_or_blocked(ensure_ui_connected)
