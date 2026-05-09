@@ -8,7 +8,9 @@ from ..runtime_smoke_schema import (
     ACCEPTED_SCHEMA_VALUES,
     ACCEPTED_TOP_LEVEL_KEYS_V2,
 )
-from .actions import ActionContext, accepted_action_kinds, dispatch_action
+from .actions import ActionContext, accepted_action_kinds
+from .case_executor import execute_case
+from .probe_dispatcher import probe_path
 from .probes import accepted_probe_kinds
 from .result_envelope import finalize_result
 
@@ -72,6 +74,7 @@ class RuntimeStateOracleRunner:
         context = ActionContext(
             service_adapters=self._service_adapters,
             clock=self._clock,
+            session=self._session,
         )
         case_results: list[dict[str, Any]] = []
         action_count = 0
@@ -80,7 +83,7 @@ class RuntimeStateOracleRunner:
         blocked_payload: dict[str, Any] | None = None
 
         for case in plan.get("cases", []):
-            case_result, executed_actions = await self._run_case(case, context)
+            case_result, executed_actions = await execute_case(case, context)
             action_count += executed_actions
             case_results.append(case_result)
             if case_result["status"] == "BLOCKED":
@@ -101,49 +104,6 @@ class RuntimeStateOracleRunner:
             cases=case_results,
             cleanup=cleanup,
             extra={"blocked": blocked_payload} if blocked_payload else None,
-        )
-
-    async def _run_case(
-        self,
-        case: dict[str, Any],
-        context: ActionContext,
-    ) -> tuple[dict[str, Any], int]:
-        action_records: list[dict[str, Any]] = []
-        action_count = 0
-        for transition in case.get("transitions", []):
-            action = dict(transition.get("action") or {})
-            action_result = await dispatch_action(action, context)
-            action_count += 1
-            action_records.append(action_result)
-            if action_result.get("status") == "BLOCKED":
-                return (
-                    {
-                        "id": case.get("id"),
-                        "status": "BLOCKED",
-                        "reason": str(action_result.get("reason") or "action blocked"),
-                        "actions": action_records,
-                        "blocked": _blocked_from_action(action_result),
-                    },
-                    action_count,
-                )
-            if action_result.get("status") == "FAIL":
-                return (
-                    {
-                        "id": case.get("id"),
-                        "status": "FAIL",
-                        "reason": str(action_result.get("reason") or "action failed"),
-                        "actions": action_records,
-                    },
-                    action_count,
-                )
-        return (
-            {
-                "id": case.get("id"),
-                "status": "PASS",
-                "reason": "case passed",
-                "actions": action_records,
-            },
-            action_count,
         )
 
     def _finalize(
@@ -220,6 +180,7 @@ def _validate_v2_plan(plan: dict[str, Any]) -> list[str]:
                     f"cases[{case_index}].transitions[{transition_index}].probes must be a list"
                 )
                 continue
+            seen_probe_paths: set[str] = set()
             for probe_index, probe in enumerate(probes):
                 if not isinstance(probe, dict):
                     errors.append(
@@ -232,13 +193,12 @@ def _validate_v2_plan(plan: dict[str, Any]) -> list[str]:
                         f"cases[{case_index}].transitions[{transition_index}]."
                         f"probes[{probe_index}].kind is not accepted: {probe.get('kind')}"
                     )
+                    continue
+                path = probe_path(probe)
+                if path in seen_probe_paths:
+                    errors.append(
+                        f"cases[{case_index}].transitions[{transition_index}] "
+                        f"has duplicate probe path: {path}"
+                    )
+                seen_probe_paths.add(path)
     return errors
-
-
-def _blocked_from_action(action_result: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "reason": action_result["reason"],
-        "requested": action_result["requested"],
-        "accepted": action_result["accepted"],
-        "next_step": action_result["next_step"],
-    }
