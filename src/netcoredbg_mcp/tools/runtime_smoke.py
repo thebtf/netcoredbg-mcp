@@ -35,6 +35,7 @@ def register_runtime_smoke_tools(
     def _get_backend() -> Any:
         if backend_holder["instance"] is None:
             from ..ui.backend import create_backend
+
             backend_holder["instance"] = create_backend(
                 process_registry=session.process_registry,
             )
@@ -280,7 +281,10 @@ def register_runtime_smoke_tools(
                 return build_error_response(access_error, state=session.state.state)
             data = await RuntimeSmokeRunner(
                 session,
-                service_adapters=ui_operation_adapters(_ensure_ui_connected),
+                service_adapters=ui_operation_adapters(
+                    _ensure_ui_connected,
+                    session=session,
+                ),
             ).run(plan)
             return _build_runtime_smoke_response(
                 session,

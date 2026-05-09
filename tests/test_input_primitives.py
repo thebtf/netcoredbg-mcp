@@ -36,8 +36,12 @@ class TestFlaUIDragForwarding:
         backend = _make_flaui()
         backend._client.call.return_value = {
             "dragged": True,
-            "x1": 10, "y1": 20, "x2": 100, "y2": 200,
-            "steps": 10, "duration_ms": 200,
+            "x1": 10,
+            "y1": 20,
+            "x2": 100,
+            "y2": 200,
+            "steps": 10,
+            "duration_ms": 200,
         }
         result = await backend.drag(10, 20, 100, 200)
         assert result["dragged"] is True
@@ -51,8 +55,12 @@ class TestFlaUIDragForwarding:
         backend = _make_flaui()
         backend._client.call.return_value = {
             "dragged": True,
-            "x1": 0, "y1": 0, "x2": 50, "y2": 50,
-            "steps": 25, "duration_ms": 500,
+            "x1": 0,
+            "y1": 0,
+            "x2": 50,
+            "y2": 50,
+            "steps": 25,
+            "duration_ms": 500,
         }
         await backend.drag(0, 0, 50, 50, speed_ms=500, hold_modifiers=["ctrl"])
         backend._client.call.assert_awaited_once_with(
@@ -73,7 +81,9 @@ class TestFlaUISystemEvent:
     async def test_send_system_event_toggle(self):
         backend = _make_flaui()
         backend._client.call.return_value = {
-            "event": "theme_change", "from": "dark", "to": "light",
+            "event": "theme_change",
+            "from": "dark",
+            "to": "light",
         }
         result = await backend.send_system_event("theme_change", mode="toggle")
         assert result["to"] == "light"
@@ -86,7 +96,9 @@ class TestFlaUISystemEvent:
     async def test_send_system_event_explicit_mode(self):
         backend = _make_flaui()
         backend._client.call.return_value = {
-            "event": "theme_change", "from": "dark", "to": "light",
+            "event": "theme_change",
+            "from": "dark",
+            "to": "light",
         }
         await backend.send_system_event("theme_change", mode="light")
         backend._client.call.assert_awaited_once_with(
@@ -239,15 +251,18 @@ class TestDragInputValidation:
 
     def test_send_drag_rejects_speed_below_floor(self):
         from netcoredbg_mcp.ui.automation import _send_drag
+
         with pytest.raises(ValueError, match="speed_ms below drag-threshold"):
             _send_drag(0, 0, 100, 100, speed_ms=10)
 
     def test_send_drag_rejects_zero_distance(self):
         from netcoredbg_mcp.ui.automation import _send_drag
+
         with pytest.raises(ValueError, match="identical"):
             _send_drag(50, 50, 50, 50, speed_ms=200)
 
     def test_send_drag_rejects_unknown_modifier(self):
         from netcoredbg_mcp.ui.automation import _send_drag
+
         with pytest.raises(ValueError, match="Unknown modifier"):
             _send_drag(0, 0, 100, 100, speed_ms=200, hold_modifiers=["super"])

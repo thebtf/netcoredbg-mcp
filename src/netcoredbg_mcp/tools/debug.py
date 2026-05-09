@@ -165,17 +165,13 @@ def register_debug_tools(
                 elif _line_count == max_build_lines + 1:
                     ok = await _safe_notify(
                         ctx.info(
-                            f"... ({_line_count}+ build lines, "
-                            f"showing first {max_build_lines})"
+                            f"... ({_line_count}+ build lines, showing first {max_build_lines})"
                         )
                     )
                     if not ok:
                         _notify_failed = True
 
-            logger.info(
-                f"[start_debug] launching: program={program}, "
-                f"pre_build={pre_build}"
-            )
+            logger.info(f"[start_debug] launching: program={program}, pre_build={pre_build}")
 
             # No blanket timeout here — each phase has its own:
             # - Build: 300s (BuildSession._run_command)
@@ -366,8 +362,13 @@ def register_debug_tools(
                 data=result,
                 state=session.state.state,
                 next_actions=[
-                    "get_call_stack", "get_variables", "evaluate_expression",
-                    "step_over", "step_into", "step_out", "continue_execution",
+                    "get_call_stack",
+                    "get_variables",
+                    "evaluate_expression",
+                    "step_over",
+                    "step_into",
+                    "step_out",
+                    "continue_execution",
                 ],
             )
         except Exception as e:
@@ -391,9 +392,7 @@ def register_debug_tools(
         if access_error:
             return build_error_response(access_error, state=session.state.state)
 
-        return await execute_and_wait(
-            ctx, session.step_over(thread_id), "step_over"
-        )
+        return await execute_and_wait(ctx, session.step_over(thread_id), "step_over")
 
     @mcp.tool(
         annotations=ToolAnnotations(
@@ -402,9 +401,7 @@ def register_debug_tools(
             openWorldHint=False,
         )
     )
-    async def get_step_in_targets(
-        ctx: Context, frame_id: int | None = None
-    ) -> dict:
+    async def get_step_in_targets(ctx: Context, frame_id: int | None = None) -> dict:
         """Get available step-in targets for the current stack frame.
 
         State: STOPPED required. Call before step_into(target_id=N) to choose target.
@@ -475,9 +472,7 @@ def register_debug_tools(
         if access_error:
             return build_error_response(access_error, state=session.state.state)
 
-        return await execute_and_wait(
-            ctx, session.step_out(thread_id), "step_out"
-        )
+        return await execute_and_wait(ctx, session.step_out(thread_id), "step_out")
 
     @mcp.tool(
         annotations=ToolAnnotations(

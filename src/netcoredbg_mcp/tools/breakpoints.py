@@ -114,13 +114,16 @@ def register_breakpoint_tools(
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def list_breakpoints(ctx: Context, file: str | None = None) -> dict:
         """List all breakpoints or breakpoints in a specific file.
 
         Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
         """
         try:
+
             def _bp_dict(file_path: str, bp) -> dict:
                 norm = session.breakpoints._normalize_path(file_path)
                 hit_count = session.state.hit_counts.get((norm, bp.line), 0)
@@ -138,15 +141,10 @@ def register_breakpoint_tools(
                 # Validate file path if provided
                 validated_file = session.validate_path(file)
                 bps = session.breakpoints.get_for_file(validated_file)
-                result = {
-                    validated_file: [_bp_dict(validated_file, bp) for bp in bps]
-                }
+                result = {validated_file: [_bp_dict(validated_file, bp) for bp in bps]}
             else:
                 all_bps = session.breakpoints.get_all()
-                result = {
-                    f: [_bp_dict(f, bp) for bp in bps]
-                    for f, bps in all_bps.items()
-                }
+                result = {f: [_bp_dict(f, bp) for bp in bps] for f, bps in all_bps.items()}
             return build_response(data=result, state=session.state.state)
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)

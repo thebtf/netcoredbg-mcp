@@ -34,61 +34,76 @@ class TestDetectAppTypeRuntimeconfig:
     """Tests based on runtimeconfig.json content."""
 
     def test_wpf_single_framework(self, app_dir: Path) -> None:
-        _write_runtimeconfig(app_dir, {
-            "runtimeOptions": {
-                "framework": {
-                    "name": "Microsoft.WindowsDesktop.App",
-                    "version": "8.0.0",
+        _write_runtimeconfig(
+            app_dir,
+            {
+                "runtimeOptions": {
+                    "framework": {
+                        "name": "Microsoft.WindowsDesktop.App",
+                        "version": "8.0.0",
+                    },
                 },
             },
-        })
+        )
         assert detect_app_type(str(app_dir / "MyApp.dll")) == "gui"
 
     def test_winforms_in_frameworks_array(self, app_dir: Path) -> None:
-        _write_runtimeconfig(app_dir, {
-            "runtimeOptions": {
-                "frameworks": [
-                    {"name": "Microsoft.NETCore.App", "version": "8.0.0"},
-                    {"name": "Microsoft.WindowsDesktop.App", "version": "8.0.0"},
-                ],
+        _write_runtimeconfig(
+            app_dir,
+            {
+                "runtimeOptions": {
+                    "frameworks": [
+                        {"name": "Microsoft.NETCore.App", "version": "8.0.0"},
+                        {"name": "Microsoft.WindowsDesktop.App", "version": "8.0.0"},
+                    ],
+                },
             },
-        })
+        )
         assert detect_app_type(str(app_dir / "MyApp.dll")) == "gui"
 
     def test_avalonia_in_framework(self, app_dir: Path) -> None:
-        _write_runtimeconfig(app_dir, {
-            "runtimeOptions": {
-                "framework": {
-                    "name": "Avalonia.App",
-                    "version": "11.0.0",
+        _write_runtimeconfig(
+            app_dir,
+            {
+                "runtimeOptions": {
+                    "framework": {
+                        "name": "Avalonia.App",
+                        "version": "11.0.0",
+                    },
                 },
             },
-        })
+        )
         assert detect_app_type(str(app_dir / "MyApp.dll")) == "gui"
 
     def test_console_app(self, app_dir: Path) -> None:
-        _write_runtimeconfig(app_dir, {
-            "runtimeOptions": {
-                "framework": {
-                    "name": "Microsoft.NETCore.App",
-                    "version": "8.0.0",
+        _write_runtimeconfig(
+            app_dir,
+            {
+                "runtimeOptions": {
+                    "framework": {
+                        "name": "Microsoft.NETCore.App",
+                        "version": "8.0.0",
+                    },
                 },
             },
-        })
+        )
         assert detect_app_type(str(app_dir / "MyApp.dll")) == "console"
 
     def test_exe_extension(self, app_dir: Path) -> None:
         """Detection works with .exe paths too."""
         exe = app_dir / "MyApp.exe"
         exe.write_text("")
-        _write_runtimeconfig(app_dir, {
-            "runtimeOptions": {
-                "framework": {
-                    "name": "Microsoft.WindowsDesktop.App",
-                    "version": "6.0.0",
+        _write_runtimeconfig(
+            app_dir,
+            {
+                "runtimeOptions": {
+                    "framework": {
+                        "name": "Microsoft.WindowsDesktop.App",
+                        "version": "6.0.0",
+                    },
                 },
             },
-        })
+        )
         assert detect_app_type(str(exe)) == "gui"
 
 
@@ -97,41 +112,53 @@ class TestDetectAppTypeDepsJsonFallback:
 
     def test_avalonia_desktop_in_deps(self, app_dir: Path) -> None:
         """Console runtimeconfig + Avalonia.Desktop in deps -> gui."""
-        _write_runtimeconfig(app_dir, {
-            "runtimeOptions": {
-                "framework": {
-                    "name": "Microsoft.NETCore.App",
-                    "version": "8.0.0",
+        _write_runtimeconfig(
+            app_dir,
+            {
+                "runtimeOptions": {
+                    "framework": {
+                        "name": "Microsoft.NETCore.App",
+                        "version": "8.0.0",
+                    },
                 },
             },
-        })
-        _write_deps(app_dir, {
-            "targets": {
-                ".NETCoreApp,Version=v8.0": {
-                    "Avalonia.Desktop/11.2.0": {"dependencies": {}},
-                    "Avalonia/11.2.0": {"dependencies": {}},
+        )
+        _write_deps(
+            app_dir,
+            {
+                "targets": {
+                    ".NETCoreApp,Version=v8.0": {
+                        "Avalonia.Desktop/11.2.0": {"dependencies": {}},
+                        "Avalonia/11.2.0": {"dependencies": {}},
+                    },
                 },
             },
-        })
+        )
         assert detect_app_type(str(app_dir / "MyApp.dll")) == "gui"
 
     def test_no_avalonia_in_deps_stays_console(self, app_dir: Path) -> None:
         """Console runtimeconfig + no Avalonia in deps -> console."""
-        _write_runtimeconfig(app_dir, {
-            "runtimeOptions": {
-                "framework": {
-                    "name": "Microsoft.NETCore.App",
-                    "version": "8.0.0",
+        _write_runtimeconfig(
+            app_dir,
+            {
+                "runtimeOptions": {
+                    "framework": {
+                        "name": "Microsoft.NETCore.App",
+                        "version": "8.0.0",
+                    },
                 },
             },
-        })
-        _write_deps(app_dir, {
-            "targets": {
-                ".NETCoreApp,Version=v8.0": {
-                    "Newtonsoft.Json/13.0.0": {},
+        )
+        _write_deps(
+            app_dir,
+            {
+                "targets": {
+                    ".NETCoreApp,Version=v8.0": {
+                        "Newtonsoft.Json/13.0.0": {},
+                    },
                 },
             },
-        })
+        )
         assert detect_app_type(str(app_dir / "MyApp.dll")) == "console"
 
 
@@ -151,9 +178,12 @@ class TestDetectAppTypeEdgeCases:
         assert detect_app_type(str(app_dir / "MyApp.dll")) is None
 
     def test_empty_frameworks_array(self, app_dir: Path) -> None:
-        _write_runtimeconfig(app_dir, {
-            "runtimeOptions": {"frameworks": []},
-        })
+        _write_runtimeconfig(
+            app_dir,
+            {
+                "runtimeOptions": {"frameworks": []},
+            },
+        )
         # Has runtimeOptions but no frameworks -> console
         assert detect_app_type(str(app_dir / "MyApp.dll")) == "console"
 

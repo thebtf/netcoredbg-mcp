@@ -29,11 +29,13 @@ class FakeKeySequenceBackend:
         modifiers: list[str],
         keys: list[str],
     ) -> dict[str, Any]:
-        self.calls.append({
-            "selector": dict(selector),
-            "modifiers": list(modifiers),
-            "keys": list(keys),
-        })
+        self.calls.append(
+            {
+                "selector": dict(selector),
+                "modifiers": list(modifiers),
+                "keys": list(keys),
+            }
+        )
         return dict(self.response)
 
 
@@ -46,14 +48,16 @@ def _make_flaui() -> FlaUIBackend:
 
 @pytest.mark.asyncio
 async def test_scoped_key_sequence_reports_shift_held_for_two_down_keys() -> None:
-    backend = FakeKeySequenceBackend({
-        "status": "PASS",
-        "focused": {"focused": True, "automationId": "CueGrid"},
-        "sent_count": 2,
-        "held_modifiers_during_sequence": ["shift"],
-        "release_result": {"released": True, "modifiers": []},
-        "final_held_modifiers": [],
-    })
+    backend = FakeKeySequenceBackend(
+        {
+            "status": "PASS",
+            "focused": {"focused": True, "automationId": "CueGrid"},
+            "sent_count": 2,
+            "held_modifiers_during_sequence": ["shift"],
+            "release_result": {"released": True, "modifiers": []},
+            "final_held_modifiers": [],
+        }
+    )
 
     result = await run_scoped_key_sequence(
         backend,
@@ -66,23 +70,27 @@ async def test_scoped_key_sequence_reports_shift_held_for_two_down_keys() -> Non
     assert result["sent_count"] == 2
     assert result["held_modifiers_during_sequence"] == ["shift"]
     assert result["final_held_modifiers"] == []
-    assert backend.calls == [{
-        "selector": {"automation_id": "CueGrid"},
-        "modifiers": ["shift"],
-        "keys": ["DOWN", "DOWN"],
-    }]
+    assert backend.calls == [
+        {
+            "selector": {"automation_id": "CueGrid"},
+            "modifiers": ["shift"],
+            "keys": ["DOWN", "DOWN"],
+        }
+    ]
 
 
 @pytest.mark.asyncio
 async def test_scoped_key_sequence_fails_when_cleanup_leaves_shift_held() -> None:
-    backend = FakeKeySequenceBackend({
-        "status": "PASS",
-        "focused": {"focused": True},
-        "sent_count": 1,
-        "held_modifiers_during_sequence": ["shift"],
-        "release_result": {"released": False, "modifiers": ["shift"]},
-        "final_held_modifiers": ["shift"],
-    })
+    backend = FakeKeySequenceBackend(
+        {
+            "status": "PASS",
+            "focused": {"focused": True},
+            "sent_count": 1,
+            "held_modifiers_during_sequence": ["shift"],
+            "release_result": {"released": False, "modifiers": ["shift"]},
+            "final_held_modifiers": ["shift"],
+        }
+    )
 
     result = await run_scoped_key_sequence(
         backend,
@@ -98,11 +106,13 @@ async def test_scoped_key_sequence_fails_when_cleanup_leaves_shift_held() -> Non
 
 @pytest.mark.asyncio
 async def test_scoped_key_sequence_blocks_unsupported_backend_without_fake_success() -> None:
-    backend = FakeKeySequenceBackend({
-        "status": "UNSUPPORTED",
-        "unsupported": True,
-        "reason": "FlaUI bridge required for scoped key sequence",
-    })
+    backend = FakeKeySequenceBackend(
+        {
+            "status": "UNSUPPORTED",
+            "unsupported": True,
+            "reason": "FlaUI bridge required for scoped key sequence",
+        }
+    )
 
     result = await run_scoped_key_sequence(
         backend,
@@ -197,9 +207,9 @@ async def test_ui_key_sequence_tool_is_registered(mock_netcoredbg_path) -> None:
 
 def test_bridge_router_registers_scoped_key_sequence_and_dispose_cleanup() -> None:
     router = (PROJECT_ROOT / "bridge" / "JsonRpcHandler.cs").read_text(encoding="utf-8")
-    command = (
-        PROJECT_ROOT / "bridge" / "Commands" / "KeySequenceCommands.cs"
-    ).read_text(encoding="utf-8")
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "KeySequenceCommands.cs").read_text(
+        encoding="utf-8"
+    )
 
     assert '["scoped_key_sequence"]' in router
     assert "KeySequenceCommands.ScopedKeySequence" in router
@@ -221,9 +231,7 @@ def test_wpf_and_avalonia_fixtures_expose_shift_datagrid_routes() -> None:
     avalonia_xaml = (fixture_root / "AvaloniaSmokeApp" / "MainWindow.axaml").read_text(
         encoding="utf-8",
     )
-    avalonia_code = (
-        fixture_root / "AvaloniaSmokeApp" / "MainWindow.axaml.cs"
-    ).read_text(
+    avalonia_code = (fixture_root / "AvaloniaSmokeApp" / "MainWindow.axaml.cs").read_text(
         encoding="utf-8",
     )
 

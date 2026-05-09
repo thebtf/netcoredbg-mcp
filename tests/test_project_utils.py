@@ -1,6 +1,5 @@
 """Tests for project root detection utilities."""
 
-import os
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -295,7 +294,9 @@ class TestSessionManagerIntegration:
         """Test SessionManager.set_project_path method."""
         from netcoredbg_mcp.session import SessionManager
 
-        with patch("netcoredbg_mcp.dap.client.DAPClient._find_netcoredbg", return_value="netcoredbg"):
+        with patch(
+            "netcoredbg_mcp.dap.client.DAPClient._find_netcoredbg", return_value="netcoredbg"
+        ):
             session = SessionManager()
             assert session.project_path is None
 
@@ -318,7 +319,9 @@ class TestSessionManagerIntegration:
         outside_file = tmp_path / "outside.cs"
         outside_file.touch()
 
-        with patch("netcoredbg_mcp.dap.client.DAPClient._find_netcoredbg", return_value="netcoredbg"):
+        with patch(
+            "netcoredbg_mcp.dap.client.DAPClient._find_netcoredbg", return_value="netcoredbg"
+        ):
             session = SessionManager()
 
             # Initially no scope - should allow any path

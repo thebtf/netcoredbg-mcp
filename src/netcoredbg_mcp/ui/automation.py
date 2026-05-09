@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from pywinauto.application import Application
@@ -40,7 +40,7 @@ def _press(vk: int) -> None:
     import ctypes.wintypes as wintypes
 
     user32 = ctypes.windll.user32
-    INPUT_KEYBOARD = 1
+    input_keyboard = 1
 
     class KEYBDINPUT(ctypes.Structure):
         _fields_ = [
@@ -54,13 +54,14 @@ def _press(vk: int) -> None:
     class INPUT(ctypes.Structure):
         class _INPUT(ctypes.Union):
             _fields_ = [("ki", KEYBDINPUT)]
+
         _fields_ = [
             ("type", wintypes.DWORD),
             ("_input", _INPUT),
         ]
 
     inp = INPUT()
-    inp.type = INPUT_KEYBOARD
+    inp.type = input_keyboard
     inp._input.ki.wVk = vk
     inp._input.ki.dwFlags = 0
     user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
@@ -72,8 +73,8 @@ def _release(vk: int) -> None:
     import ctypes.wintypes as wintypes
 
     user32 = ctypes.windll.user32
-    INPUT_KEYBOARD = 1
-    KEYEVENTF_KEYUP = 0x0002
+    input_keyboard = 1
+    keyeventf_keyup = 0x0002
 
     class KEYBDINPUT(ctypes.Structure):
         _fields_ = [
@@ -87,15 +88,16 @@ def _release(vk: int) -> None:
     class INPUT(ctypes.Structure):
         class _INPUT(ctypes.Union):
             _fields_ = [("ki", KEYBDINPUT)]
+
         _fields_ = [
             ("type", wintypes.DWORD),
             ("_input", _INPUT),
         ]
 
     inp = INPUT()
-    inp.type = INPUT_KEYBOARD
+    inp.type = input_keyboard
     inp._input.ki.wVk = vk
-    inp._input.ki.dwFlags = KEYEVENTF_KEYUP
+    inp._input.ki.dwFlags = keyeventf_keyup
     user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
 
@@ -125,11 +127,11 @@ def _send_click(x: int, y: int, button: str = "left") -> None:
     time.sleep(0.05)
 
     # Build INPUT structures for SendInput
-    MOUSEEVENTF_LEFTDOWN = 0x0002
-    MOUSEEVENTF_LEFTUP = 0x0004
-    MOUSEEVENTF_RIGHTDOWN = 0x0008
-    MOUSEEVENTF_RIGHTUP = 0x0010
-    INPUT_MOUSE = 0
+    mouseeventf_leftdown = 0x0002
+    mouseeventf_leftup = 0x0004
+    mouseeventf_rightdown = 0x0008
+    mouseeventf_rightup = 0x0010
+    input_mouse = 0
 
     class MOUSEINPUT(ctypes.Structure):
         _fields_ = [
@@ -144,20 +146,21 @@ def _send_click(x: int, y: int, button: str = "left") -> None:
     class INPUT(ctypes.Structure):
         class _INPUT(ctypes.Union):
             _fields_ = [("mi", MOUSEINPUT)]
+
         _fields_ = [
             ("type", wintypes.DWORD),
             ("_input", _INPUT),
         ]
 
     if button == "right":
-        down_flag, up_flag = MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP
+        down_flag, up_flag = mouseeventf_rightdown, mouseeventf_rightup
     else:
-        down_flag, up_flag = MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP
+        down_flag, up_flag = mouseeventf_leftdown, mouseeventf_leftup
 
     inputs = (INPUT * 2)()
-    inputs[0].type = INPUT_MOUSE
+    inputs[0].type = input_mouse
     inputs[0]._input.mi.dwFlags = down_flag
-    inputs[1].type = INPUT_MOUSE
+    inputs[1].type = input_mouse
     inputs[1]._input.mi.dwFlags = up_flag
 
     ctypes.windll.user32.SendInput(2, ctypes.byref(inputs), ctypes.sizeof(INPUT))
@@ -170,6 +173,7 @@ def _send_double_click(x: int, y: int) -> None:
     _send_click(x, y, "left")
     time.sleep(0.05)
     _send_click(x, y, "left")
+
 
 def _send_keys_via_input(keys: str) -> None:
     """Send keyboard input using Win32 SendInput API.
@@ -189,25 +193,43 @@ def _send_keys_via_input(keys: str) -> None:
 
     user32 = ctypes.windll.user32
 
-    INPUT_KEYBOARD = 1
-    KEYEVENTF_KEYUP = 0x0002
-
-    VK_MAP = {
-        "ENTER": 0x0D, "RETURN": 0x0D,
+    vk_map = {
+        "ENTER": 0x0D,
+        "RETURN": 0x0D,
         "TAB": 0x09,
-        "ESC": 0x1B, "ESCAPE": 0x1B,
-        "LEFT": 0x25, "RIGHT": 0x27, "UP": 0x26, "DOWN": 0x28,
-        "HOME": 0x24, "END": 0x23,
-        "PGUP": 0x21, "PGDN": 0x22, "PRIOR": 0x21, "NEXT": 0x22,
-        "DELETE": 0x2E, "DEL": 0x2E,
-        "BACKSPACE": 0x08, "BKSP": 0x08, "BS": 0x08,
+        "ESC": 0x1B,
+        "ESCAPE": 0x1B,
+        "LEFT": 0x25,
+        "RIGHT": 0x27,
+        "UP": 0x26,
+        "DOWN": 0x28,
+        "HOME": 0x24,
+        "END": 0x23,
+        "PGUP": 0x21,
+        "PGDN": 0x22,
+        "PRIOR": 0x21,
+        "NEXT": 0x22,
+        "DELETE": 0x2E,
+        "DEL": 0x2E,
+        "BACKSPACE": 0x08,
+        "BKSP": 0x08,
+        "BS": 0x08,
         "SPACE": 0x20,
-        "F1": 0x70, "F2": 0x71, "F3": 0x72, "F4": 0x73,
-        "F5": 0x74, "F6": 0x75, "F7": 0x76, "F8": 0x77,
-        "F9": 0x78, "F10": 0x79, "F11": 0x7A, "F12": 0x7B,
+        "F1": 0x70,
+        "F2": 0x71,
+        "F3": 0x72,
+        "F4": 0x73,
+        "F5": 0x74,
+        "F6": 0x75,
+        "F7": 0x76,
+        "F8": 0x77,
+        "F9": 0x78,
+        "F10": 0x79,
+        "F11": 0x7A,
+        "F12": 0x7B,
     }
 
-    MODIFIER_MAP = {
+    modifier_map = {
         "^": VK_CONTROL,
         "%": VK_MENU,
         "+": VK_SHIFT,
@@ -227,6 +249,7 @@ def _send_keys_via_input(keys: str) -> None:
     class INPUT(ctypes.Structure):
         class _INPUT(ctypes.Union):
             _fields_ = [("ki", KEYBDINPUT)]
+
         _fields_ = [
             ("type", wintypes.DWORD),
             ("_input", _INPUT),
@@ -269,8 +292,8 @@ def _send_keys_via_input(keys: str) -> None:
     while i < length:
         # Collect modifier prefixes
         held_modifiers: list[int] = []
-        while i < length and keys[i] in MODIFIER_MAP:
-            held_modifiers.append(MODIFIER_MAP[keys[i]])
+        while i < length and keys[i] in modifier_map:
+            held_modifiers.append(modifier_map[keys[i]])
             i += 1
 
         if i >= length:
@@ -282,10 +305,8 @@ def _send_keys_via_input(keys: str) -> None:
         if ch == "(" and held_modifiers:
             close = keys.find(")", i)
             if close == -1:
-                raise ValueError(
-                    f"Unclosed parenthesis in key sequence at position {i}"
-                )
-            group_chars = keys[i + 1:close]
+                raise ValueError(f"Unclosed parenthesis in key sequence at position {i}")
+            group_chars = keys[i + 1 : close]
             for mod_vk in held_modifiers:
                 _press(mod_vk)
                 time.sleep(0.01)
@@ -314,8 +335,8 @@ def _send_keys_via_input(keys: str) -> None:
                     raise ValueError(
                         f"Unclosed brace in key sequence at position {i}: '{keys[i:]}'"
                     )
-                key_name = keys[i + 1:end].upper()
-                vk = VK_MAP.get(key_name)
+                key_name = keys[i + 1 : end].upper()
+                vk = vk_map.get(key_name)
                 if vk is not None:
                     _tap(vk)
                 else:
@@ -360,10 +381,10 @@ def _send_drag(
     # 4 px each axis; bridge uses 5 to include a 1 px safety margin so the first
     # waypoint is guaranteed past the WPF rect. Pywinauto fallback must use the
     # same constant so ui_drag behaves identically regardless of backend.
-    _DRAG_THRESHOLD_PX = 5
-    if abs(to_x - from_x) < _DRAG_THRESHOLD_PX and abs(to_y - from_y) < _DRAG_THRESHOLD_PX:
+    drag_threshold_px = 5
+    if abs(to_x - from_x) < drag_threshold_px and abs(to_y - from_y) < drag_threshold_px:
         raise ValueError(
-            f"drag distance below WPF threshold (<{_DRAG_THRESHOLD_PX} px in each axis); "
+            f"drag distance below WPF threshold (<{drag_threshold_px} px in each axis); "
             "adjust coordinates or use ui_click"
         )
 
@@ -385,8 +406,8 @@ def _send_drag(
 
     # Move to start position
     user32.SetCursorPos(from_x, from_y)
-    MOUSEEVENTF_LEFTDOWN = 0x0002
-    MOUSEEVENTF_LEFTUP = 0x0004
+    mouseeventf_leftdown = 0x0002
+    mouseeventf_leftup = 0x0004
     steps = max(10, speed_ms // 20)
     sleep_per_step = speed_ms / steps / 1000.0
 
@@ -396,7 +417,7 @@ def _send_drag(
             pressed_modifier_vks.append(modifier_vk)
             time.sleep(0.01)
 
-        user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+        user32.mouse_event(mouseeventf_leftdown, 0, 0, 0, 0)
         mouse_down_sent = True
 
         try:
@@ -407,7 +428,7 @@ def _send_drag(
                 time.sleep(sleep_per_step)
         finally:
             if mouse_down_sent:
-                user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                user32.mouse_event(mouseeventf_leftup, 0, 0, 0, 0)
     finally:
         for modifier_vk in reversed(pressed_modifier_vks):
             _release(modifier_vk)
@@ -420,13 +441,11 @@ logger = logging.getLogger(__name__)
 class UIAutomation:
     """Async wrapper for pywinauto UI Automation."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._app: Application | None = None
         self._process_id: int | None = None
-        self._executor = ThreadPoolExecutor(
-            max_workers=2, thread_name_prefix="ui_auto"
-        )
-        self._element_cache: dict[str, dict] = {}  # automationId -> {rect, name, control_type}
+        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ui_auto")
+        self._element_cache: dict[str, dict[str, Any]] = {}
 
     @property
     def process_id(self) -> int | None:
@@ -514,21 +533,24 @@ class UIAutomation:
         """Click at absolute screen coordinates using Win32 SendInput."""
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
-            self._executor, lambda: _send_click(x, y, button="left"),
+            self._executor,
+            lambda: _send_click(x, y, button="left"),
         )
 
     async def _right_click_at_coords(self, x: int, y: int) -> None:
         """Right-click at absolute screen coordinates using Win32 SendInput."""
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
-            self._executor, lambda: _send_click(x, y, button="right"),
+            self._executor,
+            lambda: _send_click(x, y, button="right"),
         )
 
     async def _double_click_at_coords(self, x: int, y: int) -> None:
         """Double-click at absolute screen coordinates using Win32 SendInput."""
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
-            self._executor, lambda: _send_double_click(x, y),
+            self._executor,
+            lambda: _send_double_click(x, y),
         )
 
     async def _drag_at_coords(
@@ -554,9 +576,7 @@ class UIAutomation:
             ),
         )
 
-    async def get_window_tree(
-        self, max_depth: int = 3, max_children: int = 50
-    ) -> ElementInfo:
+    async def get_window_tree(self, max_depth: int = 3, max_children: int = 50) -> ElementInfo:
         """
         Get the visual tree of the main window.
 
@@ -579,14 +599,10 @@ class UIAutomation:
             try:
                 # Get the top window
                 window = self._app.top_window()
-                return serialize_element(
-                    window, max_depth=max_depth, max_children=max_children
-                )
+                return serialize_element(window, max_depth=max_depth, max_children=max_children)
             except Exception as e:
                 logger.error(f"Failed to get window tree: {e}")
-                raise ApplicationNotRespondingError(
-                    f"Cannot access window tree: {e}"
-                ) from e
+                raise ApplicationNotRespondingError(f"Cannot access window tree: {e}") from e
 
         try:
             loop = asyncio.get_running_loop()
@@ -600,9 +616,7 @@ class UIAutomation:
             return tree
         except asyncio.TimeoutError as e:
             logger.error("Window tree retrieval timed out")
-            raise UIOperationTimeoutError(
-                "Window tree retrieval timed out after 10 seconds"
-            ) from e
+            raise UIOperationTimeoutError("Window tree retrieval timed out after 10 seconds") from e
 
     async def find_element(
         self,
@@ -671,9 +685,7 @@ class UIAutomation:
             return element
         except asyncio.TimeoutError as e:
             logger.error("Element search timed out")
-            raise UIOperationTimeoutError(
-                "Element search timed out after 10 seconds"
-            ) from e
+            raise UIOperationTimeoutError("Element search timed out after 10 seconds") from e
 
     async def get_element_info(self, element: BaseWrapper) -> ElementInfo:
         """
@@ -694,9 +706,7 @@ class UIAutomation:
                 return serialize_element(element, max_depth=0, max_children=0)
             except Exception as e:
                 logger.error(f"Failed to get element info: {e}")
-                raise ApplicationNotRespondingError(
-                    f"Cannot access element info: {e}"
-                ) from e
+                raise ApplicationNotRespondingError(f"Cannot access element info: {e}") from e
 
         try:
             loop = asyncio.get_running_loop()
@@ -706,9 +716,7 @@ class UIAutomation:
             return info
         except asyncio.TimeoutError as e:
             logger.error("Get element info timed out")
-            raise UIOperationTimeoutError(
-                "Get element info timed out after 5 seconds"
-            ) from e
+            raise UIOperationTimeoutError("Get element info timed out after 5 seconds") from e
 
     async def set_focus(self, element: BaseWrapper) -> None:
         """
@@ -728,20 +736,14 @@ class UIAutomation:
                 logger.debug(f"Set focus to element: {element.element_info.name}")
             except Exception as e:
                 logger.error(f"Failed to set focus: {e}")
-                raise ApplicationNotRespondingError(
-                    f"Cannot set focus to element: {e}"
-                ) from e
+                raise ApplicationNotRespondingError(f"Cannot set focus to element: {e}") from e
 
         try:
             loop = asyncio.get_running_loop()
-            await asyncio.wait_for(
-                loop.run_in_executor(self._executor, _set_focus), timeout=5.0
-            )
+            await asyncio.wait_for(loop.run_in_executor(self._executor, _set_focus), timeout=5.0)
         except asyncio.TimeoutError as e:
             logger.error("Set focus timed out")
-            raise UIOperationTimeoutError(
-                "Set focus timed out after 5 seconds"
-            ) from e
+            raise UIOperationTimeoutError("Set focus timed out after 5 seconds") from e
 
     async def send_keys(self, element: BaseWrapper, keys: str) -> None:
         """
@@ -769,20 +771,14 @@ class UIAutomation:
                 logger.debug(f"Sent keys to element: {keys}")
             except Exception as e:
                 logger.error(f"Failed to send keys: {e}")
-                raise ApplicationNotRespondingError(
-                    f"Cannot send keys to element: {e}"
-                ) from e
+                raise ApplicationNotRespondingError(f"Cannot send keys to element: {e}") from e
 
         try:
             loop = asyncio.get_running_loop()
-            await asyncio.wait_for(
-                loop.run_in_executor(self._executor, _send_keys), timeout=5.0
-            )
+            await asyncio.wait_for(loop.run_in_executor(self._executor, _send_keys), timeout=5.0)
         except asyncio.TimeoutError as e:
             logger.error("Send keys timed out")
-            raise UIOperationTimeoutError(
-                "Send keys timed out after 5 seconds"
-            ) from e
+            raise UIOperationTimeoutError("Send keys timed out after 5 seconds") from e
 
     async def click(self, element: BaseWrapper) -> None:
         """
@@ -802,15 +798,11 @@ class UIAutomation:
                 logger.debug(f"Clicked element: {element.element_info.name}")
             except Exception as e:
                 logger.error(f"Failed to click element: {e}")
-                raise ApplicationNotRespondingError(
-                    f"Cannot click element: {e}"
-                ) from e
+                raise ApplicationNotRespondingError(f"Cannot click element: {e}") from e
 
         try:
             loop = asyncio.get_running_loop()
-            await asyncio.wait_for(
-                loop.run_in_executor(self._executor, _click), timeout=5.0
-            )
+            await asyncio.wait_for(loop.run_in_executor(self._executor, _click), timeout=5.0)
         except asyncio.TimeoutError as e:
             logger.error("Click timed out")
             raise UIOperationTimeoutError("Click timed out after 5 seconds") from e
@@ -853,9 +845,7 @@ class UIAutomation:
             )
         except asyncio.TimeoutError as e:
             logger.error("Send keys to focused timed out")
-            raise UIOperationTimeoutError(
-                "Send keys to focused timed out after 5 seconds"
-            ) from e
+            raise UIOperationTimeoutError("Send keys to focused timed out after 5 seconds") from e
 
     def shutdown(self):
         """Shutdown the thread pool executor. Call this during server shutdown."""

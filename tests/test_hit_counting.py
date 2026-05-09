@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -18,17 +17,21 @@ class TestHitCounting:
     def manager(self):
         with patch("netcoredbg_mcp.session.manager.DAPClient"):
             from netcoredbg_mcp.session import SessionManager
+
             m = SessionManager()
             return m
 
     @pytest.mark.asyncio
     async def test_hit_count_increments(self, manager):
         """Hit count increments when stopped at a breakpoint location."""
-        manager.get_stack_trace = AsyncMock(return_value=[
-            StackFrame(id=1, name="Main", source="C:\\app\\Program.cs", line=10, column=1),
-        ])
+        manager.get_stack_trace = AsyncMock(
+            return_value=[
+                StackFrame(id=1, name="Main", source="C:\\app\\Program.cs", line=10, column=1),
+            ]
+        )
         # Add a breakpoint at that location
         from netcoredbg_mcp.session.state import Breakpoint
+
         manager.breakpoints.add(Breakpoint(file="C:\\app\\Program.cs", line=10))
 
         await manager._update_hit_count(thread_id=1)
@@ -55,9 +58,11 @@ class TestHitCounting:
     @pytest.mark.asyncio
     async def test_hit_count_no_source(self, manager):
         """No crash when top frame has no source."""
-        manager.get_stack_trace = AsyncMock(return_value=[
-            StackFrame(id=1, name="[External]", source=None, line=0, column=0),
-        ])
+        manager.get_stack_trace = AsyncMock(
+            return_value=[
+                StackFrame(id=1, name="[External]", source=None, line=0, column=0),
+            ]
+        )
         await manager._update_hit_count(thread_id=1)
         assert manager.state.hit_counts == {}
 

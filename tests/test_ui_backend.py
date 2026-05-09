@@ -41,6 +41,7 @@ class TestCreateBackend:
         with patch("netcoredbg_mcp.ui.backend.find_flaui_bridge", return_value=None):
             backend = create_backend()
             from netcoredbg_mcp.ui.pywinauto_backend import PywinautoBackend
+
             assert isinstance(backend, PywinautoBackend)
 
     def test_creates_flaui_when_found(self, tmp_path):
@@ -50,6 +51,7 @@ class TestCreateBackend:
         with patch("netcoredbg_mcp.ui.backend.find_flaui_bridge", return_value=str(bridge)):
             backend = create_backend()
             from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
             assert isinstance(backend, FlaUIBackend)
 
     def test_passes_process_registry(self, tmp_path):
@@ -60,6 +62,7 @@ class TestCreateBackend:
         with patch("netcoredbg_mcp.ui.backend.find_flaui_bridge", return_value=str(bridge)):
             backend = create_backend(process_registry=mock_registry)
             from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
             assert isinstance(backend, FlaUIBackend)
             assert backend.client._process_registry is mock_registry
 
@@ -113,9 +116,9 @@ class TestFlaUIBackendConnect:
         )
 
     def test_bridge_connect_selects_usable_primary_window(self):
-        command = (
-            PROJECT_ROOT / "bridge" / "Commands" / "ElementCommands.cs"
-        ).read_text(encoding="utf-8")
+        command = (PROJECT_ROOT / "bridge" / "Commands" / "ElementCommands.cs").read_text(
+            encoding="utf-8"
+        )
 
         assert "SelectPrimaryWindow(windows)" in command
         assert "PrimaryWindowScore(window)" in command

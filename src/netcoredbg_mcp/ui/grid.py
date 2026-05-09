@@ -96,10 +96,12 @@ async def assert_grid_rows(
             continue
         cells = row.get("cells")
         if not isinstance(cells, dict) or not cells:
-            failures.append({
-                "index": index,
-                "reason": "row cell evidence unavailable",
-            })
+            failures.append(
+                {
+                    "index": index,
+                    "reason": "row cell evidence unavailable",
+                }
+            )
             continue
         missing = {
             str(key): value
@@ -107,14 +109,17 @@ async def assert_grid_rows(
             if str(cells.get(str(key), "")) != str(value)
         }
         if missing:
-            failures.append({
-                "index": index,
-                "reason": "row cell mismatch",
-                "missing": missing,
-                "actual_cells": dict(cells),
-            })
+            failures.append(
+                {
+                    "index": index,
+                    "reason": "row cell mismatch",
+                    "missing": missing,
+                    "actual_cells": dict(cells),
+                }
+            )
             continue
-        matched_rows.append(int(index))
+        if index is not None:
+            matched_rows.append(int(index))
 
     if failures:
         reason = (

@@ -41,16 +41,18 @@ def create_preview(
     Returns:
         Tuple of (webp_bytes, width, height).
     """
-    from PIL import Image
     import io
 
-    img = Image.open(io.BytesIO(image_data))
+    from PIL import Image
+
+    img: Any = Image.open(io.BytesIO(image_data))
+    resample_filter: Any = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
 
     # Downscale if wider than max_width
     if img.width > max_width:
         ratio = max_width / img.width
         new_height = int(img.height * ratio)
-        img = img.resize((max_width, new_height), Image.LANCZOS)
+        img = img.resize((max_width, new_height), resample_filter)
 
     # Convert to WebP
     buf = io.BytesIO()
@@ -146,8 +148,8 @@ def capture_window(hwnd: int) -> tuple[bytes, int, int]:
 
                 try:
                     # PrintWindow with PW_RENDERFULLCONTENT for best results
-                    PW_RENDERFULLCONTENT = 0x00000002
-                    success = user32.PrintWindow(hwnd, cdc, PW_RENDERFULLCONTENT)
+                    pw_renderfullcontent = 0x00000002
+                    success = user32.PrintWindow(hwnd, cdc, pw_renderfullcontent)
                     if not success:
                         # Fallback: try BitBlt
                         gdi32.BitBlt(cdc, 0, 0, width, height, wdc, 0, 0, 0x00CC0020)
@@ -159,14 +161,24 @@ def capture_window(hwnd: int) -> tuple[bytes, int, int]:
                     buffer = ctypes.create_string_buffer(width * height * 4)
 
                     gdi32.GetDIBits(
-                        cdc, bitmap, 0, height,
-                        buffer, ctypes.byref(bmi),
+                        cdc,
+                        bitmap,
+                        0,
+                        height,
+                        buffer,
+                        ctypes.byref(bmi),
                         0,  # DIB_RGB_COLORS
                     )
 
                     # Convert BGRA → RGBA
                     image = Image.frombuffer(
-                        "RGBA", (width, height), buffer, "raw", "BGRA", 0, -1
+                        "RGBA",
+                        (width, height),
+                        bytes(buffer),
+                        "raw",
+                        "BGRA",
+                        0,
+                        -1,
                     )
 
                     # Encode to PNG
@@ -241,13 +253,14 @@ def _process_screenshot(
     """
     from PIL import Image
 
-    image = Image.open(io.BytesIO(raw_png_bytes))
+    image: Any = Image.open(io.BytesIO(raw_png_bytes))
+    resample_filter: Any = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
 
     # Downsample if needed
     if image.width > max_width:
         ratio = max_width / image.width
         new_height = int(image.height * ratio)
-        image = image.resize((max_width, new_height), Image.LANCZOS)
+        image = image.resize((max_width, new_height), resample_filter)
 
     width, height = image.size
     buffer = io.BytesIO()
@@ -291,7 +304,6 @@ def capture_window_for_llm(
         Dict with image (base64), width, height, format, mimeType, and optionally filePath
     """
     import os
-    import tempfile
     import time
 
     raw_png, orig_w, orig_h = capture_window(hwnd)
@@ -321,7 +333,8 @@ def capture_window_for_llm(
 
 # Keep backward-compatible alias
 def capture_window_as_base64(
-    hwnd: int, max_width: int = SCREENSHOT_MAX_WIDTH,
+    hwnd: int,
+    max_width: int = SCREENSHOT_MAX_WIDTH,
 ) -> dict[str, Any]:
     """Legacy alias for capture_window_for_llm."""
     return capture_window_for_llm(hwnd, max_width=max_width)
@@ -342,11 +355,24 @@ def collect_visible_elements(
     Returns:
         List of element dicts with id, name, type, automationId, bounds
     """
-    INTERACTIVE_TYPES = {
-        "Button", "CheckBox", "ComboBox", "Edit", "Hyperlink",
-        "ListItem", "MenuItem", "RadioButton", "ScrollBar",
-        "Slider", "Spinner", "TabItem", "Text", "TextBox",
-        "ToggleButton", "TreeItem", "DataItem",
+    interactive_types = {
+        "Button",
+        "CheckBox",
+        "ComboBox",
+        "Edit",
+        "Hyperlink",
+        "ListItem",
+        "MenuItem",
+        "RadioButton",
+        "ScrollBar",
+        "Slider",
+        "Spinner",
+        "TabItem",
+        "Text",
+        "TextBox",
+        "ToggleButton",
+        "TreeItem",
+        "DataItem",
     }
 
     elements: list[dict[str, Any]] = []
@@ -380,18 +406,20 @@ def collect_visible_elements(
             # (interactive elements may be nested inside zero-size containers)
             if bounds["width"] > 0 and bounds["height"] > 0:
                 # Filter by interactivity
-                if interactive_only and control_type not in INTERACTIVE_TYPES:
+                if interactive_only and control_type not in interactive_types:
                     # Still walk children — interactive elements may be nested
                     pass
                 else:
                     element_id += 1
-                    elements.append({
-                        "id": element_id,
-                        "name": name,
-                        "type": control_type,
-                        "automationId": auto_id,
-                        "bounds": bounds,
-                    })
+                    elements.append(
+                        {
+                            "id": element_id,
+                            "name": name,
+                            "type": control_type,
+                            "automationId": auto_id,
+                            "bounds": bounds,
+                        }
+                    )
 
         except Exception:
             logger.debug(f"Failed to read element info at depth {depth}", exc_info=True)
@@ -435,21 +463,22 @@ def annotate_screenshot(
     """
     from PIL import Image, ImageDraw, ImageFont
 
-    image = Image.open(io.BytesIO(png_bytes))
+    image: Any = Image.open(io.BytesIO(png_bytes))
+    resample_filter: Any = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
 
     # Calculate scale factor for downsampling
     scale = 1.0
     if image.width > max_width:
         scale = max_width / image.width
         new_height = int(image.height * scale)
-        image = image.resize((max_width, new_height), Image.LANCZOS)
+        image = image.resize((max_width, new_height), resample_filter)
 
     draw = ImageDraw.Draw(image)
 
     # Try to load a small font for labels
     try:
-        font = ImageFont.truetype("arial.ttf", 12)
-    except (OSError, IOError):
+        font: Any = ImageFont.truetype("arial.ttf", 12)
+    except OSError:
         font = ImageFont.load_default()
 
     # Window offset for screen->client coordinate conversion

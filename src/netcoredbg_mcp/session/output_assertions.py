@@ -50,11 +50,13 @@ class OutputAssertionService:
             checkpoint=name,
             entry_count=checkpoint["entry_count"],
             byte_offset=checkpoint["byte_offset"],
-            evidence_refs=[{
-                "kind": "output_checkpoint",
-                "ref": f"output:{name}",
-                "summary": "output checkpoint created",
-            }],
+            evidence_refs=[
+                {
+                    "kind": "output_checkpoint",
+                    "ref": f"output:{name}",
+                    "summary": "output checkpoint created",
+                }
+            ],
         )
 
     def assert_since(
@@ -84,8 +86,8 @@ class OutputAssertionService:
         searched_text = "".join(entry.text for entry in searched_entries)
         lines = searched_text.splitlines()
 
-        required_compiled = compiled[:len(required_patterns)]
-        forbidden_compiled = compiled[len(required_patterns):]
+        required_compiled = compiled[: len(required_patterns)]
+        forbidden_compiled = compiled[len(required_patterns) :]
         matches, missing_required = self._match_required(
             required_patterns,
             required_compiled,
@@ -109,36 +111,40 @@ class OutputAssertionService:
             missing_count=len(missing_required),
             forbidden_count=len(forbidden_matches),
         )
-        return OutputAssertionResult({
-            "status": status.value,
-            "reason": (
-                "output assertions passed"
-                if status == TerminalStatus.PASS
-                else "output assertions failed"
-            ),
-            "checkpoint": checkpoint,
-            "summary": summary,
-            "searched_range": {
-                "start_entry": int(saved["entry_count"]),
-                "end_entry": len(entries),
-                "start_byte": int(saved["byte_offset"]),
-                "end_byte": self._byte_length(entries),
-                "start_sequence": saved.get("next_sequence"),
-                "end_sequence": self._last_sequence(entries),
-                "line_count": len(lines),
-            },
-            "matches": matches,
-            "missing_required": missing_required,
-            "forbidden_matches": forbidden_matches,
-            "evidence_refs": [{
-                "kind": "output_assertion",
-                "ref": f"output:{checkpoint}",
-                "summary": (
-                    f"matched={len(matches)} missing={len(missing_required)} "
-                    f"forbidden={len(forbidden_matches)}"
+        return OutputAssertionResult(
+            {
+                "status": status.value,
+                "reason": (
+                    "output assertions passed"
+                    if status == TerminalStatus.PASS
+                    else "output assertions failed"
                 ),
-            }],
-        })
+                "checkpoint": checkpoint,
+                "summary": summary,
+                "searched_range": {
+                    "start_entry": int(saved["entry_count"]),
+                    "end_entry": len(entries),
+                    "start_byte": int(saved["byte_offset"]),
+                    "end_byte": self._byte_length(entries),
+                    "start_sequence": saved.get("next_sequence"),
+                    "end_sequence": self._last_sequence(entries),
+                    "line_count": len(lines),
+                },
+                "matches": matches,
+                "missing_required": missing_required,
+                "forbidden_matches": forbidden_matches,
+                "evidence_refs": [
+                    {
+                        "kind": "output_assertion",
+                        "ref": f"output:{checkpoint}",
+                        "summary": (
+                            f"matched={len(matches)} missing={len(missing_required)} "
+                            f"forbidden={len(forbidden_matches)}"
+                        ),
+                    }
+                ],
+            }
+        )
 
     @property
     def _runtime_smoke(self) -> RuntimeSmokeSession:
@@ -158,9 +164,7 @@ class OutputAssertionService:
     def _is_trimmed(self, saved: dict[str, Any], entries: list[OutputEntry]) -> bool:
         if self._uses_sequence_tracking(saved, entries):
             next_sequence = int(saved["next_sequence"])
-            trimmed_before = int(
-                getattr(self._session.state, "output_trimmed_before", 0) or 0
-            )
+            trimmed_before = int(getattr(self._session.state, "output_trimmed_before", 0) or 0)
             if trimmed_before >= next_sequence:
                 return True
 
@@ -193,7 +197,7 @@ class OutputAssertionService:
                 for entry in entries
                 if int(getattr(entry, "sequence", 0) or 0) >= next_sequence
             ]
-        return entries[int(saved["entry_count"]):]
+        return entries[int(saved["entry_count"]) :]
 
     def _uses_sequence_tracking(
         self,
@@ -267,11 +271,13 @@ class OutputAssertionService:
                 if compiled_pattern.search(line):
                     pattern_found = True
                     if len(matches) < max_matches:
-                        matches.append({
-                            "pattern": pattern,
-                            "line": line_number,
-                            "text": line,
-                        })
+                        matches.append(
+                            {
+                                "pattern": pattern,
+                                "line": line_number,
+                                "text": line,
+                            }
+                        )
             if not pattern_found:
                 missing.append(pattern)
         return matches, missing
@@ -287,23 +293,29 @@ class OutputAssertionService:
         for pattern, compiled_pattern in zip(patterns, compiled, strict=True):
             for line_number, line in enumerate(lines, 1):
                 if compiled_pattern.search(line) and len(matches) < max_matches:
-                    matches.append({
-                        "pattern": pattern,
-                        "line": line_number,
-                        "text": line,
-                    })
+                    matches.append(
+                        {
+                            "pattern": pattern,
+                            "line": line_number,
+                            "text": line,
+                        }
+                    )
         return matches
 
     def _pass(self, reason: str, **payload: Any) -> OutputAssertionResult:
-        return OutputAssertionResult({
-            "status": TerminalStatus.PASS.value,
-            "reason": reason,
-            **payload,
-        })
+        return OutputAssertionResult(
+            {
+                "status": TerminalStatus.PASS.value,
+                "reason": reason,
+                **payload,
+            }
+        )
 
     def _fail(self, reason: str, **payload: Any) -> OutputAssertionResult:
-        return OutputAssertionResult({
-            "status": TerminalStatus.FAIL.value,
-            "reason": reason,
-            **payload,
-        })
+        return OutputAssertionResult(
+            {
+                "status": TerminalStatus.FAIL.value,
+                "reason": reason,
+                **payload,
+            }
+        )

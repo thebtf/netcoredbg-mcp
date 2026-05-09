@@ -1,0 +1,49 @@
+{
+  "schema": "netcoredbg.runtime_smoke.v2",
+  "name": "WpfSmokeApp generated toggle matrix",
+  "baseline": {
+    "steps": [
+      {
+        "id": "launch_wpf_fixture",
+        "kind": "isolated_profile.launch",
+        "launch": {
+          "program": "tests/fixtures/WpfSmokeApp/bin/Debug/net8.0-windows/WpfSmokeApp.dll",
+          "cwd": "tests/fixtures/WpfSmokeApp/bin/Debug/net8.0-windows",
+          "pre_build": true,
+          "build_project": "tests/fixtures/WpfSmokeApp/WpfSmokeApp.csproj",
+          "build_configuration": "Debug"
+        }
+      }
+    ]
+  },
+  "generate": {
+    "template": "toggle-setting-ab",
+    "matrix": [
+      {
+        "id": "feature_enabled",
+        "control": "chkEnabled",
+        "value": true
+      },
+      {
+        "id": "feature_disabled",
+        "control": "chkEnabled",
+        "value": false
+      },
+      {
+        "id": "feature_enabled_again",
+        "control": "chkEnabled",
+        "value": true
+      }
+    ]
+  },
+  "cleanup": {
+    "steps": [
+      {
+        "kind": "process.registry.assert_empty"
+      },
+      {
+        "kind": "debug.stop"
+      }
+    ]
+  }
+}

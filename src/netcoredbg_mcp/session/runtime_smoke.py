@@ -14,15 +14,18 @@ from typing import Any
 
 from .freshness import DebugFreshnessVerifier
 from .runtime_smoke_schema import (
+    SCHEMA_VERSION_V2,
     normalize_plan_step,
     schema_help_fields,
     validate_plan,
 )
+from .runtime_smoke_v2.result_envelope import (
+    compact_runtime_smoke_result,
+    finalize_result,
+)
 from .state import EvidenceRef
 
 TERMINAL_STATUSES = {"PASS", "FAIL", "BLOCKED", "IMPASSE"}
-MAX_COMPACT_TEXT_LENGTH = 240
-MAX_COMPACT_LIST_ITEMS = 8
 RESTORE_RETRY_DELAYS_SECONDS = (0.1, 0.2, 0.5, 1.0, 2.0, 4.0)
 UI_OPERATION_PREFIXES = ("ui.",)
 UI_OPERATION_NAMES = {"ui_key_sequence", "ui_grid"}
@@ -35,6 +38,7 @@ OperationAdapter = Callable[..., Any]
 @dataclass
 class RuntimeSmokeSession:
     """Mutable runtime smoke state owned by one debug session."""
+
     instrumentation_groups: dict[str, Any] = field(default_factory=dict)
     output_checkpoints: dict[str, Any] = field(default_factory=dict)
     freshness_evidence: dict[str, Any] = field(default_factory=dict)
@@ -142,15 +146,22 @@ class RuntimeSmokeRunner:
                 cleanup=cleanup,
                 extra={
                     "validation_errors": validation_errors,
-                    **schema_help_fields(),
+                    **schema_help_fields(plan if isinstance(plan, dict) else None),
                 },
             )
 
+        if isinstance(plan, dict) and plan.get("schema") == SCHEMA_VERSION_V2:
+            from .runtime_smoke_v2 import RuntimeStateOracleRunner
+
+            return await RuntimeStateOracleRunner(
+                self._session,
+                service_adapters=self._service_adapters,
+                clock=self._clock,
+            ).run(plan)
+
         budgets = _budgets(plan)
         action_count = 0
-        stop_on_first_failed_assertion = bool(
-            plan.get("stop_on_first_failed_assertion", True)
-        )
+        stop_on_first_failed_assertion = bool(plan.get("stop_on_first_failed_assertion", True))
 
         async def execute_step(phase: str, step: dict[str, Any]) -> tuple[str | None, str | None]:
             nonlocal action_count
@@ -190,11 +201,13 @@ class RuntimeSmokeRunner:
             if status == "PASS":
                 return None, None
             if phase == "assertion":
-                failed_assertions.append({
-                    "name": name,
-                    "reason": result.get("reason", "assertion failed"),
-                    "result": result,
-                })
+                failed_assertions.append(
+                    {
+                        "name": name,
+                        "reason": result.get("reason", "assertion failed"),
+                        "result": result,
+                    }
+                )
                 if stop_on_first_failed_assertion:
                     return "FAIL", "assertion failed"
                 return None, None
@@ -219,6 +232,7 @@ class RuntimeSmokeRunner:
             terminal_reason = "runtime smoke scenario passed"
 
         cleanup = await self._teardown(plan)
+        assert terminal_reason is not None
         return self._finalize(
             status=terminal_status,
             reason=terminal_reason,
@@ -306,20 +320,24 @@ class RuntimeSmokeRunner:
                 {"name": group_name},
             )
             if _terminal_status(result.get("status", "PASS")) != "PASS":
-                failures.append({
-                    "operation": "instrumentation_group_clear",
-                    "name": group_name,
-                    "reason": result.get("reason", "instrumentation cleanup failed"),
-                    "result": result,
-                })
+                failures.append(
+                    {
+                        "operation": "instrumentation_group_clear",
+                        "name": group_name,
+                        "reason": result.get("reason", "instrumentation cleanup failed"),
+                        "result": result,
+                    }
+                )
 
         pre_reset_state = _remaining_runtime_smoke_state(self._session)
         if pre_reset_state["instrumentation_groups"]:
-            failures.append({
-                "operation": "runtime_smoke_residue",
-                "reason": "runtime smoke state still owns instrumentation groups",
-                "remaining_runtime_smoke_state": pre_reset_state,
-            })
+            failures.append(
+                {
+                    "operation": "runtime_smoke_residue",
+                    "reason": "runtime smoke state still owns instrumentation groups",
+                    "remaining_runtime_smoke_state": pre_reset_state,
+                }
+            )
 
         if stop_debug_mode:
             mode = "graceful" if stop_debug_mode is True else str(stop_debug_mode)
@@ -337,19 +355,19 @@ class RuntimeSmokeRunner:
                     "mode": mode,
                     "reason": str(exc),
                 }
-                failures.append({
-                    "operation": "stop_debug",
-                    "mode": mode,
-                    "reason": str(exc),
-                    "result": dict(debug_stop),
-                })
+                failures.append(
+                    {
+                        "operation": "stop_debug",
+                        "mode": mode,
+                        "reason": str(exc),
+                        "result": dict(debug_stop),
+                    }
+                )
 
         if allow_restore:
             for entry in restore_entries:
                 raw_path = (
-                    str(entry.get("path", "<missing>"))
-                    if isinstance(entry, dict)
-                    else "<invalid>"
+                    str(entry.get("path", "<missing>")) if isinstance(entry, dict) else "<invalid>"
                 )
                 attempted.append(f"restore_file:{raw_path}")
                 try:
@@ -366,11 +384,13 @@ class RuntimeSmokeRunner:
             attempted.append("debug_hygiene_preflight")
             result = await self._execute_operation("debug_hygiene_preflight", {})
             if _terminal_status(result.get("status", "PASS")) != "PASS":
-                failures.append({
-                    "operation": "debug_hygiene_preflight",
-                    "reason": result.get("reason", "debug hygiene cleanup failed"),
-                    "result": result,
-                })
+                failures.append(
+                    {
+                        "operation": "debug_hygiene_preflight",
+                        "reason": result.get("reason", "debug hygiene cleanup failed"),
+                        "result": result,
+                    }
+                )
 
         reset_failures: tuple[CleanupFailure, ...] = ()
         runtime_smoke = getattr(self._session, "runtime_smoke", None)
@@ -378,11 +398,13 @@ class RuntimeSmokeRunner:
             attempted.append("runtime_smoke_reset")
             reset_failures = runtime_smoke.reset()
             for failure in reset_failures:
-                failures.append({
-                    "operation": "runtime_smoke_reset",
-                    "reason": failure.get("error", "runtime smoke reset failed"),
-                    "result": dict(failure),
-                })
+                failures.append(
+                    {
+                        "operation": "runtime_smoke_reset",
+                        "reason": failure.get("error", "runtime smoke reset failed"),
+                        "result": dict(failure),
+                    }
+                )
         remaining = _remaining_runtime_smoke_state(self._session)
 
         return {
@@ -526,7 +548,7 @@ class RuntimeSmokeRunner:
 
         client = getattr(self._session, "client", None)
         capabilities = getattr(client, "capabilities", {}) if client is not None else {}
-        if capabilities.get("supportsTerminateRequest", False):
+        if client is not None and capabilities.get("supportsTerminateRequest", False):
             await client.terminate()
             wait_for_stopped = getattr(self._session, "wait_for_stopped", None)
             if wait_for_stopped is not None:
@@ -554,25 +576,18 @@ class RuntimeSmokeRunner:
         cleanup: dict[str, Any],
         extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        terminal_status = status
-        terminal_reason = reason
-        if cleanup["status"] == "FAIL" and terminal_status not in {"FAIL", "IMPASSE"}:
-            terminal_status = "FAIL"
-            terminal_reason = "teardown failed"
-        result = {
-            "status": terminal_status,
-            "reason": terminal_reason,
-            "elapsed_ms": int(max(0.0, self._clock() - started) * 1000),
-            "action_count": action_count,
-            "completed_steps": completed_steps,
-            "failed_assertions": failed_assertions,
-            "cleanup": cleanup,
-            "evidence_refs": _collect_evidence_refs(completed_steps),
-        }
-        if extra:
-            result.update(extra)
-        result["compact"] = compact_runtime_smoke_result(result)
-        return result
+        return finalize_result(
+            status=status,
+            reason=reason,
+            elapsed_ms=int(max(0.0, self._clock() - started) * 1000),
+            action_count=action_count,
+            completed_steps=completed_steps,
+            failed_assertions=failed_assertions,
+            cleanup=cleanup,
+            evidence_refs=_collect_evidence_refs(completed_steps),
+            compact_builder=compact_runtime_smoke_result,
+            extra=extra,
+        )
 
 
 def _clear_windows_hidden_attribute(target: Path) -> int | None:
@@ -600,20 +615,6 @@ def _set_windows_file_attributes(target: Path, attributes: int) -> None:
     if not kernel32.SetFileAttributesW(str(target), attributes):
         error = ctypes.GetLastError()
         raise OSError(error, f"SetFileAttributesW failed for {target}")
-
-
-def compact_runtime_smoke_result(result: dict[str, Any]) -> dict[str, Any]:
-    """Return a pasteable bounded runtime smoke result."""
-    return {
-        "status": result.get("status"),
-        "reason": result.get("reason"),
-        "elapsed_ms": result.get("elapsed_ms", 0),
-        "action_count": result.get("action_count", 0),
-        "failed_assertions": _compact_value(result.get("failed_assertions", [])),
-        "cleanup": _compact_value(result.get("cleanup", {})),
-        "evidence_refs": _compact_value(result.get("evidence_refs", [])),
-        "completed_steps": _compact_value(result.get("completed_steps", [])),
-    }
 
 
 def _budgets(plan: dict[str, Any]) -> dict[str, float | int]:
@@ -784,31 +785,3 @@ def _collect_evidence_refs(completed_steps: list[dict[str, Any]]) -> list[dict[s
         if isinstance(result, dict):
             refs.extend(dict(ref) for ref in result.get("evidence_refs", []))
     return refs
-
-
-def _compact_value(value: Any) -> Any:
-    if isinstance(value, dict):
-        compact: dict[str, Any] = {}
-        omitted: list[str] = []
-        for key, item in value.items():
-            if isinstance(item, str) and len(item) > MAX_COMPACT_TEXT_LENGTH:
-                omitted.append(key)
-                compact[f"{key}_length"] = len(item)
-                continue
-            compact[key] = _compact_value(item)
-        if omitted:
-            compact["omitted_fields"] = omitted
-        return compact
-    if isinstance(value, list):
-        compact_items = [_compact_value(item) for item in value[:MAX_COMPACT_LIST_ITEMS]]
-        if len(value) > MAX_COMPACT_LIST_ITEMS:
-            compact_items.append({
-                "omitted_count": len(value) - MAX_COMPACT_LIST_ITEMS,
-            })
-        return compact_items
-    if isinstance(value, str) and len(value) > MAX_COMPACT_TEXT_LENGTH:
-        return {
-            "text_length": len(value),
-            "omitted_fields": ["value"],
-        }
-    return value

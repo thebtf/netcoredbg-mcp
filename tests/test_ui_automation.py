@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 
 from netcoredbg_mcp.ui.errors import (
     ElementNotFoundError,
@@ -94,6 +95,7 @@ class TestUIAutomation:
     def ui_automation(self):
         """Create UIAutomation instance."""
         from netcoredbg_mcp.ui.automation import UIAutomation
+
         return UIAutomation()
 
     def test_init(self, ui_automation):
@@ -165,9 +167,7 @@ class TestSerializeElement:
         mock_element.element_info.control_type = "Button"
         mock_element.element_info.name = "Test"
         mock_element.element_info.class_name = "Button"
-        mock_element.element_info.rectangle = MagicMock(
-            left=0, top=0, right=100, bottom=50
-        )
+        mock_element.element_info.rectangle = MagicMock(left=0, top=0, right=100, bottom=50)
         mock_element.is_enabled.return_value = True
         mock_element.is_visible.return_value = True
         mock_element.has_keyboard_focus.return_value = False

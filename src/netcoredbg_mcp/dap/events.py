@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 class StopReason(str, Enum):
     """Reasons for stopped event."""
+
     BREAKPOINT = "breakpoint"
     STEP = "step"
     EXCEPTION = "exception"
@@ -21,6 +22,7 @@ class StopReason(str, Enum):
 
 class OutputCategory(str, Enum):
     """Output event categories."""
+
     CONSOLE = "console"
     STDOUT = "stdout"
     STDERR = "stderr"
@@ -29,6 +31,7 @@ class OutputCategory(str, Enum):
 
 class ThreadReason(str, Enum):
     """Thread event reasons."""
+
     STARTED = "started"
     EXITED = "exited"
 
@@ -36,6 +39,7 @@ class ThreadReason(str, Enum):
 @dataclass
 class StoppedEventBody:
     """Body of stopped event."""
+
     reason: StopReason
     thread_id: int | None = None
     all_threads_stopped: bool = True
@@ -68,6 +72,7 @@ class InitializedEventBody:
 @dataclass
 class ContinuedEventBody:
     """Body of continued event."""
+
     thread_id: int | None = None
     all_threads_continued: bool = True
 
@@ -88,6 +93,7 @@ class ContinuedEventBody:
 @dataclass
 class TerminatedEventBody:
     """Body of terminated event."""
+
     restart: Any | None = None
 
     @classmethod
@@ -101,6 +107,7 @@ class TerminatedEventBody:
 @dataclass
 class ProcessEventBody:
     """Body of process event."""
+
     name: str | None = None
     system_process_id: int | None = None
     is_local_process: bool = True
@@ -134,6 +141,7 @@ class ProcessEventBody:
 @dataclass
 class OutputEventBody:
     """Body of output event."""
+
     category: OutputCategory
     output: str
     source: str | None = None
@@ -156,6 +164,7 @@ class OutputEventBody:
 @dataclass
 class ThreadEventBody:
     """Body of thread event."""
+
     reason: ThreadReason
     thread_id: int
 
@@ -170,6 +179,7 @@ class ThreadEventBody:
 @dataclass
 class ExitedEventBody:
     """Body of exited event."""
+
     exit_code: int
 
     @classmethod
@@ -180,6 +190,7 @@ class ExitedEventBody:
 @dataclass
 class BreakpointEventBody:
     """Body of breakpoint event (breakpoint added/changed/removed by adapter)."""
+
     reason: str  # "new", "changed", "removed"
     breakpoint_id: int | None = None
     verified: bool = False
@@ -204,6 +215,7 @@ class BreakpointEventBody:
 @dataclass
 class ModuleEventBody:
     """Body of module event (assembly loaded/changed/unloaded)."""
+
     reason: str  # "new", "changed", "removed"
     module_id: int | str = 0
     name: str = ""
@@ -229,6 +241,7 @@ class ModuleEventBody:
 @dataclass
 class CapabilitiesEventBody:
     """Body of capabilities event."""
+
     capabilities: dict[str, Any]
 
     @classmethod
@@ -243,6 +256,7 @@ class CapabilitiesEventBody:
 @dataclass
 class InvalidatedEventBody:
     """Body of invalidated event."""
+
     areas: list[str]
     thread_id: int | None = None
     stack_frame_id: int | None = None
@@ -267,6 +281,7 @@ class InvalidatedEventBody:
 @dataclass
 class LoadedSourceEventBody:
     """Body of loadedSource event."""
+
     reason: Literal["new", "changed", "removed"]
     source: dict[str, Any]
 
@@ -288,6 +303,7 @@ class LoadedSourceEventBody:
 @dataclass
 class ProgressStartEventBody:
     """Body of progressStart event."""
+
     progress_id: str
     title: str
     request_id: int | None = None
@@ -324,6 +340,7 @@ class ProgressStartEventBody:
 @dataclass
 class ProgressUpdateEventBody:
     """Body of progressUpdate event."""
+
     progress_id: str
     message: str | None = None
     percentage: float | None = None
@@ -348,6 +365,7 @@ class ProgressUpdateEventBody:
 @dataclass
 class ProgressEndEventBody:
     """Body of progressEnd event."""
+
     progress_id: str
     message: str | None = None
 
@@ -368,6 +386,7 @@ class ProgressEndEventBody:
 @dataclass
 class MemoryEventBody:
     """Body of memory event."""
+
     memory_reference: str
     offset: int = 0
     count: int = 0

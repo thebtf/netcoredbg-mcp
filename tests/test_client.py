@@ -71,10 +71,12 @@ class TestDAPClientProperties:
             "supportsStepInTargetsRequest": True,
         }
 
-        added, changed, total_before, total_after = client.update_capabilities({
-            "supportsDisassembleRequest": True,
-            "supportsLoadedSourcesRequest": True,
-        })
+        added, changed, total_before, total_after = client.update_capabilities(
+            {
+                "supportsDisassembleRequest": True,
+                "supportsLoadedSourcesRequest": True,
+            }
+        )
 
         assert added == ["supportsLoadedSourcesRequest"]
         assert changed == [
@@ -131,12 +133,7 @@ class TestDAPClientEventHandlers:
         client.on_event("output", handler)
 
         # Simulate receiving an event
-        data = {
-            "seq": 1,
-            "type": "event",
-            "event": "output",
-            "body": {"output": "test"}
-        }
+        data = {"seq": 1, "type": "event", "event": "output", "body": {"output": "test"}}
         client._handle_message(data)
 
         handler.assert_called_once()
@@ -174,7 +171,7 @@ class TestDAPClientResponseHandling:
             "request_seq": 1,
             "success": True,
             "command": "threads",
-            "body": {"threads": []}
+            "body": {"threads": []},
         }
         client._handle_message(data)
 
@@ -193,12 +190,16 @@ class TestDAPClientRequestBuilding:
         client = DAPClient("/path")
 
         captured_args = {}
+
         async def mock_send(command, arguments=None, timeout=30.0):
             captured_args["command"] = command
             captured_args["arguments"] = arguments
             return DAPResponse(
-                seq=1, request_seq=1, success=True, command=command,
-                body={"supportsConfigurationDoneRequest": True}
+                seq=1,
+                request_seq=1,
+                success=True,
+                command=command,
+                body={"supportsConfigurationDoneRequest": True},
             )
 
         client.send_request = mock_send
@@ -217,18 +218,14 @@ class TestDAPClientRequestBuilding:
         client = DAPClient("/path")
 
         captured_args = {}
+
         async def mock_send(command, arguments=None, timeout=30.0):
             captured_args["command"] = command
             captured_args["arguments"] = arguments
             return DAPResponse(seq=1, request_seq=1, success=True, command=command)
 
         client.send_request = mock_send
-        await client.launch(
-            program="test.dll",
-            cwd="/test",
-            args=["--arg1"],
-            stop_at_entry=True
-        )
+        await client.launch(program="test.dll", cwd="/test", args=["--arg1"], stop_at_entry=True)
 
         assert captured_args["command"] == "launch"
         assert captured_args["arguments"]["program"] == "test.dll"
@@ -472,18 +469,21 @@ class TestDAPClientRequestBuilding:
         client = DAPClient("/path")
 
         captured_args = {}
+
         async def mock_send(command, arguments=None, timeout=30.0):
             captured_args["command"] = command
             captured_args["arguments"] = arguments
             return DAPResponse(
-                seq=1, request_seq=1, success=True, command=command,
-                body={"breakpoints": [{"verified": True, "line": 10}]}
+                seq=1,
+                request_seq=1,
+                success=True,
+                command=command,
+                body={"breakpoints": [{"verified": True, "line": 10}]},
             )
 
         client.send_request = mock_send
         await client.set_breakpoints(
-            source_path="test.cs",
-            breakpoints=[{"line": 10, "condition": "x > 5"}]
+            source_path="test.cs", breakpoints=[{"line": 10, "condition": "x > 5"}]
         )
 
         assert captured_args["command"] == "setBreakpoints"
@@ -497,6 +497,7 @@ class TestDAPClientRequestBuilding:
         client = DAPClient("/path")
 
         captured_args = {}
+
         async def mock_send(command, arguments=None, timeout=30.0):
             captured_args["command"] = command
             captured_args["arguments"] = arguments
@@ -514,12 +515,12 @@ class TestDAPClientRequestBuilding:
         client = DAPClient("/path")
 
         captured_args = {}
+
         async def mock_send(command, arguments=None, timeout=30.0):
             captured_args["command"] = command
             captured_args["arguments"] = arguments
             return DAPResponse(
-                seq=1, request_seq=1, success=True, command=command,
-                body={"stackFrames": []}
+                seq=1, request_seq=1, success=True, command=command, body={"stackFrames": []}
             )
 
         client.send_request = mock_send
@@ -536,12 +537,16 @@ class TestDAPClientRequestBuilding:
         client = DAPClient("/path")
 
         captured_args = {}
+
         async def mock_send(command, arguments=None, timeout=30.0):
             captured_args["command"] = command
             captured_args["arguments"] = arguments
             return DAPResponse(
-                seq=1, request_seq=1, success=True, command=command,
-                body={"result": "10", "type": "int"}
+                seq=1,
+                request_seq=1,
+                success=True,
+                command=command,
+                body={"result": "10", "type": "int"},
             )
 
         client.send_request = mock_send
@@ -562,6 +567,7 @@ class TestDAPClientStepCommands:
         client = DAPClient("/path")
 
         captured_args = {}
+
         async def mock_send(command, arguments=None, timeout=30.0):
             captured_args["command"] = command
             captured_args["arguments"] = arguments
@@ -579,6 +585,7 @@ class TestDAPClientStepCommands:
         client = DAPClient("/path")
 
         captured_args = {}
+
         async def mock_send(command, arguments=None, timeout=30.0):
             captured_args["command"] = command
             captured_args["arguments"] = arguments
@@ -595,6 +602,7 @@ class TestDAPClientStepCommands:
         client = DAPClient("/path")
 
         captured_args = {}
+
         async def mock_send(command, arguments=None, timeout=30.0):
             captured_args["command"] = command
             captured_args["arguments"] = arguments
@@ -611,6 +619,7 @@ class TestDAPClientStepCommands:
         client = DAPClient("/path")
 
         captured_args = {}
+
         async def mock_send(command, arguments=None, timeout=30.0):
             captured_args["command"] = command
             captured_args["arguments"] = arguments
@@ -632,12 +641,16 @@ class TestDAPClientVariableInspection:
         client = DAPClient("/path")
 
         captured_args = {}
+
         async def mock_send(command, arguments=None, timeout=30.0):
             captured_args["command"] = command
             captured_args["arguments"] = arguments
             return DAPResponse(
-                seq=1, request_seq=1, success=True, command=command,
-                body={"scopes": [{"name": "Locals", "variablesReference": 1}]}
+                seq=1,
+                request_seq=1,
+                success=True,
+                command=command,
+                body={"scopes": [{"name": "Locals", "variablesReference": 1}]},
             )
 
         client.send_request = mock_send
@@ -652,12 +665,12 @@ class TestDAPClientVariableInspection:
         client = DAPClient("/path")
 
         captured_args = {}
+
         async def mock_send(command, arguments=None, timeout=30.0):
             captured_args["command"] = command
             captured_args["arguments"] = arguments
             return DAPResponse(
-                seq=1, request_seq=1, success=True, command=command,
-                body={"variables": []}
+                seq=1, request_seq=1, success=True, command=command, body={"variables": []}
             )
 
         client.send_request = mock_send
@@ -672,6 +685,7 @@ class TestDAPClientVariableInspection:
         client = DAPClient("/path")
 
         captured_args = {}
+
         async def mock_send(command, arguments=None, timeout=30.0):
             captured_args["command"] = command
             captured_args["arguments"] = arguments
@@ -693,6 +707,7 @@ class TestDAPClientVariableInspection:
         client = DAPClient("/path")
 
         captured_args = {}
+
         async def mock_send(command, arguments=None, timeout=30.0):
             captured_args["command"] = command
             captured_args["arguments"] = arguments
@@ -715,6 +730,7 @@ class TestDAPClientVariableInspection:
         client = DAPClient("/path")
 
         captured_args = {}
+
         async def mock_send(command, arguments=None, timeout=30.0):
             captured_args["command"] = command
             captured_args["arguments"] = arguments
@@ -732,6 +748,7 @@ class TestDAPClientVariableInspection:
         client = DAPClient("/path")
 
         captured_args = {}
+
         async def mock_send(command, arguments=None, timeout=30.0):
             captured_args["command"] = command
             captured_args["arguments"] = arguments
@@ -761,6 +778,7 @@ class TestDAPClientVariableInspection:
         client = DAPClient("/path")
 
         captured_args = {}
+
         async def mock_send(command, arguments=None, timeout=30.0):
             captured_args["command"] = command
             captured_args["arguments"] = arguments
@@ -778,12 +796,16 @@ class TestDAPClientVariableInspection:
         client = DAPClient("/path")
 
         captured_args = {}
+
         async def mock_send(command, arguments=None, timeout=30.0):
             captured_args["command"] = command
             captured_args["arguments"] = arguments
             return DAPResponse(
-                seq=1, request_seq=1, success=True, command=command,
-                body={"threads": [{"id": 1, "name": "Main"}]}
+                seq=1,
+                request_seq=1,
+                success=True,
+                command=command,
+                body={"threads": [{"id": 1, "name": "Main"}]},
             )
 
         client.send_request = mock_send
@@ -801,6 +823,7 @@ class TestDAPClientDisconnect:
         client = DAPClient("/path")
 
         captured_args = {}
+
         async def mock_send(command, arguments=None, timeout=30.0):
             captured_args["command"] = command
             captured_args["arguments"] = arguments
@@ -818,6 +841,7 @@ class TestDAPClientDisconnect:
         client = DAPClient("/path")
 
         captured_args = {}
+
         async def mock_send(command, arguments=None, timeout=30.0):
             captured_args["command"] = command
             captured_args["arguments"] = arguments

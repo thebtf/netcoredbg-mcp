@@ -211,7 +211,8 @@ async def get_project_root(ctx: Context | None = None) -> Path | None:
     # 1. Try MCP Roots from client (highest priority - client knows best)
     if ctx is not None:
         try:
-            roots = await ctx.list_roots()
+            list_roots = getattr(ctx, "list_roots", None)
+            roots = await list_roots() if list_roots is not None else None
             logger.info(f"MCP list_roots() returned {len(roots) if roots else 0} roots")
             if roots:
                 # Use the first root

@@ -14,7 +14,6 @@ class TestBuildOutputCallback:
     @pytest.mark.asyncio
     async def test_callback_receives_stdout_lines(self):
         """output_callback called with stdout lines."""
-        from netcoredbg_mcp.build.session import BuildSession
 
         lines_received = []
 
@@ -42,8 +41,9 @@ class TestBuildOutputCallback:
     async def test_none_callback_accepted(self):
         """output_callback=None doesn't crash."""
         # Verify the function signature accepts None
-        from netcoredbg_mcp.build.session import BuildSession
         import inspect
+
+        from netcoredbg_mcp.build.session import BuildSession
 
         sig = inspect.signature(BuildSession._run_command)
         params = sig.parameters
@@ -104,15 +104,15 @@ class TestBuildLineThrottling:
     async def test_cap_at_500_lines(self):
         """After 500 lines, notifications are suppressed."""
         line_count = 0
-        MAX = 500
+        max_lines = 500
         sent = []
 
         async def on_build_output(line: str, stream: str) -> None:
             nonlocal line_count
             line_count += 1
-            if line_count <= MAX:
+            if line_count <= max_lines:
                 sent.append(line)
-            elif line_count == MAX + 1:
+            elif line_count == max_lines + 1:
                 sent.append(f"... ({line_count}+ lines)")
 
         for i in range(600):
@@ -150,7 +150,8 @@ class TestHeartbeat:
             mgr._execution_event.set()
 
         _snapshot = await mgr.wait_for_stopped(
-            timeout=30.0, heartbeat_callback=heartbeat,
+            timeout=30.0,
+            heartbeat_callback=heartbeat,
         )
         assert len(heartbeats) >= 1
         assert heartbeats[0] >= 0
@@ -184,8 +185,9 @@ class TestExecuteAndWaitProgress:
     async def test_progress_phases_reported(self):
         """_execute_and_wait reports progress phases."""
         # Verify server.py has progress in _execute_and_wait
-        from netcoredbg_mcp.server import create_server
         import inspect
+
+        from netcoredbg_mcp.server import create_server
 
         # Just verify the function exists and has ctx parameter
         # (full integration test requires running server)
@@ -201,6 +203,7 @@ class TestCallbackPlumbing:
     def test_build_session_build_accepts_callback(self):
         """BuildSession.build() accepts output_callback."""
         import inspect
+
         from netcoredbg_mcp.build.session import BuildSession
 
         sig = inspect.signature(BuildSession.build)
@@ -209,6 +212,7 @@ class TestCallbackPlumbing:
     def test_build_session_restore_accepts_callback(self):
         """BuildSession.restore() accepts output_callback."""
         import inspect
+
         from netcoredbg_mcp.build.session import BuildSession
 
         sig = inspect.signature(BuildSession.restore)
@@ -217,6 +221,7 @@ class TestCallbackPlumbing:
     def test_build_manager_accepts_callback(self):
         """BuildManager.pre_launch_build() accepts output_callback."""
         import inspect
+
         from netcoredbg_mcp.build.manager import BuildManager
 
         sig = inspect.signature(BuildManager.pre_launch_build)
@@ -225,6 +230,7 @@ class TestCallbackPlumbing:
     def test_session_manager_launch_accepts_callback(self):
         """SessionManager.launch() accepts output_callback."""
         import inspect
+
         from netcoredbg_mcp.session.manager import SessionManager
 
         sig = inspect.signature(SessionManager.launch)
@@ -233,6 +239,7 @@ class TestCallbackPlumbing:
     def test_wait_for_stopped_accepts_heartbeat(self):
         """SessionManager.wait_for_stopped() accepts heartbeat_callback."""
         import inspect
+
         from netcoredbg_mcp.session.manager import SessionManager
 
         sig = inspect.signature(SessionManager.wait_for_stopped)

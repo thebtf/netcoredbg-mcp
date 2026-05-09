@@ -15,12 +15,13 @@ import shutil
 import tarfile
 import tempfile
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-from .home import get_home_dir, get_config, save_config
+from .home import get_config, get_home_dir, save_config
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +78,9 @@ def get_latest_release_info() -> tuple[str, str, int] | None:
             size = asset.get("size", 0)
             logger.info(
                 "Found release: %s v%s (%d bytes)",
-                name, version, size,
+                name,
+                version,
+                size,
             )
             return url, version, size
 
@@ -130,7 +133,8 @@ def download_netcoredbg(
         if expected_size > 0 and abs(actual_size - expected_size) > 1024:
             logger.warning(
                 "Download size mismatch: expected %d, got %d",
-                expected_size, actual_size,
+                expected_size,
+                actual_size,
             )
             os.unlink(tmp_path)
             return None

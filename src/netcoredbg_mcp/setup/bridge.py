@@ -100,11 +100,16 @@ def build_bridge(
     try:
         result = subprocess.run(
             [
-                "dotnet", "publish", str(csproj),
-                "-c", "Release",
-                "-r", "win-x64",
+                "dotnet",
+                "publish",
+                str(csproj),
+                "-c",
+                "Release",
+                "-r",
+                "win-x64",
                 "--self-contained",
-                "-o", str(output_dir),
+                "-o",
+                str(output_dir),
             ],
             capture_output=True,
             text=True,

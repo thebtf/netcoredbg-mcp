@@ -101,11 +101,13 @@ class UIEventBufferStore:
             "events": list(buffer.events),
             "event_count": len(buffer.events),
             "dropped_count": buffer.dropped_count,
-            "evidence_refs": [{
-                "kind": "ui_events",
-                "ref": f"ui_events:{buffer_id}",
-                "summary": f"events={len(buffer.events)} dropped={buffer.dropped_count}",
-            }],
+            "evidence_refs": [
+                {
+                    "kind": "ui_events",
+                    "ref": f"ui_events:{buffer_id}",
+                    "summary": f"events={len(buffer.events)} dropped={buffer.dropped_count}",
+                }
+            ],
         }
 
     def stop(self, buffer_id: str) -> dict[str, Any]:
@@ -131,11 +133,13 @@ def _events_from_diff(diff: dict[str, Any]) -> list[dict[str, Any]]:
         return []
     events = []
     for record in diff.get("changed", []):
-        events.append({
-            "kind": "changed",
-            "element_id": record["element_id"],
-            "changes": record["changes"],
-        })
+        events.append(
+            {
+                "kind": "changed",
+                "element_id": record["element_id"],
+                "changes": record["changes"],
+            }
+        )
     for record in diff.get("added", []):
         events.append({"kind": "added", "element": record})
     for record in diff.get("removed", []):

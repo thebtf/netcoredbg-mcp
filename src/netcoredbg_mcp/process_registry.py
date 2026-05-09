@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class ProcessEntry:
     """A tracked process entry."""
+
     pid: int
     role: str  # "netcoredbg", "debuggee", "build"
     program: str | None = None
@@ -88,9 +89,7 @@ def _is_pid_alive_windows(pid: int) -> bool:
         kernel32.CloseHandle.restype = wintypes.BOOL
 
         process_query_limited_information = 0x1000
-        handle = kernel32.OpenProcess(
-            process_query_limited_information, False, pid
-        )
+        handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
         if not handle:
             # Check if process exists but we lack permission
             error = ctypes.GetLastError()
@@ -307,9 +306,7 @@ class ProcessRegistry:
         for entry in list(self._entries.values()):
             if _is_pid_alive(entry.pid):
                 if _terminate_pid(entry.pid, timeout):
-                    logger.info(
-                        f"Cleaned up process: PID={entry.pid}, role={entry.role}"
-                    )
+                    logger.info(f"Cleaned up process: PID={entry.pid}, role={entry.role}")
                     terminated += 1
                 else:
                     logger.warning(
@@ -326,9 +323,7 @@ class ProcessRegistry:
         Returns count of processes terminated.
         """
         terminated = 0
-        to_remove = [
-            e for e in self._entries.values() if e.session_id == session_id
-        ]
+        to_remove = [e for e in self._entries.values() if e.session_id == session_id]
         for entry in to_remove:
             if _is_pid_alive(entry.pid):
                 if _terminate_pid(entry.pid, timeout):
@@ -413,8 +408,7 @@ class ProcessRegistry:
         # If previous server is still alive, don't touch its processes or PID file
         if prev_server_pid and _is_pid_alive(prev_server_pid):
             logger.info(
-                f"Previous server (PID {prev_server_pid}) is still alive — "
-                f"leaving PID file intact"
+                f"Previous server (PID {prev_server_pid}) is still alive — leaving PID file intact"
             )
             return 0
 
@@ -440,9 +434,7 @@ class ProcessRegistry:
                     )
                     terminated += 1
                 else:
-                    logger.warning(
-                        f"Failed to terminate orphaned process: PID={entry.pid}"
-                    )
+                    logger.warning(f"Failed to terminate orphaned process: PID={entry.pid}")
             else:
                 logger.debug(f"Orphaned process already dead: PID={entry.pid}")
 

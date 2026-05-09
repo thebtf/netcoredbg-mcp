@@ -140,8 +140,9 @@ class SessionTempManager:
                     mtime = entry.stat().st_mtime
                     if (now - mtime) > max_age_seconds:
                         shutil.rmtree(entry, ignore_errors=True)
-                        logger.info("Removed stale temp dir: %s (age: %.1fh)",
-                                    entry, (now - mtime) / 3600)
+                        logger.info(
+                            "Removed stale temp dir: %s (age: %.1fh)", entry, (now - mtime) / 3600
+                        )
                         removed += 1
                 except OSError:
                     continue

@@ -18,6 +18,7 @@ class ToolRegistry:
         def decorator(func):
             self.tools[func.__name__] = func
             return func
+
         return decorator
 
 
@@ -68,11 +69,15 @@ async def test_read_memory_negative_count_errors():
 @pytest.mark.asyncio
 async def test_read_memory_success_maps_dap_fields():
     manager = make_manager()
-    manager.client.read_memory = AsyncMock(return_value=make_response(body={
-        "address": "0x1234",
-        "unreadableBytes": 2,
-        "data": "AQID",
-    }))
+    manager.client.read_memory = AsyncMock(
+        return_value=make_response(
+            body={
+                "address": "0x1234",
+                "unreadableBytes": 2,
+                "data": "AQID",
+            }
+        )
+    )
 
     result = await manager.read_memory("0x1234", offset=4, count=16)
 
@@ -83,10 +88,12 @@ async def test_read_memory_success_maps_dap_fields():
 @pytest.mark.asyncio
 async def test_read_memory_failure_raises_message():
     manager = make_manager()
-    manager.client.read_memory = AsyncMock(return_value=make_response(
-        success=False,
-        message="not supported",
-    ))
+    manager.client.read_memory = AsyncMock(
+        return_value=make_response(
+            success=False,
+            message="not supported",
+        )
+    )
 
     with pytest.raises(RuntimeError, match="not supported"):
         await manager.read_memory("0x1234", count=16)
@@ -103,10 +110,14 @@ async def test_write_memory_rejects_invalid_base64():
 @pytest.mark.asyncio
 async def test_write_memory_success_maps_dap_fields():
     manager = make_manager()
-    manager.client.write_memory = AsyncMock(return_value=make_response(body={
-        "bytesWritten": 3,
-        "offset": 4,
-    }))
+    manager.client.write_memory = AsyncMock(
+        return_value=make_response(
+            body={
+                "bytesWritten": 3,
+                "offset": 4,
+            }
+        )
+    )
 
     result = await manager.write_memory("0x1234", "AQID", offset=4, allow_partial=True)
 
@@ -137,11 +148,13 @@ async def test_read_memory_tool_capability_gate():
 async def test_read_memory_tool_success_path():
     manager = make_manager()
     manager.client._capabilities = {"supportsReadMemoryRequest": True}
-    manager.read_memory = AsyncMock(return_value={
-        "address": "0x1234",
-        "unreadable_bytes": 0,
-        "data": "AQID",
-    })
+    manager.read_memory = AsyncMock(
+        return_value={
+            "address": "0x1234",
+            "unreadable_bytes": 0,
+            "data": "AQID",
+        }
+    )
     tools = register_tools(manager)
 
     response = await tools["read_memory"]("0x1234", count=3)

@@ -185,22 +185,24 @@ async def test_runner_passes_with_preflight_output_assertion_and_teardown() -> N
     session.runtime_smoke.instrumentation_groups["flow"] = {"breakpoints": [1]}
     session.state.output_buffer.append(OutputEntry("boot\n"))
 
-    result = await _runner(session).run({
-        "name": "happy",
-        "budgets": {"max_actions": 5, "max_elapsed_seconds": 10},
-        "preflight": {"name": "debug_hygiene_preflight"},
-        "actions": [
-            {"name": "output_checkpoint", "args": {"name": "start"}},
-            {"name": "append_output", "args": {"text": "ready\n"}},
-        ],
-        "assertions": [
-            {
-                "name": "output_assert_since",
-                "args": {"checkpoint": "start", "required": ["ready"]},
-            },
-        ],
-        "teardown": {"instrumentation_groups": ["flow"]},
-    })
+    result = await _runner(session).run(
+        {
+            "name": "happy",
+            "budgets": {"max_actions": 5, "max_elapsed_seconds": 10},
+            "preflight": {"name": "debug_hygiene_preflight"},
+            "actions": [
+                {"name": "output_checkpoint", "args": {"name": "start"}},
+                {"name": "append_output", "args": {"text": "ready\n"}},
+            ],
+            "assertions": [
+                {
+                    "name": "output_assert_since",
+                    "args": {"checkpoint": "start", "required": ["ready"]},
+                },
+            ],
+            "teardown": {"instrumentation_groups": ["flow"]},
+        }
+    )
 
     assert result["status"] == "PASS"
     assert result["action_count"] == 4
@@ -220,18 +222,20 @@ async def test_runner_stops_on_first_failed_assertion_and_still_tears_down() -> 
     session = FakeRuntimeSmokeSession()
     session.runtime_smoke.instrumentation_groups["flow"] = {"breakpoints": [1]}
 
-    result = await _runner(session).run({
-        "name": "failed-assertion",
-        "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}],
-        "assertions": [
-            {
-                "name": "output_assert_since",
-                "args": {"checkpoint": "start", "required": ["missing"]},
-            },
-            {"name": "append_output", "args": {"text": "must not run\n"}},
-        ],
-        "teardown": {"instrumentation_groups": ["flow"]},
-    })
+    result = await _runner(session).run(
+        {
+            "name": "failed-assertion",
+            "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}],
+            "assertions": [
+                {
+                    "name": "output_assert_since",
+                    "args": {"checkpoint": "start", "required": ["missing"]},
+                },
+                {"name": "append_output", "args": {"text": "must not run\n"}},
+            ],
+            "teardown": {"instrumentation_groups": ["flow"]},
+        }
+    )
 
     assert result["status"] == "FAIL"
     assert result["reason"] == "assertion failed"
@@ -245,14 +249,16 @@ async def test_runner_stops_on_first_failed_assertion_and_still_tears_down() -> 
 async def test_runner_action_budget_exhaustion_returns_impasse_with_completed_steps() -> None:
     session = FakeRuntimeSmokeSession()
 
-    result = await _runner(session).run({
-        "name": "budget",
-        "budgets": {"max_actions": 1, "max_elapsed_seconds": 10},
-        "actions": [
-            {"name": "output_checkpoint", "args": {"name": "start"}},
-            {"name": "append_output", "args": {"text": "ready\n"}},
-        ],
-    })
+    result = await _runner(session).run(
+        {
+            "name": "budget",
+            "budgets": {"max_actions": 1, "max_elapsed_seconds": 10},
+            "actions": [
+                {"name": "output_checkpoint", "args": {"name": "start"}},
+                {"name": "append_output", "args": {"text": "ready\n"}},
+            ],
+        }
+    )
 
     assert result["status"] == "IMPASSE"
     assert result["reason"] == "action budget exhausted"
@@ -266,20 +272,22 @@ async def test_runner_unsupported_backend_action_returns_blocked_and_teardown() 
     session = FakeRuntimeSmokeSession()
     session.runtime_smoke.instrumentation_groups["flow"] = {"breakpoints": [1]}
 
-    result = await _runner(session).run({
-        "name": "unsupported-ui",
-        "actions": [
-            {
-                "name": "ui_key_sequence",
-                "args": {
-                    "selector": {"automation_id": "Grid"},
-                    "modifiers": ["Shift"],
-                    "keys": ["Down"],
-                },
-            }
-        ],
-        "teardown": {"instrumentation_groups": ["flow"]},
-    })
+    result = await _runner(session).run(
+        {
+            "name": "unsupported-ui",
+            "actions": [
+                {
+                    "name": "ui_key_sequence",
+                    "args": {
+                        "selector": {"automation_id": "Grid"},
+                        "modifiers": ["Shift"],
+                        "keys": ["Down"],
+                    },
+                }
+            ],
+            "teardown": {"instrumentation_groups": ["flow"]},
+        }
+    )
 
     assert result["status"] == "BLOCKED"
     assert result["reason"] == "ui backend unsupported"
@@ -292,15 +300,17 @@ async def test_runner_unsupported_backend_action_returns_blocked_and_teardown() 
 async def test_runner_treats_freshness_warning_as_non_terminal_failure() -> None:
     session = FakeRuntimeSmokeSession()
 
-    result = await _runner(session).run({
-        "name": "freshness-warn",
-        "actions": [
-            {
-                "name": "verify_debug_freshness",
-                "args": {"expected_workspace": "C:/repo"},
-            },
-        ],
-    })
+    result = await _runner(session).run(
+        {
+            "name": "freshness-warn",
+            "actions": [
+                {
+                    "name": "verify_debug_freshness",
+                    "args": {"expected_workspace": "C:/repo"},
+                },
+            ],
+        }
+    )
 
     assert result["status"] == "PASS"
     assert result["completed_steps"][0]["status"] == "PASS"
@@ -312,27 +322,26 @@ async def test_runner_cleanup_failure_changes_success_to_fail_with_residue_evide
     session = FakeRuntimeSmokeSession()
     session.runtime_smoke.instrumentation_groups["leak"] = {"breakpoints": [1]}
 
-    result = await _runner(session).run({
-        "name": "cleanup-leak",
-        "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}],
-        "teardown": {"instrumentation_groups": ["leak"]},
-    })
+    result = await _runner(session).run(
+        {
+            "name": "cleanup-leak",
+            "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}],
+            "teardown": {"instrumentation_groups": ["leak"]},
+        }
+    )
 
     assert result["status"] == "FAIL"
     assert result["reason"] == "teardown failed"
     assert result["cleanup"]["status"] == "FAIL"
     assert (
-        result["cleanup"]["failures"][0]["reason"]
-        == "instrumentation group cleanup leaked state"
+        result["cleanup"]["failures"][0]["reason"] == "instrumentation group cleanup leaked state"
     )
     residue_failure = next(
         item
         for item in result["cleanup"]["failures"]
         if item["operation"] == "runtime_smoke_residue"
     )
-    assert residue_failure["remaining_runtime_smoke_state"]["instrumentation_groups"] == [
-        "leak"
-    ]
+    assert residue_failure["remaining_runtime_smoke_state"]["instrumentation_groups"] == ["leak"]
     assert result["cleanup"]["remaining_runtime_smoke_state"]["instrumentation_groups"] == []
 
 
@@ -360,11 +369,13 @@ async def test_runner_reports_operation_exception_and_still_tears_down() -> None
     session = FakeRuntimeSmokeSession()
     session.runtime_smoke.instrumentation_groups["flow"] = {"breakpoints": [1]}
 
-    result = await _runner(session).run({
-        "name": "operation-error",
-        "actions": [{"name": "failing_action"}],
-        "teardown": {"instrumentation_groups": ["flow"]},
-    })
+    result = await _runner(session).run(
+        {
+            "name": "operation-error",
+            "actions": [{"name": "failing_action"}],
+            "teardown": {"instrumentation_groups": ["flow"]},
+        }
+    )
 
     assert result["status"] == "FAIL"
     assert result["reason"] == "runtime smoke operation raised exception"
@@ -381,11 +392,13 @@ async def test_runner_reports_operation_exception_and_still_tears_down() -> None
 async def test_runner_rejects_invalid_budget_values_without_raising() -> None:
     session = FakeRuntimeSmokeSession()
 
-    result = await _runner(session).run({
-        "name": "bad-budgets",
-        "budgets": {"max_actions": "many", "max_elapsed_seconds": []},
-        "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}],
-    })
+    result = await _runner(session).run(
+        {
+            "name": "bad-budgets",
+            "budgets": {"max_actions": "many", "max_elapsed_seconds": []},
+            "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}],
+        }
+    )
 
     assert result["status"] == "FAIL"
     assert result["reason"] == "invalid plan schema"
@@ -402,13 +415,15 @@ async def test_runner_compact_export_truncates_large_step_evidence() -> None:
     session = FakeRuntimeSmokeSession()
     long_text = "x" * 600
 
-    result = await _runner(session).run({
-        "name": "large-evidence",
-        "actions": [
-            {"name": "append_output", "args": {"text": long_text}},
-            {"name": "output_checkpoint", "args": {"name": "after_large"}},
-        ],
-    })
+    result = await _runner(session).run(
+        {
+            "name": "large-evidence",
+            "actions": [
+                {"name": "append_output", "args": {"text": long_text}},
+                {"name": "output_checkpoint", "args": {"name": "after_large"}},
+            ],
+        }
+    )
 
     step = result["completed_steps"][0]
     compact_step = result["compact"]["completed_steps"][0]
@@ -421,32 +436,34 @@ async def test_runner_compact_export_truncates_large_step_evidence() -> None:
 async def test_runner_executes_op_style_ui_and_output_steps_in_one_plan() -> None:
     session = FakeRuntimeSmokeSession()
 
-    result = await _runner(session).run({
-        "schema": "netcoredbg.runtime_smoke.v1",
-        "steps": [
-            {"op": "ui.grid.snapshot", "selector": {"automation_id": "CueGrid"}},
-            {
-                "op": "ui.list.invoke_item",
-                "selector": {"automation_id": "CharactersListBox"},
-                "item": {"name": "ALICE"},
-            },
-            {
-                "op": "ui.list.toggle_item_child",
-                "selector": {"automation_id": "CharactersListBox"},
-                "item": {"name": "ALICE"},
-                "child": {"automation_id": "CharGender"},
-            },
-            {"op": "ui.focus.assert", "selector": {"automation_id": "CueGrid"}},
-            {"op": "ui.text.assert", "selector": {"name": "female"}},
-            {"op": "ui.invoke", "selector": {"automation_id": "menuItemUndo"}},
-            {"op": "debug.output_checkpoint", "name": "before"},
-            {
-                "op": "debug.output_assert_since",
-                "checkpoint": "before",
-                "forbidden": ["boom"],
-            },
-        ],
-    })
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v1",
+            "steps": [
+                {"op": "ui.grid.snapshot", "selector": {"automation_id": "CueGrid"}},
+                {
+                    "op": "ui.list.invoke_item",
+                    "selector": {"automation_id": "CharactersListBox"},
+                    "item": {"name": "ALICE"},
+                },
+                {
+                    "op": "ui.list.toggle_item_child",
+                    "selector": {"automation_id": "CharactersListBox"},
+                    "item": {"name": "ALICE"},
+                    "child": {"automation_id": "CharGender"},
+                },
+                {"op": "ui.focus.assert", "selector": {"automation_id": "CueGrid"}},
+                {"op": "ui.text.assert", "selector": {"name": "female"}},
+                {"op": "ui.invoke", "selector": {"automation_id": "menuItemUndo"}},
+                {"op": "debug.output_checkpoint", "name": "before"},
+                {
+                    "op": "debug.output_assert_since",
+                    "checkpoint": "before",
+                    "forbidden": ["boom"],
+                },
+            ],
+        }
+    )
 
     assert result["status"] == "PASS"
     assert [step["name"] for step in result["completed_steps"]] == [
@@ -473,14 +490,16 @@ async def test_runner_executes_op_style_ui_and_output_steps_in_one_plan() -> Non
 async def test_runner_eagerly_connects_ui_after_launch_before_freshness() -> None:
     session = FakeRuntimeSmokeSession()
 
-    result = await _runner(session).run({
-        "schema": "netcoredbg.runtime_smoke.v1",
-        "launch": {"program": "Smoke.dll"},
-        "freshness": {"expected_process_name": "Smoke"},
-        "steps": [
-            {"op": "ui.grid.snapshot", "selector": {"automation_id": "CueGrid"}},
-        ],
-    })
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v1",
+            "launch": {"program": "Smoke.dll"},
+            "freshness": {"expected_process_name": "Smoke"},
+            "steps": [
+                {"op": "ui.grid.snapshot", "selector": {"automation_id": "CueGrid"}},
+            ],
+        }
+    )
 
     assert result["status"] == "PASS"
     assert [step["name"] for step in result["completed_steps"]] == [
@@ -496,10 +515,12 @@ async def test_runner_eagerly_connects_ui_after_launch_before_freshness() -> Non
 async def test_runner_accepted_ui_op_without_backend_returns_blocked_not_schema_error() -> None:
     session = FakeRuntimeSmokeSession()
 
-    result = await RuntimeSmokeRunner(session).run({
-        "schema": "netcoredbg.runtime_smoke.v1",
-        "steps": [{"op": "ui.grid.snapshot", "selector": {"automation_id": "CueGrid"}}],
-    })
+    result = await RuntimeSmokeRunner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v1",
+            "steps": [{"op": "ui.grid.snapshot", "selector": {"automation_id": "CueGrid"}}],
+        }
+    )
 
     assert result["status"] == "BLOCKED"
     assert result["reason"] == "unsupported runtime smoke operation"
@@ -521,9 +542,11 @@ async def test_ui_operation_adapters_reject_non_object_selector() -> None:
     result = await RuntimeSmokeRunner(
         session,
         service_adapters=ui_operation_adapters(backend_provider),
-    ).run({
-        "actions": [{"name": "ui.invoke", "args": {"selector": []}}],
-    })
+    ).run(
+        {
+            "actions": [{"name": "ui.invoke", "args": {"selector": []}}],
+        }
+    )
 
     assert result["status"] == "FAIL"
     assert result["reason"] == "runtime smoke operation raised exception"
@@ -565,29 +588,323 @@ async def test_ui_invoke_uses_fallback_key_sequence_when_primary_missing() -> No
     result = await RuntimeSmokeRunner(
         session,
         service_adapters=ui_operation_adapters(backend_provider),
-    ).run({
-        "schema": "netcoredbg.runtime_smoke.v1",
-        "steps": [
-            {
-                "op": "ui.invoke",
-                "selector": {"automation_id": "menuItemUndo"},
-                "fallback_key_sequence": {
-                    "automation_id": "CueDataGrid",
-                    "modifiers": ["ctrl"],
-                    "keys": ["z"],
-                },
-            }
-        ],
-    })
+    ).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v1",
+            "steps": [
+                {
+                    "op": "ui.invoke",
+                    "selector": {"automation_id": "menuItemUndo"},
+                    "fallback_key_sequence": {
+                        "automation_id": "CueDataGrid",
+                        "modifiers": ["ctrl"],
+                        "keys": ["z"],
+                    },
+                }
+            ],
+        }
+    )
 
     assert result["status"] == "PASS"
     step_result = result["completed_steps"][0]["result"]
     assert step_result["method"] == "fallback_key_sequence"
     assert step_result["invoked"] is True
     assert "menuItemUndo" in step_result["primary_error"]
-    assert backend.key_sequence_calls == [
-        ({"automation_id": "CueDataGrid"}, ["ctrl"], ["z"])
-    ]
+    assert backend.key_sequence_calls == [({"automation_id": "CueDataGrid"}, ["ctrl"], ["z"])]
+
+
+@pytest.mark.asyncio
+async def test_ui_invoke_preserves_non_selector_backend_exception() -> None:
+    session = FakeRuntimeSmokeSession()
+
+    class FakeBackend:
+        async def invoke_element(self, **_: Any) -> dict[str, Any]:
+            raise RuntimeError("bridge transport unavailable")
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await RuntimeSmokeRunner(
+        session,
+        service_adapters=ui_operation_adapters(backend_provider),
+    ).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v1",
+            "steps": [
+                {
+                    "op": "ui.invoke",
+                    "selector": {"automation_id": "menuItemUndo"},
+                }
+            ],
+        }
+    )
+
+    step_result = result["completed_steps"][0]["result"]
+    assert result["status"] == "BLOCKED"
+    assert step_result["reason"] == "bridge transport unavailable"
+    assert step_result["requested"]["selector"] == {"automation_id": "menuItemUndo"}
+
+
+@pytest.mark.asyncio
+async def test_ui_get_property_propagates_backend_failure_status() -> None:
+    class FakeBackend:
+        async def extract_text(self, **_: Any) -> dict[str, Any]:
+            return {"status": "BLOCKED", "reason": "backend not connected"}
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.get_property"](
+        selector={"automation_id": "statusText"},
+        property_name="Text",
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "backend not connected"
+
+
+@pytest.mark.asyncio
+async def test_ui_get_property_name_reads_element_property_not_text() -> None:
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.extract_text_calls = 0
+            self.find_element_calls = 0
+
+        async def extract_text(self, **_: Any) -> dict[str, Any]:
+            self.extract_text_calls += 1
+            return {"status": "PASS", "text": "visible caption"}
+
+        async def find_element(self, **_: Any) -> dict[str, Any]:
+            self.find_element_calls += 1
+            return {"status": "PASS", "name": "accessible name", "text": "visible caption"}
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    result = await ui_operation_adapters(backend_provider)["ui.get_property"](
+        selector={"automation_id": "statusText"},
+        property_name="name",
+    )
+
+    assert result["status"] == "PASS"
+    assert result["value"] == "accessible name"
+    assert backend.extract_text_calls == 0
+    assert backend.find_element_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_ui_get_property_preserves_selector_backend_errors() -> None:
+    class FakeBackend:
+        async def find_element(self, **_: Any) -> dict[str, Any]:
+            return {"status": "BLOCKED", "reason": "selector schema unsupported"}
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.get_property"](
+        selector={"automation_id": "statusText"},
+        property_name="name",
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "selector schema unsupported"
+    assert "requested" not in result
+
+
+@pytest.mark.asyncio
+async def test_ui_get_property_blocks_backend_find_exceptions() -> None:
+    class FakeBackend:
+        async def find_element(self, **_: Any) -> dict[str, Any]:
+            raise RuntimeError("bridge transport unavailable")
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.get_property"](
+        selector={"automation_id": "statusText"},
+        property_name="name",
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "bridge transport unavailable"
+    assert result["requested"] == {"adapter": "ui.get_property"}
+
+
+@pytest.mark.asyncio
+async def test_ui_find_element_blocks_backend_exceptions() -> None:
+    class FakeBackend:
+        async def find_element(self, **_: Any) -> dict[str, Any]:
+            raise RuntimeError("bridge transport unavailable")
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.find_element"](
+        selector={"automation_id": "statusText"},
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "bridge transport unavailable"
+    assert result["requested"] == {"adapter": "ui.find_element"}
+
+
+@pytest.mark.asyncio
+async def test_ui_send_keys_focused_preserves_backend_failure_status() -> None:
+    class FakeBackend:
+        async def send_keys(self, keys: str) -> dict[str, Any]:
+            return {
+                "status": "BLOCKED",
+                "reason": "focused key input rejected",
+                "keys": keys,
+            }
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.send_keys_focused"](
+        keys="{SPACE}",
+    )
+
+    assert result == {
+        "status": "BLOCKED",
+        "reason": "focused key input rejected",
+        "keys": "{SPACE}",
+    }
+
+
+@pytest.mark.asyncio
+async def test_ui_set_focus_blocks_bridge_call_errors() -> None:
+    class FakeClient:
+        async def call(self, _method: str, _payload: dict[str, Any]) -> dict[str, Any]:
+            raise RuntimeError("bridge disconnected")
+
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.client = FakeClient()
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.set_focus"](
+        selector={"automation_id": "statusText"},
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "bridge disconnected"
+    assert result["requested"] == {"adapter": "ui.set_focus"}
+
+
+@pytest.mark.asyncio
+async def test_session_operation_adapters_preserve_non_pass_statuses() -> None:
+    class FailingSession(FakeRuntimeSmokeSession):
+        async def launch(self, **_: Any) -> dict[str, Any]:
+            self.launch_calls += 1
+            return {"status": "BLOCKED", "reason": "program missing"}
+
+        async def evaluate(self, expression: str) -> dict[str, Any]:
+            return {
+                "status": "FAIL",
+                "reason": "expression failed",
+                "expression": expression,
+            }
+
+        async def stop(self) -> dict[str, Any]:
+            self.stop_calls += 1
+            return {"status": "BLOCKED", "reason": "debuggee is busy"}
+
+    class FakeBackend:
+        pass
+
+    session = FailingSession()
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    adapters = ui_operation_adapters(backend_provider, session=session)
+
+    launch = await adapters["launch"](program="missing.dll")
+    evaluate = await adapters["debug.evaluate"](expression="Settings.Mode")
+    stop = await adapters["debug.stop"](mode="graceful")
+
+    assert launch == {"status": "BLOCKED", "reason": "program missing"}
+    assert evaluate == {
+        "status": "FAIL",
+        "reason": "expression failed",
+        "expression": "Settings.Mode",
+    }
+    assert stop == {"status": "BLOCKED", "reason": "debuggee is busy"}
+
+
+@pytest.mark.asyncio
+async def test_process_registry_count_blocks_registry_errors() -> None:
+    class FailingRegistry:
+        def reap_stale(self) -> None:
+            raise RuntimeError("registry unavailable")
+
+        def status(self) -> list[dict[str, Any]]:
+            return [{"alive": True}]
+
+    class RegistrySession(FakeRuntimeSmokeSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.process_registry = FailingRegistry()
+
+    class FakeBackend:
+        pass
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    adapters = ui_operation_adapters(backend_provider, session=RegistrySession())
+
+    result = await adapters["process.registry.count"]()
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "registry unavailable"
+    assert result["requested"] == {"adapter": "process.registry.count"}
+
+
+@pytest.mark.asyncio
+async def test_fixture_restore_returns_structured_failure_for_io_errors(
+    tmp_path: Path,
+) -> None:
+    session = FakeRuntimeSmokeSession()
+    session.allowed_root = tmp_path
+    baseline_dir = tmp_path / "baseline-dir"
+    baseline_dir.mkdir()
+    target = tmp_path / "settings.json"
+
+    adapters = ui_operation_adapters(lambda: None, session=session)
+    result = await adapters["fixture.restore"](
+        path=str(target),
+        baseline_file=str(baseline_dir),
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["requested"]["adapter"] == "fixture.restore"
+    assert "fixture baseline read failed" in result["reason"]
+
+
+@pytest.mark.asyncio
+async def test_fixture_restore_returns_structured_failure_for_write_errors(
+    tmp_path: Path,
+) -> None:
+    session = FakeRuntimeSmokeSession()
+    session.allowed_root = tmp_path
+    target_dir = tmp_path / "target-dir"
+    target_dir.mkdir()
+
+    adapters = ui_operation_adapters(lambda: None, session=session)
+    result = await adapters["fixture.restore"](
+        path=str(target_dir),
+        baseline_text="baseline",
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["requested"]["adapter"] == "fixture.restore"
+    assert "fixture restore write failed" in result["reason"]
 
 
 @pytest.mark.asyncio
@@ -628,18 +945,20 @@ async def test_state_changing_ui_operations_return_settle_evidence(
     result = await RuntimeSmokeRunner(
         session,
         service_adapters=smoke_ops.ui_operation_adapters(backend_provider),
-    ).run({
-        "schema": "netcoredbg.runtime_smoke.v1",
-        "steps": [
-            {
-                "op": "ui.list.toggle_item_child",
-                "selector": {"automation_id": "CharactersListBox"},
-                "item": {"name": "ALICE"},
-                "child": {"automation_id": "CharGender"},
-                "target_state": "Off",
-            }
-        ],
-    })
+    ).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v1",
+            "steps": [
+                {
+                    "op": "ui.list.toggle_item_child",
+                    "selector": {"automation_id": "CharactersListBox"},
+                    "item": {"name": "ALICE"},
+                    "child": {"automation_id": "CharGender"},
+                    "target_state": "Off",
+                }
+            ],
+        }
+    )
 
     assert result["status"] == "PASS"
     step_result = result["completed_steps"][0]["result"]
@@ -677,22 +996,24 @@ async def test_ui_operation_adapters_forward_grid_columns_and_backend_text_statu
     result = await RuntimeSmokeRunner(
         session,
         service_adapters=ui_operation_adapters(backend_provider),
-    ).run({
-        "schema": "netcoredbg.runtime_smoke.v1",
-        "steps": [
-            {
-                "op": "ui.grid.assert_rows",
-                "selector": {"automation_id": "CueGrid"},
-                "columns": ["Start", "Phrase"],
-                "rows": [{"index": 0, "contains": {"Phrase": "Fixture cue one"}}],
-            },
-            {
-                "op": "ui.text.assert",
-                "selector": {"automation_id": "status"},
-                "contains": "ready",
-            },
-        ],
-    })
+    ).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v1",
+            "steps": [
+                {
+                    "op": "ui.grid.assert_rows",
+                    "selector": {"automation_id": "CueGrid"},
+                    "columns": ["Start", "Phrase"],
+                    "rows": [{"index": 0, "contains": {"Phrase": "Fixture cue one"}}],
+                },
+                {
+                    "op": "ui.text.assert",
+                    "selector": {"automation_id": "status"},
+                    "contains": "ready",
+                },
+            ],
+        }
+    )
 
     assert backend.grid_columns == ["Start", "Phrase"]
     assert result["status"] == "BLOCKED"
@@ -743,17 +1064,17 @@ async def test_runner_restores_files_on_every_terminal_status(
         ]
         budgets = {"max_actions": 1, "max_elapsed_seconds": 10}
 
-    result = await _runner(session).run({
-        "name": f"restore-{case}",
-        "budgets": budgets,
-        "actions": actions,
-        "assertions": assertions,
-        "cleanup": {
-            "restore_files": [
-                {"path": str(fixture), "baseline_text": f"baseline-{case}"}
-            ]
-        },
-    })
+    result = await _runner(session).run(
+        {
+            "name": f"restore-{case}",
+            "budgets": budgets,
+            "actions": actions,
+            "assertions": assertions,
+            "cleanup": {
+                "restore_files": [{"path": str(fixture), "baseline_text": f"baseline-{case}"}]
+            },
+        }
+    )
 
     assert result["status"] == expected_status
     assert fixture.read_text(encoding="utf-8") == f"baseline-{case}"
@@ -779,15 +1100,13 @@ async def test_runner_restores_from_validated_baseline_file(tmp_path: Path) -> N
     fixture.write_text("mutated", encoding="utf-8")
     baseline.write_text("restored from file", encoding="utf-8")
 
-    result = await _runner(session).run({
-        "name": "restore-baseline-file",
-        "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}],
-        "cleanup": {
-            "restore_files": [
-                {"path": str(fixture), "baseline_file": str(baseline)}
-            ]
-        },
-    })
+    result = await _runner(session).run(
+        {
+            "name": "restore-baseline-file",
+            "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}],
+            "cleanup": {"restore_files": [{"path": str(fixture), "baseline_file": str(baseline)}]},
+        }
+    )
 
     assert result["status"] == "PASS"
     assert fixture.read_text(encoding="utf-8") == "restored from file"
@@ -810,13 +1129,13 @@ async def test_runner_restores_hidden_windows_file_and_preserves_attribute(
     _set_windows_file_attributes(fixture, hidden_attributes)
 
     try:
-        result = await _runner(session).run({
-            "name": "restore-hidden-file",
-            "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}],
-            "cleanup": {
-                "restore_files": [{"path": str(fixture), "baseline_text": "baseline"}]
-            },
-        })
+        result = await _runner(session).run(
+            {
+                "name": "restore-hidden-file",
+                "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}],
+                "cleanup": {"restore_files": [{"path": str(fixture), "baseline_text": "baseline"}]},
+            }
+        )
 
         assert result["status"] == "PASS"
         assert fixture.read_text(encoding="utf-8") == "baseline"
@@ -847,15 +1166,15 @@ async def test_runner_retries_transient_restore_permission_error(
 
     monkeypatch.setattr(runner, "_restore_file", flaky_restore)
 
-    result = await runner.run({
-        "name": "restore-transient-lock",
-        "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}],
-        "cleanup": {
-            "restore_files": [
-                {"path": str(fixture), "baseline_text": "restored after retry"}
-            ]
-        },
-    })
+    result = await runner.run(
+        {
+            "name": "restore-transient-lock",
+            "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}],
+            "cleanup": {
+                "restore_files": [{"path": str(fixture), "baseline_text": "restored after retry"}]
+            },
+        }
+    )
 
     assert result["status"] == "PASS"
     assert attempts == 2
@@ -881,13 +1200,13 @@ async def test_runner_accepts_already_matched_file_after_restore_write_lock(
 
     monkeypatch.setattr(Path, "write_text", fail_fixture_write)
 
-    result = await _runner(session).run({
-        "name": "restore-already-matched",
-        "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}],
-        "cleanup": {
-            "restore_files": [{"path": str(fixture), "baseline_text": "baseline"}]
-        },
-    })
+    result = await _runner(session).run(
+        {
+            "name": "restore-already-matched",
+            "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}],
+            "cleanup": {"restore_files": [{"path": str(fixture), "baseline_text": "baseline"}]},
+        }
+    )
 
     assert result["status"] == "PASS"
     assert result["cleanup"]["status"] == "PASS"
@@ -903,15 +1222,15 @@ async def test_runner_cleanup_failure_changes_success_to_fail_for_restore_error(
     directory_target = tmp_path / "fixture-dir"
     directory_target.mkdir()
 
-    result = await _runner(session).run({
-        "name": "restore-fails",
-        "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}],
-        "cleanup": {
-            "restore_files": [
-                {"path": str(directory_target), "baseline_text": "baseline"}
-            ]
-        },
-    })
+    result = await _runner(session).run(
+        {
+            "name": "restore-fails",
+            "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}],
+            "cleanup": {
+                "restore_files": [{"path": str(directory_target), "baseline_text": "baseline"}]
+            },
+        }
+    )
 
     assert result["status"] == "FAIL"
     assert result["reason"] == "teardown failed"
@@ -924,11 +1243,13 @@ async def test_runner_cleanup_failure_changes_success_to_fail_for_restore_error(
 async def test_runner_records_graceful_debug_stop_when_requested() -> None:
     session = FakeRuntimeSmokeSession()
 
-    result = await _runner(session).run({
-        "name": "stop-debug",
-        "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}],
-        "cleanup": {"stop_debug": "graceful"},
-    })
+    result = await _runner(session).run(
+        {
+            "name": "stop-debug",
+            "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}],
+            "cleanup": {"stop_debug": "graceful"},
+        }
+    )
 
     assert result["status"] == "PASS"
     assert session.stop_calls == 1
@@ -951,15 +1272,13 @@ async def test_runner_rejects_restore_path_outside_project_before_steps(
     outside = tmp_path / "outside.txt"
     outside.write_text("mutated", encoding="utf-8")
 
-    result = await _runner(session).run({
-        "name": "unsafe-restore",
-        "actions": [{"name": "append_output", "args": {"text": "must not run\n"}}],
-        "cleanup": {
-            "restore_files": [
-                {"path": str(outside), "baseline_text": "baseline"}
-            ]
-        },
-    })
+    result = await _runner(session).run(
+        {
+            "name": "unsafe-restore",
+            "actions": [{"name": "append_output", "args": {"text": "must not run\n"}}],
+            "cleanup": {"restore_files": [{"path": str(outside), "baseline_text": "baseline"}]},
+        }
+    )
 
     assert result["status"] == "FAIL"
     assert result["reason"] == "invalid plan schema"
@@ -979,11 +1298,13 @@ async def test_runner_rejects_restore_without_explicit_baseline_before_steps(
     fixture = tmp_path / "fixture.txt"
     fixture.write_text("mutated", encoding="utf-8")
 
-    result = await _runner(session).run({
-        "name": "missing-baseline",
-        "actions": [{"name": "append_output", "args": {"text": "must not run\n"}}],
-        "cleanup": {"restore_files": [{"path": str(fixture)}]},
-    })
+    result = await _runner(session).run(
+        {
+            "name": "missing-baseline",
+            "actions": [{"name": "append_output", "args": {"text": "must not run\n"}}],
+            "cleanup": {"restore_files": [{"path": str(fixture)}]},
+        }
+    )
 
     assert result["status"] == "FAIL"
     assert result["reason"] == "invalid plan schema"
@@ -1003,14 +1324,16 @@ async def test_runner_skips_plan_owned_cleanup_when_restore_schema_is_invalid(
     fixture = tmp_path / "fixture.txt"
     fixture.write_text("mutated", encoding="utf-8")
 
-    result = await _runner(session).run({
-        "name": "invalid-cleanup",
-        "cleanup": {
-            "restore_files": [{"path": str(fixture)}],
-            "stop_debug": "graceful",
-            "debug_hygiene": True,
-        },
-    })
+    result = await _runner(session).run(
+        {
+            "name": "invalid-cleanup",
+            "cleanup": {
+                "restore_files": [{"path": str(fixture)}],
+                "stop_debug": "graceful",
+                "debug_hygiene": True,
+            },
+        }
+    )
 
     assert result["status"] == "FAIL"
     assert result["reason"] == "invalid plan schema"
@@ -1071,7 +1394,8 @@ async def test_runtime_smoke_tools_register_freshness_and_runner(capturing_mcp) 
     assert non_object["data"]["reason"] == "invalid plan schema"
     assert non_object["data"]["validation_errors"] == ["plan must be an object"]
     assert non_object["data"]["accepted_schema_values"] == [
-        "netcoredbg.runtime_smoke.v1"
+        "netcoredbg.runtime_smoke.v1",
+        "netcoredbg.runtime_smoke.v2",
     ]
     assert "debug.output_checkpoint" in non_object["data"]["accepted_operation_names"]
     assert non_object["data"]["completed_steps"] == []

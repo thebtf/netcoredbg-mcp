@@ -36,6 +36,7 @@ class TestBuildManagerSessions:
         manager = BuildManager()
 
         import os
+
         path_with_sep = str(tmp_path) + os.sep
         path_without = str(tmp_path)
 
@@ -61,7 +62,6 @@ class TestBuildManagerSessions:
         result = manager.clear_session(str(tmp_path / "nonexistent"))
 
         assert result is False
-
 
     def test_two_instances_dont_share_sessions(self, tmp_path):
         """Test that two BuildManager instances have independent sessions."""
@@ -119,9 +119,7 @@ class TestBuildManagerBuild:
             mock_process.wait = AsyncMock(return_value=0)
             mock_exec.return_value = mock_process
 
-            result = await manager.build(
-                str(tmp_path), str(project), BuildCommand.BUILD
-            )
+            result = await manager.build(str(tmp_path), str(project), BuildCommand.BUILD)
 
         assert result.success is True
 
@@ -173,9 +171,7 @@ class TestBuildManagerPreLaunchBuild:
             return mock_process
 
         with patch("asyncio.create_subprocess_exec", capture_exec):
-            result = await manager.pre_launch_build(
-                str(tmp_path), str(project), restore_first=True
-            )
+            result = await manager.pre_launch_build(str(tmp_path), str(project), restore_first=True)
 
         assert result.success is True
         # Filter to dotnet commands only (exclude cleanup taskkill calls)

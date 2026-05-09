@@ -177,11 +177,13 @@ def diff_ui_snapshots(
         "added": added,
         "removed": removed,
         "changed": changed,
-        "evidence_refs": [{
-            "kind": "ui_diff",
-            "ref": f"ui_diff:{before}->{after}",
-            "summary": f"added={len(added)} removed={len(removed)} changed={len(changed)}",
-        }],
+        "evidence_refs": [
+            {
+                "kind": "ui_diff",
+                "ref": f"ui_diff:{before}->{after}",
+                "summary": f"added={len(added)} removed={len(removed)} changed={len(changed)}",
+            }
+        ],
     }
 
 

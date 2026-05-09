@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from netcoredbg_mcp.dap.protocol import DAPResponse
 from netcoredbg_mcp.session.state import (
     DebugState,
     OutputEntry,
@@ -16,11 +15,11 @@ from netcoredbg_mcp.session.state import (
 
 
 class TestExceptionContext:
-
     @pytest.fixture
     def manager(self):
         with patch("netcoredbg_mcp.session.manager.DAPClient"):
             from netcoredbg_mcp.session import SessionManager
+
             m = SessionManager()
             m._state.state = DebugState.STOPPED
             m._state.stop_reason = "exception"
@@ -30,20 +29,28 @@ class TestExceptionContext:
 
     @pytest.mark.asyncio
     async def test_returns_exception_info(self, manager):
-        manager.get_exception_info = AsyncMock(return_value={
-            "exceptionId": "System.NullReferenceException",
-            "description": "Object reference not set",
-            "breakMode": "always",
-        })
-        manager.get_stack_trace = AsyncMock(return_value=[
-            StackFrame(id=1, name="Main", source="Program.cs", line=42, column=1),
-        ])
-        manager.get_scopes = AsyncMock(return_value=[
-            {"name": "Locals", "variablesReference": 100},
-        ])
-        manager.get_variables = AsyncMock(return_value=[
-            Variable(name="x", value="null", type="object", variables_reference=0),
-        ])
+        manager.get_exception_info = AsyncMock(
+            return_value={
+                "exceptionId": "System.NullReferenceException",
+                "description": "Object reference not set",
+                "breakMode": "always",
+            }
+        )
+        manager.get_stack_trace = AsyncMock(
+            return_value=[
+                StackFrame(id=1, name="Main", source="Program.cs", line=42, column=1),
+            ]
+        )
+        manager.get_scopes = AsyncMock(
+            return_value=[
+                {"name": "Locals", "variablesReference": 100},
+            ]
+        )
+        manager.get_variables = AsyncMock(
+            return_value=[
+                Variable(name="x", value="null", type="object", variables_reference=0),
+            ]
+        )
         manager.evaluate = AsyncMock(return_value={"error": "no inner"})
 
         result = await manager.get_exception_context()
@@ -73,6 +80,7 @@ class TestExceptionContext:
         manager.get_stack_trace = AsyncMock(return_value=[])
 
         call_count = 0
+
         async def mock_evaluate(expr, *args, **kwargs):
             nonlocal call_count
             call_count += 1
@@ -88,11 +96,11 @@ class TestExceptionContext:
 
 
 class TestStopContext:
-
     @pytest.fixture
     def manager(self):
         with patch("netcoredbg_mcp.session.manager.DAPClient"):
             from netcoredbg_mcp.session import SessionManager
+
             m = SessionManager()
             m._state.state = DebugState.STOPPED
             m._state.stop_reason = "breakpoint"
@@ -102,16 +110,22 @@ class TestStopContext:
 
     @pytest.mark.asyncio
     async def test_returns_context(self, manager):
-        manager.get_stack_trace = AsyncMock(return_value=[
-            StackFrame(id=1, name="DoWork", source="Service.cs", line=10, column=1),
-            StackFrame(id=2, name="Main", source="Program.cs", line=5, column=1),
-        ])
-        manager.get_scopes = AsyncMock(return_value=[
-            {"name": "Locals", "variablesReference": 100},
-        ])
-        manager.get_variables = AsyncMock(return_value=[
-            Variable(name="count", value="42", type="int", variables_reference=0),
-        ])
+        manager.get_stack_trace = AsyncMock(
+            return_value=[
+                StackFrame(id=1, name="DoWork", source="Service.cs", line=10, column=1),
+                StackFrame(id=2, name="Main", source="Program.cs", line=5, column=1),
+            ]
+        )
+        manager.get_scopes = AsyncMock(
+            return_value=[
+                {"name": "Locals", "variablesReference": 100},
+            ]
+        )
+        manager.get_variables = AsyncMock(
+            return_value=[
+                Variable(name="count", value="42", type="int", variables_reference=0),
+            ]
+        )
         manager._state.output_buffer.append(OutputEntry(text="Hello\n", category="stdout"))
 
         result = await manager.get_stop_context()
@@ -133,9 +147,11 @@ class TestStopContext:
 
     @pytest.mark.asyncio
     async def test_with_hit_count(self, manager):
-        manager.get_stack_trace = AsyncMock(return_value=[
-            StackFrame(id=1, name="Loop", source="C:\\app\\test.cs", line=15, column=1),
-        ])
+        manager.get_stack_trace = AsyncMock(
+            return_value=[
+                StackFrame(id=1, name="Loop", source="C:\\app\\test.cs", line=15, column=1),
+            ]
+        )
         manager.get_scopes = AsyncMock(return_value=[])
         norm = manager.breakpoints._normalize_path("C:\\app\\test.cs")
         manager._state.hit_counts[(norm, 15)] = 7
@@ -145,9 +161,11 @@ class TestStopContext:
 
     @pytest.mark.asyncio
     async def test_no_variables(self, manager):
-        manager.get_stack_trace = AsyncMock(return_value=[
-            StackFrame(id=1, name="Main", source="test.cs", line=1, column=1),
-        ])
+        manager.get_stack_trace = AsyncMock(
+            return_value=[
+                StackFrame(id=1, name="Main", source="test.cs", line=1, column=1),
+            ]
+        )
         result = await manager.get_stop_context(include_variables=False)
         assert "locals" not in result
 
@@ -155,9 +173,11 @@ class TestStopContext:
     async def test_exception_stop_includes_exception_info(self, manager):
         manager._state.stop_reason = "exception"
         manager.get_stack_trace = AsyncMock(return_value=[])
-        manager.get_exception_info = AsyncMock(return_value={
-            "exceptionId": "System.Exception",
-        })
+        manager.get_exception_info = AsyncMock(
+            return_value={
+                "exceptionId": "System.Exception",
+            }
+        )
         result = await manager.get_stop_context(include_variables=False, include_output_tail=0)
         assert "exception" in result
         assert result["exception"]["exceptionId"] == "System.Exception"

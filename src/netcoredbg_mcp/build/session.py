@@ -116,7 +116,7 @@ class BuildSession:
                 return None
 
             # Set JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-            class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+            class JobObjectBasicLimitInformation(ctypes.Structure):
                 _fields_ = [
                     ("PerProcessUserTimeLimit", ctypes.c_int64),
                     ("PerJobUserTimeLimit", ctypes.c_int64),
@@ -129,7 +129,7 @@ class BuildSession:
                     ("SchedulingClass", wintypes.DWORD),
                 ]
 
-            class IO_COUNTERS(ctypes.Structure):
+            class IoCounters(ctypes.Structure):
                 _fields_ = [
                     ("ReadOperationCount", ctypes.c_uint64),
                     ("WriteOperationCount", ctypes.c_uint64),
@@ -139,25 +139,25 @@ class BuildSession:
                     ("OtherTransferCount", ctypes.c_uint64),
                 ]
 
-            class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+            class JobObjectExtendedLimitInformation(ctypes.Structure):
                 _fields_ = [
-                    ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
-                    ("IoInfo", IO_COUNTERS),
+                    ("BasicLimitInformation", JobObjectBasicLimitInformation),
+                    ("IoInfo", IoCounters),
                     ("ProcessMemoryLimit", ctypes.c_size_t),
                     ("JobMemoryLimit", ctypes.c_size_t),
                     ("PeakProcessMemoryUsed", ctypes.c_size_t),
                     ("PeakJobMemoryUsed", ctypes.c_size_t),
                 ]
 
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
-            JobObjectExtendedLimitInformation = 9
+            job_object_limit_kill_on_job_close = 0x2000
+            job_object_extended_limit_information = 9
 
-            info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            info = JobObjectExtendedLimitInformation()
+            info.BasicLimitInformation.LimitFlags = job_object_limit_kill_on_job_close
 
             success = kernel32.SetInformationJobObject(
                 job,
-                JobObjectExtendedLimitInformation,
+                job_object_extended_limit_information,
                 ctypes.byref(info),
                 ctypes.sizeof(info),
             )
@@ -187,11 +187,9 @@ class BuildSession:
             kernel32 = ctypes.windll.kernel32
 
             # Get process handle from PID
-            PROCESS_SET_QUOTA = 0x0100
-            PROCESS_TERMINATE = 0x0001
-            proc_handle = kernel32.OpenProcess(
-                PROCESS_SET_QUOTA | PROCESS_TERMINATE, False, pid
-            )
+            process_set_quota = 0x0100
+            process_terminate = 0x0001
+            proc_handle = kernel32.OpenProcess(process_set_quota | process_terminate, False, pid)
             if proc_handle:
                 kernel32.AssignProcessToJobObject(self._job_handle, proc_handle)
                 kernel32.CloseHandle(proc_handle)
@@ -282,7 +280,9 @@ class BuildSession:
                             try:
                                 await output_callback(decoded.rstrip("\r\n"), stream_name)
                             except Exception as exc:  # noqa: BLE001
-                                logger.debug("output_callback raised %s: %s", type(exc).__name__, exc)
+                                logger.debug(
+                                    "output_callback raised %s: %s", type(exc).__name__, exc
+                                )
                     except asyncio.TimeoutError:
                         if self._cancel_requested:
                             raise asyncio.CancelledError()
@@ -449,7 +449,9 @@ class BuildSession:
                     )
                     logger.info(f"Running clean: {' '.join(clean_cmd)}")
                     exit_code, stdout, stderr = await self._run_command(
-                        clean_cmd, cwd=self._workspace_root, timeout=timeout / 2,
+                        clean_cmd,
+                        cwd=self._workspace_root,
+                        timeout=timeout / 2,
                         output_callback=output_callback,
                     )
                     if exit_code != 0:
@@ -567,9 +569,7 @@ class BuildSession:
         timeout: float = 60.0,
     ) -> BuildResult:
         """Clean build outputs."""
-        return await self.build(
-            project_path, BuildCommand.CLEAN, configuration, timeout=timeout
-        )
+        return await self.build(project_path, BuildCommand.CLEAN, configuration, timeout=timeout)
 
     async def restore(
         self,
@@ -579,7 +579,9 @@ class BuildSession:
     ) -> BuildResult:
         """Restore NuGet packages."""
         return await self.build(
-            project_path, BuildCommand.RESTORE, timeout=timeout,
+            project_path,
+            BuildCommand.RESTORE,
+            timeout=timeout,
             output_callback=output_callback,
         )
 

@@ -36,13 +36,13 @@ def compute_collection_stats(items: list, sample_size: int) -> dict[str, Any]:
     null_count = sum(1 for v in items if v.value in _NULL_SENTINELS)
 
     first_items = [
-        {"name": v.name, "value": v.value, "type": v.type or ""}
-        for v in items[:sample_size]
+        {"name": v.name, "value": v.value, "type": v.type or ""} for v in items[:sample_size]
     ]
-    last_items = [
-        {"name": v.name, "value": v.value, "type": v.type or ""}
-        for v in items[-sample_size:]
-    ] if count > sample_size else []
+    last_items = (
+        [{"name": v.name, "value": v.value, "type": v.type or ""} for v in items[-sample_size:]]
+        if count > sample_size
+        else []
+    )
 
     result: dict[str, Any] = {
         "count": count,
@@ -84,7 +84,9 @@ def register_inspection_tools(
     """Register variable inspection and evaluation tools on the MCP server."""
     from mcp.types import ToolAnnotations
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def get_threads() -> dict:
         """Get all threads in the debugged process.
 
@@ -99,7 +101,9 @@ def register_inspection_tools(
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def get_call_stack(thread_id: int | None = None, levels: int = 20) -> dict:
         """Get the call stack for a thread.
 
@@ -123,8 +127,11 @@ def register_inspection_tools(
             frames = await session.get_stack_trace(thread_id, 0, levels)
             frames_data = [
                 {
-                    "id": f.id, "name": f.name, "source": f.source,
-                    "line": f.line, "column": f.column,
+                    "id": f.id,
+                    "name": f.name,
+                    "source": f.source,
+                    "line": f.line,
+                    "column": f.column,
                 }
                 for f in frames
             ]
@@ -149,11 +156,14 @@ def register_inspection_tools(
                 )
             return build_error_response(error_msg, state=session.state.state)
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def get_scopes(frame_id: int | None = None) -> dict:
         """Get variable scopes for a stack frame.
 
-        State: STOPPED required. Call get_call_stack() first to get frame_id. Returns variables_reference for get_variables().
+        State: STOPPED required. Call get_call_stack() first to get frame_id.
+        Returns variables_reference for get_variables().
 
         Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
         """
@@ -172,7 +182,9 @@ def register_inspection_tools(
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def get_variables(
         variables_reference: int,
         filter: str | None = None,
@@ -257,7 +269,9 @@ def register_inspection_tools(
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def get_exception_info(thread_id: int | None = None) -> dict:
         """Get information about the current exception.
 
@@ -271,7 +285,9 @@ def register_inspection_tools(
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def get_modules() -> dict:
         """List loaded assemblies/modules in the debug session.
 
@@ -291,11 +307,13 @@ def register_inspection_tools(
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool(annotations=ToolAnnotations(
-        readOnlyHint=True,
-        idempotentHint=True,
-        openWorldHint=False,
-    ))
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            idempotentHint=True,
+            openWorldHint=False,
+        )
+    )
     async def get_progress() -> dict:
         """List active debugger progress operations.
 
@@ -313,7 +331,9 @@ def register_inspection_tools(
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def get_loaded_sources() -> dict:
         """List sources currently loaded by the debug adapter.
 
@@ -339,7 +359,9 @@ def register_inspection_tools(
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def disassemble(
         memory_reference: str,
         offset: int = 0,
@@ -377,7 +399,9 @@ def register_inspection_tools(
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def get_locations(location_reference: int) -> dict:
         """Resolve a DAP locationReference into source coordinates.
 
@@ -400,7 +424,9 @@ def register_inspection_tools(
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True, openWorldHint=False)
+    )
     async def quick_evaluate(expression: str, frame_id: int | None = None) -> dict:
         """Evaluate an expression while the program is running (atomic pause-eval-resume).
 
@@ -425,7 +451,9 @@ def register_inspection_tools(
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def get_exception_context(
         max_frames: int = 10,
         include_variables_for_frames: int = 1,
@@ -461,7 +489,9 @@ def register_inspection_tools(
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def get_stop_context(
         include_variables: bool = True,
         include_output_tail: int = 10,
@@ -521,18 +551,24 @@ def register_inspection_tools(
                 return build_error_response(access_error, state=session.state.state)
 
             from ..session.tracepoints import TracepointManager
-            if not hasattr(session, '_tracepoint_manager'):
-                session._tracepoint_manager = TracepointManager()
 
-            mgr: TracepointManager = session._tracepoint_manager
+            manager = getattr(session, "_tracepoint_manager", None)
+            if manager is None:
+                manager = TracepointManager()
+                setattr(session, "_tracepoint_manager", manager)
+
+            mgr: TracepointManager = manager
 
             # Validate and normalize file path to prevent path traversal
             real_file = os.path.realpath(os.path.abspath(file))
             if not os.path.isabs(real_file):
-                return build_error_response("File path must be absolute.", state=session.state.state)
+                return build_error_response(
+                    "File path must be absolute.", state=session.state.state
+                )
             if not os.path.isfile(real_file):
                 return build_error_response(
-                    f"File not found: {real_file}", state=session.state.state,
+                    f"File not found: {real_file}",
+                    state=session.state.state,
                 )
             norm_file = real_file
 
@@ -575,14 +611,15 @@ def register_inspection_tools(
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
 
-            mgr = getattr(session, '_tracepoint_manager', None)
+            mgr = getattr(session, "_tracepoint_manager", None)
             if mgr is None:
                 return build_error_response("No tracepoints configured.", state=session.state.state)
 
             tp = mgr.remove(tracepoint_id)
             if tp is None:
                 return build_error_response(
-                    f"Tracepoint '{tracepoint_id}' not found.", state=session.state.state,
+                    f"Tracepoint '{tracepoint_id}' not found.",
+                    state=session.state.state,
                 )
 
             # Remove the underlying DAP breakpoint so it no longer stops execution
@@ -598,7 +635,9 @@ def register_inspection_tools(
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def get_trace_log(
         since: float | None = None,
         tracepoint_id: str | None = None,
@@ -612,7 +651,7 @@ def register_inspection_tools(
             tracepoint_id: Filter to specific tracepoint
         """
         try:
-            mgr = getattr(session, '_tracepoint_manager', None)
+            mgr = getattr(session, "_tracepoint_manager", None)
             if mgr is None:
                 return build_response(
                     data={"entries": [], "total": 0, "truncated": False},
@@ -650,10 +689,11 @@ def register_inspection_tools(
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
 
-            mgr = getattr(session, '_tracepoint_manager', None)
+            mgr = getattr(session, "_tracepoint_manager", None)
             count = mgr.clear_log() if mgr else 0
             return build_response(
-                data={"cleared": count}, state=session.state.state,
+                data={"cleared": count},
+                state=session.state.state,
             )
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
@@ -678,10 +718,13 @@ def register_inspection_tools(
                 return build_error_response(access_error, state=session.state.state)
 
             from ..session.snapshots import SnapshotManager
-            if not hasattr(session, '_snapshot_manager'):
-                session._snapshot_manager = SnapshotManager()
 
-            snap = await session._snapshot_manager.create(name, session)
+            snapshot_manager = getattr(session, "_snapshot_manager", None)
+            if snapshot_manager is None:
+                snapshot_manager = SnapshotManager()
+                setattr(session, "_snapshot_manager", snapshot_manager)
+
+            snap = await snapshot_manager.create(name, session)
             return build_response(
                 data={
                     "name": snap.name,
@@ -696,7 +739,9 @@ def register_inspection_tools(
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def diff_snapshots(name1: str, name2: str) -> dict:
         """Compare two snapshots and show variable differences.
 
@@ -705,7 +750,7 @@ def register_inspection_tools(
             name2: Second snapshot name (after state)
         """
         try:
-            mgr = getattr(session, '_snapshot_manager', None)
+            mgr = getattr(session, "_snapshot_manager", None)
             if mgr is None:
                 return build_error_response("No snapshots created.", state=session.state.state)
 
@@ -716,25 +761,31 @@ def register_inspection_tools(
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def list_snapshots() -> dict:
         """List all captured snapshots with metadata."""
         try:
-            mgr = getattr(session, '_snapshot_manager', None)
+            mgr = getattr(session, "_snapshot_manager", None)
             if mgr is None:
                 return build_response(
-                    data={"snapshots": []}, state=session.state.state,
+                    data={"snapshots": []},
+                    state=session.state.state,
                 )
             snapshots = mgr.list_snapshots()
             return build_response(
-                data={"snapshots": snapshots}, state=session.state.state,
+                data={"snapshots": snapshots},
+                state=session.state.state,
             )
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
     # ── Collection analyzer (FR-5) ───────────────────────────────────
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def analyze_collection(
         ctx: Context,
         variables_reference: int,
@@ -758,10 +809,12 @@ def register_inspection_tools(
 
             if sample_size <= 0:
                 return build_error_response(
-                    "sample_size must be greater than 0.", state=session.state.state,
+                    "sample_size must be greater than 0.",
+                    state=session.state.state,
                 )
 
             from ..session.state import DebugState
+
             if session.state.state != DebugState.STOPPED:
                 return build_error_response(
                     "Program must be stopped to analyze collections.",
@@ -782,7 +835,9 @@ def register_inspection_tools(
 
     # ── Object summarizer (FR-6) ─────────────────────────────────────
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def summarize_object(
         ctx: Context,
         variables_reference: int,
@@ -807,6 +862,7 @@ def register_inspection_tools(
                 return build_error_response(access_error, state=session.state.state)
 
             from ..session.state import DebugState
+
             if session.state.state != DebugState.STOPPED:
                 return build_error_response(
                     "Program must be stopped to summarize objects.",
@@ -816,16 +872,20 @@ def register_inspection_tools(
             clamped_depth = max(1, min(max_depth, 5))
             properties: list[dict[str, str]] = []
 
-            async def _walk(var_ref: int, prefix: str, depth: int, ancestors: frozenset[int]) -> None:
+            async def _walk(
+                var_ref: int, prefix: str, depth: int, ancestors: frozenset[int]
+            ) -> None:
                 if depth > clamped_depth or len(properties) >= max_properties:
                     return
                 if var_ref in ancestors:
                     # True cycle: this ref is on the current call stack
-                    properties.append({
-                        "path": prefix or "<root>",
-                        "value": "<circular ref>",
-                        "type": "",
-                    })
+                    properties.append(
+                        {
+                            "path": prefix or "<root>",
+                            "value": "<circular ref>",
+                            "type": "",
+                        }
+                    )
                     return
 
                 current_ancestors = ancestors | {var_ref}
@@ -836,11 +896,13 @@ def register_inspection_tools(
                         break
 
                     path = f"{prefix}.{v.name}" if prefix else v.name
-                    properties.append({
-                        "path": path,
-                        "value": v.value,
-                        "type": v.type or "",
-                    })
+                    properties.append(
+                        {
+                            "path": path,
+                            "value": v.value,
+                            "type": v.type or "",
+                        }
+                    )
 
                     # Recurse into nested objects
                     if v.variables_reference > 0 and depth < clamped_depth:

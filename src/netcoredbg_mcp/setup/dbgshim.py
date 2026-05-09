@@ -32,26 +32,26 @@ def _get_runtime_scan_paths() -> list[Path]:
     if system == "Windows":
         # Standard install: C:\Program Files\dotnet\...
         program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
-        paths.append(
-            Path(program_files) / "dotnet" / "shared" / "Microsoft.NETCore.App"
-        )
+        paths.append(Path(program_files) / "dotnet" / "shared" / "Microsoft.NETCore.App")
         # x86 on 64-bit Windows
         program_files_x86 = os.environ.get("ProgramFiles(x86)", "")
         if program_files_x86:
-            paths.append(
-                Path(program_files_x86) / "dotnet" / "shared" / "Microsoft.NETCore.App"
-            )
+            paths.append(Path(program_files_x86) / "dotnet" / "shared" / "Microsoft.NETCore.App")
     elif system == "Linux":
-        paths.extend([
-            Path("/usr/share/dotnet/shared/Microsoft.NETCore.App"),
-            Path("/usr/local/share/dotnet/shared/Microsoft.NETCore.App"),
-            Path.home() / ".dotnet" / "shared" / "Microsoft.NETCore.App",
-        ])
+        paths.extend(
+            [
+                Path("/usr/share/dotnet/shared/Microsoft.NETCore.App"),
+                Path("/usr/local/share/dotnet/shared/Microsoft.NETCore.App"),
+                Path.home() / ".dotnet" / "shared" / "Microsoft.NETCore.App",
+            ]
+        )
     elif system == "Darwin":
-        paths.extend([
-            Path("/usr/local/share/dotnet/shared/Microsoft.NETCore.App"),
-            Path.home() / ".dotnet" / "shared" / "Microsoft.NETCore.App",
-        ])
+        paths.extend(
+            [
+                Path("/usr/local/share/dotnet/shared/Microsoft.NETCore.App"),
+                Path.home() / ".dotnet" / "shared" / "Microsoft.NETCore.App",
+            ]
+        )
 
     # DOTNET_ROOT override (all platforms)
     dotnet_root = os.environ.get("DOTNET_ROOT")
@@ -194,9 +194,7 @@ def select_dbgshim(
             continue
 
         # Parse full version for sorting (higher = better)
-        version_tuple = tuple(
-            int(p) for p in version_parts if p.isdigit()
-        )
+        version_tuple = tuple(int(p) for p in version_parts if p.isdigit())
         candidates.append((version_tuple, dbgshim))
 
     if not candidates:
@@ -208,7 +206,8 @@ def select_dbgshim(
     best = candidates[0][1]
     logger.info(
         "Selected dbgshim %s for target %s",
-        best.parent.name, target_version,
+        best.parent.name,
+        target_version,
     )
     return best
 

@@ -10,10 +10,10 @@ from netcoredbg_mcp.dap.protocol import Commands
 from netcoredbg_mcp.session import DebugState, SessionManager
 from netcoredbg_mcp.session.state import OutputEntry
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def make_manager() -> SessionManager:
     """Create a SessionManager with a mocked DAPClient."""
@@ -41,6 +41,7 @@ def make_dap_response(
 # L2: stepInTargets — protocol.py
 # ---------------------------------------------------------------------------
 
+
 class TestStepInTargetsCommand:
     def test_command_value(self):
         assert Commands.STEP_IN_TARGETS == "stepInTargets"
@@ -50,27 +51,28 @@ class TestStepInTargetsCommand:
 # L2: stepInTargets — dap/client.py
 # ---------------------------------------------------------------------------
 
+
 class TestDAPClientStepInTargets:
     @pytest.mark.asyncio
     async def test_step_in_targets_sends_correct_request(self):
         """step_in_targets calls send_request with correct command and frameId."""
         from netcoredbg_mcp.dap.client import DAPClient
+
         client = DAPClient.__new__(DAPClient)
-        client.send_request = AsyncMock(return_value=make_dap_response(
-            body={"targets": [{"id": 1, "label": "Foo()"}]}
-        ))
+        client.send_request = AsyncMock(
+            return_value=make_dap_response(body={"targets": [{"id": 1, "label": "Foo()"}]})
+        )
         client._capabilities = {}
 
         response = await client.step_in_targets(frame_id=42)
-        client.send_request.assert_called_once_with(
-            Commands.STEP_IN_TARGETS, {"frameId": 42}
-        )
+        client.send_request.assert_called_once_with(Commands.STEP_IN_TARGETS, {"frameId": 42})
         assert response.success
 
     @pytest.mark.asyncio
     async def test_step_in_with_target_id(self):
         """step_in passes targetId when provided."""
         from netcoredbg_mcp.dap.client import DAPClient
+
         client = DAPClient.__new__(DAPClient)
         client.send_request = AsyncMock(return_value=make_dap_response())
         client._capabilities = {}
@@ -84,19 +86,19 @@ class TestDAPClientStepInTargets:
     async def test_step_in_without_target_id(self):
         """step_in omits targetId when not provided."""
         from netcoredbg_mcp.dap.client import DAPClient
+
         client = DAPClient.__new__(DAPClient)
         client.send_request = AsyncMock(return_value=make_dap_response())
         client._capabilities = {}
 
         await client.step_in(thread_id=1)
-        client.send_request.assert_called_once_with(
-            Commands.STEP_IN, {"threadId": 1}
-        )
+        client.send_request.assert_called_once_with(Commands.STEP_IN, {"threadId": 1})
 
 
 # ---------------------------------------------------------------------------
 # L2: stepInTargets — session/manager.py
 # ---------------------------------------------------------------------------
+
 
 class TestSessionManagerStepInTargets:
     @pytest.mark.asyncio
@@ -104,12 +106,16 @@ class TestSessionManagerStepInTargets:
         """get_step_in_targets returns list of {id, label} dicts."""
         mgr = make_manager()
         mgr._state.current_frame_id = 10
-        mgr._client.step_in_targets = AsyncMock(return_value=make_dap_response(
-            body={"targets": [
-                {"id": 1, "label": "Foo.Bar()"},
-                {"id": 2, "label": "Baz.Qux()"},
-            ]}
-        ))
+        mgr._client.step_in_targets = AsyncMock(
+            return_value=make_dap_response(
+                body={
+                    "targets": [
+                        {"id": 1, "label": "Foo.Bar()"},
+                        {"id": 2, "label": "Baz.Qux()"},
+                    ]
+                }
+            )
+        )
 
         targets = await mgr.get_step_in_targets()
         assert targets == [
@@ -122,9 +128,9 @@ class TestSessionManagerStepInTargets:
         """get_step_in_targets uses provided frame_id over current_frame_id."""
         mgr = make_manager()
         mgr._state.current_frame_id = 99
-        mgr._client.step_in_targets = AsyncMock(return_value=make_dap_response(
-            body={"targets": []}
-        ))
+        mgr._client.step_in_targets = AsyncMock(
+            return_value=make_dap_response(body={"targets": []})
+        )
 
         await mgr.get_step_in_targets(frame_id=5)
         mgr._client.step_in_targets.assert_called_once_with(5)
@@ -175,6 +181,7 @@ class TestSessionManagerStepInTargets:
 # L3: allThreadsContinued in _on_continued
 # ---------------------------------------------------------------------------
 
+
 class TestOnContinuedAllThreads:
     def test_on_continued_clears_thread_id_when_all_threads_continued(self):
         """_on_continued clears current_thread_id when allThreadsContinued=True."""
@@ -224,11 +231,13 @@ class TestOnContinuedAllThreads:
 # L5: Variable paging
 # ---------------------------------------------------------------------------
 
+
 class TestVariablePaging:
     @pytest.mark.asyncio
     async def test_variables_client_passes_filter(self):
         """DAPClient.variables passes filter to DAP."""
         from netcoredbg_mcp.dap.client import DAPClient
+
         client = DAPClient.__new__(DAPClient)
         client.send_request = AsyncMock(return_value=make_dap_response(body={"variables": []}))
 
@@ -241,6 +250,7 @@ class TestVariablePaging:
     async def test_variables_client_passes_paging(self):
         """DAPClient.variables passes start and count to DAP."""
         from netcoredbg_mcp.dap.client import DAPClient
+
         client = DAPClient.__new__(DAPClient)
         client.send_request = AsyncMock(return_value=make_dap_response(body={"variables": []}))
 
@@ -253,26 +263,21 @@ class TestVariablePaging:
     async def test_variables_client_omits_optional_params(self):
         """DAPClient.variables omits optional params when not provided."""
         from netcoredbg_mcp.dap.client import DAPClient
+
         client = DAPClient.__new__(DAPClient)
         client.send_request = AsyncMock(return_value=make_dap_response(body={"variables": []}))
 
         await client.variables(5)
-        client.send_request.assert_called_once_with(
-            Commands.VARIABLES, {"variablesReference": 5}
-        )
+        client.send_request.assert_called_once_with(Commands.VARIABLES, {"variablesReference": 5})
 
     @pytest.mark.asyncio
     async def test_session_get_variables_passes_paging(self):
         """SessionManager.get_variables passes filter/start/count to client."""
         mgr = make_manager()
-        mgr._client.variables = AsyncMock(
-            return_value=make_dap_response(body={"variables": []})
-        )
+        mgr._client.variables = AsyncMock(return_value=make_dap_response(body={"variables": []}))
 
         await mgr.get_variables(5, filter="named", start=0, count=10)
-        mgr._client.variables.assert_called_once_with(
-            5, filter="named", start=0, count=10
-        )
+        mgr._client.variables.assert_called_once_with(5, filter="named", start=0, count=10)
 
     @pytest.mark.asyncio
     async def test_session_get_variables_no_paging(self):
@@ -287,24 +292,27 @@ class TestVariablePaging:
         result = await mgr.get_variables(5)
         assert len(result) == 1
         assert result[0].name == "x"
-        mgr._client.variables.assert_called_once_with(
-            5, filter=None, start=None, count=None
-        )
+        mgr._client.variables.assert_called_once_with(5, filter=None, start=None, count=None)
 
 
 # ---------------------------------------------------------------------------
 # L6: Output variablesReference
 # ---------------------------------------------------------------------------
 
+
 class TestOutputVariablesReference:
     def test_on_output_stores_variables_reference(self):
         """_on_output stores variablesReference when present and > 0."""
         mgr = make_manager()
-        event = DAPEvent(seq=1, event="output", body={
-            "category": "console",
-            "output": "Object: {x=1}",
-            "variablesReference": 42,
-        })
+        event = DAPEvent(
+            seq=1,
+            event="output",
+            body={
+                "category": "console",
+                "output": "Object: {x=1}",
+                "variablesReference": 42,
+            },
+        )
 
         mgr._on_output(event)
 
@@ -316,11 +324,15 @@ class TestOutputVariablesReference:
     def test_on_output_omits_variables_reference_when_zero(self):
         """_on_output leaves variables_reference at 0 when field is 0."""
         mgr = make_manager()
-        event = DAPEvent(seq=1, event="output", body={
-            "category": "stdout",
-            "output": "Hello\n",
-            "variablesReference": 0,
-        })
+        event = DAPEvent(
+            seq=1,
+            event="output",
+            body={
+                "category": "stdout",
+                "output": "Hello\n",
+                "variablesReference": 0,
+            },
+        )
 
         mgr._on_output(event)
 
@@ -330,10 +342,14 @@ class TestOutputVariablesReference:
     def test_on_output_omits_variables_reference_when_absent(self):
         """_on_output leaves variables_reference at 0 when field is absent."""
         mgr = make_manager()
-        event = DAPEvent(seq=1, event="output", body={
-            "category": "stdout",
-            "output": "Hello\n",
-        })
+        event = DAPEvent(
+            seq=1,
+            event="output",
+            body={
+                "category": "stdout",
+                "output": "Hello\n",
+            },
+        )
 
         mgr._on_output(event)
 
@@ -355,6 +371,7 @@ class TestOutputVariablesReference:
 # MCP tool wrapper — get_step_in_targets response shape
 # ---------------------------------------------------------------------------
 
+
 class TestGetStepInTargetsMCPWrapper:
     """Test the response shape produced by the get_step_in_targets MCP tool wrapper.
 
@@ -371,9 +388,9 @@ class TestGetStepInTargetsMCPWrapper:
         mgr = make_manager()
         mgr._state.state = DebugState.STOPPED
         mgr._state.current_frame_id = 10
-        mgr._client.step_in_targets = AsyncMock(return_value=make_dap_response(
-            body={"targets": [{"id": 1, "label": "Foo()"}]}
-        ))
+        mgr._client.step_in_targets = AsyncMock(
+            return_value=make_dap_response(body={"targets": [{"id": 1, "label": "Foo()"}]})
+        )
 
         targets = await mgr.get_step_in_targets()
         response = build_response(data={"targets": targets}, state=mgr._state.state)

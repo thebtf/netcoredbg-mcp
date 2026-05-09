@@ -332,9 +332,7 @@ class TestGetDotnetCommand:
         policy = BuildPolicy(workspace_root=str(tmp_path))
 
         with pytest.raises(ValueError):
-            policy.get_dotnet_command(
-                BuildCommand.BUILD, str(project), extra_args=["--evil-flag"]
-            )
+            policy.get_dotnet_command(BuildCommand.BUILD, str(project), extra_args=["--evil-flag"])
 
 
 class TestWorktreeAndEnvPaths:

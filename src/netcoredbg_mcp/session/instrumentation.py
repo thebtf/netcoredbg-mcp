@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -15,14 +16,19 @@ MAX_TRACE_LOG_LINES = 20
 
 
 class _BreakpointRegistry(Protocol):
-    def get_for_file(self, file: str) -> list[Any]: ...
+    def get_for_file(self, file: str) -> Sequence[Any]: ...
     def _normalize_path(self, path: str) -> str: ...
 
 
 class _InstrumentationSession(Protocol):
-    breakpoints: _BreakpointRegistry
-    runtime_smoke: RuntimeSmokeSession
-    state: Any
+    @property
+    def breakpoints(self) -> _BreakpointRegistry: ...
+
+    @property
+    def runtime_smoke(self) -> RuntimeSmokeSession: ...
+
+    @property
+    def state(self) -> Any: ...
 
     async def add_breakpoint(
         self,
@@ -101,8 +107,7 @@ class InstrumentationGroupService:
             return self._fail("instrumentation group not found", group=name)
 
         breakpoint_refs = [
-            {**ref, "hit_count": self._breakpoint_hit_count(ref)}
-            for ref in record["breakpoints"]
+            {**ref, "hit_count": self._breakpoint_hit_count(ref)} for ref in record["breakpoints"]
         ]
         tracepoint_refs = [self._tracepoint_evidence(ref) for ref in record["tracepoints"]]
         hit_count = sum(int(ref["hit_count"]) for ref in breakpoint_refs)
@@ -186,6 +191,7 @@ class InstrumentationGroupService:
         line = int(spec["line"])
         expression = str(spec["expression"])
         manager = self._tracepoint_manager(create=True)
+        assert manager is not None
         tracepoint = manager.add(file, line, expression)
         try:
             bp = await self._session.add_breakpoint(file, line)
@@ -224,7 +230,7 @@ class InstrumentationGroupService:
         manager = getattr(self._session, "_tracepoint_manager", None)
         if manager is None and create:
             manager = TracepointManager()
-            self._session._tracepoint_manager = manager
+            setattr(self._session, "_tracepoint_manager", manager)
         return manager
 
     def _breakpoint_hit_count(self, ref: dict[str, Any]) -> int:
@@ -263,11 +269,13 @@ class InstrumentationGroupService:
         for ref in [*record["breakpoints"], *record["tracepoints"]]:
             for bp in self._session.breakpoints.get_for_file(str(ref["file"])):
                 if int(getattr(bp, "line", -1)) == int(ref["line"]):
-                    leaks.append({
-                        "kind": "breakpoint",
-                        "file": os.path.normpath(str(ref["file"])),
-                        "line": int(ref["line"]),
-                    })
+                    leaks.append(
+                        {
+                            "kind": "breakpoint",
+                            "file": os.path.normpath(str(ref["file"])),
+                            "line": int(ref["line"]),
+                        }
+                    )
                     break
         if manager is not None:
             tracepoints = manager.tracepoints
@@ -278,23 +286,31 @@ class InstrumentationGroupService:
 
     def _pass(self, reason: str, **payload: Any) -> InstrumentationResult:
         group = str(payload.get("group", ""))
-        evidence_refs = [
+        evidence_refs = (
+            [
+                {
+                    "kind": "instrumentation_group",
+                    "ref": f"group:{group}",
+                    "summary": reason,
+                }
+            ]
+            if group
+            else []
+        )
+        return InstrumentationResult(
             {
-                "kind": "instrumentation_group",
-                "ref": f"group:{group}",
-                "summary": reason,
+                "status": TerminalStatus.PASS.value,
+                "reason": reason,
+                **payload,
+                "evidence_refs": evidence_refs,
             }
-        ] if group else []
-        return InstrumentationResult({
-            "status": TerminalStatus.PASS.value,
-            "reason": reason,
-            **payload,
-            "evidence_refs": evidence_refs,
-        })
+        )
 
     def _fail(self, reason: str, **payload: Any) -> InstrumentationResult:
-        return InstrumentationResult({
-            "status": TerminalStatus.FAIL.value,
-            "reason": reason,
-            **payload,
-        })
+        return InstrumentationResult(
+            {
+                "status": TerminalStatus.FAIL.value,
+                "reason": reason,
+                **payload,
+            }
+        )

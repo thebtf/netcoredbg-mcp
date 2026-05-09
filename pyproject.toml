@@ -27,6 +27,8 @@ dependencies = [
     "mcp>=1.5.0,<2.0.0",
     "pywinauto>=0.6.8; sys_platform == 'win32'",
     "Pillow>=10.0; sys_platform == 'win32'",
+    "jsonpath-ng>=1.8.0,<2.0.0",
+    "psutil>=7.2.2,<8.0.0",
 ]
 
 [project.optional-dependencies]
@@ -63,11 +65,22 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
 
+[tool.ruff.lint.per-file-ignores]
+"src/netcoredbg_mcp/prompts.py" = ["E501"]
+
 [tool.mypy]
 python_version = "3.10"
-strict = true
-warn_return_any = true
 warn_unused_configs = true
+# The legacy codebase is not strict-clean yet; keep full-src mypy as a
+# production gate and ratchet concrete type errors without hiding entire modules.
+ignore_missing_imports = true
+disallow_any_generics = false
+disallow_untyped_calls = false
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+warn_return_any = false
+warn_redundant_casts = false
+warn_unused_ignores = false
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

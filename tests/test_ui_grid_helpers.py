@@ -122,8 +122,7 @@ def _make_flaui() -> FlaUIBackend:
 
 
 @pytest.mark.asyncio
-async def test_grid_helpers_return_visible_selected_and_range_evidence_without_mutating_selector(
-) -> None:
+async def test_grid_helpers_preserve_selector() -> None:
     backend = FakeGridBackend()
     selector = {"automation_id": "CueGrid"}
 
@@ -134,9 +133,7 @@ async def test_grid_helpers_return_visible_selected_and_range_evidence_without_m
 
     assert selector == {"automation_id": "CueGrid"}
     assert visible["visible_rows"][0]["automation_id"] == "Row_0"
-    assert selected["selected_rows"] == [
-        {"index": 1, "automation_id": "Row_1", "name": "B"}
-    ]
+    assert selected["selected_rows"] == [{"index": 1, "automation_id": "Row_1", "name": "B"}]
     assert selected_range["selected_range"] == {"start": 1, "end": 2}
     assert asserted_range["asserted"] is True
 
@@ -293,8 +290,7 @@ def test_bridge_grid_assertion_requires_exact_selected_range() -> None:
     assert "expected.All(selectedRows.Contains)" not in command
 
 
-def test_bridge_grid_rejects_invalid_control_type_and_prevalidates_selection_range(
-) -> None:
+def test_bridge_grid_rejects_invalid_control_type_and_prevalidates_selection_range() -> None:
     command = (PROJECT_ROOT / "bridge" / "Commands" / "GridCommands.cs").read_text(
         encoding="utf-8",
     )

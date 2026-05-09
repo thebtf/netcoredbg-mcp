@@ -30,15 +30,14 @@ def mock_netcoredbg_path():
 @dataclass
 class FakeSmokeSession:
     """Minimal shared fake for runtime smoke service tests."""
+
     breakpoints: dict[str, list[object]] = field(default_factory=dict)
     tracepoints: dict[str, object] = field(default_factory=dict)
     output_buffer: deque[object] = field(default_factory=deque)
     modules: list[object] = field(default_factory=list)
     loaded_sources: dict[str, object] = field(default_factory=dict)
     process_id: int | None = None
-    state: SimpleNamespace = field(
-        default_factory=lambda: SimpleNamespace(state="idle")
-    )
+    state: SimpleNamespace = field(default_factory=lambda: SimpleNamespace(state="idle"))
 
 
 @pytest.fixture
@@ -65,6 +64,33 @@ class CapturingMCP:
 def capturing_mcp() -> CapturingMCP:
     """Return an isolated tool-capturing MCP test double."""
     return CapturingMCP()
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--critical-only",
+        action="store_true",
+        default=False,
+        help="Run only tests marked with @pytest.mark.critical.",
+    )
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config,
+    items: list[pytest.Item],
+) -> None:
+    if not config.getoption("--critical-only"):
+        return
+    selected: list[pytest.Item] = []
+    deselected: list[pytest.Item] = []
+    for item in items:
+        if item.get_closest_marker("critical") is not None:
+            selected.append(item)
+        else:
+            deselected.append(item)
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+    items[:] = selected
 
 
 @pytest.fixture

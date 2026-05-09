@@ -56,9 +56,7 @@ class BuildManager:
         if key not in self._sessions:
             session = BuildSession(workspace_root)
             # Wire up global listeners
-            session.on_state_change(
-                lambda state: self._notify_listeners(workspace_root, state)
-            )
+            session.on_state_change(lambda state: self._notify_listeners(workspace_root, state))
             self._sessions[key] = session
         return self._sessions[key]
 
@@ -70,9 +68,7 @@ class BuildManager:
             except Exception:
                 logger.exception("Global build listener error")
 
-    def on_build_state_change(
-        self, listener: Callable[[str, BuildState], None]
-    ) -> None:
+    def on_build_state_change(self, listener: Callable[[str, BuildState], None]) -> None:
         """Register global build state change listener.
 
         Listener receives (workspace_path, new_state).
@@ -107,9 +103,7 @@ class BuildManager:
         if not os.path.isabs(project_path):
             project_path = os.path.join(workspace_root, project_path)
 
-        return await session.build(
-            project_path, command, configuration, extra_args, timeout
-        )
+        return await session.build(project_path, command, configuration, extra_args, timeout)
 
     async def pre_launch_build(
         self,
@@ -265,9 +259,7 @@ class BuildManager:
             "sessions": {
                 path: {
                     "state": session.state.value,
-                    "lastResult": (
-                        session.last_result.to_dict() if session.last_result else None
-                    ),
+                    "lastResult": (session.last_result.to_dict() if session.last_result else None),
                 }
                 for path, session in self._sessions.items()
             }

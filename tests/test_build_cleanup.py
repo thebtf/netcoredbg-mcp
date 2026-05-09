@@ -41,7 +41,9 @@ class TestKillProcessesInDirectoryWindows:
         with patch("os.name", "nt"):
             with patch("asyncio.create_subprocess_exec") as mock_exec:
                 mock_proc = AsyncMock()
-                mock_proc.communicate = AsyncMock(return_value=(b"Node,ExecutablePath,ProcessId\n", b""))
+                mock_proc.communicate = AsyncMock(
+                    return_value=(b"Node,ExecutablePath,ProcessId\n", b"")
+                )
                 mock_exec.return_value = mock_proc
 
                 result = await kill_processes_in_directory(str(tmp_path))
@@ -293,7 +295,7 @@ class TestCleanupForBuild:
                 mock_kill_dbg.return_value = 0
                 mock_kill_dir.return_value = 1
 
-                result = await cleanup_for_build(str(project))
+                await cleanup_for_build(str(project))
 
                 # Should scan both Debug and Release
                 assert mock_kill_dir.call_count >= 2
@@ -310,7 +312,7 @@ class TestCleanupForBuild:
                 mock_kill_dbg.return_value = 0
                 mock_kill_dir.return_value = 1
 
-                result = await cleanup_for_build(
+                await cleanup_for_build(
                     str(project),
                     configurations=["CustomConfig"],
                 )

@@ -24,6 +24,7 @@ from .utils.project import configure_project_root, get_project_root_sync
 #   by name with no runtime import cost.
 try:
     import anyio as _anyio
+
     _TRANSPORT_SHUTDOWN_ERRORS: tuple[type[BaseException], ...] = (
         BrokenPipeError,
         ConnectionResetError,
@@ -111,6 +112,7 @@ async def main() -> None:
     # Handle --setup: run wizard and exit (don't start MCP server)
     if getattr(args, "setup", False):
         from .setup.wizard import run_setup
+
         sys.exit(run_setup())
 
     # Capture CWD at startup (before any chdir)

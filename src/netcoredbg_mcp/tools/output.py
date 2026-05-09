@@ -2,12 +2,13 @@
 
 import logging
 import re
+from collections.abc import Iterable
 
 from mcp.server.fastmcp import FastMCP
 
-from ..session import SessionManager
-
 from ..response import build_error_response, build_response
+from ..session import SessionManager
+from ..session.state import OutputEntry
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,7 @@ def register_output_tools(
             category: Filter by category: "stdout", "stderr", or "console" (default: all)
         """
         try:
-            entries = session.state.output_buffer
+            entries: Iterable[OutputEntry] = session.state.output_buffer
             if category:
                 entries = [e for e in entries if e.category == category]
             output = "".join(e.text for e in entries)
@@ -47,9 +48,13 @@ def register_output_tools(
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def search_output(
-        pattern: str, context_lines: int = 2, category: str | None = None,
+        pattern: str,
+        context_lines: int = 2,
+        category: str | None = None,
     ) -> dict:
         """Search program output for a pattern (regex supported).
 
@@ -65,7 +70,7 @@ def register_output_tools(
             List of matches with line numbers and context
         """
         try:
-            entries = session.state.output_buffer
+            entries: Iterable[OutputEntry] = session.state.output_buffer
             if category:
                 entries = [e for e in entries if e.category == category]
             output = "".join(e.text for e in entries)
@@ -82,11 +87,13 @@ def register_output_tools(
                     start = max(0, i - context_lines)
                     end = min(len(lines), i + context_lines + 1)
                     context = lines[start:end]
-                    matches.append({
-                        "line_number": i + 1,
-                        "match": line,
-                        "context": context,
-                    })
+                    matches.append(
+                        {
+                            "line_number": i + 1,
+                            "match": line,
+                            "context": context,
+                        }
+                    )
 
             return build_response(
                 data={
@@ -99,7 +106,9 @@ def register_output_tools(
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def get_output_tail(lines: int = 50, category: str | None = None) -> dict:
         """Get the last N lines of program output.
 
@@ -111,7 +120,7 @@ def register_output_tools(
             category: Filter by category: "stdout", "stderr", or "console" (default: all)
         """
         try:
-            entries = session.state.output_buffer
+            entries: Iterable[OutputEntry] = session.state.output_buffer
             if category:
                 entries = [e for e in entries if e.category == category]
             output = "".join(e.text for e in entries)
@@ -128,7 +137,9 @@ def register_output_tools(
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
     async def get_build_diagnostics(include_warnings: bool = True) -> dict:
         """Get full build diagnostics including all warnings.
 

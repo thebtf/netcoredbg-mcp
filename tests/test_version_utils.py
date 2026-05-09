@@ -2,13 +2,11 @@
 
 import json
 import os
-import tempfile
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from netcoredbg_mcp.utils.version import (
-    VersionCompatibility,
     VersionInfo,
     check_version_compatibility,
     get_dbgshim_version,
@@ -285,9 +283,7 @@ class TestCheckVersionCompatibility:
         netcoredbg = tmp_path / "netcoredbg.exe"
         netcoredbg.touch()
 
-        with patch(
-            "netcoredbg_mcp.utils.version.get_dbgshim_version", return_value=None
-        ):
+        with patch("netcoredbg_mcp.utils.version.get_dbgshim_version", return_value=None):
             result = check_version_compatibility(str(program), str(netcoredbg))
 
         assert result.compatible is True

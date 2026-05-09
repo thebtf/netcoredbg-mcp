@@ -199,9 +199,7 @@ class BuildPolicy:
         Raises:
             ValueError: If path is invalid or outside all allowed scopes
         """
-        validated = self._validate_path(
-            project_path, allow_symlinks=False, context="project_path"
-        )
+        validated = self._validate_path(project_path, allow_symlinks=False, context="project_path")
 
         # Check 1: within workspace root
         if self._is_within(validated, self.workspace_root):
@@ -259,7 +257,7 @@ class BuildPolicy:
                     content = f.read().strip()
                 if content.startswith("gitdir: "):
                     real_git_dir = os.path.abspath(
-                        os.path.join(self.workspace_root, content[len("gitdir: "):])
+                        os.path.join(self.workspace_root, content[len("gitdir: ") :])
                     )
                     git_dir = os.path.dirname(os.path.dirname(real_git_dir))
 
@@ -294,9 +292,7 @@ class BuildPolicy:
         Raises:
             ValueError: If path is invalid or not in allowed directories
         """
-        validated = self._validate_path(
-            output_path, allow_symlinks=False, context="output_path"
-        )
+        validated = self._validate_path(output_path, allow_symlinks=False, context="output_path")
 
         # Must be within workspace, explicit allowed directories, worktrees, or env paths
         allowed_roots = (
@@ -315,9 +311,7 @@ class BuildPolicy:
 
         raise ValueError(f"Output path not in allowed directories: {output_path}")
 
-    def validate_arguments(
-        self, args: list[str]
-    ) -> list[str]:
+    def validate_arguments(self, args: list[str]) -> list[str]:
         """Validate and filter build arguments.
 
         Args:

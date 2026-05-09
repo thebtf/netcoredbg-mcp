@@ -14,12 +14,14 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Known process names that might hold locks on .NET build outputs
-KNOWN_DEBUGGER_PROCESSES = frozenset({
-    "netcoredbg",
-    "netcoredbg.exe",
-    "dotnet",
-    "dotnet.exe",
-})
+KNOWN_DEBUGGER_PROCESSES = frozenset(
+    {
+        "netcoredbg",
+        "netcoredbg.exe",
+        "dotnet",
+        "dotnet.exe",
+    }
+)
 
 
 async def kill_processes_in_directory(
@@ -180,7 +182,10 @@ async def kill_debugger_processes(
         try:
             if os.name == "nt":
                 proc = await asyncio.create_subprocess_exec(
-                    "taskkill", "/F", "/IM", "netcoredbg.exe",
+                    "taskkill",
+                    "/F",
+                    "/IM",
+                    "netcoredbg.exe",
                     stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
@@ -190,7 +195,9 @@ async def kill_debugger_processes(
                 killed += 1
             else:
                 proc = await asyncio.create_subprocess_exec(
-                    "pkill", "-9", "netcoredbg",
+                    "pkill",
+                    "-9",
+                    "netcoredbg",
                     stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
@@ -205,7 +212,10 @@ async def kill_debugger_processes(
         try:
             if os.name == "nt":
                 proc = await asyncio.create_subprocess_exec(
-                    "taskkill", "/F", "/PID", str(netcoredbg_pid),
+                    "taskkill",
+                    "/F",
+                    "/PID",
+                    str(netcoredbg_pid),
                     stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
@@ -224,7 +234,10 @@ async def kill_debugger_processes(
         try:
             if os.name == "nt":
                 proc = await asyncio.create_subprocess_exec(
-                    "taskkill", "/F", "/IM", program_name,
+                    "taskkill",
+                    "/F",
+                    "/IM",
+                    program_name,
                     stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
@@ -234,7 +247,10 @@ async def kill_debugger_processes(
                 logger.info(f"Killed processes: {program_name}")
             else:
                 proc = await asyncio.create_subprocess_exec(
-                    "pkill", "-9", "-f", program_name,
+                    "pkill",
+                    "-9",
+                    "-f",
+                    program_name,
                     stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,

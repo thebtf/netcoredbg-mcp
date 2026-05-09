@@ -13,7 +13,6 @@ import os
 import shutil
 import subprocess
 import sys
-from pathlib import Path
 
 from .home import get_home_dir
 
@@ -31,7 +30,9 @@ def _check_dotnet_sdk() -> bool:
     try:
         result = subprocess.run(
             ["dotnet", "--version"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
             stdin=subprocess.DEVNULL,
         )
         if result.returncode == 0:
@@ -47,8 +48,6 @@ def _check_dotnet_sdk() -> bool:
 def _setup_netcoredbg() -> str | None:
     """Find or download netcoredbg."""
     _print("\n[2/5] Setting up netcoredbg debugger...")
-
-    from .netcoredbg import find_netcoredbg
 
     # Check if already available (env, home, PATH)
     env_path = os.environ.get("NETCOREDBG_PATH")
@@ -78,7 +77,9 @@ def _setup_netcoredbg() -> str | None:
     def progress(downloaded: int, total: int) -> None:
         if total > 0:
             pct = min(100, int(downloaded / total * 100))
-            _print(f"\r  Downloading... {pct}%", )
+            _print(
+                f"\r  Downloading... {pct}%",
+            )
 
     result = download_netcoredbg(progress_callback=progress)
     if result:

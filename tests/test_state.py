@@ -1,6 +1,5 @@
 """Tests for debug session state management."""
 
-
 from netcoredbg_mcp.session.state import (
     Breakpoint,
     BreakpointRegistry,
@@ -248,6 +247,7 @@ class TestBreakpointRegistry:
 
         # Should find with backslashes (on Windows)
         import os
+
         if os.name == "nt":
             breakpoints = registry.get_for_file("C:\\test\\file.cs")
             assert len(breakpoints) == 1
@@ -267,9 +267,7 @@ class TestBreakpointRegistry:
         """Test adding function breakpoint with same name updates existing."""
         registry = BreakpointRegistry()
         registry.add_function_breakpoint(FunctionBreakpoint(name="Foo.Bar"))
-        registry.add_function_breakpoint(
-            FunctionBreakpoint(name="Foo.Bar", condition="x > 5")
-        )
+        registry.add_function_breakpoint(FunctionBreakpoint(name="Foo.Bar", condition="x > 5"))
 
         bps = registry.get_function_breakpoints()
         assert len(bps) == 1

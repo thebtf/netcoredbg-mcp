@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from netcoredbg_mcp.session.state import DebugState, StackFrame, Variable
 from netcoredbg_mcp.session.snapshots import MAX_SNAPSHOTS, SnapshotManager
+from netcoredbg_mcp.session.state import DebugState, StackFrame, Variable
 
 
 @pytest.fixture
@@ -15,25 +15,31 @@ def manager():
     """Create a mock SessionManager in STOPPED state."""
     with patch("netcoredbg_mcp.session.manager.DAPClient"):
         from netcoredbg_mcp.session import SessionManager
+
         m = SessionManager()
         m._state.state = DebugState.STOPPED
         m._state.current_thread_id = 1
         m._state.current_frame_id = 1
-        m.get_stack_trace = AsyncMock(return_value=[
-            StackFrame(id=1, name="Main", source="Program.cs", line=42, column=1),
-        ])
-        m.get_scopes = AsyncMock(return_value=[
-            {"name": "Locals", "variablesReference": 100},
-        ])
-        m.get_variables = AsyncMock(return_value=[
-            Variable(name="x", value="42", type="int", variables_reference=0),
-            Variable(name="name", value="hello", type="string", variables_reference=0),
-        ])
+        m.get_stack_trace = AsyncMock(
+            return_value=[
+                StackFrame(id=1, name="Main", source="Program.cs", line=42, column=1),
+            ]
+        )
+        m.get_scopes = AsyncMock(
+            return_value=[
+                {"name": "Locals", "variablesReference": 100},
+            ]
+        )
+        m.get_variables = AsyncMock(
+            return_value=[
+                Variable(name="x", value="42", type="int", variables_reference=0),
+                Variable(name="name", value="hello", type="string", variables_reference=0),
+            ]
+        )
         return m
 
 
 class TestSnapshotCreate:
-
     @pytest.mark.asyncio
     async def test_create_captures_variables(self, manager):
         mgr = SnapshotManager()
@@ -60,18 +66,19 @@ class TestSnapshotCreate:
 
 
 class TestSnapshotDiff:
-
     @pytest.mark.asyncio
     async def test_diff_detects_changes(self, manager):
         mgr = SnapshotManager()
         await mgr.create("before", manager)
 
         # Change variable values for second snapshot
-        manager.get_variables = AsyncMock(return_value=[
-            Variable(name="x", value="100", type="int", variables_reference=0),
-            Variable(name="name", value="hello", type="string", variables_reference=0),
-            Variable(name="y", value="new", type="string", variables_reference=0),
-        ])
+        manager.get_variables = AsyncMock(
+            return_value=[
+                Variable(name="x", value="100", type="int", variables_reference=0),
+                Variable(name="name", value="hello", type="string", variables_reference=0),
+                Variable(name="y", value="new", type="string", variables_reference=0),
+            ]
+        )
         await mgr.create("after", manager)
 
         diff = mgr.diff("before", "after")
@@ -88,9 +95,11 @@ class TestSnapshotDiff:
         mgr = SnapshotManager()
         await mgr.create("before", manager)
 
-        manager.get_variables = AsyncMock(return_value=[
-            Variable(name="x", value="42", type="int", variables_reference=0),
-        ])
+        manager.get_variables = AsyncMock(
+            return_value=[
+                Variable(name="x", value="42", type="int", variables_reference=0),
+            ]
+        )
         await mgr.create("after", manager)
 
         diff = mgr.diff("before", "after")
@@ -104,7 +113,6 @@ class TestSnapshotDiff:
 
 
 class TestSnapshotFIFO:
-
     @pytest.mark.asyncio
     async def test_evicts_oldest_at_max(self, manager):
         mgr = SnapshotManager()
@@ -119,7 +127,6 @@ class TestSnapshotFIFO:
 
 
 class TestSnapshotList:
-
     @pytest.mark.asyncio
     async def test_list_returns_metadata(self, manager):
         mgr = SnapshotManager()
