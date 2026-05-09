@@ -58,13 +58,18 @@ def capture_metric_snapshot(context: Any) -> MetricSnapshot:
         )
 
     private_bytes = getattr(memory_info, "private", None)
+    private_bytes_status = (
+        _blocked_field("private bytes unavailable")
+        if private_bytes is None
+        else {"status": "PASS"}
+    )
     return MetricSnapshot(
         timestamp=timestamp,
         working_set_mb=_bytes_to_mb(getattr(memory_info, "rss", None)),
         private_bytes_mb=_bytes_to_mb(private_bytes),
         field_status={
             "working_set_delta_mb": {"status": "PASS"},
-            "private_bytes_delta_mb": {"status": "PASS"},
+            "private_bytes_delta_mb": private_bytes_status,
         },
     )
 
@@ -149,19 +154,21 @@ def evaluate_metric_thresholds(
         value = metrics.get(metric_name)
         if not isinstance(value, (int, float)):
             continue
-        if "max" in rule and value > rule["max"]:
+        max_threshold = rule.get("max")
+        min_threshold = rule.get("min")
+        if isinstance(max_threshold, (int, float)) and value > max_threshold:
             failures.append({
                 "kind": "metric_threshold",
                 "metric": metric_name,
                 "value": value,
-                "threshold": {"max": rule["max"]},
+                "threshold": {"max": max_threshold},
             })
-        if "min" in rule and value < rule["min"]:
+        if isinstance(min_threshold, (int, float)) and value < min_threshold:
             failures.append({
                 "kind": "metric_threshold",
                 "metric": metric_name,
                 "value": value,
-                "threshold": {"min": rule["min"]},
+                "threshold": {"min": min_threshold},
             })
     return failures
 

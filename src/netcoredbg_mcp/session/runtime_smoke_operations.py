@@ -175,6 +175,8 @@ def ui_operation_adapters(
         result = send_keys(keys)
         if asyncio.iscoroutine(result) or isinstance(result, Awaitable):
             result = await result
+        if _is_non_pass_result(result):
+            return result
         return {"status": "PASS", "keys": keys, "result": result}
 
     async def text_assert(**args: Any) -> dict[str, Any]:
@@ -299,6 +301,8 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
             result = await launch_service(**launch_args)
         except Exception as exc:
             return _adapter_blocked("launch", str(exc))
+        if _is_non_pass_result(result):
+            return result
         return {"status": "PASS", "reason": "launch completed", "result": result}
 
     async def debug_evaluate(**args: Any) -> dict[str, Any]:
@@ -324,6 +328,8 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
             }
         if not isinstance(result, dict):
             return {"status": "PASS", "value": result}
+        if _is_non_pass_result(result):
+            return result
         if "error" in result:
             return {
                 "status": "BLOCKED",
@@ -351,6 +357,8 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
                 result = await result
         except Exception as exc:
             return {"status": "FAIL", "mode": mode, "reason": str(exc)}
+        if _is_non_pass_result(result):
+            return result
         return {"status": "PASS", "mode": mode, "result": result}
 
     async def process_registry_count(**_: Any) -> dict[str, Any]:
@@ -475,6 +483,13 @@ def _is_selector_miss(result: Any) -> bool:
         return True
     reason = str(result.get("reason") or result.get("error") or "").lower()
     return "not found" in reason or "no element" in reason or "selector" in reason
+
+
+def _is_non_pass_result(result: Any) -> bool:
+    if not isinstance(result, dict) or "status" not in result:
+        return False
+    status = str(result.get("status", "PASS")).upper()
+    return status not in {"PASS", "OK", "SUCCESS"}
 
 
 def _is_backend_success(result: Any) -> bool:

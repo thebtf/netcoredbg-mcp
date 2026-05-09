@@ -16,7 +16,26 @@ async def handle_file_json(
     kind = "file.json"
     raw_path = str(probe.get("path") or "")
     jsonpath = str(probe.get("jsonpath") or probe.get("path_expr") or "")
-    validate_path = getattr(context.session, "validate_path", None)
+    if not raw_path:
+        return blocked_probe(
+            probe,
+            kind=kind,
+            reason="missing required path",
+            requested={"path": raw_path},
+            accepted={"path": "non-empty file path"},
+            next_step="Provide a file path for the file.json probe.",
+        )
+    if not jsonpath:
+        return blocked_probe(
+            probe,
+            kind=kind,
+            reason="missing required jsonpath",
+            requested={"jsonpath": jsonpath},
+            accepted={"jsonpath": "non-empty JSONPath expression"},
+            next_step="Provide jsonpath or path_expr for the file.json probe.",
+        )
+    session = getattr(context, "session", None)
+    validate_path = getattr(session, "validate_path", None)
     try:
         resolved_path = (
             str(validate_path(raw_path, must_exist=False))

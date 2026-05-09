@@ -639,6 +639,71 @@ async def test_ui_get_property_propagates_backend_failure_status() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ui_send_keys_focused_preserves_backend_failure_status() -> None:
+    class FakeBackend:
+        async def send_keys(self, keys: str) -> dict[str, Any]:
+            return {
+                "status": "BLOCKED",
+                "reason": "focused key input rejected",
+                "keys": keys,
+            }
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.send_keys_focused"](
+        keys="{SPACE}",
+    )
+
+    assert result == {
+        "status": "BLOCKED",
+        "reason": "focused key input rejected",
+        "keys": "{SPACE}",
+    }
+
+
+@pytest.mark.asyncio
+async def test_session_operation_adapters_preserve_non_pass_statuses() -> None:
+    class FailingSession(FakeRuntimeSmokeSession):
+        async def launch(self, **_: Any) -> dict[str, Any]:
+            self.launch_calls += 1
+            return {"status": "BLOCKED", "reason": "program missing"}
+
+        async def evaluate(self, expression: str) -> dict[str, Any]:
+            return {
+                "status": "FAIL",
+                "reason": "expression failed",
+                "expression": expression,
+            }
+
+        async def stop(self) -> dict[str, Any]:
+            self.stop_calls += 1
+            return {"status": "BLOCKED", "reason": "debuggee is busy"}
+
+    class FakeBackend:
+        pass
+
+    session = FailingSession()
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    adapters = ui_operation_adapters(backend_provider, session=session)
+
+    launch = await adapters["launch"](program="missing.dll")
+    evaluate = await adapters["debug.evaluate"](expression="Settings.Mode")
+    stop = await adapters["debug.stop"](mode="graceful")
+
+    assert launch == {"status": "BLOCKED", "reason": "program missing"}
+    assert evaluate == {
+        "status": "FAIL",
+        "reason": "expression failed",
+        "expression": "Settings.Mode",
+    }
+    assert stop == {"status": "BLOCKED", "reason": "debuggee is busy"}
+
+
+@pytest.mark.asyncio
 async def test_fixture_restore_returns_structured_failure_for_io_errors(
     tmp_path: Path,
 ) -> None:

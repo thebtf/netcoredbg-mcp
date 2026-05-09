@@ -100,6 +100,28 @@ async def test_process_metric_probe_blocks_invalid_pid(
 
 
 @pytest.mark.asyncio
+async def test_process_metric_probe_preserves_explicit_zero_pid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_psutil = FakePsutil()
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+    session = ProcessMetricSession()
+
+    result = await runner(session).run(one_probe_plan({
+        "kind": "process.metric",
+        "name": "process_memory",
+        "pid": 0,
+    }))
+
+    probe = after_probe(result)
+    assert result["status"] == "BLOCKED"
+    assert probe["status"] == "BLOCKED"
+    assert probe["reason"] == "invalid pid: pid must be positive"
+    assert probe["requested"]["pid"] == 0
+    assert fake_psutil.pids == []
+
+
+@pytest.mark.asyncio
 async def test_process_metric_probe_blocks_inaccessible_process(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -114,6 +115,15 @@ async def test_v2_metric_threshold_breach_flips_case_to_fail() -> None:
     ]
 
 
+def test_v2_metric_thresholds_ignore_non_numeric_min_max() -> None:
+    failures = metrics_module.evaluate_metric_thresholds(
+        {"action_latency_ms": 410},
+        {"action_latency_ms": {"max": "250", "min": None}},
+    )
+
+    assert failures == []
+
+
 @pytest.mark.asyncio
 async def test_v2_metrics_without_thresholds_do_not_flip_case_status() -> None:
     clock = ManualClock()
@@ -144,6 +154,49 @@ async def test_v2_metrics_mark_memory_fields_blocked_when_psutil_missing(
     assert metrics["private_bytes_delta_mb"] is None
     assert metrics["field_status"]["working_set_delta_mb"]["status"] == "BLOCKED"
     assert metrics["field_status"]["private_bytes_delta_mb"]["status"] == "BLOCKED"
+
+
+@pytest.mark.asyncio
+async def test_v2_metrics_mark_private_bytes_blocked_when_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.samples = [
+                SimpleNamespace(rss=100 * 1024 * 1024),
+                SimpleNamespace(rss=112 * 1024 * 1024),
+            ]
+
+        def memory_info(self) -> Any:
+            return self.samples.pop(0)
+
+    class FakePsutil:
+        def __init__(self) -> None:
+            self.process = FakeProcess()
+            self.process_calls: list[int] = []
+
+        def Process(self, pid: int) -> FakeProcess:  # noqa: N802 - mirrors psutil API
+            self.process_calls.append(pid)
+            return self.process
+
+    fake_psutil = FakePsutil()
+    monkeypatch.setattr(metrics_module, "_load_psutil", lambda: fake_psutil)
+    clock = ManualClock()
+    session = MetricSmokeSession(clock)
+    session.process_id = 4242
+
+    result = await _runner(session, clock).run(_plan())
+
+    metrics = result["cases"][0]["metrics"]
+    assert fake_psutil.process_calls == [4242, 4242]
+    assert metrics["partial"] is True
+    assert metrics["working_set_delta_mb"] == 12.0
+    assert metrics["private_bytes_delta_mb"] is None
+    assert metrics["field_status"]["working_set_delta_mb"]["status"] == "PASS"
+    assert metrics["field_status"]["private_bytes_delta_mb"] == {
+        "status": "BLOCKED",
+        "reason": "private bytes unavailable",
+    }
 
 
 @pytest.mark.asyncio

@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+
+from netcoredbg_mcp.session.runtime_smoke_v2.probes.file_json import handle_file_json
 
 from .helpers import ProbeSmokeSession, after_probe, one_probe_plan, runner
 
@@ -64,6 +67,64 @@ async def test_file_json_probe_blocks_path_outside_project(tmp_path: Path) -> No
     assert probe["reason"] == "path outside project scope"
     assert probe["requested"]["path"] == str(outside_path)
     assert "project-relative" in probe["next_step"]
+
+
+@pytest.mark.asyncio
+async def test_file_json_probe_blocks_missing_required_path() -> None:
+    session = ProbeSmokeSession()
+
+    result = await runner(session).run(one_probe_plan({
+        "kind": "file.json",
+        "name": "missing_path",
+        "jsonpath": "$.value",
+    }))
+
+    probe = after_probe(result)
+    assert result["status"] == "BLOCKED"
+    assert probe["status"] == "BLOCKED"
+    assert probe["reason"] == "missing required path"
+    assert probe["accepted"]["path"] == "non-empty file path"
+
+
+@pytest.mark.asyncio
+async def test_file_json_probe_blocks_missing_required_jsonpath(tmp_path: Path) -> None:
+    path = tmp_path / "diagnostics.json"
+    path.write_text(json.dumps({"value": True}), encoding="utf-8")
+    session = FileJsonProbeSession(tmp_path)
+
+    result = await runner(session).run(one_probe_plan({
+        "kind": "file.json",
+        "name": "missing_jsonpath",
+        "path": str(path),
+    }))
+
+    probe = after_probe(result)
+    assert result["status"] == "BLOCKED"
+    assert probe["status"] == "BLOCKED"
+    assert probe["reason"] == "missing required jsonpath"
+    assert probe["accepted"]["jsonpath"] == "non-empty JSONPath expression"
+
+
+@pytest.mark.asyncio
+async def test_file_json_probe_without_session_uses_resolved_path(tmp_path: Path) -> None:
+    path = tmp_path / "diagnostics.json"
+    path.write_text(json.dumps({"value": True}), encoding="utf-8")
+
+    result = await handle_file_json(
+        {
+            "kind": "file.json",
+            "name": "sessionless_file",
+            "path": str(path),
+            "jsonpath": "$.value",
+            "expected": True,
+        },
+        SimpleNamespace(),
+        phase="after",
+    )
+
+    assert result["status"] == "PASS"
+    assert result["value"] is True
+    assert result["resolved_path"] == str(path.resolve())
 
 
 @pytest.mark.asyncio

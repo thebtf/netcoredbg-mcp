@@ -25,7 +25,7 @@ async def handle_process_metric(
             probe,
             kind=kind,
             reason="psutil is not installed",
-            requested={"pid": probe.get("pid") or probe.get("process_id")},
+            requested={"pid": _requested_pid(probe)},
             accepted={"dependency": "psutil>=7.2.2,<8.0.0"},
             next_step="install psutil>=7.2.2 before running process.metric probes",
         )
@@ -37,7 +37,7 @@ async def handle_process_metric(
             probe,
             kind=kind,
             reason=f"invalid pid: {exc}",
-            requested={"pid": probe.get("pid") or probe.get("process_id")},
+            requested={"pid": _requested_pid(probe)},
             accepted={"pid": "positive integer"},
             next_step="Provide a valid pid/process_id or ensure the session exposes one.",
         )
@@ -46,7 +46,7 @@ async def handle_process_metric(
             probe,
             kind=kind,
             reason="target process id unavailable",
-            requested={"pid": probe.get("pid") or probe.get("process_id")},
+            requested={"pid": _requested_pid(probe)},
             accepted={"pid": "positive integer"},
             next_step="Provide pid/process_id or launch a session that exposes process_id.",
         )
@@ -105,7 +105,7 @@ async def handle_process_metric(
 
 
 def _resolve_pid(probe: dict[str, Any], session: Any) -> int | None:
-    raw_pid = probe.get("pid") or probe.get("process_id")
+    raw_pid = _requested_pid(probe)
     if raw_pid is None:
         raw_pid = getattr(session, "process_id", None)
     if raw_pid is None:
@@ -117,6 +117,12 @@ def _resolve_pid(probe: dict[str, Any], session: Any) -> int | None:
     if pid <= 0:
         raise ValueError("pid must be positive")
     return pid
+
+
+def _requested_pid(probe: dict[str, Any]) -> Any:
+    if "pid" in probe and probe.get("pid") is not None:
+        return probe.get("pid")
+    return probe.get("process_id")
 
 
 def _memory_sample(process: Any) -> dict[str, float | None]:
