@@ -1071,7 +1071,8 @@ async def test_runtime_smoke_tools_register_freshness_and_runner(capturing_mcp) 
     assert non_object["data"]["reason"] == "invalid plan schema"
     assert non_object["data"]["validation_errors"] == ["plan must be an object"]
     assert non_object["data"]["accepted_schema_values"] == [
-        "netcoredbg.runtime_smoke.v1"
+        "netcoredbg.runtime_smoke.v1",
+        "netcoredbg.runtime_smoke.v2",
     ]
     assert "debug.output_checkpoint" in non_object["data"]["accepted_operation_names"]
     assert non_object["data"]["completed_steps"] == []

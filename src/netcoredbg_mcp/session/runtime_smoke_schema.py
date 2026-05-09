@@ -6,8 +6,9 @@ from dataclasses import dataclass
 from typing import Any
 
 SCHEMA_VERSION = "netcoredbg.runtime_smoke.v1"
+SCHEMA_VERSION_V2 = "netcoredbg.runtime_smoke.v2"
 
-ACCEPTED_SCHEMA_VALUES = (SCHEMA_VERSION,)
+ACCEPTED_SCHEMA_VALUES = (SCHEMA_VERSION, SCHEMA_VERSION_V2)
 ACCEPTED_TOP_LEVEL_KEYS = (
     "schema",
     "name",
@@ -24,6 +25,14 @@ ACCEPTED_TOP_LEVEL_KEYS = (
     "budgets",
     "stop_on_first_failed_assertion",
 )
+V2_ONLY_TOP_LEVEL_KEYS = (
+    "baseline",
+    "generate",
+    "cases",
+    "metrics_thresholds",
+)
+ACCEPTED_TOP_LEVEL_KEYS_V2 = ACCEPTED_TOP_LEVEL_KEYS + V2_ONLY_TOP_LEVEL_KEYS
+V1_EXECUTION_KEYS = ("steps", "actions", "assertions", "evidence")
 
 
 @dataclass(frozen=True)
@@ -90,10 +99,10 @@ OPERATION_SCHEMAS: dict[str, OperationSchema] = {
 }
 
 
-def schema_help_fields() -> dict[str, Any]:
+def schema_help_fields(plan: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return additive schema-help fields for invalid-plan diagnostics."""
 
-    return {
+    fields: dict[str, Any] = {
         "accepted_schema_values": list(ACCEPTED_SCHEMA_VALUES),
         "accepted_top_level_keys": list(ACCEPTED_TOP_LEVEL_KEYS),
         "accepted_operation_names": sorted(OPERATION_SCHEMAS),
@@ -106,6 +115,9 @@ def schema_help_fields() -> dict[str, Any]:
             for op_name, schema in sorted(OPERATION_SCHEMAS.items())
         },
     }
+    if _is_v2_shaped(plan):
+        fields["accepted_top_level_keys_v2"] = list(ACCEPTED_TOP_LEVEL_KEYS_V2)
+    return fields
 
 
 def validate_plan(plan: Any) -> list[str]:
@@ -126,11 +138,25 @@ def validate_plan(plan: Any) -> list[str]:
 
 
 def _validate_top_level_keys(plan: dict[str, Any], errors: list[str]) -> None:
-    accepted = set(ACCEPTED_TOP_LEVEL_KEYS)
+    accepted_keys = (
+        ACCEPTED_TOP_LEVEL_KEYS_V2
+        if plan.get("schema") == SCHEMA_VERSION_V2
+        else ACCEPTED_TOP_LEVEL_KEYS
+    )
+    accepted = set(accepted_keys)
     for key in plan:
         if key not in accepted:
-            expected = ", ".join(ACCEPTED_TOP_LEVEL_KEYS)
+            expected = ", ".join(accepted_keys)
             errors.append(f"unexpected top-level key: {key}; expected one of: {expected}")
+
+
+def _is_v2_shaped(plan: dict[str, Any] | None) -> bool:
+    if not isinstance(plan, dict):
+        return False
+    return (
+        plan.get("schema") == SCHEMA_VERSION_V2
+        or bool(set(plan).intersection(V2_ONLY_TOP_LEVEL_KEYS))
+    )
 
 
 def normalize_plan_step(raw: Any, default_name: str | None = None) -> dict[str, Any]:
@@ -153,13 +179,25 @@ def normalize_plan_step(raw: Any, default_name: str | None = None) -> dict[str, 
 
 def _validate_schema_value(plan: dict[str, Any], errors: list[str]) -> None:
     schema = plan.get("schema")
+    v2_keys = sorted(set(plan).intersection(V2_ONLY_TOP_LEVEL_KEYS))
+    if schema is None and v2_keys:
+        errors.append(
+            "schema is required when using v2-only keys: " + ", ".join(v2_keys)
+        )
     if schema is not None and schema not in ACCEPTED_SCHEMA_VALUES:
         accepted = ", ".join(ACCEPTED_SCHEMA_VALUES)
         errors.append(f"schema must be one of: {accepted}")
+    if schema == SCHEMA_VERSION_V2:
+        mixed_keys = sorted(set(plan).intersection(V1_EXECUTION_KEYS))
+        if mixed_keys and v2_keys:
+            errors.append(
+                "v2 plans cannot mix legacy execution keys with v2 case keys: "
+                + ", ".join(mixed_keys)
+            )
 
 
 def _validate_list_fields(plan: dict[str, Any], errors: list[str]) -> None:
-    for field_name in ("actions", "assertions", "evidence", "steps"):
+    for field_name in ("actions", "assertions", "evidence", "steps", "cases"):
         if field_name in plan and not isinstance(plan[field_name], list):
             errors.append(f"{field_name} must be a list")
 
@@ -171,6 +209,12 @@ def _validate_object_fields(plan: dict[str, Any], errors: list[str]) -> None:
         errors.append("launch must be an object")
     if "freshness" in plan and not isinstance(plan["freshness"], dict):
         errors.append("freshness must be an object")
+    if "baseline" in plan and not isinstance(plan["baseline"], dict):
+        errors.append("baseline must be an object")
+    if "generate" in plan and not isinstance(plan["generate"], dict):
+        errors.append("generate must be an object")
+    if "metrics_thresholds" in plan and not isinstance(plan["metrics_thresholds"], dict):
+        errors.append("metrics_thresholds must be an object")
     for field_name in ("cleanup", "teardown"):
         if field_name in plan and not isinstance(plan[field_name], dict):
             errors.append(f"{field_name} must be an object")

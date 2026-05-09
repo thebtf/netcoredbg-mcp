@@ -51,7 +51,10 @@ async def test_invalid_plan_returns_self_describing_schema_help_before_launch() 
     )
     assert session.launch_calls == 0
 
-    assert result["accepted_schema_values"] == ["netcoredbg.runtime_smoke.v1"]
+    assert result["accepted_schema_values"] == [
+        "netcoredbg.runtime_smoke.v1",
+        "netcoredbg.runtime_smoke.v2",
+    ]
     assert "steps" in result["accepted_top_level_keys"]
     assert "debug.output_checkpoint" in result["accepted_operation_names"]
     assert "debug.output_assert_since" in result["accepted_operation_names"]

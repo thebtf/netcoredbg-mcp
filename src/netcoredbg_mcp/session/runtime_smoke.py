@@ -14,10 +14,12 @@ from typing import Any
 
 from .freshness import DebugFreshnessVerifier
 from .runtime_smoke_schema import (
+    SCHEMA_VERSION_V2,
     normalize_plan_step,
     schema_help_fields,
     validate_plan,
 )
+from .runtime_smoke_v2.result_envelope import finalize_result
 from .state import EvidenceRef
 
 TERMINAL_STATUSES = {"PASS", "FAIL", "BLOCKED", "IMPASSE"}
@@ -142,9 +144,17 @@ class RuntimeSmokeRunner:
                 cleanup=cleanup,
                 extra={
                     "validation_errors": validation_errors,
-                    **schema_help_fields(),
+                    **schema_help_fields(plan if isinstance(plan, dict) else None),
                 },
             )
+
+        if isinstance(plan, dict) and plan.get("schema") == SCHEMA_VERSION_V2:
+            from .runtime_smoke_v2 import RuntimeStateOracleRunner
+
+            return await RuntimeStateOracleRunner(
+                self._session,
+                clock=self._clock,
+            ).run(plan)
 
         budgets = _budgets(plan)
         action_count = 0
@@ -554,25 +564,18 @@ class RuntimeSmokeRunner:
         cleanup: dict[str, Any],
         extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        terminal_status = status
-        terminal_reason = reason
-        if cleanup["status"] == "FAIL" and terminal_status not in {"FAIL", "IMPASSE"}:
-            terminal_status = "FAIL"
-            terminal_reason = "teardown failed"
-        result = {
-            "status": terminal_status,
-            "reason": terminal_reason,
-            "elapsed_ms": int(max(0.0, self._clock() - started) * 1000),
-            "action_count": action_count,
-            "completed_steps": completed_steps,
-            "failed_assertions": failed_assertions,
-            "cleanup": cleanup,
-            "evidence_refs": _collect_evidence_refs(completed_steps),
-        }
-        if extra:
-            result.update(extra)
-        result["compact"] = compact_runtime_smoke_result(result)
-        return result
+        return finalize_result(
+            status=status,
+            reason=reason,
+            elapsed_ms=int(max(0.0, self._clock() - started) * 1000),
+            action_count=action_count,
+            completed_steps=completed_steps,
+            failed_assertions=failed_assertions,
+            cleanup=cleanup,
+            evidence_refs=_collect_evidence_refs(completed_steps),
+            compact_builder=compact_runtime_smoke_result,
+            extra=extra,
+        )
 
 
 def _clear_windows_hidden_attribute(target: Path) -> int | None:
