@@ -754,6 +754,35 @@ async def test_session_operation_adapters_preserve_non_pass_statuses() -> None:
 
 
 @pytest.mark.asyncio
+async def test_process_registry_count_blocks_registry_errors() -> None:
+    class FailingRegistry:
+        def reap_stale(self) -> None:
+            raise RuntimeError("registry unavailable")
+
+        def status(self) -> list[dict[str, Any]]:
+            return [{"alive": True}]
+
+    class RegistrySession(FakeRuntimeSmokeSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.process_registry = FailingRegistry()
+
+    class FakeBackend:
+        pass
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    adapters = ui_operation_adapters(backend_provider, session=RegistrySession())
+
+    result = await adapters["process.registry.count"]()
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "registry unavailable"
+    assert result["requested"] == {"adapter": "process.registry.count"}
+
+
+@pytest.mark.asyncio
 async def test_fixture_restore_returns_structured_failure_for_io_errors(
     tmp_path: Path,
 ) -> None:

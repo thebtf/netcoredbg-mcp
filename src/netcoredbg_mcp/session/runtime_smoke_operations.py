@@ -368,10 +368,14 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
                 "process.registry.count",
                 "process registry service unavailable",
             )
-        registry.reap_stale()
+        try:
+            registry.reap_stale()
+            status = registry.status()
+        except Exception as exc:
+            return _adapter_blocked("process.registry.count", str(exc))
         alive = [
             entry
-            for entry in registry.status()
+            for entry in status
             if bool(entry.get("alive"))
         ]
         return {"status": "PASS", "count": len(alive), "alive": alive}
