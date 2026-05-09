@@ -27,6 +27,8 @@ dependencies = [
     "mcp>=1.5.0,<2.0.0",
     "pywinauto>=0.6.8; sys_platform == 'win32'",
     "Pillow>=10.0; sys_platform == 'win32'",
+    "jsonpath-ng>=1.8.0,<2.0.0",
+    "psutil>=7.2.2,<8.0.0",
 ]
 
 [project.optional-dependencies]
