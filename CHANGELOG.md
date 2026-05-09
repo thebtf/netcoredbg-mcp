@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-05-10
+
+### Added
+- Runtime smoke v2 state-oracle plans via `netcoredbg.runtime_smoke.v2`,
+  including baseline setup, case transitions, before/after probes, diffs,
+  cleanup aggregation, compact result envelopes, and schema dispatch through
+  the existing `run_runtime_smoke` tool.
+- V2 probes, actions, and templates for UI property/text/grid checks, debug
+  evaluation, tracepoints, output assertions, JSONPath file assertions, process
+  metrics, key-sequence actions, and matrix-generated A/B cases.
+- Release-gate coverage for the v2 state oracle, including critical tests,
+  WPF/Avalonia fixture scenarios, manual smoke inventory entries, and runnable
+  JSON examples under `docs/examples/`.
+
+### Changed
+- Runtime smoke adapters now preserve actionable `BLOCKED` evidence for
+  selector misses, bridge availability failures, process-registry failures, and
+  unavailable metric fields instead of reporting false PASS results.
+- Full-project static analysis and type checking are now ratcheted clean for
+  the release branch.
+
+### Fixed
+- UI adapter bridge exceptions from `ui.get_property`, `ui.find_element`, and
+  `ui.set_focus` are converted into structured runtime-smoke `BLOCKED` results
+  instead of crashing the smoke runner.
+
 ## [0.13.1] - 2026-05-07
 
 ### Fixed

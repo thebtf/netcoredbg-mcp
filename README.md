@@ -14,7 +14,7 @@ set breakpoints, step through code, inspect variables, evaluate expressions, rea
 debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
 and Avalonia windows without opening an IDE.
 
-**103 MCP tools · 8 prompts · 4 resources · 870 collected tests · release v0.13.1**
+**103 MCP tools · 8 prompts · 4 resources · 968 collected tests · release v0.14.0**
 
 ## Quick Links
 
@@ -23,19 +23,19 @@ and Avalonia windows without opening an IDE.
 - **Reference:** [Available Tools](#available-tools) · [Resources](#mcp-resources) · [Prompts](#mcp-prompts) · [Architecture](#architecture-overview)
 - **Project:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## What's New in v0.13.1
+## What's New in v0.14.0
 
-- **Hardened WPF one-call smoke** — `run_runtime_smoke` now connects UI
-  automation eagerly after launch and keeps bounded cleanup evidence for the
-  15-step WPF fixture workflow.
-- **More reliable DataGrid evidence** — WPF grid rows merge structured
-  `GridPattern` cells with descendant text fallback, and short grid retry
-  timeouts no longer sleep longer than requested.
-- **Stable window and cleanup behavior** — primary-window selection uses a
-  deterministic tie-breaker, and Windows file-attribute restoration fails fast
-  instead of silently hiding WinAPI errors.
-- **Release playbook coverage** — customer-mode verification now explicitly
-  includes WPF one-call runtime smoke and Avalonia fixture compatibility.
+- **Runtime smoke v2 state oracle** — `run_runtime_smoke` now accepts
+  `netcoredbg.runtime_smoke.v2` plans with baseline setup, case transitions,
+  before/after probes, diffs, cleanup aggregation, and compact evidence.
+- **Probe and template expansion** — v2 adds UI property/text/grid probes,
+  debug evaluation, tracepoints, output checks, JSONPath file assertions,
+  process metrics, key-sequence actions, and generated A/B cases.
+- **Release-gated fixture coverage** — critical tests and manual smoke entries
+  now cover WPF and Avalonia state-oracle scenarios with runnable JSON examples.
+- **Adapter failure hardening** — bridge and process-registry failures now
+  return structured `BLOCKED` evidence instead of crashing the smoke runner or
+  producing false PASS results.
 
 ## Highlights
 
