@@ -51,6 +51,8 @@ async def execute_case(
         "after": after,
         "diff": diff,
     }
+    if "rendered_from" in case:
+        result["rendered_from"] = dict(case["rendered_from"])
     if blocked is not None:
         result["blocked"] = blocked
     return result, action_count

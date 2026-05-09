@@ -11,6 +11,7 @@ from ..runtime_smoke_schema import (
 from .actions import ActionContext, accepted_action_kinds
 from .baseline import execute_baseline
 from .case_executor import execute_case
+from .generate import expand_generated_cases
 from .probe_dispatcher import probe_path
 from .probes import accepted_probe_kinds
 from .result_envelope import finalize_result
@@ -43,7 +44,11 @@ class RuntimeStateOracleRunner:
     async def run(self, plan: dict[str, Any]) -> dict[str, Any]:
         started = self._clock()
         cleanup = {"status": "PASS", "attempted": [], "failures": []}
-        validation_errors = _validate_v2_plan(plan)
+        cases, generated_case_count, generation_errors = _cases_for_execution(plan)
+        validation_errors = [
+            *generation_errors,
+            *_validate_v2_plan(plan, cases=cases),
+        ]
         if validation_errors:
             return self._finalize(
                 status="FAIL",
@@ -51,17 +56,19 @@ class RuntimeStateOracleRunner:
                 started=started,
                 action_count=0,
                 cases=[],
+                generated_case_count=generated_case_count,
                 baseline=None,
                 cleanup=cleanup,
                 extra={"validation_errors": validation_errors},
             )
-        if not plan.get("cases"):
+        if not cases:
             return self._finalize(
                 status="BLOCKED",
                 reason="runtime smoke v2 plan has no cases to execute",
                 started=started,
                 action_count=0,
                 cases=[],
+                generated_case_count=generated_case_count,
                 baseline=None,
                 cleanup=cleanup,
                 extra={
@@ -91,6 +98,7 @@ class RuntimeStateOracleRunner:
                 started=started,
                 action_count=0,
                 cases=[],
+                generated_case_count=generated_case_count,
                 baseline=baseline_result,
                 cleanup=cleanup,
                 extra={"blocked": blocked_payload} if blocked_payload else None,
@@ -102,7 +110,7 @@ class RuntimeStateOracleRunner:
         terminal_reason = "runtime smoke v2 scenario passed"
         blocked_payload: dict[str, Any] | None = None
 
-        for case in plan.get("cases", []):
+        for case in cases:
             case_result, executed_actions = await execute_case(case, context)
             action_count += executed_actions
             case_results.append(case_result)
@@ -122,6 +130,7 @@ class RuntimeStateOracleRunner:
             started=started,
             action_count=action_count,
             cases=case_results,
+            generated_case_count=generated_case_count,
             baseline=baseline_result,
             cleanup=cleanup,
             extra={"blocked": blocked_payload} if blocked_payload else None,
@@ -135,12 +144,13 @@ class RuntimeStateOracleRunner:
         started: float,
         action_count: int,
         cases: list[dict[str, Any]],
+        generated_case_count: int,
         baseline: dict[str, Any] | None,
         cleanup: dict[str, Any],
         extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         result_extra = {
-            "generated_case_count": 0,
+            "generated_case_count": generated_case_count,
             "cases": cases,
             "baseline": baseline,
             "metrics_thresholds": None,
@@ -165,17 +175,35 @@ class RuntimeStateOracleRunner:
         )
 
 
-def _validate_v2_plan(plan: dict[str, Any]) -> list[str]:
+def _cases_for_execution(
+    plan: dict[str, Any],
+) -> tuple[list[dict[str, Any]], int, list[str]]:
+    raw_cases = plan.get("cases", [])
+    cases = [dict(case) for case in raw_cases] if isinstance(raw_cases, list) else []
+    generated_cases, generation_errors = expand_generated_cases(plan)
+    return [*cases, *generated_cases], len(generated_cases), generation_errors
+
+
+def _validate_v2_plan(
+    plan: dict[str, Any],
+    *,
+    cases: list[dict[str, Any]] | None = None,
+) -> list[str]:
     errors: list[str] = []
-    cases = plan.get("cases", [])
+    cases = plan.get("cases", []) if cases is None else cases
     if not isinstance(cases, list):
         return ["cases must be a list"]
+    seen_case_ids: set[str] = set()
     known_actions = set(accepted_action_kinds())
     known_probes = set(accepted_probe_kinds())
     for case_index, case in enumerate(cases):
         if not isinstance(case, dict):
             errors.append(f"cases[{case_index}] must be an object")
             continue
+        case_id = str(case.get("id") or "")
+        if case_id in seen_case_ids:
+            errors.append(f"duplicate case id: {case_id}")
+        seen_case_ids.add(case_id)
         transitions = case.get("transitions", [])
         if not isinstance(transitions, list):
             errors.append(f"cases[{case_index}].transitions must be a list")
