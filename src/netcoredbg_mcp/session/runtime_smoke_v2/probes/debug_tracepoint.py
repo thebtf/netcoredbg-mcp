@@ -30,16 +30,20 @@ async def handle_debug_tracepoint(
             next_step="Attach a tracepoint-capable debug adapter before running this probe.",
         )
 
+    line, line_error = _optional_int(probe.get("line"), field_name="line")
+    if line_error is not None:
+        return _invalid_numeric_probe(probe, kind=kind, reason=line_error)
+
     result = await context.call_adapter(
         kind,
         file=str(probe.get("file") or ""),
-        line=int(probe.get("line") or 0),
+        line=line,
         expression=str(probe.get("expression") or ""),
         phase=phase,
     )
     status = str(result.get("status", "PASS"))
     value = {
-        "hit_count": int(result.get("hit_count", 0) or 0),
+        "hit_count": _coerce_int(result.get("hit_count"), default=0),
         "logs": list(result.get("logs") or []),
     }
     output = {
@@ -54,10 +58,52 @@ async def handle_debug_tracepoint(
     if ref:
         output["evidence_ref"] = ref
     if "expected_hit_count" in probe:
-        expected = int(probe["expected_hit_count"])
+        expected, expected_error = _required_int(
+            probe["expected_hit_count"],
+            field_name="expected_hit_count",
+        )
+        if expected_error is not None:
+            output["status"] = "FAIL"
+            output["reason"] = expected_error
+            return output
         output["expected"] = {"hit_count": expected}
         if phase == "after" and status == "PASS" and value["hit_count"] != expected:
             output["status"] = "FAIL"
             output["reason"] = "tracepoint hit count did not match"
         return output
     return attach_expected_and_status(output, probe=probe, phase=phase, value=value)
+
+
+def _optional_int(value: Any, *, field_name: str) -> tuple[int, str | None]:
+    if value in (None, ""):
+        return 0, None
+    return _required_int(value, field_name=field_name)
+
+
+def _required_int(value: Any, *, field_name: str) -> tuple[int, str | None]:
+    try:
+        return int(value), None
+    except (TypeError, ValueError):
+        return 0, f"invalid {field_name}"
+
+
+def _coerce_int(value: Any, *, default: int) -> int:
+    try:
+        return int(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _invalid_numeric_probe(
+    probe: dict[str, Any],
+    *,
+    kind: str,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "name": probe_name(probe, kind),
+        "kind": kind,
+        "status": "FAIL",
+        "reason": reason,
+        "value": None,
+    }

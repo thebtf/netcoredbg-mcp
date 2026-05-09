@@ -73,6 +73,27 @@ def test_setting_row_effect_template_supports_realize_rows() -> None:
     }
 
 
+def test_setting_row_effect_template_normalizes_scalar_columns() -> None:
+    generated, errors = expand_generated_cases({
+        "generate": {
+            "template": "setting-ab-row-effect",
+            "matrix": [
+                {
+                    "id": "media_enabled",
+                    "control": "mediaToggle",
+                    "value": True,
+                    "row_index": 750,
+                    "grid": "mediaGrid",
+                    "columns": "Title",
+                }
+            ],
+        }
+    })
+
+    assert errors == []
+    assert generated[0]["transitions"][0]["probes"][1]["columns"] == ["Title"]
+
+
 def test_radio_group_template_asserts_siblings_by_default() -> None:
     generated, errors = expand_generated_cases({
         "generate": {
@@ -102,6 +123,30 @@ def test_radio_group_template_asserts_siblings_by_default() -> None:
     assert [probe["expected"] for probe in probes] == ["generic", True, False, False]
 
 
+def test_radio_group_template_uses_target_as_debug_expected_value() -> None:
+    generated, errors = expand_generated_cases({
+        "generate": {
+            "template": "radio-group-set",
+            "matrix": [
+                {
+                    "id": "mode_scanning",
+                    "value": "generic",
+                    "target": "scanning",
+                    "expression": "ViewModel.Mode",
+                    "controls": [
+                        {"value": "generic", "automation_id": "checkBoxGeneric"},
+                        {"value": "scanning", "automation_id": "checkBoxScanning"},
+                    ],
+                }
+            ],
+        }
+    })
+
+    assert errors == []
+    probes = generated[0]["transitions"][0]["probes"]
+    assert probes[0]["expected"] == "scanning"
+
+
 def test_placeholder_substituter_rejects_unknown_without_recursive_rendering() -> None:
     assert render_template_value("case-{id}-{value}", {"id": "a", "value": True}) == (
         "case-a-true"
@@ -111,3 +156,8 @@ def test_placeholder_substituter_rejects_unknown_without_recursive_rendering() -
     )
     with pytest.raises(TemplateRenderError, match="unknown placeholder"):
         render_template_value("{missing}", {"id": "a"})
+
+
+def test_placeholder_substituter_wraps_malformed_template() -> None:
+    with pytest.raises(TemplateRenderError, match="malformed template"):
+        render_template_value("{broken", {"id": "a"})

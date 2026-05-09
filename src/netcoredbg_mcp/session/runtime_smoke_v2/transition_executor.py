@@ -73,6 +73,7 @@ async def execute_transition(
 
     status = _status_from_records([*before_results, *after_results, settle])
     reason = _reason_from_records([*after_results, *before_results, settle])
+    blocked_record = _find_blocked_record([*before_results, *after_results])
     return (
         {
             "id": transition.get("id"),
@@ -85,7 +86,7 @@ async def execute_transition(
             "after": after,
             "diff": diff,
             "probes": {"before": before_results, "after": after_results},
-            **({"blocked": _blocked_from_record(settle)} if status == "BLOCKED" else {}),
+            **({"blocked": _blocked_from_record(blocked_record)} if status == "BLOCKED" else {}),
         },
         action_count,
     )
@@ -187,3 +188,10 @@ def _blocked_from_record(record: dict[str, Any]) -> dict[str, Any]:
         "accepted": dict(record.get("accepted") or {}),
         "next_step": str(record.get("next_step") or "Inspect the blocked transition."),
     }
+
+
+def _find_blocked_record(records: list[dict[str, Any]]) -> dict[str, Any]:
+    for record in records:
+        if record.get("status") == "BLOCKED":
+            return record
+    return {}

@@ -26,8 +26,7 @@ async def handle_debug_evaluate(
             result = evaluate(expression)
             if inspect.isawaitable(result):
                 result = await result
-            if not isinstance(result, dict):
-                result = {"status": "PASS", "value": result}
+    result = _normalize_evaluate_result(result)
     status = str(result.get("status", "PASS"))
     value = result.get("value")
     expected = probe.get("expected")
@@ -46,3 +45,20 @@ async def handle_debug_evaluate(
     if status == "BLOCKED":
         output["reason"] = result.get("reason", "debug evaluation blocked")
     return output
+
+
+def _normalize_evaluate_result(result: Any) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        return {"status": "PASS", "value": result}
+    normalized = dict(result)
+    if "status" not in normalized:
+        if "error" in normalized:
+            normalized["status"] = "BLOCKED"
+            normalized.setdefault("reason", str(normalized["error"]))
+        else:
+            normalized["status"] = "PASS"
+    elif str(normalized["status"]).upper() in {"OK", "SUCCESS"}:
+        normalized["status"] = "PASS"
+    if "value" not in normalized:
+        normalized["value"] = normalized.get("result")
+    return normalized

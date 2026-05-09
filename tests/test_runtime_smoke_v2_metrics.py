@@ -144,3 +144,31 @@ async def test_v2_metrics_mark_memory_fields_blocked_when_psutil_missing(
     assert metrics["private_bytes_delta_mb"] is None
     assert metrics["field_status"]["working_set_delta_mb"]["status"] == "BLOCKED"
     assert metrics["field_status"]["private_bytes_delta_mb"]["status"] == "BLOCKED"
+
+
+@pytest.mark.asyncio
+async def test_v2_metrics_do_not_sample_orchestrator_without_target_pid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakePsutil:
+        def __init__(self) -> None:
+            self.process_calls: list[int] = []
+
+        def Process(self, pid: int) -> Any:  # noqa: N802 - mirrors psutil API
+            self.process_calls.append(pid)
+            raise AssertionError("Process should not be sampled without target pid")
+
+    fake_psutil = FakePsutil()
+    monkeypatch.setattr(metrics_module, "_load_psutil", lambda: fake_psutil)
+    clock = ManualClock()
+    session = MetricSmokeSession(clock)
+
+    result = await _runner(session, clock).run(_plan())
+
+    metrics = result["cases"][0]["metrics"]
+    assert fake_psutil.process_calls == []
+    assert metrics["partial"] is True
+    assert metrics["field_status"]["working_set_delta_mb"] == {
+        "status": "BLOCKED",
+        "reason": "target process id unavailable",
+    }

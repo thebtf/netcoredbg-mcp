@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -23,10 +23,10 @@ class ActionContext:
         adapter = self.service_adapters.get(name)
         if adapter is None:
             blocked = build_blocked(
-                reason="ui adapter not available",
+                reason="service adapter not available",
                 requested={"adapter": name},
                 accepted={"adapter_names": sorted(self.service_adapters)},
-                next_step="Connect a UI backend that exposes the requested route.",
+                next_step="Connect a service adapter that exposes the requested route.",
             )
             return {"status": "BLOCKED", **blocked}
         result = adapter(**kwargs)
@@ -67,7 +67,13 @@ async def dispatch_action(
 
 async def _handle_ui_invoke(action: dict[str, Any], context: ActionContext) -> dict[str, Any]:
     started = context.clock()
-    selector = dict(action.get("selector") or {})
+    selector, blocked = _selector_from_action(action)
+    if blocked is not None:
+        return {
+            **blocked,
+            "duration_ms": context.elapsed_ms(started),
+            "route": "invoke",
+        }
     result = await context.call_adapter("ui.invoke", selector=selector)
     return _action_result(
         status=result.get("status", "PASS"),
@@ -80,7 +86,13 @@ async def _handle_ui_invoke(action: dict[str, Any], context: ActionContext) -> d
 
 async def _handle_ui_click(action: dict[str, Any], context: ActionContext) -> dict[str, Any]:
     started = context.clock()
-    selector = dict(action.get("selector") or {})
+    selector, blocked = _selector_from_action(action)
+    if blocked is not None:
+        return {
+            **blocked,
+            "duration_ms": context.elapsed_ms(started),
+            "route": "click",
+        }
     result = await context.call_adapter("ui.click", selector=selector)
     return _action_result(
         status=result.get("status", "PASS"),
@@ -99,6 +111,23 @@ def _action_result(**payload: Any) -> dict[str, Any]:
             if key in result:
                 action[key] = result[key]
     return action
+
+
+def _selector_from_action(
+    action: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    raw_selector = action.get("selector")
+    if raw_selector is None:
+        return {}, None
+    if not isinstance(raw_selector, Mapping):
+        blocked = build_blocked(
+            reason="invalid selector payload",
+            requested={"selector": raw_selector},
+            accepted={"selector_type": "object"},
+            next_step="Provide selector as an object.",
+        )
+        return {}, {"status": "BLOCKED", **blocked}
+    return dict(raw_selector), None
 
 
 register_action("ui.click", _handle_ui_click)

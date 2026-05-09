@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner, RuntimeSmokeSession
+from netcoredbg_mcp.session.runtime_smoke_v2.probe_dispatcher import probe_path
 
 
 class DispatcherSmokeSession:
@@ -57,3 +58,8 @@ async def test_missing_schema_with_v2_only_keys_returns_schema_help() -> None:
         "netcoredbg.runtime_smoke.v1",
         "netcoredbg.runtime_smoke.v2",
     ]
+
+
+def test_probe_path_uses_kind_without_duplicating_missing_name() -> None:
+    assert probe_path({"kind": "ui.grid"}) == "ui.grid"
+    assert probe_path({"kind": "ui.grid", "name": "row_effect"}) == "ui.grid.row_effect"

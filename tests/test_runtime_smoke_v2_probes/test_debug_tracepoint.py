@@ -81,3 +81,46 @@ async def test_debug_tracepoint_probe_blocks_when_execution_is_unavailable() -> 
     assert probe["reason"] == "probe execution not available"
     assert probe["accepted"]["probe_kinds"]
     assert probe["next_step"]
+
+
+@pytest.mark.asyncio
+async def test_debug_tracepoint_probe_rejects_invalid_numeric_fields() -> None:
+    session = TracepointProbeSession()
+    session.tracepoint_results.extend([
+        {"status": "PASS", "hit_count": 0, "logs": []},
+        {"status": "PASS", "hit_count": 0, "logs": []},
+    ])
+
+    invalid_line = await runner(
+        session,
+        {"debug.tracepoint": session.tracepoint_probe},
+    ).run(one_probe_plan({
+        "kind": "debug.tracepoint",
+        "name": "bad_line",
+        "file": "SettingsViewModel.cs",
+        "line": "not-a-line",
+        "expression": "Mode.SpellCheckInput",
+    }))
+
+    line_probe = after_probe(invalid_line)
+    assert invalid_line["status"] == "FAIL"
+    assert line_probe["status"] == "FAIL"
+    assert line_probe["reason"] == "invalid line"
+    assert session.calls == [("ui.invoke", {"automation_id": "ToggleSetting"})]
+
+    invalid_expected = await runner(
+        session,
+        {"debug.tracepoint": session.tracepoint_probe},
+    ).run(one_probe_plan({
+        "kind": "debug.tracepoint",
+        "name": "bad_expected",
+        "file": "SettingsViewModel.cs",
+        "line": 42,
+        "expression": "Mode.SpellCheckInput",
+        "expected_hit_count": "not-a-count",
+    }))
+
+    expected_probe = after_probe(invalid_expected)
+    assert invalid_expected["status"] == "FAIL"
+    assert expected_probe["status"] == "FAIL"
+    assert expected_probe["reason"] == "invalid expected_hit_count"

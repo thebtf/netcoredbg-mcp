@@ -35,7 +35,11 @@ def _render_string(template: str, record: dict[str, Any]) -> Any:
 
     rendered = []
     formatter = Formatter()
-    for literal, field_name, format_spec, conversion in formatter.parse(template):
+    try:
+        parsed = list(formatter.parse(template))
+    except ValueError as exc:
+        raise TemplateRenderError(f"malformed template {template!r}: {exc}") from exc
+    for literal, field_name, format_spec, conversion in parsed:
         rendered.append(literal)
         if field_name is None:
             continue

@@ -18,7 +18,7 @@ async def handle_ui_property(
         selector=selector,
         property_name=property_name,
     )
-    if result.get("status") != "PASS" or result.get("found") is False:
+    if result.get("found") is False:
         blocked = build_blocked(
             reason="selector not found",
             requested={"selector": selector, "property": property_name},
@@ -32,6 +32,20 @@ async def handle_ui_property(
             "value": None,
             **blocked,
         }
+    result_status = str(result.get("status", "PASS"))
+    if result_status != "PASS":
+        status = result_status
+        output = {
+            "name": str(probe.get("name") or property_name or "ui.property"),
+            "kind": "ui.property",
+            "status": status,
+            "value": result.get("value"),
+            "reason": _failure_reason(result),
+        }
+        for key in ("requested", "accepted", "next_step"):
+            if key in result:
+                output[key] = result[key]
+        return output
 
     status = str(result.get("status", "PASS"))
     value = result.get("value")
@@ -49,3 +63,12 @@ async def handle_ui_property(
     if status == "FAIL":
         output["reason"] = result.get("reason", "expected property value did not match")
     return output
+
+
+def _failure_reason(result: dict[str, Any]) -> str:
+    return str(
+        result.get("reason")
+        or result.get("error")
+        or result.get("message")
+        or f"ui.get_property returned status {result.get('status')}"
+    )

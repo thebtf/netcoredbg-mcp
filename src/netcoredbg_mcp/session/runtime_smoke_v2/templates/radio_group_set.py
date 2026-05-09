@@ -28,7 +28,7 @@ def render_radio_group_set(
             "kind": "debug.evaluate",
             "name": "selected_value",
             "expression": expression,
-            "expected": record.get("value"),
+            "expected": target_value,
         },
         {
             "kind": "ui.property",

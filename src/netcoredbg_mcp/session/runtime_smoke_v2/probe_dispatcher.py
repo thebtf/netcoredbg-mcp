@@ -32,7 +32,12 @@ class ProbeContext:
 
 def probe_path(probe: dict[str, Any]) -> str:
     kind = str(probe.get("kind") or "")
-    name = str(probe.get("name") or kind)
+    name = probe.get("name")
+    if name is None:
+        return kind
+    name = str(name)
+    if not name:
+        return kind
     return f"{kind}.{name}"
 
 

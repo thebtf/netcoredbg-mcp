@@ -109,6 +109,8 @@ def ui_operation_adapters(
             result = await backend.extract_text(**_selector_kwargs(selector))
             if _is_selector_miss(result):
                 return _selector_blocked(selector, result=result)
+            if not _is_backend_success(result):
+                return _backend_failure_result(result, operation="ui.get_property")
             return {
                 "status": "PASS",
                 "property": property_name,
@@ -119,6 +121,8 @@ def ui_operation_adapters(
         result = await backend.find_element(**_selector_kwargs(selector))
         if _is_selector_miss(result):
             return _selector_blocked(selector, result=result)
+        if not _is_backend_success(result):
+            return _backend_failure_result(result, operation="ui.get_property")
         property_keys = {
             "automationid": "automationId",
             "automation_id": "automationId",
@@ -236,13 +240,17 @@ def ui_operation_adapters(
             primary_error = str(result.get("reason") or result)
         except Exception as exc:
             if fallback is None:
-                return _selector_blocked(
-                    selector,
-                    result={
-                        "status": "BLOCKED",
-                        "reason": str(exc),
-                    },
-                )
+                result = {"status": "BLOCKED", "reason": str(exc)}
+                if _is_selector_miss(result):
+                    return _selector_blocked(selector, result=result)
+                return {
+                    "status": "BLOCKED",
+                    "reason": str(exc),
+                    "requested": {"selector": selector},
+                    "accepted": {"backend": "connected UI backend supporting ui.invoke"},
+                    "next_step": "Inspect UI backend or bridge transport diagnostics.",
+                    "result": result,
+                }
             primary_error = str(exc)
 
         result = await _invoke_fallback_key_sequence(
@@ -364,7 +372,10 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
         validate_path = getattr(session, "validate_path", None)
         if validate_path is None:
             return _adapter_blocked("fixture.restore", "path validation service unavailable")
-        target_path = str(validate_path(str(args.get("path") or ""), must_exist=False))
+        try:
+            target_path = str(validate_path(str(args.get("path") or ""), must_exist=False))
+        except ValueError as exc:
+            return _adapter_blocked("fixture.restore", str(exc))
         baseline_file = args.get("baseline_file")
         content = args.get("baseline_text")
         source = "baseline_text"
@@ -375,8 +386,14 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
                     "fixture.restore",
                     "fixture restore requires baseline_text or baseline_file",
                 )
-            source_path = str(validate_path(str(baseline_file), must_exist=True))
-            content = Path(source_path).read_text(encoding="utf-8")
+            try:
+                source_path = str(validate_path(str(baseline_file), must_exist=True))
+                content = Path(source_path).read_text(encoding="utf-8")
+            except (OSError, UnicodeError, ValueError) as exc:
+                return _adapter_blocked(
+                    "fixture.restore",
+                    f"fixture baseline read failed: {exc}",
+                )
         if not isinstance(content, str):
             return _adapter_blocked("fixture.restore", "fixture restore content must be text")
         target = Path(target_path)
@@ -385,7 +402,13 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
                 "fixture.restore",
                 f"restore parent directory does not exist: {target.parent}",
             )
-        target.write_text(content, encoding="utf-8")
+        try:
+            target.write_text(content, encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            return _adapter_blocked(
+                "fixture.restore",
+                f"fixture restore write failed: {exc}",
+            )
         return {
             "status": "PASS",
             "path": target_path,
@@ -452,6 +475,25 @@ def _is_selector_miss(result: Any) -> bool:
         return True
     reason = str(result.get("reason") or result.get("error") or "").lower()
     return "not found" in reason or "no element" in reason or "selector" in reason
+
+
+def _is_backend_success(result: Any) -> bool:
+    if not isinstance(result, dict):
+        return False
+    return str(result.get("status", "PASS")).upper() in {"PASS", "OK", "SUCCESS"}
+
+
+def _backend_failure_result(result: Any, *, operation: str) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        return {
+            "status": "FAIL",
+            "reason": f"{operation} returned non-object result",
+            "result": result,
+        }
+    failure = dict(result)
+    failure.setdefault("status", "FAIL")
+    failure.setdefault("reason", f"{operation} failed")
+    return failure
 
 
 def _selector_blocked(

@@ -12,6 +12,7 @@ class CleanupSmokeSession:
         self.runtime_smoke = RuntimeSmokeSession()
         self.calls: list[tuple[str, Any]] = []
         self.restore_results: dict[str, dict[str, Any]] = {}
+        self.process_registry_result: dict[str, Any] = {"status": "PASS", "count": 0}
 
     async def invoke(self, selector: dict[str, Any]) -> dict[str, Any]:
         self.calls.append(("ui.invoke", dict(selector)))
@@ -35,7 +36,7 @@ class CleanupSmokeSession:
 
     async def process_registry_count(self) -> dict[str, Any]:
         self.calls.append(("process.registry.count", None))
-        return {"status": "PASS", "count": 0}
+        return dict(self.process_registry_result)
 
 
 def _runner(session: CleanupSmokeSession) -> RuntimeSmokeRunner:
@@ -125,3 +126,33 @@ async def test_v2_cleanup_aggregates_plan_and_case_cleanup_without_stopping_next
         }
     ]
     assert ("ui.invoke", {"automation_id": "caseB"}) in session.calls
+
+
+@pytest.mark.asyncio
+async def test_v2_cleanup_reports_invalid_process_registry_count() -> None:
+    session = CleanupSmokeSession()
+    session.process_registry_result = {"status": "PASS", "count": "not-a-number"}
+
+    result = await _runner(session).run({
+        "schema": "netcoredbg.runtime_smoke.v2",
+        "cleanup": {"steps": [{"kind": "process.registry.assert_empty"}]},
+        "cases": [
+            {
+                "id": "case_a",
+                "transitions": [
+                    {
+                        "action": {
+                            "kind": "ui.invoke",
+                            "selector": {"automation_id": "caseA"},
+                        },
+                        "probes": [],
+                    }
+                ],
+            }
+        ],
+    })
+
+    assert result["status"] == "FAIL"
+    assert result["cleanup"]["status"] == "FAIL"
+    assert result["cleanup"]["failures"][0]["reason"] == "invalid process registry count"
+    assert result["cleanup"]["failures"][0]["result"]["count"] == "not-a-number"

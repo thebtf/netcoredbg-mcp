@@ -12,6 +12,8 @@ class ActionSmokeSession:
         self.runtime_smoke = RuntimeSmokeSession()
         self.calls: list[tuple[str, Any]] = []
         self.tracepoint_hits: list[bool] = []
+        self.focus_result: dict[str, Any] = {"status": "PASS"}
+        self.send_keys_result: dict[str, Any] = {"status": "PASS"}
 
     async def find_element(self, selector: dict[str, Any]) -> dict[str, Any]:
         self.calls.append(("find_element", dict(selector)))
@@ -19,11 +21,11 @@ class ActionSmokeSession:
 
     async def set_focus(self, selector: dict[str, Any]) -> dict[str, Any]:
         self.calls.append(("set_focus", dict(selector)))
-        return {"status": "PASS"}
+        return dict(self.focus_result)
 
     async def send_keys_focused(self, keys: str) -> dict[str, Any]:
         self.calls.append(("send_keys_focused", keys))
-        return {"status": "PASS", "sent": keys}
+        return {**self.send_keys_result, "sent": keys}
 
     async def invoke(self, selector: dict[str, Any]) -> dict[str, Any]:
         self.calls.append(("invoke", dict(selector)))
@@ -140,6 +142,71 @@ async def test_v2_ui_invoke_route_does_not_focus_before_invoke() -> None:
         ("invoke", {"automation_id": "checkBoxSpellCheckInput"}),
     ]
     assert result["cases"][0]["actions"][0]["route"] == "invoke"
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_invoke_invalid_selector_returns_blocked() -> None:
+    session = ActionSmokeSession()
+
+    result = await _runner(session).run({
+        "schema": "netcoredbg.runtime_smoke.v2",
+        "name": "invalid selector",
+        "cases": [
+            {
+                "id": "invoke_checkbox",
+                "transitions": [
+                    {
+                        "action": {
+                            "kind": "ui.invoke",
+                            "selector": ["not", "a", "mapping"],
+                        },
+                        "probes": [],
+                    }
+                ],
+            }
+        ],
+    })
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == "BLOCKED"
+    assert action["status"] == "BLOCKED"
+    assert action["reason"] == "invalid selector payload"
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_key_sequence_propagates_focus_failure() -> None:
+    session = ActionSmokeSession()
+    session.focus_result = {"status": "BLOCKED", "reason": "focus backend offline"}
+
+    result = await _runner(session).run({
+        "schema": "netcoredbg.runtime_smoke.v2",
+        "name": "focus failure",
+        "cases": [
+            {
+                "id": "spellcheck_input",
+                "transitions": [
+                    {
+                        "action": {
+                            "kind": "ui.key_sequence",
+                            "selector": {"automation_id": "checkBoxSpellCheckInput"},
+                            "keys": "{SPACE}",
+                        },
+                        "probes": [],
+                    }
+                ],
+            }
+        ],
+    })
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == "BLOCKED"
+    assert action["status"] == "BLOCKED"
+    assert action["reason"] == "focus backend offline"
+    assert session.calls == [
+        ("find_element", {"automation_id": "checkBoxSpellCheckInput"}),
+        ("set_focus", {"automation_id": "checkBoxSpellCheckInput"}),
+    ]
 
 
 @pytest.mark.asyncio

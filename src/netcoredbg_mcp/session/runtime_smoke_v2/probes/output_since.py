@@ -37,11 +37,13 @@ async def handle_output_since(
             max_matches=max_matches,
         )
         if result.get("status") == "BLOCKED":
+            reason = str(result.get("reason") or "output probe blocked")
             return blocked_probe(
                 probe,
                 kind=kind,
+                reason=reason,
                 requested={"checkpoint": checkpoint},
-                next_step="Create an output checkpoint before running output.since.",
+                next_step=_next_step_for_blocked_output(reason, result),
             )
     status = str(result.get("status", "PASS"))
     value = {
@@ -66,7 +68,7 @@ async def handle_output_since(
                 reason=str(output.get("reason") or "output probe blocked"),
                 requested={"checkpoint": checkpoint},
                 accepted={"checkpoint": "existing output checkpoint name"},
-                next_step="Create the checkpoint before running this output.since probe.",
+                next_step=_next_step_for_blocked_output(str(output["reason"]), result),
             )
         )
     return output
@@ -92,3 +94,12 @@ def _assert_since_session(
         regex=regex,
         max_matches=max_matches,
     ).to_dict()
+
+
+def _next_step_for_blocked_output(reason: str, result: dict[str, Any]) -> str:
+    if "checkpoint" in reason and "not found" in reason:
+        return "Create the checkpoint before running this output.since probe."
+    next_step = result.get("next_step")
+    if next_step:
+        return str(next_step)
+    return "Connect an output assertion service before running output.since."

@@ -591,6 +591,95 @@ async def test_ui_invoke_uses_fallback_key_sequence_when_primary_missing() -> No
 
 
 @pytest.mark.asyncio
+async def test_ui_invoke_preserves_non_selector_backend_exception() -> None:
+    session = FakeRuntimeSmokeSession()
+
+    class FakeBackend:
+        async def invoke_element(self, **_: Any) -> dict[str, Any]:
+            raise RuntimeError("bridge transport unavailable")
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await RuntimeSmokeRunner(
+        session,
+        service_adapters=ui_operation_adapters(backend_provider),
+    ).run({
+        "schema": "netcoredbg.runtime_smoke.v1",
+        "steps": [
+            {
+                "op": "ui.invoke",
+                "selector": {"automation_id": "menuItemUndo"},
+            }
+        ],
+    })
+
+    step_result = result["completed_steps"][0]["result"]
+    assert result["status"] == "BLOCKED"
+    assert step_result["reason"] == "bridge transport unavailable"
+    assert step_result["requested"]["selector"] == {"automation_id": "menuItemUndo"}
+
+
+@pytest.mark.asyncio
+async def test_ui_get_property_propagates_backend_failure_status() -> None:
+    class FakeBackend:
+        async def extract_text(self, **_: Any) -> dict[str, Any]:
+            return {"status": "BLOCKED", "reason": "backend not connected"}
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.get_property"](
+        selector={"automation_id": "statusText"},
+        property_name="Name",
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "backend not connected"
+
+
+@pytest.mark.asyncio
+async def test_fixture_restore_returns_structured_failure_for_io_errors(
+    tmp_path: Path,
+) -> None:
+    session = FakeRuntimeSmokeSession()
+    session.allowed_root = tmp_path
+    baseline_dir = tmp_path / "baseline-dir"
+    baseline_dir.mkdir()
+    target = tmp_path / "settings.json"
+
+    adapters = ui_operation_adapters(lambda: None, session=session)
+    result = await adapters["fixture.restore"](
+        path=str(target),
+        baseline_file=str(baseline_dir),
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["requested"]["adapter"] == "fixture.restore"
+    assert "fixture baseline read failed" in result["reason"]
+
+
+@pytest.mark.asyncio
+async def test_fixture_restore_returns_structured_failure_for_write_errors(
+    tmp_path: Path,
+) -> None:
+    session = FakeRuntimeSmokeSession()
+    session.allowed_root = tmp_path
+    target_dir = tmp_path / "target-dir"
+    target_dir.mkdir()
+
+    adapters = ui_operation_adapters(lambda: None, session=session)
+    result = await adapters["fixture.restore"](
+        path=str(target_dir),
+        baseline_text="baseline",
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["requested"]["adapter"] == "fixture.restore"
+    assert "fixture restore write failed" in result["reason"]
+
+
+@pytest.mark.asyncio
 async def test_state_changing_ui_operations_return_settle_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

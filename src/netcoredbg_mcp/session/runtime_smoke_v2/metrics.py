@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib
-import os
 import types
 from dataclasses import dataclass
 from typing import Any
@@ -31,8 +30,20 @@ def capture_metric_snapshot(context: Any) -> MetricSnapshot:
             },
         )
 
+    pid = _process_id(context)
+    if pid is None:
+        return MetricSnapshot(
+            timestamp=timestamp,
+            working_set_mb=None,
+            private_bytes_mb=None,
+            field_status={
+                "working_set_delta_mb": _blocked_field("target process id unavailable"),
+                "private_bytes_delta_mb": _blocked_field("target process id unavailable"),
+            },
+        )
+
     try:
-        process = psutil.Process(_process_id(context))
+        process = psutil.Process(pid)
         memory_info = process.memory_info()
     except Exception as exc:  # pragma: no cover - platform/process dependent
         reason = f"psutil memory read failed: {exc}"
@@ -163,13 +174,13 @@ def _load_psutil() -> Any | None:
     return psutil if isinstance(psutil, types.ModuleType) else None
 
 
-def _process_id(context: Any) -> int:
+def _process_id(context: Any) -> int | None:
     session = getattr(context, "session", None)
     for attr_name in ("process_id", "debuggee_pid", "pid"):
         value = getattr(session, attr_name, None)
         if isinstance(value, int):
             return value
-    return os.getpid()
+    return None
 
 
 def _bytes_to_mb(value: Any) -> float | None:

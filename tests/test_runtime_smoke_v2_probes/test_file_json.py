@@ -84,3 +84,21 @@ async def test_file_json_probe_fails_when_file_is_missing(tmp_path: Path) -> Non
     assert probe["reason"] == "json file missing"
     assert probe["missing_side"] == "file"
     assert probe["resolved_path"] == str(missing_path.resolve())
+
+
+@pytest.mark.asyncio
+async def test_file_json_probe_fails_when_path_is_directory(tmp_path: Path) -> None:
+    session = FileJsonProbeSession(tmp_path)
+
+    result = await runner(session).run(one_probe_plan({
+        "kind": "file.json",
+        "name": "directory_path",
+        "path": str(tmp_path),
+        "jsonpath": "$.value",
+    }))
+
+    probe = after_probe(result)
+    assert result["status"] == "FAIL"
+    assert probe["status"] == "FAIL"
+    assert probe["reason"] == "path is not a file"
+    assert probe["missing_side"] == "file"

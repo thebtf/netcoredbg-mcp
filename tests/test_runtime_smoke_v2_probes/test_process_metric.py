@@ -20,6 +20,7 @@ class FakePsutil:
             SimpleNamespace(rss=112 * 1024 * 1024, private=45 * 1024 * 1024),
         ]
         self.pids: list[int] = []
+        self.error: Exception | None = None
 
     def Process(self, pid: int) -> Any:  # noqa: N802 - mirrors psutil module API
         self.pids.append(pid)
@@ -27,7 +28,11 @@ class FakePsutil:
 
         class FakeProcess:
             def memory_info(self) -> Any:
-                return fake.samples.pop(0)
+                if fake.error is not None:
+                    raise fake.error
+                if fake.samples:
+                    return fake.samples.pop(0)
+                return SimpleNamespace(rss=0, private=0)
 
         return FakeProcess()
 
@@ -71,3 +76,46 @@ async def test_process_metric_probe_blocks_when_psutil_is_missing(
     assert probe["status"] == "BLOCKED"
     assert probe["reason"] == "psutil is not installed"
     assert "install psutil" in probe["next_step"]
+
+
+@pytest.mark.asyncio
+async def test_process_metric_probe_blocks_invalid_pid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_psutil = FakePsutil()
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+    session = ProcessMetricSession()
+
+    result = await runner(session).run(one_probe_plan({
+        "kind": "process.metric",
+        "name": "process_memory",
+        "pid": "not-a-pid",
+    }))
+
+    probe = after_probe(result)
+    assert result["status"] == "BLOCKED"
+    assert probe["status"] == "BLOCKED"
+    assert probe["reason"].startswith("invalid pid")
+    assert fake_psutil.pids == []
+
+
+@pytest.mark.asyncio
+async def test_process_metric_probe_blocks_inaccessible_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_psutil = FakePsutil()
+    fake_psutil.error = RuntimeError("process vanished")
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+    session = ProcessMetricSession()
+
+    result = await runner(session).run(one_probe_plan({
+        "kind": "process.metric",
+        "name": "process_memory",
+        "pid": 4242,
+    }))
+
+    probe = after_probe(result)
+    assert result["status"] == "BLOCKED"
+    assert probe["status"] == "BLOCKED"
+    assert probe["reason"] == "target process is not accessible"
+    assert probe["error"] == "process vanished"

@@ -47,6 +47,16 @@ async def handle_file_json(
             "resolved_path": str(path),
             "missing_side": "file",
         }
+    if not path.is_file():
+        return {
+            "name": probe_name(probe, kind),
+            "kind": kind,
+            "status": "FAIL",
+            "reason": "path is not a file",
+            "value": None,
+            "resolved_path": str(path),
+            "missing_side": "file",
+        }
 
     try:
         from jsonpath_ng import parse

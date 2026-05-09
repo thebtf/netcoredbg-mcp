@@ -22,23 +22,17 @@
       {
         "id": "feature_enabled",
         "control": "chkEnabled",
-        "value": true,
-        "expression": "1 + 1",
-        "property": "Name"
+        "value": true
       },
       {
         "id": "feature_disabled",
         "control": "chkEnabled",
-        "value": false,
-        "expression": "1 + 1",
-        "property": "Name"
+        "value": false
       },
       {
         "id": "feature_enabled_again",
         "control": "chkEnabled",
-        "value": true,
-        "expression": "1 + 1",
-        "property": "Name"
+        "value": true
       }
     ]
   },

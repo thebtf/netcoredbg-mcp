@@ -59,13 +59,22 @@ async def run_cleanup(
             attempted.append("process.registry.assert_empty")
             result = await context.call_adapter("process.registry.count")
             if str(result.get("status", "PASS")) == "PASS":
-                process_registry_after = int(result.get("count", 0))
-                if process_registry_after != 0:
+                raw_count = result.get("count", 0)
+                try:
+                    process_registry_after = int(raw_count)
+                except (TypeError, ValueError):
                     result = {
                         "status": "FAIL",
-                        "reason": "process registry not empty",
-                        "count": process_registry_after,
+                        "reason": "invalid process registry count",
+                        "count": raw_count,
                     }
+                else:
+                    if process_registry_after != 0:
+                        result = {
+                            "status": "FAIL",
+                            "reason": "process registry not empty",
+                            "count": process_registry_after,
+                        }
         else:
             attempted.append(kind or "unknown")
             result = {

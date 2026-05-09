@@ -24,7 +24,7 @@ def finalize_result(
 ) -> dict[str, Any]:
     terminal_status = status
     terminal_reason = reason
-    if cleanup["status"] == "FAIL" and terminal_status not in {"FAIL", "IMPASSE"}:
+    if cleanup.get("status") == "FAIL" and terminal_status not in {"FAIL", "IMPASSE"}:
         terminal_status = "FAIL"
         terminal_reason = "teardown failed"
 

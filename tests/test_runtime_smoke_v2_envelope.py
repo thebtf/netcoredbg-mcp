@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner, RuntimeSmokeSession
+from netcoredbg_mcp.session.runtime_smoke_v2.result_envelope import finalize_result
 
 
 class EnvelopeSmokeSession:
@@ -43,3 +44,20 @@ async def test_v2_plan_rejects_mixed_legacy_execution_keys_before_launch() -> No
     assert {"baseline", "generate", "cases", "metrics_thresholds"}.issubset(
         set(result["accepted_top_level_keys_v2"])
     )
+
+
+def test_v2_result_envelope_tolerates_empty_cleanup() -> None:
+    result = finalize_result(
+        status="PASS",
+        reason="runtime smoke passed",
+        elapsed_ms=1,
+        action_count=0,
+        completed_steps=[],
+        failed_assertions=[],
+        cleanup={},
+        evidence_refs=[],
+        compact_builder=lambda value: {"status": value["status"]},
+    )
+
+    assert result["status"] == "PASS"
+    assert result["cleanup"] == {}

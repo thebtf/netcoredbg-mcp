@@ -44,12 +44,20 @@ def render_setting_ab_row_effect(
                         "name": "row_effect",
                         "selector": grid_selector,
                         "rows": [row_expected],
-                        "columns": [
-                            str(column)
-                            for column in record.get("columns") or []
-                        ],
+                        "columns": _columns_from_record(record),
                     },
                 ],
             }
         ],
     }
+
+
+def _columns_from_record(record: dict[str, Any]) -> list[str]:
+    columns = record.get("columns")
+    if columns is None:
+        return []
+    if isinstance(columns, str):
+        return [columns]
+    if isinstance(columns, (list, tuple)):
+        return [str(column) for column in columns]
+    return [str(columns)]

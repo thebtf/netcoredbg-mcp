@@ -109,4 +109,5 @@ async def test_output_since_probe_blocks_when_execution_is_unavailable() -> None
     probe = after_probe(result)
     assert result["status"] == "BLOCKED"
     assert probe["status"] == "BLOCKED"
-    assert probe["reason"] == "probe execution not available"
+    assert probe["reason"] == "output assertion service unavailable"
+    assert probe["next_step"] == "Connect an output assertion service before running output.since."

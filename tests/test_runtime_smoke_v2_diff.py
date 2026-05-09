@@ -114,6 +114,46 @@ async def test_v2_case_records_before_after_and_diff_maps() -> None:
     ]
 
 
+@pytest.mark.asyncio
+async def test_v2_transition_blocked_payload_comes_from_blocked_probe() -> None:
+    session = DiffSmokeSession()
+    session.debug_values["_settings.SpellCheckInput"].extend([False, True])
+    session.property_values["spellcheckIndicator:Visibility"].extend([
+        "Collapsed",
+        {
+            "status": "BLOCKED",
+            "reason": "backend bridge disconnected",
+            "requested": {"adapter": "ui.get_property"},
+            "accepted": {"adapter_names": ["ui.get_property"]},
+            "next_step": "Reconnect UI bridge.",
+        },
+    ])
+
+    async def get_property(
+        selector: dict[str, Any],
+        property_name: str,
+    ) -> dict[str, Any]:
+        session.calls.append(("ui.get_property", dict(selector), property_name))
+        value = session.property_values[f"{selector['automation_id']}:{property_name}"].popleft()
+        if isinstance(value, dict):
+            return value
+        return {"status": "PASS", "value": value}
+
+    result = await RuntimeSmokeRunner(
+        session,
+        service_adapters={
+            "ui.invoke": session.invoke,
+            "debug.evaluate": session.evaluate,
+            "ui.get_property": get_property,
+        },
+    ).run(_single_case_plan())
+
+    transition = result["cases"][0]["transitions"][0]
+    assert result["status"] == "BLOCKED"
+    assert transition["blocked"]["reason"] == "backend bridge disconnected"
+    assert transition["blocked"]["next_step"] == "Reconnect UI bridge."
+
+
 def test_compute_diff_omits_unchanged_values() -> None:
     assert compute_diff(
         before={
@@ -126,6 +166,21 @@ def test_compute_diff_omits_unchanged_values() -> None:
         },
     ) == {
         "debug.evaluate.changed": {"from": "Off", "to": "On"},
+    }
+
+
+def test_compute_diff_includes_removed_values() -> None:
+    assert compute_diff(
+        before={
+            "debug.evaluate.removed": "On",
+            "ui.property.added": None,
+        },
+        after={
+            "ui.property.added": "Visible",
+        },
+    ) == {
+        "debug.evaluate.removed": {"from": "On", "to": None},
+        "ui.property.added": {"from": None, "to": "Visible"},
     }
 
 

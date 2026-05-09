@@ -9,7 +9,7 @@ def compute_diff(
     after: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
     return {
-        key: {"from": before.get(key), "to": value}
-        for key, value in after.items()
-        if before.get(key) != value
+        key: {"from": before.get(key), "to": after.get(key)}
+        for key in sorted(before.keys() | after.keys())
+        if before.get(key) != after.get(key)
     }
