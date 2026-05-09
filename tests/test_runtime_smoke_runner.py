@@ -713,6 +713,28 @@ async def test_ui_send_keys_focused_preserves_backend_failure_status() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ui_set_focus_blocks_bridge_call_errors() -> None:
+    class FakeClient:
+        async def call(self, _method: str, _payload: dict[str, Any]) -> dict[str, Any]:
+            raise RuntimeError("bridge disconnected")
+
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.client = FakeClient()
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.set_focus"](
+        selector={"automation_id": "statusText"},
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "bridge disconnected"
+    assert result["requested"] == {"adapter": "ui.set_focus"}
+
+
+@pytest.mark.asyncio
 async def test_session_operation_adapters_preserve_non_pass_statuses() -> None:
     class FailingSession(FakeRuntimeSmokeSession):
         async def launch(self, **_: Any) -> dict[str, Any]:

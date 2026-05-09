@@ -154,7 +154,10 @@ def ui_operation_adapters(
         selector = _selector(args)
         client = getattr(backend, "client", None)
         if client is not None:
-            result = await client.call("set_focus", _bridge_selector_kwargs(selector))
+            try:
+                result = await client.call("set_focus", _bridge_selector_kwargs(selector))
+            except Exception as exc:
+                return _adapter_blocked("ui.set_focus", str(exc))
             return result if isinstance(result, dict) else {"status": "PASS", "result": result}
         result = await assert_focus(backend, selector)
         if str(result.get("status", "PASS")).upper() != "PASS":
