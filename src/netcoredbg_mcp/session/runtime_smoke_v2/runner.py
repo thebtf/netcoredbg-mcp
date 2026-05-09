@@ -44,6 +44,11 @@ class RuntimeStateOracleRunner:
     async def run(self, plan: dict[str, Any]) -> dict[str, Any]:
         started = self._clock()
         cleanup = {"status": "PASS", "attempted": [], "failures": []}
+        metrics_thresholds = (
+            dict(plan.get("metrics_thresholds"))
+            if isinstance(plan.get("metrics_thresholds"), dict)
+            else None
+        )
         cases, generated_case_count, generation_errors = _cases_for_execution(plan)
         validation_errors = [
             *generation_errors,
@@ -57,6 +62,7 @@ class RuntimeStateOracleRunner:
                 action_count=0,
                 cases=[],
                 generated_case_count=generated_case_count,
+                metrics_thresholds=metrics_thresholds,
                 baseline=None,
                 cleanup=cleanup,
                 extra={"validation_errors": validation_errors},
@@ -69,6 +75,7 @@ class RuntimeStateOracleRunner:
                 action_count=0,
                 cases=[],
                 generated_case_count=generated_case_count,
+                metrics_thresholds=metrics_thresholds,
                 baseline=None,
                 cleanup=cleanup,
                 extra={
@@ -99,6 +106,7 @@ class RuntimeStateOracleRunner:
                 action_count=0,
                 cases=[],
                 generated_case_count=generated_case_count,
+                metrics_thresholds=metrics_thresholds,
                 baseline=baseline_result,
                 cleanup=cleanup,
                 extra={"blocked": blocked_payload} if blocked_payload else None,
@@ -111,7 +119,11 @@ class RuntimeStateOracleRunner:
         blocked_payload: dict[str, Any] | None = None
 
         for case in cases:
-            case_result, executed_actions = await execute_case(case, context)
+            case_result, executed_actions = await execute_case(
+                case,
+                context,
+                metrics_thresholds=metrics_thresholds,
+            )
             action_count += executed_actions
             case_results.append(case_result)
             if case_result["status"] == "BLOCKED":
@@ -131,6 +143,7 @@ class RuntimeStateOracleRunner:
             action_count=action_count,
             cases=case_results,
             generated_case_count=generated_case_count,
+            metrics_thresholds=metrics_thresholds,
             baseline=baseline_result,
             cleanup=cleanup,
             extra={"blocked": blocked_payload} if blocked_payload else None,
@@ -145,6 +158,7 @@ class RuntimeStateOracleRunner:
         action_count: int,
         cases: list[dict[str, Any]],
         generated_case_count: int,
+        metrics_thresholds: dict[str, Any] | None,
         baseline: dict[str, Any] | None,
         cleanup: dict[str, Any],
         extra: dict[str, Any] | None = None,
@@ -153,7 +167,7 @@ class RuntimeStateOracleRunner:
             "generated_case_count": generated_case_count,
             "cases": cases,
             "baseline": baseline,
-            "metrics_thresholds": None,
+            "metrics_thresholds": metrics_thresholds,
             "accepted_schema_values": list(ACCEPTED_SCHEMA_VALUES),
             "accepted_top_level_keys_v2": list(ACCEPTED_TOP_LEVEL_KEYS_V2),
             "accepted_action_kinds": accepted_action_kinds(),

@@ -6,6 +6,7 @@ from typing import Any
 
 from .actions import ActionContext, dispatch_action
 from .diff import compute_diff
+from .metrics import capture_metric_snapshot, finish_transition_metrics
 from .probe_dispatcher import ProbeContext, dispatch_probe, probe_path
 
 DEFAULT_IDLE_MS = 250
@@ -23,6 +24,7 @@ async def execute_transition(
     before = _probe_value_map(probes, before_results)
 
     action = dict(transition.get("action") or {})
+    metrics_started = capture_metric_snapshot(action_context)
     action_result = await dispatch_action(action, action_context)
     action_count = 1
     actions = [action_result]
@@ -34,6 +36,7 @@ async def execute_transition(
             "status": status,
             "reason": reason,
             "actions": actions,
+            "metrics": finish_transition_metrics(metrics_started, action_context),
             "before": before,
             "after": {},
             "diff": {},
@@ -44,6 +47,7 @@ async def execute_transition(
         return result, action_count
 
     settle = await _settle(dict(transition.get("settle") or {}), action_context)
+    metrics = finish_transition_metrics(metrics_started, action_context)
     if settle.get("status") != "PASS":
         status = _status_from_records([*before_results, settle])
         reason = _reason_from_records([settle, *before_results])
@@ -53,6 +57,7 @@ async def execute_transition(
                 "status": status,
                 "reason": reason,
                 "actions": actions,
+                "metrics": metrics,
                 "settle": settle,
                 "before": before,
                 "after": {},
@@ -74,6 +79,7 @@ async def execute_transition(
             "status": status,
             "reason": reason,
             "actions": actions,
+            "metrics": metrics,
             "settle": settle,
             "before": before,
             "after": after,

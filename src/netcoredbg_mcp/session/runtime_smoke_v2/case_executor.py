@@ -3,12 +3,15 @@ from __future__ import annotations
 from typing import Any
 
 from .actions import ActionContext
+from .metrics import evaluate_metric_thresholds, merge_case_metrics
 from .transition_executor import execute_transition
 
 
 async def execute_case(
     case: dict[str, Any],
     context: ActionContext,
+    *,
+    metrics_thresholds: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], int]:
     transitions: list[dict[str, Any]] = []
     actions: list[dict[str, Any]] = []
@@ -16,6 +19,8 @@ async def execute_case(
     after: dict[str, Any] = {}
     diff: dict[str, Any] = {}
     blocked: dict[str, Any] | None = None
+    metrics_records: list[dict[str, Any]] = []
+    failed_assertions: list[dict[str, Any]] = []
     action_count = 0
     status = "PASS"
     reason = "case passed"
@@ -28,6 +33,9 @@ async def execute_case(
         action_count += transition_actions
         transitions.append(transition_result)
         actions.extend(transition_result.get("actions", []))
+        transition_metrics = transition_result.get("metrics")
+        if isinstance(transition_metrics, dict):
+            metrics_records.append(transition_metrics)
         before.update(transition_result.get("before", {}))
         after.update(transition_result.get("after", {}))
         diff.update(transition_result.get("diff", {}))
@@ -41,6 +49,13 @@ async def execute_case(
             blocked = transition_result.get("blocked")
             break
 
+    metrics = merge_case_metrics(metrics_records)
+    metric_failures = evaluate_metric_thresholds(metrics, metrics_thresholds)
+    failed_assertions.extend(metric_failures)
+    if metric_failures and status == "PASS":
+        status = "FAIL"
+        reason = "metric threshold exceeded"
+
     result = {
         "id": case.get("id"),
         "status": status,
@@ -50,6 +65,8 @@ async def execute_case(
         "before": before,
         "after": after,
         "diff": diff,
+        "metrics": metrics,
+        "failed_assertions": failed_assertions,
     }
     if "rendered_from" in case:
         result["rendered_from"] = dict(case["rendered_from"])
