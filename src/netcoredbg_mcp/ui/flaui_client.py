@@ -257,15 +257,19 @@ class FlaUIBackend:
         """Connected process ID."""
         return self._process_id
 
-    async def connect(self, pid: int) -> None:
+    async def connect(self, pid: int, stealth: bool = False) -> None:
         """Connect to process via FlaUI bridge."""
         await self._client.ensure_alive()
         deadline = time.monotonic() + CONNECT_RETRY_TIMEOUT_SECONDS
+        connect_params: dict[str, Any] = {"pid": pid}
+        if stealth:
+            connect_params["stealth"] = True
+
         while True:
             try:
                 result = await self._client.call(
                     "connect",
-                    {"pid": pid},
+                    connect_params,
                     timeout=CONNECT_CALL_TIMEOUT_SECONDS,
                 )
             except RuntimeError as exc:

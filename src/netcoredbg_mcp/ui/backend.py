@@ -250,6 +250,17 @@ class UIBackend(Protocol):
         ...
 
 
+async def connect_backend(backend: UIBackend, pid: int, *, stealth_mode: bool = False) -> None:
+    """Connect a UI backend, passing stealth context only to backends that support it."""
+    from .flaui_client import FlaUIBackend
+
+    if isinstance(backend, FlaUIBackend):
+        await backend.connect(pid, stealth=stealth_mode)
+        return
+
+    await backend.connect(pid)
+
+
 def find_flaui_bridge() -> str | None:
     """Find or build FlaUIBridge.exe.
 

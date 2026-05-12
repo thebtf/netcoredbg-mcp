@@ -2,7 +2,7 @@
 
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -148,3 +148,64 @@ async def test_start_debug_passes_stealth_mode_to_session_launch(tmp_path) -> No
         pre_build=False,
     )
     assert session.launch.await_args.kwargs["stealth_mode"] is False
+
+
+@pytest.mark.asyncio
+async def test_flaui_backend_connect_sends_stealth_flag_to_bridge() -> None:
+    from netcoredbg_mcp.ui.flaui_client import CONNECT_CALL_TIMEOUT_SECONDS, FlaUIBackend
+
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._client = MagicMock()
+    backend._client.ensure_alive = AsyncMock(return_value=True)
+    backend._client.call = AsyncMock(return_value={"connected": True, "title": "WPF Smoke"})
+    backend._element_cache = {}
+    backend._process_id = None
+
+    await backend.connect(42, stealth=True)
+
+    backend._client.call.assert_awaited_once_with(
+        "connect",
+        {"pid": 42, "stealth": True},
+        timeout=CONNECT_CALL_TIMEOUT_SECONDS,
+    )
+
+
+@pytest.mark.asyncio
+async def test_ui_tools_connect_flaui_backend_with_session_stealth_mode() -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    class ToolRegistry:
+        def __init__(self) -> None:
+            self.tools = {}
+
+        def tool(self, annotations=None):
+            def decorator(func):
+                self.tools[func.__name__] = func
+                return func
+
+            return decorator
+
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._process_id = None
+    backend.connect = AsyncMock()
+    backend.get_window_tree = AsyncMock(return_value={"windows": [], "count": 0})
+
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=True,
+    )
+    registry = ToolRegistry()
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(
+            registry,
+            session,
+            check_session_access=lambda ctx: None,
+        )
+
+        await registry.tools["ui_get_window_tree"]()
+
+    backend.connect.assert_awaited_once_with(42, stealth=True)
