@@ -292,6 +292,12 @@ public static class ClickCommands
 
     private static void EnsureForeground(AutomationElement? mainWindow)
     {
+        if (JsonRpcHandler.Stealth)
+        {
+            Program.Log("stealth: skipping foreground");
+            return;
+        }
+
         if (mainWindow is null)
         {
             return;

@@ -48,3 +48,17 @@ def test_bridge_window_ensure_foreground_skips_only_in_stealth_mode() -> None:
     assert 'Program.Log("stealth: skipping foreground");' in command
     assert "SetForegroundWindow(hwnd)" in command
     assert "ShowWindow(hwnd, showCmd)" in command
+
+
+def test_bridge_foreground_helpers_all_check_stealth_before_set_foreground() -> None:
+    for relative_path in [
+        "bridge/Commands/InputCommands.cs",
+        "bridge/Commands/FocusCommands.cs",
+        "bridge/Commands/ClickCommands.cs",
+    ]:
+        command = (PROJECT_ROOT / relative_path).read_text(encoding="utf-8")
+        guard_index = command.index("if (JsonRpcHandler.Stealth)")
+        foreground_index = command.index("SetForegroundWindow(hwnd)")
+
+        assert guard_index < foreground_index, relative_path
+        assert 'Program.Log("stealth: skipping foreground");' in command

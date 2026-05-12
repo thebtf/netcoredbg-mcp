@@ -46,12 +46,19 @@ public static class FocusCommands
             element = mainWindow.FindFirstDescendant(cf.ByName(name));
         }
 
-        // Step 1: Bring window to foreground via Win32
-        var hwnd = mainWindow.Properties.NativeWindowHandle.ValueOrDefault;
-        if (hwnd != IntPtr.Zero)
+        // Step 1: Bring window to foreground via Win32 unless stealth mode keeps the user's window active.
+        if (JsonRpcHandler.Stealth)
         {
-            ShowWindow(hwnd, SW_RESTORE);
-            SetForegroundWindow(hwnd);
+            Program.Log("stealth: skipping foreground");
+        }
+        else
+        {
+            var hwnd = mainWindow.Properties.NativeWindowHandle.ValueOrDefault;
+            if (hwnd != IntPtr.Zero)
+            {
+                ShowWindow(hwnd, SW_RESTORE);
+                SetForegroundWindow(hwnd);
+            }
         }
 
         // Step 2: Set UIA focus on the target element (or window if no element specified)

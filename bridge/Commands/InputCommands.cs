@@ -26,6 +26,12 @@ public static partial class InputCommands
     /// </summary>
     private static void EnsureForeground(AutomationElement? mainWindow)
     {
+        if (JsonRpcHandler.Stealth)
+        {
+            Program.Log("stealth: skipping foreground");
+            return;
+        }
+
         if (mainWindow is null) return;
         var hwnd = mainWindow.Properties.NativeWindowHandle.ValueOrDefault;
         if (hwnd != IntPtr.Zero)
