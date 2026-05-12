@@ -9,6 +9,18 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
+class ToolRegistry:
+    def __init__(self) -> None:
+        self.tools = {}
+
+    def tool(self, annotations=None):
+        def decorator(func):
+            self.tools[func.__name__] = func
+            return func
+
+        return decorator
+
+
 def test_bridge_registers_save_restore_foreground_commands() -> None:
     router = (PROJECT_ROOT / "bridge" / "JsonRpcHandler.cs").read_text(encoding="utf-8")
 
@@ -90,17 +102,6 @@ def test_session_manager_launch_stores_stealth_mode_source_contract() -> None:
 async def test_start_debug_passes_stealth_mode_to_session_launch(tmp_path) -> None:
     from netcoredbg_mcp.tools.debug import register_debug_tools
 
-    class ToolRegistry:
-        def __init__(self) -> None:
-            self.tools = {}
-
-        def tool(self, annotations=None):
-            def decorator(func):
-                self.tools[func.__name__] = func
-                return func
-
-            return decorator
-
     registry = ToolRegistry()
     session = SimpleNamespace(
         project_path=str(tmp_path),
@@ -176,17 +177,6 @@ async def test_ui_tools_connect_flaui_backend_with_session_stealth_mode() -> Non
     from netcoredbg_mcp.tools.ui import register_ui_tools
     from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
 
-    class ToolRegistry:
-        def __init__(self) -> None:
-            self.tools = {}
-
-        def tool(self, annotations=None):
-            def decorator(func):
-                self.tools[func.__name__] = func
-                return func
-
-            return decorator
-
     backend = FlaUIBackend.__new__(FlaUIBackend)
     backend._process_id = None
     backend.connect = AsyncMock()
@@ -209,3 +199,57 @@ async def test_ui_tools_connect_flaui_backend_with_session_stealth_mode() -> Non
         await registry.tools["ui_get_window_tree"]()
 
     backend.connect.assert_awaited_once_with(42, stealth=True)
+
+
+@pytest.mark.asyncio
+async def test_wpf_fixture_stealth_foundation_read_only_ui_path() -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    fixture_root = PROJECT_ROOT / "tests" / "fixtures" / "WpfSmokeApp"
+    xaml = (fixture_root / "MainWindow.xaml").read_text(encoding="utf-8")
+
+    assert (fixture_root / "WpfSmokeApp.csproj").exists()
+    assert 'AutomationProperties.AutomationId="mainWindow"' in xaml
+    assert 'AutomationProperties.AutomationId="btnInvoke"' in xaml
+    assert 'AutomationProperties.AutomationId="txtOutput"' in xaml
+
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._process_id = None
+    backend.connect = AsyncMock()
+    backend.get_window_tree = AsyncMock(
+        return_value={
+            "windows": [
+                {
+                    "automationId": "mainWindow",
+                    "name": "WPF Smoke Test",
+                    "children": [
+                        {"automationId": "btnInvoke"},
+                        {"automationId": "txtOutput"},
+                    ],
+                }
+            ],
+            "count": 1,
+        }
+    )
+
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=4242),
+        stealth_mode=True,
+    )
+    registry = ToolRegistry()
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(
+            registry,
+            session,
+            check_session_access=lambda ctx: None,
+        )
+
+        response = await registry.tools["ui_get_window_tree"]()
+
+    backend.connect.assert_awaited_once_with(4242, stealth=True)
+    backend.get_window_tree.assert_awaited_once_with(3, 50)
+    assert response["data"]["windows"][0]["automationId"] == "mainWindow"
