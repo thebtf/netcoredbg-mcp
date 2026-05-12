@@ -56,6 +56,8 @@ public static class JsonRpcHandler
         {
             ["ping"] = PingCommand.Handle,
             ["connect"] = ElementCommands.Connect,
+            ["save_foreground"] = StealthCommands.SaveForeground,
+            ["restore_foreground"] = StealthCommands.RestoreForeground,
             ["find_element"] = ElementCommands.FindElement,
             ["get_tree"] = ElementCommands.GetTree,
             ["set_active_window"] = ElementCommands.SetActiveWindow,
