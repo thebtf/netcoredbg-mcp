@@ -86,6 +86,7 @@ class SessionManager:
         self._last_launch_config: dict[str, Any] | None = None  # For restart
         self._last_version_warning: str | None = None  # dbgshim version mismatch warning
         self._session_id: str | None = None
+        self._stealth_mode = False
         self._quick_eval_lock = asyncio.Lock()
         self._runtime_smoke = RuntimeSmokeSession()
         self._hygiene = RuntimeHygieneService(self)
@@ -143,6 +144,11 @@ class SessionManager:
     def session_id(self) -> str | None:
         """Get current session identifier for temp dir isolation."""
         return self._session_id
+
+    @property
+    def stealth_mode(self) -> bool:
+        """Whether the current launch avoids foreground-stealing UI actions."""
+        return self._stealth_mode
 
     @property
     def is_active(self) -> bool:
@@ -1032,6 +1038,7 @@ class SessionManager:
         pre_build: bool = False,
         build_project: str | None = None,
         build_configuration: str = "Debug",
+        stealth_mode: bool = False,
         progress_callback: Callable[[float, float, str], Awaitable[None]] | None = None,
         output_callback: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
@@ -1046,6 +1053,7 @@ class SessionManager:
             pre_build: Run pre-launch build before launching
             build_project: Project file for pre-build (required if pre_build=True)
             build_configuration: Build configuration for pre-build
+            stealth_mode: Avoid foreground-stealing UI actions for this launch
             progress_callback: Async callback(progress, total, message) for progress
 
         Returns:
@@ -1060,6 +1068,8 @@ class SessionManager:
         async def report(progress: float, total: float, message: str) -> None:
             if progress_callback:
                 await progress_callback(progress, total, message)
+
+        self._stealth_mode = stealth_mode
 
         # Run pre-launch build if requested
         if pre_build:
@@ -1167,6 +1177,7 @@ class SessionManager:
             "pre_build": pre_build,
             "build_project": build_project,
             "build_configuration": build_configuration,
+            "stealth_mode": stealth_mode,
         }
 
         result: dict[str, Any] = {"success": True, "program": program}

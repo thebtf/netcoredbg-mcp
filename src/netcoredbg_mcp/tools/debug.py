@@ -56,6 +56,7 @@ def register_debug_tools(
         pre_build: bool = True,
         build_project: str | None = None,
         build_configuration: str = "Debug",
+        stealth_mode: bool = False,
     ) -> dict:
         """
         Start debugging a .NET program. RECOMMENDED for most debugging scenarios.
@@ -92,6 +93,7 @@ def register_debug_tools(
             pre_build: Build project before launching (default: True). Requires build_project.
             build_project: Path to .csproj file (required when pre_build=True)
             build_configuration: Build configuration (Debug/Release)
+            stealth_mode: Avoid foreground-stealing UI actions for GUI debugging
         """
         try:
             access_error = check_session_access(ctx)
@@ -187,6 +189,7 @@ def register_debug_tools(
                 pre_build=pre_build,
                 build_project=validated_build_project,
                 build_configuration=build_configuration,
+                stealth_mode=stealth_mode,
                 progress_callback=report_progress,
                 output_callback=on_build_output,
             )
