@@ -37,3 +37,14 @@ def test_bridge_connect_stores_stealth_state_and_exposes_get_state() -> None:
     assert '["stealth"] = Stealth' in router
     assert "_stealth = false;" in router
     assert 'JsonRpcHandler.Stealth = @params?["stealth"]?.GetValue<bool>() ?? false;' in elements
+
+
+def test_bridge_window_ensure_foreground_skips_only_in_stealth_mode() -> None:
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "WindowCommands.cs").read_text(
+        encoding="utf-8"
+    )
+
+    assert "if (JsonRpcHandler.Stealth)" in command
+    assert 'Program.Log("stealth: skipping foreground");' in command
+    assert "SetForegroundWindow(hwnd)" in command
+    assert "ShowWindow(hwnd, showCmd)" in command

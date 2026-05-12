@@ -26,6 +26,12 @@ public static class WindowCommands
 
     internal static void EnsureForeground(AutomationElement? window)
     {
+        if (JsonRpcHandler.Stealth)
+        {
+            Program.Log("stealth: skipping foreground");
+            return;
+        }
+
         if (window is null)
             return;
 
