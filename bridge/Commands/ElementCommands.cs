@@ -13,6 +13,7 @@ public static class ElementCommands
     {
         var pid = @params?["pid"]?.GetValue<int>()
             ?? throw new ArgumentException("Missing required parameter: pid");
+        JsonRpcHandler.Stealth = @params?["stealth"]?.GetValue<bool>() ?? false;
 
         var desktop = automation.GetDesktop();
         var windows = desktop.FindAllChildren(

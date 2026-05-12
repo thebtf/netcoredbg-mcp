@@ -23,3 +23,17 @@ def test_bridge_stealth_foreground_round_trip_contract() -> None:
     assert '@params?["hwnd"]?.GetValue<long>()' in command
     assert "SetForegroundWindow(hwnd)" in command
     assert '["restored"] = restored' in command
+
+
+def test_bridge_connect_stores_stealth_state_and_exposes_get_state() -> None:
+    router = (PROJECT_ROOT / "bridge" / "JsonRpcHandler.cs").read_text(encoding="utf-8")
+    elements = (PROJECT_ROOT / "bridge" / "Commands" / "ElementCommands.cs").read_text(
+        encoding="utf-8"
+    )
+
+    assert "private static bool _stealth;" in router
+    assert "internal static bool Stealth" in router
+    assert '["get_state"] = GetState' in router
+    assert '["stealth"] = Stealth' in router
+    assert "_stealth = false;" in router
+    assert 'JsonRpcHandler.Stealth = @params?["stealth"]?.GetValue<bool>() ?? false;' in elements
