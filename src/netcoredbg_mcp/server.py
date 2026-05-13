@@ -249,6 +249,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
 
     from .prompts import register_prompts
     from .tools.breakpoints import register_breakpoint_tools
+    from .tools.code_search import register_code_search_tools
     from .tools.debug import register_debug_tools
     from .tools.inspection import register_inspection_tools
     from .tools.memory import register_memory_tools
@@ -316,6 +317,12 @@ def create_server(project_path: str | None = None) -> FastMCP:
         mcp=mcp,
         session=session,
         check_session_access=_check_session_access,
+    )
+
+    register_code_search_tools(
+        mcp=mcp,
+        session=session,
+        resolve_project_root=resolve_project_root,
     )
 
     register_prompts(mcp)

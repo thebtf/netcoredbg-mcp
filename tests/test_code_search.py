@@ -1,10 +1,12 @@
 """Tests for project-scoped code search."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from netcoredbg_mcp.code_search import CodeSearchEngine
+from netcoredbg_mcp.session.manager import DebugState
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_ROOT = PROJECT_ROOT / "tests" / "fixtures" / "SearchTestApp"
@@ -161,3 +163,70 @@ def test_search_source_caps_results() -> None:
     results = engine.search_source("CueInputPanel", max_results=1)
 
     assert len(results) == 1
+
+
+@pytest.mark.asyncio
+async def test_code_search_tools_work_without_active_debug_session(capturing_mcp) -> None:
+    from netcoredbg_mcp.tools.code_search import register_code_search_tools
+
+    async def resolve_project_root(ctx, session):
+        return FIXTURE_ROOT
+
+    session = SimpleNamespace(
+        project_path=None,
+        state=SimpleNamespace(state=DebugState.IDLE),
+    )
+
+    register_code_search_tools(
+        capturing_mcp,
+        session,
+        resolve_project_root=resolve_project_root,
+    )
+
+    assert {
+        "find_code_symbol",
+        "find_code_references",
+        "get_source_context",
+        "search_source",
+    }.issubset(capturing_mcp.tools)
+
+    symbol = await capturing_mcp.tools["find_code_symbol"](
+        SimpleNamespace(),
+        name="LoadAssignedCharacter",
+    )
+    references = await capturing_mcp.tools["find_code_references"](
+        SimpleNamespace(),
+        name="CueInputPanel",
+    )
+    context = await capturing_mcp.tools["get_source_context"](
+        SimpleNamespace(),
+        file="MainViewModel.cs",
+        line=10,
+        radius=0,
+    )
+    search = await capturing_mcp.tools["search_source"](
+        SimpleNamespace(),
+        pattern="textBoxCue|Phrase",
+        file_glob="*.xaml",
+    )
+
+    assert symbol["state"] == DebugState.IDLE.value
+    assert symbol["data"]["results"][0]["name"] == "LoadAssignedCharacter"
+    assert references["data"]["count"] >= 2
+    assert context["data"]["lines"][0]["line"] == 10
+    assert search["data"]["results"][0]["file"] == "Views/MainWindow.xaml"
+
+
+@pytest.mark.asyncio
+async def test_code_search_tools_register_on_server() -> None:
+    from netcoredbg_mcp.server import create_server
+
+    server = create_server(str(FIXTURE_ROOT))
+    tool_names = {tool.name for tool in await server.list_tools()}
+
+    assert {
+        "find_code_symbol",
+        "find_code_references",
+        "get_source_context",
+        "search_source",
+    }.issubset(tool_names)
