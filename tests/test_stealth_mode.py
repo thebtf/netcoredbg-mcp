@@ -131,6 +131,21 @@ def test_bridge_screenshot_uses_printwindow_in_stealth_mode() -> None:
     )
 
 
+def test_bridge_screenshot_falls_back_to_flash_focus_bitblt_when_blank() -> None:
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCommands.cs").read_text(
+        encoding="utf-8"
+    )
+
+    assert "private const double BlankFrameVarianceThreshold = 0.01;" in command
+    assert "private static bool IsBlankFrame(Bitmap bitmap)" in command
+    assert "CaptureWithFlashFocusBitBlt(hwnd, width, height)" in command
+    assert "GetForegroundWindow()" in command
+    assert "SetForegroundWindow(hwnd)" in command
+    assert "BitBlt(" in command
+    assert 'result["fallback"] = "flash-focus";' in command
+    assert "SetForegroundWindow(savedForeground)" in command
+
+
 def test_bridge_connect_stores_stealth_state_and_exposes_get_state() -> None:
     router = (PROJECT_ROOT / "bridge" / "JsonRpcHandler.cs").read_text(encoding="utf-8")
     elements = (PROJECT_ROOT / "bridge" / "Commands" / "ElementCommands.cs").read_text(
