@@ -90,6 +90,32 @@ def test_bridge_send_keys_routes_to_flash_focus_only_in_stealth_mode() -> None:
     assert "internal static JsonObject SendKeysBatchWithoutForeground" in command
 
 
+def test_bridge_click_routes_stealth_to_invoke_or_flash_focus_click() -> None:
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "ClickCommands.cs").read_text(
+        encoding="utf-8"
+    )
+
+    click_start = command.index("public static JsonNode Click(")
+    right_click_start = command.index("public static JsonNode RightClick(")
+    click_body = command[click_start:right_click_start]
+    automation_start = command.index("private static JsonNode ClickByAutomationId(")
+    coordinates_start = command.index("private static (int x, int y) GetCoordinates(")
+    automation_body = command[automation_start:coordinates_start]
+
+    assert "if (JsonRpcHandler.Stealth)" in click_body
+    assert "return FlashFocusClick(x.Value, y.Value, mainWindow);" in click_body
+    assert "EnsureForeground(mainWindow);" in click_body
+    assert "invokePattern.Invoke();" in automation_body
+    assert '["method"] = "InvokePattern"' in automation_body
+    assert "if (JsonRpcHandler.Stealth)" in automation_body
+    assert (
+        "return FlashFocusClick(center.X, center.Y, mainWindow, automationId);"
+        in automation_body
+    )
+    assert "private static JsonObject FlashFocusClick" in command
+    assert "SetForegroundWindow(savedForeground)" in command
+
+
 def test_bridge_connect_stores_stealth_state_and_exposes_get_state() -> None:
     router = (PROJECT_ROOT / "bridge" / "JsonRpcHandler.cs").read_text(encoding="utf-8")
     elements = (PROJECT_ROOT / "bridge" / "Commands" / "ElementCommands.cs").read_text(

@@ -19,6 +19,9 @@ public static class ClickCommands
     [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
     private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
     private const int SW_RESTORE = 9;
     private const int DragThresholdPixels = 5;
 
@@ -36,6 +39,11 @@ public static class ClickCommands
 
         if (x is not null && y is not null)
         {
+            if (JsonRpcHandler.Stealth)
+            {
+                return FlashFocusClick(x.Value, y.Value, mainWindow);
+            }
+
             EnsureForeground(mainWindow);
             Mouse.Click(new Point(x.Value, y.Value));
             return new JsonObject { ["clicked"] = true, ["x"] = x.Value, ["y"] = y.Value };
@@ -205,6 +213,11 @@ public static class ClickCommands
                 (int)(rect.Y + rect.Height / 2));
         }
 
+        if (JsonRpcHandler.Stealth)
+        {
+            return FlashFocusClick(center.X, center.Y, mainWindow, automationId);
+        }
+
         Mouse.Click(center);
 
         return new JsonObject
@@ -215,6 +228,51 @@ public static class ClickCommands
             ["x"] = center.X,
             ["y"] = center.Y
         };
+    }
+
+    private static JsonObject FlashFocusClick(
+        int x,
+        int y,
+        AutomationElement? mainWindow,
+        string? automationId = null)
+    {
+        if (mainWindow is null)
+            throw new InvalidOperationException("Not connected. Call 'connect' first.");
+
+        var targetHwnd = mainWindow.Properties.NativeWindowHandle.ValueOrDefault;
+        if (targetHwnd == IntPtr.Zero)
+            throw new InvalidOperationException("Connected window has no native HWND");
+
+        var savedForeground = GetForegroundWindow();
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            ShowWindow(targetHwnd, SW_RESTORE);
+            SetForegroundWindow(targetHwnd);
+            Mouse.Click(new Point(x, y));
+        }
+        finally
+        {
+            if (savedForeground != IntPtr.Zero)
+            {
+                SetForegroundWindow(savedForeground);
+            }
+            stopwatch.Stop();
+        }
+
+        var result = new JsonObject
+        {
+            ["clicked"] = true,
+            ["method"] = "flash-focus",
+            ["x"] = x,
+            ["y"] = y,
+            ["flash_ms"] = (int)stopwatch.ElapsedMilliseconds
+        };
+        if (automationId is not null)
+        {
+            result["automationId"] = automationId;
+        }
+        return result;
     }
 
     private static (int x, int y) GetCoordinates(JsonNode? @params)
