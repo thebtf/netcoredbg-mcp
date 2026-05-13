@@ -157,9 +157,7 @@ class CodeSearchEngine:
 
             for filename in sorted(filenames):
                 path = current_dir / filename
-                if not self._is_supported_file(path):
-                    continue
-                if self._is_ignored(path, is_dir=False):
+                if not self._is_source_file(path):
                     continue
                 if file_glob is not None and not self._matches_file_glob(path, file_glob):
                     continue
@@ -318,6 +316,19 @@ class CodeSearchEngine:
     def _is_supported_file(self, path: Path) -> bool:
         return path.suffix.lower() in self.extensions
 
+    def _is_source_file(self, path: Path) -> bool:
+        if not self._is_supported_file(path):
+            return False
+        if not path.is_file():
+            return False
+        try:
+            resolved = path.resolve(strict=False)
+        except OSError:
+            return False
+        if not _is_relative_to(resolved, self.project_root):
+            return False
+        return not self._is_ignored(path, is_dir=False)
+
     def _is_ignored(self, path: Path, *, is_dir: bool) -> bool:
         relative_path = path.relative_to(self.project_root).as_posix()
         if is_dir and path.name in ALWAYS_IGNORED_DIRS:
@@ -364,10 +375,13 @@ class CodeSearchEngine:
         if not _is_relative_to(resolved, self.project_root):
             raise ValueError(f"Path is outside project root: {file_path}")
 
-        if resolved.exists():
-            if not resolved.is_file():
+        source_path = candidate if candidate.is_symlink() else resolved
+        if source_path.exists():
+            if not source_path.is_file():
                 raise IsADirectoryError(f"Path is not a file: {file_path}")
-            return resolved
+            if self._is_source_file(source_path):
+                return source_path
+            raise FileNotFoundError(f"Source file not found: {file_path}")
 
         if len(raw_path.parts) == 1:
             return self._resolve_unique_basename(raw_path.name)

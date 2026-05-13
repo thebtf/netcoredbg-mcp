@@ -40,6 +40,29 @@ def test_code_search_engine_respects_gitignore() -> None:
     assert "Views/Generated.generated.cs" not in files
 
 
+def test_code_search_engine_skips_symlinked_files_outside_project_root(
+    tmp_path: Path,
+) -> None:
+    external_dir = tmp_path / "external"
+    external_dir.mkdir()
+    external_file = external_dir / "External.cs"
+    external_file.write_text("public class External { }\n", encoding="utf-8")
+
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "Local.cs").write_text("public class Local { }\n", encoding="utf-8")
+    try:
+        (project_root / "LinkedExternal.cs").symlink_to(external_file)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"file symlinks are unavailable in this environment: {exc}")
+
+    engine = CodeSearchEngine(project_root)
+    files = _relative_files(engine)
+
+    assert "Local.cs" in files
+    assert "LinkedExternal.cs" not in files
+
+
 def test_code_search_engine_keeps_ignored_dirs_with_descendant_negation(tmp_path: Path) -> None:
     (tmp_path / ".gitignore").write_text(
         "ignored/\n!ignored/Keep.cs\n",
@@ -192,6 +215,24 @@ def test_get_source_context_rejects_path_traversal() -> None:
 
     with pytest.raises(ValueError, match="outside project root"):
         engine.get_source_context("../WpfSmokeApp/WpfSmokeApp.csproj", line=1, radius=0)
+
+
+def test_get_source_context_rejects_ignored_or_unsupported_existing_files(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".gitignore").write_text("ignored/\n", encoding="utf-8")
+    ignored_dir = tmp_path / "ignored"
+    ignored_dir.mkdir()
+    (ignored_dir / "Ignored.cs").write_text("public class Ignored { }\n", encoding="utf-8")
+    (tmp_path / "notes.txt").write_text("not source\n", encoding="utf-8")
+
+    engine = CodeSearchEngine(tmp_path)
+
+    with pytest.raises(FileNotFoundError, match="Source file not found"):
+        engine.get_source_context("ignored/Ignored.cs", line=1, radius=0)
+
+    with pytest.raises(FileNotFoundError, match="Source file not found"):
+        engine.get_source_context("notes.txt", line=1, radius=0)
 
 
 def test_search_source_finds_regex_matches_in_globbed_xaml() -> None:
