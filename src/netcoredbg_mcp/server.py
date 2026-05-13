@@ -251,6 +251,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
     from .tools.breakpoints import register_breakpoint_tools
     from .tools.code_search import register_code_search_tools
     from .tools.debug import register_debug_tools
+    from .tools.enc import register_enc_tools
     from .tools.inspection import register_inspection_tools
     from .tools.memory import register_memory_tools
     from .tools.output import register_output_tools
@@ -322,6 +323,14 @@ def create_server(project_path: str | None = None) -> FastMCP:
     register_code_search_tools(
         mcp=mcp,
         session=session,
+        resolve_project_root=resolve_project_root,
+    )
+
+    register_enc_tools(
+        mcp=mcp,
+        session=session,
+        check_session_access=_check_session_access,
+        notify_state_changed=notify_state_changed,
         resolve_project_root=resolve_project_root,
     )
 

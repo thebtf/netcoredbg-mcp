@@ -71,6 +71,7 @@ VALID_ACTIONS: dict[str, list[str]] = {
         "ui_send_keys",
         "ui_send_keys_focused",
         "ui_set_focus",
+        "apply_code_change",
     ],
     DebugState.APPLYING_CHANGES.value: [
         "get_debug_state",
