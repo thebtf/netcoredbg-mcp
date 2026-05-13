@@ -57,6 +57,7 @@ packages = ["src/netcoredbg_mcp"]
 "bridge/JsonRpcHandler.cs" = "netcoredbg_mcp/bridge/JsonRpcHandler.cs"
 "bridge/Program.cs" = "netcoredbg_mcp/bridge/Program.cs"
 "bridge/app.manifest" = "netcoredbg_mcp/bridge/app.manifest"
+"scripts/build-netcoredbg-enc.ps1" = "netcoredbg_mcp/scripts/build-netcoredbg-enc.ps1"
 
 [tool.ruff]
 line-length = 100
