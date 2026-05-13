@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-05-13
+
+### Added
+- Stealth-mode GUI debugging for background-safe launch, click, send-keys,
+  screenshot, and explicit bring-to-front workflows.
+- Edit-and-Continue support with a Roslyn delta compiler wrapper, DAP
+  `applyDeltas` integration, `apply_code_change`, and `setup --enc` packaging.
+- Project-scoped code search tools for symbol lookup, references, source
+  context, and regex search with `.gitignore` support.
+
+### Fixed
+- Code search now rejects external symlink targets and prevents direct source
+  context reads from bypassing source-extension and ignore-rule eligibility.
+
 ## [0.14.0] - 2026-05-10
 
 ### Added
