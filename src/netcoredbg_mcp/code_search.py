@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import re
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +20,35 @@ DEFAULT_SOURCE_EXTENSIONS = frozenset(
     }
 )
 ALWAYS_IGNORED_DIRS = frozenset({".git", ".hg", ".svn"})
+CodeSymbolResult = dict[str, str | int]
+SUPPORTED_SYMBOL_KINDS = frozenset({"class", "method", "property", "field"})
+_CSHARP_MODIFIERS = (
+    "public",
+    "private",
+    "protected",
+    "internal",
+    "static",
+    "abstract",
+    "sealed",
+    "partial",
+    "virtual",
+    "override",
+    "async",
+    "extern",
+    "readonly",
+    "const",
+    "volatile",
+    "required",
+    "new",
+)
+_MODIFIER_PATTERN = "|".join(_CSHARP_MODIFIERS)
+_TYPE_PATTERN = r"[\w.<>,\[\]?]+"
+_CSHARP_SYMBOL_PATTERNS = {
+    "class": rf"^\s*(?:(?:{_MODIFIER_PATTERN})\s+)*(?:class|record|struct|interface)\s+__NAME__\b",
+    "method": rf"^\s*(?:(?:{_MODIFIER_PATTERN})\s+)*(?:{_TYPE_PATTERN}\s+)+__NAME__\s*\(",
+    "property": rf"^\s*(?:(?:{_MODIFIER_PATTERN})\s+)*(?:{_TYPE_PATTERN}\s+)+__NAME__\s*\{{",
+    "field": rf"^\s*(?:(?:{_MODIFIER_PATTERN})\s+)*(?:{_TYPE_PATTERN}\s+)+__NAME__\s*(?:=|;)",
+}
 
 
 @dataclass(frozen=True)
@@ -123,6 +153,45 @@ class CodeSearchEngine:
                 if file_glob is not None and not self._matches_file_glob(path, file_glob):
                     continue
                 yield path
+
+    def find_code_symbol(self, name: str, kind: str | None = None) -> list[CodeSymbolResult]:
+        """Find C# symbol definitions by name."""
+        if not name.strip():
+            raise ValueError("Symbol name must not be empty")
+        if kind is not None and kind not in SUPPORTED_SYMBOL_KINDS:
+            supported = ", ".join(sorted(SUPPORTED_SYMBOL_KINDS))
+            raise ValueError(f"Unsupported symbol kind '{kind}'. Supported kinds: {supported}")
+
+        escaped_name = re.escape(name)
+        kinds = (kind,) if kind is not None else ("class", "method", "property", "field")
+        patterns = tuple(
+            (
+                symbol_kind,
+                re.compile(_CSHARP_SYMBOL_PATTERNS[symbol_kind].replace("__NAME__", escaped_name)),
+            )
+            for symbol_kind in kinds
+        )
+
+        results: list[CodeSymbolResult] = []
+        for path in self.iter_source_files("*.cs"):
+            relative_file = path.relative_to(self.project_root).as_posix()
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            for line_number, line in enumerate(lines, start=1):
+                stripped = line.strip()
+                for symbol_kind, pattern in patterns:
+                    if pattern.search(line):
+                        results.append(
+                            {
+                                "file": relative_file,
+                                "line": line_number,
+                                "name": name,
+                                "kind": symbol_kind,
+                                "context": stripped,
+                            }
+                        )
+                        break
+
+        return results
 
     def _is_supported_file(self, path: Path) -> bool:
         return path.suffix.lower() in self.extensions
