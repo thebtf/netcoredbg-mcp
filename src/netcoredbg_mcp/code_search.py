@@ -22,6 +22,7 @@ DEFAULT_SOURCE_EXTENSIONS = frozenset(
 ALWAYS_IGNORED_DIRS = frozenset({".git", ".hg", ".svn"})
 CodeSymbolResult = dict[str, str | int]
 CodeReferenceResult = dict[str, str | int]
+CodeContextResult = dict[str, object]
 SUPPORTED_SYMBOL_KINDS = frozenset({"class", "method", "property", "field"})
 MAX_REFERENCE_RESULTS = 1000
 _CSHARP_MODIFIERS = (
@@ -227,6 +228,36 @@ class CodeSearchEngine:
 
         return results
 
+    def get_source_context(
+        self,
+        file_path: str | os.PathLike[str],
+        *,
+        line: int,
+        radius: int = 10,
+    ) -> CodeContextResult:
+        """Read source lines around a 1-based line number."""
+        if line < 1:
+            raise ValueError("line must be at least 1")
+        if radius < 0:
+            raise ValueError("radius must be non-negative")
+
+        path = self._resolve_project_file(file_path)
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        if line > len(lines):
+            raise ValueError(f"line {line} is outside file range 1..{len(lines)}")
+
+        start_line = max(1, line - radius)
+        end_line = min(len(lines), line + radius)
+        return {
+            "file": path.relative_to(self.project_root).as_posix(),
+            "start_line": start_line,
+            "end_line": end_line,
+            "lines": [
+                {"line": line_number, "text": lines[line_number - 1]}
+                for line_number in range(start_line, end_line + 1)
+            ],
+        }
+
     def _is_supported_file(self, path: Path) -> bool:
         return path.suffix.lower() in self.extensions
 
@@ -248,6 +279,35 @@ class CodeSearchEngine:
             file_glob,
         )
 
+    def _resolve_project_file(self, file_path: str | os.PathLike[str]) -> Path:
+        raw_path = Path(file_path)
+        candidate = (
+            raw_path.expanduser()
+            if raw_path.is_absolute()
+            else self.project_root / raw_path
+        )
+        resolved = candidate.resolve(strict=False)
+        if not _is_relative_to(resolved, self.project_root):
+            raise ValueError(f"Path is outside project root: {file_path}")
+
+        if resolved.exists():
+            if not resolved.is_file():
+                raise IsADirectoryError(f"Path is not a file: {file_path}")
+            return resolved
+
+        if len(raw_path.parts) == 1:
+            return self._resolve_unique_basename(raw_path.name)
+
+        raise FileNotFoundError(f"Source file not found: {file_path}")
+
+    def _resolve_unique_basename(self, filename: str) -> Path:
+        matches = [path for path in self.iter_source_files() if path.name == filename]
+        if not matches:
+            raise FileNotFoundError(f"Source file not found: {filename}")
+        if len(matches) > 1:
+            raise ValueError(f"Source file basename is ambiguous: {filename}")
+        return matches[0]
+
 
 def _normalize_extension(extension: str) -> str:
     normalized = extension.lower()
@@ -265,3 +325,11 @@ def _load_gitignore_rules(project_root: Path) -> list[_GitIgnoreRule]:
         if rule is not None:
             rules.append(rule)
     return rules
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True

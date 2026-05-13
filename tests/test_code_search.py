@@ -104,3 +104,38 @@ def test_find_code_references_caps_results() -> None:
     results = engine.find_code_references("CueInputPanel", max_results=1)
 
     assert len(results) == 1
+
+
+def test_get_source_context_returns_line_range_with_numbers() -> None:
+    engine = CodeSearchEngine(FIXTURE_ROOT)
+
+    context = engine.get_source_context("ViewModels/MainViewModel.cs", line=10, radius=2)
+
+    assert context["file"] == "ViewModels/MainViewModel.cs"
+    assert context["start_line"] == 8
+    assert context["end_line"] == 12
+    assert context["lines"] == [
+        {"line": 8, "text": '    public string ActiveControlName => "CueInputPanel";'},
+        {"line": 9, "text": ""},
+        {"line": 10, "text": "    public void LoadAssignedCharacter()"},
+        {"line": 11, "text": "    {"},
+        {"line": 12, "text": "        _loadCount++;"},
+    ]
+
+
+def test_get_source_context_resolves_unique_basename() -> None:
+    engine = CodeSearchEngine(FIXTURE_ROOT)
+
+    context = engine.get_source_context("MainViewModel.cs", line=10, radius=0)
+
+    assert context["file"] == "ViewModels/MainViewModel.cs"
+    assert context["lines"] == [
+        {"line": 10, "text": "    public void LoadAssignedCharacter()"}
+    ]
+
+
+def test_get_source_context_rejects_path_traversal() -> None:
+    engine = CodeSearchEngine(FIXTURE_ROOT)
+
+    with pytest.raises(ValueError, match="outside project root"):
+        engine.get_source_context("../WpfSmokeApp/WpfSmokeApp.csproj", line=1, radius=0)
