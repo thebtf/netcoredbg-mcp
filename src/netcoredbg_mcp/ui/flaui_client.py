@@ -312,6 +312,48 @@ class FlaUIBackend:
         self._process_id = None
         self._element_cache.clear()
 
+    async def bring_to_front(self) -> dict[str, Any]:
+        """Bring the connected debuggee window to the foreground."""
+        if self._process_id is None:
+            raise RuntimeError("FlaUI backend is not connected to a process")
+
+        import ctypes
+
+        from .screenshot import get_hwnd_for_pid
+
+        hwnd = get_hwnd_for_pid(self._process_id)
+        if not hwnd:
+            raise RuntimeError(f"No visible window for process {self._process_id}")
+
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        foreground_hwnd = user32.GetForegroundWindow()
+        current_thread = kernel32.GetCurrentThreadId()
+        foreground_thread = user32.GetWindowThreadProcessId(foreground_hwnd, None)
+        target_thread = user32.GetWindowThreadProcessId(hwnd, None)
+        attached_threads: list[tuple[int, int]] = []
+        for thread_id in (foreground_thread, target_thread):
+            if thread_id and thread_id != current_thread:
+                if user32.AttachThreadInput(current_thread, thread_id, True):
+                    attached_threads.append((current_thread, thread_id))
+
+        try:
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+            activated = user32.GetForegroundWindow() == hwnd
+        finally:
+            for source_thread, attached_thread in reversed(attached_threads):
+                user32.AttachThreadInput(source_thread, attached_thread, False)
+
+        if activated:
+            await self.connect(self._process_id, stealth=False)
+
+        return {
+            "activated": activated,
+            "hwnd": hwnd,
+        }
+
     @staticmethod
     def _build_search_params(
         automation_id: str | None = None,

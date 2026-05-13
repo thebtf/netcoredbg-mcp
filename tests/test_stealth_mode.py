@@ -204,6 +204,28 @@ def test_session_manager_launch_stores_stealth_mode_source_contract() -> None:
     assert "self._stealth_mode = stealth_mode" in manager
 
 
+def test_session_manager_allows_explicit_stealth_exit_source_contract() -> None:
+    manager = (PROJECT_ROOT / "src" / "netcoredbg_mcp" / "session" / "manager.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "@stealth_mode.setter" in manager
+    assert "self._stealth_mode = value" in manager
+
+
+def test_flaui_backend_bring_to_front_reconnects_bridge_without_stealth() -> None:
+    backend = (PROJECT_ROOT / "src" / "netcoredbg_mcp" / "ui" / "flaui_client.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "async def bring_to_front(self) -> dict[str, Any]:" in backend
+    assert "get_hwnd_for_pid(self._process_id)" in backend
+    assert "SetForegroundWindow(hwnd)" in backend
+    assert "await self.connect(self._process_id, stealth=False)" in backend
+    assert '["activated"] = activated' not in backend
+    assert '"activated": activated' in backend
+
+
 @pytest.mark.asyncio
 async def test_start_debug_passes_stealth_mode_to_session_launch(tmp_path) -> None:
     from netcoredbg_mcp.tools.debug import register_debug_tools
@@ -305,6 +327,38 @@ async def test_ui_tools_connect_flaui_backend_with_session_stealth_mode() -> Non
         await registry.tools["ui_get_window_tree"]()
 
     backend.connect.assert_awaited_once_with(42, stealth=True)
+
+
+@pytest.mark.asyncio
+async def test_ui_bring_to_front_disables_session_stealth_mode() -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    backend = SimpleNamespace(
+        process_id=42,
+        bring_to_front=AsyncMock(return_value={"activated": True, "hwnd": 123}),
+    )
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=True,
+    )
+    registry = ToolRegistry()
+    ctx = SimpleNamespace()
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(
+            registry,
+            session,
+            check_session_access=lambda ctx: None,
+        )
+
+        response = await registry.tools["ui_bring_to_front"](ctx)
+
+    backend.bring_to_front.assert_awaited_once_with()
+    assert session.stealth_mode is False
+    assert response["data"]["activated"] is True
+    assert response["data"]["stealth_mode"] is False
 
 
 @pytest.mark.asyncio

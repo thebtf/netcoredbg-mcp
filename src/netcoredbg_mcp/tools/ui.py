@@ -249,6 +249,38 @@ def register_ui_tools(
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def ui_bring_to_front(ctx: Context) -> dict:
+        """Bring the debuggee window to the foreground and exit stealth mode."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            ui = await _ensure_ui_connected()
+            bring_to_front = getattr(ui, "bring_to_front", None)
+            if bring_to_front is None:
+                return build_error_response(
+                    "ui_bring_to_front is only supported by the FlaUI backend",
+                    state=session.state.state,
+                )
+
+            result = await bring_to_front()
+            if not isinstance(result, dict):
+                return build_error_response(
+                    "bring_to_front: backend returned non-dict response "
+                    f"({type(result).__name__})",
+                    state=session.state.state,
+                )
+
+            if result.get("activated") is True:
+                session.stealth_mode = False
+                result["stealth_mode"] = False
+
+            return build_response(data=result, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
     @mcp.tool(annotations=ToolAnnotations(idempotentHint=True, openWorldHint=False))
     async def ui_switch_window(
         ctx: Context,

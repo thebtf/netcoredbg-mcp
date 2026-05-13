@@ -150,6 +150,11 @@ class SessionManager:
         """Whether the current launch avoids foreground-stealing UI actions."""
         return self._stealth_mode
 
+    @stealth_mode.setter
+    def stealth_mode(self, value: bool) -> None:
+        """Set whether UI operations should avoid foreground-stealing actions."""
+        self._stealth_mode = value
+
     @property
     def is_active(self) -> bool:
         """Check if session is active."""
