@@ -24,6 +24,12 @@ try
         return 1;
     }
 
+    if (request.Edits is null)
+    {
+        await WriteResponseAsync(CliResponse.Failure(["edits is required."]));
+        return 1;
+    }
+
     var edits = request.Edits
         .Select(edit => new SourceEdit(edit.StartLine, edit.EndLine, edit.NewText))
         .ToArray();

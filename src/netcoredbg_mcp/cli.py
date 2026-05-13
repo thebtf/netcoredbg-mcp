@@ -25,16 +25,20 @@ def run_setup_enc(script_path: str | Path | None = None) -> int:
         )
         return 1
 
-    completed = subprocess.run(
-        [
-            powershell,
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(script),
-        ]
-    )
+    try:
+        completed = subprocess.run(
+            [
+                powershell,
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script),
+            ]
+        )
+    except OSError as exc:
+        print(f"Failed to launch PowerShell: {exc}", file=sys.stderr)
+        return 1
     return completed.returncode
 
 

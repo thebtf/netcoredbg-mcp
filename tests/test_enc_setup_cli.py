@@ -44,6 +44,27 @@ def test_run_setup_enc_invokes_powershell_script(monkeypatch, tmp_path):
     ]
 
 
+def test_run_setup_enc_returns_error_when_powershell_launch_fails(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    from netcoredbg_mcp.cli import run_setup_enc
+
+    script = tmp_path / "build-netcoredbg-enc.ps1"
+    script.write_text("Write-Host test", encoding="utf-8")
+
+    monkeypatch.setattr("shutil.which", lambda name: "pwsh.exe" if name == "pwsh" else None)
+
+    def fake_run(_args):
+        raise OSError("blocked")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert run_setup_enc(script_path=script) == 1
+    assert "Failed to launch PowerShell: blocked" in capsys.readouterr().err
+
+
 def test_build_netcoredbg_enc_script_contract():
     script = PROJECT_ROOT / "scripts" / "build-netcoredbg-enc.ps1"
 

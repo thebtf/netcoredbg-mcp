@@ -200,7 +200,7 @@ public static partial class InputCommands
             @params,
             automation,
             mainWindow,
-            ensureForegroundBeforeEach: true);
+            ensureForegroundBeforeEach: false);
     }
 
     internal static JsonObject SendKeysBatchWithoutForeground(

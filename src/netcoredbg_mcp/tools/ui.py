@@ -1053,12 +1053,14 @@ def register_ui_tools(
                 if isinstance(ui, FlaUIBackend):
                     bridge_result = await ui.client.call("screenshot", {})
                     if not isinstance(bridge_result, dict) or "base64" not in bridge_result:
-                        return build_error_response(
-                            "screenshot: bridge returned invalid screenshot response",
-                            state=session.state.state,
+                        logger.warning(
+                            "screenshot: bridge returned invalid screenshot response; "
+                            "falling back to HWND capture"
                         )
-                    bridge_screenshot = bridge_result
-                    png_bytes = base64.b64decode(bridge_result["base64"])
+                        bridge_screenshot = None
+                    else:
+                        bridge_screenshot = bridge_result
+                        png_bytes = base64.b64decode(bridge_result["base64"])
                 else:
                     bridge_screenshot = None
 

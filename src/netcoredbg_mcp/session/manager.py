@@ -101,7 +101,8 @@ class SessionManager:
         self._snapshot_manager: SnapshotManager | None = None
         self._stealth_foreground_restore_task: asyncio.Task[None] | None = None
 
-    def _restore_foreground_if_debuggee_owns_foreground(self, saved_hwnd: int | None) -> bool:
+    def _restore_foreground_if_safe(self, saved_hwnd: int | None) -> bool:
+        """Restore foreground if the debuggee owns it; return whether retries may continue."""
         if not saved_hwnd:
             return False
 
@@ -124,14 +125,14 @@ class SessionManager:
             saved_hwnd,
             restored,
         )
-        return restored
+        return True
 
     async def _restore_foreground_after_stealth_launch(self, saved_hwnd: int | None) -> None:
         for delay_seconds in (0.0, 0.05, 0.2, 0.5):
             if delay_seconds:
                 await asyncio.sleep(delay_seconds)
 
-            if not self._restore_foreground_if_debuggee_owns_foreground(saved_hwnd):
+            if not self._restore_foreground_if_safe(saved_hwnd):
                 return
 
     @property
@@ -1217,7 +1218,7 @@ class SessionManager:
         self._set_state(DebugState.RUNNING)
 
         if stealth_mode:
-            self._restore_foreground_if_debuggee_owns_foreground(saved_foreground_hwnd)
+            self._restore_foreground_if_safe(saved_foreground_hwnd)
             self._stealth_foreground_restore_task = asyncio.create_task(
                 self._restore_foreground_after_stealth_launch(saved_foreground_hwnd)
             )

@@ -13,7 +13,7 @@ public static class ElementCommands
     {
         var pid = @params?["pid"]?.GetValue<int>()
             ?? throw new ArgumentException("Missing required parameter: pid");
-        JsonRpcHandler.Stealth = @params?["stealth"]?.GetValue<bool>() ?? false;
+        var requestedStealth = @params?["stealth"]?.GetValue<bool>() ?? false;
 
         var desktop = automation.GetDesktop();
         var windows = desktop.FindAllChildren(
@@ -30,6 +30,7 @@ public static class ElementCommands
         // Store pid independently so window enumeration still works after
         // set_active_window switches MainWindow to a dialog that later closes.
         JsonRpcHandler.ProcessId = pid;
+        JsonRpcHandler.Stealth = requestedStealth;
 
         Program.Log($"Connected to window: {SafeString(() => window.Name)} (pid={pid})");
 

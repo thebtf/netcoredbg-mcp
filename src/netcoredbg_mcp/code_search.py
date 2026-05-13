@@ -53,7 +53,10 @@ _MODIFIER_PATTERN = "|".join(_CSHARP_MODIFIERS)
 _TYPE_PATTERN = r"[\w.<>,\[\]?]+"
 _CSHARP_SYMBOL_PATTERNS = {
     "class": rf"^\s*(?:(?:{_MODIFIER_PATTERN})\s+)*(?:class|record|struct|interface)\s+__NAME__\b",
-    "method": rf"^\s*(?:(?:{_MODIFIER_PATTERN})\s+)*(?:{_TYPE_PATTERN}\s+)+__NAME__\s*\(",
+    "method": (
+        rf"^\s*(?:(?:{_MODIFIER_PATTERN})\s+)*"
+        rf"(?:(?:{_TYPE_PATTERN}\s+)+__NAME__|__NAME__)\s*\("
+    ),
     "property": rf"^\s*(?:(?:{_MODIFIER_PATTERN})\s+)*(?:{_TYPE_PATTERN}\s+)+__NAME__\s*\{{",
     "field": rf"^\s*(?:(?:{_MODIFIER_PATTERN})\s+)*(?:{_TYPE_PATTERN}\s+)+__NAME__\s*(?:=|;)",
 }
@@ -149,7 +152,7 @@ class CodeSearchEngine:
             dirnames[:] = sorted(
                 dirname
                 for dirname in dirnames
-                if not self._is_ignored(current_dir / dirname, is_dir=True)
+                if not self._should_prune_directory(current_dir / dirname)
             )
 
             for filename in sorted(filenames):
@@ -214,12 +217,13 @@ class CodeSearchEngine:
             raise ValueError("max_results must be at least 1")
 
         limit = min(max_results, MAX_REFERENCE_RESULTS)
+        reference_pattern = _compile_literal_reference_pattern(name)
         results: list[CodeReferenceResult] = []
         for path in self.iter_source_files():
             relative_file = path.relative_to(self.project_root).as_posix()
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
             for line_number, line in enumerate(lines, start=1):
-                if name not in line:
+                if reference_pattern.search(line) is None:
                     continue
                 results.append(
                     {
@@ -325,6 +329,23 @@ class CodeSearchEngine:
                 ignored = not rule.negated
         return ignored
 
+    def _should_prune_directory(self, path: Path) -> bool:
+        if not self._is_ignored(path, is_dir=True):
+            return False
+        return not self._has_descendant_negation(path)
+
+    def _has_descendant_negation(self, path: Path) -> bool:
+        relative_path = path.relative_to(self.project_root).as_posix().strip("/")
+        for rule in self._ignore_rules:
+            if not rule.negated:
+                continue
+            if not rule.anchored and not rule.has_slash:
+                return True
+            pattern = rule.pattern.strip("/")
+            if pattern == relative_path or pattern.startswith(f"{relative_path}/"):
+                return True
+        return False
+
     def _matches_file_glob(self, path: Path, file_glob: str) -> bool:
         relative_path = path.relative_to(self.project_root).as_posix()
         return fnmatch.fnmatchcase(relative_path, file_glob) or fnmatch.fnmatchcase(
@@ -365,6 +386,13 @@ class CodeSearchEngine:
 def _normalize_extension(extension: str) -> str:
     normalized = extension.lower()
     return normalized if normalized.startswith(".") else f".{normalized}"
+
+
+def _compile_literal_reference_pattern(name: str) -> re.Pattern[str]:
+    escaped_name = re.escape(name)
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+        return re.compile(rf"(?<![A-Za-z0-9_]){escaped_name}(?![A-Za-z0-9_])")
+    return re.compile(escaped_name)
 
 
 def _load_gitignore_rules(project_root: Path) -> list[_GitIgnoreRule]:

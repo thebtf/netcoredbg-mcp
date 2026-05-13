@@ -54,6 +54,7 @@ public static class ClickCommands
 
     public static JsonNode RightClick(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
+        RejectStealthMouseInput("right_click");
         var (x, y) = GetCoordinates(@params);
         EnsureForeground(mainWindow);
         Mouse.RightClick(new Point(x, y));
@@ -62,6 +63,7 @@ public static class ClickCommands
 
     public static JsonNode DoubleClick(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
+        RejectStealthMouseInput("double_click");
         var (x, y) = GetCoordinates(@params);
         EnsureForeground(mainWindow);
         Mouse.DoubleClick(new Point(x, y));
@@ -70,6 +72,7 @@ public static class ClickCommands
 
     public static JsonNode Drag(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
+        RejectStealthMouseInput("drag");
         var x1 = @params?["x1"]?.GetValue<int>()
             ?? throw new ArgumentException("Missing 'x1'");
         var y1 = @params?["y1"]?.GetValue<int>()
@@ -260,7 +263,12 @@ public static class ClickCommands
         try
         {
             ShowWindow(targetHwnd, SW_RESTORE);
-            SetForegroundWindow(targetHwnd);
+            var foregroundSet = SetForegroundWindow(targetHwnd);
+            if (!foregroundSet || GetForegroundWindow() != targetHwnd)
+            {
+                throw new InvalidOperationException(
+                    "flash-focus click could not activate the debuggee window safely");
+            }
             Mouse.Click(new Point(x, y));
         }
         finally
@@ -285,6 +293,19 @@ public static class ClickCommands
             result["automationId"] = automationId;
         }
         return result;
+    }
+
+    private static void RejectStealthMouseInput(string commandName)
+    {
+        if (!JsonRpcHandler.Stealth)
+        {
+            return;
+        }
+
+        Program.Log($"stealth: blocking {commandName} coordinate mouse input");
+        throw new InvalidOperationException(
+            $"{commandName} is not available in stealth mode because it requires coordinate mouse input. "
+            + "Use ui_click with automationId or ui_bring_to_front first.");
     }
 
     private static (int x, int y) GetCoordinates(JsonNode? @params)

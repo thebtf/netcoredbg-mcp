@@ -40,6 +40,23 @@ async def test_apply_deltas_sends_custom_dap_request() -> None:
 
 
 @pytest.mark.asyncio
+async def test_apply_deltas_handles_empty_response_body() -> None:
+    client = FakeDapClient(success=True, empty_body=True)
+
+    result = await apply_deltas(
+        client,
+        dll_name="Sample.dll",
+        metadata_path="Sample.metadata",
+        il_path="Sample.il",
+        pdb_path="Sample.pdb",
+        line_updates_path=None,
+    )
+
+    assert result.success is True
+    assert result.body == {}
+
+
+@pytest.mark.asyncio
 async def test_apply_code_change_stopped_success_updates_source_and_restores_state(
     tmp_path: Path,
 ):
@@ -109,6 +126,22 @@ async def test_apply_code_change_without_ncdbhook_returns_setup_error(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_apply_code_change_rejects_out_of_range_source_edit(tmp_path: Path):
+    project, source, netcoredbg = _write_project(tmp_path)
+    session = FakeSession(DebugState.STOPPED, project, netcoredbg)
+
+    result = await apply_code_change_to_session(
+        session,
+        project,
+        "Sample.cs",
+        [{"start_line": 999, "end_line": 999, "new_text": "        return 2;"}],
+    )
+
+    assert "Invalid edit range 999..999" in result["error"]
+    assert source.read_text(encoding="utf-8").count("return 1;") == 1
+
+
+@pytest.mark.asyncio
 async def test_apply_code_change_rude_edit_returns_restart_suggestion(tmp_path: Path):
     project, _source, netcoredbg = _write_project(tmp_path)
     session = FakeSession(DebugState.STOPPED, project, netcoredbg)
@@ -133,13 +166,20 @@ async def test_apply_code_change_rude_edit_returns_restart_suggestion(tmp_path: 
 
 
 class FakeDapClient:
-    def __init__(self, *, success: bool) -> None:
+    def __init__(
+        self,
+        *,
+        success: bool,
+        body: dict | None = None,
+        empty_body: bool = False,
+    ) -> None:
         self.success = success
+        self.body = None if empty_body else (body or {"applied": True})
         self.requests: list[tuple[str, dict, float]] = []
 
     async def send_request(self, command: str, arguments: dict, timeout: float = 30.0):
         self.requests.append((command, arguments, timeout))
-        return SimpleNamespace(success=self.success, message=None, body={"applied": True})
+        return SimpleNamespace(success=self.success, message=None, body=self.body)
 
 
 class FakeSession:

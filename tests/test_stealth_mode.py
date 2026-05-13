@@ -89,7 +89,7 @@ def test_bridge_send_keys_routes_to_flash_focus_only_in_stealth_mode() -> None:
     assert "return StealthCommands.FlashFocusSendKeysBatch(@params, automation, mainWindow);" in (
         batch_body
     )
-    assert "ensureForegroundBeforeEach: true" in batch_body
+    assert "ensureForegroundBeforeEach: false" in batch_body
     assert "internal static JsonObject SendKeysBatchWithoutForeground" in command
 
 
@@ -122,7 +122,20 @@ def test_bridge_click_routes_stealth_to_invoke_or_flash_focus_click() -> None:
         in automation_body
     )
     assert "private static JsonObject FlashFocusClick" in command
+    assert "GetForegroundWindow() != targetHwnd" in command
+    assert "flash-focus click could not activate the debuggee window safely" in command
     assert "SetForegroundWindow(savedForeground)" in command
+
+
+def test_bridge_blocks_unsupported_stealth_coordinate_mouse_commands() -> None:
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "ClickCommands.cs").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'RejectStealthMouseInput("right_click");' in command
+    assert 'RejectStealthMouseInput("double_click");' in command
+    assert 'RejectStealthMouseInput("drag");' in command
+    assert "Use ui_click with automationId or ui_bring_to_front first." in command
 
 
 def test_bridge_screenshot_uses_printwindow_in_stealth_mode() -> None:
@@ -166,7 +179,11 @@ def test_bridge_connect_stores_stealth_state_and_exposes_get_state() -> None:
     assert '["get_state"] = GetState' in router
     assert '["stealth"] = Stealth' in router
     assert "_stealth = false;" in router
-    assert 'JsonRpcHandler.Stealth = @params?["stealth"]?.GetValue<bool>() ?? false;' in elements
+    assert 'var requestedStealth = @params?["stealth"]?.GetValue<bool>() ?? false;' in elements
+    assert "JsonRpcHandler.Stealth = requestedStealth;" in elements
+    assert elements.index("var window = SelectPrimaryWindow") < elements.index(
+        "JsonRpcHandler.Stealth = requestedStealth;"
+    )
 
 
 def test_bridge_window_ensure_foreground_skips_only_in_stealth_mode() -> None:
@@ -212,12 +229,12 @@ def test_session_manager_launch_stores_stealth_mode_source_contract() -> None:
     assert "stealth_mode: bool = False" in manager
     assert "self._stealth_mode = stealth_mode" in manager
     assert "saved_foreground_hwnd = get_foreground_window() if stealth_mode else None" in manager
-    assert "self._restore_foreground_if_debuggee_owns_foreground(saved_foreground_hwnd)" in manager
+    assert "self._restore_foreground_if_safe(saved_foreground_hwnd)" in manager
     assert "asyncio.create_task(" in manager
 
 
 @pytest.mark.asyncio
-async def test_session_manager_stealth_launch_restores_only_debuggee_foreground(
+async def test_session_manager_stealth_launch_restores_while_safe(
     monkeypatch,
 ) -> None:
     from netcoredbg_mcp.session.manager import SessionManager
@@ -246,6 +263,22 @@ async def test_session_manager_stealth_launch_restores_only_debuggee_foreground(
 
     assert restored == [123, 123]
     assert sleep.await_count == 2
+
+
+def test_session_manager_stealth_launch_stops_after_user_moves_foreground(monkeypatch) -> None:
+    from netcoredbg_mcp.session.manager import SessionManager
+
+    manager = SessionManager.__new__(SessionManager)
+    manager._state = SimpleNamespace(process_id=42)
+
+    monkeypatch.setattr("netcoredbg_mcp.session.manager.get_foreground_window", lambda: 777)
+    monkeypatch.setattr("netcoredbg_mcp.session.manager.get_window_process_id", lambda hwnd: 100)
+
+    restore = MagicMock(return_value=True)
+    monkeypatch.setattr("netcoredbg_mcp.session.manager.restore_foreground_window", restore)
+
+    assert manager._restore_foreground_if_safe(123) is False
+    restore.assert_not_called()
 
 
 def test_session_manager_allows_explicit_stealth_exit_source_contract() -> None:

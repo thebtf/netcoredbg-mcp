@@ -1,5 +1,7 @@
 using System.Collections.Immutable;
 using System.Text;
+using System.Text.Json;
+using System.Xml.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -121,9 +123,15 @@ public sealed class DeltaEmitter
                     $"Invalid edit range {edit.StartLine}..{edit.EndLine} for {lines.Count} lines.");
             }
 
-            var replacement = SplitLines(edit.NewText.TrimEnd('\r', '\n'));
+            var replacementText = edit.NewText.TrimEnd('\r', '\n');
+            var replacement = string.IsNullOrEmpty(replacementText)
+                ? new List<string>()
+                : SplitLines(replacementText);
             lines.RemoveRange(edit.StartLine - 1, edit.EndLine - edit.StartLine + 1);
-            lines.InsertRange(edit.StartLine - 1, replacement);
+            if (replacement.Count > 0)
+            {
+                lines.InsertRange(edit.StartLine - 1, replacement);
+            }
         }
 
         return string.Join(Environment.NewLine, lines) + Environment.NewLine;
@@ -209,7 +217,7 @@ public sealed class DeltaEmitter
         return CSharpCompilation.Create(
             assemblyName,
             trees,
-            GetMetadataReferences(),
+            GetMetadataReferences(projectRoot),
             CompilationOptions);
     }
 
@@ -221,16 +229,201 @@ public sealed class DeltaEmitter
             || string.Equals(segment, "obj", StringComparison.OrdinalIgnoreCase));
     }
 
-    private static ImmutableArray<MetadataReference> GetMetadataReferences()
+    private static ImmutableArray<MetadataReference> GetMetadataReferences(PathMap projectRoot)
     {
         var trustedAssemblies = ((string?)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES"))
             ?.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
             ?? Array.Empty<string>();
 
         return trustedAssemblies
+            .Concat(GetProjectMetadataReferencePaths(projectRoot))
             .Where(File.Exists)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
             .Select(path => (MetadataReference)MetadataReference.CreateFromFile(path))
             .ToImmutableArray();
+    }
+
+    private static IEnumerable<string> GetProjectMetadataReferencePaths(PathMap projectRoot)
+    {
+        if (projectRoot.ProjectFile is null)
+        {
+            yield break;
+        }
+
+        foreach (var path in GetReferenceHintPaths(projectRoot.ProjectFile))
+        {
+            yield return path;
+        }
+
+        foreach (var path in GetPackageAssetReferences(projectRoot))
+        {
+            yield return path;
+        }
+
+        foreach (var path in GetProjectReferenceOutputs(projectRoot.ProjectFile))
+        {
+            yield return path;
+        }
+    }
+
+    private static IEnumerable<string> GetReferenceHintPaths(string projectFile)
+    {
+        var projectDirectory = Path.GetDirectoryName(projectFile)!;
+        var document = XDocument.Load(projectFile);
+
+        foreach (var reference in document.Descendants().Where(element => element.Name.LocalName == "Reference"))
+        {
+            var hintPath = reference.Elements()
+                .FirstOrDefault(element => element.Name.LocalName == "HintPath")
+                ?.Value;
+            if (!string.IsNullOrWhiteSpace(hintPath))
+            {
+                yield return Path.GetFullPath(Path.Combine(projectDirectory, hintPath));
+            }
+        }
+    }
+
+    private static IEnumerable<string> GetPackageAssetReferences(PathMap projectRoot)
+    {
+        if (projectRoot.ProjectFile is null)
+        {
+            yield break;
+        }
+
+        var assetsPath = Path.Combine(projectRoot.RootDirectory, "obj", "project.assets.json");
+        if (!File.Exists(assetsPath))
+        {
+            yield break;
+        }
+
+        using var document = JsonDocument.Parse(File.ReadAllText(assetsPath, Encoding.UTF8));
+        var root = document.RootElement;
+        if (!root.TryGetProperty("packageFolders", out var packageFolders)
+            || !root.TryGetProperty("libraries", out var libraries)
+            || !root.TryGetProperty("targets", out var targets))
+        {
+            yield break;
+        }
+
+        var folders = packageFolders.EnumerateObject()
+            .Select(folder => folder.Name)
+            .ToArray();
+
+        foreach (var target in targets.EnumerateObject())
+        {
+            foreach (var dependency in target.Value.EnumerateObject())
+            {
+                if (!dependency.Value.TryGetProperty("compile", out var compileAssets)
+                    || !libraries.TryGetProperty(dependency.Name, out var library)
+                    || !library.TryGetProperty("path", out var packagePathElement))
+                {
+                    continue;
+                }
+
+                var packagePath = packagePathElement.GetString();
+                if (string.IsNullOrWhiteSpace(packagePath))
+                {
+                    continue;
+                }
+
+                foreach (var asset in compileAssets.EnumerateObject())
+                {
+                    if (asset.Name.EndsWith("_._", StringComparison.Ordinal)
+                        || !asset.Name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    foreach (var folder in folders)
+                    {
+                        var candidate = Path.GetFullPath(Path.Combine(folder, packagePath, asset.Name));
+                        if (File.Exists(candidate))
+                        {
+                            yield return candidate;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private static IEnumerable<string> GetProjectReferenceOutputs(string projectFile)
+    {
+        var projectDirectory = Path.GetDirectoryName(projectFile)!;
+        var document = XDocument.Load(projectFile);
+
+        foreach (var reference in document.Descendants()
+            .Where(element => element.Name.LocalName == "ProjectReference"))
+        {
+            var include = reference.Attribute("Include")?.Value;
+            if (string.IsNullOrWhiteSpace(include))
+            {
+                continue;
+            }
+
+            var referencedProject = Path.GetFullPath(Path.Combine(projectDirectory, include));
+            var targetFramework = GetTargetFramework(referencedProject) ?? GetTargetFramework(projectFile);
+            if (targetFramework is null)
+            {
+                continue;
+            }
+
+            var assemblyName = GetAssemblyName(referencedProject) ?? Path.GetFileNameWithoutExtension(referencedProject);
+            foreach (var configuration in new[] { "Debug", "Release" })
+            {
+                var outputPath = Path.Combine(
+                    Path.GetDirectoryName(referencedProject)!,
+                    "bin",
+                    configuration,
+                    targetFramework,
+                    $"{assemblyName}.dll");
+                if (File.Exists(outputPath))
+                {
+                    yield return outputPath;
+                    break;
+                }
+            }
+        }
+    }
+
+    private static string? GetTargetFramework(string projectFile)
+    {
+        if (!File.Exists(projectFile))
+        {
+            return null;
+        }
+
+        var document = XDocument.Load(projectFile);
+        var targetFramework = document.Descendants()
+            .FirstOrDefault(element => element.Name.LocalName == "TargetFramework")
+            ?.Value
+            .Trim();
+        if (!string.IsNullOrWhiteSpace(targetFramework))
+        {
+            return targetFramework;
+        }
+
+        var targetFrameworks = document.Descendants()
+            .FirstOrDefault(element => element.Name.LocalName == "TargetFrameworks")
+            ?.Value;
+        return targetFrameworks?
+            .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .FirstOrDefault();
+    }
+
+    private static string? GetAssemblyName(string projectFile)
+    {
+        if (!File.Exists(projectFile))
+        {
+            return null;
+        }
+
+        return XDocument.Load(projectFile)
+            .Descendants()
+            .FirstOrDefault(element => element.Name.LocalName == "AssemblyName")
+            ?.Value
+            .Trim();
     }
 
     private static InitialEmitResult EmitInitialAssembly(

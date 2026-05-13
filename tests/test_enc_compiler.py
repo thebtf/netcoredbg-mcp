@@ -92,6 +92,102 @@ def test_compile_delta_returns_error_for_invalid_file(
     assert any("Target file not found" in diagnostic for diagnostic in result.diagnostics)
 
 
+def test_compile_delta_resolves_project_reference_metadata(
+    tmp_path: Path, enc_compiler_dll: Path
+):
+    dependency_project = tmp_path / "Dependency" / "Dependency.csproj"
+    dependency_project.parent.mkdir()
+    dependency_project.write_text(
+        """<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+  </PropertyGroup>
+</Project>
+""",
+        encoding="utf-8",
+    )
+    (dependency_project.parent / "ExternalValue.cs").write_text(
+        """namespace Dependency;
+
+public sealed class ExternalValue
+{
+    public int Value { get; set; }
+}
+""",
+        encoding="utf-8",
+    )
+    subprocess.run(["dotnet", "build", dependency_project, "-v", "quiet"], check=True)
+
+    project = tmp_path / "Sample" / "Sample.csproj"
+    project.parent.mkdir()
+    project.write_text(
+        """<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\\Dependency\\Dependency.csproj" />
+  </ItemGroup>
+</Project>
+""",
+        encoding="utf-8",
+    )
+    source = project.parent / "Sample.cs"
+    source.write_text(
+        """using Dependency;
+
+namespace Fixture;
+
+public class Sample
+{
+    public int GetValue()
+    {
+        return new ExternalValue { Value = 1 }.Value;
+    }
+}
+""",
+        encoding="utf-8",
+    )
+    return_line = _line_number(source, "Value = 1")
+
+    result = compile_delta(
+        project,
+        source,
+        [
+            SourceEdit(
+                start_line=return_line,
+                end_line=return_line,
+                new_text="        return new ExternalValue { Value = 2 }.Value;",
+            )
+        ],
+        compiler_path=enc_compiler_dll,
+        output_dir=tmp_path / "deltas",
+    )
+
+    assert result.success, result.diagnostics
+
+
+def test_enc_compiler_rejects_null_edits(enc_compiler_dll: Path, tmp_path: Path):
+    project, source = _write_fixture_project(tmp_path)
+
+    completed = subprocess.run(
+        ["dotnet", str(enc_compiler_dll)],
+        input=(
+            "{"
+            f"\"project_path\": {str(project)!r}, "
+            f"\"file_path\": {str(source)!r}, "
+            "\"edits\": null"
+            "}"
+        ).replace("'", '"'),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert "edits is required" in completed.stdout
+
+
 def _write_fixture_project(tmp_path: Path) -> tuple[Path, Path]:
     project = tmp_path / "Sample.csproj"
     project.write_text(

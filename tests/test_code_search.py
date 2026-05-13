@@ -40,6 +40,23 @@ def test_code_search_engine_respects_gitignore() -> None:
     assert "Views/Generated.generated.cs" not in files
 
 
+def test_code_search_engine_keeps_ignored_dirs_with_descendant_negation(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text(
+        "ignored/\n!ignored/Keep.cs\n",
+        encoding="utf-8",
+    )
+    ignored_dir = tmp_path / "ignored"
+    ignored_dir.mkdir()
+    (ignored_dir / "Keep.cs").write_text("public class Keep { }\n", encoding="utf-8")
+    (ignored_dir / "Drop.cs").write_text("public class Drop { }\n", encoding="utf-8")
+
+    engine = CodeSearchEngine(tmp_path)
+    files = _relative_files(engine)
+
+    assert "ignored/Keep.cs" in files
+    assert "ignored/Drop.cs" not in files
+
+
 def test_code_search_engine_rejects_missing_project_root(tmp_path: Path) -> None:
     missing = tmp_path / "missing"
 
@@ -59,6 +76,32 @@ def test_find_code_symbol_returns_csharp_method_definition() -> None:
             "name": "LoadAssignedCharacter",
             "kind": "method",
             "context": "public void LoadAssignedCharacter()",
+        }
+    ]
+
+
+def test_find_code_symbol_supports_constructor_definitions(tmp_path: Path) -> None:
+    (tmp_path / "Sample.cs").write_text(
+        """public sealed class Sample
+{
+    public Sample()
+    {
+    }
+}
+""",
+        encoding="utf-8",
+    )
+    engine = CodeSearchEngine(tmp_path)
+
+    results = engine.find_code_symbol("Sample", kind="method")
+
+    assert results == [
+        {
+            "file": "Sample.cs",
+            "line": 3,
+            "name": "Sample",
+            "kind": "method",
+            "context": "public Sample()",
         }
     ]
 
@@ -98,6 +141,14 @@ def test_find_code_references_returns_cs_and_xaml_usages() -> None:
         ("Views/MainWindow.xaml", 8),
     }.issubset({(result["file"], result["line"]) for result in results})
     assert all(result["context"] for result in results)
+
+
+def test_find_code_references_does_not_match_partial_identifiers() -> None:
+    engine = CodeSearchEngine(FIXTURE_ROOT)
+
+    results = engine.find_code_references("Cue")
+
+    assert results == []
 
 
 def test_find_code_references_caps_results() -> None:

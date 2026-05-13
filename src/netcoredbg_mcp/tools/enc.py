@@ -83,6 +83,7 @@ async def apply_code_change_to_session(
         root = _resolve_project_root(project_root)
         target_file = _resolve_project_file(root, file)
         source_edits = [_parse_edit(edit) for edit in edits]
+        _validate_source_edit_ranges(target_file, source_edits)
     except Exception as exc:
         return build_error_response(str(exc), state=session.state.state)
 
@@ -213,6 +214,16 @@ def _apply_source_edits(target_file: Path, edits: list[SourceEdit]) -> None:
         replacement = edit.new_text.rstrip("\r\n").splitlines()
         lines[edit.start_line - 1 : edit.end_line] = replacement
     target_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _validate_source_edit_ranges(target_file: Path, edits: list[SourceEdit]) -> None:
+    line_count = len(target_file.read_text(encoding="utf-8").splitlines())
+    for edit in edits:
+        if edit.start_line < 1 or edit.end_line < edit.start_line or edit.end_line > line_count:
+            raise ValueError(
+                f"Invalid edit range {edit.start_line}..{edit.end_line} "
+                f"for {line_count} lines."
+            )
 
 
 def _require_delta_path(value: str | None, kind: str) -> str:

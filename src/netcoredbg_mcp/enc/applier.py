@@ -37,5 +37,5 @@ async def apply_deltas(
     return ApplyDeltasResult(
         success=bool(response.success),
         message=response.message,
-        body=dict(response.body),
+        body=dict(response.body) if response.body is not None else {},
     )
