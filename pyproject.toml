@@ -58,6 +58,9 @@ packages = ["src/netcoredbg_mcp"]
 "bridge/Program.cs" = "netcoredbg_mcp/bridge/Program.cs"
 "bridge/app.manifest" = "netcoredbg_mcp/bridge/app.manifest"
 "scripts/build-netcoredbg-enc.ps1" = "netcoredbg_mcp/scripts/build-netcoredbg-enc.ps1"
+"tools/enc_compiler/EncCompiler.csproj" = "netcoredbg_mcp/tools/enc_compiler/EncCompiler.csproj"
+"tools/enc_compiler/DeltaEmitter.cs" = "netcoredbg_mcp/tools/enc_compiler/DeltaEmitter.cs"
+"tools/enc_compiler/Program.cs" = "netcoredbg_mcp/tools/enc_compiler/Program.cs"
 
 [tool.ruff]
 line-length = 100
