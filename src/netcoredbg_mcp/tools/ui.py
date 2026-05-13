@@ -103,8 +103,25 @@ def register_ui_tools(
 
         backend = _get_backend()
         if backend.process_id != process_id:
-            await backend.connect(process_id)
+            from ..ui.backend import connect_backend
+
+            await connect_backend(
+                backend,
+                process_id,
+                stealth_mode=getattr(session, "stealth_mode", False),
+            )
         return backend
+
+    def _stealth_response_mode(result: Any) -> str | None:
+        if not getattr(session, "stealth_mode", False):
+            return None
+        if isinstance(result, dict) and (
+            result.get("fallback") == "flash-focus"
+            or result.get("method") == "flash-focus"
+            or "flash_ms" in result
+        ):
+            return "flash-focus"
+        return "stealth"
 
     async def _find_ui_element(
         automation_id: str | None = None,
@@ -240,6 +257,38 @@ def register_ui_tools(
             # Backend returns dict directly (both FlaUI and pywinauto)
             data = tree if isinstance(tree, dict) else tree.to_dict()
             return build_response(data=data, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def ui_bring_to_front(ctx: Context) -> dict:
+        """Bring the debuggee window to the foreground and exit stealth mode."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            ui = await _ensure_ui_connected()
+            bring_to_front = getattr(ui, "bring_to_front", None)
+            if bring_to_front is None:
+                return build_error_response(
+                    "ui_bring_to_front is only supported by the FlaUI backend",
+                    state=session.state.state,
+                )
+
+            result = await bring_to_front()
+            if not isinstance(result, dict):
+                return build_error_response(
+                    "bring_to_front: backend returned non-dict response "
+                    f"({type(result).__name__})",
+                    state=session.state.state,
+                )
+
+            if result.get("activated") is True:
+                session.stealth_mode = False
+                result["stealth_mode"] = False
+
+            return build_response(data=result, state=session.state.state)
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
@@ -464,12 +513,16 @@ def register_ui_tools(
                 if automation_id:
                     params["automationId"] = automation_id
                 result = await ui.client.call("send_keys", params)
+                mode = _stealth_response_mode(result)
+                data = {
+                    "sent": keys,
+                    "method": "bridge",
+                    **(result if isinstance(result, dict) else {}),
+                }
+                if mode:
+                    data["mode"] = mode
                 return build_response(
-                    data={
-                        "sent": keys,
-                        "method": "bridge",
-                        **(result if isinstance(result, dict) else {}),
-                    },
+                    data=data,
                     state=session.state.state,
                 )
 
@@ -651,12 +704,16 @@ def register_ui_tools(
                             params["y"] = (rect["top"] + rect["bottom"]) // 2
                 if params:
                     result = await ui.client.call("click", params)
+                    mode = _stealth_response_mode(result)
+                    data = {
+                        "clicked": True,
+                        "method": "bridge",
+                        **(result if isinstance(result, dict) else {}),
+                    }
+                    if mode:
+                        data["mode"] = mode
                     return build_response(
-                        data={
-                            "clicked": True,
-                            "method": "bridge",
-                            **(result if isinstance(result, dict) else {}),
-                        },
+                        data=data,
                         state=session.state.state,
                     )
 
@@ -977,6 +1034,8 @@ def register_ui_tools(
 
             # Validate format against allow-list
             safe_format = format if format in valid_formats else "webp"
+            bridge_screenshot: dict[str, Any] | None = None
+            png_bytes: bytes
 
             pid = session.state.process_id
             if not pid:
@@ -984,20 +1043,40 @@ def register_ui_tools(
                     "No debug process. Start debugging first.", state=session.state.state
                 )
 
-            hwnd = get_hwnd_for_pid(pid)
-            if not hwnd:
-                return build_error_response(
-                    f"No visible window found for process {pid}. The app may not have a UI yet.",
-                    state=session.state.state,
-                )
-
             loop = asyncio.get_running_loop()
 
             # Capture raw screenshot
-            png_bytes, _, _ = await loop.run_in_executor(
-                None,
-                lambda: capture_window(hwnd),
-            )
+            if getattr(session, "stealth_mode", False):
+                ui = await _ensure_ui_connected()
+                from ..ui.flaui_client import FlaUIBackend
+
+                if isinstance(ui, FlaUIBackend):
+                    bridge_result = await ui.client.call("screenshot", {})
+                    if not isinstance(bridge_result, dict) or "base64" not in bridge_result:
+                        logger.warning(
+                            "screenshot: bridge returned invalid screenshot response; "
+                            "falling back to HWND capture"
+                        )
+                        bridge_screenshot = None
+                    else:
+                        bridge_screenshot = bridge_result
+                        png_bytes = base64.b64decode(bridge_result["base64"])
+                else:
+                    bridge_screenshot = None
+
+            if bridge_screenshot is None:
+                hwnd = get_hwnd_for_pid(pid)
+                if not hwnd:
+                    return build_error_response(
+                        f"No visible window found for process {pid}. "
+                        "The app may not have a UI yet.",
+                        state=session.state.state,
+                    )
+
+                png_bytes, _, _ = await loop.run_in_executor(
+                    None,
+                    lambda: capture_window(hwnd),
+                )
 
             # Create HD version in requested format
             hd_bytes, hd_w, hd_h, _ = await loop.run_in_executor(
@@ -1021,8 +1100,22 @@ def register_ui_tools(
                 if hasattr(session.state.state, "value")
                 else str(session.state.state),
             }
+            if bridge_screenshot is not None:
+                mode = _stealth_response_mode(bridge_screenshot)
+                if mode:
+                    metadata["mode"] = mode
+                for key in (
+                    "method",
+                    "fallback",
+                    "flags",
+                    "variance",
+                    "printwindow_variance",
+                    "printwindow_error",
+                ):
+                    if key in bridge_screenshot:
+                        metadata[key] = bridge_screenshot[key]
 
-            sid = session.session_id
+            sid = getattr(session, "session_id", None)
             if sid:
                 ts = int(_time.time() * 1000) & 0xFFFFFFFF
                 hd_path = session.temp_manager.save_screenshot(

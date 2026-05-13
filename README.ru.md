@@ -308,6 +308,27 @@ variables недоступны по устройству отладчика.
 6. Когда state=stopped, проверьте variables и call stack.
 ```
 
+### Stealth Mode
+
+Используйте stealth mode, когда пользователь должен сохранять focus в другом
+приложении, пока агент запускает и инспектирует debuggee в фоне.
+
+```text
+start_debug(
+    program="bin/Debug/net8.0/App.dll",
+    build_project="App.csproj",
+    stealth_mode=True,
+)
+ui_get_window_tree()
+ui_click(automation_id="btnSave")
+```
+
+В stealth mode чтение UIA tree и клики по automation-id не активируют окно
+debuggee. `ui_send_keys` и fallback для blank screenshot могут использовать
+flash-focus: bridge ненадолго выводит debuggee вперед, выполняет операцию и
+восстанавливает прежнее foreground window. Вызовите `ui_bring_to_front()`, если
+debuggee должен явно выйти из stealth mode.
+
 ### Визуальная инспекция
 
 Screenshots возвращают MCP image content, поэтому vision-capable agents могут
@@ -351,6 +372,46 @@ first-class compatibility target: её manual fixture должна давать 
 `UNSUPPORTED` или `BLOCKED` evidence для UIA gaps, а не выпадать из release
 checks.
 
+## Edit-and-Continue
+
+`apply_code_change` применяет поддерживаемые source edits к остановленной .NET
+debug session без restart process. Инструмент предназначен для method-body
+changes, найденных во время live investigation; если меняется shape программы,
+нужен rebuild.
+
+### EnC Setup
+
+Соберите EnC-capable `netcoredbg` через встроенный setup flow:
+
+```powershell
+netcoredbg-mcp setup --enc
+```
+
+Команда запускает `scripts/build-netcoredbg-enc.ps1`, собирает поддерживаемый
+fork `thebtf/netcoredbg` с `ncdbhook.dll` и устанавливает debugger, принимающий
+custom DAP request `applyDeltas`. Если `ncdbhook.dll` отсутствует,
+`apply_code_change` вернет понятную ошибку вместо crash.
+
+### Runtime Code Change Workflow
+
+```text
+find_code_symbol(name="OrderService")
+get_source_context(file="Services/OrderService.cs", line=42, radius=8)
+apply_code_change(
+    file="Services/OrderService.cs",
+    edits=[{"start_line": 42, "end_line": 44, "new_text": "return fixedValue;"}],
+)
+continue_execution()
+```
+
+Debug session должна быть в STOPPED state. Успешное изменение обновляет source
+file и применяет IL/metadata/PDB deltas через `netcoredbg`; session остается
+STOPPED, пока вы не продолжите выполнение или step.
+
+Rude edits вроде добавления fields, изменения method signatures или generics
+отклоняются до runtime application. Для них используйте
+`restart_debug(rebuild=True)`.
+
 ## Доступные инструменты
 
 | Категория | Количество | Tools |
@@ -364,6 +425,8 @@ checks.
 | Output and build diagnostics | 4 | `get_output`, `search_output`, `get_output_tail`, `get_build_diagnostics` |
 | Runtime smoke orchestration | 8 | `debug_hygiene_preflight`, `instrumentation_group_create`, `instrumentation_group_inspect`, `instrumentation_group_clear`, `output_checkpoint`, `output_assert_since`, `verify_debug_freshness`, `run_runtime_smoke` |
 | UI automation | 46 | Дерево окон, поиск элементов, focus, keyboard, mouse, screenshots, annotations, selection, clipboard, управление окнами, expand/collapse, value setting, virtualization, grid evidence, UI snapshots, UI events |
+| Code search | 4 | `find_code_symbol`, `find_code_references`, `get_source_context`, `search_source` |
+| Edit-and-Continue | 1 | `apply_code_change` |
 | Process management | 1 | `cleanup_processes` |
 
 ## MCP-ресурсы
@@ -450,6 +513,7 @@ graph TB
 netcoredbg-mcp --help
 netcoredbg-mcp --version
 netcoredbg-mcp --setup
+netcoredbg-mcp setup --enc
 netcoredbg-mcp --project C:\Work\MyApp
 netcoredbg-mcp --project-from-cwd
 ```
@@ -459,6 +523,7 @@ netcoredbg-mcp --project-from-cwd
 | `--version` | Напечатать package version |
 | `--setup` | Запустить первичную настройку и выйти |
 | `--project PATH` | Ограничить debug operations конкретным project root |
+| `setup --enc` | Собрать и установить EnC-capable `netcoredbg` с `ncdbhook.dll` |
 | `--project-from-cwd` | Определить project root из process working directory и MCP roots |
 
 `--project` и `--project-from-cwd` взаимно исключают друг друга.

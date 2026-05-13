@@ -55,7 +55,13 @@ def register_runtime_smoke_tools(
 
         backend = _get_backend()
         if backend.process_id != process_id:
-            await backend.connect(process_id)
+            from ..ui.backend import connect_backend
+
+            await connect_backend(
+                backend,
+                process_id,
+                stealth_mode=getattr(session, "stealth_mode", False),
+            )
         return backend
 
     @mcp.tool(annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))

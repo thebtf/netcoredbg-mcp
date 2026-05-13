@@ -34,6 +34,11 @@ from ..dap.events import (
 )
 from ..dap.protocol import Events
 from ..process_registry import ProcessRegistry
+from ..ui.foreground import (
+    get_foreground_window,
+    get_window_process_id,
+    restore_foreground_window,
+)
 from ..ui.temp_manager import SessionTempManager
 from ..utils.version import check_version_compatibility
 from .hygiene import RuntimeHygieneService
@@ -86,6 +91,7 @@ class SessionManager:
         self._last_launch_config: dict[str, Any] | None = None  # For restart
         self._last_version_warning: str | None = None  # dbgshim version mismatch warning
         self._session_id: str | None = None
+        self._stealth_mode = False
         self._quick_eval_lock = asyncio.Lock()
         self._runtime_smoke = RuntimeSmokeSession()
         self._hygiene = RuntimeHygieneService(self)
@@ -93,6 +99,41 @@ class SessionManager:
         self._output_assertions = OutputAssertionService(self)
         self._tracepoint_manager: TracepointManager | None = None
         self._snapshot_manager: SnapshotManager | None = None
+        self._stealth_foreground_restore_task: asyncio.Task[None] | None = None
+
+    def _restore_foreground_if_safe(self, saved_hwnd: int | None) -> bool:
+        """Restore foreground if the debuggee owns it; return whether retries may continue."""
+        if not saved_hwnd:
+            return False
+
+        debuggee_pid = self._state.process_id
+        current_hwnd = get_foreground_window()
+        if current_hwnd == saved_hwnd:
+            return True
+
+        current_pid = get_window_process_id(current_hwnd)
+        if debuggee_pid is not None and current_pid not in (None, debuggee_pid):
+            logger.info(
+                "[launch] stealth foreground restore skipped; foreground moved to pid=%s",
+                current_pid,
+            )
+            return False
+
+        restored = restore_foreground_window(saved_hwnd)
+        logger.info(
+            "[launch] stealth foreground restore hwnd=%s restored=%s",
+            saved_hwnd,
+            restored,
+        )
+        return True
+
+    async def _restore_foreground_after_stealth_launch(self, saved_hwnd: int | None) -> None:
+        for delay_seconds in (0.0, 0.05, 0.2, 0.5):
+            if delay_seconds:
+                await asyncio.sleep(delay_seconds)
+
+            if not self._restore_foreground_if_safe(saved_hwnd):
+                return
 
     @property
     def state(self) -> SessionState:
@@ -143,6 +184,16 @@ class SessionManager:
     def session_id(self) -> str | None:
         """Get current session identifier for temp dir isolation."""
         return self._session_id
+
+    @property
+    def stealth_mode(self) -> bool:
+        """Whether the current launch avoids foreground-stealing UI actions."""
+        return self._stealth_mode
+
+    @stealth_mode.setter
+    def stealth_mode(self, value: bool) -> None:
+        """Set whether UI operations should avoid foreground-stealing actions."""
+        self._stealth_mode = value
 
     @property
     def is_active(self) -> bool:
@@ -389,6 +440,17 @@ class SessionManager:
                     listener(new_state)
                 except Exception:
                     logger.exception("State listener error")
+
+    def begin_applying_changes(self) -> DebugState:
+        """Enter EnC apply state and return the previous state."""
+        previous_state = self._state.state
+        self._set_state(DebugState.APPLYING_CHANGES)
+        return previous_state
+
+    def finish_applying_changes(self, previous_state: DebugState) -> None:
+        """Restore state after EnC apply if the session is still applying changes."""
+        if self._state.state == DebugState.APPLYING_CHANGES:
+            self._set_state(previous_state)
 
     async def start(self) -> None:
         """Start DAP client and initialize session."""
@@ -1032,6 +1094,7 @@ class SessionManager:
         pre_build: bool = False,
         build_project: str | None = None,
         build_configuration: str = "Debug",
+        stealth_mode: bool = False,
         progress_callback: Callable[[float, float, str], Awaitable[None]] | None = None,
         output_callback: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
@@ -1046,6 +1109,7 @@ class SessionManager:
             pre_build: Run pre-launch build before launching
             build_project: Project file for pre-build (required if pre_build=True)
             build_configuration: Build configuration for pre-build
+            stealth_mode: Avoid foreground-stealing UI actions for this launch
             progress_callback: Async callback(progress, total, message) for progress
 
         Returns:
@@ -1060,6 +1124,9 @@ class SessionManager:
         async def report(progress: float, total: float, message: str) -> None:
             if progress_callback:
                 await progress_callback(progress, total, message)
+
+        self._stealth_mode = stealth_mode
+        saved_foreground_hwnd = get_foreground_window() if stealth_mode else None
 
         # Run pre-launch build if requested
         if pre_build:
@@ -1150,6 +1217,12 @@ class SessionManager:
         await self._client.configuration_done()
         self._set_state(DebugState.RUNNING)
 
+        if stealth_mode:
+            self._restore_foreground_if_safe(saved_foreground_hwnd)
+            self._stealth_foreground_restore_task = asyncio.create_task(
+                self._restore_foreground_after_stealth_launch(saved_foreground_hwnd)
+            )
+
         await report(100, 100, "Debug session started")
 
         # Generate session ID for temp dir isolation
@@ -1167,6 +1240,7 @@ class SessionManager:
             "pre_build": pre_build,
             "build_project": build_project,
             "build_configuration": build_configuration,
+            "stealth_mode": stealth_mode,
         }
 
         result: dict[str, Any] = {"success": True, "program": program}

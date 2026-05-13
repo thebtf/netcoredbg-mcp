@@ -19,6 +19,9 @@ public static class ClickCommands
     [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
     private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
     private const int SW_RESTORE = 9;
     private const int DragThresholdPixels = 5;
 
@@ -36,6 +39,11 @@ public static class ClickCommands
 
         if (x is not null && y is not null)
         {
+            if (JsonRpcHandler.Stealth)
+            {
+                return FlashFocusClick(x.Value, y.Value, mainWindow);
+            }
+
             EnsureForeground(mainWindow);
             Mouse.Click(new Point(x.Value, y.Value));
             return new JsonObject { ["clicked"] = true, ["x"] = x.Value, ["y"] = y.Value };
@@ -46,6 +54,7 @@ public static class ClickCommands
 
     public static JsonNode RightClick(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
+        RejectStealthMouseInput("right_click");
         var (x, y) = GetCoordinates(@params);
         EnsureForeground(mainWindow);
         Mouse.RightClick(new Point(x, y));
@@ -54,6 +63,7 @@ public static class ClickCommands
 
     public static JsonNode DoubleClick(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
+        RejectStealthMouseInput("double_click");
         var (x, y) = GetCoordinates(@params);
         EnsureForeground(mainWindow);
         Mouse.DoubleClick(new Point(x, y));
@@ -62,6 +72,7 @@ public static class ClickCommands
 
     public static JsonNode Drag(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
+        RejectStealthMouseInput("drag");
         var x1 = @params?["x1"]?.GetValue<int>()
             ?? throw new ArgumentException("Missing 'x1'");
         var y1 = @params?["y1"]?.GetValue<int>()
@@ -182,7 +193,19 @@ public static class ClickCommands
         // Try InvokePattern first
         if (element.Patterns.Invoke.TryGetPattern(out var invokePattern))
         {
-            invokePattern.Invoke();
+            var savedForeground = JsonRpcHandler.Stealth ? GetForegroundWindow() : IntPtr.Zero;
+            try
+            {
+                invokePattern.Invoke();
+            }
+            finally
+            {
+                if (JsonRpcHandler.Stealth && savedForeground != IntPtr.Zero)
+                {
+                    SetForegroundWindow(savedForeground);
+                }
+            }
+
             return new JsonObject
             {
                 ["clicked"] = true,
@@ -205,6 +228,11 @@ public static class ClickCommands
                 (int)(rect.Y + rect.Height / 2));
         }
 
+        if (JsonRpcHandler.Stealth)
+        {
+            return FlashFocusClick(center.X, center.Y, mainWindow, automationId);
+        }
+
         Mouse.Click(center);
 
         return new JsonObject
@@ -215,6 +243,69 @@ public static class ClickCommands
             ["x"] = center.X,
             ["y"] = center.Y
         };
+    }
+
+    private static JsonObject FlashFocusClick(
+        int x,
+        int y,
+        AutomationElement? mainWindow,
+        string? automationId = null)
+    {
+        if (mainWindow is null)
+            throw new InvalidOperationException("Not connected. Call 'connect' first.");
+
+        var targetHwnd = mainWindow.Properties.NativeWindowHandle.ValueOrDefault;
+        if (targetHwnd == IntPtr.Zero)
+            throw new InvalidOperationException("Connected window has no native HWND");
+
+        var savedForeground = GetForegroundWindow();
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            ShowWindow(targetHwnd, SW_RESTORE);
+            var foregroundSet = SetForegroundWindow(targetHwnd);
+            if (!foregroundSet || GetForegroundWindow() != targetHwnd)
+            {
+                throw new InvalidOperationException(
+                    "flash-focus click could not activate the debuggee window safely");
+            }
+            Mouse.Click(new Point(x, y));
+        }
+        finally
+        {
+            if (savedForeground != IntPtr.Zero)
+            {
+                SetForegroundWindow(savedForeground);
+            }
+            stopwatch.Stop();
+        }
+
+        var result = new JsonObject
+        {
+            ["clicked"] = true,
+            ["method"] = "flash-focus",
+            ["x"] = x,
+            ["y"] = y,
+            ["flash_ms"] = (int)stopwatch.ElapsedMilliseconds
+        };
+        if (automationId is not null)
+        {
+            result["automationId"] = automationId;
+        }
+        return result;
+    }
+
+    private static void RejectStealthMouseInput(string commandName)
+    {
+        if (!JsonRpcHandler.Stealth)
+        {
+            return;
+        }
+
+        Program.Log($"stealth: blocking {commandName} coordinate mouse input");
+        throw new InvalidOperationException(
+            $"{commandName} is not available in stealth mode because it requires coordinate mouse input. "
+            + "Use ui_click with automationId or ui_bring_to_front first.");
     }
 
     private static (int x, int y) GetCoordinates(JsonNode? @params)
@@ -292,6 +383,12 @@ public static class ClickCommands
 
     private static void EnsureForeground(AutomationElement? mainWindow)
     {
+        if (JsonRpcHandler.Stealth)
+        {
+            Program.Log("stealth: skipping foreground");
+            return;
+        }
+
         if (mainWindow is null)
         {
             return;

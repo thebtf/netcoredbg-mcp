@@ -104,6 +104,13 @@ def test_extend_next_actions_adds_smoke_actions_without_changing_base_actions() 
     ]
 
 
+def test_applying_changes_allows_only_state_inspection() -> None:
+    response = build_response(state=DebugState.APPLYING_CHANGES)
+
+    assert response["next_actions"] == ["get_debug_state"]
+    assert "applying changes" in response["message"].lower()
+
+
 def test_wpf_one_call_runtime_smoke_scenario_is_inventory_visible() -> None:
     smoke = (REPO_ROOT / "tests" / "smoke_test_manual.py").read_text(encoding="utf-8")
 

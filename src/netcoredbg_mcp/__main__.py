@@ -65,10 +65,16 @@ def configure_logging() -> None:
         root_logger.addHandler(file_handler)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
         description="NetCoreDbg MCP Server - Debug .NET applications via MCP"
+    )
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=["setup"],
+        help="Optional command. Use `setup --enc` to build an EnC-capable netcoredbg.",
     )
     parser.add_argument(
         "--version",
@@ -99,7 +105,16 @@ def parse_args() -> argparse.Namespace:
         help="Run first-time setup: download netcoredbg, scan dbgshim "
         "versions, build FlaUI bridge, generate MCP configuration.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--enc",
+        action="store_true",
+        default=False,
+        help="With `setup`, build an EnC-capable netcoredbg with ncdbhook.dll.",
+    )
+    args = parser.parse_args(argv)
+    if args.enc and not (args.setup or args.command == "setup"):
+        parser.error("--enc must be used with setup or --setup")
+    return args
 
 
 async def main() -> None:
@@ -109,8 +124,14 @@ async def main() -> None:
 
     args = parse_args()
 
-    # Handle --setup: run wizard and exit (don't start MCP server)
-    if getattr(args, "setup", False):
+    # Handle setup commands and exit (don't start MCP server)
+    setup_requested = getattr(args, "setup", False) or getattr(args, "command", None) == "setup"
+    if setup_requested and getattr(args, "enc", False):
+        from .cli import run_setup_enc
+
+        sys.exit(run_setup_enc())
+
+    if setup_requested:
         from .setup.wizard import run_setup
 
         sys.exit(run_setup())

@@ -295,6 +295,27 @@ If you need a clean slate:
 2. Edit code
 3. start_debug(..., pre_build=True) — fresh session with rebuild
 
+## Apply Code Changes at Runtime
+
+When the session is STOPPED and the target uses an EnC-capable netcoredbg build,
+prefer `apply_code_change` for supported method-body fixes:
+
+1. Find the source with `find_code_symbol`, `find_code_references`,
+   `get_source_context`, or `search_source`.
+2. Confirm the app is in STOPPED state with `get_debug_state()`.
+3. Call `apply_code_change(file="Relative/Path.cs", edits=[...])` with
+   1-based inclusive line ranges.
+4. Read the result. On success, the source file and runtime method body are
+   updated; the session remains STOPPED so you decide when to continue.
+5. Call `continue_execution()` or step through the changed path to verify the
+   runtime behavior.
+
+`apply_code_change` requires `ncdbhook.dll` next to `netcoredbg.exe`; if the
+tool reports missing EnC support, run `netcoredbg-mcp setup --enc` or restart
+with a manually built ncdbhook-enabled debugger. Rude edits such as adding
+fields, changing method signatures, or changing generics cannot be applied at
+runtime. When you get a rude edit, use `restart_debug(rebuild=True)` instead.
+
 ## Multi-Threaded Debugging
 
 When the app has multiple threads (WPF UI + background workers, ASP.NET request threads):
@@ -324,7 +345,7 @@ Common: CS1002 (missing semicolon), CS0103 (undefined name), CS0246 (missing usi
 |-------|-----------|
 | IDLE | start_debug, attach_debug |
 | RUNNING | pause_execution, get_output*, get_debug_state, add_breakpoint, stop_debug, quick_evaluate |
-| STOPPED | get_call_stack, get_variables, get_scopes, evaluate_expression, step_*, continue_execution, set_variable, ui_*, stop_debug, add_tracepoint, create_snapshot, analyze_collection, summarize_object, get_step_in_targets |
+| STOPPED | get_call_stack, get_variables, get_scopes, evaluate_expression, step_*, continue_execution, set_variable, ui_*, apply_code_change, stop_debug, add_tracepoint, create_snapshot, analyze_collection, summarize_object, get_step_in_targets |
 | TERMINATED | get_output*, stop_debug, start_debug |
 
 *get_output, get_output_tail, search_output work in all non-IDLE states.
@@ -440,6 +461,31 @@ continue_execution()
 stop_debug()
 ```
 
+## Stealth Mode
+
+Use stealth mode when the user needs to keep working in another foreground app
+while you inspect or drive a GUI debuggee in the background:
+
+```
+start_debug(
+    program="bin/Debug/net8.0/App.dll",
+    build_project="App.csproj",
+    stealth_mode=True,
+)
+ui_get_window_tree()
+ui_click(automation_id="btnSave")
+```
+
+In stealth mode, UI tree reads and automation-id clicks avoid foreground
+activation. `ui_send_keys` and `ui_send_keys_batch` use flash-focus: the bridge
+briefly activates the debuggee, sends input, then restores the previous
+foreground window. Screenshots use `PrintWindow`; if WPF renders a blank frame,
+the bridge may fall back to flash-focus capture and report that fallback.
+
+Call `ui_bring_to_front()` when you explicitly want to exit stealth behavior and
+activate the debuggee window. After that, normal foreground-oriented UI driving
+is appropriate.
+
 ## Exception — Startup Debugging
 
 If the bug IS in startup code, use stop_at_entry:
@@ -459,6 +505,7 @@ pywinauto is used as fallback — works for most controls.
 | Action | Tool |
 |--------|------|
 | Activate button (preferred) | ui_invoke(automation_id="btnSave") — uses InvokePattern, no mouse |
+| Bring debuggee to foreground | ui_bring_to_front() — exits stealth by explicitly activating the window |
 | Click button (coordinate) | ui_click(automation_id="btnSave") — mouse click, needs visible element |
 | Toggle checkbox | ui_toggle(automation_id="chkEnabled") — returns new state On/Off |
 | Complete file dialog | ui_file_dialog(path="C:/data/test.txt") — enters path and clicks Open |

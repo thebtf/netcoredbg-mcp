@@ -3237,6 +3237,143 @@ async def test_avalonia_ui_fixture_compatibility():
         await m.stop()
 
 
+async def _launch_wpf_stealth_backend():
+    """Launch the WPF fixture in stealth mode and connect a UI backend."""
+    if not WPF_GUI_ENABLED:
+        check("WPF fixture built", True, "skipped: build tests/fixtures/WpfSmokeApp")
+        return None, None
+
+    from netcoredbg_mcp.ui.backend import create_backend
+
+    m = await new_session()
+    try:
+        await m.launch(
+            program=WPF_DLL,
+            cwd=os.path.dirname(WPF_DLL),
+            stealth_mode=True,
+        )
+        await asyncio.sleep(2.0)
+        pid = m.state.process_id
+        if not pid:
+            check("Stealth debuggee PID", False, "no PID")
+            await m.stop()
+            return None, None
+
+        backend = create_backend(process_registry=m.process_registry)
+        await backend.connect(pid, stealth=True)
+        return m, backend
+    except Exception:
+        await m.stop()
+        raise
+
+
+def _current_foreground_hwnd() -> int | None:
+    if os.name != "nt":
+        return None
+    import ctypes
+
+    return int(ctypes.windll.user32.GetForegroundWindow())
+
+
+async def test_stealth_launch():
+    """Scenario: stealth launch keeps the current foreground window unchanged."""
+    print("\n--- Stealth Launch ---")
+    if not WPF_GUI_ENABLED:
+        check("WPF fixture built", True, "skipped: build tests/fixtures/WpfSmokeApp")
+        return
+
+    before_hwnd = _current_foreground_hwnd()
+    m = await new_session()
+    try:
+        await m.launch(
+            program=WPF_DLL,
+            cwd=os.path.dirname(WPF_DLL),
+            stealth_mode=True,
+        )
+        await asyncio.sleep(1.5)
+        after_hwnd = _current_foreground_hwnd()
+
+        check("Stealth flag stored", m.stealth_mode is True)
+        if before_hwnd is None or after_hwnd is None:
+            check("Foreground unchanged", True, "skipped: non-Windows foreground API")
+        else:
+            check(
+                "Foreground unchanged",
+                before_hwnd == after_hwnd,
+                f"before={before_hwnd} after={after_hwnd}",
+            )
+    finally:
+        await m.stop()
+
+
+async def test_stealth_click():
+    """Scenario: stealth click by automation id uses InvokePattern when available."""
+    print("\n--- Stealth Click ---")
+    m = None
+    backend = None
+    try:
+        m, backend = await _launch_wpf_stealth_backend()
+        if m is None or backend is None:
+            return
+
+        result = await backend.client.call("click", {"automationId": "btnInvoke"})
+        check("Stealth click succeeds", result.get("clicked") is True, str(result))
+        check(
+            "Stealth click uses InvokePattern",
+            result.get("method") == "InvokePattern",
+            str(result),
+        )
+    finally:
+        if backend is not None:
+            await backend.disconnect()
+        if m is not None:
+            await m.stop()
+
+
+async def test_stealth_screenshot():
+    """Scenario: stealth screenshot uses PrintWindow or documented flash-focus fallback."""
+    print("\n--- Stealth Screenshot ---")
+    m = None
+    backend = None
+    try:
+        m, backend = await _launch_wpf_stealth_backend()
+        if m is None or backend is None:
+            return
+
+        result = await backend.client.call("screenshot", {})
+        method = result.get("method")
+        fallback = result.get("fallback")
+        check("Stealth screenshot returned image", bool(result.get("base64")), str(result))
+        check(
+            "Stealth screenshot uses PrintWindow path",
+            method == "PrintWindow" or fallback == "flash-focus",
+            f"method={method} fallback={fallback}",
+        )
+    finally:
+        if backend is not None:
+            await backend.disconnect()
+        if m is not None:
+            await m.stop()
+
+
+async def test_code_search():
+    """Scenario: project-scoped code search finds fixture symbols."""
+    print("\n--- Code Search ---")
+    from netcoredbg_mcp.code_search import CodeSearchEngine
+
+    fixture_root = os.path.join(BASE, "tests", "fixtures", "SearchTestApp")
+    engine = CodeSearchEngine(fixture_root)
+
+    symbols = engine.find_code_symbol("LoadAssignedCharacter")
+    references = engine.find_code_references("CueInputPanel")
+    context = engine.get_source_context("ViewModels/MainViewModel.cs", line=5, radius=2)
+    matches = engine.search_source("textBoxCue|Phrase", file_glob="*.xaml")
+
+    check("find_code_symbol", any(item["name"] == "LoadAssignedCharacter" for item in symbols))
+    check("find_code_references", len(references) > 0, f"count={len(references)}")
+    check("get_source_context", len(context.get("lines", [])) > 0)
+    check("search_source", len(matches) > 0, f"count={len(matches)}")
+
 def get_scenarios():
     scenarios = [
         ("Hit Counting", test_hit_counting),
@@ -3261,6 +3398,10 @@ def get_scenarios():
         ("Output Checkpoint Assertions", test_output_checkpoint_assertions),
         ("Runtime Smoke Bounded Runner", test_runtime_smoke_bounded_runner),
         ("UI Focused Evidence", test_ui_focused_evidence),
+        ("Stealth Launch", test_stealth_launch),
+        ("Stealth Click", test_stealth_click),
+        ("Stealth Screenshot", test_stealth_screenshot),
+        ("Code Search", test_code_search),
         ("WPF V2 State Oracle Runtime Smoke", test_wpf_v2_state_oracle_runtime_smoke),
         (
             "Avalonia V2 State Oracle Runtime Smoke",
