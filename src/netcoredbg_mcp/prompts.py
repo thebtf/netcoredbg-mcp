@@ -295,6 +295,27 @@ If you need a clean slate:
 2. Edit code
 3. start_debug(..., pre_build=True) — fresh session with rebuild
 
+## Apply Code Changes at Runtime
+
+When the session is STOPPED and the target uses an EnC-capable netcoredbg build,
+prefer `apply_code_change` for supported method-body fixes:
+
+1. Find the source with `find_code_symbol`, `find_code_references`,
+   `get_source_context`, or `search_source`.
+2. Confirm the app is in STOPPED state with `get_debug_state()`.
+3. Call `apply_code_change(file="Relative/Path.cs", edits=[...])` with
+   1-based inclusive line ranges.
+4. Read the result. On success, the source file and runtime method body are
+   updated; the session remains STOPPED so you decide when to continue.
+5. Call `continue_execution()` or step through the changed path to verify the
+   runtime behavior.
+
+`apply_code_change` requires `ncdbhook.dll` next to `netcoredbg.exe`; if the
+tool reports missing EnC support, run `netcoredbg-mcp setup --enc` or restart
+with a manually built ncdbhook-enabled debugger. Rude edits such as adding
+fields, changing method signatures, or changing generics cannot be applied at
+runtime. When you get a rude edit, use `restart_debug(rebuild=True)` instead.
+
 ## Multi-Threaded Debugging
 
 When the app has multiple threads (WPF UI + background workers, ASP.NET request threads):
@@ -324,7 +345,7 @@ Common: CS1002 (missing semicolon), CS0103 (undefined name), CS0246 (missing usi
 |-------|-----------|
 | IDLE | start_debug, attach_debug |
 | RUNNING | pause_execution, get_output*, get_debug_state, add_breakpoint, stop_debug, quick_evaluate |
-| STOPPED | get_call_stack, get_variables, get_scopes, evaluate_expression, step_*, continue_execution, set_variable, ui_*, stop_debug, add_tracepoint, create_snapshot, analyze_collection, summarize_object, get_step_in_targets |
+| STOPPED | get_call_stack, get_variables, get_scopes, evaluate_expression, step_*, continue_execution, set_variable, ui_*, apply_code_change, stop_debug, add_tracepoint, create_snapshot, analyze_collection, summarize_object, get_step_in_targets |
 | TERMINATED | get_output*, stop_debug, start_debug |
 
 *get_output, get_output_tail, search_output work in all non-IDLE states.
