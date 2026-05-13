@@ -28,6 +28,12 @@ def test_bridge_registers_save_restore_foreground_commands() -> None:
     assert '["restore_foreground"] = StealthCommands.RestoreForeground' in router
 
 
+def test_bridge_registers_flash_focus_send_keys_command() -> None:
+    router = (PROJECT_ROOT / "bridge" / "JsonRpcHandler.cs").read_text(encoding="utf-8")
+
+    assert '["flash_focus_send_keys"] = StealthCommands.FlashFocusSendKeys' in router
+
+
 def test_bridge_stealth_foreground_round_trip_contract() -> None:
     command = (PROJECT_ROOT / "bridge" / "Commands" / "StealthCommands.cs").read_text(
         encoding="utf-8"
@@ -38,6 +44,24 @@ def test_bridge_stealth_foreground_round_trip_contract() -> None:
     assert '@params?["hwnd"]?.GetValue<long>()' in command
     assert "SetForegroundWindow(hwnd)" in command
     assert '["restored"] = restored' in command
+
+
+def test_bridge_flash_focus_send_keys_contract() -> None:
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "StealthCommands.cs").read_text(
+        encoding="utf-8"
+    )
+    input_commands = (PROJECT_ROOT / "bridge" / "Commands" / "InputCommands.cs").read_text(
+        encoding="utf-8"
+    )
+
+    assert "public static JsonNode FlashFocusSendKeys" in command
+    assert "var savedForeground = GetForegroundWindow();" in command
+    assert "SetForegroundWindow(targetHwnd)" in command
+    assert "InputCommands.SendKeysWithoutForeground" in command
+    assert "SetForegroundWindow(savedForeground)" in command
+    assert '["sent"] = true' in command
+    assert '["flash_ms"]' in command
+    assert "internal static JsonObject SendKeysWithoutForeground" in input_commands
 
 
 def test_bridge_connect_stores_stealth_state_and_exposes_get_state() -> None:

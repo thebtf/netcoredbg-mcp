@@ -66,6 +66,7 @@ public static class JsonRpcHandler
             ["get_state"] = GetState,
             ["save_foreground"] = StealthCommands.SaveForeground,
             ["restore_foreground"] = StealthCommands.RestoreForeground,
+            ["flash_focus_send_keys"] = StealthCommands.FlashFocusSendKeys,
             ["find_element"] = ElementCommands.FindElement,
             ["get_tree"] = ElementCommands.GetTree,
             ["set_active_window"] = ElementCommands.SetActiveWindow,

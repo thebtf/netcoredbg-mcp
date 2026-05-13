@@ -77,12 +77,20 @@ public static partial class InputCommands
 
     public static JsonNode SendKeys(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
-        var keys = @params?["keys"]?.GetValue<string>()
-            ?? throw new ArgumentException("Missing required parameter: keys");
-
         // Ensure target window is foreground before sending keyboard input.
         // Without this, SendInput goes to the terminal/IDE instead of the app.
         EnsureForeground(mainWindow);
+
+        return SendKeysWithoutForeground(@params, automation, mainWindow);
+    }
+
+    internal static JsonObject SendKeysWithoutForeground(
+        JsonNode? @params,
+        UIA3Automation automation,
+        AutomationElement? mainWindow)
+    {
+        var keys = @params?["keys"]?.GetValue<string>()
+            ?? throw new ArgumentException("Missing required parameter: keys");
 
         // If automationId provided, focus that specific element via UIA
         var automationId = @params?["automationId"]?.GetValue<string>();
@@ -93,6 +101,17 @@ public static partial class InputCommands
             element?.Focus();
         }
 
+        var sent = SendKeySequence(keys);
+
+        return new JsonObject
+        {
+            ["sent"] = true,
+            ["keys"] = string.Join("", sent)
+        };
+    }
+
+    private static List<string> SendKeySequence(string keys)
+    {
         var sent = new List<string>();
         var i = 0;
 
@@ -155,11 +174,7 @@ public static partial class InputCommands
             }
         }
 
-        return new JsonObject
-        {
-            ["sent"] = true,
-            ["keys"] = string.Join("", sent)
-        };
+        return sent;
     }
 
     /// <summary>
