@@ -64,6 +64,32 @@ def test_bridge_flash_focus_send_keys_contract() -> None:
     assert "internal static JsonObject SendKeysWithoutForeground" in input_commands
 
 
+def test_bridge_send_keys_routes_to_flash_focus_only_in_stealth_mode() -> None:
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "InputCommands.cs").read_text(
+        encoding="utf-8"
+    )
+
+    send_keys_start = command.index("public static JsonNode SendKeys(")
+    batch_start = command.index("public static JsonNode SendKeysBatch(")
+    send_keys_body = command[send_keys_start:batch_start]
+    batch_body = command[batch_start: command.index("public static JsonNode SetValue(")]
+
+    assert "if (JsonRpcHandler.Stealth)" in send_keys_body
+    assert "return StealthCommands.FlashFocusSendKeys(@params, automation, mainWindow);" in (
+        send_keys_body
+    )
+    assert "EnsureForeground(mainWindow);" in send_keys_body
+    assert send_keys_body.index("if (JsonRpcHandler.Stealth)") < send_keys_body.index(
+        "EnsureForeground(mainWindow);"
+    )
+    assert "if (JsonRpcHandler.Stealth)" in batch_body
+    assert "return StealthCommands.FlashFocusSendKeysBatch(@params, automation, mainWindow);" in (
+        batch_body
+    )
+    assert "ensureForegroundBeforeEach: true" in batch_body
+    assert "internal static JsonObject SendKeysBatchWithoutForeground" in command
+
+
 def test_bridge_connect_stores_stealth_state_and_exposes_get_state() -> None:
     router = (PROJECT_ROOT / "bridge" / "JsonRpcHandler.cs").read_text(encoding="utf-8")
     elements = (PROJECT_ROOT / "bridge" / "Commands" / "ElementCommands.cs").read_text(

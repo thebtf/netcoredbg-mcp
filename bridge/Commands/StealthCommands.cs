@@ -78,4 +78,43 @@ public static class StealthCommands
             ["flash_ms"] = (int)stopwatch.ElapsedMilliseconds
         };
     }
+
+    public static JsonNode FlashFocusSendKeysBatch(
+        JsonNode? @params,
+        UIA3Automation automation,
+        AutomationElement? mainWindow)
+    {
+        if (mainWindow is null)
+            throw new InvalidOperationException("Not connected. Call 'connect' first.");
+
+        var targetHwnd = mainWindow.Properties.NativeWindowHandle.ValueOrDefault;
+        if (targetHwnd == IntPtr.Zero)
+            throw new InvalidOperationException("Connected window has no native HWND");
+
+        var savedForeground = GetForegroundWindow();
+        var stopwatch = Stopwatch.StartNew();
+        JsonObject sendResult;
+        try
+        {
+            ShowWindow(targetHwnd, SW_RESTORE);
+            SetForegroundWindow(targetHwnd);
+            sendResult = InputCommands.SendKeysBatchWithoutForeground(@params, automation, mainWindow);
+        }
+        finally
+        {
+            if (savedForeground != IntPtr.Zero)
+            {
+                SetForegroundWindow(savedForeground);
+            }
+            stopwatch.Stop();
+        }
+
+        return new JsonObject
+        {
+            ["sent"] = true,
+            ["count"] = sendResult["count"]?.GetValue<int>() ?? 0,
+            ["delay_ms"] = sendResult["delay_ms"]?.GetValue<int>() ?? 0,
+            ["flash_ms"] = (int)stopwatch.ElapsedMilliseconds
+        };
+    }
 }

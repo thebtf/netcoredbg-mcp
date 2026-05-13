@@ -77,6 +77,11 @@ public static partial class InputCommands
 
     public static JsonNode SendKeys(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
+        if (JsonRpcHandler.Stealth)
+        {
+            return StealthCommands.FlashFocusSendKeys(@params, automation, mainWindow);
+        }
+
         // Ensure target window is foreground before sending keyboard input.
         // Without this, SendInput goes to the terminal/IDE instead of the app.
         EnsureForeground(mainWindow);
@@ -183,13 +188,31 @@ public static partial class InputCommands
     /// </summary>
     public static JsonNode SendKeysBatch(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
+        if (JsonRpcHandler.Stealth)
+        {
+            return StealthCommands.FlashFocusSendKeysBatch(@params, automation, mainWindow);
+        }
+
+        // Foreground once for entire batch
+        EnsureForeground(mainWindow);
+
+        return SendKeysBatchWithoutForeground(
+            @params,
+            automation,
+            mainWindow,
+            ensureForegroundBeforeEach: true);
+    }
+
+    internal static JsonObject SendKeysBatchWithoutForeground(
+        JsonNode? @params,
+        UIA3Automation automation,
+        AutomationElement? mainWindow,
+        bool ensureForegroundBeforeEach = false)
+    {
         var keysArray = @params?["keys"]?.AsArray()
             ?? throw new ArgumentException("Missing required parameter: keys (array of strings)");
         var delayMs = @params?["delay_ms"]?.GetValue<int>() ?? 50;
         var automationId = @params?["automationId"]?.GetValue<string>();
-
-        // Foreground once for entire batch
-        EnsureForeground(mainWindow);
 
         // Focus target element once
         AutomationElement? targetElement = null;
@@ -206,49 +229,12 @@ public static partial class InputCommands
             var keyStr = keyNode?.GetValue<string>();
             if (string.IsNullOrEmpty(keyStr)) continue;
 
-            // Re-verify foreground before each key (in case OS stole it)
-            EnsureForeground(mainWindow);
-            targetElement?.Focus();
-
-            // Parse and send single key sequence
-            var j = 0;
-            while (j < keyStr.Length)
+            if (ensureForegroundBeforeEach)
             {
-                switch (keyStr[j])
-                {
-                    case '^':
-                        j++;
-                        var ct = ConsumeNextToken(keyStr, ref j);
-                        Keyboard.Press(VirtualKeyShort.CONTROL);
-                        try { TypeToken(ct); } finally { Keyboard.Release(VirtualKeyShort.CONTROL); }
-                        break;
-                    case '%':
-                        j++;
-                        var at = ConsumeNextToken(keyStr, ref j);
-                        Keyboard.Press(VirtualKeyShort.ALT);
-                        try { TypeToken(at); } finally { Keyboard.Release(VirtualKeyShort.ALT); }
-                        break;
-                    case '+':
-                        j++;
-                        var st = ConsumeNextToken(keyStr, ref j);
-                        Keyboard.Press(VirtualKeyShort.SHIFT);
-                        try { TypeToken(st); } finally { Keyboard.Release(VirtualKeyShort.SHIFT); }
-                        break;
-                    case '{':
-                        var cb = keyStr.IndexOf('}', j);
-                        if (cb < 0) throw new ArgumentException($"Unclosed brace at {j}");
-                        var kn = keyStr[(j + 1)..cb];
-                        j = cb + 1;
-                        if (SpecialKeys.TryGetValue(kn, out var vk))
-                        { Keyboard.Press(vk); Keyboard.Release(vk); }
-                        else throw new ArgumentException($"Unknown key: {{{kn}}}");
-                        break;
-                    default:
-                        Keyboard.Type(keyStr[j].ToString());
-                        j++;
-                        break;
-                }
+                EnsureForeground(mainWindow);
             }
+            targetElement?.Focus();
+            SendKeySequence(keyStr);
 
             sentCount++;
             if (delayMs > 0 && sentCount < keysArray.Count)
