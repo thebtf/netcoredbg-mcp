@@ -401,6 +401,17 @@ class SessionManager:
                 except Exception:
                     logger.exception("State listener error")
 
+    def begin_applying_changes(self) -> DebugState:
+        """Enter EnC apply state and return the previous state."""
+        previous_state = self._state.state
+        self._set_state(DebugState.APPLYING_CHANGES)
+        return previous_state
+
+    def finish_applying_changes(self, previous_state: DebugState) -> None:
+        """Restore state after EnC apply if the session is still applying changes."""
+        if self._state.state == DebugState.APPLYING_CHANGES:
+            self._set_state(previous_state)
+
     async def start(self) -> None:
         """Start DAP client and initialize session."""
         if self._client.is_running:
