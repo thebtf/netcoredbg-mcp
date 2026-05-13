@@ -302,6 +302,27 @@ are unavailable by design.
 6. When state=stopped, inspect variables and call stack.
 ```
 
+### Stealth Mode
+
+Use stealth mode when the user should keep focus in another application while
+the agent launches and inspects the debuggee in the background.
+
+```text
+start_debug(
+    program="bin/Debug/net8.0/App.dll",
+    build_project="App.csproj",
+    stealth_mode=True,
+)
+ui_get_window_tree()
+ui_click(automation_id="btnSave")
+```
+
+In stealth mode, UIA tree reads and automation-id clicks avoid activating the
+debuggee window. `ui_send_keys` and blank-screenshot fallbacks may use
+flash-focus: the bridge briefly brings the debuggee forward, performs the
+operation, and restores the previous foreground window. Call
+`ui_bring_to_front()` when the debuggee should explicitly leave stealth mode.
+
 ### Visual Inspection
 
 Screenshots return MCP image content, so vision-capable agents can inspect
@@ -345,6 +366,46 @@ briefly holds attributes or locks. Avalonia remains a first-class compatibility
 target: its manual fixture is expected to produce bounded `UNSUPPORTED` or
 `BLOCKED` evidence for UIA gaps instead of being omitted from release checks.
 
+## Edit-and-Continue
+
+`apply_code_change` applies supported source edits to a stopped .NET debug
+session without restarting the process. It is intended for method-body changes
+found during a live investigation; it is not a replacement for rebuilding when
+the shape of the program changes.
+
+### EnC Setup
+
+Build an EnC-capable `netcoredbg` with the bundled setup flow:
+
+```powershell
+netcoredbg-mcp setup --enc
+```
+
+The command runs `scripts/build-netcoredbg-enc.ps1`, builds the maintained
+`thebtf/netcoredbg` fork with `ncdbhook.dll`, and installs a debugger that
+accepts the custom DAP `applyDeltas` request. If `ncdbhook.dll` is missing,
+`apply_code_change` returns an actionable error instead of crashing.
+
+### Runtime Code Change Workflow
+
+```text
+find_code_symbol(name="OrderService")
+get_source_context(file="Services/OrderService.cs", line=42, radius=8)
+apply_code_change(
+    file="Services/OrderService.cs",
+    edits=[{"start_line": 42, "end_line": 44, "new_text": "return fixedValue;"}],
+)
+continue_execution()
+```
+
+The debug session must be in STOPPED state. Successful changes update the source
+file and apply IL/metadata/PDB deltas through `netcoredbg`; the session remains
+STOPPED until you continue or step.
+
+Rude edits such as adding fields, changing method signatures, or changing
+generics are rejected before runtime application. Use
+`restart_debug(rebuild=True)` for those changes.
+
 ## Available Tools
 
 | Category | Count | Tools |
@@ -358,6 +419,8 @@ target: its manual fixture is expected to produce bounded `UNSUPPORTED` or
 | Output and build diagnostics | 4 | `get_output`, `search_output`, `get_output_tail`, `get_build_diagnostics` |
 | Runtime smoke orchestration | 8 | `debug_hygiene_preflight`, `instrumentation_group_create`, `instrumentation_group_inspect`, `instrumentation_group_clear`, `output_checkpoint`, `output_assert_since`, `verify_debug_freshness`, `run_runtime_smoke` |
 | UI automation | 46 | Window tree, element search, focus, keyboard, mouse, screenshots, annotations, selection, clipboard, window management, expand/collapse, value setting, virtualization, grid evidence, UI snapshots, UI events |
+| Code search | 4 | `find_code_symbol`, `find_code_references`, `get_source_context`, `search_source` |
+| Edit-and-Continue | 1 | `apply_code_change` |
 | Process management | 1 | `cleanup_processes` |
 
 ## MCP Resources
@@ -444,6 +507,7 @@ graph TB
 netcoredbg-mcp --help
 netcoredbg-mcp --version
 netcoredbg-mcp --setup
+netcoredbg-mcp setup --enc
 netcoredbg-mcp --project C:\Work\MyApp
 netcoredbg-mcp --project-from-cwd
 ```
@@ -453,6 +517,7 @@ netcoredbg-mcp --project-from-cwd
 | `--version` | Print the package version |
 | `--setup` | Run first-time setup and exit |
 | `--project PATH` | Constrain debug operations to a specific project root |
+| `setup --enc` | Build and install an EnC-capable `netcoredbg` with `ncdbhook.dll` |
 | `--project-from-cwd` | Detect the project root from the process working directory and MCP roots |
 
 `--project` and `--project-from-cwd` are mutually exclusive.
