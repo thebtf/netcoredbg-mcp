@@ -53,7 +53,7 @@ def test_find_code_symbol_returns_csharp_method_definition() -> None:
     assert results == [
         {
             "file": "ViewModels/MainViewModel.cs",
-            "line": 9,
+            "line": 10,
             "name": "LoadAssignedCharacter",
             "kind": "method",
             "context": "public void LoadAssignedCharacter()",
@@ -84,3 +84,23 @@ def test_find_code_symbol_supports_kind_filter(
     assert results[0]["name"] == name
     assert results[0]["kind"] == kind
     assert name in results[0]["context"]
+
+
+def test_find_code_references_returns_cs_and_xaml_usages() -> None:
+    engine = CodeSearchEngine(FIXTURE_ROOT)
+
+    results = engine.find_code_references("CueInputPanel")
+
+    assert {
+        ("ViewModels/MainViewModel.cs", 8),
+        ("Views/MainWindow.xaml", 8),
+    }.issubset({(result["file"], result["line"]) for result in results})
+    assert all(result["context"] for result in results)
+
+
+def test_find_code_references_caps_results() -> None:
+    engine = CodeSearchEngine(FIXTURE_ROOT)
+
+    results = engine.find_code_references("CueInputPanel", max_results=1)
+
+    assert len(results) == 1

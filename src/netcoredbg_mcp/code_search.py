@@ -21,7 +21,9 @@ DEFAULT_SOURCE_EXTENSIONS = frozenset(
 )
 ALWAYS_IGNORED_DIRS = frozenset({".git", ".hg", ".svn"})
 CodeSymbolResult = dict[str, str | int]
+CodeReferenceResult = dict[str, str | int]
 SUPPORTED_SYMBOL_KINDS = frozenset({"class", "method", "property", "field"})
+MAX_REFERENCE_RESULTS = 1000
 _CSHARP_MODIFIERS = (
     "public",
     "private",
@@ -190,6 +192,38 @@ class CodeSearchEngine:
                             }
                         )
                         break
+
+        return results
+
+    def find_code_references(
+        self,
+        name: str,
+        *,
+        max_results: int = MAX_REFERENCE_RESULTS,
+    ) -> list[CodeReferenceResult]:
+        """Find literal symbol references across supported project files."""
+        if not name.strip():
+            raise ValueError("Reference name must not be empty")
+        if max_results < 1:
+            raise ValueError("max_results must be at least 1")
+
+        limit = min(max_results, MAX_REFERENCE_RESULTS)
+        results: list[CodeReferenceResult] = []
+        for path in self.iter_source_files():
+            relative_file = path.relative_to(self.project_root).as_posix()
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            for line_number, line in enumerate(lines, start=1):
+                if name not in line:
+                    continue
+                results.append(
+                    {
+                        "file": relative_file,
+                        "line": line_number,
+                        "context": line.strip(),
+                    }
+                )
+                if len(results) >= limit:
+                    return results
 
         return results
 

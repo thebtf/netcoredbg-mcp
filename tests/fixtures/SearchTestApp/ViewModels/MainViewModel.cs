@@ -5,6 +5,7 @@ public sealed class MainViewModel
     private int _loadCount;
 
     public string Phrase { get; private set; } = "ready";
+    public string ActiveControlName => "CueInputPanel";
 
     public void LoadAssignedCharacter()
     {
