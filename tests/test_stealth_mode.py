@@ -116,6 +116,21 @@ def test_bridge_click_routes_stealth_to_invoke_or_flash_focus_click() -> None:
     assert "SetForegroundWindow(savedForeground)" in command
 
 
+def test_bridge_screenshot_uses_printwindow_in_stealth_mode() -> None:
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCommands.cs").read_text(
+        encoding="utf-8"
+    )
+
+    assert "private const uint PW_RENDERFULLCONTENT = 0x00000002;" in command
+    assert "if (JsonRpcHandler.Stealth)" in command
+    assert "PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT)" in command
+    assert '["base64"] = base64' in command
+    assert "Capture.Rectangle(rect)" in command
+    assert command.index("if (JsonRpcHandler.Stealth)") < command.index(
+        "Capture.Rectangle(rect)"
+    )
+
+
 def test_bridge_connect_stores_stealth_state_and_exposes_get_state() -> None:
     router = (PROJECT_ROOT / "bridge" / "JsonRpcHandler.cs").read_text(encoding="utf-8")
     elements = (PROJECT_ROOT / "bridge" / "Commands" / "ElementCommands.cs").read_text(
