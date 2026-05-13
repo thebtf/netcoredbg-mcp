@@ -1,5 +1,8 @@
 """Tests for stealth-mode bridge contracts."""
 
+import base64
+import io
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -359,6 +362,113 @@ async def test_ui_bring_to_front_disables_session_stealth_mode() -> None:
     assert session.stealth_mode is False
     assert response["data"]["activated"] is True
     assert response["data"]["stealth_mode"] is False
+
+
+@pytest.mark.asyncio
+async def test_ui_click_stealth_response_includes_mode() -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._process_id = 42
+    backend._client = MagicMock()
+    backend._client.call = AsyncMock(return_value={"clicked": True, "method": "InvokePattern"})
+    backend._element_cache = {}
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=True,
+    )
+    registry = ToolRegistry()
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(
+            registry,
+            session,
+            check_session_access=lambda ctx: None,
+        )
+
+        response = await registry.tools["ui_click"](SimpleNamespace(), automation_id="btnInvoke")
+
+    backend.client.call.assert_awaited_once_with("click", {"automationId": "btnInvoke"})
+    assert response["data"]["mode"] == "stealth"
+    assert response["data"]["method"] == "InvokePattern"
+
+
+@pytest.mark.asyncio
+async def test_ui_send_keys_stealth_response_includes_flash_focus_mode() -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._process_id = 42
+    backend._client = MagicMock()
+    backend._client.call = AsyncMock(return_value={"sent": True, "flash_ms": 12})
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=True,
+    )
+    registry = ToolRegistry()
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(
+            registry,
+            session,
+            check_session_access=lambda ctx: None,
+        )
+
+        response = await registry.tools["ui_send_keys"](SimpleNamespace(), keys="abc")
+
+    backend.client.call.assert_awaited_once_with("send_keys", {"keys": "abc"})
+    assert response["data"]["mode"] == "flash-focus"
+    assert response["data"]["flash_ms"] == 12
+
+
+@pytest.mark.asyncio
+async def test_ui_take_screenshot_stealth_uses_bridge_screenshot_metadata() -> None:
+    from PIL import Image
+
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    png = io.BytesIO()
+    Image.new("RGB", (8, 8), (255, 255, 255)).save(png, format="PNG")
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._process_id = 42
+    backend._client = MagicMock()
+    backend._client.call = AsyncMock(
+        return_value={
+            "base64": base64.b64encode(png.getvalue()).decode("ascii"),
+            "width": 8,
+            "height": 8,
+            "method": "PrintWindow",
+        }
+    )
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=True,
+        session_id=None,
+    )
+    registry = ToolRegistry()
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(
+            registry,
+            session,
+            check_session_access=lambda ctx: None,
+        )
+
+        content = await registry.tools["ui_take_screenshot"](SimpleNamespace(), format="png")
+
+    backend.client.call.assert_awaited_once_with("screenshot", {})
+    metadata = json.loads(content[1].text)
+    assert metadata["mode"] == "stealth"
+    assert metadata["method"] == "PrintWindow"
 
 
 @pytest.mark.asyncio
