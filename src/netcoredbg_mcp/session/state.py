@@ -19,6 +19,7 @@ class DebugState(str, Enum):
     CONFIGURED = "configured"  # Breakpoints set, ready to run
     RUNNING = "running"  # Program executing
     STOPPED = "stopped"  # Hit breakpoint/paused
+    APPLYING_CHANGES = "applying_changes"  # EnC delta application in progress
     TERMINATED = "terminated"  # Program ended
 
 

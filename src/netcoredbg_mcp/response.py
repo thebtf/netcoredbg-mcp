@@ -72,6 +72,9 @@ VALID_ACTIONS: dict[str, list[str]] = {
         "ui_send_keys_focused",
         "ui_set_focus",
     ],
+    DebugState.APPLYING_CHANGES.value: [
+        "get_debug_state",
+    ],
     DebugState.TERMINATED.value: [
         "get_output",
         "get_output_tail",
@@ -95,6 +98,9 @@ STATE_MESSAGES: dict[str, str] = {
     DebugState.STOPPED.value: (
         "Program is PAUSED. UI is frozen, app cannot respond to input. "
         "Inspect state with get_call_stack/get_variables, then resume."
+    ),
+    DebugState.APPLYING_CHANGES.value: (
+        "Debug session is applying changes. Wait for completion or inspect state."
     ),
     DebugState.TERMINATED.value: (
         "Program has terminated. Check output for errors, then stop the session."

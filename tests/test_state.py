@@ -22,6 +22,7 @@ class TestDebugState:
         assert DebugState.CONFIGURED.value == "configured"
         assert DebugState.RUNNING.value == "running"
         assert DebugState.STOPPED.value == "stopped"
+        assert DebugState.APPLYING_CHANGES.value == "applying_changes"
         assert DebugState.TERMINATED.value == "terminated"
 
     def test_state_is_string_enum(self):
