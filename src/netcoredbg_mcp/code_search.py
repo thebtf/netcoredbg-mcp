@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import fnmatch
+import multiprocessing
 import os
+import queue
 import re
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
@@ -23,8 +25,11 @@ ALWAYS_IGNORED_DIRS = frozenset({".git", ".hg", ".svn"})
 CodeSymbolResult = dict[str, str | int]
 CodeReferenceResult = dict[str, str | int]
 CodeContextResult = dict[str, object]
+CodeSearchResult = dict[str, str | int]
 SUPPORTED_SYMBOL_KINDS = frozenset({"class", "method", "property", "field"})
 MAX_REFERENCE_RESULTS = 1000
+MAX_SEARCH_RESULTS = 1000
+DEFAULT_SEARCH_TIMEOUT_SECONDS = 5.0
 _CSHARP_MODIFIERS = (
     "public",
     "private",
@@ -258,6 +263,54 @@ class CodeSearchEngine:
             ],
         }
 
+    def search_source(
+        self,
+        pattern: str,
+        *,
+        file_glob: str | None = None,
+        timeout_seconds: float = DEFAULT_SEARCH_TIMEOUT_SECONDS,
+        max_results: int = MAX_SEARCH_RESULTS,
+    ) -> list[CodeSearchResult]:
+        """Search project source files with a process-enforced timeout."""
+        if not pattern:
+            raise ValueError("Search pattern must not be empty")
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        if max_results < 1:
+            raise ValueError("max_results must be at least 1")
+
+        re.compile(pattern)
+        file_paths = [str(path) for path in self.iter_source_files(file_glob)]
+        if not file_paths:
+            return []
+
+        limit = min(max_results, MAX_SEARCH_RESULTS)
+        context = multiprocessing.get_context("spawn")
+        output = context.Queue(maxsize=1)
+        process = context.Process(
+            target=_search_source_worker,
+            args=(str(self.project_root), file_paths, pattern, limit, output),
+            daemon=True,
+        )
+        process.start()
+        process.join(timeout_seconds)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=1)
+            raise TimeoutError(f"search_source exceeded {timeout_seconds:.2f}s timeout")
+
+        try:
+            payload = output.get_nowait()
+        except queue.Empty as exc:
+            raise RuntimeError(f"search_source worker exited with code {process.exitcode}") from exc
+        finally:
+            output.close()
+            output.join_thread()
+
+        if not payload["ok"]:
+            raise RuntimeError(payload["error"])
+        return payload["results"]
+
     def _is_supported_file(self, path: Path) -> bool:
         return path.suffix.lower() in self.extensions
 
@@ -333,3 +386,37 @@ def _is_relative_to(path: Path, root: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _search_source_worker(
+    project_root: str,
+    file_paths: list[str],
+    pattern: str,
+    max_results: int,
+    output: multiprocessing.Queue,
+) -> None:
+    try:
+        root = Path(project_root)
+        compiled = re.compile(pattern)
+        results: list[CodeSearchResult] = []
+        for file_path in file_paths:
+            path = Path(file_path)
+            relative_file = path.relative_to(root).as_posix()
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            for line_number, line in enumerate(lines, start=1):
+                if compiled.search(line) is None:
+                    continue
+                results.append(
+                    {
+                        "file": relative_file,
+                        "line": line_number,
+                        "context": line.strip(),
+                    }
+                )
+                if len(results) >= max_results:
+                    output.put({"ok": True, "results": results})
+                    return
+
+        output.put({"ok": True, "results": results})
+    except Exception as exc:
+        output.put({"ok": False, "error": f"{type(exc).__name__}: {exc}"})

@@ -139,3 +139,25 @@ def test_get_source_context_rejects_path_traversal() -> None:
 
     with pytest.raises(ValueError, match="outside project root"):
         engine.get_source_context("../WpfSmokeApp/WpfSmokeApp.csproj", line=1, radius=0)
+
+
+def test_search_source_finds_regex_matches_in_globbed_xaml() -> None:
+    engine = CodeSearchEngine(FIXTURE_ROOT)
+
+    results = engine.search_source("textBoxCue|Phrase", file_glob="*.xaml")
+
+    assert results == [
+        {
+            "file": "Views/MainWindow.xaml",
+            "line": 7,
+            "context": '<TextBox x:Name="textBoxCue" Text="{Binding Phrase}" />',
+        }
+    ]
+
+
+def test_search_source_caps_results() -> None:
+    engine = CodeSearchEngine(FIXTURE_ROOT)
+
+    results = engine.search_source("CueInputPanel", max_results=1)
+
+    assert len(results) == 1
