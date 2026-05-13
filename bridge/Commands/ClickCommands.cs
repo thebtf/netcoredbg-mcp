@@ -190,7 +190,19 @@ public static class ClickCommands
         // Try InvokePattern first
         if (element.Patterns.Invoke.TryGetPattern(out var invokePattern))
         {
-            invokePattern.Invoke();
+            var savedForeground = JsonRpcHandler.Stealth ? GetForegroundWindow() : IntPtr.Zero;
+            try
+            {
+                invokePattern.Invoke();
+            }
+            finally
+            {
+                if (JsonRpcHandler.Stealth && savedForeground != IntPtr.Zero)
+                {
+                    SetForegroundWindow(savedForeground);
+                }
+            }
+
             return new JsonObject
             {
                 ["clicked"] = true,

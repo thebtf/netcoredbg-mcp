@@ -110,6 +110,12 @@ def test_bridge_click_routes_stealth_to_invoke_or_flash_focus_click() -> None:
     assert "EnsureForeground(mainWindow);" in click_body
     assert "invokePattern.Invoke();" in automation_body
     assert '["method"] = "InvokePattern"' in automation_body
+    expected_saved_foreground = (
+        "var savedForeground = JsonRpcHandler.Stealth ? "
+        "GetForegroundWindow() : IntPtr.Zero;"
+    )
+    assert expected_saved_foreground in automation_body
+    assert "SetForegroundWindow(savedForeground);" in automation_body
     assert "if (JsonRpcHandler.Stealth)" in automation_body
     assert (
         "return FlashFocusClick(center.X, center.Y, mainWindow, automationId);"
