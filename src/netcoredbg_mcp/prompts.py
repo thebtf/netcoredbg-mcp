@@ -461,6 +461,31 @@ continue_execution()
 stop_debug()
 ```
 
+## Stealth Mode
+
+Use stealth mode when the user needs to keep working in another foreground app
+while you inspect or drive a GUI debuggee in the background:
+
+```
+start_debug(
+    program="bin/Debug/net8.0/App.dll",
+    build_project="App.csproj",
+    stealth_mode=True,
+)
+ui_get_window_tree()
+ui_click(automation_id="btnSave")
+```
+
+In stealth mode, UI tree reads and automation-id clicks avoid foreground
+activation. `ui_send_keys` and `ui_send_keys_batch` use flash-focus: the bridge
+briefly activates the debuggee, sends input, then restores the previous
+foreground window. Screenshots use `PrintWindow`; if WPF renders a blank frame,
+the bridge may fall back to flash-focus capture and report that fallback.
+
+Call `ui_bring_to_front()` when you explicitly want to exit stealth behavior and
+activate the debuggee window. After that, normal foreground-oriented UI driving
+is appropriate.
+
 ## Exception — Startup Debugging
 
 If the bug IS in startup code, use stop_at_entry:
@@ -480,6 +505,7 @@ pywinauto is used as fallback — works for most controls.
 | Action | Tool |
 |--------|------|
 | Activate button (preferred) | ui_invoke(automation_id="btnSave") — uses InvokePattern, no mouse |
+| Bring debuggee to foreground | ui_bring_to_front() — exits stealth by explicitly activating the window |
 | Click button (coordinate) | ui_click(automation_id="btnSave") — mouse click, needs visible element |
 | Toggle checkbox | ui_toggle(automation_id="chkEnabled") — returns new state On/Off |
 | Complete file dialog | ui_file_dialog(path="C:/data/test.txt") — enters path and clicks Open |
