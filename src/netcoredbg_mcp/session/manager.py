@@ -34,6 +34,11 @@ from ..dap.events import (
 )
 from ..dap.protocol import Events
 from ..process_registry import ProcessRegistry
+from ..ui.foreground import (
+    get_foreground_window,
+    get_window_process_id,
+    restore_foreground_window,
+)
 from ..ui.temp_manager import SessionTempManager
 from ..utils.version import check_version_compatibility
 from .hygiene import RuntimeHygieneService
@@ -94,6 +99,40 @@ class SessionManager:
         self._output_assertions = OutputAssertionService(self)
         self._tracepoint_manager: TracepointManager | None = None
         self._snapshot_manager: SnapshotManager | None = None
+        self._stealth_foreground_restore_task: asyncio.Task[None] | None = None
+
+    def _restore_foreground_if_debuggee_owns_foreground(self, saved_hwnd: int | None) -> bool:
+        if not saved_hwnd:
+            return False
+
+        debuggee_pid = self._state.process_id
+        current_hwnd = get_foreground_window()
+        if current_hwnd == saved_hwnd:
+            return True
+
+        current_pid = get_window_process_id(current_hwnd)
+        if debuggee_pid is not None and current_pid not in (None, debuggee_pid):
+            logger.info(
+                "[launch] stealth foreground restore skipped; foreground moved to pid=%s",
+                current_pid,
+            )
+            return False
+
+        restored = restore_foreground_window(saved_hwnd)
+        logger.info(
+            "[launch] stealth foreground restore hwnd=%s restored=%s",
+            saved_hwnd,
+            restored,
+        )
+        return restored
+
+    async def _restore_foreground_after_stealth_launch(self, saved_hwnd: int | None) -> None:
+        for delay_seconds in (0.0, 0.05, 0.2, 0.5):
+            if delay_seconds:
+                await asyncio.sleep(delay_seconds)
+
+            if not self._restore_foreground_if_debuggee_owns_foreground(saved_hwnd):
+                return
 
     @property
     def state(self) -> SessionState:
@@ -1086,6 +1125,7 @@ class SessionManager:
                 await progress_callback(progress, total, message)
 
         self._stealth_mode = stealth_mode
+        saved_foreground_hwnd = get_foreground_window() if stealth_mode else None
 
         # Run pre-launch build if requested
         if pre_build:
@@ -1175,6 +1215,12 @@ class SessionManager:
         logger.info("[launch] phase 9/9: configuration done")
         await self._client.configuration_done()
         self._set_state(DebugState.RUNNING)
+
+        if stealth_mode:
+            self._restore_foreground_if_debuggee_owns_foreground(saved_foreground_hwnd)
+            self._stealth_foreground_restore_task = asyncio.create_task(
+                self._restore_foreground_after_stealth_launch(saved_foreground_hwnd)
+            )
 
         await report(100, 100, "Debug session started")
 

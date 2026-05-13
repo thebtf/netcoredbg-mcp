@@ -211,6 +211,41 @@ def test_session_manager_launch_stores_stealth_mode_source_contract() -> None:
     assert "def stealth_mode(self) -> bool:" in manager
     assert "stealth_mode: bool = False" in manager
     assert "self._stealth_mode = stealth_mode" in manager
+    assert "saved_foreground_hwnd = get_foreground_window() if stealth_mode else None" in manager
+    assert "self._restore_foreground_if_debuggee_owns_foreground(saved_foreground_hwnd)" in manager
+    assert "asyncio.create_task(" in manager
+
+
+@pytest.mark.asyncio
+async def test_session_manager_stealth_launch_restores_only_debuggee_foreground(
+    monkeypatch,
+) -> None:
+    from netcoredbg_mcp.session.manager import SessionManager
+
+    manager = SessionManager.__new__(SessionManager)
+    manager._state = SimpleNamespace(process_id=42)
+    restored: list[int] = []
+
+    foregrounds = iter([900, 900, 777])
+    monkeypatch.setattr(
+        "netcoredbg_mcp.session.manager.get_foreground_window",
+        lambda: next(foregrounds),
+    )
+    monkeypatch.setattr(
+        "netcoredbg_mcp.session.manager.get_window_process_id",
+        lambda hwnd: 42 if hwnd == 900 else 100,
+    )
+    monkeypatch.setattr(
+        "netcoredbg_mcp.session.manager.restore_foreground_window",
+        lambda hwnd: restored.append(hwnd) is None or True,
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr("netcoredbg_mcp.session.manager.asyncio.sleep", sleep)
+
+    await manager._restore_foreground_after_stealth_launch(123)
+
+    assert restored == [123, 123]
+    assert sleep.await_count == 2
 
 
 def test_session_manager_allows_explicit_stealth_exit_source_contract() -> None:
