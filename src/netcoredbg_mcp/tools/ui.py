@@ -270,18 +270,19 @@ def register_ui_tools(
         """
         try:
             ui = await _ensure_ui_connected()
-            tree = await asyncio.wait_for(
-                ui.get_window_tree(max_depth, max_children),
-                timeout=UI_TREE_DISCOVERY_TIMEOUT_SECONDS,
-            )
+            try:
+                tree = await asyncio.wait_for(
+                    ui.get_window_tree(max_depth, max_children),
+                    timeout=UI_TREE_DISCOVERY_TIMEOUT_SECONDS,
+                )
+            except (asyncio.TimeoutError, TimeoutError) as e:
+                return build_response(
+                    data=_ui_tree_timeout_payload(e, session=session, ui=ui),
+                    state=session.state.state,
+                )
             # Backend returns dict directly (both FlaUI and pywinauto)
             data = tree if isinstance(tree, dict) else tree.to_dict()
             return build_response(data=data, state=session.state.state)
-        except (asyncio.TimeoutError, TimeoutError) as e:
-            return build_response(
-                data=_ui_tree_timeout_payload(e, session=session, ui=locals().get("ui")),
-                state=session.state.state,
-            )
         except Exception as e:
             from ..ui import UIOperationTimeoutError
 
@@ -290,7 +291,7 @@ def register_ui_tools(
                     data=_ui_tree_timeout_payload(e, session=session, ui=locals().get("ui")),
                     state=session.state.state,
                 )
-            return build_error_response(str(e), state=session.state.state)
+            return build_error_response(str(e) or type(e).__name__, state=session.state.state)
 
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def ui_bring_to_front(ctx: Context) -> dict:

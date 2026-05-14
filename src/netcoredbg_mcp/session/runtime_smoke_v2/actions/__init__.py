@@ -139,6 +139,16 @@ def _action_result(**payload: Any) -> dict[str, Any]:
 
 def _idle_ms_from_action(action: dict[str, Any]) -> tuple[int, dict[str, Any] | None]:
     raw_idle_ms = action.get("idle_ms", 0)
+    if isinstance(raw_idle_ms, bool) or (
+        isinstance(raw_idle_ms, float) and not raw_idle_ms.is_integer()
+    ):
+        blocked = build_blocked(
+            reason="invalid wait duration",
+            requested={"idle_ms": raw_idle_ms},
+            accepted={"idle_ms": "non-negative integer milliseconds"},
+            next_step="Provide wait idle_ms as a non-negative integer.",
+        )
+        return 0, {"status": "BLOCKED", **blocked}
     try:
         idle_ms = int(raw_idle_ms)
     except (TypeError, ValueError):

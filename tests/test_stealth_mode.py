@@ -454,6 +454,43 @@ async def test_ui_get_window_tree_timeout_returns_structured_blocked() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ui_get_window_tree_connect_timeout_is_not_discovery_timeout() -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    backend = SimpleNamespace(
+        process_id=None,
+        get_window_tree=AsyncMock(return_value={"windows": [], "count": 0}),
+    )
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=True,
+    )
+    registry = ToolRegistry()
+
+    with (
+        patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend),
+        patch(
+            "netcoredbg_mcp.ui.backend.connect_backend",
+            AsyncMock(side_effect=asyncio.TimeoutError("connect timeout")),
+        ) as connect_backend,
+    ):
+        register_ui_tools(
+            registry,
+            session,
+            check_session_access=lambda ctx: None,
+        )
+
+        response = await registry.tools["ui_get_window_tree"](max_depth=1)
+
+    connect_backend.assert_awaited_once_with(backend, 42, stealth_mode=True)
+    backend.get_window_tree.assert_not_awaited()
+    assert response["error"] == "connect timeout"
+    assert "data" not in response
+
+
+@pytest.mark.asyncio
 async def test_ui_bring_to_front_disables_session_stealth_mode() -> None:
     from netcoredbg_mcp.session.manager import DebugState
     from netcoredbg_mcp.tools.ui import register_ui_tools

@@ -318,6 +318,38 @@ async def test_v2_wait_and_noop_actions_require_no_selector() -> None:
     assert session.calls == []
 
 
+@pytest.mark.parametrize("idle_ms", [True, 1.5])
+@pytest.mark.asyncio
+async def test_v2_wait_rejects_non_integer_idle_ms(idle_ms: object) -> None:
+    session = ActionSmokeSession()
+    clock = ManualClock()
+
+    result = await _runner_with_clock(session, clock).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "cases": [
+                {
+                    "id": "invalid_wait",
+                    "transitions": [
+                        {
+                            "action": {"kind": "wait", "idle_ms": idle_ms},
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == "BLOCKED"
+    assert action["status"] == "BLOCKED"
+    assert action["reason"] == "invalid wait duration"
+    assert action["requested"] == {"idle_ms": idle_ms}
+    assert clock.sleeps_ms == []
+    assert session.calls == []
+
+
 @pytest.mark.asyncio
 async def test_v2_transition_waits_for_tracepoint_settle() -> None:
     session = ActionSmokeSession()
