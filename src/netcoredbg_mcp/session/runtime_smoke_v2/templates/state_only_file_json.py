@@ -53,11 +53,15 @@ def _file_json_probes(record: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _single_oracle(record: dict[str, Any]) -> dict[str, Any]:
-    return {
+    oracle: dict[str, Any] = {
         "name": record.get("name", "value"),
         "jsonpath": record.get("jsonpath", ""),
-        "expected": record.get("expected"),
     }
+    if "expected" in record:
+        oracle["expected"] = record["expected"]
+    elif "expect" in record:
+        oracle["expect"] = record["expect"]
+    return oracle
 
 
 def _action_from_record(record: dict[str, Any]) -> dict[str, Any] | None:

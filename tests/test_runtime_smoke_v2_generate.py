@@ -153,6 +153,35 @@ def test_state_only_file_json_matrix_can_cover_many_regression_routes() -> None:
     }
 
 
+def test_state_only_single_oracle_does_not_invent_null_expectation() -> None:
+    plan = {
+        "schema": "netcoredbg.runtime_smoke.v2",
+        "generate": {
+            "template": "state-only-file-json",
+            "matrix": [
+                {
+                    "id": "observe_only",
+                    "path": "evidence.json",
+                    "jsonpath": "$.value",
+                },
+                {
+                    "id": "expect_alias",
+                    "path": "evidence.json",
+                    "jsonpath": "$.value",
+                    "expect": "fresh",
+                },
+            ],
+        },
+    }
+
+    generated, errors = expand_generated_cases(plan)
+
+    assert errors == []
+    assert "expected" not in generated[0]["transitions"][0]["probes"][0]
+    assert "expect" not in generated[0]["transitions"][0]["probes"][0]
+    assert generated[1]["transitions"][0]["probes"][0]["expect"] == "fresh"
+
+
 @pytest.mark.asyncio
 async def test_runner_executes_handwritten_cases_before_generated_cases() -> None:
     session = GenerateSmokeSession()

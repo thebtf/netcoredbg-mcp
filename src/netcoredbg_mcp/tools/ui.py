@@ -121,7 +121,7 @@ def register_ui_tools(
             "timeout_seconds": UI_TREE_DISCOVERY_TIMEOUT_SECONDS,
             "debuggee_process_id": getattr(session.state, "process_id", None),
             "ui_backend": backend_name,
-            "error": str(error),
+            "error": str(error) or type(error).__name__,
             "next_step": (
                 "Use a narrower selector with ui_wait_for/ui_find_element, lower max_depth "
                 "or max_children, or inspect the debuggee UI thread responsiveness before "

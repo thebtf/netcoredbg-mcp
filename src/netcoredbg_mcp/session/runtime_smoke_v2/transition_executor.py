@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import asyncio
-import inspect
 from typing import Any
 
 from .actions import ActionContext, dispatch_action
 from .diff import compute_diff
 from .metrics import capture_metric_snapshot, finish_transition_metrics
 from .probe_dispatcher import ProbeContext, dispatch_probe, probe_path, probe_runs_in_phase
+from .timing import sleep_ms
 
 DEFAULT_IDLE_MS = 250
 DEFAULT_TRACEPOINT_TIMEOUT_MS = 2000
@@ -160,13 +159,7 @@ async def _settle(
 
 
 async def _sleep_ms(context: ActionContext, idle_ms: int) -> None:
-    sleeper = getattr(context.clock, "sleep_ms", None)
-    if callable(sleeper):
-        result = sleeper(idle_ms)
-        if inspect.isawaitable(result):
-            await result
-        return
-    await asyncio.sleep(idle_ms / 1000)
+    await sleep_ms(context.clock, idle_ms)
 
 
 def _status_from_records(records: list[dict[str, Any]]) -> str:

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from ..blocked import build_blocked
+from ..timing import sleep_ms
 from .ui_key_sequence import handle_ui_key_sequence
 
 ActionHandler = Callable[[dict[str, Any], "ActionContext"], Awaitable[dict[str, Any]]]
@@ -161,13 +161,7 @@ def _idle_ms_from_action(action: dict[str, Any]) -> tuple[int, dict[str, Any] | 
 
 
 async def _sleep_ms(context: ActionContext, idle_ms: int) -> None:
-    sleeper = getattr(context.clock, "sleep_ms", None)
-    if callable(sleeper):
-        result = sleeper(idle_ms)
-        if inspect.isawaitable(result):
-            await result
-        return
-    await asyncio.sleep(idle_ms / 1000)
+    await sleep_ms(context.clock, idle_ms)
 
 
 def _selector_from_action(
