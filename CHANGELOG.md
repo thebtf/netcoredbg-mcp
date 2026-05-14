@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-05-14
+
+### Added
+- Runtime smoke v2 state-only transitions for setup, observation, and cleanup
+  plans that do not need a selector-driven UI action.
+- A state-only file JSON matrix example covering stable write/read/delete
+  routes with fresh run-id oracles.
+
+### Fixed
+- `ui_get_window_tree` now returns a bounded structured `BLOCKED` result when
+  UI tree enumeration exceeds the discovery timeout.
+- Runtime smoke v2 now rejects invalid setup/action shapes and non-integer
+  `wait.idle_ms` durations before executing the affected transition.
+
 ## [0.15.0] - 2026-05-13
 
 ### Added
