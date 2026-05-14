@@ -34,7 +34,7 @@ async def test_v2_plan_rejects_mixed_legacy_execution_keys_before_launch() -> No
         }
     )
 
-    assert result["status"] == "FAIL"
+    assert result["status"] == "INVALID_SETUP"
     assert result["reason"] == "invalid plan schema"
     assert session.launch_calls == 0
 

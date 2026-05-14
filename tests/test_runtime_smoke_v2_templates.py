@@ -10,10 +10,11 @@ from netcoredbg_mcp.session.runtime_smoke_v2.templates._substituter import (
 )
 
 
-def test_template_registry_exposes_three_builtin_templates() -> None:
+def test_template_registry_exposes_builtin_templates() -> None:
     assert accepted_template_names() == [
         "radio-group-set",
         "setting-ab-row-effect",
+        "state-only-file-json",
         "toggle-setting-ab",
     ]
 

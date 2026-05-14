@@ -7,6 +7,7 @@ from typing import Any
 from ._substituter import TemplateRenderError as TemplateRenderError
 from .radio_group_set import render_radio_group_set
 from .setting_ab_row_effect import render_setting_ab_row_effect
+from .state_only_file_json import render_state_only_file_json
 from .toggle_setting_ab import render_toggle_setting_ab
 
 TemplateRenderer = Callable[[dict[str, Any], str], dict[str, Any]]
@@ -33,6 +34,11 @@ _TEMPLATES: dict[str, TemplateDefinition] = {
         name="setting-ab-row-effect",
         default_id_pattern="{id}.row-{row_index}.{value}",
         render=render_setting_ab_row_effect,
+    ),
+    "state-only-file-json": TemplateDefinition(
+        name="state-only-file-json",
+        default_id_pattern="{id}",
+        render=render_state_only_file_json,
     ),
     "toggle-setting-ab": TemplateDefinition(
         name="toggle-setting-ab",

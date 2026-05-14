@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..blocked import build_blocked
+from ..timing import sleep_ms
 from .ui_key_sequence import handle_ui_key_sequence
 
 ActionHandler = Callable[[dict[str, Any], "ActionContext"], Awaitable[dict[str, Any]]]
@@ -103,6 +104,29 @@ async def _handle_ui_click(action: dict[str, Any], context: ActionContext) -> di
     )
 
 
+async def _handle_wait(action: dict[str, Any], context: ActionContext) -> dict[str, Any]:
+    started = context.clock()
+    idle_ms, blocked = _idle_ms_from_action(action)
+    if blocked is not None:
+        return {**blocked, "duration_ms": context.elapsed_ms(started), "route": "wait"}
+    await _sleep_ms(context, idle_ms)
+    return {
+        "status": "PASS",
+        "route": "wait",
+        "idle_ms": idle_ms,
+        "duration_ms": context.elapsed_ms(started),
+    }
+
+
+async def _handle_noop(action: dict[str, Any], context: ActionContext) -> dict[str, Any]:
+    started = context.clock()
+    return {
+        "status": "PASS",
+        "route": "noop",
+        "duration_ms": context.elapsed_ms(started),
+    }
+
+
 def _action_result(**payload: Any) -> dict[str, Any]:
     result = dict(payload.get("result") or {})
     action = dict(payload)
@@ -111,6 +135,43 @@ def _action_result(**payload: Any) -> dict[str, Any]:
             if key in result:
                 action[key] = result[key]
     return action
+
+
+def _idle_ms_from_action(action: dict[str, Any]) -> tuple[int, dict[str, Any] | None]:
+    raw_idle_ms = action.get("idle_ms", 0)
+    if isinstance(raw_idle_ms, bool) or (
+        isinstance(raw_idle_ms, float) and not raw_idle_ms.is_integer()
+    ):
+        blocked = build_blocked(
+            reason="invalid wait duration",
+            requested={"idle_ms": raw_idle_ms},
+            accepted={"idle_ms": "non-negative integer milliseconds"},
+            next_step="Provide wait idle_ms as a non-negative integer.",
+        )
+        return 0, {"status": "BLOCKED", **blocked}
+    try:
+        idle_ms = int(raw_idle_ms)
+    except (TypeError, ValueError):
+        blocked = build_blocked(
+            reason="invalid wait duration",
+            requested={"idle_ms": raw_idle_ms},
+            accepted={"idle_ms": "non-negative integer milliseconds"},
+            next_step="Provide wait idle_ms as a non-negative integer.",
+        )
+        return 0, {"status": "BLOCKED", **blocked}
+    if idle_ms < 0:
+        blocked = build_blocked(
+            reason="invalid wait duration",
+            requested={"idle_ms": raw_idle_ms},
+            accepted={"idle_ms": "non-negative integer milliseconds"},
+            next_step="Provide wait idle_ms as a non-negative integer.",
+        )
+        return 0, {"status": "BLOCKED", **blocked}
+    return idle_ms, None
+
+
+async def _sleep_ms(context: ActionContext, idle_ms: int) -> None:
+    await sleep_ms(context.clock, idle_ms)
 
 
 def _selector_from_action(
@@ -130,6 +191,8 @@ def _selector_from_action(
     return dict(raw_selector), None
 
 
+register_action("noop", _handle_noop)
 register_action("ui.click", _handle_ui_click)
 register_action("ui.invoke", _handle_ui_invoke)
 register_action("ui.key_sequence", handle_ui_key_sequence)
+register_action("wait", _handle_wait)

@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 _SUPPORTED_MODIFIERS = {"ctrl", "shift", "alt", "win"}
 _SUPPORTED_SYSTEM_EVENTS = {"theme_change"}
 _SUPPORTED_THEME_MODES = {"toggle", "light", "dark"}
+UI_TREE_DISCOVERY_TIMEOUT_SECONDS = 10.0
 
 
 def _normalize_modifier_list(modifiers: list[str] | None) -> list[str]:
@@ -111,6 +112,22 @@ def register_ui_tools(
                 stealth_mode=getattr(session, "stealth_mode", False),
             )
         return backend
+
+    def _ui_tree_timeout_payload(error: BaseException, *, session: SessionManager, ui: Any) -> dict:
+        backend_name = type(ui).__name__ if ui is not None else "unknown"
+        return {
+            "status": "BLOCKED",
+            "reason": "ui tree discovery timed out",
+            "timeout_seconds": UI_TREE_DISCOVERY_TIMEOUT_SECONDS,
+            "debuggee_process_id": getattr(session.state, "process_id", None),
+            "ui_backend": backend_name,
+            "error": str(error) or type(error).__name__,
+            "next_step": (
+                "Use a narrower selector with ui_wait_for/ui_find_element, lower max_depth "
+                "or max_children, or inspect the debuggee UI thread responsiveness before "
+                "retrying ui_get_window_tree."
+            ),
+        }
 
     def _stealth_response_mode(result: Any) -> str | None:
         if not getattr(session, "stealth_mode", False):
@@ -253,12 +270,28 @@ def register_ui_tools(
         """
         try:
             ui = await _ensure_ui_connected()
-            tree = await ui.get_window_tree(max_depth, max_children)
+            try:
+                tree = await asyncio.wait_for(
+                    ui.get_window_tree(max_depth, max_children),
+                    timeout=UI_TREE_DISCOVERY_TIMEOUT_SECONDS,
+                )
+            except (asyncio.TimeoutError, TimeoutError) as e:
+                return build_response(
+                    data=_ui_tree_timeout_payload(e, session=session, ui=ui),
+                    state=session.state.state,
+                )
             # Backend returns dict directly (both FlaUI and pywinauto)
             data = tree if isinstance(tree, dict) else tree.to_dict()
             return build_response(data=data, state=session.state.state)
         except Exception as e:
-            return build_error_response(str(e), state=session.state.state)
+            from ..ui import UIOperationTimeoutError
+
+            if isinstance(e, UIOperationTimeoutError):
+                return build_response(
+                    data=_ui_tree_timeout_payload(e, session=session, ui=locals().get("ui")),
+                    state=session.state.state,
+                )
+            return build_error_response(str(e) or type(e).__name__, state=session.state.state)
 
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def ui_bring_to_front(ctx: Context) -> dict:

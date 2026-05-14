@@ -193,9 +193,12 @@ async def test_v2_probe_key_collision_fails_prelaunch() -> None:
 
     result = await _runner(session).run(plan)
 
-    assert result["status"] == "FAIL"
+    assert result["status"] == "INVALID_SETUP"
     assert result["reason"] == "invalid plan schema"
     assert result["validation_errors"] == [
-        "cases[0].transitions[0] has duplicate probe path: debug.evaluate.spellcheck_setting"
+        "cases[0].transitions[0] has duplicate probe path for before: "
+        "debug.evaluate.spellcheck_setting",
+        "cases[0].transitions[0] has duplicate probe path for after: "
+        "debug.evaluate.spellcheck_setting",
     ]
     assert session.calls == []

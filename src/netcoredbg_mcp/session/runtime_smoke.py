@@ -25,7 +25,7 @@ from .runtime_smoke_v2.result_envelope import (
 )
 from .state import EvidenceRef
 
-TERMINAL_STATUSES = {"PASS", "FAIL", "BLOCKED", "IMPASSE"}
+TERMINAL_STATUSES = {"PASS", "FAIL", "BLOCKED", "IMPASSE", "INVALID_SETUP"}
 RESTORE_RETRY_DELAYS_SECONDS = (0.1, 0.2, 0.5, 1.0, 2.0, 4.0)
 UI_OPERATION_PREFIXES = ("ui.",)
 UI_OPERATION_NAMES = {"ui_key_sequence", "ui_grid"}
@@ -131,13 +131,18 @@ class RuntimeSmokeRunner:
         if not validation_errors and isinstance(plan, dict):
             validation_errors.extend(self._validate_restore_paths(plan))
         if validation_errors:
+            status = (
+                "INVALID_SETUP"
+                if isinstance(plan, dict) and plan.get("schema") == SCHEMA_VERSION_V2
+                else "FAIL"
+            )
             cleanup = await self._teardown(
                 plan if isinstance(plan, dict) else {},
                 allow_restore=False,
                 allow_plan_cleanup=False,
             )
             return self._finalize(
-                status="FAIL",
+                status=status,
                 reason="invalid plan schema",
                 started=started,
                 action_count=0,

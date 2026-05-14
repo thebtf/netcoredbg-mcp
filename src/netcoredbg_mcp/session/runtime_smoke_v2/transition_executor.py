@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import asyncio
-import inspect
 from typing import Any
 
 from .actions import ActionContext, dispatch_action
 from .diff import compute_diff
 from .metrics import capture_metric_snapshot, finish_transition_metrics
-from .probe_dispatcher import ProbeContext, dispatch_probe, probe_path
+from .probe_dispatcher import ProbeContext, dispatch_probe, probe_path, probe_runs_in_phase
+from .timing import sleep_ms
 
 DEFAULT_IDLE_MS = 250
 DEFAULT_TRACEPOINT_TIMEOUT_MS = 2000
@@ -20,31 +19,36 @@ async def execute_transition(
 ) -> tuple[dict[str, Any], int]:
     probes = [dict(probe) for probe in transition.get("probes", [])]
     probe_context = ProbeContext(action_context=action_context)
-    before_results = await _collect_probe_results(probes, probe_context, phase="before")
-    before = _probe_value_map(probes, before_results)
+    before_probes = _probes_for_phase(probes, "before")
+    after_probes = _probes_for_phase(probes, "after")
+    before_results = await _collect_probe_results(before_probes, probe_context, phase="before")
+    before = _probe_value_map(before_probes, before_results)
 
-    action = dict(transition.get("action") or {})
     metrics_started = capture_metric_snapshot(action_context)
-    action_result = await dispatch_action(action, action_context)
-    action_count = 1
-    actions = [action_result]
-    if action_result.get("status") != "PASS":
-        status = _status_from_records([action_result])
-        reason = str(action_result.get("reason") or "action failed")
-        result = {
-            "id": transition.get("id"),
-            "status": status,
-            "reason": reason,
-            "actions": actions,
-            "metrics": finish_transition_metrics(metrics_started, action_context),
-            "before": before,
-            "after": {},
-            "diff": {},
-            "probes": {"before": before_results, "after": []},
-        }
-        if status == "BLOCKED":
-            result["blocked"] = _blocked_from_record(action_result)
-        return result, action_count
+    raw_action = transition.get("action")
+    action_count = 0
+    actions: list[dict[str, Any]] = []
+    if raw_action is not None:
+        action_result = await dispatch_action(dict(raw_action), action_context)
+        action_count = 1
+        actions = [action_result]
+        if action_result.get("status") != "PASS":
+            status = _status_from_records([action_result])
+            reason = str(action_result.get("reason") or "action failed")
+            result = {
+                "id": transition.get("id"),
+                "status": status,
+                "reason": reason,
+                "actions": actions,
+                "metrics": finish_transition_metrics(metrics_started, action_context),
+                "before": before,
+                "after": {},
+                "diff": {},
+                "probes": {"before": before_results, "after": []},
+            }
+            if status == "BLOCKED":
+                result["blocked"] = _blocked_from_record(action_result)
+            return result, action_count
 
     settle = await _settle(dict(transition.get("settle") or {}), action_context)
     metrics = finish_transition_metrics(metrics_started, action_context)
@@ -67,8 +71,8 @@ async def execute_transition(
             },
             action_count,
         )
-    after_results = await _collect_probe_results(probes, probe_context, phase="after")
-    after = _probe_value_map(probes, after_results)
+    after_results = await _collect_probe_results(after_probes, probe_context, phase="after")
+    after = _probe_value_map(after_probes, after_results)
     diff = compute_diff(before=before, after=after)
 
     status = _status_from_records([*before_results, *after_results, settle])
@@ -90,6 +94,10 @@ async def execute_transition(
         },
         action_count,
     )
+
+
+def _probes_for_phase(probes: list[dict[str, Any]], phase: str) -> list[dict[str, Any]]:
+    return [probe for probe in probes if probe_runs_in_phase(probe, phase)]
 
 
 async def _collect_probe_results(
@@ -151,13 +159,7 @@ async def _settle(
 
 
 async def _sleep_ms(context: ActionContext, idle_ms: int) -> None:
-    sleeper = getattr(context.clock, "sleep_ms", None)
-    if callable(sleeper):
-        result = sleeper(idle_ms)
-        if inspect.isawaitable(result):
-            await result
-        return
-    await asyncio.sleep(idle_ms / 1000)
+    await sleep_ms(context.clock, idle_ms)
 
 
 def _status_from_records(records: list[dict[str, Any]]) -> str:

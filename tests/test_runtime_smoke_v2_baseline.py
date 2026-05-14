@@ -109,7 +109,7 @@ async def test_v2_baseline_failure_blocks_cases_and_runs_cleanup() -> None:
 
     result = await _runner(session).run(_baseline_plan())
 
-    assert result["status"] == "BLOCKED"
+    assert result["status"] == "INVALID_SETUP"
     assert result["reason"] == "baseline setup failed"
     assert result["cases"] == []
     assert result["baseline"]["status"] == "BLOCKED"
