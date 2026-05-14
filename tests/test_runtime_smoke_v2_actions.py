@@ -251,6 +251,74 @@ async def test_v2_transition_observes_default_idle_settle() -> None:
 
 
 @pytest.mark.asyncio
+async def test_v2_transition_can_settle_without_action() -> None:
+    session = ActionSmokeSession()
+    clock = ManualClock()
+
+    result = await _runner_with_clock(session, clock).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "cases": [
+                {
+                    "id": "state_only",
+                    "transitions": [
+                        {
+                            "settle": {"idle_ms": 500},
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    transition = result["cases"][0]["transitions"][0]
+    assert result["status"] == "PASS"
+    assert result["action_count"] == 0
+    assert transition["actions"] == []
+    assert transition["settle"] == {"status": "PASS", "idle_ms": 500}
+    assert clock.sleeps_ms == [500]
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_v2_wait_and_noop_actions_require_no_selector() -> None:
+    session = ActionSmokeSession()
+    clock = ManualClock()
+
+    result = await _runner_with_clock(session, clock).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "cases": [
+                {
+                    "id": "state_actions",
+                    "transitions": [
+                        {
+                            "action": {"kind": "wait", "idle_ms": 300},
+                            "settle": {"idle_ms": 0},
+                            "probes": [],
+                        },
+                        {
+                            "action": {"kind": "noop"},
+                            "settle": {"idle_ms": 0},
+                            "probes": [],
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+
+    actions = result["cases"][0]["actions"]
+    assert result["status"] == "PASS"
+    assert result["action_count"] == 2
+    assert [action["route"] for action in actions] == ["wait", "noop"]
+    assert actions[0]["idle_ms"] == 300
+    assert clock.sleeps_ms == [300, 0, 0]
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
 async def test_v2_transition_waits_for_tracepoint_settle() -> None:
     session = ActionSmokeSession()
     session.tracepoint_hits = [False, True]

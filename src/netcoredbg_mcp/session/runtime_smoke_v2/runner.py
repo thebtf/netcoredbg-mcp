@@ -13,7 +13,7 @@ from .baseline import execute_baseline
 from .case_executor import execute_case
 from .cleanup import cleanup_steps_from_plan, merge_cleanup_results, run_cleanup
 from .generate import expand_generated_cases
-from .probe_dispatcher import probe_path
+from .probe_dispatcher import accepted_probe_phases, probe_path, probe_runs_in_phase
 from .probes import accepted_probe_kinds
 from .result_envelope import compact_value, finalize_result
 
@@ -57,7 +57,7 @@ class RuntimeStateOracleRunner:
         ]
         if validation_errors:
             return self._finalize(
-                status="FAIL",
+                status="INVALID_SETUP",
                 reason="invalid plan schema",
                 started=started,
                 action_count=0,
@@ -70,7 +70,7 @@ class RuntimeStateOracleRunner:
             )
         if not cases:
             return self._finalize(
-                status="BLOCKED",
+                status="INVALID_SETUP",
                 reason="runtime smoke v2 plan has no cases to execute",
                 started=started,
                 action_count=0,
@@ -103,7 +103,7 @@ class RuntimeStateOracleRunner:
             plan_cleanup = await run_cleanup(cleanup_steps_from_plan(plan), context)
             cleanup = merge_cleanup_results(plan_cleanup, [])
             return self._finalize(
-                status="BLOCKED",
+                status="INVALID_SETUP",
                 reason="baseline setup failed",
                 started=started,
                 action_count=0,
@@ -244,9 +244,16 @@ def _validate_v2_plan(
                 )
                 continue
             action = transition.get("action")
-            if not isinstance(action, dict):
+            if action is None:
+                pass
+            elif not isinstance(action, dict):
                 errors.append(
                     f"cases[{case_index}].transitions[{transition_index}].action must be an object"
+                )
+            elif not action:
+                errors.append(
+                    f"cases[{case_index}].transitions[{transition_index}].action.kind "
+                    "is required when action is present"
                 )
             elif action.get("kind") not in known_actions:
                 errors.append(
@@ -267,6 +274,13 @@ def _validate_v2_plan(
                         f"probes[{probe_index}] must be an object"
                     )
                     continue
+                phase_error = _probe_phase_error(probe)
+                if phase_error is not None:
+                    errors.append(
+                        f"cases[{case_index}].transitions[{transition_index}]."
+                        f"probes[{probe_index}].{phase_error}"
+                    )
+                    continue
                 if probe.get("kind") not in known_probes:
                     errors.append(
                         f"cases[{case_index}].transitions[{transition_index}]."
@@ -274,13 +288,41 @@ def _validate_v2_plan(
                     )
                     continue
                 path = probe_path(probe)
-                if path in seen_probe_paths:
-                    errors.append(
-                        f"cases[{case_index}].transitions[{transition_index}] "
-                        f"has duplicate probe path: {path}"
-                    )
-                seen_probe_paths.add(path)
+                for phase in ("before", "after"):
+                    if not probe_runs_in_phase(probe, phase):
+                        continue
+                    phase_path = f"{phase}:{path}"
+                    if phase_path in seen_probe_paths:
+                        errors.append(
+                            f"cases[{case_index}].transitions[{transition_index}] "
+                            f"has duplicate probe path for {phase}: {path}"
+                        )
+                    seen_probe_paths.add(phase_path)
     return errors
+
+
+def _probe_phase_error(probe: dict[str, Any]) -> str | None:
+    if "phase" in probe and "phases" in probe:
+        return "phase must not be combined with phases"
+    accepted = set(accepted_probe_phases())
+    if "phase" in probe:
+        phase = str(probe.get("phase"))
+        if phase not in accepted:
+            return f"phase is not accepted: {probe.get('phase')}"
+    if "phases" in probe:
+        raw_phases = probe.get("phases")
+        if isinstance(raw_phases, str):
+            phases = [raw_phases]
+        elif isinstance(raw_phases, (list, tuple, set)):
+            phases = [str(item) for item in raw_phases]
+        else:
+            return "phases must be a list of accepted phase names"
+        if not phases:
+            return "phases must contain at least one accepted phase name"
+        invalid = [phase for phase in phases if phase not in accepted]
+        if invalid:
+            return f"phases contains unaccepted values: {invalid}"
+    return None
 
 
 def _collect_v2_evidence_refs(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:

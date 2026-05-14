@@ -98,7 +98,7 @@ async def test_v2_unknown_probe_kind_fails_prelaunch_with_supported_kinds() -> N
         }
     )
 
-    assert result["status"] == "FAIL"
+    assert result["status"] == "INVALID_SETUP"
     assert result["reason"] == "invalid plan schema"
     assert "ui.colorscheme" in "\n".join(result["validation_errors"])
     assert result["accepted_probe_kinds"] == [
@@ -112,4 +112,41 @@ async def test_v2_unknown_probe_kind_fails_prelaunch_with_supported_kinds() -> N
         "ui.property",
         "ui.text",
     ]
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_v2_empty_probe_phases_fail_prelaunch() -> None:
+    session = BlockedSmokeSession()
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "empty probe phases",
+            "cases": [
+                {
+                    "id": "empty_probe_phases",
+                    "transitions": [
+                        {
+                            "action": {"kind": "noop"},
+                            "probes": [
+                                {
+                                    "name": "theme",
+                                    "kind": "output.field",
+                                    "field": "message",
+                                    "phases": [],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert result["status"] == "INVALID_SETUP"
+    assert result["reason"] == "invalid plan schema"
+    assert "phases must contain at least one accepted phase name" in "\n".join(
+        result["validation_errors"]
+    )
     assert session.calls == []

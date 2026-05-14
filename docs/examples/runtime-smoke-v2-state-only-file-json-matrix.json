@@ -1,0 +1,596 @@
+{
+    "schema": "netcoredbg.runtime_smoke.v2",
+    "name": "State-only regression matrix with fresh file evidence",
+    "generate": {
+        "template": "state-only-file-json",
+        "id_pattern": "{group}.{route}",
+        "matrix": [
+            {
+                "group": "enter_commit",
+                "route": "enter",
+                "row_count": 1000,
+                "wait_ms": 5000,
+                "path": "Tmp/regression-protocols/evidence/{group}-{route}.json",
+                "oracles": [
+                    {
+                        "name": "run_id",
+                        "jsonpath": "$.run_id",
+                        "expected": "runtime-smoke-v2-{group}-{route}"
+                    },
+                    {
+                        "name": "verdict",
+                        "jsonpath": "$.verdict",
+                        "expected": "PASS"
+                    },
+                    {
+                        "name": "row_count",
+                        "jsonpath": "$.row_count",
+                        "expected": "{row_count}"
+                    }
+                ]
+            },
+            {
+                "group": "enter_commit",
+                "route": "arrow_down",
+                "row_count": 1000,
+                "wait_ms": 5000,
+                "path": "Tmp/regression-protocols/evidence/{group}-{route}.json",
+                "oracles": [
+                    {
+                        "name": "run_id",
+                        "jsonpath": "$.run_id",
+                        "expected": "runtime-smoke-v2-{group}-{route}"
+                    },
+                    {
+                        "name": "verdict",
+                        "jsonpath": "$.verdict",
+                        "expected": "PASS"
+                    },
+                    {
+                        "name": "row_count",
+                        "jsonpath": "$.row_count",
+                        "expected": "{row_count}"
+                    }
+                ]
+            },
+            {
+                "group": "enter_commit",
+                "route": "arrow_up",
+                "row_count": 1000,
+                "wait_ms": 5000,
+                "path": "Tmp/regression-protocols/evidence/{group}-{route}.json",
+                "oracles": [
+                    {
+                        "name": "run_id",
+                        "jsonpath": "$.run_id",
+                        "expected": "runtime-smoke-v2-{group}-{route}"
+                    },
+                    {
+                        "name": "verdict",
+                        "jsonpath": "$.verdict",
+                        "expected": "PASS"
+                    },
+                    {
+                        "name": "row_count",
+                        "jsonpath": "$.row_count",
+                        "expected": "{row_count}"
+                    }
+                ]
+            },
+            {
+                "group": "grid_click",
+                "route": "single_click",
+                "row_count": 1000,
+                "wait_ms": 5000,
+                "path": "Tmp/regression-protocols/evidence/{group}-{route}.json",
+                "oracles": [
+                    {
+                        "name": "run_id",
+                        "jsonpath": "$.run_id",
+                        "expected": "runtime-smoke-v2-{group}-{route}"
+                    },
+                    {
+                        "name": "verdict",
+                        "jsonpath": "$.verdict",
+                        "expected": "PASS"
+                    },
+                    {
+                        "name": "row_count",
+                        "jsonpath": "$.row_count",
+                        "expected": "{row_count}"
+                    }
+                ]
+            },
+            {
+                "group": "grid_click",
+                "route": "double_click",
+                "row_count": 1000,
+                "wait_ms": 5000,
+                "path": "Tmp/regression-protocols/evidence/{group}-{route}.json",
+                "oracles": [
+                    {
+                        "name": "run_id",
+                        "jsonpath": "$.run_id",
+                        "expected": "runtime-smoke-v2-{group}-{route}"
+                    },
+                    {
+                        "name": "verdict",
+                        "jsonpath": "$.verdict",
+                        "expected": "PASS"
+                    },
+                    {
+                        "name": "row_count",
+                        "jsonpath": "$.row_count",
+                        "expected": "{row_count}"
+                    }
+                ]
+            },
+            {
+                "group": "grid_click",
+                "route": "context_action",
+                "row_count": 1000,
+                "wait_ms": 5000,
+                "path": "Tmp/regression-protocols/evidence/{group}-{route}.json",
+                "oracles": [
+                    {
+                        "name": "run_id",
+                        "jsonpath": "$.run_id",
+                        "expected": "runtime-smoke-v2-{group}-{route}"
+                    },
+                    {
+                        "name": "verdict",
+                        "jsonpath": "$.verdict",
+                        "expected": "PASS"
+                    },
+                    {
+                        "name": "row_count",
+                        "jsonpath": "$.row_count",
+                        "expected": "{row_count}"
+                    }
+                ]
+            },
+            {
+                "group": "table_actions",
+                "route": "insert_before",
+                "row_count": 1000,
+                "wait_ms": 5000,
+                "path": "Tmp/regression-protocols/evidence/{group}-{route}.json",
+                "oracles": [
+                    {
+                        "name": "run_id",
+                        "jsonpath": "$.run_id",
+                        "expected": "runtime-smoke-v2-{group}-{route}"
+                    },
+                    {
+                        "name": "verdict",
+                        "jsonpath": "$.verdict",
+                        "expected": "PASS"
+                    },
+                    {
+                        "name": "row_count",
+                        "jsonpath": "$.row_count",
+                        "expected": "{row_count}"
+                    }
+                ]
+            },
+            {
+                "group": "table_actions",
+                "route": "insert_after",
+                "row_count": 1000,
+                "wait_ms": 5000,
+                "path": "Tmp/regression-protocols/evidence/{group}-{route}.json",
+                "oracles": [
+                    {
+                        "name": "run_id",
+                        "jsonpath": "$.run_id",
+                        "expected": "runtime-smoke-v2-{group}-{route}"
+                    },
+                    {
+                        "name": "verdict",
+                        "jsonpath": "$.verdict",
+                        "expected": "PASS"
+                    },
+                    {
+                        "name": "row_count",
+                        "jsonpath": "$.row_count",
+                        "expected": "{row_count}"
+                    }
+                ]
+            },
+            {
+                "group": "table_actions",
+                "route": "delete_row",
+                "row_count": 1000,
+                "wait_ms": 5000,
+                "path": "Tmp/regression-protocols/evidence/{group}-{route}.json",
+                "oracles": [
+                    {
+                        "name": "run_id",
+                        "jsonpath": "$.run_id",
+                        "expected": "runtime-smoke-v2-{group}-{route}"
+                    },
+                    {
+                        "name": "verdict",
+                        "jsonpath": "$.verdict",
+                        "expected": "PASS"
+                    },
+                    {
+                        "name": "row_count",
+                        "jsonpath": "$.row_count",
+                        "expected": "{row_count}"
+                    }
+                ]
+            },
+            {
+                "group": "character_focus",
+                "route": "list_focus",
+                "row_count": 1000,
+                "wait_ms": 5000,
+                "path": "Tmp/regression-protocols/evidence/{group}-{route}.json",
+                "oracles": [
+                    {
+                        "name": "run_id",
+                        "jsonpath": "$.run_id",
+                        "expected": "runtime-smoke-v2-{group}-{route}"
+                    },
+                    {
+                        "name": "verdict",
+                        "jsonpath": "$.verdict",
+                        "expected": "PASS"
+                    },
+                    {
+                        "name": "row_count",
+                        "jsonpath": "$.row_count",
+                        "expected": "{row_count}"
+                    }
+                ]
+            },
+            {
+                "group": "character_focus",
+                "route": "role_toggle",
+                "row_count": 1000,
+                "wait_ms": 5000,
+                "path": "Tmp/regression-protocols/evidence/{group}-{route}.json",
+                "oracles": [
+                    {
+                        "name": "run_id",
+                        "jsonpath": "$.run_id",
+                        "expected": "runtime-smoke-v2-{group}-{route}"
+                    },
+                    {
+                        "name": "verdict",
+                        "jsonpath": "$.verdict",
+                        "expected": "PASS"
+                    },
+                    {
+                        "name": "row_count",
+                        "jsonpath": "$.row_count",
+                        "expected": "{row_count}"
+                    }
+                ]
+            },
+            {
+                "group": "character_focus",
+                "route": "speaker_change",
+                "row_count": 1000,
+                "wait_ms": 5000,
+                "path": "Tmp/regression-protocols/evidence/{group}-{route}.json",
+                "oracles": [
+                    {
+                        "name": "run_id",
+                        "jsonpath": "$.run_id",
+                        "expected": "runtime-smoke-v2-{group}-{route}"
+                    },
+                    {
+                        "name": "verdict",
+                        "jsonpath": "$.verdict",
+                        "expected": "PASS"
+                    },
+                    {
+                        "name": "row_count",
+                        "jsonpath": "$.row_count",
+                        "expected": "{row_count}"
+                    }
+                ]
+            },
+            {
+                "group": "drag_drop",
+                "route": "row_reorder",
+                "row_count": 1000,
+                "wait_ms": 5000,
+                "path": "Tmp/regression-protocols/evidence/{group}-{route}.json",
+                "oracles": [
+                    {
+                        "name": "run_id",
+                        "jsonpath": "$.run_id",
+                        "expected": "runtime-smoke-v2-{group}-{route}"
+                    },
+                    {
+                        "name": "verdict",
+                        "jsonpath": "$.verdict",
+                        "expected": "PASS"
+                    },
+                    {
+                        "name": "row_count",
+                        "jsonpath": "$.row_count",
+                        "expected": "{row_count}"
+                    }
+                ]
+            },
+            {
+                "group": "drag_drop",
+                "route": "character_drop",
+                "row_count": 1000,
+                "wait_ms": 5000,
+                "path": "Tmp/regression-protocols/evidence/{group}-{route}.json",
+                "oracles": [
+                    {
+                        "name": "run_id",
+                        "jsonpath": "$.run_id",
+                        "expected": "runtime-smoke-v2-{group}-{route}"
+                    },
+                    {
+                        "name": "verdict",
+                        "jsonpath": "$.verdict",
+                        "expected": "PASS"
+                    },
+                    {
+                        "name": "row_count",
+                        "jsonpath": "$.row_count",
+                        "expected": "{row_count}"
+                    }
+                ]
+            },
+            {
+                "group": "drag_drop",
+                "route": "media_drop",
+                "row_count": 1000,
+                "wait_ms": 5000,
+                "path": "Tmp/regression-protocols/evidence/{group}-{route}.json",
+                "oracles": [
+                    {
+                        "name": "run_id",
+                        "jsonpath": "$.run_id",
+                        "expected": "runtime-smoke-v2-{group}-{route}"
+                    },
+                    {
+                        "name": "verdict",
+                        "jsonpath": "$.verdict",
+                        "expected": "PASS"
+                    },
+                    {
+                        "name": "row_count",
+                        "jsonpath": "$.row_count",
+                        "expected": "{row_count}"
+                    }
+                ]
+            },
+            {
+                "group": "export",
+                "route": "export_plain",
+                "row_count": 1000,
+                "wait_ms": 5000,
+                "path": "Tmp/regression-protocols/evidence/{group}-{route}.json",
+                "oracles": [
+                    {
+                        "name": "run_id",
+                        "jsonpath": "$.run_id",
+                        "expected": "runtime-smoke-v2-{group}-{route}"
+                    },
+                    {
+                        "name": "verdict",
+                        "jsonpath": "$.verdict",
+                        "expected": "PASS"
+                    },
+                    {
+                        "name": "row_count",
+                        "jsonpath": "$.row_count",
+                        "expected": "{row_count}"
+                    }
+                ]
+            },
+            {
+                "group": "export",
+                "route": "export_all_caps",
+                "row_count": 1000,
+                "wait_ms": 5000,
+                "path": "Tmp/regression-protocols/evidence/{group}-{route}.json",
+                "oracles": [
+                    {
+                        "name": "run_id",
+                        "jsonpath": "$.run_id",
+                        "expected": "runtime-smoke-v2-{group}-{route}"
+                    },
+                    {
+                        "name": "verdict",
+                        "jsonpath": "$.verdict",
+                        "expected": "PASS"
+                    },
+                    {
+                        "name": "row_count",
+                        "jsonpath": "$.row_count",
+                        "expected": "{row_count}"
+                    }
+                ]
+            },
+            {
+                "group": "export",
+                "route": "export_subset",
+                "row_count": 1000,
+                "wait_ms": 5000,
+                "path": "Tmp/regression-protocols/evidence/{group}-{route}.json",
+                "oracles": [
+                    {
+                        "name": "run_id",
+                        "jsonpath": "$.run_id",
+                        "expected": "runtime-smoke-v2-{group}-{route}"
+                    },
+                    {
+                        "name": "verdict",
+                        "jsonpath": "$.verdict",
+                        "expected": "PASS"
+                    },
+                    {
+                        "name": "row_count",
+                        "jsonpath": "$.row_count",
+                        "expected": "{row_count}"
+                    }
+                ]
+            },
+            {
+                "group": "media_follow",
+                "route": "follow_video_on",
+                "row_count": 1000,
+                "wait_ms": 5000,
+                "path": "Tmp/regression-protocols/evidence/{group}-{route}.json",
+                "oracles": [
+                    {
+                        "name": "run_id",
+                        "jsonpath": "$.run_id",
+                        "expected": "runtime-smoke-v2-{group}-{route}"
+                    },
+                    {
+                        "name": "verdict",
+                        "jsonpath": "$.verdict",
+                        "expected": "PASS"
+                    },
+                    {
+                        "name": "row_count",
+                        "jsonpath": "$.row_count",
+                        "expected": "{row_count}"
+                    }
+                ]
+            },
+            {
+                "group": "media_follow",
+                "route": "follow_video_off",
+                "row_count": 1000,
+                "wait_ms": 5000,
+                "path": "Tmp/regression-protocols/evidence/{group}-{route}.json",
+                "oracles": [
+                    {
+                        "name": "run_id",
+                        "jsonpath": "$.run_id",
+                        "expected": "runtime-smoke-v2-{group}-{route}"
+                    },
+                    {
+                        "name": "verdict",
+                        "jsonpath": "$.verdict",
+                        "expected": "PASS"
+                    },
+                    {
+                        "name": "row_count",
+                        "jsonpath": "$.row_count",
+                        "expected": "{row_count}"
+                    }
+                ]
+            },
+            {
+                "group": "media_follow",
+                "route": "media_seek",
+                "row_count": 1000,
+                "wait_ms": 5000,
+                "path": "Tmp/regression-protocols/evidence/{group}-{route}.json",
+                "oracles": [
+                    {
+                        "name": "run_id",
+                        "jsonpath": "$.run_id",
+                        "expected": "runtime-smoke-v2-{group}-{route}"
+                    },
+                    {
+                        "name": "verdict",
+                        "jsonpath": "$.verdict",
+                        "expected": "PASS"
+                    },
+                    {
+                        "name": "row_count",
+                        "jsonpath": "$.row_count",
+                        "expected": "{row_count}"
+                    }
+                ]
+            },
+            {
+                "group": "hardware",
+                "route": "auto",
+                "row_count": 1000,
+                "wait_ms": 5000,
+                "path": "Tmp/regression-protocols/evidence/{group}-{route}.json",
+                "oracles": [
+                    {
+                        "name": "run_id",
+                        "jsonpath": "$.run_id",
+                        "expected": "runtime-smoke-v2-{group}-{route}"
+                    },
+                    {
+                        "name": "verdict",
+                        "jsonpath": "$.verdict",
+                        "expected": "PASS"
+                    },
+                    {
+                        "name": "row_count",
+                        "jsonpath": "$.row_count",
+                        "expected": "{row_count}"
+                    }
+                ]
+            },
+            {
+                "group": "hardware",
+                "route": "cuda_fallback",
+                "row_count": 1000,
+                "wait_ms": 5000,
+                "path": "Tmp/regression-protocols/evidence/{group}-{route}.json",
+                "oracles": [
+                    {
+                        "name": "run_id",
+                        "jsonpath": "$.run_id",
+                        "expected": "runtime-smoke-v2-{group}-{route}"
+                    },
+                    {
+                        "name": "verdict",
+                        "jsonpath": "$.verdict",
+                        "expected": "PASS"
+                    },
+                    {
+                        "name": "row_count",
+                        "jsonpath": "$.row_count",
+                        "expected": "{row_count}"
+                    }
+                ]
+            },
+            {
+                "group": "hardware",
+                "route": "software_fallback",
+                "row_count": 1000,
+                "wait_ms": 5000,
+                "path": "Tmp/regression-protocols/evidence/{group}-{route}.json",
+                "oracles": [
+                    {
+                        "name": "run_id",
+                        "jsonpath": "$.run_id",
+                        "expected": "runtime-smoke-v2-{group}-{route}"
+                    },
+                    {
+                        "name": "verdict",
+                        "jsonpath": "$.verdict",
+                        "expected": "PASS"
+                    },
+                    {
+                        "name": "row_count",
+                        "jsonpath": "$.row_count",
+                        "expected": "{row_count}"
+                    }
+                ]
+            }
+        ]
+    },
+    "cleanup": {
+        "steps": [
+            {
+                "kind": "process.registry.assert_empty"
+            },
+            {
+                "kind": "debug.stop"
+            }
+        ]
+    }
+}

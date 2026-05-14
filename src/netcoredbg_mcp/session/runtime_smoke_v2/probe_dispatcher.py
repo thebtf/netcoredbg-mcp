@@ -16,6 +16,8 @@ from .probes.ui_grid import handle_ui_grid
 from .probes.ui_property import handle_ui_property
 from .probes.ui_text import handle_ui_text
 
+ACCEPTED_PROBE_PHASES = frozenset({"before", "after", "both"})
+
 
 @dataclass(frozen=True)
 class ProbeContext:
@@ -39,6 +41,30 @@ def probe_path(probe: dict[str, Any]) -> str:
     if not name:
         return kind
     return f"{kind}.{name}"
+
+
+def accepted_probe_phases() -> list[str]:
+    return sorted(ACCEPTED_PROBE_PHASES)
+
+
+def probe_runs_in_phase(probe: dict[str, Any], phase: str) -> bool:
+    phases = _probe_phases(probe)
+    return "both" in phases or phase in phases
+
+
+def _probe_phases(probe: dict[str, Any]) -> set[str]:
+    raw_phases = probe.get("phases")
+    if raw_phases is not None:
+        if isinstance(raw_phases, str):
+            return {raw_phases}
+        if isinstance(raw_phases, (list, tuple, set)):
+            return {str(item) for item in raw_phases}
+        return {str(raw_phases)}
+
+    raw_phase = probe.get("phase")
+    if raw_phase is None:
+        return {"both"}
+    return {str(raw_phase)}
 
 
 async def dispatch_probe(

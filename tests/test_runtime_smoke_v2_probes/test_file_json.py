@@ -55,6 +55,58 @@ async def test_file_json_probe_reads_jsonpath_value(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_file_json_after_only_probe_can_run_without_action(tmp_path: Path) -> None:
+    path = tmp_path / "diagnostics.json"
+    path.write_text(
+        json.dumps(
+            {
+                "run_id": "runtime-smoke-v2-commit-before-rebind-1000",
+                "verdict": "PASS",
+                "row_count": 1000,
+            }
+        ),
+        encoding="utf-8",
+    )
+    session = FileJsonProbeSession(tmp_path)
+
+    result = await runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "cases": [
+                {
+                    "id": "state_only_file_probe",
+                    "transitions": [
+                        {
+                            "settle": {"idle_ms": 0},
+                            "probes": [
+                                {
+                                    "kind": "file.json",
+                                    "phase": "after",
+                                    "name": "run_id",
+                                    "path": str(path),
+                                    "jsonpath": "$.run_id",
+                                    "expected": "runtime-smoke-v2-commit-before-rebind-1000",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    transition = result["cases"][0]["transitions"][0]
+    probe = transition["probes"]["after"][0]
+    assert result["status"] == "PASS"
+    assert result["action_count"] == 0
+    assert transition["actions"] == []
+    assert transition["probes"]["before"] == []
+    assert probe["status"] == "PASS"
+    assert probe["value"] == "runtime-smoke-v2-commit-before-rebind-1000"
+    assert probe["expected"] == "runtime-smoke-v2-commit-before-rebind-1000"
+
+
+@pytest.mark.asyncio
 async def test_file_json_probe_blocks_path_outside_project(tmp_path: Path) -> None:
     session = FileJsonProbeSession(tmp_path / "project")
     outside_path = tmp_path / "outside.json"

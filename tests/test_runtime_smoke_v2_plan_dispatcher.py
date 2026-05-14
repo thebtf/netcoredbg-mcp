@@ -25,7 +25,7 @@ async def test_v2_schema_dispatches_to_v2_result_envelope() -> None:
         }
     )
 
-    assert result["status"] == "BLOCKED"
+    assert result["status"] == "INVALID_SETUP"
     assert result["generated_case_count"] == 0
     assert result["cases"] == []
     assert result["cleanup"]["status"] == "PASS"

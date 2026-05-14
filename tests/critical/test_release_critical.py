@@ -162,7 +162,7 @@ async def test_runtime_smoke_runner_surface_is_release_critical() -> None:
                 loaded_sources={},
             )
 
-    assert TERMINAL_STATUSES == {"PASS", "FAIL", "BLOCKED", "IMPASSE"}
+    assert TERMINAL_STATUSES == {"PASS", "FAIL", "BLOCKED", "IMPASSE", "INVALID_SETUP"}
     result = await RuntimeSmokeRunner(FakeSession()).run({"name": "release-critical"})
 
     assert result["status"] in TERMINAL_STATUSES

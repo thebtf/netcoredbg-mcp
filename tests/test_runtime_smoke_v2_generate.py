@@ -100,6 +100,59 @@ def test_generate_matrix_expands_in_declaration_order_and_preserves_records() ->
     ]
 
 
+def test_state_only_file_json_matrix_can_cover_many_regression_routes() -> None:
+    routes = [f"route_{index:02d}" for index in range(24)]
+    groups = [f"group_{index:02d}" for index in range(8)]
+    plan = {
+        "schema": "netcoredbg.runtime_smoke.v2",
+        "generate": {
+            "template": "state-only-file-json",
+            "id_pattern": "{group}.{route}",
+            "matrix": [
+                {
+                    "group": groups[index % len(groups)],
+                    "route": route,
+                    "path": "Tmp/regression-protocols/evidence/{group}-{route}.json",
+                    "settle": {"idle_ms": 0},
+                    "oracles": [
+                        {
+                            "name": "run_id",
+                            "jsonpath": "$.run_id",
+                            "expected": "runtime-smoke-v2-{group}-{route}",
+                        },
+                        {
+                            "name": "verdict",
+                            "jsonpath": "$.verdict",
+                            "expected": "PASS",
+                        },
+                    ],
+                }
+                for index, route in enumerate(routes)
+            ],
+        },
+    }
+
+    generated, errors = expand_generated_cases(plan)
+
+    assert errors == []
+    assert len(generated) == 24
+    assert len({case["rendered_from"]["group"] for case in generated}) == 8
+    assert all("action" not in case["transitions"][0] for case in generated)
+    assert all(
+        probe["kind"] == "file.json" and probe["phase"] == "after"
+        for case in generated
+        for probe in case["transitions"][0]["probes"]
+    )
+    assert generated[0]["transitions"][0]["probes"][0] == {
+        "kind": "file.json",
+        "phase": "after",
+        "name": "run_id",
+        "path": "Tmp/regression-protocols/evidence/group_00-route_00.json",
+        "jsonpath": "$.run_id",
+        "expected": "runtime-smoke-v2-group_00-route_00",
+    }
+
+
 @pytest.mark.asyncio
 async def test_runner_executes_handwritten_cases_before_generated_cases() -> None:
     session = GenerateSmokeSession()
@@ -152,7 +205,7 @@ async def test_duplicate_generated_case_id_fails_before_launch() -> None:
 
     result = await _runner(session).run(plan)
 
-    assert result["status"] == "FAIL"
+    assert result["status"] == "INVALID_SETUP"
     assert result["reason"] == "invalid plan schema"
     assert "duplicate case id: spellcheck_input.true" in result["validation_errors"]
     assert session.calls == []
