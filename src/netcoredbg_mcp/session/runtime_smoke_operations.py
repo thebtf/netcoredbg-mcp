@@ -767,7 +767,7 @@ async def _drag_route(
 
 
 def _requires_path_drag(path: list[dict[str, Any]]) -> bool:
-    return len(path) > 2 or any("hold_ms" in point for point in path)
+    return len(path) >= 2 or any("hold_ms" in point for point in path)
 
 
 def _drag_cancel_key(cancel: dict[str, Any]) -> str | None:
@@ -1467,7 +1467,11 @@ async def _selected_viewport_rows_from_backend(
             reason="selected row evidence unavailable",
             selector=selector,
         )
-    result = await read_grid_selected_rows(backend, selector)
+    result = await read_grid_selected_rows(
+        backend,
+        selector,
+        columns=_viewport_columns(identity),
+    )
     if _is_non_pass_result(result):
         return [], {
             **dict(result),
