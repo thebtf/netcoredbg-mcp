@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-05-15
+
+### Added
+- Runtime smoke v2 drag/drop scenarios for visible-row reorder, edge-scroll,
+  multi-row selected payload preservation, and negative no-op classification.
+- Backend route evidence for bridge `Drag`, including path points and final
+  pointer coordinates for customer-mode smoke diagnostics.
+
+### Fixed
+- Visible-row drag smoke now uses threshold-aware bridge dragging for
+  two-point row reorders while preserving route evidence.
+- Coordinate drag primitives now settle after moving to the source point before
+  pressing the left button, avoiding WPF input races where fresh fixtures stayed
+  at `Ready` and never entered `DoDragDrop`.
+
 ## [0.15.1] - 2026-05-14
 
 ### Added
