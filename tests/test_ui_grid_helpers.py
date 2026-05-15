@@ -312,6 +312,7 @@ def test_bridge_grid_builds_cell_text_evidence_for_rows() -> None:
     assert '["grid_snapshot"] = GridCommands.Snapshot' in handler
     assert '["grid_assert_rows"] = GridCommands.AssertRows' in handler
     assert '["cells"]' in command
+    assert '["bounds"] = SafeRect(row)' in command
     assert "ReadCellText" in command
     assert "new Grid(grid.FrameworkAutomationElement)" in command
     assert "gridElement.ColumnHeaders" in command

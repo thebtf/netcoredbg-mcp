@@ -330,6 +330,31 @@ public static class GridCommands
                controlType == ControlType.ListItem;
     }
 
+    private static JsonObject SafeRect(AutomationElement element)
+    {
+        try
+        {
+            var rect = element.BoundingRectangle;
+            return new JsonObject
+            {
+                ["x"] = rect.X,
+                ["y"] = rect.Y,
+                ["width"] = rect.Width,
+                ["height"] = rect.Height
+            };
+        }
+        catch
+        {
+            return new JsonObject
+            {
+                ["x"] = 0,
+                ["y"] = 0,
+                ["width"] = 0,
+                ["height"] = 0
+            };
+        }
+    }
+
     private static JsonArray BuildRows(
         AutomationElement grid,
         AutomationElement[] gridRows,
@@ -359,6 +384,7 @@ public static class GridCommands
             ["automation_id"] = SafeString(() => row.AutomationId),
             ["name"] = SafeString(() => row.Name),
             ["control_type"] = SafeString(() => row.ControlType.ToString()),
+            ["bounds"] = SafeRect(row),
             ["selected"] = IsSelected(row),
             ["cells"] = cells.Object,
             ["cell_values"] = cells.Array

@@ -3126,6 +3126,263 @@ async def test_wpf_v2_state_oracle_runtime_smoke():
     )
 
 
+async def run_wpf_v2_visible_row_drag_runtime_smoke() -> dict[str, Any]:
+    from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner
+    from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
+    from netcoredbg_mcp.ui.backend import create_backend
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    if sys.platform != "win32":
+        return {
+            "status": "BLOCKED",
+            "reason": "WPF v2 visible-row drag smoke requires Windows UI automation",
+        }
+
+    m = SessionManager(project_path=BASE)
+    backend_holder: dict[str, object | None] = {"backend": None}
+    backend_holder["backend"] = create_backend(process_registry=m.process_registry)
+    if not isinstance(backend_holder["backend"], FlaUIBackend):
+        return {
+            "status": "BLOCKED",
+            "backend": type(backend_holder["backend"]).__name__,
+            "reason": "FlaUI bridge required for WPF v2 visible-row drag smoke",
+        }
+
+    async def ensure_ui_connected():
+        backend = backend_holder["backend"]
+        if backend is None:
+            backend = create_backend(process_registry=m.process_registry)
+            backend_holder["backend"] = backend
+        pid = m.state.process_id
+        if not pid:
+            raise RuntimeError("Process ID not available for WPF v2 visible-row drag smoke")
+        if getattr(backend, "process_id", None) != pid:
+            await backend.connect(pid)
+        return backend
+
+    plan = _v2_visible_row_drag_plan(
+        program=WPF_DLL,
+        build_project=os.path.join(
+            BASE,
+            "tests",
+            "fixtures",
+            "WpfSmokeApp",
+            "WpfSmokeApp.csproj",
+        ),
+    )
+
+    try:
+        result = await RuntimeSmokeRunner(
+            m,
+            service_adapters=ui_operation_adapters(ensure_ui_connected, session=m),
+        ).run(plan)
+        return _v2_visible_row_drag_summary(result)
+    finally:
+        if backend_holder["backend"] is not None:
+            try:
+                await backend_holder["backend"].disconnect()
+            except Exception as exc:
+                print(f"  [DEBUG] WPF v2 visible-row drag backend.disconnect() failed: {exc}")
+        await m.stop()
+
+
+def _v2_visible_row_drag_plan(
+    *,
+    program: str,
+    build_project: str,
+) -> dict[str, Any]:
+    selector = {"automation_id": "dataGrid"}
+    return {
+        "schema": "netcoredbg.runtime_smoke.v2",
+        "name": "wpf v2 visible-row drag reorder",
+        "baseline": {
+            "steps": [
+                {
+                    "id": "launch_fixture",
+                    "kind": "isolated_profile.launch",
+                    "launch": {
+                        "program": program,
+                        "cwd": os.path.dirname(program),
+                        "pre_build": True,
+                        "build_project": build_project,
+                        "build_configuration": "Debug",
+                    },
+                }
+            ]
+        },
+        "cases": [
+            {
+                "id": "wpf_visible_row_drag_reorder",
+                "transitions": [
+                    {
+                        "id": "drag_row_1_to_row_3",
+                        "action": {
+                            "kind": "ui.drag",
+                            "source": {
+                                "selector": selector,
+                                "row_index": 1,
+                            },
+                            "path": [
+                                {"relative_to": "source", "x": 0.5, "y": 0.5},
+                                {"relative_to": "drop", "x": 0.5, "y": 0.5},
+                            ],
+                            "drop": {
+                                "selector": selector,
+                                "row_index": 3,
+                            },
+                            "duration_ms": 450,
+                            "expect": {
+                                "row_count_preserved": True,
+                                "identity_set_preserved": True,
+                                "single_move": {"source_index": 1, "target_index": 3},
+                            },
+                        },
+                        "settle": {"idle_ms": 500},
+                        "probes": [
+                            {
+                                "kind": "ui.grid",
+                                "name": "cue_order",
+                                "selector": selector,
+                                "columns": ["Start", "End", "Character", "Phrase"],
+                                "phases": ["before", "after"],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+        "cleanup": {
+            "steps": [
+                {"kind": "process.registry.assert_empty"},
+                {"kind": "debug.stop"},
+            ]
+        },
+    }
+
+
+def _v2_visible_row_drag_summary(result: dict[str, Any]) -> dict[str, Any]:
+    transition = _first_v2_transition(result)
+    action = _first_transition_action(transition)
+    before_rows = _transition_grid_rows(transition, "before")
+    after_rows = _transition_grid_rows(transition, "after")
+    before_refs = _row_identity_refs(before_rows)
+    after_refs = _row_identity_refs(after_rows)
+    expected_after_refs = _moved_refs(before_refs, source_index=1, target_index=3)
+    route_evidence = dict(action.get("route_evidence") or {}) if action else {}
+    row_count_preserved = len(before_refs) == len(after_refs) and bool(before_refs)
+    identity_set_preserved = sorted(before_refs) == sorted(after_refs) and bool(before_refs)
+    order_changed_once = after_refs == expected_after_refs and after_refs != before_refs
+
+    compact = {
+        "status": result.get("status"),
+        "reason": result.get("reason"),
+        "backend": action.get("backend") if action else None,
+        "source_bounds": route_evidence.get("source_bounds"),
+        "target_bounds": route_evidence.get("target_bounds"),
+        "move_points": route_evidence.get("move_points"),
+        "final_pointer": route_evidence.get("final_pointer"),
+        "before_identity_refs": before_refs,
+        "after_identity_refs": after_refs,
+        "row_count_preserved": row_count_preserved,
+        "identity_set_preserved": identity_set_preserved,
+        "order_changed_once": order_changed_once,
+        "cleanup": result.get("cleanup"),
+        "blocked": result.get("blocked"),
+    }
+    if result.get("status") == "BLOCKED":
+        compact["status"] = "BLOCKED"
+        return compact
+    compact["status"] = (
+        "PASS"
+        if result.get("status") == "PASS"
+        and row_count_preserved
+        and identity_set_preserved
+        and order_changed_once
+        and route_evidence.get("source_bounds")
+        and route_evidence.get("final_pointer")
+        else "FAIL"
+    )
+    return compact
+
+
+def _first_v2_transition(result: dict[str, Any]) -> dict[str, Any]:
+    cases = result.get("cases")
+    if not isinstance(cases, list) or not cases:
+        return {}
+    transitions = cases[0].get("transitions") if isinstance(cases[0], dict) else None
+    if not isinstance(transitions, list) or not transitions:
+        return {}
+    return transitions[0] if isinstance(transitions[0], dict) else {}
+
+
+def _first_transition_action(transition: dict[str, Any]) -> dict[str, Any]:
+    actions = transition.get("actions")
+    if not isinstance(actions, list) or not actions:
+        return {}
+    return actions[0] if isinstance(actions[0], dict) else {}
+
+
+def _transition_grid_rows(transition: dict[str, Any], phase: str) -> list[dict[str, Any]]:
+    phase_values = transition.get(phase)
+    if not isinstance(phase_values, dict):
+        return []
+    rows = phase_values.get("ui.grid.cue_order")
+    if not isinstance(rows, list):
+        return []
+    return [dict(row) for row in rows if isinstance(row, dict)]
+
+
+def _row_identity_refs(rows: list[dict[str, Any]]) -> list[str]:
+    refs: list[str] = []
+    for row in rows:
+        cells = row.get("cells")
+        if isinstance(cells, dict) and cells.get("Phrase"):
+            refs.append(str(cells["Phrase"]))
+            continue
+        if row.get("automation_id"):
+            refs.append(str(row["automation_id"]))
+            continue
+        refs.append(f"row:{row.get('index')}")
+    return refs
+
+
+def _moved_refs(refs: list[str], *, source_index: int, target_index: int) -> list[str]:
+    if source_index >= len(refs) or target_index >= len(refs):
+        return []
+    moved = list(refs)
+    item = moved.pop(source_index)
+    moved.insert(target_index, item)
+    return moved
+
+
+async def test_wpf_v2_visible_row_drag_runtime_smoke():
+    print("\nWPF V2 VISIBLE-ROW DRAG RUNTIME SMOKE")
+    evidence = await run_wpf_v2_visible_row_drag_runtime_smoke()
+    print(f"  evidence: {evidence}")
+    if evidence.get("status") == "BLOCKED":
+        check("WPF v2 visible-row drag reports actionable BLOCKED", True, str(evidence))
+        return
+    check(
+        "WPF v2 visible-row drag returned PASS",
+        evidence.get("status") == "PASS",
+        str(evidence),
+    )
+    check(
+        "WPF v2 visible-row drag preserved row count and identities",
+        bool(evidence.get("row_count_preserved"))
+        and bool(evidence.get("identity_set_preserved")),
+        str(evidence),
+    )
+    check(
+        "WPF v2 visible-row drag route evidence is compact and complete",
+        bool(evidence.get("backend"))
+        and bool(evidence.get("source_bounds"))
+        and bool(evidence.get("move_points"))
+        and bool(evidence.get("final_pointer")),
+        str(evidence),
+    )
+
+
 async def test_avalonia_v2_state_oracle_runtime_smoke():
     print("\nAVALONIA V2 STATE ORACLE RUNTIME SMOKE")
     evidence = await run_avalonia_v2_state_oracle_runtime_smoke()
@@ -3403,6 +3660,10 @@ def get_scenarios():
         ("Stealth Screenshot", test_stealth_screenshot),
         ("Code Search", test_code_search),
         ("WPF V2 State Oracle Runtime Smoke", test_wpf_v2_state_oracle_runtime_smoke),
+        (
+            "WPF V2 Visible-Row Drag Runtime Smoke",
+            test_wpf_v2_visible_row_drag_runtime_smoke,
+        ),
         (
             "Avalonia V2 State Oracle Runtime Smoke",
             test_avalonia_v2_state_oracle_runtime_smoke,

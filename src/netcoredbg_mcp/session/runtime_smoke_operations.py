@@ -285,7 +285,12 @@ def ui_operation_adapters(
         source = dict(args.get("source") or {})
         path = _mapping_list(args.get("path"))
         drop = dict(args.get("drop") or {})
-        route, blocked = _point_drag_route(source=source, path=path, drop=drop)
+        route, route_evidence, blocked = await _drag_route(
+            backend,
+            source=source,
+            path=path,
+            drop=drop,
+        )
         if blocked is not None:
             return blocked
 
@@ -310,10 +315,14 @@ def ui_operation_adapters(
             }
 
         route_evidence = {
-            "source": source,
+            **route_evidence,
             "move_points": path,
             "hold_points": [point for point in path if "hold_ms" in point],
-            "final_pointer": drop or (path[-1] if path else None),
+            "final_pointer": drop
+            if _screen_point(drop) is not None
+            else route_evidence.get("target_point")
+            or drop
+            or (path[-1] if path else None),
             "modifiers": modifiers,
             "start": {"x": route["from_x"], "y": route["from_y"]},
             "drop": {"x": route["to_x"], "y": route["to_y"]},
@@ -501,6 +510,340 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
         "debug.stop": debug_stop,
         "process.registry.count": process_registry_count,
         "fixture.restore": fixture_restore,
+    }
+
+
+async def _drag_route(
+    backend: Any,
+    *,
+    source: dict[str, Any],
+    path: list[dict[str, Any]],
+    drop: dict[str, Any],
+) -> tuple[dict[str, int], dict[str, Any], dict[str, Any] | None]:
+    source_point, source_evidence, blocked = await _resolve_drag_endpoint(
+        backend,
+        source,
+        role="source",
+    )
+    if blocked is not None:
+        return {}, {}, blocked
+
+    target_payload = drop or (path[-1] if path else {})
+    target_point, target_evidence, blocked = await _resolve_drag_endpoint(
+        backend,
+        target_payload,
+        role="target",
+    )
+    if blocked is not None:
+        return {}, {}, blocked
+
+    route = {
+        "from_x": source_point["x"],
+        "from_y": source_point["y"],
+        "to_x": target_point["x"],
+        "to_y": target_point["y"],
+    }
+    return (
+        route,
+        {
+            "source": source,
+            "target": target_payload,
+            "source_bounds": source_evidence.get("bounds"),
+            "target_bounds": target_evidence.get("bounds"),
+            "source_identity": source_evidence.get("identity"),
+            "target_identity": target_evidence.get("identity"),
+            "source_point": source_point,
+            "target_point": target_point,
+        },
+        None,
+    )
+
+
+async def _resolve_drag_endpoint(
+    backend: Any,
+    endpoint: dict[str, Any],
+    *,
+    role: str,
+) -> tuple[dict[str, int], dict[str, Any], dict[str, Any] | None]:
+    point = _screen_point(endpoint)
+    if point is not None:
+        return {"x": point[0], "y": point[1]}, {"point": endpoint}, None
+
+    kind = str(endpoint.get("kind") or _endpoint_kind(endpoint) or "")
+    if kind == "point":
+        point = _screen_point(endpoint.get("point"))
+        if point is None:
+            return {}, {}, _drag_blocked(
+                reason=f"drag {role} requires screen coordinates",
+                requested={role: endpoint},
+                accepted={f"{role}.point": "screen coordinate object"},
+                next_step=f"Provide {role}.point using relative_to: screen.",
+            )
+        return {"x": point[0], "y": point[1]}, {"point": endpoint.get("point")}, None
+
+    if kind == "selector":
+        selector = dict(endpoint.get("selector") or endpoint)
+        return await _resolve_selector_endpoint(backend, selector, role=role)
+
+    if kind in {"row_index", "row_identity"}:
+        selector = dict(endpoint.get("selector") or {})
+        if not selector:
+            return {}, {}, _drag_blocked(
+                reason=f"drag {role} row source requires selector",
+                requested={role: endpoint},
+                accepted={f"{role}.selector": "grid selector for visible row lookup"},
+                next_step=f"Provide {role}.selector with {role}.{kind}.",
+            )
+        snapshot, blocked = await _grid_snapshot_for_drag(backend, selector, role=role)
+        if blocked is not None:
+            return {}, {}, blocked
+        row, blocked = _row_from_drag_endpoint(snapshot, endpoint, role=role, kind=kind)
+        if blocked is not None:
+            return {}, {}, blocked
+        bounds = _bounds_from_mapping(row)
+        if bounds is None:
+            return {}, {}, _drag_blocked(
+                reason=f"drag {role} row bounds unavailable",
+                requested={role: endpoint},
+                accepted={"row.bounds": "visible row bounding rectangle"},
+                next_step="Use a UI backend that returns row bounds in grid snapshot evidence.",
+            )
+        return (
+            _center_point(bounds),
+            {"bounds": bounds, "identity": _row_identity(row), "row": _compact_row_ref(row)},
+            None,
+        )
+
+    return {}, {}, _drag_blocked(
+        reason=f"drag {role} requires coordinate resolution",
+        requested={role: endpoint},
+        accepted={
+            f"{role}.kind": "point, selector, row_index, or row_identity with resolvable bounds"
+        },
+        next_step="Provide a resolvable drag endpoint for ui.drag.",
+    )
+
+
+async def _resolve_selector_endpoint(
+    backend: Any,
+    selector: dict[str, Any],
+    *,
+    role: str,
+) -> tuple[dict[str, int], dict[str, Any], dict[str, Any] | None]:
+    find_element = getattr(backend, "find_element", None)
+    if not callable(find_element):
+        return {}, {}, _drag_blocked(
+            reason=f"drag {role} selector lookup unavailable",
+            requested={role: selector},
+            accepted={"backend": "find_element-capable UI backend"},
+            next_step="Use a UI backend that can resolve selectors to element bounds.",
+        )
+    result = await find_element(**_selector_kwargs(selector))
+    if not isinstance(result, Mapping) or not result.get("found", True):
+        return {}, {}, _drag_blocked(
+            reason=f"drag {role} selector not found",
+            requested={role: selector},
+            accepted={"selector": "unique visible element selector"},
+            next_step="Update the selector so it resolves to one visible element.",
+        )
+    bounds = _bounds_from_mapping(result)
+    if bounds is None:
+        return {}, {}, _drag_blocked(
+            reason=f"drag {role} selector bounds unavailable",
+            requested={role: selector},
+            accepted={"selector.bounds": "element bounding rectangle"},
+            next_step="Use a UI backend that returns element bounds.",
+        )
+    return _center_point(bounds), {"bounds": bounds, "identity": _selector_identity(result)}, None
+
+
+async def _grid_snapshot_for_drag(
+    backend: Any,
+    selector: dict[str, Any],
+    *,
+    role: str,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    grid_snapshot = getattr(backend, "grid_snapshot", None)
+    if callable(grid_snapshot):
+        result = await grid_snapshot(
+            selector,
+            rows={"visible_only": True},
+            columns=["Start", "End", "Character", "Phrase"],
+        )
+    else:
+        grid_visible_rows = getattr(backend, "grid_visible_rows", None)
+        if not callable(grid_visible_rows):
+            return {}, _drag_blocked(
+                reason=f"drag {role} row lookup unavailable",
+                requested={role: {"selector": selector}},
+                accepted={"backend": "grid_snapshot or grid_visible_rows capable UI backend"},
+                next_step="Use a UI backend with visible row evidence.",
+            )
+        result = await grid_visible_rows(selector)
+    if not isinstance(result, Mapping):
+        return {}, _drag_blocked(
+            reason=f"drag {role} grid lookup returned non-object result",
+            requested={role: {"selector": selector}},
+            accepted={"grid_result": "object with visible_rows"},
+            next_step="Inspect the UI backend grid snapshot implementation.",
+        )
+    status = str(result.get("status", "PASS")).upper()
+    if status not in {"PASS", "OK", "SUCCESS"}:
+        return {}, _drag_blocked(
+            reason=str(result.get("reason") or f"drag {role} grid lookup failed"),
+            requested={role: {"selector": selector}},
+            accepted={"grid_result": "PASS with visible_rows"},
+            next_step="Resolve the grid selector or backend capability before dragging.",
+        )
+    return dict(result), None
+
+
+def _row_from_drag_endpoint(
+    snapshot: dict[str, Any],
+    endpoint: dict[str, Any],
+    *,
+    role: str,
+    kind: str,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    rows = snapshot.get("visible_rows")
+    if not isinstance(rows, list):
+        return {}, _drag_blocked(
+            reason=f"drag {role} visible row evidence unavailable",
+            requested={role: endpoint},
+            accepted={"visible_rows": "list of visible row objects"},
+            next_step="Use a grid backend that returns visible row evidence.",
+        )
+
+    if kind == "row_index":
+        try:
+            raw_row_index = endpoint.get("row_index")
+            if raw_row_index is None:
+                raise ValueError("missing row_index")
+            row_index = int(raw_row_index)
+        except (TypeError, ValueError):
+            row_index = -1
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            try:
+                raw_visible_index = row.get("index")
+                if raw_visible_index is None:
+                    raise ValueError("missing row index")
+                visible_index = int(raw_visible_index)
+            except (TypeError, ValueError):
+                visible_index = -1
+            if visible_index == row_index:
+                return dict(row), None
+        return {}, _drag_blocked(
+            reason=f"drag {role} row index not visible",
+            requested={role: endpoint},
+            accepted={"row_index": "currently visible row index"},
+            next_step="Scroll the grid or choose a visible row index before dragging.",
+        )
+
+    requested_identity = str(endpoint.get("row_identity") or "")
+    matches = [
+        dict(row)
+        for row in rows
+        if isinstance(row, Mapping) and _row_matches_identity(row, requested_identity)
+    ]
+    if len(matches) == 1:
+        return matches[0], None
+    if not matches:
+        return {}, _drag_blocked(
+            reason=f"drag {role} row identity not visible",
+            requested={role: endpoint},
+            accepted={"row_identity": "visible row identity"},
+            next_step="Use a visible row identity or scroll the grid before dragging.",
+        )
+    return {}, _drag_blocked(
+        reason="duplicate row identity",
+        requested={"row_identity": requested_identity},
+        accepted={"row_identity": "unique visible row identity"},
+        next_step="Disambiguate the row with row_index or cached_element.",
+    )
+
+
+def _endpoint_kind(endpoint: dict[str, Any]) -> str | None:
+    for key in ("row_index", "row_identity", "cached_element", "point"):
+        if endpoint.get(key) is not None:
+            return key
+    if endpoint.get("selector") or endpoint.get("automation_id") or endpoint.get("automationId"):
+        return "selector"
+    return None
+
+
+def _row_matches_identity(row: Mapping[str, Any], identity: str) -> bool:
+    if not identity:
+        return False
+    candidates = {
+        _row_identity(row),
+        str(row.get("automation_id") or ""),
+        str(row.get("name") or ""),
+    }
+    cells = row.get("cells")
+    if isinstance(cells, Mapping):
+        candidates.update(str(value) for value in cells.values())
+    cell_values = row.get("cell_values")
+    if isinstance(cell_values, list):
+        for cell in cell_values:
+            if isinstance(cell, Mapping):
+                candidates.add(str(cell.get("text") or ""))
+    return identity in candidates
+
+
+def _row_identity(row: Mapping[str, Any]) -> str:
+    cells = row.get("cells")
+    if isinstance(cells, Mapping):
+        for key in ("Phrase", "Start", "Character", "End"):
+            if cells.get(key):
+                return str(cells[key])
+    if row.get("automation_id"):
+        return str(row["automation_id"])
+    if row.get("name"):
+        return str(row["name"])
+    return f"row:{row.get('index')}"
+
+
+def _compact_row_ref(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "index": row.get("index"),
+        "automation_id": row.get("automation_id"),
+        "identity": _row_identity(row),
+    }
+
+
+def _selector_identity(result: Mapping[str, Any]) -> str:
+    return str(
+        result.get("automationId")
+        or result.get("automation_id")
+        or result.get("name")
+        or ""
+    )
+
+
+def _bounds_from_mapping(value: Mapping[str, Any]) -> dict[str, int] | None:
+    raw = value.get("bounds") or value.get("rect")
+    if not isinstance(raw, Mapping):
+        return None
+    try:
+        bounds = {
+            "x": int(round(float(raw["x"]))),
+            "y": int(round(float(raw["y"]))),
+            "width": int(round(float(raw["width"]))),
+            "height": int(round(float(raw["height"]))),
+        }
+    except (KeyError, TypeError, ValueError):
+        return None
+    if bounds["width"] <= 0 or bounds["height"] <= 0:
+        return None
+    return bounds
+
+
+def _center_point(bounds: Mapping[str, int]) -> dict[str, int]:
+    return {
+        "x": int(bounds["x"] + bounds["width"] / 2),
+        "y": int(bounds["y"] + bounds["height"] / 2),
     }
 
 

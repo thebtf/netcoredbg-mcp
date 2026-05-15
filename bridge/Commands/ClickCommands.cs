@@ -22,8 +22,35 @@ public static class ClickCommands
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
 
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr processId);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern bool BringWindowToTop(IntPtr hWnd);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetCursorPos(int x, int y);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern void mouse_event(
+        uint dwFlags,
+        uint dx,
+        uint dy,
+        uint dwData,
+        UIntPtr dwExtraInfo);
+
     private const int SW_RESTORE = 9;
     private const int DragThresholdPixels = 5;
+    private const int ForegroundActivationTimeoutMs = 750;
+    private const int ForegroundActivationPollMs = 25;
+    private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+    private const uint MOUSEEVENTF_LEFTUP = 0x0004;
 
     public static JsonNode Click(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
@@ -114,18 +141,21 @@ public static class ClickCommands
                 pressedTemporaryModifiers.Add(modifier);
             }
 
-            Mouse.MoveTo(new Point(x1, y1));
-            Mouse.Down(MouseButton.Left);
+            MoveCursor(x1, y1);
+            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
             mouseButtonDown = true;
+            Thread.Sleep(50);
 
             var waypoints = BuildDragWaypoints(x1, y1, x2, y2, steps);
             var delayMs = Math.Max(1, (int)Math.Round(speedMs / (double)steps));
 
             foreach (var waypoint in waypoints)
             {
-                Mouse.MoveTo(waypoint);
+                MoveCursor(waypoint.X, waypoint.Y);
                 Thread.Sleep(delayMs);
             }
+
+            Thread.Sleep(Math.Min(120, Math.Max(30, delayMs)));
         }
         catch (Exception ex)
         {
@@ -138,7 +168,7 @@ public static class ClickCommands
             {
                 try
                 {
-                    Mouse.Up(MouseButton.Left);
+                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
                 }
                 catch (Exception ex)
                 {
@@ -179,6 +209,15 @@ public static class ClickCommands
             ["steps"] = steps,
             ["duration_ms"] = stopwatch.ElapsedMilliseconds
         };
+    }
+
+    private static void MoveCursor(int x, int y)
+    {
+        if (!SetCursorPos(x, y))
+        {
+            var error = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+            throw new InvalidOperationException($"SetCursorPos failed with Win32 error {error}");
+        }
     }
 
     private static JsonNode ClickByAutomationId(string automationId, UIA3Automation automation, AutomationElement? mainWindow)
@@ -400,7 +439,61 @@ public static class ClickCommands
             return;
         }
 
-        ShowWindow(hwnd, SW_RESTORE);
-        SetForegroundWindow(hwnd);
+        var foregroundHwnd = GetForegroundWindow();
+        var currentThread = GetCurrentThreadId();
+        var foregroundThread = GetWindowThreadProcessId(foregroundHwnd, IntPtr.Zero);
+        var targetThread = GetWindowThreadProcessId(hwnd, IntPtr.Zero);
+        var attachedThreads = new List<uint>();
+
+        try
+        {
+            foreach (var threadId in new HashSet<uint> { foregroundThread, targetThread })
+            {
+                if (threadId != 0 && threadId != currentThread && AttachThreadInput(currentThread, threadId, true))
+                {
+                    attachedThreads.Add(threadId);
+                }
+            }
+
+            ShowWindow(hwnd, SW_RESTORE);
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
+            if (!WaitForForeground(hwnd))
+            {
+                Program.Log("foreground activation did not settle after first request; retrying once");
+                ShowWindow(hwnd, SW_RESTORE);
+                BringWindowToTop(hwnd);
+                SetForegroundWindow(hwnd);
+            }
+        }
+        finally
+        {
+            for (var index = attachedThreads.Count - 1; index >= 0; index--)
+            {
+                AttachThreadInput(currentThread, attachedThreads[index], false);
+            }
+        }
+
+        if (!WaitForForeground(hwnd))
+        {
+            throw new InvalidOperationException(
+                "coordinate mouse input could not activate the debuggee window safely");
+        }
+    }
+
+    private static bool WaitForForeground(IntPtr hwnd)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        while (stopwatch.ElapsedMilliseconds < ForegroundActivationTimeoutMs)
+        {
+            if (GetForegroundWindow() == hwnd)
+            {
+                return true;
+            }
+
+            Thread.Sleep(ForegroundActivationPollMs);
+        }
+
+        return GetForegroundWindow() == hwnd;
     }
 }
