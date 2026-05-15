@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner, RuntimeSmokeSession
+from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
 
 
 class BlockedSmokeSession:
@@ -151,3 +152,73 @@ async def test_v2_empty_probe_phases_fail_prelaunch() -> None:
         result["validation_errors"]
     )
     assert session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_v2_drag_path_backend_gap_returns_actionable_blocked() -> None:
+    class BackendWithoutDragPath:
+        async def drag(
+            self,
+            from_x: int,
+            from_y: int,
+            to_x: int,
+            to_y: int,
+            speed_ms: int = 200,
+            hold_modifiers: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "dragged": True,
+                "from": {"x": from_x, "y": from_y},
+                "to": {"x": to_x, "y": to_y},
+                "speed_ms": speed_ms,
+                "hold_modifiers": hold_modifiers or [],
+            }
+
+    async def backend_provider() -> BackendWithoutDragPath:
+        return BackendWithoutDragPath()
+
+    result = await RuntimeSmokeRunner(
+        BlockedSmokeSession(),
+        service_adapters=ui_operation_adapters(backend_provider),
+    ).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "path-aware drag blocked",
+            "cases": [
+                {
+                    "id": "path_aware_drag_blocked",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.drag",
+                                "source": {"point": {"x": 10, "y": 20}},
+                                "path": [
+                                    {"relative_to": "screen", "x": 15, "y": 30},
+                                    {
+                                        "relative_to": "screen",
+                                        "x": 20,
+                                        "y": 40,
+                                        "hold_ms": 250,
+                                    },
+                                ],
+                                "drop": {"relative_to": "screen", "x": 30, "y": 60},
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert result["status"] == "BLOCKED"
+    blocked = result["blocked"]
+    assert blocked["reason"] == "path-aware drag backend unavailable"
+    assert blocked["requested"] == {
+        "adapter": "ui.drag",
+        "capability": "path-aware drag",
+    }
+    assert blocked["accepted"]["backend"] == "FlaUI drag_path"
+    assert blocked["accepted"]["capability"] == "real pointer path with waypoint holds"
+    assert blocked["next_step"]

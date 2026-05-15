@@ -336,6 +336,7 @@ def _action_result(
     selected_payload = _selected_payload_from_result(result)
     no_op = _no_op_from_result(result)
     cleanup = _cleanup_from_result(result)
+    route_evidence = _route_evidence_from_result(result)
     output: dict[str, Any] = {
         "status": status,
         "route": "drag",
@@ -345,18 +346,11 @@ def _action_result(
         "modifiers": modifiers,
         "duration_ms": duration_ms,
         "backend": result.get("backend"),
-        "route_evidence": compact_evidence(dict(result.get("route_evidence") or {})),
+        "route_evidence": route_evidence,
     }
     if cancel:
         output["cancel"] = cancel
-    if not output["route_evidence"]:
-        output["route_evidence"] = _default_route_evidence(
-            source=source,
-            path=path,
-            drop=drop,
-            modifiers=modifiers,
-        )
-    elif isinstance(output["route_evidence"], dict):
+    if output["route_evidence"]:
         output["route_evidence"].setdefault("source", source)
         output["route_evidence"].setdefault("move_points", path)
         output["route_evidence"].setdefault(
@@ -416,12 +410,40 @@ def _action_result(
         ) and status == "PASS":
             output["status"] = "FAIL"
             output["reason"] = "no-op expectation failed"
+    if _is_passing(output) and not output["route_evidence"]:
+        output["status"] = "BLOCKED"
+        output["reason"] = "real pointer route evidence unavailable"
+        output["requested"] = {
+            "adapter_status": status,
+            "route_evidence": None,
+        }
+        output["accepted"] = {
+            "route_evidence": (
+                "backend-produced pointer route evidence with move_points "
+                "and final_pointer"
+            )
+        }
+        output["next_step"] = (
+            "Use a UI backend adapter that reports real pointer route evidence."
+        )
     if status != "PASS":
         attach_blocked_details(output, result)
     evidence_ref = result.get("evidence_ref")
     if evidence_ref:
         output["evidence_ref"] = str(evidence_ref)
     return output
+
+
+def _route_evidence_from_result(result: dict[str, Any]) -> dict[str, Any]:
+    route_evidence = result.get("route_evidence")
+    if not isinstance(route_evidence, Mapping):
+        return {}
+    compact_route = compact_evidence(dict(route_evidence))
+    return compact_route if isinstance(compact_route, dict) else {}
+
+
+def _is_passing(result: dict[str, Any]) -> bool:
+    return str(result.get("status", "")).upper() == "PASS"
 
 
 def _selected_payload_from_result(result: dict[str, Any]) -> dict[str, Any] | None:
@@ -517,22 +539,6 @@ def _difference(left: list[str], right: list[str]) -> list[str]:
         else:
             missing.append(identity)
     return missing
-
-
-def _default_route_evidence(
-    *,
-    source: dict[str, Any],
-    path: list[dict[str, Any]],
-    drop: dict[str, Any],
-    modifiers: list[str],
-) -> dict[str, Any]:
-    return {
-        "source": source,
-        "move_points": path,
-        "hold_points": [point for point in path if "hold_ms" in point],
-        "final_pointer": drop or (path[-1] if path else None),
-        "modifiers": modifiers,
-    }
 
 
 def _blocked(

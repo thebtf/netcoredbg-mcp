@@ -1000,6 +1000,10 @@ async def test_v2_ui_drag_accepts_negative_no_op_reason(reason: str) -> None:
         {
             "status": "PASS",
             "backend": "fake",
+            "route_evidence": {
+                "move_points": [{"relative_to": "source", "x": 0.6, "y": 0.5}],
+                "final_pointer": {"relative_to": "source", "x": 0.6, "y": 0.5},
+            },
             "no_op": {
                 "expected": True,
                 "reason": reason,
@@ -1058,6 +1062,10 @@ async def test_v2_ui_drag_forwards_cancel_request_to_adapter() -> None:
         {
             "status": "PASS",
             "backend": "fake",
+            "route_evidence": {
+                "move_points": [{"relative_to": "drop", "x": 0.5, "y": 0.5}],
+                "final_pointer": {"relative_to": "drop", "x": 0.5, "y": 0.5},
+            },
             "no_op": {"expected": True, "reason": "cancelled"},
             "cleanup": {
                 "modifier_cleanup": {"released": []},
@@ -1114,7 +1122,14 @@ async def test_v2_ui_drag_forwards_cancel_request_to_adapter() -> None:
     ("adapter_result", "expected_status", "expected_reason"),
     [
         (
-            {"status": "PASS", "backend": "fake"},
+            {
+                "status": "PASS",
+                "backend": "fake",
+                "route_evidence": {
+                    "move_points": [{"relative_to": "source", "x": 0.6, "y": 0.5}],
+                    "final_pointer": {"relative_to": "source", "x": 0.6, "y": 0.5},
+                },
+            },
             "BLOCKED",
             "no-op evidence unavailable",
         ),
@@ -1122,6 +1137,10 @@ async def test_v2_ui_drag_forwards_cancel_request_to_adapter() -> None:
             {
                 "status": "PASS",
                 "backend": "fake",
+                "route_evidence": {
+                    "move_points": [{"relative_to": "source", "x": 0.6, "y": 0.5}],
+                    "final_pointer": {"relative_to": "source", "x": 0.6, "y": 0.5},
+                },
                 "no_op": {"expected": True, "reason": "cancelled"},
             },
             "BLOCKED",
@@ -1131,6 +1150,10 @@ async def test_v2_ui_drag_forwards_cancel_request_to_adapter() -> None:
             {
                 "status": "PASS",
                 "backend": "fake",
+                "route_evidence": {
+                    "move_points": [{"relative_to": "source", "x": 0.6, "y": 0.5}],
+                    "final_pointer": {"relative_to": "source", "x": 0.6, "y": 0.5},
+                },
                 "no_op": {"expected": False, "reason": "invalid_drop"},
                 "cleanup": {
                     "modifier_cleanup": {"released": []},
@@ -1227,6 +1250,51 @@ async def test_v2_ui_drag_blocks_when_adapter_is_missing() -> None:
     assert "ui.drag" not in action["accepted"]["adapter_names"]
     assert action["next_step"]
     assert session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_drag_blocks_pass_without_route_evidence() -> None:
+    session = ActionSmokeSession()
+    session.drag_results.append(
+        {
+            "status": "PASS",
+            "backend": "diagnostic-shortcut",
+        }
+    )
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "drag false pass guard",
+            "cases": [
+                {
+                    "id": "drag_false_pass_guard",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.drag",
+                                "source": {"point": {"x": 10, "y": 10}},
+                                "path": [{"relative_to": "screen", "x": 12, "y": 14}],
+                                "drop": {"relative_to": "screen", "x": 20, "y": 30},
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == "BLOCKED"
+    assert action["status"] == "BLOCKED"
+    assert action["reason"] == "real pointer route evidence unavailable"
+    assert action["requested"] == {
+        "adapter_status": "PASS",
+        "route_evidence": None,
+    }
+    assert action["accepted"]["route_evidence"]
+    assert action["next_step"]
 
 
 @pytest.mark.parametrize(

@@ -403,7 +403,7 @@ def ui_operation_adapters(
             if use_path_drag:
                 backend_drag_path = getattr(backend, "drag_path", None)
                 if not callable(backend_drag_path):
-                    return _adapter_blocked("ui.drag", "path-aware drag backend unavailable")
+                    return _path_drag_blocked("path-aware drag backend unavailable")
                 resolved_path_points, blocked = await _drag_path_points(
                     backend,
                     source=source,
@@ -1558,6 +1558,24 @@ def _drag_blocked(
         "requested": requested,
         "accepted": accepted,
         "next_step": next_step,
+    }
+
+
+def _path_drag_blocked(reason: str) -> dict[str, Any]:
+    return {
+        "status": "BLOCKED",
+        "reason": reason,
+        "requested": {
+            "adapter": "ui.drag",
+            "capability": "path-aware drag",
+        },
+        "accepted": {
+            "backend": "FlaUI drag_path",
+            "capability": "real pointer path with waypoint holds",
+        },
+        "next_step": (
+            "Use the FlaUI bridge backend for release-critical path-aware drag proof."
+        ),
     }
 
 
