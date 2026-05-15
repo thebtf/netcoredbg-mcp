@@ -14,6 +14,7 @@ class ActionSmokeSession:
         self.tracepoint_hits: list[bool] = []
         self.focus_result: dict[str, Any] = {"status": "PASS"}
         self.send_keys_result: dict[str, Any] = {"status": "PASS"}
+        self.drag_results: list[dict[str, Any]] = []
 
     async def find_element(self, selector: dict[str, Any]) -> dict[str, Any]:
         self.calls.append(("find_element", dict(selector)))
@@ -30,6 +31,19 @@ class ActionSmokeSession:
     async def invoke(self, selector: dict[str, Any]) -> dict[str, Any]:
         self.calls.append(("invoke", dict(selector)))
         return {"status": "PASS", "method": "InvokePattern"}
+
+    async def drag(self, **request: Any) -> dict[str, Any]:
+        self.calls.append(("drag", request))
+        if self.drag_results:
+            return self.drag_results.pop(0)
+        return {
+            "status": "PASS",
+            "backend": "fake",
+            "route_evidence": {
+                "move_points": list(request.get("path") or []),
+                "final_pointer": request.get("drop"),
+            },
+        }
 
     async def tracepoint_status(self, tracepoint_id: str) -> dict[str, Any]:
         self.calls.append(("tracepoint_status", tracepoint_id))
@@ -58,6 +72,20 @@ def _runner(session: ActionSmokeSession) -> RuntimeSmokeRunner:
             "ui.set_focus": session.set_focus,
             "ui.send_keys_focused": session.send_keys_focused,
             "ui.invoke": session.invoke,
+            "ui.drag": session.drag,
+            "debug.tracepoint_status": session.tracepoint_status,
+        },
+    )
+
+
+def _runner_without_drag(session: ActionSmokeSession) -> RuntimeSmokeRunner:
+    return RuntimeSmokeRunner(
+        session,
+        service_adapters={
+            "ui.find_element": session.find_element,
+            "ui.set_focus": session.set_focus,
+            "ui.send_keys_focused": session.send_keys_focused,
+            "ui.invoke": session.invoke,
             "debug.tracepoint_status": session.tracepoint_status,
         },
     )
@@ -74,6 +102,7 @@ def _runner_with_clock(
             "ui.set_focus": session.set_focus,
             "ui.send_keys_focused": session.send_keys_focused,
             "ui.invoke": session.invoke,
+            "ui.drag": session.drag,
             "debug.tracepoint_status": session.tracepoint_status,
         },
         clock=clock,
@@ -423,3 +452,282 @@ async def test_v2_tracepoint_settle_timeout_returns_blocked() -> None:
     assert settle["status"] == "BLOCKED"
     assert settle["reason"] == "settle condition not met"
     assert settle["tracepoint_timeout_ms"] == 2000
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_drag_is_accepted_and_routes_distinct_payloads() -> None:
+    session = ActionSmokeSession()
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "drag route",
+            "cases": [
+                {
+                    "id": "drag_visible_rows",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.drag",
+                                "source": {
+                                    "selector": {"automation_id": "CueDataGrid"},
+                                    "row_index": 1,
+                                },
+                                "path": [
+                                    {"relative_to": "source", "x": 0.5, "y": 0.5},
+                                    {"relative_to": "viewport", "x": 0.5, "y": 0.75},
+                                ],
+                                "drop": {"relative_to": "viewport", "x": 0.5, "y": 0.75},
+                            },
+                            "probes": [],
+                        },
+                        {
+                            "action": {
+                                "kind": "ui.drag",
+                                "source": {
+                                    "selector": {"automation_id": "CueDataGrid"},
+                                    "row_identity": "Cue 042",
+                                },
+                                "path": [
+                                    {"relative_to": "source", "x": 0.5, "y": 0.5},
+                                    {
+                                        "relative_to": "viewport",
+                                        "x": 0.5,
+                                        "y": 0.95,
+                                        "hold_ms": 1200,
+                                    },
+                                ],
+                                "drop": {"relative_to": "viewport", "x": 0.5, "y": 0.65},
+                                "modifiers": ["ctrl"],
+                                "duration_ms": 500,
+                            },
+                            "probes": [],
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+
+    actions = result["cases"][0]["actions"]
+    drag_calls = [call for call in session.calls if call[0] == "drag"]
+    assert result["status"] == "PASS"
+    assert "ui.drag" in result["accepted_action_kinds"]
+    assert [action["route"] for action in actions] == ["drag", "drag"]
+    assert len(drag_calls) == 2
+    assert drag_calls[0][1]["source"]["row_index"] == 1
+    assert drag_calls[1][1]["source"]["row_identity"] == "Cue 042"
+    assert drag_calls[0][1]["path"] != drag_calls[1][1]["path"]
+    assert (
+        actions[0]["route_evidence"]["move_points"]
+        != actions[1]["route_evidence"]["move_points"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_drag_keeps_route_evidence_compact() -> None:
+    session = ActionSmokeSession()
+    session.drag_results.append(
+        {
+            "status": "PASS",
+            "backend": "fake",
+            "route_evidence": {
+                "move_points": [{"relative_to": "screen", "x": 12, "y": 14}],
+                "target": {
+                    "bounds": {"x": 20, "y": 30, "width": 50, "height": 12},
+                    "children": [{"automation_id": "TooLarge"}],
+                },
+                "window_tree": {"children": [{"automation_id": "Root"}]},
+            },
+        }
+    )
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "compact drag evidence",
+            "cases": [
+                {
+                    "id": "compact_drag_evidence",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.drag",
+                                "source": {"point": {"x": 10, "y": 10}},
+                                "path": [{"relative_to": "screen", "x": 12, "y": 14}],
+                                "drop": {"relative_to": "screen", "x": 20, "y": 30},
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    route_evidence = result["cases"][0]["actions"][0]["route_evidence"]
+    assert result["status"] == "PASS"
+    assert route_evidence["move_points"] == [
+        {"relative_to": "screen", "x": 12, "y": 14}
+    ]
+    assert route_evidence["target"]["bounds"] == {
+        "x": 20,
+        "y": 30,
+        "width": 50,
+        "height": 12,
+    }
+    assert "window_tree" not in route_evidence
+    assert "children" not in route_evidence["target"]
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_drag_blocks_when_adapter_is_missing() -> None:
+    session = ActionSmokeSession()
+
+    result = await _runner_without_drag(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "missing drag adapter",
+            "cases": [
+                {
+                    "id": "missing_drag_adapter",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.drag",
+                                "source": {"point": {"x": 10, "y": 10}},
+                                "path": [{"relative_to": "screen", "x": 12, "y": 14}],
+                                "drop": {"relative_to": "screen", "x": 20, "y": 30},
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == "BLOCKED"
+    assert "ui.drag" in result["accepted_action_kinds"]
+    assert action["status"] == "BLOCKED"
+    assert action["route"] == "drag"
+    assert action["reason"] == "service adapter not available"
+    assert action["requested"] == {"adapter": "ui.drag"}
+    assert "ui.drag" not in action["accepted"]["adapter_names"]
+    assert action["next_step"]
+    assert session.calls == []
+
+
+@pytest.mark.parametrize(
+    ("action", "reason"),
+    [
+        (
+            {
+                "kind": "ui.drag",
+                "source": ["not", "an", "object"],
+                "path": [{"relative_to": "screen", "x": 10, "y": 10}],
+                "drop": {"relative_to": "screen", "x": 20, "y": 20},
+            },
+            "invalid drag source",
+        ),
+        (
+            {
+                "kind": "ui.drag",
+                "source": {"point": {"x": 10, "y": 10}},
+                "path": [{"relative_to": "screen", "x": 10, "y": 10}],
+                "drop": {"relative_to": "screen", "x": 20, "y": 20},
+                "modifiers": ["hyper"],
+            },
+            "invalid drag modifier",
+        ),
+        (
+            {
+                "kind": "ui.drag",
+                "source": {"point": {"x": 10, "y": 10}},
+                "path": [{"relative_to": "screen", "x": 10, "y": 10}],
+                "drop": {"relative_to": "screen", "x": 10, "y": 10},
+            },
+            "zero-distance drag route",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_v2_ui_drag_rejects_invalid_payloads(
+    action: dict[str, Any],
+    reason: str,
+) -> None:
+    session = ActionSmokeSession()
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "invalid drag",
+            "cases": [
+                {
+                    "id": "invalid_drag",
+                    "transitions": [{"action": action, "probes": []}],
+                }
+            ],
+        }
+    )
+
+    action_result = result["cases"][0]["actions"][0]
+    assert result["status"] == "BLOCKED"
+    assert action_result["status"] == "BLOCKED"
+    assert action_result["reason"] == reason
+    assert action_result["requested"]
+    assert action_result["accepted"]
+    assert action_result["next_step"]
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_drag_propagates_duplicate_row_identity_blocked() -> None:
+    session = ActionSmokeSession()
+    session.drag_results.append(
+        {
+            "status": "BLOCKED",
+            "reason": "duplicate row identity",
+            "requested": {"row_identity": "Cue 010"},
+            "accepted": {"row_identity": "unique visible row identity"},
+            "next_step": "Disambiguate the row with row_index or cached_element.",
+        }
+    )
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "duplicate row identity",
+            "cases": [
+                {
+                    "id": "duplicate_row",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.drag",
+                                "source": {
+                                    "selector": {"automation_id": "CueDataGrid"},
+                                    "row_identity": "Cue 010",
+                                },
+                                "path": [
+                                    {"relative_to": "source", "x": 0.5, "y": 0.5},
+                                    {"relative_to": "viewport", "x": 0.5, "y": 0.75},
+                                ],
+                                "drop": {"relative_to": "viewport", "x": 0.5, "y": 0.75},
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == "BLOCKED"
+    assert action["status"] == "BLOCKED"
+    assert action["reason"] == "duplicate row identity"
+    assert action["requested"] == {"row_identity": "Cue 010"}
+    assert action["accepted"] == {"row_identity": "unique visible row identity"}
+    assert action["next_step"] == "Disambiguate the row with row_index or cached_element."

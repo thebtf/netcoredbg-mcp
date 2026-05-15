@@ -7,6 +7,7 @@ from typing import Any
 
 from ..blocked import build_blocked
 from ..timing import sleep_ms
+from .ui_drag import handle_ui_drag
 from .ui_key_sequence import handle_ui_key_sequence
 
 ActionHandler = Callable[[dict[str, Any], "ActionContext"], Awaitable[dict[str, Any]]]
@@ -193,6 +194,7 @@ def _selector_from_action(
 
 register_action("noop", _handle_noop)
 register_action("ui.click", _handle_ui_click)
+register_action("ui.drag", handle_ui_drag)
 register_action("ui.invoke", _handle_ui_invoke)
 register_action("ui.key_sequence", handle_ui_key_sequence)
 register_action("wait", _handle_wait)

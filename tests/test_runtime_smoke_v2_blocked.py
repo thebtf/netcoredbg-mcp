@@ -109,6 +109,7 @@ async def test_v2_unknown_probe_kind_fails_prelaunch_with_supported_kinds() -> N
         "output.since",
         "process.metric",
         "ui.grid",
+        "ui.grid.viewport",
         "ui.property",
         "ui.text",
     ]

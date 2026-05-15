@@ -13,6 +13,7 @@ from .probes.output_field import handle_output_field
 from .probes.output_since import handle_output_since
 from .probes.process_metric import handle_process_metric
 from .probes.ui_grid import handle_ui_grid
+from .probes.ui_grid_viewport import handle_ui_grid_viewport
 from .probes.ui_property import handle_ui_property
 from .probes.ui_text import handle_ui_text
 
@@ -88,6 +89,8 @@ async def dispatch_probe(
         return await handle_process_metric(probe, context, phase=phase)
     if kind == "ui.grid":
         return await handle_ui_grid(probe, context, phase=phase)
+    if kind == "ui.grid.viewport":
+        return await handle_ui_grid_viewport(probe, context, phase=phase)
     if kind == "ui.property":
         return await handle_ui_property(probe, context, phase=phase)
     if kind == "ui.text":
