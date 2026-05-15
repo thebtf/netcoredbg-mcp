@@ -104,6 +104,7 @@ class TestFlaUIDragForwarding:
                 "speed_ms": 700,
                 "hold_modifiers": ["shift"],
             },
+            timeout=10.0,
         )
 
     @pytest.mark.asyncio
@@ -125,6 +126,22 @@ class TestFlaUIDragForwarding:
         assert direct_payload["points"] != held_payload["points"]
         assert "hold_ms" not in direct_payload["points"][1]
         assert held_payload["points"][1]["hold_ms"] == 650
+
+    @pytest.mark.asyncio
+    async def test_drag_path_expands_timeout_for_long_edge_holds(self):
+        backend = _make_flaui()
+        backend._client.call.return_value = {"dragged": True}
+        points = [
+            {"x": 70, "y": 75},
+            {"x": 70, "y": 212, "hold_ms": 7000},
+            {"x": 70, "y": 200},
+        ]
+
+        await backend.drag_path(points, speed_ms=900)
+
+        timeout = backend._client.call.await_args.kwargs["timeout"]
+        assert timeout > 10.0
+        assert timeout <= 60.0
 
 
 class TestFlaUISystemEvent:
@@ -352,6 +369,10 @@ class TestDragInputValidation:
         assert "drag_path route requires pointer movement" in command
         assert "speed_ms below drag-path safety floor" in command
         assert "hold_ms must be non-negative" in command
+        assert "private const int DragPathHoldPulseMs" in command
+        assert "PulseHeldDragPoint(point, point.HoldMs);" in command
+        drag_path_body = command[command.index("public static JsonNode DragPath(") :]
+        assert "Thread.Sleep(Math.Max(FinalDropSettleMs, delayMs));" in drag_path_body
 
     def test_bridge_drag_path_releases_pointer_and_modifiers_on_exceptions(self):
         command = (PROJECT_ROOT / "bridge" / "Commands" / "ClickCommands.cs").read_text(

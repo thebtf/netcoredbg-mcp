@@ -381,6 +381,7 @@ public static class GridCommands
         return new JsonObject
         {
             ["index"] = index,
+            ["row_index"] = RowIndex(row, index),
             ["automation_id"] = SafeString(() => row.AutomationId),
             ["name"] = SafeString(() => row.Name),
             ["control_type"] = SafeString(() => row.ControlType.ToString()),
@@ -748,6 +749,29 @@ public static class GridCommands
         {
             if (cell.Patterns.GridItem.TryGetPattern(out var pattern))
                 return pattern.Column.Value;
+        }
+        catch { /* fallback */ }
+
+        return fallback;
+    }
+
+    private static int RowIndex(AutomationElement row, int fallback)
+    {
+        try
+        {
+            if (row.Patterns.GridItem.TryGetPattern(out var pattern))
+                return pattern.Row.Value;
+        }
+        catch { /* fallback */ }
+
+        try
+        {
+            var gridRow = new GridRow(row.FrameworkAutomationElement);
+            foreach (var cell in gridRow.Cells)
+            {
+                if (cell.Patterns.GridItem.TryGetPattern(out var pattern))
+                    return pattern.Row.Value;
+            }
         }
         catch { /* fallback */ }
 

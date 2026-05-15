@@ -45,6 +45,7 @@ def test_wpf_fixture_declares_cue_grid_drag_drop_bindings() -> None:
 
     assert 'PreviewMouseLeftButtonDown="CueDataGrid_PreviewMouseLeftButtonDown"' in xaml
     assert 'PreviewMouseMove="CueDataGrid_PreviewMouseMove"' in xaml
+    assert 'DragOver="CueDataGrid_DragOver"' in xaml
     assert 'Drop="CueDataGrid_Drop"' in xaml
     assert 'AllowDrop="True"' in xaml
 
@@ -54,15 +55,18 @@ def test_wpf_fixture_code_reports_deterministic_reorder_status() -> None:
 
     assert "CueDataGrid_PreviewMouseLeftButtonDown" in code
     assert "CueDataGrid_PreviewMouseMove" in code
+    assert "CueDataGrid_DragOver" in code
     assert "CueDataGrid_Drop" in code
     assert "WpfWorkflow DragReorder" in code
+    assert "WpfWorkflow DragEdgeScroll" in code
+    assert "edgeScrollDirection=" in code
     assert "sourceIdentity=" in code
     assert "targetIdentity=" in code
     assert "orderFingerprint=" in code
 
 
-def test_wpf_fixture_seeds_enough_rows_for_visible_reorder_evidence() -> None:
+def test_wpf_fixture_seeds_enough_rows_for_edge_scroll_evidence() -> None:
     code = (FIXTURE_ROOT / "MainWindow.xaml.cs").read_text(encoding="utf-8")
 
     cue_rows = re.findall(r'new\("00:00:\d{2}\.0"', code)
-    assert len(cue_rows) >= 8
+    assert len(cue_rows) >= 20

@@ -406,6 +406,7 @@ class PywinautoBackend:
         """Path-aware held-edge drags require the FlaUI bridge backend."""
         return {
             "status": "BLOCKED",
+            "reason": "path-aware drag requires the FlaUI backend",
             "requested": {
                 "capability": "path-aware drag",
                 "points": points,

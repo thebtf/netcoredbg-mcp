@@ -68,6 +68,8 @@ def ui_operation_adapters(
                 reason="grid viewport visible row evidence unavailable",
                 selector=selector,
             )
+        viewport_bounds = await _viewport_bounds_from_backend(backend, selector)
+        visible_rows = _rows_inside_viewport(visible_rows, viewport_bounds)
 
         selected_rows = _selected_viewport_rows_from_visible(visible_rows, identity)
         if expect.get("selected_payload_preserved") is True and not selected_rows:
@@ -324,10 +326,6 @@ def ui_operation_adapters(
         backend = await _backend_or_blocked(ensure_ui_connected)
         if isinstance(backend, dict):
             return backend
-        backend_drag = getattr(backend, "drag", None)
-        if not callable(backend_drag):
-            return _adapter_blocked("ui.drag", "drag backend unavailable")
-
         source = dict(args.get("source") or {})
         path = _mapping_list(args.get("path"))
         drop = dict(args.get("drop") or {})
@@ -342,15 +340,40 @@ def ui_operation_adapters(
 
         modifiers = [str(modifier) for modifier in args.get("modifiers") or []]
         speed_ms = _positive_int(args.get("duration_ms"), default=200)
+        use_path_drag = _requires_path_drag(path)
+        resolved_path_points: list[dict[str, int]] = []
         try:
-            result = await backend_drag(
-                route["from_x"],
-                route["from_y"],
-                route["to_x"],
-                route["to_y"],
-                speed_ms=speed_ms,
-                hold_modifiers=modifiers,
-            )
+            if use_path_drag:
+                backend_drag_path = getattr(backend, "drag_path", None)
+                if not callable(backend_drag_path):
+                    return _adapter_blocked("ui.drag", "path-aware drag backend unavailable")
+                resolved_path_points, blocked = await _drag_path_points(
+                    backend,
+                    source=source,
+                    path=path,
+                    drop=drop,
+                    route=route,
+                    route_evidence=route_evidence,
+                )
+                if blocked is not None:
+                    return blocked
+                result = await backend_drag_path(
+                    resolved_path_points,
+                    speed_ms=speed_ms,
+                    hold_modifiers=modifiers,
+                )
+            else:
+                backend_drag = getattr(backend, "drag", None)
+                if not callable(backend_drag):
+                    return _adapter_blocked("ui.drag", "drag backend unavailable")
+                result = await backend_drag(
+                    route["from_x"],
+                    route["from_y"],
+                    route["to_x"],
+                    route["to_y"],
+                    speed_ms=speed_ms,
+                    hold_modifiers=modifiers,
+                )
         except Exception as exc:
             return _adapter_blocked("ui.drag", str(exc))
         if not isinstance(result, dict):
@@ -363,16 +386,26 @@ def ui_operation_adapters(
         route_evidence = {
             **route_evidence,
             "move_points": path,
-            "hold_points": [point for point in path if "hold_ms" in point],
-            "final_pointer": drop
-            if _screen_point(drop) is not None
-            else route_evidence.get("target_point")
-            or drop
-            or (path[-1] if path else None),
+            "hold_points": (
+                [point for point in resolved_path_points if "hold_ms" in point]
+                if resolved_path_points
+                else [point for point in path if "hold_ms" in point]
+            ),
+            "final_pointer": (
+                resolved_path_points[-1]
+                if resolved_path_points
+                else drop
+                if _screen_point(drop) is not None
+                else route_evidence.get("target_point")
+                or drop
+                or (path[-1] if path else None)
+            ),
             "modifiers": modifiers,
             "start": {"x": route["from_x"], "y": route["from_y"]},
             "drop": {"x": route["to_x"], "y": route["to_y"]},
         }
+        if resolved_path_points:
+            route_evidence["resolved_move_points"] = resolved_path_points
         status = str(result.get("status", "PASS")).upper()
         output: dict[str, Any] = {
             "status": status,
@@ -381,6 +414,7 @@ def ui_operation_adapters(
             "result": result,
         }
         if status != "PASS":
+            output["reason"] = str(result.get("reason") or "ui.drag backend did not pass")
             for key in ("reason", "requested", "accepted", "next_step"):
                 if key in result:
                     output[key] = result[key]
@@ -606,6 +640,96 @@ async def _drag_route(
     )
 
 
+def _requires_path_drag(path: list[dict[str, Any]]) -> bool:
+    return len(path) > 2 or any("hold_ms" in point for point in path)
+
+
+async def _drag_path_points(
+    backend: Any,
+    *,
+    source: dict[str, Any],
+    path: list[dict[str, Any]],
+    drop: dict[str, Any],
+    route: dict[str, int],
+    route_evidence: dict[str, Any],
+) -> tuple[list[dict[str, int]], dict[str, Any] | None]:
+    points: list[dict[str, int]] = []
+    for waypoint in path:
+        point, blocked = await _resolve_drag_waypoint(
+            backend,
+            waypoint,
+            source=source,
+            drop=drop,
+            route_evidence=route_evidence,
+        )
+        if blocked is not None:
+            return [], blocked
+        points.append(point)
+
+    start = {"x": route["from_x"], "y": route["from_y"]}
+    end = {"x": route["to_x"], "y": route["to_y"]}
+    if not points or not _same_point(points[0], start):
+        points.insert(0, start)
+    if not _same_point(points[-1], end):
+        points.append(end)
+    return points, None
+
+
+async def _resolve_drag_waypoint(
+    backend: Any,
+    waypoint: dict[str, Any],
+    *,
+    source: dict[str, Any],
+    drop: dict[str, Any],
+    route_evidence: dict[str, Any],
+) -> tuple[dict[str, int], dict[str, Any] | None]:
+    screen = _screen_point(waypoint)
+    if screen is not None:
+        return _point_payload(screen, waypoint), None
+
+    relative_to = str(waypoint.get("relative_to") or "")
+    if relative_to == "source":
+        point = _relative_point_from_evidence(route_evidence, "source", waypoint)
+        if point is not None:
+            return _point_payload(point, waypoint), None
+    elif relative_to in {"drop", "target"}:
+        point = _relative_point_from_evidence(route_evidence, "target", waypoint)
+        if point is not None:
+            return _point_payload(point, waypoint), None
+    elif relative_to in {"viewport", "grid"}:
+        selector = (
+            _selector_from_endpoint(waypoint)
+            or _selector_from_endpoint(source)
+            or _selector_from_endpoint(drop)
+        )
+        if not selector:
+            return {}, _drag_blocked(
+                reason="drag waypoint viewport selector unavailable",
+                requested={"waypoint": waypoint},
+                accepted={"selector": "viewport waypoint selector or source/drop selector"},
+                next_step="Provide selector on viewport-relative drag waypoints.",
+            )
+        _, evidence, blocked = await _resolve_selector_endpoint(
+            backend,
+            selector,
+            role="waypoint",
+        )
+        if blocked is not None:
+            return {}, blocked
+        bounds = evidence.get("bounds")
+        if isinstance(bounds, Mapping):
+            point = _relative_point(bounds, waypoint)
+            if point is not None:
+                return _point_payload(point, waypoint), None
+
+    return {}, _drag_blocked(
+        reason="drag waypoint requires coordinate resolution",
+        requested={"waypoint": waypoint},
+        accepted={"relative_to": "screen, source, drop, target, viewport, or grid"},
+        next_step="Provide a drag waypoint that resolves to screen coordinates.",
+    )
+
+
 async def _resolve_drag_endpoint(
     backend: Any,
     endpoint: dict[str, Any],
@@ -615,6 +739,33 @@ async def _resolve_drag_endpoint(
     point = _screen_point(endpoint)
     if point is not None:
         return {"x": point[0], "y": point[1]}, {"point": endpoint}, None
+
+    relative_to = str(endpoint.get("relative_to") or "")
+    if relative_to in {"viewport", "grid"}:
+        selector = _selector_from_endpoint(endpoint)
+        if not selector:
+            return {}, {}, _drag_blocked(
+                reason=f"drag {role} viewport selector unavailable",
+                requested={role: endpoint},
+                accepted={f"{role}.selector": "grid selector for viewport-relative drop"},
+                next_step=f"Provide {role}.selector for viewport-relative coordinates.",
+            )
+        _, evidence, blocked = await _resolve_selector_endpoint(backend, selector, role=role)
+        if blocked is not None:
+            return {}, {}, blocked
+        bounds = evidence.get("bounds")
+        if isinstance(bounds, Mapping):
+            relative_point = _relative_point(bounds, endpoint)
+            if relative_point is not None:
+                return (
+                    {"x": relative_point[0], "y": relative_point[1]},
+                    {
+                        "bounds": bounds,
+                        "identity": evidence.get("identity"),
+                        "point": endpoint,
+                    },
+                    None,
+                )
 
     kind = str(endpoint.get("kind") or _endpoint_kind(endpoint) or "")
     if kind == "point":
@@ -893,10 +1044,60 @@ def _viewport_snapshot_from_rows(
     }
 
 
+async def _viewport_bounds_from_backend(
+    backend: Any,
+    selector: dict[str, Any],
+) -> dict[str, int] | None:
+    find_element = getattr(backend, "find_element", None)
+    if not callable(find_element):
+        return None
+    try:
+        result = await find_element(**_selector_kwargs(selector))
+    except Exception:
+        return None
+    if not isinstance(result, Mapping) or not _is_backend_success(result):
+        return None
+    return _bounds_from_mapping(result)
+
+
+def _rows_inside_viewport(
+    rows: list[Any],
+    viewport_bounds: Mapping[str, int] | None,
+) -> list[Any]:
+    if viewport_bounds is None:
+        return rows
+    filtered: list[Any] = []
+    saw_row_bounds = False
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        row_bounds = _bounds_from_mapping(row)
+        if row_bounds is None:
+            continue
+        saw_row_bounds = True
+        if _bounds_intersect(row_bounds, viewport_bounds):
+            filtered.append(row)
+    if saw_row_bounds and filtered:
+        return filtered
+    return rows
+
+
+def _bounds_intersect(
+    left: Mapping[str, int],
+    right: Mapping[str, int],
+) -> bool:
+    return (
+        left["x"] < right["x"] + right["width"]
+        and left["x"] + left["width"] > right["x"]
+        and left["y"] < right["y"] + right["height"]
+        and left["y"] + left["height"] > right["y"]
+    )
+
+
 def _viewport_row_ref(row: Mapping[str, Any], identity: Mapping[str, Any]) -> dict[str, Any]:
     row_identity, derived = _viewport_row_identity(row, identity)
     return {
-        "index": _int_or_none(row.get("index")),
+        "index": _viewport_row_index(row),
         "identity": row_identity,
         "derived": derived,
     }
@@ -917,7 +1118,14 @@ def _viewport_row_identity(
         values = [str(value) for value in cells.values() if value]
         if values:
             return "|".join(values), False
-    return f"row:{row.get('index')}", True
+    return f"row:{_viewport_row_index(row)}", True
+
+
+def _viewport_row_index(row: Mapping[str, Any]) -> int | None:
+    row_index = _int_or_none(row.get("row_index"))
+    if row_index is not None:
+        return row_index
+    return _int_or_none(row.get("index"))
 
 
 def _viewport_identity_strategy(
@@ -1084,6 +1292,69 @@ def _screen_point(value: Any) -> tuple[int, int] | None:
         return int(round(float(value["x"]))), int(round(float(value["y"])))
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def _selector_from_endpoint(endpoint: Mapping[str, Any]) -> dict[str, Any] | None:
+    selector = endpoint.get("selector")
+    if isinstance(selector, Mapping):
+        return dict(selector)
+    if endpoint.get("automation_id") or endpoint.get("automationId") or endpoint.get("name"):
+        return _selector_kwargs(dict(endpoint))
+    return None
+
+
+def _relative_point_from_evidence(
+    route_evidence: Mapping[str, Any],
+    prefix: str,
+    waypoint: Mapping[str, Any],
+) -> tuple[int, int] | None:
+    bounds = route_evidence.get(f"{prefix}_bounds")
+    if isinstance(bounds, Mapping):
+        point = _relative_point(bounds, waypoint)
+        if point is not None:
+            return point
+    raw_point = route_evidence.get(f"{prefix}_point")
+    if isinstance(raw_point, Mapping):
+        return _screen_point({"x": raw_point.get("x"), "y": raw_point.get("y")})
+    return None
+
+
+def _relative_point(
+    bounds: Mapping[str, Any],
+    waypoint: Mapping[str, Any],
+) -> tuple[int, int] | None:
+    try:
+        x = _relative_axis(float(bounds["x"]), float(bounds["width"]), waypoint["x"])
+        y = _relative_axis(float(bounds["y"]), float(bounds["height"]), waypoint["y"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return int(round(x)), int(round(y))
+
+
+def _relative_axis(origin: float, size: float, raw_value: Any) -> float:
+    value = float(raw_value)
+    if 0.0 <= value <= 1.0:
+        return origin + (size * value)
+    return origin + value
+
+
+def _point_payload(point: tuple[int, int], source: Mapping[str, Any]) -> dict[str, int]:
+    payload = {"x": point[0], "y": point[1]}
+    if "hold_ms" in source:
+        payload["hold_ms"] = _non_negative_int(source["hold_ms"])
+    return payload
+
+
+def _same_point(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    return left.get("x") == right.get("x") and left.get("y") == right.get("y")
+
+
+def _non_negative_int(value: Any) -> int:
+    try:
+        candidate = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, candidate)
 
 
 def _positive_int(value: Any, *, default: int) -> int:

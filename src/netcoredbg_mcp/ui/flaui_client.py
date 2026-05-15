@@ -21,10 +21,41 @@ CONNECT_RETRY_TIMEOUT_SECONDS = 30.0
 CONNECT_CALL_TIMEOUT_SECONDS = 30.0
 CONNECT_RETRY_INTERVAL_SECONDS = 0.2
 WINDOW_NOT_READY_ERROR = "No window found for process"
+BRIDGE_DEFAULT_CALL_TIMEOUT_SECONDS = 10.0
+DRAG_PATH_POINTER_DOWN_SETTLE_MS = 100
+DRAG_PATH_FINAL_DROP_SETTLE_MS = 180
+DRAG_PATH_TIMEOUT_MARGIN_SECONDS = 3.0
+DRAG_PATH_TIMEOUT_MULTIPLIER = 1.5
+DRAG_PATH_MAX_TIMEOUT_SECONDS = 60.0
 
 
 def _is_window_not_ready(exc: RuntimeError) -> bool:
     return WINDOW_NOT_READY_ERROR in str(exc)
+
+
+def _drag_path_timeout_seconds(points: list[dict[str, Any]], speed_ms: int) -> float:
+    segment_count = max(1, len(points) - 1)
+    delay_ms = max(1, round(speed_ms / segment_count))
+    hold_ms = sum(max(0, _int_or_zero(point.get("hold_ms"))) for point in points)
+    estimated_ms = (
+        DRAG_PATH_POINTER_DOWN_SETTLE_MS
+        + (delay_ms * segment_count)
+        + hold_ms
+        + max(DRAG_PATH_FINAL_DROP_SETTLE_MS, delay_ms)
+    )
+    timeout = (estimated_ms / 1000.0) * DRAG_PATH_TIMEOUT_MULTIPLIER
+    timeout += DRAG_PATH_TIMEOUT_MARGIN_SECONDS
+    return min(
+        DRAG_PATH_MAX_TIMEOUT_SECONDS,
+        max(BRIDGE_DEFAULT_CALL_TIMEOUT_SECONDS, timeout),
+    )
+
+
+def _int_or_zero(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 class FlaUIBridgeClient:
@@ -516,6 +547,7 @@ class FlaUIBackend:
                 "speed_ms": speed_ms,
                 "hold_modifiers": hold_modifiers or [],
             },
+            timeout=_drag_path_timeout_seconds(points, speed_ms),
         )
         if not isinstance(result, dict):
             raise RuntimeError(

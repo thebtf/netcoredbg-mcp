@@ -77,6 +77,7 @@
                   PreviewKeyDown="DataGrid_PreviewKeyDown"
                   PreviewMouseLeftButtonDown="CueDataGrid_PreviewMouseLeftButtonDown"
                   PreviewMouseMove="CueDataGrid_PreviewMouseMove"
+                  DragOver="CueDataGrid_DragOver"
                   Drop="CueDataGrid_Drop"
                   ItemsSource="{Binding CueRows}">
             <DataGrid.Columns>

@@ -101,6 +101,15 @@ def _compare_snapshots(before: dict[str, Any], after: dict[str, Any]) -> dict[st
             direction = "down"
         elif after_first < before_first:
             direction = "up"
+    if (
+        direction == "unchanged"
+        and isinstance(before_last, int)
+        and isinstance(after_last, int)
+    ):
+        if after_last > before_last:
+            direction = "down"
+        elif after_last < before_last:
+            direction = "up"
     selected_before = _row_identity_refs(before.get("selected_rows"))
     selected_after = _row_identity_refs(after.get("selected_rows"))
     before_row_count = before.get("row_count")

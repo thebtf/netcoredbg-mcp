@@ -235,6 +235,44 @@ async def test_ui_grid_viewport_detects_upward_scroll_direction() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ui_grid_viewport_uses_last_visible_index_for_partial_edge_scroll() -> None:
+    session = GridViewportProbeSession()
+    session.viewport_results.extend(
+        [
+            {"status": "PASS", "snapshot": _viewport_snapshot(first=1, last=8)},
+            {"status": "PASS", "snapshot": _viewport_snapshot(first=1, last=17)},
+        ]
+    )
+
+    result = await runner(
+        session,
+        {"ui.grid.viewport": session.grid_viewport},
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "ui.grid.viewport",
+                "name": "cue_viewport",
+                "phase": "both",
+                "selector": {"automation_id": "CueDataGrid"},
+                "identity": {"column": "PhraseId"},
+                "rows": {"visible_only": True, "max": 5},
+                "expect": {
+                    "viewport_moved": True,
+                    "direction": "down",
+                },
+            }
+        )
+    )
+
+    after = after_probe(result)
+    assert result["status"] == "PASS"
+    assert after["comparison"]["first_visible_index_changed"] is False
+    assert after["comparison"]["last_visible_index_changed"] is True
+    assert after["comparison"]["viewport_moved"] is True
+    assert after["comparison"]["direction"] == "down"
+
+
+@pytest.mark.asyncio
 async def test_ui_grid_viewport_fails_when_expected_scroll_is_unchanged() -> None:
     session = GridViewportProbeSession()
     session.viewport_results.extend(

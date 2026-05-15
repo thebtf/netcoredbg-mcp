@@ -52,6 +52,7 @@ public static class ClickCommands
     private const int ForegroundActivationTimeoutMs = 750;
     private const int ForegroundActivationPollMs = 25;
     private const int PointerDownSettleMs = 100;
+    private const int DragPathHoldPulseMs = 100;
     private const int FinalDropSettleMs = 180;
     private const uint MOUSEEVENTF_MOVE = 0x0001;
     private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
@@ -267,9 +268,11 @@ public static class ClickCommands
                 Thread.Sleep(delayMs);
                 if (point.HoldMs > 0)
                 {
-                    Thread.Sleep(point.HoldMs);
+                    PulseHeldDragPoint(point, point.HoldMs);
                 }
             }
+
+            Thread.Sleep(Math.Max(FinalDropSettleMs, delayMs));
         }
         catch (Exception ex)
         {
@@ -340,6 +343,27 @@ public static class ClickCommands
         }
 
         mouse_event(MOUSEEVENTF_MOVE, 0, 0, 0, UIntPtr.Zero);
+    }
+
+    private static void PulseHeldDragPoint(DragPathPoint point, int holdMs)
+    {
+        var elapsedMs = 0;
+        var offset = 1;
+        while (elapsedMs < holdMs)
+        {
+            var sleepMs = Math.Min(DragPathHoldPulseMs, holdMs - elapsedMs);
+            Thread.Sleep(sleepMs);
+            elapsedMs += sleepMs;
+            if (elapsedMs >= holdMs)
+            {
+                break;
+            }
+
+            MoveCursor(point.X + offset, point.Y);
+            offset = -offset;
+        }
+
+        MoveCursor(point.X, point.Y);
     }
 
     private static (List<DragPathPoint> Points, JsonObject? Blocked) ParseDragPathPoints(
