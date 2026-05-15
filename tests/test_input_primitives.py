@@ -413,8 +413,20 @@ class TestDragInputValidation:
         assert 'TryReadDragPathCancelKey(@params?["cancel_key"]' in command
         assert "VirtualKeyShort.ESCAPE" in command
         drag_path_body = _csharp_method_body(command, "public static JsonNode DragPath(")
+        assert "Thread.Sleep(PointerMoveSettleMs);" in drag_path_body
         assert "Thread.Sleep(Math.Max(FinalDropSettleMs, delayMs));" in drag_path_body
         assert "SendDragPathCancel(cancelKey.Value);" in drag_path_body
+
+    def test_bridge_simple_drag_returns_route_evidence(self):
+        command = (PROJECT_ROOT / "bridge" / "Commands" / "ClickCommands.cs").read_text(
+            encoding="utf-8"
+        )
+        drag_body = _csharp_method_body(command, "public static JsonNode Drag(")
+
+        assert "BuildDragWaypoints(x1, y1, x2, y2, steps)" in drag_body
+        assert "Thread.Sleep(PointerMoveSettleMs);" in drag_body
+        assert '["path_points"] = DragPointsJson' in drag_body
+        assert '["final_pointer"] = DragPointJson(new Point(x2, y2))' in drag_body
 
     def test_bridge_drag_path_releases_pointer_and_modifiers_on_exceptions(self):
         command = (PROJECT_ROOT / "bridge" / "Commands" / "ClickCommands.cs").read_text(

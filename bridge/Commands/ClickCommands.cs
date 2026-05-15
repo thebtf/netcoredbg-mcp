@@ -51,6 +51,7 @@ public static class ClickCommands
     private const int DragThresholdPixels = 5;
     private const int ForegroundActivationTimeoutMs = 750;
     private const int ForegroundActivationPollMs = 25;
+    private const int PointerMoveSettleMs = 50;
     private const int PointerDownSettleMs = 100;
     private const int DragPathHoldPulseMs = 100;
     private const int FinalDropSettleMs = 180;
@@ -138,6 +139,7 @@ public static class ClickCommands
         EnsureForeground(mainWindow);
 
         var stopwatch = Stopwatch.StartNew();
+        IReadOnlyList<Point> waypoints = Array.Empty<Point>();
 
         try
         {
@@ -148,11 +150,12 @@ public static class ClickCommands
             }
 
             MoveCursor(x1, y1);
+            Thread.Sleep(PointerMoveSettleMs);
             mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
             mouseButtonDown = true;
             Thread.Sleep(PointerDownSettleMs);
 
-            var waypoints = BuildDragWaypoints(x1, y1, x2, y2, steps);
+            waypoints = BuildDragWaypoints(x1, y1, x2, y2, steps);
             var delayMs = Math.Max(1, (int)Math.Round(speedMs / (double)steps));
 
             foreach (var waypoint in waypoints)
@@ -212,6 +215,8 @@ public static class ClickCommands
             ["y1"] = y1,
             ["x2"] = x2,
             ["y2"] = y2,
+            ["path_points"] = DragPointsJson(new[] { new Point(x1, y1) }.Concat(waypoints)),
+            ["final_pointer"] = DragPointJson(new Point(x2, y2)),
             ["steps"] = steps,
             ["duration_ms"] = stopwatch.ElapsedMilliseconds
         };
@@ -269,6 +274,7 @@ public static class ClickCommands
             }
 
             MoveCursor(points[0].X, points[0].Y);
+            Thread.Sleep(PointerMoveSettleMs);
             mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
             mouseButtonDown = true;
             Thread.Sleep(PointerDownSettleMs);
@@ -562,6 +568,26 @@ public static class ClickCommands
         }
 
         return result;
+    }
+
+    private static JsonArray DragPointsJson(IEnumerable<Point> points)
+    {
+        var result = new JsonArray();
+        foreach (var point in points)
+        {
+            result.Add(DragPointJson(point));
+        }
+
+        return result;
+    }
+
+    private static JsonObject DragPointJson(Point point)
+    {
+        return new JsonObject
+        {
+            ["x"] = point.X,
+            ["y"] = point.Y
+        };
     }
 
     private static JsonObject DragPathBlocked(
