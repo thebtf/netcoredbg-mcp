@@ -118,6 +118,11 @@ def ui_operation_adapters(
                 "grid selection requires an automation_id selector",
             )
         indices = [int(index) for index in args.get("indices") or []]
+        if not indices:
+            return _adapter_blocked(
+                "ui.grid.select_indices",
+                "indices list cannot be empty",
+            )
         multi_select = getattr(backend, "multi_select", None)
         if not callable(multi_select):
             return _adapter_blocked(
@@ -1548,10 +1553,10 @@ def _bounds_from_mapping(value: Mapping[str, Any]) -> dict[str, int] | None:
         return None
     try:
         bounds = {
-            "x": int(round(float(raw["x"]))),
-            "y": int(round(float(raw["y"]))),
-            "width": int(round(float(raw["width"]))),
-            "height": int(round(float(raw["height"]))),
+            "x": round(float(raw["x"])),
+            "y": round(float(raw["y"])),
+            "width": round(float(raw["width"])),
+            "height": round(float(raw["height"])),
         }
     except (KeyError, TypeError, ValueError):
         return None
@@ -1613,7 +1618,7 @@ def _screen_point(value: Any) -> tuple[int, int] | None:
     if str(value.get("relative_to") or "screen") != "screen":
         return None
     try:
-        return int(round(float(value["x"]))), int(round(float(value["y"])))
+        return round(float(value["x"])), round(float(value["y"]))
     except (KeyError, TypeError, ValueError):
         return None
 
