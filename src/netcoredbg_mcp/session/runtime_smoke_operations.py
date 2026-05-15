@@ -467,29 +467,23 @@ def ui_operation_adapters(
                 ),
             }
 
+        backend_route = _mapping_evidence_from_result(result, "route_evidence") or {}
         route_evidence = {
             **route_evidence,
-            "move_points": path,
-            "hold_points": (
-                [point for point in resolved_path_points if "hold_ms" in point]
-                if resolved_path_points
-                else [point for point in path if "hold_ms" in point]
-            ),
-            "final_pointer": (
-                resolved_path_points[-1]
-                if resolved_path_points
-                else drop
-                if _screen_point(drop) is not None
-                else route_evidence.get("target_point")
-                or drop
-                or (path[-1] if path else None)
-            ),
+            **backend_route,
             "modifiers": modifiers,
             "start": {"x": route["from_x"], "y": route["from_y"]},
             "drop": {"x": route["to_x"], "y": route["to_y"]},
         }
-        if resolved_path_points:
-            route_evidence["resolved_move_points"] = resolved_path_points
+        path_points = result.get("path_points")
+        if isinstance(path_points, list):
+            route_evidence["move_points"] = list(path_points)
+        hold_points = result.get("hold_points")
+        if isinstance(hold_points, list):
+            route_evidence["hold_points"] = list(hold_points)
+        final_pointer = result.get("final_pointer")
+        if isinstance(final_pointer, Mapping):
+            route_evidence["final_pointer"] = dict(final_pointer)
         if selected_payload is not None:
             route_evidence["selected_payload"] = selected_payload
         status = str(result.get("status", "PASS")).upper()

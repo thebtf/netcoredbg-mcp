@@ -680,6 +680,43 @@ async def test_v2_ui_drag_distinguishes_source_forms_in_request_and_evidence() -
 
 
 @pytest.mark.asyncio
+async def test_v2_ui_drag_rejects_fractional_row_index() -> None:
+    session = ActionSmokeSession()
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "fractional drag row index",
+            "cases": [
+                {
+                    "id": "fractional_drag_row_index",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.drag",
+                                "source": {
+                                    "selector": {"automation_id": "CueDataGrid"},
+                                    "row_index": 1.5,
+                                },
+                                "path": [{"relative_to": "source", "x": 0.5, "y": 0.5}],
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == "BLOCKED"
+    assert action["status"] == "BLOCKED"
+    assert action["reason"] == "invalid drag source"
+    assert action["requested"] == {"row_index": 1.5}
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
 async def test_v2_ui_grid_select_routes_non_contiguous_indices() -> None:
     session = ActionSmokeSession()
 

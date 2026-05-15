@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -7,6 +8,7 @@ from ..blocked import build_blocked
 from ..evidence import attach_blocked_details, compact_evidence
 
 _ACCEPTED_MODIFIERS = frozenset({"alt", "control", "ctrl", "shift", "win", "windows"})
+_INTEGER_TEXT = re.compile(r"-?\d+")
 _SOURCE_KINDS = ("row_index", "row_identity", "cached_element", "point")
 
 
@@ -195,9 +197,11 @@ def _row_index_from_source(source: dict[str, Any]) -> tuple[int, dict[str, Any] 
             accepted={"row_index": "non-negative integer"},
             next_step="Provide source.row_index as a non-negative integer.",
         )
-    try:
+    if isinstance(raw_row_index, int):
+        row_index = raw_row_index
+    elif isinstance(raw_row_index, str) and _INTEGER_TEXT.fullmatch(raw_row_index.strip()):
         row_index = int(raw_row_index)
-    except (TypeError, ValueError):
+    else:
         return 0, _blocked(
             reason="invalid drag source",
             requested={"row_index": raw_row_index},
@@ -375,12 +379,6 @@ def _action_result(
         output["cancel"] = cancel
     if output["route_evidence"]:
         output["route_evidence"].setdefault("source", source)
-        output["route_evidence"].setdefault("move_points", path)
-        output["route_evidence"].setdefault(
-            "hold_points",
-            [point for point in path if "hold_ms" in point],
-        )
-        output["route_evidence"].setdefault("final_pointer", drop or (path[-1] if path else None))
         output["route_evidence"].setdefault("modifiers", modifiers)
     if selected_payload is not None:
         output["selected_payload"] = selected_payload

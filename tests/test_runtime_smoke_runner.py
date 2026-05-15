@@ -1070,14 +1070,11 @@ async def test_ui_operation_adapters_route_point_drag_to_backend() -> None:
     assert result["status"] == "PASS"
     assert result["backend"] == "FakeBackend"
     assert result["route_evidence"]["source"]["kind"] == "point"
-    assert result["route_evidence"]["move_points"] == [
-        {"relative_to": "screen", "x": 25, "y": 40}
-    ]
-    assert result["route_evidence"]["final_pointer"] == {
-        "relative_to": "screen",
-        "x": 50,
-        "y": 80,
-    }
+    assert result["route_evidence"]["start"] == {"x": 10, "y": 20}
+    assert result["route_evidence"]["drop"] == {"x": 50, "y": 80}
+    assert "move_points" not in result["route_evidence"]
+    assert "hold_points" not in result["route_evidence"]
+    assert "final_pointer" not in result["route_evidence"]
 
 
 @pytest.mark.asyncio
@@ -1163,7 +1160,7 @@ async def test_ui_operation_adapters_resolve_visible_row_drag_sources_to_backend
     }
     assert result["route_evidence"]["source_identity"] == "Cue two"
     assert result["route_evidence"]["target_identity"] == "Cue four"
-    assert result["route_evidence"]["final_pointer"] == {"x": 70, "y": 155}
+    assert "final_pointer" not in result["route_evidence"]
 
     top_row_result = await ui_operation_adapters(backend_provider)["ui.drag"](
         source={"kind": "row_index", "selector": {"automation_id": "dataGrid"}, "row_index": 0},
@@ -1472,7 +1469,7 @@ async def test_ui_operation_adapters_route_held_edge_drag_through_drag_path() ->
             [],
         )
     ]
-    assert result["route_evidence"]["resolved_move_points"] == [
+    assert result["route_evidence"]["move_points"] == [
         {"x": 70, "y": 75},
         {"x": 70, "y": 212, "hold_ms": 900},
         {"x": 70, "y": 200},
