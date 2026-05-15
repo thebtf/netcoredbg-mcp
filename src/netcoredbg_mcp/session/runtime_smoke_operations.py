@@ -117,7 +117,9 @@ def ui_operation_adapters(
                 "ui.grid.select_indices",
                 "grid selection requires an automation_id selector",
             )
-        indices = [int(index) for index in args.get("indices") or []]
+        indices, blocked = _grid_selection_indices(args.get("indices"))
+        if blocked is not None:
+            return blocked
         if not indices:
             return _adapter_blocked(
                 "ui.grid.select_indices",
@@ -1694,6 +1696,38 @@ def _positive_int(value: Any, *, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return max(1, candidate)
+
+
+def _grid_selection_indices(value: Any) -> tuple[list[int], dict[str, Any] | None]:
+    raw_indices = value or []
+    if not isinstance(raw_indices, list):
+        return [], _adapter_blocked(
+            "ui.grid.select_indices",
+            "indices must be a list",
+        )
+    indices: list[int] = []
+    for raw_index in raw_indices:
+        if isinstance(raw_index, bool):
+            return [], _adapter_blocked(
+                "ui.grid.select_indices",
+                "indices must be non-negative integers",
+            )
+        if isinstance(raw_index, int):
+            index = raw_index
+        elif isinstance(raw_index, str) and raw_index.strip().isdigit():
+            index = int(raw_index)
+        else:
+            return [], _adapter_blocked(
+                "ui.grid.select_indices",
+                "indices must be non-negative integers",
+            )
+        if index < 0:
+            return [], _adapter_blocked(
+                "ui.grid.select_indices",
+                "indices must be non-negative integers",
+            )
+        indices.append(index)
+    return indices, None
 
 
 def _drag_blocked(

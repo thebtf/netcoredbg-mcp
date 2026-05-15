@@ -1853,6 +1853,25 @@ async def test_ui_operation_adapters_grid_select_indices_blocks_empty_indices() 
 
 
 @pytest.mark.asyncio
+async def test_ui_operation_adapters_grid_select_indices_blocks_invalid_indices() -> None:
+    class FakeBackend:
+        async def multi_select(self, container_id: str, indices: list[int]) -> int:
+            raise AssertionError("invalid selection must fail before backend call")
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.grid.select_indices"](
+        selector={"automation_id": "dataGrid"},
+        indices=["a", 1],
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "indices must be non-negative integers"
+    assert result["requested"] == {"adapter": "ui.grid.select_indices"}
+
+
+@pytest.mark.asyncio
 async def test_ui_operation_adapters_drag_returns_selected_payload_evidence() -> None:
     class FakeBackend:
         def __init__(self) -> None:
