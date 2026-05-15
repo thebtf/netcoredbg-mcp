@@ -502,6 +502,28 @@ class FlaUIBackend:
             )
         return result
 
+    async def drag_path(
+        self,
+        points: list[dict[str, Any]],
+        speed_ms: int = 200,
+        hold_modifiers: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Drag through a path of screen points via the FlaUI bridge."""
+        result = await self._client.call(
+            "drag_path",
+            {
+                "points": points,
+                "speed_ms": speed_ms,
+                "hold_modifiers": hold_modifiers or [],
+            },
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"drag_path: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result
+
     async def send_keys(self, keys: str) -> None:
         """Send keys via FlaUI bridge."""
         await self._client.call("send_keys", {"keys": keys})

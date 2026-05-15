@@ -13,6 +13,8 @@ namespace FlaUIBridge.Commands;
 
 public static class ClickCommands
 {
+    private sealed record DragPathPoint(int X, int Y, int HoldMs);
+
     [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
     private static extern bool SetForegroundWindow(IntPtr hWnd);
 
@@ -49,6 +51,9 @@ public static class ClickCommands
     private const int DragThresholdPixels = 5;
     private const int ForegroundActivationTimeoutMs = 750;
     private const int ForegroundActivationPollMs = 25;
+    private const int PointerDownSettleMs = 100;
+    private const int FinalDropSettleMs = 180;
+    private const uint MOUSEEVENTF_MOVE = 0x0001;
     private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
     private const uint MOUSEEVENTF_LEFTUP = 0x0004;
 
@@ -144,7 +149,7 @@ public static class ClickCommands
             MoveCursor(x1, y1);
             mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
             mouseButtonDown = true;
-            Thread.Sleep(50);
+            Thread.Sleep(PointerDownSettleMs);
 
             var waypoints = BuildDragWaypoints(x1, y1, x2, y2, steps);
             var delayMs = Math.Max(1, (int)Math.Round(speedMs / (double)steps));
@@ -155,7 +160,7 @@ public static class ClickCommands
                 Thread.Sleep(delayMs);
             }
 
-            Thread.Sleep(Math.Min(120, Math.Max(30, delayMs)));
+            Thread.Sleep(Math.Max(FinalDropSettleMs, delayMs));
         }
         catch (Exception ex)
         {
@@ -211,6 +216,121 @@ public static class ClickCommands
         };
     }
 
+    public static JsonNode DragPath(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
+    {
+        RejectStealthMouseInput("drag_path");
+
+        var speedMs = @params?["speed_ms"]?.GetValue<int>() ?? 200;
+        if (speedMs < 20)
+        {
+            return DragPathBlocked(
+                "speed_ms below drag-path safety floor",
+                new JsonObject { ["speed_ms"] = speedMs },
+                new JsonObject { ["speed_ms"] = "integer >= 20" },
+                "Increase speed_ms to at least 20 for path-aware drag.");
+        }
+
+        var (points, blocked) = ParseDragPathPoints(@params?["points"]);
+        if (blocked is not null)
+        {
+            return blocked;
+        }
+
+        var temporaryModifiers = ModifierCommands.GetTemporaryModifierKeys(@params?["hold_modifiers"]);
+        var pressedTemporaryModifiers = new List<FlaUI.Core.WindowsAPI.VirtualKeyShort>();
+        var mouseButtonDown = false;
+        ExceptionDispatchInfo? capturedException = null;
+        Exception? cleanupException = null;
+
+        EnsureForeground(mainWindow);
+
+        var stopwatch = Stopwatch.StartNew();
+        var delayMs = Math.Max(1, (int)Math.Round(speedMs / (double)Math.Max(1, points.Count - 1)));
+
+        try
+        {
+            foreach (var modifier in temporaryModifiers)
+            {
+                Keyboard.Press(modifier);
+                pressedTemporaryModifiers.Add(modifier);
+            }
+
+            MoveCursor(points[0].X, points[0].Y);
+            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+            mouseButtonDown = true;
+            Thread.Sleep(PointerDownSettleMs);
+
+            for (var index = 1; index < points.Count; index++)
+            {
+                var point = points[index];
+                MoveCursor(point.X, point.Y);
+                Thread.Sleep(delayMs);
+                if (point.HoldMs > 0)
+                {
+                    Thread.Sleep(point.HoldMs);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            capturedException = ExceptionDispatchInfo.Capture(ex);
+        }
+        finally
+        {
+            stopwatch.Stop();
+            if (mouseButtonDown)
+            {
+                try
+                {
+                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+                }
+                catch (Exception ex)
+                {
+                    Program.Log($"Drag path cleanup failed to release left mouse button: {ex.Message}");
+                    cleanupException ??= new InvalidOperationException(
+                        "Drag path cleanup failed to release left mouse button.",
+                        ex);
+                }
+            }
+
+            for (var i = pressedTemporaryModifiers.Count - 1; i >= 0; i--)
+            {
+                try
+                {
+                    Keyboard.Release(pressedTemporaryModifiers[i]);
+                }
+                catch (Exception ex)
+                {
+                    Program.Log($"Drag path cleanup failed to release modifier {pressedTemporaryModifiers[i]}: {ex.Message}");
+                    cleanupException ??= new InvalidOperationException(
+                        $"Drag path cleanup failed to release modifier {pressedTemporaryModifiers[i]}.",
+                        ex);
+                }
+            }
+        }
+
+        capturedException?.Throw();
+        if (cleanupException is not null)
+            throw cleanupException;
+
+        var releasedModifiers = new JsonArray();
+        foreach (var modifier in pressedTemporaryModifiers)
+        {
+            releasedModifiers.Add(modifier.ToString());
+        }
+
+        return new JsonObject
+        {
+            ["dragged"] = true,
+            ["path_points"] = DragPathPointsJson(points),
+            ["hold_points"] = DragPathPointsJson(points.Where(point => point.HoldMs > 0)),
+            ["final_pointer"] = DragPathPointJson(points[^1]),
+            ["modifier_cleanup"] = new JsonObject { ["released"] = releasedModifiers },
+            ["steps"] = Math.Max(0, points.Count - 1),
+            ["duration_ms"] = stopwatch.ElapsedMilliseconds
+        };
+    }
+
     private static void MoveCursor(int x, int y)
     {
         if (!SetCursorPos(x, y))
@@ -218,6 +338,152 @@ public static class ClickCommands
             var error = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
             throw new InvalidOperationException($"SetCursorPos failed with Win32 error {error}");
         }
+
+        mouse_event(MOUSEEVENTF_MOVE, 0, 0, 0, UIntPtr.Zero);
+    }
+
+    private static (List<DragPathPoint> Points, JsonObject? Blocked) ParseDragPathPoints(
+        JsonNode? pointsNode)
+    {
+        if (pointsNode is not JsonArray pointsArray || pointsArray.Count < 2)
+        {
+            return (
+                new List<DragPathPoint>(),
+                DragPathBlocked(
+                    "drag_path requires at least two points",
+                    new JsonObject { ["points_count"] = pointsNode is JsonArray array ? array.Count : 0 },
+                    new JsonObject { ["points"] = "array with at least two screen points" },
+                    "Provide start and end points for path-aware drag."));
+        }
+
+        var points = new List<DragPathPoint>(pointsArray.Count);
+        for (var index = 0; index < pointsArray.Count; index++)
+        {
+            if (pointsArray[index] is not JsonObject pointObject)
+            {
+                return (
+                    new List<DragPathPoint>(),
+                    DragPathBlocked(
+                        "drag_path point must be an object",
+                        new JsonObject { ["point_index"] = index },
+                        new JsonObject { ["point"] = "object with integer x and y" },
+                        "Provide every path point as an object."));
+            }
+
+            if (!TryReadInt(pointObject, "x", out var x) || !TryReadInt(pointObject, "y", out var y))
+            {
+                return (
+                    new List<DragPathPoint>(),
+                    DragPathBlocked(
+                        "drag_path point requires integer x and y",
+                        new JsonObject { ["point_index"] = index },
+                        new JsonObject { ["x"] = "integer", ["y"] = "integer" },
+                        "Provide integer screen coordinates for each path point."));
+            }
+
+            var holdMs = 0;
+            if (pointObject.TryGetPropertyValue("hold_ms", out var holdNode))
+            {
+                if (holdNode is null || !TryReadInt(pointObject, "hold_ms", out holdMs))
+                {
+                    return (
+                        new List<DragPathPoint>(),
+                        DragPathBlocked(
+                            "hold_ms must be an integer",
+                            new JsonObject { ["point_index"] = index },
+                            new JsonObject { ["hold_ms"] = "integer >= 0" },
+                            "Use a non-negative integer hold_ms value."));
+                }
+
+                if (holdMs < 0)
+                {
+                    return (
+                        new List<DragPathPoint>(),
+                        DragPathBlocked(
+                            "hold_ms must be non-negative",
+                            new JsonObject { ["point_index"] = index, ["hold_ms"] = holdMs },
+                            new JsonObject { ["hold_ms"] = "integer >= 0" },
+                            "Use a non-negative hold duration for path-aware drag."));
+                }
+            }
+
+            points.Add(new DragPathPoint(x, y, holdMs));
+        }
+
+        var firstPoint = points[0];
+        if (!points.Skip(1).Any(point => point.X != firstPoint.X || point.Y != firstPoint.Y))
+        {
+            return (
+                new List<DragPathPoint>(),
+                DragPathBlocked(
+                    "drag_path route requires pointer movement",
+                    new JsonObject { ["points_count"] = points.Count },
+                    new JsonObject { ["points"] = "at least one point after start must move" },
+                    "Provide a path that moves away from the start point."));
+        }
+
+        return (points, null);
+    }
+
+    private static bool TryReadInt(JsonObject value, string key, out int result)
+    {
+        result = 0;
+        try
+        {
+            if (value[key] is null)
+            {
+                return false;
+            }
+
+            result = value[key]!.GetValue<int>();
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static JsonArray DragPathPointsJson(IEnumerable<DragPathPoint> points)
+    {
+        var result = new JsonArray();
+        foreach (var point in points)
+        {
+            result.Add(DragPathPointJson(point));
+        }
+
+        return result;
+    }
+
+    private static JsonObject DragPathPointJson(DragPathPoint point)
+    {
+        var result = new JsonObject
+        {
+            ["x"] = point.X,
+            ["y"] = point.Y
+        };
+        if (point.HoldMs > 0)
+        {
+            result["hold_ms"] = point.HoldMs;
+        }
+
+        return result;
+    }
+
+    private static JsonObject DragPathBlocked(
+        string reason,
+        JsonObject requested,
+        JsonObject accepted,
+        string nextStep)
+    {
+        return new JsonObject
+        {
+            ["status"] = "BLOCKED",
+            ["reason"] = reason,
+            ["requested"] = requested,
+            ["accepted"] = accepted,
+            ["next_step"] = nextStep
+        };
     }
 
     private static JsonNode ClickByAutomationId(string automationId, UIA3Automation automation, AutomationElement? mainWindow)
