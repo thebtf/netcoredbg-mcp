@@ -8,6 +8,7 @@ PROBE_KINDS = (
     "output.since",
     "process.metric",
     "ui.grid",
+    "ui.grid.viewport",
     "ui.property",
     "ui.text",
 )

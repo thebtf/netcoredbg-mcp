@@ -397,6 +397,33 @@ class PywinautoBackend:
             "duration_ms": speed_ms,
         }
 
+    async def drag_path(
+        self,
+        points: list[dict[str, Any]],
+        speed_ms: int = 200,
+        hold_modifiers: list[str] | None = None,
+        cancel_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Path-aware held-edge drags require the FlaUI bridge backend."""
+        return {
+            "status": "BLOCKED",
+            "reason": "path-aware drag requires the FlaUI backend",
+            "requested": {
+                "capability": "path-aware drag",
+                "points": points,
+                "speed_ms": speed_ms,
+                "hold_modifiers": hold_modifiers or [],
+                "cancel_key": cancel_key,
+            },
+            "accepted": {
+                "backend": "FlaUI drag_path",
+                "capability": "real pointer path with waypoint holds",
+            },
+            "next_step": (
+                "Use the FlaUI bridge backend for release-critical path-aware drag proof."
+            ),
+        }
+
     async def send_keys(self, keys: str) -> None:
         """Send keyboard input to focused element."""
         await self._ui.send_keys_focused(keys)

@@ -133,6 +133,22 @@ def test_wpf_one_call_runtime_smoke_scenario_is_inventory_visible() -> None:
     assert "WPF one-call did not claim false PASS" not in scenario_body
 
 
+def test_wpf_v2_negative_drag_scenario_is_inventory_visible() -> None:
+    smoke = (REPO_ROOT / "tests" / "smoke_test_manual.py").read_text(encoding="utf-8")
+
+    assert "WPF V2 NEGATIVE DRAG RUNTIME SMOKE" in smoke
+    scenario_start = smoke.index("run_wpf_v2_negative_drag_runtime_smoke")
+    next_scenario = smoke.find("\nasync def run_", scenario_start + 1)
+    scenario_body = smoke[
+        scenario_start : next_scenario if next_scenario != -1 else len(smoke)
+    ]
+
+    assert '"WPF V2 Negative Drag Runtime Smoke"' in scenario_body
+    assert '"no_op": True' in scenario_body
+    assert '"identity_order_preserved": True' in scenario_body
+    assert "cleanup_observed" in scenario_body
+
+
 def test_wpf_workflow_example_is_one_call_and_contains_required_evidence_sections() -> None:
     example_path = REPO_ROOT / "docs" / "examples" / "runtime-smoke-wpf-workflow-plan.json"
     example = example_path.read_text(encoding="utf-8")

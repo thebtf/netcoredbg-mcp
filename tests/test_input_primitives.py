@@ -15,6 +15,7 @@ Covers the Python-side contract for:
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -22,12 +23,29 @@ import pytest
 from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
 from netcoredbg_mcp.ui.pywinauto_backend import PywinautoBackend
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 
 def _make_flaui() -> FlaUIBackend:
     backend = FlaUIBackend("C:/fake/FlaUIBridge.exe")
     backend._client = MagicMock()
     backend._client.call = AsyncMock()
     return backend
+
+
+def _csharp_method_body(content: str, signature: str) -> str:
+    method_start = content.index(signature)
+    body_start = content.index("{", method_start)
+    depth = 0
+    for index in range(body_start, len(content)):
+        char = content[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return content[method_start : index + 1]
+    raise AssertionError(f"Could not find method body for {signature}")
 
 
 class TestFlaUIDragForwarding:
@@ -74,6 +92,94 @@ class TestFlaUIDragForwarding:
         backend._client.call.return_value = None
         with pytest.raises(RuntimeError, match="non-dict response"):
             await backend.drag(0, 0, 100, 100)
+
+    @pytest.mark.asyncio
+    async def test_drag_path_forwards_points_holds_and_modifiers(self):
+        backend = _make_flaui()
+        points = [
+            {"x": 10, "y": 20},
+            {"x": 10, "y": 180, "hold_ms": 650},
+            {"x": 40, "y": 220},
+        ]
+        backend._client.call.return_value = {
+            "dragged": True,
+            "path_points": points,
+            "hold_points": [points[1]],
+            "modifier_cleanup": {"released": ["shift"]},
+        }
+
+        result = await backend.drag_path(points, speed_ms=700, hold_modifiers=["shift"])
+
+        assert result["hold_points"] == [points[1]]
+        assert result["modifier_cleanup"] == {"released": ["shift"]}
+        backend._client.call.assert_awaited_once_with(
+            "drag_path",
+            {
+                "points": points,
+                "speed_ms": 700,
+                "hold_modifiers": ["shift"],
+            },
+            timeout=10.0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_drag_path_forwards_cancel_key_when_requested(self):
+        backend = _make_flaui()
+        points = [{"x": 10, "y": 20}, {"x": 40, "y": 220}]
+        backend._client.call.return_value = {
+            "dragged": True,
+            "cancel": {"key": "escape", "sent": True},
+        }
+
+        result = await backend.drag_path(points, cancel_key="escape")
+
+        assert result["cancel"] == {"key": "escape", "sent": True}
+        backend._client.call.assert_awaited_once_with(
+            "drag_path",
+            {
+                "points": points,
+                "speed_ms": 200,
+                "hold_modifiers": [],
+                "cancel_key": "escape",
+            },
+            timeout=10.0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_drag_path_distinguishes_held_edge_from_direct_route(self):
+        backend = _make_flaui()
+        backend._client.call.return_value = {"dragged": True}
+        direct_points = [{"x": 10, "y": 20}, {"x": 40, "y": 220}]
+        held_points = [
+            {"x": 10, "y": 20},
+            {"x": 10, "y": 180, "hold_ms": 650},
+            {"x": 40, "y": 220},
+        ]
+
+        await backend.drag_path(direct_points)
+        await backend.drag_path(held_points)
+
+        direct_payload = backend._client.call.await_args_list[0].args[1]
+        held_payload = backend._client.call.await_args_list[1].args[1]
+        assert direct_payload["points"] != held_payload["points"]
+        assert "hold_ms" not in direct_payload["points"][1]
+        assert held_payload["points"][1]["hold_ms"] == 650
+
+    @pytest.mark.asyncio
+    async def test_drag_path_expands_timeout_for_long_edge_holds(self):
+        backend = _make_flaui()
+        backend._client.call.return_value = {"dragged": True}
+        points = [
+            {"x": 70, "y": 75},
+            {"x": 70, "y": 212, "hold_ms": 7000},
+            {"x": 70, "y": 200},
+        ]
+
+        await backend.drag_path(points, speed_ms=900)
+
+        timeout = backend._client.call.await_args.kwargs["timeout"]
+        assert timeout > 10.0
+        assert timeout <= 60.0
 
 
 class TestFlaUISystemEvent:
@@ -243,6 +349,24 @@ class TestPywinautoDrag:
         assert result["dragged"] is True
         assert result["duration_ms"] == 300
 
+    @pytest.mark.asyncio
+    async def test_drag_path_returns_blocked_for_release_critical_routes(self):
+        backend = PywinautoBackend()
+        result = await backend.drag_path(
+            [
+                {"x": 10, "y": 20},
+                {"x": 10, "y": 180, "hold_ms": 650},
+                {"x": 40, "y": 220},
+            ],
+            speed_ms=700,
+            hold_modifiers=["shift"],
+        )
+
+        assert result["status"] == "BLOCKED"
+        assert result["requested"]["capability"] == "path-aware drag"
+        assert result["accepted"]["backend"] == "FlaUI drag_path"
+        assert "FlaUI bridge" in result["next_step"]
+
 
 class TestDragInputValidation:
     """_send_drag (module-level helper) enforces drag-threshold safety floor
@@ -266,3 +390,40 @@ class TestDragInputValidation:
 
         with pytest.raises(ValueError, match="Unknown modifier"):
             _send_drag(0, 0, 100, 100, speed_ms=200, hold_modifiers=["super"])
+
+    def test_bridge_registers_drag_path_command(self):
+        handler = (PROJECT_ROOT / "bridge" / "JsonRpcHandler.cs").read_text(encoding="utf-8")
+
+        assert '["drag_path"] = ClickCommands.DragPath' in handler
+
+    def test_bridge_drag_path_validates_route_speed_and_holds(self):
+        command = (PROJECT_ROOT / "bridge" / "Commands" / "ClickCommands.cs").read_text(
+            encoding="utf-8"
+        )
+
+        assert "public static JsonNode DragPath(" in command
+        assert "DragPathBlocked(" in command
+        assert "drag_path requires at least two points" in command
+        assert "drag_path route requires pointer movement" in command
+        assert "speed_ms below drag-path safety floor" in command
+        assert "hold_ms must be non-negative" in command
+        assert "private const int DragPathHoldPulseMs" in command
+        assert "PulseHeldDragPoint(point, point.HoldMs);" in command
+        assert 'TryReadInt(paramObject, "speed_ms", out var requestedSpeedMs)' in command
+        assert 'TryReadDragPathCancelKey(@params?["cancel_key"]' in command
+        assert "VirtualKeyShort.ESCAPE" in command
+        drag_path_body = _csharp_method_body(command, "public static JsonNode DragPath(")
+        assert "Thread.Sleep(Math.Max(FinalDropSettleMs, delayMs));" in drag_path_body
+        assert "SendDragPathCancel(cancelKey.Value);" in drag_path_body
+
+    def test_bridge_drag_path_releases_pointer_and_modifiers_on_exceptions(self):
+        command = (PROJECT_ROOT / "bridge" / "Commands" / "ClickCommands.cs").read_text(
+            encoding="utf-8"
+        )
+        drag_path_body = _csharp_method_body(command, "public static JsonNode DragPath(")
+
+        assert "mouseButtonDown" in drag_path_body
+        assert "mouse_event(MOUSEEVENTF_LEFTDOWN" in drag_path_body
+        assert "mouse_event(MOUSEEVENTF_LEFTUP" in drag_path_body
+        assert "Keyboard.Release(pressedTemporaryModifiers[i])" in drag_path_body
+        assert "finally" in drag_path_body

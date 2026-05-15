@@ -9,6 +9,7 @@ on after installing the package:
 - MCP server surface registration for tools, prompts, and resources.
 - Launch environment profile handling and secret-safe metadata.
 - Runtime smoke orchestration and GUI fixture availability.
+- WPF DataGrid drag/drop and edge-scroll runtime-smoke v2 proof.
 
 The playbook is intentionally executable on a release workstation without a
 private downstream application. GUI debugging against WPF, WinForms, and
@@ -133,6 +134,46 @@ Expected result:
   Avalonia UIA grid or key-routing paths are reported as bounded `UNSUPPORTED`
   or `BLOCKED` evidence rather than being skipped.
 
+### 7. WPF DataGrid Drag/Drop Customer-Mode Gate
+
+Contract source:
+
+- `docs/examples/runtime-smoke-v2-drag-drop-grid.json`
+
+Customer-mode setup:
+
+1. Open only this playbook, the example JSON, and public README guidance.
+2. Configure a WPF DataGrid stand with stable row identity values matching the
+   example selectors or adapt the generic `DataGridUnderTest` and `StableRowId`
+   names to the product under test.
+3. Run the v2 plan through `run_runtime_smoke` on a Windows GUI workstation with
+   a backend that can produce real pointer route evidence and
+   `ui.grid.viewport` identity evidence.
+4. Run the release-critical guard:
+
+```powershell
+python -m pytest tests/test_runtime_smoke_v2_docs.py
+python -m pytest tests/critical/test_runtime_smoke_v2_critical.py -m critical
+```
+
+Expected result:
+
+- `PRODUCT_WORKS`: the configured WPF stand returns `PASS`, the result includes
+  backend-produced `ui.drag` `route_evidence`, before/after `ui.grid.viewport`
+  snapshots, selected payload identity continuity, row count preservation, and
+  negative no-op cleanup evidence.
+- `PARTIALLY_WORKS`: the JSON example parses and the critical guard passes, but
+  the live stand is absent or returns an honest `BLOCKED` result that names the
+  missing pointer, route, viewport, selected-payload, no-op, or cleanup
+  capability with a concrete `next_step`.
+- `BROKEN`: the plan returns `FAIL` or `INVALID_SETUP`; a drag result reports
+  `PASS` without backend-produced route evidence; viewport or row identity
+  evidence is missing without `BLOCKED`; or docs/tests use another fixture as a
+  substitute for WPF DataGrid acceptance.
+
+WinForms `dragList` primitive smoke is not a substitute for WPF DataGrid CR-001
+acceptance.
+
 ## Failure-Mode Catalog
 
 - CLI exits non-zero or fails to import the package.
@@ -144,6 +185,10 @@ Expected result:
 - WPF one-call smoke does not return cleanup evidence for the bounded plan.
 - Avalonia compatibility is omitted or treated as unsupported without bounded
   evidence from the fixture.
+- WPF DataGrid drag/drop is marked passing without `ui.drag` route evidence,
+  before/after `ui.grid.viewport` evidence, or selected row identity checks.
+- WinForms `dragList` primitive smoke is used as a substitute for WPF DataGrid
+  CR-001 acceptance.
 
 ## Verdict Template
 
@@ -155,6 +200,7 @@ Expected result:
 | Manual smoke surface inventory | WPF, WPF one-call, and Avalonia scenarios listed |  |  |
 | WPF one-call runtime smoke | One `run_runtime_smoke` plan returns PASS or an honest BLOCKED/FAIL with cleanup evidence |  |  |
 | Avalonia fixture compatibility | Fixture found; key cleanup succeeds; UIA gaps are bounded UNSUPPORTED/BLOCKED evidence |  |  |
+| WPF DataGrid drag/drop customer-mode gate | `docs/examples/runtime-smoke-v2-drag-drop-grid.json` returns PASS or an honest BLOCKED with route and viewport evidence requirements named |  |  |
 
 Overall verdict: `PRODUCT_WORKS` / `PARTIALLY_WORKS` / `BROKEN`
 

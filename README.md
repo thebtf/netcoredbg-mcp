@@ -366,6 +366,14 @@ briefly holds attributes or locks. Avalonia remains a first-class compatibility
 target: its manual fixture is expected to produce bounded `UNSUPPORTED` or
 `BLOCKED` evidence for UIA gaps instead of being omitted from release checks.
 
+For WPF DataGrid drag/drop and edge-scroll release proof, start from
+[`docs/examples/runtime-smoke-v2-drag-drop-grid.json`](docs/examples/runtime-smoke-v2-drag-drop-grid.json).
+The v2 example shows `ui.drag`, before/after `ui.grid.viewport` probes,
+selected payload identity checks, negative no-op expectations, and fail-closed
+`BLOCKED` behavior when real pointer route or viewport evidence is unavailable.
+WinForms `dragList` primitive smoke is not a substitute for WPF DataGrid CR-001
+acceptance.
+
 ## Edit-and-Continue
 
 `apply_code_change` applies supported source edits to a stopped .NET debug

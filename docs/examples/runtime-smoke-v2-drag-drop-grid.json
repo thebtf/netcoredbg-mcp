@@ -1,0 +1,165 @@
+{
+  "schema": "netcoredbg.runtime_smoke.v2",
+  "name": "Generic WPF DataGrid drag/drop edge-scroll protocol; BLOCKED when real pointer or viewport evidence is unavailable",
+  "budgets": {
+    "max_actions": 4,
+    "max_elapsed_seconds": 30
+  },
+  "cases": [
+    {
+      "id": "visible-row-drag-edge-scroll-reorder",
+      "description": "Drag a visible row toward the bottom viewport edge, hold long enough for auto-scroll, then drop into a new visible position.",
+      "notes": [
+        "Requires a WPF-capable UI backend that performs real pointer movement and returns backend-produced route_evidence.",
+        "Classify the run as BLOCKED, not PASS, if ui.drag route_evidence or ui.grid.viewport identity evidence is unavailable."
+      ],
+      "transitions": [
+        {
+          "action": {
+            "kind": "ui.drag",
+            "source": {
+              "selector": {
+                "automation_id": "DataGridUnderTest",
+                "control_type": "DataGrid"
+              },
+              "row_identity": "ROW-010"
+            },
+            "path": [
+              {
+                "relative_to": "source",
+                "x": 0.5,
+                "y": 0.5
+              },
+              {
+                "relative_to": "viewport",
+                "x": 0.5,
+                "y": 0.92,
+                "hold_ms": 750
+              },
+              {
+                "relative_to": "viewport",
+                "x": 0.5,
+                "y": 0.98,
+                "hold_ms": 1000
+              }
+            ],
+            "drop": {
+              "relative_to": "viewport",
+              "x": 0.5,
+              "y": 0.82
+            },
+            "identity": {
+              "column": "StableRowId"
+            },
+            "duration_ms": 1600,
+            "step_count": 8,
+            "expect": {
+              "selected_payload_preserved": true
+            }
+          },
+          "probes": [
+            {
+              "kind": "ui.grid.viewport",
+              "name": "drag_viewport",
+              "phase": "both",
+              "selector": {
+                "automation_id": "DataGridUnderTest",
+                "control_type": "DataGrid"
+              },
+              "identity": {
+                "column": "StableRowId"
+              },
+              "rows": {
+                "visible_only": true,
+                "max": 20
+              },
+              "expect": {
+                "viewport_moved": true,
+                "direction": "down",
+                "row_count_preserved": true,
+                "identity_order_preserved": false,
+                "selected_payload_preserved": true
+              }
+            }
+          ],
+          "settle": {
+            "idle_ms": 250
+          }
+        }
+      ]
+    },
+    {
+      "id": "negative-outside-drop-noop",
+      "description": "Move enough to exercise the drag primitive, release outside a valid row drop zone, and prove row identity order stays unchanged.",
+      "notes": [
+        "Requires cleanup evidence for pointer release and modifier release when observable.",
+        "Classify the run as BLOCKED, not PASS, if the backend cannot report no_op and cleanup evidence for negative gestures."
+      ],
+      "transitions": [
+        {
+          "action": {
+            "kind": "ui.drag",
+            "source": {
+              "selector": {
+                "automation_id": "DataGridUnderTest",
+                "control_type": "DataGrid"
+              },
+              "row_identity": "ROW-015"
+            },
+            "path": [
+              {
+                "relative_to": "source",
+                "x": 0.5,
+                "y": 0.5
+              },
+              {
+                "relative_to": "viewport",
+                "x": 0.98,
+                "y": 0.5
+              }
+            ],
+            "drop": {
+              "relative_to": "viewport",
+              "x": 0.98,
+              "y": 0.5
+            },
+            "identity": {
+              "column": "StableRowId"
+            },
+            "duration_ms": 700,
+            "step_count": 4,
+            "expect": {
+              "no_op": true,
+              "no_op_reason": "outside_drop_zone"
+            }
+          },
+          "probes": [
+            {
+              "kind": "ui.grid.viewport",
+              "name": "negative_viewport",
+              "phase": "both",
+              "selector": {
+                "automation_id": "DataGridUnderTest",
+                "control_type": "DataGrid"
+              },
+              "identity": {
+                "column": "StableRowId"
+              },
+              "rows": {
+                "visible_only": true,
+                "max": 20
+              },
+              "expect": {
+                "identity_order_preserved": true,
+                "row_count_preserved": true
+              }
+            }
+          ],
+          "settle": {
+            "idle_ms": 250
+          }
+        }
+      ]
+    }
+  ]
+}

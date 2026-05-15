@@ -11,6 +11,7 @@ Usage: python tests/smoke_test.py
 
 import asyncio
 import os
+import re
 import sys
 import traceback
 from typing import Any
@@ -3126,6 +3127,1303 @@ async def test_wpf_v2_state_oracle_runtime_smoke():
     )
 
 
+async def run_wpf_v2_visible_row_drag_runtime_smoke() -> dict[str, Any]:
+    from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner
+    from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
+    from netcoredbg_mcp.ui.backend import create_backend
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    if sys.platform != "win32":
+        return {
+            "status": "BLOCKED",
+            "reason": "WPF v2 visible-row drag smoke requires Windows UI automation",
+        }
+
+    m = SessionManager(project_path=BASE)
+    backend_holder: dict[str, object | None] = {"backend": None}
+    backend_holder["backend"] = create_backend(process_registry=m.process_registry)
+    if not isinstance(backend_holder["backend"], FlaUIBackend):
+        return {
+            "status": "BLOCKED",
+            "backend": type(backend_holder["backend"]).__name__,
+            "reason": "FlaUI bridge required for WPF v2 visible-row drag smoke",
+        }
+
+    async def ensure_ui_connected():
+        backend = backend_holder["backend"]
+        if backend is None:
+            backend = create_backend(process_registry=m.process_registry)
+            backend_holder["backend"] = backend
+        pid = m.state.process_id
+        if not pid:
+            raise RuntimeError("Process ID not available for WPF v2 visible-row drag smoke")
+        if getattr(backend, "process_id", None) != pid:
+            await backend.connect(pid)
+        return backend
+
+    plan = _v2_visible_row_drag_plan(
+        program=WPF_DLL,
+        build_project=os.path.join(
+            BASE,
+            "tests",
+            "fixtures",
+            "WpfSmokeApp",
+            "WpfSmokeApp.csproj",
+        ),
+    )
+
+    try:
+        result = await RuntimeSmokeRunner(
+            m,
+            service_adapters=ui_operation_adapters(ensure_ui_connected, session=m),
+        ).run(plan)
+        return _v2_visible_row_drag_summary(result)
+    finally:
+        if backend_holder["backend"] is not None:
+            try:
+                await backend_holder["backend"].disconnect()
+            except Exception as exc:
+                print(f"  [DEBUG] WPF v2 visible-row drag backend.disconnect() failed: {exc}")
+        await m.stop()
+
+
+def _v2_visible_row_drag_plan(
+    *,
+    program: str,
+    build_project: str,
+) -> dict[str, Any]:
+    selector = {"automation_id": "dataGrid"}
+    return {
+        "schema": "netcoredbg.runtime_smoke.v2",
+        "name": "wpf v2 visible-row drag reorder",
+        "baseline": {
+            "steps": [
+                {
+                    "id": "launch_fixture",
+                    "kind": "isolated_profile.launch",
+                    "launch": {
+                        "program": program,
+                        "cwd": os.path.dirname(program),
+                        "pre_build": True,
+                        "build_project": build_project,
+                        "build_configuration": "Debug",
+                    },
+                }
+            ]
+        },
+        "cases": [
+            {
+                "id": "wpf_visible_row_drag_reorder",
+                "transitions": [
+                    {
+                        "id": "drag_row_1_to_row_3",
+                        "action": {
+                            "kind": "ui.drag",
+                            "source": {
+                                "selector": selector,
+                                "row_index": 1,
+                            },
+                            "path": [
+                                {"relative_to": "source", "x": 0.5, "y": 0.5},
+                                {"relative_to": "drop", "x": 0.5, "y": 0.5},
+                            ],
+                            "drop": {
+                                "selector": selector,
+                                "row_index": 3,
+                            },
+                            "duration_ms": 450,
+                            "expect": {
+                                "row_count_preserved": True,
+                                "identity_set_preserved": True,
+                                "single_move": {"source_index": 1, "target_index": 3},
+                            },
+                        },
+                        "settle": {"idle_ms": 500},
+                        "probes": [
+                            {
+                                "kind": "ui.grid",
+                                "name": "cue_order",
+                                "selector": selector,
+                                "columns": ["Start", "End", "Character", "Phrase"],
+                                "phases": ["before", "after"],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+        "cleanup": {
+            "steps": [
+                {"kind": "process.registry.assert_empty"},
+                {"kind": "debug.stop"},
+            ]
+        },
+    }
+
+
+def _v2_visible_row_drag_summary(result: dict[str, Any]) -> dict[str, Any]:
+    transition = _first_v2_transition(result)
+    action = _first_transition_action(transition)
+    before_rows = _transition_grid_rows(transition, "before")
+    after_rows = _transition_grid_rows(transition, "after")
+    before_refs = _row_identity_refs(before_rows)
+    after_refs = _row_identity_refs(after_rows)
+    expected_after_refs = _moved_refs(before_refs, source_index=1, target_index=3)
+    route_evidence = dict(action.get("route_evidence") or {}) if action else {}
+    row_count_preserved = len(before_refs) == len(after_refs) and bool(before_refs)
+    identity_set_preserved = sorted(before_refs) == sorted(after_refs) and bool(before_refs)
+    order_changed_once = after_refs == expected_after_refs and after_refs != before_refs
+
+    compact = {
+        "status": result.get("status"),
+        "reason": result.get("reason"),
+        "backend": action.get("backend") if action else None,
+        "source_bounds": route_evidence.get("source_bounds"),
+        "target_bounds": route_evidence.get("target_bounds"),
+        "move_points": route_evidence.get("move_points"),
+        "final_pointer": route_evidence.get("final_pointer"),
+        "before_identity_refs": before_refs,
+        "after_identity_refs": after_refs,
+        "row_count_preserved": row_count_preserved,
+        "identity_set_preserved": identity_set_preserved,
+        "order_changed_once": order_changed_once,
+        "cleanup": result.get("cleanup"),
+        "blocked": result.get("blocked"),
+    }
+    if result.get("status") == "BLOCKED":
+        compact["status"] = "BLOCKED"
+        return compact
+    compact["status"] = (
+        "PASS"
+        if result.get("status") == "PASS"
+        and row_count_preserved
+        and identity_set_preserved
+        and order_changed_once
+        and route_evidence.get("source_bounds")
+        and route_evidence.get("final_pointer")
+        else "FAIL"
+    )
+    return compact
+
+
+async def run_wpf_v2_edge_scroll_drag_runtime_smoke() -> dict[str, Any]:
+    from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner
+    from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
+    from netcoredbg_mcp.ui.backend import create_backend
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    if sys.platform != "win32":
+        return {
+            "status": "BLOCKED",
+            "reason": "WPF v2 edge-scroll drag smoke requires Windows UI automation",
+        }
+
+    m = SessionManager(project_path=BASE)
+    backend_holder: dict[str, object | None] = {"backend": None}
+    backend_holder["backend"] = create_backend(process_registry=m.process_registry)
+    if not isinstance(backend_holder["backend"], FlaUIBackend):
+        return {
+            "status": "BLOCKED",
+            "backend": type(backend_holder["backend"]).__name__,
+            "reason": "FlaUI bridge required for WPF v2 edge-scroll drag smoke",
+            "accepted": {"backend": "FlaUI drag_path"},
+            "next_step": "Build the FlaUI bridge and run on a Windows desktop session.",
+        }
+
+    async def ensure_ui_connected():
+        backend = backend_holder["backend"]
+        if backend is None:
+            backend = create_backend(process_registry=m.process_registry)
+            backend_holder["backend"] = backend
+        pid = m.state.process_id
+        if not pid:
+            raise RuntimeError("Process ID not available for WPF v2 edge-scroll drag smoke")
+        if getattr(backend, "process_id", None) != pid:
+            await backend.connect(pid)
+        return backend
+
+    plan = _v2_edge_scroll_drag_plan(
+        program=WPF_DLL,
+        build_project=os.path.join(
+            BASE,
+            "tests",
+            "fixtures",
+            "WpfSmokeApp",
+            "WpfSmokeApp.csproj",
+        ),
+    )
+
+    try:
+        result = await RuntimeSmokeRunner(
+            m,
+            service_adapters=ui_operation_adapters(ensure_ui_connected, session=m),
+        ).run(plan)
+        return _v2_edge_scroll_drag_summary(result)
+    finally:
+        if backend_holder["backend"] is not None:
+            try:
+                await backend_holder["backend"].disconnect()
+            except Exception as exc:
+                print(f"  [DEBUG] WPF v2 edge-scroll drag backend.disconnect() failed: {exc}")
+        await m.stop()
+
+
+def _v2_edge_scroll_drag_plan(
+    *,
+    program: str,
+    build_project: str,
+) -> dict[str, Any]:
+    selector = {"automation_id": "dataGrid"}
+    status_selector = {"automation_id": "txtOutput"}
+    return {
+        "schema": "netcoredbg.runtime_smoke.v2",
+        "name": "wpf v2 edge-scroll drag reorder",
+        "baseline": {
+            "steps": [
+                {
+                    "id": "launch_fixture",
+                    "kind": "isolated_profile.launch",
+                    "launch": {
+                        "program": program,
+                        "cwd": os.path.dirname(program),
+                        "pre_build": True,
+                        "build_project": build_project,
+                        "build_configuration": "Debug",
+                    },
+                }
+            ]
+        },
+        "cases": [
+            {
+                "id": "wpf_edge_scroll_drag_reorder",
+                "transitions": [
+                    _v2_edge_scroll_transition(
+                        transition_id="edge_scroll_down",
+                        source={"selector": selector, "row_index": 1},
+                        hold_y=0.96,
+                        drop_y=0.90,
+                        hold_ms=7000,
+                        viewport_probe_name="edge_down_viewport",
+                        status_probe_name="edge_down_status",
+                        metric_probe_name="edge_down_process",
+                        selector=selector,
+                        status_selector=status_selector,
+                    ),
+                    _v2_edge_scroll_transition(
+                        transition_id="edge_scroll_up",
+                        source={"selector": selector, "row_identity": "Fixture cue two"},
+                        hold_y=0.25,
+                        drop_y=0.35,
+                        hold_ms=3000,
+                        viewport_probe_name="edge_up_viewport",
+                        status_probe_name="edge_up_status",
+                        metric_probe_name="edge_up_process",
+                        selector=selector,
+                        status_selector=status_selector,
+                    ),
+                ],
+            }
+        ],
+        "cleanup": {
+            "steps": [
+                {"kind": "process.registry.assert_empty"},
+                {"kind": "debug.stop"},
+            ]
+        },
+    }
+
+
+def _v2_edge_scroll_transition(
+    *,
+    transition_id: str,
+    source: dict[str, Any],
+    hold_y: float,
+    drop_y: float,
+    hold_ms: int,
+    viewport_probe_name: str,
+    status_probe_name: str,
+    metric_probe_name: str,
+    selector: dict[str, Any],
+    status_selector: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "id": transition_id,
+        "action": {
+            "kind": "ui.drag",
+            "source": source,
+            "path": [
+                {"relative_to": "source", "x": 0.5, "y": 0.5},
+                {
+                    "relative_to": "viewport",
+                    "selector": selector,
+                    "x": 0.5,
+                    "y": hold_y,
+                    "hold_ms": hold_ms,
+                },
+                {
+                    "relative_to": "viewport",
+                    "selector": selector,
+                    "x": 0.5,
+                    "y": drop_y,
+                },
+            ],
+            "drop": {
+                "relative_to": "viewport",
+                "selector": selector,
+                "x": 0.5,
+                "y": drop_y,
+            },
+            "duration_ms": 900,
+            "expect": {
+                "row_count_preserved": True,
+                "identity_set_preserved": True,
+            },
+        },
+        "settle": {"idle_ms": 700},
+        "probes": [
+            {
+                "kind": "ui.grid.viewport",
+                "name": viewport_probe_name,
+                "selector": selector,
+                "identity": {"column": "Phrase"},
+                "rows": {"visible_only": True, "max": 8},
+                "expect": {
+                    "row_count_preserved": True,
+                },
+            },
+            {
+                "kind": "ui.property",
+                "name": status_probe_name,
+                "selector": status_selector,
+                "property": "Text",
+                "phase": "after",
+            },
+            {
+                "kind": "process.metric",
+                "name": metric_probe_name,
+            },
+        ],
+    }
+
+
+def _v2_edge_scroll_drag_summary(result: dict[str, Any]) -> dict[str, Any]:
+    down = _v2_transition(result, 0)
+    up = _v2_transition(result, 1)
+    down_viewport = _transition_probe_result(
+        down,
+        "after",
+        "ui.grid.viewport.edge_down_viewport",
+    )
+    up_viewport = _transition_probe_result(
+        up,
+        "after",
+        "ui.grid.viewport.edge_up_viewport",
+    )
+    down_status = _parse_drag_reorder_status(
+        _transition_probe_value(down, "after", "ui.property.edge_down_status")
+    )
+    up_status = _parse_drag_reorder_status(
+        _transition_probe_value(up, "after", "ui.property.edge_up_status")
+    )
+    initial_order = _wpf_fixture_cue_order()
+    down_expected = _moved_refs_by_identity(
+        initial_order,
+        source=down_status.get("source_identity"),
+        target=down_status.get("target_identity"),
+    )
+    up_expected = _moved_refs_by_identity(
+        down_status.get("order") or [],
+        source=up_status.get("source_identity"),
+        target=up_status.get("target_identity"),
+    )
+    down_comparison = dict(down_viewport.get("comparison") or {})
+    up_comparison = dict(up_viewport.get("comparison") or {})
+    process_metrics = {
+        "down": _transition_probe_value(down, "after", "process.metric.edge_down_process"),
+        "up": _transition_probe_value(up, "after", "process.metric.edge_up_process"),
+    }
+    down_route = _first_transition_action(down).get("route_evidence", {})
+    up_route = _first_transition_action(up).get("route_evidence", {})
+    down_edge_scroll_matches = down_status.get("edge_scroll_direction") == "down"
+    up_edge_scroll_matches = up_status.get("edge_scroll_direction") == "up"
+    down_final_order_matches = down_status.get("order") == down_expected
+    up_final_order_matches = up_status.get("order") == up_expected
+    compact = {
+        "status": result.get("status"),
+        "reason": result.get("reason"),
+        "down": {
+            "viewport": down_comparison,
+            "status": down_status,
+            "edge_scroll_matches": down_edge_scroll_matches,
+            "final_order_matches": down_final_order_matches,
+            "hold_points": down_route.get("hold_points"),
+        },
+        "up": {
+            "viewport": up_comparison,
+            "status": up_status,
+            "edge_scroll_matches": up_edge_scroll_matches,
+            "final_order_matches": up_final_order_matches,
+            "hold_points": up_route.get("hold_points"),
+        },
+        "process_metrics": process_metrics,
+        "cleanup": result.get("cleanup"),
+        "blocked": result.get("blocked"),
+    }
+    if result.get("status") == "BLOCKED":
+        compact["status"] = "BLOCKED"
+        return compact
+    compact["status"] = (
+        "PASS"
+        if result.get("status") == "PASS"
+        and down_edge_scroll_matches
+        and up_edge_scroll_matches
+        and down_final_order_matches
+        and up_final_order_matches
+        and bool(down_route.get("hold_points"))
+        and bool(up_route.get("hold_points"))
+        and isinstance(process_metrics["down"], dict)
+        and isinstance(process_metrics["up"], dict)
+        else "FAIL"
+    )
+    return compact
+
+
+async def run_wpf_v2_multi_row_drag_runtime_smoke() -> dict[str, Any]:
+    results: dict[str, Any] = {}
+    for mode, indices, source_identity, target_index in (
+        ("contiguous", [1, 2], "Fixture cue two", 5),
+        ("non_contiguous", [1, 4], "Fixture cue two", 5),
+    ):
+        results[mode] = await _run_wpf_v2_multi_row_drag_case(
+            mode=mode,
+            indices=indices,
+            source_identity=source_identity,
+            target_index=target_index,
+        )
+
+    statuses = [
+        value.get("status")
+        for value in results.values()
+        if isinstance(value, dict)
+    ]
+    status = (
+        "BLOCKED"
+        if any(item == "BLOCKED" for item in statuses)
+        else "PASS"
+        if statuses and all(item == "PASS" for item in statuses)
+        else "FAIL"
+    )
+    return {"status": status, "cases": results}
+
+
+async def _run_wpf_v2_multi_row_drag_case(
+    *,
+    mode: str,
+    indices: list[int],
+    source_identity: str,
+    target_index: int,
+) -> dict[str, Any]:
+    from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner
+    from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
+    from netcoredbg_mcp.ui.backend import create_backend
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    if sys.platform != "win32":
+        return {
+            "status": "BLOCKED",
+            "reason": "WPF v2 multi-row drag smoke requires Windows UI automation",
+        }
+
+    m = SessionManager(project_path=BASE)
+    backend_holder: dict[str, object | None] = {"backend": None}
+    backend_holder["backend"] = create_backend(process_registry=m.process_registry)
+    if not isinstance(backend_holder["backend"], FlaUIBackend):
+        return {
+            "status": "BLOCKED",
+            "backend": type(backend_holder["backend"]).__name__,
+            "reason": "FlaUI bridge required for WPF v2 multi-row drag smoke",
+            "accepted": {"backend": "FlaUI multi_select and drag_path"},
+            "next_step": "Build the FlaUI bridge and run on a Windows desktop session.",
+        }
+
+    async def ensure_ui_connected():
+        backend = backend_holder["backend"]
+        if backend is None:
+            backend = create_backend(process_registry=m.process_registry)
+            backend_holder["backend"] = backend
+        pid = m.state.process_id
+        if not pid:
+            raise RuntimeError("Process ID not available for WPF v2 multi-row drag smoke")
+        if getattr(backend, "process_id", None) != pid:
+            await backend.connect(pid)
+        return backend
+
+    plan = _v2_multi_row_drag_plan(
+        program=WPF_DLL,
+        build_project=os.path.join(
+            BASE,
+            "tests",
+            "fixtures",
+            "WpfSmokeApp",
+            "WpfSmokeApp.csproj",
+        ),
+        mode=mode,
+        indices=indices,
+        source_identity=source_identity,
+        target_index=target_index,
+    )
+
+    try:
+        result = await RuntimeSmokeRunner(
+            m,
+            service_adapters=ui_operation_adapters(ensure_ui_connected, session=m),
+        ).run(plan)
+        return _v2_multi_row_drag_summary(
+            result,
+            mode=mode,
+            expected_count=len(indices),
+        )
+    finally:
+        if backend_holder["backend"] is not None:
+            try:
+                await backend_holder["backend"].disconnect()
+            except Exception as exc:
+                print(f"  [DEBUG] WPF v2 multi-row drag backend.disconnect() failed: {exc}")
+        await m.stop()
+
+
+def _v2_multi_row_drag_plan(
+    *,
+    program: str,
+    build_project: str,
+    mode: str,
+    indices: list[int],
+    source_identity: str,
+    target_index: int,
+) -> dict[str, Any]:
+    selector = {"automation_id": "dataGrid"}
+    status_selector = {"automation_id": "txtOutput"}
+    return {
+        "schema": "netcoredbg.runtime_smoke.v2",
+        "name": f"wpf v2 {mode} selected-payload drag reorder",
+        "baseline": {
+            "steps": [
+                {
+                    "id": "launch_fixture",
+                    "kind": "isolated_profile.launch",
+                    "launch": {
+                        "program": program,
+                        "cwd": os.path.dirname(program),
+                        "pre_build": True,
+                        "build_project": build_project,
+                        "build_configuration": "Debug",
+                    },
+                }
+            ]
+        },
+        "cases": [
+            {
+                "id": f"wpf_{mode}_selected_payload_drag_reorder",
+                "transitions": [
+                    {
+                        "id": "select_payload",
+                        "action": {
+                            "kind": "ui.grid.select",
+                            "selector": selector,
+                            "indices": indices,
+                        },
+                        "settle": {"idle_ms": 300},
+                        "probes": [
+                            {
+                                "kind": "ui.grid.viewport",
+                                "name": "selected_payload_setup",
+                                "selector": selector,
+                                "identity": {"column": "Phrase"},
+                                "rows": {"visible_only": True, "max": 8},
+                                "phase": "after",
+                            }
+                        ],
+                    },
+                    {
+                        "id": "drag_selected_payload",
+                        "action": {
+                            "kind": "ui.drag",
+                            "source": {
+                                "selector": selector,
+                                "row_identity": source_identity,
+                            },
+                            "path": [
+                                {"relative_to": "source", "x": 0.5, "y": 0.5},
+                                {"relative_to": "drop", "x": 0.5, "y": 0.5},
+                            ],
+                            "drop": {
+                                "selector": selector,
+                                "row_index": target_index,
+                            },
+                            "duration_ms": 650,
+                            "expect": {
+                                "row_count_preserved": True,
+                                "identity_set_preserved": True,
+                                "selected_payload_preserved": True,
+                            },
+                        },
+                        "settle": {"idle_ms": 700},
+                        "probes": [
+                            {
+                                "kind": "ui.grid.viewport",
+                                "name": "selected_payload_viewport",
+                                "selector": selector,
+                                "identity": {"column": "Phrase"},
+                                "rows": {"visible_only": True, "max": 8},
+                                "expect": {
+                                    "selected_payload_preserved": True,
+                                    "row_count_preserved": True,
+                                },
+                            },
+                            {
+                                "kind": "ui.property",
+                                "name": "selected_payload_status",
+                                "selector": status_selector,
+                                "property": "Text",
+                                "phase": "after",
+                            },
+                        ],
+                    },
+                ],
+            }
+        ],
+        "cleanup": {
+            "steps": [
+                {"kind": "process.registry.assert_empty"},
+                {"kind": "debug.stop"},
+            ]
+        },
+    }
+
+
+def _v2_multi_row_drag_summary(
+    result: dict[str, Any],
+    *,
+    mode: str,
+    expected_count: int,
+) -> dict[str, Any]:
+    drag_transition = _v2_transition(result, 1)
+    action = _first_transition_action(drag_transition)
+    selected_payload = dict(action.get("selected_payload") or {})
+    status = _parse_drag_reorder_status(
+        _transition_probe_value(
+            drag_transition,
+            "after",
+            "ui.property.selected_payload_status",
+        )
+    )
+    viewport = _transition_probe_result(
+        drag_transition,
+        "after",
+        "ui.grid.viewport.selected_payload_viewport",
+    )
+    comparison = dict(viewport.get("comparison") or {})
+    before = selected_payload.get("before") or status.get("selected_payload_before") or []
+    after = selected_payload.get("after") or status.get("selected_payload_after") or []
+    order = status.get("order") or []
+    compact = {
+        "status": result.get("status"),
+        "reason": result.get("reason"),
+        "mode": mode,
+        "selected_payload": selected_payload,
+        "status_text": status,
+        "viewport": comparison,
+        "selected_before": before,
+        "selected_after": after,
+        "selected_count_matches": len(before) == expected_count and len(after) == expected_count,
+        "selected_payload_preserved": before == after and len(set(after)) == len(after),
+        "selected_payload_group_visible": _payload_group_visible(order, after),
+        "cleanup": result.get("cleanup"),
+        "blocked": result.get("blocked"),
+    }
+    if result.get("status") == "BLOCKED":
+        compact["status"] = "BLOCKED"
+        return compact
+    compact["status"] = (
+        "PASS"
+        if result.get("status") == "PASS"
+        and compact["selected_count_matches"]
+        and compact["selected_payload_preserved"]
+        and compact["selected_payload_group_visible"]
+        and comparison.get("selected_payload_preserved") is True
+        else "FAIL"
+    )
+    return compact
+
+
+async def run_wpf_v2_negative_drag_runtime_smoke() -> dict[str, Any]:
+    from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner
+    from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
+    from netcoredbg_mcp.ui.backend import create_backend
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    if sys.platform != "win32":
+        return {
+            "status": "BLOCKED",
+            "reason": "WPF v2 negative drag smoke requires Windows UI automation",
+        }
+
+    m = SessionManager(project_path=BASE)
+    backend_holder: dict[str, object | None] = {"backend": None}
+    backend_holder["backend"] = create_backend(process_registry=m.process_registry)
+    if not isinstance(backend_holder["backend"], FlaUIBackend):
+        return {
+            "status": "BLOCKED",
+            "backend": type(backend_holder["backend"]).__name__,
+            "reason": "FlaUI bridge required for WPF v2 negative drag smoke",
+            "accepted": {"backend": "FlaUI drag_path and viewport evidence"},
+            "next_step": "Build the FlaUI bridge and run on a Windows desktop session.",
+        }
+
+    async def ensure_ui_connected():
+        backend = backend_holder["backend"]
+        if backend is None:
+            backend = create_backend(process_registry=m.process_registry)
+            backend_holder["backend"] = backend
+        pid = m.state.process_id
+        if not pid:
+            raise RuntimeError("Process ID not available for WPF v2 negative drag smoke")
+        if getattr(backend, "process_id", None) != pid:
+            await backend.connect(pid)
+        return backend
+
+    plan = _v2_negative_drag_plan(
+        program=WPF_DLL,
+        build_project=os.path.join(
+            BASE,
+            "tests",
+            "fixtures",
+            "WpfSmokeApp",
+            "WpfSmokeApp.csproj",
+        ),
+    )
+
+    try:
+        result = await RuntimeSmokeRunner(
+            m,
+            service_adapters=ui_operation_adapters(ensure_ui_connected, session=m),
+        ).run(plan)
+        return _v2_negative_drag_summary(result)
+    finally:
+        if backend_holder["backend"] is not None:
+            try:
+                await backend_holder["backend"].disconnect()
+            except Exception as exc:
+                print(f"  [DEBUG] WPF v2 negative drag backend.disconnect() failed: {exc}")
+        await m.stop()
+
+
+def _v2_negative_drag_plan(
+    *,
+    program: str,
+    build_project: str,
+) -> dict[str, Any]:
+    selector = {"automation_id": "dataGrid"}
+    return {
+        "schema": "netcoredbg.runtime_smoke.v2",
+        "name": "wpf v2 negative drag no-op safety",
+        "baseline": {
+            "steps": [
+                {
+                    "id": "launch_fixture",
+                    "kind": "isolated_profile.launch",
+                    "launch": {
+                        "program": program,
+                        "cwd": os.path.dirname(program),
+                        "pre_build": True,
+                        "build_project": build_project,
+                        "build_configuration": "Debug",
+                    },
+                }
+            ]
+        },
+        "cases": [
+            {
+                "id": "wpf_negative_drag_noop_safety",
+                "transitions": [
+                    _v2_negative_drag_transition(
+                        transition_id="small_movement_noop",
+                        source={"selector": selector, "row_index": 1},
+                        path=[
+                            {"relative_to": "source", "x": 0.5, "y": 0.5},
+                            {
+                                "relative_to": "source",
+                                "x": 0.52,
+                                "y": 0.5,
+                            },
+                            {
+                                "relative_to": "source",
+                                "x": 0.5,
+                                "y": 0.5,
+                            },
+                        ],
+                        drop={
+                            "selector": selector,
+                            "row_index": 1,
+                        },
+                        no_op_reason="small_movement",
+                        viewport_probe_name="small_movement_viewport",
+                        selector=selector,
+                        modifiers=["shift"],
+                    ),
+                    _v2_negative_drag_transition(
+                        transition_id="cancel_no_drop",
+                        source={"selector": selector, "row_index": 1},
+                        path=[
+                            {"relative_to": "source", "x": 0.5, "y": 0.5},
+                            {
+                                "relative_to": "drop",
+                                "x": 0.5,
+                                "y": 0.5,
+                            },
+                            {
+                                "relative_to": "source",
+                                "x": 0.5,
+                                "y": 0.5,
+                            },
+                        ],
+                        drop={
+                            "selector": selector,
+                            "row_index": 2,
+                        },
+                        no_op_reason="cancelled",
+                        viewport_probe_name="cancel_no_drop_viewport",
+                        selector=selector,
+                        cancel={"key": "escape"},
+                        modifiers=[],
+                    ),
+                ],
+            }
+        ],
+        "cleanup": {
+            "steps": [
+                {"kind": "process.registry.assert_empty"},
+                {"kind": "debug.stop"},
+            ]
+        },
+    }
+
+
+def _v2_negative_drag_transition(
+    *,
+    transition_id: str,
+    source: dict[str, Any],
+    path: list[dict[str, Any]],
+    drop: dict[str, Any],
+    no_op_reason: str,
+    viewport_probe_name: str,
+    selector: dict[str, Any],
+    modifiers: list[str],
+    cancel: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": transition_id,
+        "action": {
+            "kind": "ui.drag",
+            "source": source,
+            "path": path,
+            "drop": drop,
+            "duration_ms": 320,
+            "modifiers": modifiers,
+            "cancel": cancel or {},
+            "expect": {
+                "no_op": True,
+                "no_op_reason": no_op_reason,
+            },
+        },
+        "settle": {"idle_ms": 500},
+        "probes": [
+            {
+                "kind": "ui.grid.viewport",
+                "name": viewport_probe_name,
+                "selector": selector,
+                "identity": {"column": "Phrase"},
+                "rows": {"visible_only": True, "max": 8},
+                "expect": {
+                    "identity_order_preserved": True,
+                    "row_count_preserved": True,
+                },
+            }
+        ],
+    }
+
+
+def _v2_negative_drag_summary(result: dict[str, Any]) -> dict[str, Any]:
+    cases = {
+        "small_movement": _v2_negative_drag_case_summary(
+            result,
+            transition_index=0,
+            probe_path="ui.grid.viewport.small_movement_viewport",
+            expected_reason="small_movement",
+        ),
+        "cancel_no_drop": _v2_negative_drag_case_summary(
+            result,
+            transition_index=1,
+            probe_path="ui.grid.viewport.cancel_no_drop_viewport",
+            expected_reason="cancelled",
+        ),
+    }
+    statuses = [case.get("status") for case in cases.values()]
+    status = (
+        "BLOCKED"
+        if result.get("status") == "BLOCKED" or any(item == "BLOCKED" for item in statuses)
+        else "PASS"
+        if result.get("status") == "PASS" and all(item == "PASS" for item in statuses)
+        else "FAIL"
+    )
+    return {
+        "status": status,
+        "reason": result.get("reason"),
+        "cases": cases,
+        "blocked": result.get("blocked"),
+    }
+
+
+def _v2_negative_drag_case_summary(
+    result: dict[str, Any],
+    *,
+    transition_index: int,
+    probe_path: str,
+    expected_reason: str,
+) -> dict[str, Any]:
+    transition = _v2_transition(result, transition_index)
+    action = _first_transition_action(transition)
+    no_op = dict(action.get("no_op") or {})
+    cleanup = dict(action.get("cleanup") or {})
+    viewport = _transition_probe_result(transition, "after", probe_path)
+    comparison = dict(viewport.get("comparison") or {})
+    order_preserved = (
+        comparison.get("identity_order_preserved") is True
+        and comparison.get("row_count_preserved") is True
+    )
+    cleanup_observed = bool(cleanup.get("modifier_cleanup")) and bool(
+        cleanup.get("pointer_cleanup")
+    )
+    status = (
+        "PASS"
+        if action.get("status") == "PASS"
+        and no_op.get("expected") is True
+        and no_op.get("reason") == expected_reason
+        and order_preserved
+        and cleanup_observed
+        else action.get("status")
+        if action.get("status") == "BLOCKED"
+        else "FAIL"
+    )
+    return {
+        "status": status,
+        "action_status": action.get("status"),
+        "no_op": no_op,
+        "cleanup": cleanup,
+        "viewport": comparison,
+        "order_preserved": order_preserved,
+        "cleanup_observed": cleanup_observed,
+    }
+
+
+def _payload_group_visible(order: list[str], payload: list[str]) -> bool:
+    if not order or not payload:
+        return False
+    for index in range(0, len(order) - len(payload) + 1):
+        if order[index : index + len(payload)] == payload:
+            return True
+    return False
+
+
+def _first_v2_transition(result: dict[str, Any]) -> dict[str, Any]:
+    cases = result.get("cases")
+    if not isinstance(cases, list) or not cases:
+        return {}
+    transitions = cases[0].get("transitions") if isinstance(cases[0], dict) else None
+    if not isinstance(transitions, list) or not transitions:
+        return {}
+    return transitions[0] if isinstance(transitions[0], dict) else {}
+
+
+def _v2_transition(result: dict[str, Any], index: int) -> dict[str, Any]:
+    cases = result.get("cases")
+    if not isinstance(cases, list) or not cases:
+        return {}
+    transitions = cases[0].get("transitions") if isinstance(cases[0], dict) else None
+    if not isinstance(transitions, list) or index >= len(transitions):
+        return {}
+    return transitions[index] if isinstance(transitions[index], dict) else {}
+
+
+def _first_transition_action(transition: dict[str, Any]) -> dict[str, Any]:
+    actions = transition.get("actions")
+    if not isinstance(actions, list) or not actions:
+        return {}
+    return actions[0] if isinstance(actions[0], dict) else {}
+
+
+def _transition_probe_result(
+    transition: dict[str, Any],
+    phase: str,
+    path: str,
+) -> dict[str, Any]:
+    probes_by_phase = transition.get("probes")
+    if not isinstance(probes_by_phase, dict):
+        return {}
+    probes = probes_by_phase.get(phase)
+    if not isinstance(probes, list):
+        return {}
+    for probe in probes:
+        if isinstance(probe, dict) and probe.get("path") == path:
+            return probe
+    return {}
+
+
+def _transition_probe_value(transition: dict[str, Any], phase: str, path: str) -> Any:
+    values = transition.get(phase)
+    if not isinstance(values, dict):
+        return None
+    return values.get(path)
+
+
+def _transition_grid_rows(transition: dict[str, Any], phase: str) -> list[dict[str, Any]]:
+    phase_values = transition.get(phase)
+    if not isinstance(phase_values, dict):
+        return []
+    rows = phase_values.get("ui.grid.cue_order")
+    if not isinstance(rows, list):
+        return []
+    return [dict(row) for row in rows if isinstance(row, dict)]
+
+
+def _row_identity_refs(rows: list[dict[str, Any]]) -> list[str]:
+    refs: list[str] = []
+    for row in rows:
+        cells = row.get("cells")
+        if isinstance(cells, dict) and cells.get("Phrase"):
+            refs.append(str(cells["Phrase"]))
+            continue
+        if row.get("automation_id"):
+            refs.append(str(row["automation_id"]))
+            continue
+        refs.append(f"row:{row.get('index')}")
+    return refs
+
+
+def _moved_refs(refs: list[str], *, source_index: int, target_index: int) -> list[str]:
+    if source_index >= len(refs) or target_index >= len(refs):
+        return []
+    moved = list(refs)
+    item = moved.pop(source_index)
+    moved.insert(target_index, item)
+    return moved
+
+
+def _moved_refs_by_identity(
+    refs: list[str],
+    *,
+    source: Any,
+    target: Any,
+) -> list[str]:
+    if not source or not target or source not in refs or target not in refs:
+        return []
+    moved = list(refs)
+    source_index = moved.index(str(source))
+    target_index = moved.index(str(target))
+    item = moved.pop(source_index)
+    moved.insert(target_index, item)
+    return moved
+
+
+def _parse_drag_reorder_status(value: Any) -> dict[str, Any]:
+    text = str(value or "")
+    match = re.search(
+        r"sourceIdentity=(.*?) targetIdentity=(.*?) "
+        r"(?:selectedPayloadMode=(.*?) selectedPayloadBefore=(.*?) "
+        r"selectedPayloadAfter=(.*?) )?"
+        r"edgeScrollDirection=(.*?) "
+        r"edgeFirstVisible=(-?\d+) edgeLastVisible=(-?\d+) orderFingerprint=(.*)$",
+        text,
+    )
+    if not match:
+        return {"raw": text}
+    selected_before = match.group(4)
+    selected_after = match.group(5)
+    return {
+        "raw": text,
+        "source_identity": match.group(1),
+        "target_identity": match.group(2),
+        "selected_payload_mode": match.group(3),
+        "selected_payload_before": selected_before.split("|") if selected_before else [],
+        "selected_payload_after": selected_after.split("|") if selected_after else [],
+        "edge_scroll_direction": match.group(6),
+        "edge_first_visible": int(match.group(7)),
+        "edge_last_visible": int(match.group(8)),
+        "order": match.group(9).split(">") if match.group(9) else [],
+    }
+
+
+def _wpf_fixture_cue_order() -> list[str]:
+    return [
+        "Fixture cue one",
+        "Fixture cue two",
+        "Fixture cue three",
+        "Fixture cue four",
+        "Fixture cue five",
+        "Fixture cue six",
+        "Fixture cue seven",
+        "Fixture cue eight",
+        "Fixture cue nine",
+        "Fixture cue ten",
+        "Fixture cue eleven",
+        "Fixture cue twelve",
+        "Fixture cue thirteen",
+        "Fixture cue fourteen",
+        "Fixture cue fifteen",
+        "Fixture cue sixteen",
+        "Fixture cue seventeen",
+        "Fixture cue eighteen",
+        "Fixture cue nineteen",
+        "Fixture cue twenty",
+        "Fixture cue twenty-one",
+        "Fixture cue twenty-two",
+        "Fixture cue twenty-three",
+        "Fixture cue twenty-four",
+    ]
+
+
+async def test_wpf_v2_visible_row_drag_runtime_smoke():
+    print("\nWPF V2 VISIBLE-ROW DRAG RUNTIME SMOKE")
+    evidence = await run_wpf_v2_visible_row_drag_runtime_smoke()
+    print(f"  evidence: {evidence}")
+    if evidence.get("status") == "BLOCKED":
+        check("WPF v2 visible-row drag reports actionable BLOCKED", True, str(evidence))
+        return
+    check(
+        "WPF v2 visible-row drag returned PASS",
+        evidence.get("status") == "PASS",
+        str(evidence),
+    )
+    check(
+        "WPF v2 visible-row drag preserved row count and identities",
+        bool(evidence.get("row_count_preserved"))
+        and bool(evidence.get("identity_set_preserved")),
+        str(evidence),
+    )
+    check(
+        "WPF v2 visible-row drag route evidence is compact and complete",
+        bool(evidence.get("backend"))
+        and bool(evidence.get("source_bounds"))
+        and bool(evidence.get("move_points"))
+        and bool(evidence.get("final_pointer")),
+        str(evidence),
+    )
+
+
+async def test_wpf_v2_edge_scroll_drag_runtime_smoke():
+    print("\nWPF V2 EDGE-SCROLL DRAG RUNTIME SMOKE")
+    evidence = await run_wpf_v2_edge_scroll_drag_runtime_smoke()
+    print(f"  evidence: {evidence}")
+    if evidence.get("status") == "BLOCKED":
+        check("WPF v2 edge-scroll drag reports actionable BLOCKED", True, str(evidence))
+        return
+    check(
+        "WPF v2 edge-scroll drag returned PASS",
+        evidence.get("status") == "PASS",
+        str(evidence),
+    )
+    check(
+        "WPF v2 edge-scroll drag proved down and up viewport movement",
+        bool(evidence.get("down", {}).get("edge_scroll_matches"))
+        and bool(evidence.get("up", {}).get("edge_scroll_matches")),
+        str(evidence),
+    )
+    check(
+        "WPF v2 edge-scroll drag preserved final order expectations",
+        bool(evidence.get("down", {}).get("final_order_matches"))
+        and bool(evidence.get("up", {}).get("final_order_matches")),
+        str(evidence),
+    )
+    check(
+        "WPF v2 edge-scroll drag includes path holds and process metrics",
+        bool(evidence.get("down", {}).get("hold_points"))
+        and bool(evidence.get("up", {}).get("hold_points"))
+        and isinstance(evidence.get("process_metrics", {}).get("down"), dict)
+        and isinstance(evidence.get("process_metrics", {}).get("up"), dict),
+        str(evidence),
+    )
+
+
+async def test_wpf_v2_multi_row_drag_runtime_smoke():
+    print("\nWPF V2 MULTI-ROW DRAG RUNTIME SMOKE")
+    evidence = await run_wpf_v2_multi_row_drag_runtime_smoke()
+    print(f"  evidence: {evidence}")
+    if evidence.get("status") == "BLOCKED":
+        check("WPF v2 multi-row drag reports actionable BLOCKED", True, str(evidence))
+        return
+    cases = evidence.get("cases", {})
+    contiguous = cases.get("contiguous", {}) if isinstance(cases, dict) else {}
+    non_contiguous = cases.get("non_contiguous", {}) if isinstance(cases, dict) else {}
+    check(
+        "WPF v2 multi-row drag returned PASS",
+        evidence.get("status") == "PASS",
+        str(evidence),
+    )
+    check(
+        "WPF v2 multi-row drag preserves contiguous selected payload",
+        contiguous.get("status") == "PASS"
+        and bool(contiguous.get("selected_payload_preserved")),
+        str(contiguous),
+    )
+    check(
+        "WPF v2 multi-row drag preserves non-contiguous selected payload",
+        non_contiguous.get("status") == "PASS"
+        and bool(non_contiguous.get("selected_payload_preserved")),
+        str(non_contiguous),
+    )
+    check(
+        "WPF v2 multi-row drag keeps selected payload grouped after reorder",
+        bool(contiguous.get("selected_payload_group_visible"))
+        and bool(non_contiguous.get("selected_payload_group_visible")),
+        str(evidence),
+    )
+
+
+async def test_wpf_v2_negative_drag_runtime_smoke():
+    print("\nWPF V2 NEGATIVE DRAG RUNTIME SMOKE")
+    evidence = await run_wpf_v2_negative_drag_runtime_smoke()
+    print(f"  evidence: {evidence}")
+    if evidence.get("status") == "BLOCKED":
+        check("WPF v2 negative drag reports actionable BLOCKED", True, str(evidence))
+        return
+    cases = evidence.get("cases", {})
+    small_movement = cases.get("small_movement", {}) if isinstance(cases, dict) else {}
+    cancel_no_drop = cases.get("cancel_no_drop", {}) if isinstance(cases, dict) else {}
+    check(
+        "WPF v2 negative drag returned PASS",
+        evidence.get("status") == "PASS",
+        str(evidence),
+    )
+    check(
+        "WPF v2 negative drag preserves order for small movement",
+        small_movement.get("status") == "PASS"
+        and bool(small_movement.get("order_preserved")),
+        str(small_movement),
+    )
+    check(
+        "WPF v2 negative drag preserves order for cancel/no-drop",
+        cancel_no_drop.get("status") == "PASS"
+        and bool(cancel_no_drop.get("order_preserved")),
+        str(cancel_no_drop),
+    )
+    check(
+        "WPF v2 negative drag exposes cleanup evidence",
+        bool(small_movement.get("cleanup_observed"))
+        and bool(cancel_no_drop.get("cleanup_observed")),
+        str(evidence),
+    )
+
+
 async def test_avalonia_v2_state_oracle_runtime_smoke():
     print("\nAVALONIA V2 STATE ORACLE RUNTIME SMOKE")
     evidence = await run_avalonia_v2_state_oracle_runtime_smoke()
@@ -3403,6 +4701,22 @@ def get_scenarios():
         ("Stealth Screenshot", test_stealth_screenshot),
         ("Code Search", test_code_search),
         ("WPF V2 State Oracle Runtime Smoke", test_wpf_v2_state_oracle_runtime_smoke),
+        (
+            "WPF V2 Visible-Row Drag Runtime Smoke",
+            test_wpf_v2_visible_row_drag_runtime_smoke,
+        ),
+        (
+            "WPF V2 Edge-Scroll Drag Runtime Smoke",
+            test_wpf_v2_edge_scroll_drag_runtime_smoke,
+        ),
+        (
+            "WPF V2 Multi-Row Drag Runtime Smoke",
+            test_wpf_v2_multi_row_drag_runtime_smoke,
+        ),
+        (
+            "WPF V2 Negative Drag Runtime Smoke",
+            test_wpf_v2_negative_drag_runtime_smoke,
+        ),
         (
             "Avalonia V2 State Oracle Runtime Smoke",
             test_avalonia_v2_state_oracle_runtime_smoke,

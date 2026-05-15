@@ -140,6 +140,21 @@ def test_bridge_blocks_unsupported_stealth_coordinate_mouse_commands() -> None:
     assert "Use ui_click with automationId or ui_bring_to_front first." in command
 
 
+def test_bridge_coordinate_mouse_input_verifies_foreground_activation() -> None:
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "ClickCommands.cs").read_text(
+        encoding="utf-8"
+    )
+
+    ensure_start = command.index("private static void EnsureForeground(")
+    ensure_body = command[ensure_start:]
+
+    assert "AttachThreadInput(currentThread, threadId, true)" in ensure_body
+    assert "BringWindowToTop(hwnd);" in ensure_body
+    assert "WaitForForeground(hwnd)" in ensure_body
+    assert "if (!WaitForForeground(hwnd))" in ensure_body
+    assert "coordinate mouse input could not activate the debuggee window safely" in ensure_body
+
+
 def test_bridge_screenshot_uses_printwindow_in_stealth_mode() -> None:
     command = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCommands.cs").read_text(
         encoding="utf-8"

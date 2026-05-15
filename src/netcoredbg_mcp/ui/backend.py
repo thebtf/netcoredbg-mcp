@@ -118,6 +118,16 @@ class UIBackend(Protocol):
         """Drag from one position to another."""
         ...
 
+    async def drag_path(
+        self,
+        points: list[dict[str, Any]],
+        speed_ms: int = 200,
+        hold_modifiers: list[str] | None = None,
+        cancel_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Drag through a path of screen points, including optional waypoint holds."""
+        ...
+
     async def send_system_event(self, event: str, mode: str = "toggle") -> dict[str, Any]:
         """Send a supported system event through the active backend."""
         ...

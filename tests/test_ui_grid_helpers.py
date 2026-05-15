@@ -312,12 +312,16 @@ def test_bridge_grid_builds_cell_text_evidence_for_rows() -> None:
     assert '["grid_snapshot"] = GridCommands.Snapshot' in handler
     assert '["grid_assert_rows"] = GridCommands.AssertRows' in handler
     assert '["cells"]' in command
+    assert '["bounds"] = SafeRect(row)' in command
+    assert '["row_index"] = RowIndex(row, index)' in command
+    assert "private static int RowIndex(" in command
     assert "ReadCellText" in command
     assert "new Grid(grid.FrameworkAutomationElement)" in command
     assert "gridElement.ColumnHeaders" in command
     assert "new GridRow(row.FrameworkAutomationElement)" in command
     assert "gridRow.Cells" in command
     assert "CellColumnIndex(cell, ordinal)" in command
+    assert "return pattern.Row.Value;" in command
     assert "ReadDescendantCellText" in command
     assert "IsLikelyCellPlaceholder" in command
     assert "CellPlaceholderSubstrings" in command
@@ -344,3 +348,14 @@ def test_bridge_grid_builds_cell_text_evidence_for_rows() -> None:
     assert direct_children_index < descendant_fallback_index
     assert ordinal_index < increment_index < blank_continue_index
     assert pattern_value_index < pattern_placeholder_guard_index < pattern_read_text_index
+
+
+def test_bridge_multi_select_uses_data_grid_rows_not_raw_children() -> None:
+    command = (
+        PROJECT_ROOT / "bridge" / "Commands" / "SelectionCommands.cs"
+    ).read_text(encoding="utf-8")
+
+    assert "SelectionTargets(container, automation)" in command
+    assert "FindAllChildren(RowCondition(automation))" in command
+    assert "FindAllDescendants(RowCondition(automation))" in command
+    assert "var children = container.FindAllChildren();" not in command

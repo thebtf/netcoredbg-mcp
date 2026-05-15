@@ -67,6 +67,38 @@ class TestCreateBackend:
             assert backend.client._process_registry is mock_registry
 
 
+class TestPathAwareDragBackendContract:
+    def test_backend_protocol_declares_path_aware_drag(self):
+        backend_source = (PROJECT_ROOT / "src" / "netcoredbg_mcp" / "ui" / "backend.py").read_text(
+            encoding="utf-8"
+        )
+
+        assert "async def drag_path(" in backend_source
+        assert "points: list[dict[str, Any]]" in backend_source
+        assert "hold_modifiers: list[str] | None = None" in backend_source
+
+    def test_flaui_backend_routes_path_aware_drag_to_bridge(self):
+        flaui_source = (
+            PROJECT_ROOT / "src" / "netcoredbg_mcp" / "ui" / "flaui_client.py"
+        ).read_text(encoding="utf-8")
+
+        assert "async def drag_path(" in flaui_source
+        assert '"drag_path"' in flaui_source
+        assert '"points": points' in flaui_source
+        assert '"hold_modifiers": hold_modifiers or []' in flaui_source
+
+    def test_pywinauto_backend_blocks_path_aware_release_critical_drag(self):
+        pywinauto_source = (
+            PROJECT_ROOT / "src" / "netcoredbg_mcp" / "ui" / "pywinauto_backend.py"
+        ).read_text(encoding="utf-8")
+
+        assert "async def drag_path(" in pywinauto_source
+        assert '"status": "BLOCKED"' in pywinauto_source
+        assert '"requested"' in pywinauto_source
+        assert '"accepted"' in pywinauto_source
+        assert '"next_step"' in pywinauto_source
+
+
 class TestFlaUIBackendConnect:
     @pytest.mark.asyncio
     async def test_retries_until_gui_window_is_ready(self):

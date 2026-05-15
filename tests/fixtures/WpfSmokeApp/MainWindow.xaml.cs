@@ -6,6 +6,7 @@ using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
 using Microsoft.Win32;
 
 namespace WpfSmokeApp;
@@ -17,8 +18,30 @@ public partial class MainWindow : Window
     private readonly string? _mutableFile;
     private int _dataGridAnchorIndex;
     private int _dataGridCurrentIndex;
+    private Point? _dragStartPoint;
+    private CueRow? _dragSourceRow;
+    private CueDragPayload? _dragPayload;
+    private string _lastEdgeScrollDirection = "none";
+    private int _lastEdgeScrollFirstVisible = -1;
+    private int _lastEdgeScrollLastVisible = -1;
     private bool _suppressCharacterSelection;
     private bool _suppressSelectionSync;
+
+    private sealed class CueDragPayload
+    {
+        public CueDragPayload(CueRow sourceRow, IReadOnlyList<CueRow> rows, string selectionMode)
+        {
+            SourceRow = sourceRow;
+            Rows = rows;
+            SelectionMode = selectionMode;
+        }
+
+        public CueRow SourceRow { get; }
+
+        public IReadOnlyList<CueRow> Rows { get; }
+
+        public string SelectionMode { get; }
+    }
 
     public MainWindow()
     {
@@ -98,6 +121,78 @@ public partial class MainWindow : Window
         var selected = string.Join(",", selectedNames);
         _viewModel.StatusText = $"DataGridArrow key={e.Key} shift={shiftHeld} selected={selected}";
         Console.WriteLine(_viewModel.StatusText);
+    }
+
+    private void CueDataGrid_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        _dragStartPoint = e.GetPosition(CueDataGrid);
+        _dragSourceRow = FindCueRowFromEventSource(e.OriginalSource);
+        _dragPayload = _dragSourceRow is null ? null : BuildCueDragPayload(_dragSourceRow);
+        ResetEdgeScrollEvidence();
+    }
+
+    private void CueDataGrid_PreviewMouseMove(object sender, MouseEventArgs e)
+    {
+        if (e.LeftButton != MouseButtonState.Pressed ||
+            _dragStartPoint is not { } startPoint ||
+            _dragPayload is not { } payload)
+        {
+            return;
+        }
+
+        var currentPoint = e.GetPosition(CueDataGrid);
+        if (Math.Abs(currentPoint.X - startPoint.X) < SystemParameters.MinimumHorizontalDragDistance &&
+            Math.Abs(currentPoint.Y - startPoint.Y) < SystemParameters.MinimumVerticalDragDistance)
+        {
+            return;
+        }
+
+        DragDrop.DoDragDrop(CueDataGrid, payload, DragDropEffects.Move);
+        _dragStartPoint = null;
+        _dragSourceRow = null;
+        _dragPayload = null;
+    }
+
+    private void CueDataGrid_DragOver(object sender, DragEventArgs e)
+    {
+        if (!TryGetCueDragPayload(e, out var payload))
+        {
+            return;
+        }
+
+        e.Effects = DragDropEffects.Move;
+        var direction = ScrollCueGridNearEdge(e.GetPosition(CueDataGrid));
+        if (direction is null)
+        {
+            return;
+        }
+
+        var (firstVisible, lastVisible) = GetVisibleCueRange();
+        _lastEdgeScrollDirection = direction;
+        _lastEdgeScrollFirstVisible = firstVisible;
+        _lastEdgeScrollLastVisible = lastVisible;
+        _viewModel.StatusText =
+            $"WpfWorkflow DragEdgeScroll direction={direction} sourceIdentity={payload.SourceRow.Phrase} selectedPayloadMode={payload.SelectionMode} firstVisible={firstVisible} lastVisible={lastVisible}";
+        Console.WriteLine(_viewModel.StatusText);
+        e.Handled = true;
+    }
+
+    private void CueDataGrid_Drop(object sender, DragEventArgs e)
+    {
+        if (!TryGetCueDragPayload(e, out var payload))
+        {
+            return;
+        }
+
+        var targetRow = FindCueRowFromEventSource(e.OriginalSource);
+        if (targetRow is null)
+        {
+            _viewModel.StatusText = $"WpfWorkflow DragReorder blocked sourceIdentity={payload.SourceRow.Phrase} targetIdentity=<none>";
+            Console.WriteLine(_viewModel.StatusText);
+            return;
+        }
+
+        MoveCueRows(payload, targetRow);
     }
 
     private void CharactersListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -207,6 +302,250 @@ public partial class MainWindow : Window
         Keyboard.Focus(CueDataGrid);
     }
 
+    private CueDragPayload BuildCueDragPayload(CueRow sourceRow)
+    {
+        var rows = _viewModel.CueRows;
+        var selectedRows = CueDataGrid.SelectedItems
+            .OfType<CueRow>()
+            .Where(row => rows.Contains(row))
+            .Distinct()
+            .OrderBy(row => rows.IndexOf(row))
+            .ToArray();
+        if (selectedRows.Length == 0 || !selectedRows.Contains(sourceRow))
+        {
+            selectedRows = new[] { sourceRow };
+        }
+
+        var selectionMode = selectedRows.Length <= 1
+            ? "single"
+            : IsContiguousSelection(selectedRows)
+                ? "contiguous"
+                : "non_contiguous";
+        return new CueDragPayload(sourceRow, selectedRows, selectionMode);
+    }
+
+    private bool TryGetCueDragPayload(DragEventArgs e, out CueDragPayload payload)
+    {
+        if (e.Data.GetData(typeof(CueDragPayload)) is CueDragPayload dragPayload)
+        {
+            payload = dragPayload;
+            return true;
+        }
+
+        if (e.Data.GetData(typeof(CueRow)) is CueRow sourceRow)
+        {
+            payload = BuildCueDragPayload(sourceRow);
+            return true;
+        }
+
+        payload = new CueDragPayload(
+            new CueRow(string.Empty, string.Empty, string.Empty, string.Empty),
+            Array.Empty<CueRow>(),
+            "none");
+        return false;
+    }
+
+    private bool IsContiguousSelection(IReadOnlyList<CueRow> selectedRows)
+    {
+        if (selectedRows.Count <= 1)
+        {
+            return true;
+        }
+
+        var rows = _viewModel.CueRows;
+        var indices = selectedRows
+            .Select(row => rows.IndexOf(row))
+            .Where(index => index >= 0)
+            .OrderBy(index => index)
+            .ToArray();
+        return indices.Length == selectedRows.Count &&
+            indices[^1] - indices[0] + 1 == selectedRows.Count;
+    }
+
+    private void MoveCueRows(CueDragPayload payload, CueRow targetRow)
+    {
+        var rows = _viewModel.CueRows;
+        var targetIndex = rows.IndexOf(targetRow);
+        var payloadRows = payload.Rows
+            .Where(row => rows.Contains(row))
+            .Distinct()
+            .OrderBy(row => rows.IndexOf(row))
+            .ToArray();
+        if (payloadRows.Length == 0 || targetIndex < 0)
+        {
+            _viewModel.StatusText =
+                $"WpfWorkflow DragReorder blocked sourceIdentity={payload.SourceRow.Phrase} targetIdentity={targetRow.Phrase}";
+            Console.WriteLine(_viewModel.StatusText);
+            return;
+        }
+
+        var selectedPayloadBefore = SelectedPayloadIdentities(payloadRows);
+        if (!payloadRows.Contains(targetRow))
+        {
+            var originalIndices = payloadRows
+                .Select(row => rows.IndexOf(row))
+                .ToArray();
+            var removedBeforeTarget = originalIndices.Count(index => index >= 0 && index < targetIndex);
+            foreach (var row in payloadRows)
+            {
+                rows.Remove(row);
+            }
+
+            var insertIndex = targetIndex - removedBeforeTarget;
+            if (removedBeforeTarget > 0)
+            {
+                insertIndex++;
+            }
+            insertIndex = Math.Clamp(insertIndex, 0, rows.Count);
+            foreach (var row in payloadRows)
+            {
+                rows.Insert(insertIndex, row);
+                insertIndex++;
+            }
+        }
+
+        var edgeScrollDirection = _lastEdgeScrollDirection;
+        var edgeFirstVisible = _lastEdgeScrollFirstVisible;
+        var edgeLastVisible = _lastEdgeScrollLastVisible;
+        ResetEdgeScrollEvidence();
+
+        _suppressSelectionSync = true;
+        try
+        {
+            CueDataGrid.SelectedItems.Clear();
+            foreach (var row in payloadRows)
+            {
+                CueDataGrid.SelectedItems.Add(row);
+            }
+        }
+        finally
+        {
+            _suppressSelectionSync = false;
+        }
+
+        CueDataGrid.ScrollIntoView(payload.SourceRow);
+        var selectedPayloadAfter = SelectedPayloadIdentities(payloadRows);
+        var orderFingerprint = string.Join(">", rows.Select(row => row.Phrase));
+        _viewModel.StatusText =
+            $"WpfWorkflow DragReorder sourceIdentity={payload.SourceRow.Phrase} targetIdentity={targetRow.Phrase} selectedPayloadMode={payload.SelectionMode} selectedPayloadBefore={selectedPayloadBefore} selectedPayloadAfter={selectedPayloadAfter} edgeScrollDirection={edgeScrollDirection} edgeFirstVisible={edgeFirstVisible} edgeLastVisible={edgeLastVisible} orderFingerprint={orderFingerprint}";
+        Console.WriteLine(_viewModel.StatusText);
+        WriteMutableState($"drag-reorder={payload.SourceRow.Phrase}->{targetRow.Phrase};selected={selectedPayloadAfter};order={orderFingerprint}");
+    }
+
+    private static string SelectedPayloadIdentities(IEnumerable<CueRow> rows)
+    {
+        return string.Join("|", rows.Select(row => row.Phrase));
+    }
+
+    private string? ScrollCueGridNearEdge(Point point)
+    {
+        var scrollViewer = FindVisualChild<ScrollViewer>(CueDataGrid);
+        if (scrollViewer is null || CueDataGrid.ActualHeight <= 0)
+        {
+            return null;
+        }
+
+        var bottomEdgeThreshold = Math.Max(20.0, CueDataGrid.ActualHeight * 0.18);
+        var topEdgeThreshold = Math.Max(48.0, CueDataGrid.ActualHeight * 0.32);
+        if (point.Y >= CueDataGrid.ActualHeight - bottomEdgeThreshold &&
+            scrollViewer.VerticalOffset < scrollViewer.ScrollableHeight)
+        {
+            scrollViewer.ScrollToVerticalOffset(
+                Math.Min(scrollViewer.ScrollableHeight, scrollViewer.VerticalOffset + 1));
+            CueDataGrid.UpdateLayout();
+            return "down";
+        }
+
+        if (point.Y <= topEdgeThreshold && scrollViewer.VerticalOffset > 0)
+        {
+            scrollViewer.ScrollToVerticalOffset(Math.Max(0, scrollViewer.VerticalOffset - 1));
+            CueDataGrid.UpdateLayout();
+            return "up";
+        }
+
+        return null;
+    }
+
+    private (int First, int Last) GetVisibleCueRange()
+    {
+        var first = -1;
+        var last = -1;
+        for (var index = 0; index < CueDataGrid.Items.Count; index++)
+        {
+            if (CueDataGrid.ItemContainerGenerator.ContainerFromIndex(index) is not DataGridRow row)
+            {
+                continue;
+            }
+
+            try
+            {
+                var bounds = row
+                    .TransformToAncestor(CueDataGrid)
+                    .TransformBounds(new Rect(new Size(row.ActualWidth, row.ActualHeight)));
+                if (bounds.Bottom < 0 || bounds.Top > CueDataGrid.ActualHeight)
+                {
+                    continue;
+                }
+            }
+            catch (InvalidOperationException)
+            {
+                continue;
+            }
+
+            if (first < 0)
+            {
+                first = index;
+            }
+            last = index;
+        }
+
+        return (first, last);
+    }
+
+    private void ResetEdgeScrollEvidence()
+    {
+        _lastEdgeScrollDirection = "none";
+        _lastEdgeScrollFirstVisible = -1;
+        _lastEdgeScrollLastVisible = -1;
+    }
+
+    private static T? FindVisualChild<T>(DependencyObject parent)
+        where T : DependencyObject
+    {
+        for (var index = 0; index < VisualTreeHelper.GetChildrenCount(parent); index++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, index);
+            if (child is T typed)
+            {
+                return typed;
+            }
+
+            var descendant = FindVisualChild<T>(child);
+            if (descendant is not null)
+            {
+                return descendant;
+            }
+        }
+
+        return null;
+    }
+
+    private CueRow? FindCueRowFromEventSource(object source)
+    {
+        var current = source as DependencyObject;
+        while (current is not null)
+        {
+            if (current is DataGridRow { Item: CueRow cueRow })
+            {
+                return cueRow;
+            }
+
+            current = VisualTreeHelper.GetParent(current);
+        }
+
+        return null;
+    }
+
     private void WriteMutableState(string value)
     {
         if (string.IsNullOrWhiteSpace(_mutableFile))
@@ -299,6 +638,27 @@ public class MainViewModel : INotifyPropertyChanged
         new("00:00:01.0", "00:00:03.0", "Narrator", "Fixture cue one"),
         new("00:00:04.0", "00:00:06.0", "Narrator", "Fixture cue two"),
         new("00:00:07.0", "00:00:09.0", "Narrator", "Fixture cue three"),
+        new("00:00:10.0", "00:00:12.0", "Narrator", "Fixture cue four"),
+        new("00:00:13.0", "00:00:15.0", "Narrator", "Fixture cue five"),
+        new("00:00:16.0", "00:00:18.0", "Narrator", "Fixture cue six"),
+        new("00:00:19.0", "00:00:21.0", "Narrator", "Fixture cue seven"),
+        new("00:00:22.0", "00:00:24.0", "Narrator", "Fixture cue eight"),
+        new("00:00:25.0", "00:00:27.0", "Narrator", "Fixture cue nine"),
+        new("00:00:28.0", "00:00:30.0", "Narrator", "Fixture cue ten"),
+        new("00:00:31.0", "00:00:33.0", "Narrator", "Fixture cue eleven"),
+        new("00:00:34.0", "00:00:36.0", "Narrator", "Fixture cue twelve"),
+        new("00:00:37.0", "00:00:39.0", "Narrator", "Fixture cue thirteen"),
+        new("00:00:40.0", "00:00:42.0", "Narrator", "Fixture cue fourteen"),
+        new("00:00:43.0", "00:00:45.0", "Narrator", "Fixture cue fifteen"),
+        new("00:00:46.0", "00:00:48.0", "Narrator", "Fixture cue sixteen"),
+        new("00:00:49.0", "00:00:51.0", "Narrator", "Fixture cue seventeen"),
+        new("00:00:52.0", "00:00:54.0", "Narrator", "Fixture cue eighteen"),
+        new("00:00:55.0", "00:00:57.0", "Narrator", "Fixture cue nineteen"),
+        new("00:00:58.0", "00:00:60.0", "Narrator", "Fixture cue twenty"),
+        new("00:00:61.0", "00:00:63.0", "Narrator", "Fixture cue twenty-one"),
+        new("00:00:64.0", "00:00:66.0", "Narrator", "Fixture cue twenty-two"),
+        new("00:00:67.0", "00:00:69.0", "Narrator", "Fixture cue twenty-three"),
+        new("00:00:70.0", "00:00:72.0", "Narrator", "Fixture cue twenty-four"),
     };
 
     public ObservableCollection<CharacterRow> Characters { get; } = new()

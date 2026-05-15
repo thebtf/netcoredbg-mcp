@@ -72,8 +72,13 @@
                   SelectionUnit="FullRow"
                   SelectedIndex="0"
                   IsReadOnly="True"
+                  AllowDrop="True"
                   SelectionChanged="DataGrid_SelectionChanged"
                   PreviewKeyDown="DataGrid_PreviewKeyDown"
+                  PreviewMouseLeftButtonDown="CueDataGrid_PreviewMouseLeftButtonDown"
+                  PreviewMouseMove="CueDataGrid_PreviewMouseMove"
+                  DragOver="CueDataGrid_DragOver"
+                  Drop="CueDataGrid_Drop"
                   ItemsSource="{Binding CueRows}">
             <DataGrid.Columns>
                 <DataGridTextColumn Header="Start" Binding="{Binding Start}" Width="*"/>
