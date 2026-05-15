@@ -3760,6 +3760,7 @@ def _v2_multi_row_drag_plan(
                                 "selector": selector,
                                 "row_index": target_index,
                             },
+                            "identity": {"column": "Phrase"},
                             "duration_ms": 650,
                             "expect": {
                                 "row_count_preserved": True,

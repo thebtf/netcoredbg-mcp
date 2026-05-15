@@ -161,7 +161,11 @@ class UIBackend(Protocol):
         """Read visible DataGrid rows."""
         ...
 
-    async def grid_selected_rows(self, selector: dict[str, Any]) -> dict[str, Any]:
+    async def grid_selected_rows(
+        self,
+        selector: dict[str, Any],
+        columns: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Read selected DataGrid rows."""
         ...
 

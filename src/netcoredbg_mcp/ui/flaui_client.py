@@ -633,9 +633,13 @@ class FlaUIBackend:
         """Read visible DataGrid rows via FlaUI bridge."""
         return await self._call_grid("grid_visible_rows", selector)
 
-    async def grid_selected_rows(self, selector: dict[str, Any]) -> dict[str, Any]:
+    async def grid_selected_rows(
+        self,
+        selector: dict[str, Any],
+        columns: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Read selected DataGrid rows via FlaUI bridge."""
-        return await self._call_grid("grid_selected_rows", selector)
+        return await self._call_grid("grid_selected_rows", selector, columns=columns or [])
 
     async def grid_snapshot(
         self,

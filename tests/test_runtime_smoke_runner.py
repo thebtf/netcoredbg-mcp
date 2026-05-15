@@ -1168,6 +1168,7 @@ async def test_ui_operation_adapters_resolve_visible_row_drag_sources_to_backend
     class FakeBackend:
         def __init__(self) -> None:
             self.drag_calls: list[tuple[int, int, int, int, int, list[str]]] = []
+            self.drag_path_calls: list[tuple[list[dict[str, int]], int, list[str]]] = []
 
         async def grid_snapshot(
             self,
@@ -1215,6 +1216,20 @@ async def test_ui_operation_adapters_resolve_visible_row_drag_sources_to_backend
             self.drag_calls.append((from_x, from_y, to_x, to_y, speed_ms, modifiers))
             return {"status": "PASS", "dragged": True}
 
+        async def drag_path(
+            self,
+            points: list[dict[str, int]],
+            speed_ms: int = 200,
+            hold_modifiers: list[str] | None = None,
+        ) -> dict[str, Any]:
+            modifiers = list(hold_modifiers or [])
+            self.drag_path_calls.append((points, speed_ms, modifiers))
+            return {
+                "status": "PASS",
+                "path_points": points,
+                "final_pointer": points[-1],
+            }
+
     backend = FakeBackend()
 
     async def backend_provider() -> FakeBackend:
@@ -1230,7 +1245,10 @@ async def test_ui_operation_adapters_resolve_visible_row_drag_sources_to_backend
         duration_ms=450,
     )
 
-    assert backend.drag_calls == [(70, 75, 70, 155, 450, [])]
+    assert backend.drag_calls == []
+    assert backend.drag_path_calls == [
+        ([{"x": 70, "y": 75}, {"x": 70, "y": 155}], 450, [])
+    ]
     assert result["status"] == "PASS"
     assert result["route_evidence"]["source_bounds"] == {
         "x": 10,
@@ -1246,7 +1264,11 @@ async def test_ui_operation_adapters_resolve_visible_row_drag_sources_to_backend
     }
     assert result["route_evidence"]["source_identity"] == "Cue two"
     assert result["route_evidence"]["target_identity"] == "Cue four"
-    assert "final_pointer" not in result["route_evidence"]
+    assert result["route_evidence"]["move_points"] == [
+        {"x": 70, "y": 75},
+        {"x": 70, "y": 155},
+    ]
+    assert result["route_evidence"]["final_pointer"] == {"x": 70, "y": 155}
 
     top_row_result = await ui_operation_adapters(backend_provider)["ui.drag"](
         source={"kind": "row_index", "selector": {"automation_id": "dataGrid"}, "row_index": 0},
@@ -1259,7 +1281,11 @@ async def test_ui_operation_adapters_resolve_visible_row_drag_sources_to_backend
     )
 
     assert top_row_result["status"] == "PASS"
-    assert backend.drag_calls[-1] == (70, 35, 70, 115, 300, [])
+    assert backend.drag_path_calls[-1] == (
+        [{"x": 70, "y": 35}, {"x": 70, "y": 115}],
+        300,
+        [],
+    )
     assert top_row_result["route_evidence"]["source_identity"] == "Cue one"
 
 
@@ -1914,7 +1940,12 @@ async def test_ui_operation_adapters_drag_returns_selected_payload_evidence() ->
                 ],
             }
 
-        async def grid_selected_rows(self, selector: dict[str, Any]) -> dict[str, Any]:
+        async def grid_selected_rows(
+            self,
+            selector: dict[str, Any],
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            _ = columns
             selected = self.selected_results.pop(0)
             return {
                 "status": "PASS",
@@ -1997,7 +2028,12 @@ async def test_ui_operation_adapters_drag_fails_when_selected_payload_changes() 
                 ],
             }
 
-        async def grid_selected_rows(self, selector: dict[str, Any]) -> dict[str, Any]:
+        async def grid_selected_rows(
+            self,
+            selector: dict[str, Any],
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            _ = columns
             selected = self.selected_results.pop(0)
             return {
                 "status": "PASS",
@@ -2061,7 +2097,12 @@ async def test_ui_operation_adapters_drag_blocks_selected_payload_postflight_exc
                 ],
             }
 
-        async def grid_selected_rows(self, selector: dict[str, Any]) -> dict[str, Any]:
+        async def grid_selected_rows(
+            self,
+            selector: dict[str, Any],
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            _ = columns
             self.selected_calls += 1
             if self.selected_calls > 1:
                 raise RuntimeError("selection probe failed")
@@ -2104,6 +2145,7 @@ async def test_ui_operation_adapters_drag_uses_configured_identity_for_rows() ->
     class FakeBackend:
         def __init__(self) -> None:
             self.grid_snapshot_columns: list[list[str]] = []
+            self.grid_selected_columns: list[list[str]] = []
             self.selected_results = [
                 ["Task 001", "Task 004"],
                 ["Task 001", "Task 004"],
@@ -2143,7 +2185,12 @@ async def test_ui_operation_adapters_drag_uses_configured_identity_for_rows() ->
                 ],
             }
 
-        async def grid_selected_rows(self, selector: dict[str, Any]) -> dict[str, Any]:
+        async def grid_selected_rows(
+            self,
+            selector: dict[str, Any],
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            self.grid_selected_columns.append(list(columns or []))
             selected = self.selected_results.pop(0)
             return {
                 "status": "PASS",
@@ -2178,6 +2225,7 @@ async def test_ui_operation_adapters_drag_uses_configured_identity_for_rows() ->
     )
 
     assert backend.grid_snapshot_columns == [["Title"], ["Title"]]
+    assert backend.grid_selected_columns == [["Title"], ["Title"]]
     assert result["route_evidence"]["source_identity"] == "Task 001"
     assert result["route_evidence"]["target_identity"] == "Task 004"
     assert result["selected_payload"] == {
@@ -2231,7 +2279,12 @@ async def test_ui_operation_adapters_drag_waits_for_selected_payload_to_settle()
                 ],
             }
 
-        async def grid_selected_rows(self, selector: dict[str, Any]) -> dict[str, Any]:
+        async def grid_selected_rows(
+            self,
+            selector: dict[str, Any],
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            _ = columns
             selected = self.selected_results.pop(0)
             return {
                 "status": "PASS",

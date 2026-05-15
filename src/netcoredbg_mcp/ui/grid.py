@@ -33,9 +33,10 @@ async def snapshot_grid(
 async def read_grid_selected_rows(
     backend: Any,
     selector: dict[str, Any],
+    columns: list[str] | None = None,
 ) -> dict[str, Any]:
     """Read selected DataGrid row evidence through the active backend."""
-    return await backend.grid_selected_rows(dict(selector))
+    return await backend.grid_selected_rows(dict(selector), columns=columns or [])
 
 
 async def select_grid_range(

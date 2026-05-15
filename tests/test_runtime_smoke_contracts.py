@@ -149,6 +149,17 @@ def test_wpf_v2_negative_drag_scenario_is_inventory_visible() -> None:
     assert "cleanup_observed" in scenario_body
 
 
+def test_wpf_v2_multi_row_drag_scenario_declares_payload_identity() -> None:
+    smoke = (REPO_ROOT / "tests" / "smoke_test_manual.py").read_text(encoding="utf-8")
+
+    scenario_start = smoke.index("def _v2_multi_row_drag_plan")
+    scenario_end = smoke.index("def _v2_multi_row_drag_summary", scenario_start)
+    scenario_body = smoke[scenario_start:scenario_end]
+
+    assert '"identity": {"column": "Phrase"}' in scenario_body
+    assert '"selected_payload_preserved": True' in scenario_body
+
+
 def test_wpf_workflow_example_is_one_call_and_contains_required_evidence_sections() -> None:
     example_path = REPO_ROOT / "docs" / "examples" / "runtime-smoke-wpf-workflow-plan.json"
     example = example_path.read_text(encoding="utf-8")

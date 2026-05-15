@@ -73,8 +73,14 @@ class FakeGridBackend:
         result["requested_columns"] = list(columns or [])
         return result
 
-    async def grid_selected_rows(self, selector: dict[str, Any]) -> dict[str, Any]:
-        self.calls.append(("selected", dict(selector)))
+    async def grid_selected_rows(
+        self,
+        selector: dict[str, Any],
+        columns: list[str] | None = None,
+    ) -> dict[str, Any]:
+        call = dict(selector)
+        call["columns"] = list(columns or [])
+        self.calls.append(("selected", call))
         return {
             "status": "PASS",
             "selected_rows": [{"index": 1, "automation_id": "Row_1", "name": "B"}],
@@ -248,7 +254,7 @@ async def test_flaui_backend_forwards_grid_helpers_to_bridge() -> None:
 
     selector = {"automation_id": "CueGrid"}
     result = await backend.grid_visible_rows(selector)
-    await backend.grid_selected_rows(selector)
+    await backend.grid_selected_rows(selector, columns=["Phrase"])
     await backend.grid_select_range(selector, 0, 2)
     await backend.grid_assert_range(selector, 0, 2)
     await snapshot_grid(backend, selector, columns=["Start"])
@@ -263,6 +269,8 @@ async def test_flaui_backend_forwards_grid_helpers_to_bridge() -> None:
     calls = backend._client.call.await_args_list
     assert calls[0].args[0] == "grid_visible_rows"
     assert calls[0].args[1]["selector"]["automationId"] == "CueGrid"
+    assert calls[1].args[0] == "grid_selected_rows"
+    assert calls[1].args[1]["columns"] == ["Phrase"]
     assert calls[2].args[0] == "grid_select_range"
     assert calls[2].args[1]["start_index"] == 0
     assert calls[2].args[1]["end_index"] == 2
