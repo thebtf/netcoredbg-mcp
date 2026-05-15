@@ -389,10 +389,13 @@ Build an EnC-capable `netcoredbg` with the bundled setup flow:
 netcoredbg-mcp setup --enc
 ```
 
-The command runs `scripts/build-netcoredbg-enc.ps1`, builds the maintained
-`thebtf/netcoredbg` fork with `ncdbhook.dll`, and installs a debugger that
-accepts the custom DAP `applyDeltas` request. If `ncdbhook.dll` is missing,
-`apply_code_change` returns an actionable error instead of crashing.
+The command runs `scripts/build-netcoredbg-enc.ps1`, installs the maintained
+`thebtf/netcoredbg` fork build with `ncdbhook.dll`, and places it in the
+managed `~/.netcoredbg-mcp/netcoredbg` path that accepts the custom DAP
+`applyDeltas` request. On Windows x64, setup downloads the published
+`3.1.3-1062-enc.2` EnC build by default; pass `-BuildFromSource` to the script
+for a local source build. If `ncdbhook.dll` is missing, `apply_code_change`
+returns an actionable error instead of crashing.
 
 ### Runtime Code Change Workflow
 

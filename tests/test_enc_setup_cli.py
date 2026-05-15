@@ -71,8 +71,19 @@ def test_build_netcoredbg_enc_script_contract():
     text = script.read_text(encoding="utf-8")
 
     assert "https://github.com/thebtf/netcoredbg.git" in text
+    assert "3.1.3-1062-enc.2" in text
+    assert "netcoredbg-win64-3.1.3-1062-enc.2.zip" in text
+    assert "208B94AEC38924ACD6580BD8FFE1E87833F9FBDEB53A95E4ED9139ED84DDE139" in text
+    assert '.netcoredbg-mcp\\netcoredbg' in text
+    assert "Invoke-WebRequest" in text
+    assert "Get-FileHash" in text
+    assert "Expand-Archive" in text
+    assert "Assert-InstalledDebugger" in text
+    assert "Save-NetcoredbgConfig" in text
+    assert "thebtf/netcoredbg" in text
+    assert "BuildFromSource" in text
     assert "git clone" in text
-    assert "-DNCDB_DOTNET_STARTUP_HOOK=1" in text
+    assert '-DNCDB_DOTNET_STARTUP_HOOK=$ncdbhookCMakePath' in text
     assert "cmake" in text
     assert "dotnet" in text
     assert "cl.exe" in text
