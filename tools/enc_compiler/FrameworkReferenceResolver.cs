@@ -132,7 +132,20 @@ internal static class FrameworkReferenceResolver
         }
 
         const string defaultWindowsRoot = @"C:\Program Files\dotnet";
-        return Directory.Exists(defaultWindowsRoot) ? defaultWindowsRoot : null;
+        if (Directory.Exists(defaultWindowsRoot))
+        {
+            return defaultWindowsRoot;
+        }
+
+        foreach (var candidateRoot in new[] { "/usr/share/dotnet", "/usr/local/share/dotnet", "/opt/dotnet" })
+        {
+            if (Directory.Exists(candidateRoot))
+            {
+                return candidateRoot;
+            }
+        }
+
+        return null;
     }
 
     private static string? ResolveReferenceDirectory(string packVersionDirectory, string? targetFramework)

@@ -104,6 +104,48 @@ async def test_apply_code_change_stopped_success_updates_source_and_restores_sta
 
 
 @pytest.mark.asyncio
+async def test_apply_code_change_rejects_line_changing_edit_before_compile_or_apply(
+    tmp_path: Path,
+):
+    project, source, netcoredbg = _write_project(tmp_path)
+    original_source = source.read_text(encoding="utf-8")
+    session = FakeSession(DebugState.STOPPED, project, netcoredbg)
+    compiled = False
+    applied = False
+
+    def fake_compiler(**_kwargs):
+        nonlocal compiled
+        compiled = True
+        return DeltaResult(True, "Sample.il", "Sample.metadata", "Sample.pdb", (), ())
+
+    async def fake_apply(*_args, **_kwargs):
+        nonlocal applied
+        applied = True
+        return ApplyDeltasResult(success=True, message=None, body={})
+
+    result = await apply_code_change_to_session(
+        session,
+        project,
+        "Sample.cs",
+        [
+            {
+                "start_line": 7,
+                "end_line": 7,
+                "new_text": "        var value = 2;\n        return value;",
+            }
+        ],
+        compiler=fake_compiler,
+        apply=fake_apply,
+    )
+
+    assert "Line-changing edits are not supported" in result["error"]
+    assert compiled is False
+    assert applied is False
+    assert source.read_text(encoding="utf-8") == original_source
+    assert session.transitions == []
+
+
+@pytest.mark.asyncio
 async def test_apply_code_change_restores_source_when_apply_deltas_fails(
     tmp_path: Path,
 ):

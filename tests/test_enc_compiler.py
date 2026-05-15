@@ -75,6 +75,34 @@ def test_compile_delta_uses_loaded_module_and_portable_pdb_baseline(
         assert Path(delta_path).stat().st_size > 0
 
 
+def test_compile_delta_uses_module_tfm_for_multitarget_project(
+    tmp_path: Path, enc_compiler_dll: Path
+):
+    project, source = _write_multitarget_fixture_project(tmp_path)
+    subprocess.run(["dotnet", "build", project, "-f", "net8.0", "-v", "quiet"], check=True)
+    module_path = tmp_path / "bin" / "Debug" / "net8.0" / "Sample.dll"
+    return_line = _line_number(source, "TimeProvider.System")
+    output_dir = tmp_path / "deltas"
+
+    result = compile_delta(
+        project,
+        source,
+        [
+            SourceEdit(
+                start_line=return_line,
+                end_line=return_line,
+                new_text="        return System.TimeProvider.System.GetUtcNow().Year + 1;",
+            )
+        ],
+        compiler_path=enc_compiler_dll,
+        module_path=module_path,
+        output_dir=output_dir,
+    )
+
+    assert result.success, result.diagnostics
+    assert result.rude_edits == ()
+
+
 def test_compile_delta_reports_rude_edit_for_added_field(
     tmp_path: Path, enc_compiler_dll: Path
 ):
@@ -234,6 +262,34 @@ public class Sample
     public int GetValue()
     {
         return 1;
+    }
+}
+""",
+        encoding="utf-8",
+    )
+    return project, source
+
+
+def _write_multitarget_fixture_project(tmp_path: Path) -> tuple[Path, Path]:
+    project = tmp_path / "Sample.csproj"
+    project.write_text(
+        """<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net6.0;net8.0</TargetFrameworks>
+  </PropertyGroup>
+</Project>
+""",
+        encoding="utf-8",
+    )
+    source = tmp_path / "Sample.cs"
+    source.write_text(
+        """namespace Fixture;
+
+public class Sample
+{
+    public int GetValue()
+    {
+        return System.TimeProvider.System.GetUtcNow().Year;
     }
 }
 """,

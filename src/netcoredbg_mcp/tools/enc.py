@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -84,6 +84,7 @@ async def apply_code_change_to_session(
         target_file = _resolve_project_file(root, file)
         source_edits = [_parse_edit(edit) for edit in edits]
         _validate_source_edit_ranges(target_file, source_edits)
+        _validate_line_updates_compatible_edits(source_edits)
     except Exception as exc:
         return build_error_response(str(exc), state=session.state.state)
 
@@ -127,7 +128,7 @@ async def apply_code_change_to_session(
     apply_error: Exception | None = None
     apply_result = None
     try:
-        line_updates_path = _ensure_empty_line_updates_file(delta)
+        line_updates_path = _ensure_empty_line_updates_file(delta, source_edits)
         apply_result = await apply(
             session.client,
             dll_name=module_name,
@@ -257,13 +258,25 @@ def _validate_source_edit_ranges(target_file: Path, edits: list[SourceEdit]) -> 
             )
 
 
+def _validate_line_updates_compatible_edits(edits: Sequence[SourceEdit]) -> None:
+    for edit in edits:
+        replaced_line_count = edit.end_line - edit.start_line + 1
+        replacement_line_count = len(edit.new_text.rstrip("\r\n").splitlines())
+        if replacement_line_count != replaced_line_count:
+            raise ValueError(
+                "Line-changing edits are not supported until the EnC compiler "
+                "emits lineUpdates. Keep each edit to the same number of source lines."
+            )
+
+
 def _require_delta_path(value: str | None, kind: str) -> str:
     if value is None:
         raise RuntimeError(f"Delta compiler did not return {kind} delta path.")
     return value
 
 
-def _ensure_empty_line_updates_file(delta: DeltaResult) -> str:
+def _ensure_empty_line_updates_file(delta: DeltaResult, edits: Sequence[SourceEdit]) -> str:
+    _validate_line_updates_compatible_edits(edits)
     metadata_path = Path(_require_delta_path(delta.metadata_delta_path, "metadata"))
     line_updates_path = metadata_path.with_suffix(".lineupdates")
     line_updates_path.write_bytes((0).to_bytes(4, byteorder="little", signed=False))

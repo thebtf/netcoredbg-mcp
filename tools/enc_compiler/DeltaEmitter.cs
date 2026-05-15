@@ -241,7 +241,7 @@ public sealed class DeltaEmitter
         return CSharpCompilation.Create(
             assemblyName,
             trees,
-            GetMetadataReferences(projectRoot),
+            GetMetadataReferences(projectRoot, modulePath),
             CompilationOptions);
     }
 
@@ -296,6 +296,55 @@ public sealed class DeltaEmitter
 
     private static string? ResolveGeneratedSourceDirectory(string projectRoot, string? modulePath)
     {
+        var buildOutput = ResolveBuildOutputLayout(projectRoot, modulePath);
+        if (buildOutput is null)
+        {
+            return null;
+        }
+
+        return Path.Combine(projectRoot, "obj", buildOutput.Configuration, buildOutput.TargetFramework);
+    }
+
+    private static bool IsSdkGeneratedCompilationInput(string path, string assemblyName)
+    {
+        var fileName = Path.GetFileName(path);
+        return fileName.Equals($"{assemblyName}.AssemblyInfo.cs", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals($"{assemblyName}.GlobalUsings.g.cs", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals($"{assemblyName}.AssemblyAttributes.cs", StringComparison.OrdinalIgnoreCase)
+            || fileName.EndsWith(".AssemblyAttributes.cs", StringComparison.OrdinalIgnoreCase)
+            || fileName.EndsWith(".g.cs", StringComparison.OrdinalIgnoreCase)
+            || fileName.EndsWith(".g.i.cs", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static ImmutableArray<MetadataReference> GetMetadataReferences(PathMap projectRoot, string? modulePath)
+    {
+        var trustedAssemblies = ((string?)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES"))
+            ?.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+            ?? Array.Empty<string>();
+        var targetFramework = ResolveTargetFrameworkFromModulePath(projectRoot.RootDirectory, modulePath)
+            ?? (projectRoot.ProjectFile is null ? null : GetTargetFramework(projectRoot.ProjectFile));
+        var frameworkReferencePaths = FrameworkReferenceResolver
+            .GetReferencePaths(projectRoot.ProjectFile, targetFramework)
+            .ToArray();
+        var platformReferencePaths = frameworkReferencePaths.Length > 0
+            ? frameworkReferencePaths
+            : trustedAssemblies;
+
+        return platformReferencePaths
+            .Concat(GetProjectMetadataReferencePaths(projectRoot))
+            .Where(File.Exists)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Select(path => (MetadataReference)MetadataReference.CreateFromFile(path))
+            .ToImmutableArray();
+    }
+
+    private static string? ResolveTargetFrameworkFromModulePath(string projectRoot, string? modulePath)
+    {
+        return ResolveBuildOutputLayout(projectRoot, modulePath)?.TargetFramework;
+    }
+
+    private static BuildOutputLayout? ResolveBuildOutputLayout(string projectRoot, string? modulePath)
+    {
         if (string.IsNullOrWhiteSpace(modulePath))
         {
             return null;
@@ -319,38 +368,9 @@ public sealed class DeltaEmitter
 
         var configuration = segments[binIndex + 1];
         var targetFramework = segments[binIndex + 2];
-        return Path.Combine(projectRoot, "obj", configuration, targetFramework);
-    }
-
-    private static bool IsSdkGeneratedCompilationInput(string path, string assemblyName)
-    {
-        var fileName = Path.GetFileName(path);
-        return fileName.Equals($"{assemblyName}.AssemblyInfo.cs", StringComparison.OrdinalIgnoreCase)
-            || fileName.Equals($"{assemblyName}.GlobalUsings.g.cs", StringComparison.OrdinalIgnoreCase)
-            || fileName.Equals($"{assemblyName}.AssemblyAttributes.cs", StringComparison.OrdinalIgnoreCase)
-            || fileName.EndsWith(".AssemblyAttributes.cs", StringComparison.OrdinalIgnoreCase)
-            || fileName.EndsWith(".g.cs", StringComparison.OrdinalIgnoreCase)
-            || fileName.EndsWith(".g.i.cs", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static ImmutableArray<MetadataReference> GetMetadataReferences(PathMap projectRoot)
-    {
-        var trustedAssemblies = ((string?)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES"))
-            ?.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
-            ?? Array.Empty<string>();
-        var frameworkReferencePaths = FrameworkReferenceResolver
-            .GetReferencePaths(projectRoot.ProjectFile, projectRoot.ProjectFile is null ? null : GetTargetFramework(projectRoot.ProjectFile))
-            .ToArray();
-        var platformReferencePaths = frameworkReferencePaths.Length > 0
-            ? frameworkReferencePaths
-            : trustedAssemblies;
-
-        return platformReferencePaths
-            .Concat(GetProjectMetadataReferencePaths(projectRoot))
-            .Where(File.Exists)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Select(path => (MetadataReference)MetadataReference.CreateFromFile(path))
-            .ToImmutableArray();
+        return string.IsNullOrWhiteSpace(configuration) || string.IsNullOrWhiteSpace(targetFramework)
+            ? null
+            : new BuildOutputLayout(configuration, targetFramework);
     }
 
     private static IEnumerable<string> GetProjectMetadataReferencePaths(PathMap projectRoot)
@@ -725,6 +745,8 @@ public sealed class DeltaEmitter
         byte[] AssemblyBytes,
         byte[] PdbBytes,
         IReadOnlyList<string> Diagnostics);
+
+    private sealed record BuildOutputLayout(string Configuration, string TargetFramework);
 
     private sealed record MethodSnapshot(MethodDeclarationSyntax Node, IMethodSymbol Symbol);
 }
