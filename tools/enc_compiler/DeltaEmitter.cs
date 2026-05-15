@@ -143,15 +143,9 @@ public sealed class DeltaEmitter
                     $"Invalid edit range {edit.StartLine}..{edit.EndLine} for {lines.Count} lines.");
             }
 
-            var replacementText = edit.NewText.TrimEnd('\r', '\n');
-            var replacement = string.IsNullOrEmpty(replacementText)
-                ? new List<string>()
-                : SplitLines(replacementText);
+            var replacement = SplitLines(edit.NewText.TrimEnd('\r', '\n'));
             lines.RemoveRange(edit.StartLine - 1, edit.EndLine - edit.StartLine + 1);
-            if (replacement.Count > 0)
-            {
-                lines.InsertRange(edit.StartLine - 1, replacement);
-            }
+            lines.InsertRange(edit.StartLine - 1, replacement);
         }
 
         return string.Join(Environment.NewLine, lines) + Environment.NewLine;

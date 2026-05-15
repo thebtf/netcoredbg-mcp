@@ -234,7 +234,7 @@ def _project_name_for_file(target_file: Path) -> str | None:
 def _apply_source_edits(target_file: Path, edits: list[SourceEdit]) -> None:
     lines = target_file.read_text(encoding="utf-8").splitlines()
     for edit in sorted(edits, key=lambda item: item.start_line, reverse=True):
-        replacement = edit.new_text.rstrip("\r\n").splitlines()
+        replacement = _replacement_lines(edit.new_text)
         lines[edit.start_line - 1 : edit.end_line] = replacement
     target_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -261,12 +261,16 @@ def _validate_source_edit_ranges(target_file: Path, edits: list[SourceEdit]) -> 
 def _validate_line_updates_compatible_edits(edits: Sequence[SourceEdit]) -> None:
     for edit in edits:
         replaced_line_count = edit.end_line - edit.start_line + 1
-        replacement_line_count = len(edit.new_text.rstrip("\r\n").splitlines())
+        replacement_line_count = len(_replacement_lines(edit.new_text))
         if replacement_line_count != replaced_line_count:
             raise ValueError(
                 "Line-changing edits are not supported until the EnC compiler "
                 "emits lineUpdates. Keep each edit to the same number of source lines."
             )
+
+
+def _replacement_lines(new_text: str) -> list[str]:
+    return new_text.rstrip("\r\n").splitlines() or [""]
 
 
 def _require_delta_path(value: str | None, kind: str) -> str:

@@ -146,6 +146,39 @@ async def test_apply_code_change_rejects_line_changing_edit_before_compile_or_ap
 
 
 @pytest.mark.asyncio
+async def test_apply_code_change_treats_empty_new_text_as_blank_same_line(
+    tmp_path: Path,
+):
+    project, source, netcoredbg = _write_project(tmp_path)
+    session = FakeSession(DebugState.STOPPED, project, netcoredbg)
+    session.state.modules = [
+        ModuleInfo(name="Sample.dll", path=str(tmp_path / "bin" / "Debug" / "Sample.dll"))
+    ]
+
+    async def fake_apply(*_args, **_kwargs):
+        return ApplyDeltasResult(success=True, message=None, body={"ok": True})
+
+    result = await apply_code_change_to_session(
+        session,
+        project,
+        "Sample.cs",
+        [{"start_line": 7, "end_line": 7, "new_text": ""}],
+        compiler=lambda **_kwargs: DeltaResult(
+            True,
+            str(tmp_path / "Sample.il"),
+            str(tmp_path / "Sample.metadata"),
+            str(tmp_path / "Sample.pdb"),
+            (),
+            (),
+        ),
+        apply=fake_apply,
+    )
+
+    assert result["data"]["success"] is True
+    assert source.read_text(encoding="utf-8").splitlines()[6] == ""
+
+
+@pytest.mark.asyncio
 async def test_apply_code_change_restores_source_when_apply_deltas_fails(
     tmp_path: Path,
 ):

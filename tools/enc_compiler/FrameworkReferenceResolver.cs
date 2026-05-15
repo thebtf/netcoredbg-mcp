@@ -63,7 +63,11 @@ internal static class FrameworkReferenceResolver
             }
         }
 
-        if (targetFramework?.StartsWith("net", StringComparison.OrdinalIgnoreCase) == true)
+        if (targetFramework?.StartsWith("netstandard", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            yield return "NETStandard.Library.Ref";
+        }
+        else if (targetFramework?.StartsWith("net", StringComparison.OrdinalIgnoreCase) == true)
         {
             yield return "Microsoft.NETCore.App";
         }

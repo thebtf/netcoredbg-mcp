@@ -53,10 +53,14 @@ def test_compile_delta_uses_loaded_module_and_portable_pdb_baseline(
     tmp_path: Path, enc_compiler_dll: Path
 ):
     project, source = _write_fixture_project(tmp_path)
-    subprocess.run(["dotnet", "build", project, "-v", "quiet"], check=True)
-    module_path = tmp_path / "bin" / "Debug" / "net8.0" / "Sample.dll"
+    module_output = tmp_path / "loaded-module"
+    subprocess.run(["dotnet", "build", project, "-o", module_output, "-v", "quiet"], check=True)
+    module_path = module_output / "Sample.dll"
     return_line = _line_number(source, "return 1;")
     output_dir = tmp_path / "deltas"
+
+    assert module_path.is_file()
+    assert not (tmp_path / "bin" / "Debug" / "net8.0" / "Sample.dll").exists()
 
     result = compile_delta(
         project,
@@ -73,6 +77,21 @@ def test_compile_delta_uses_loaded_module_and_portable_pdb_baseline(
         assert delta_path is not None
         assert Path(delta_path).is_file()
         assert Path(delta_path).stat().st_size > 0
+
+    missing_module_result = compile_delta(
+        project,
+        source,
+        [SourceEdit(start_line=return_line, end_line=return_line, new_text="        return 2;")],
+        compiler_path=enc_compiler_dll,
+        module_path=tmp_path / "missing" / "Sample.dll",
+        output_dir=tmp_path / "missing-deltas",
+    )
+
+    assert missing_module_result.success is False
+    assert any(
+        "Baseline module not found" in diagnostic
+        for diagnostic in missing_module_result.diagnostics
+    )
 
 
 def test_compile_delta_uses_module_tfm_for_multitarget_project(
@@ -101,6 +120,30 @@ def test_compile_delta_uses_module_tfm_for_multitarget_project(
 
     assert result.success, result.diagnostics
     assert result.rude_edits == ()
+
+
+def test_compile_delta_uses_netstandard_reference_pack(
+    tmp_path: Path, enc_compiler_dll: Path
+):
+    project, source = _write_netstandard_fixture_project(tmp_path)
+    return_line = _line_number(source, "return 1;")
+
+    result = compile_delta(
+        project,
+        source,
+        [
+            SourceEdit(
+                start_line=return_line,
+                end_line=return_line,
+                new_text="        return System.TimeProvider.System.GetUtcNow().Year;",
+            )
+        ],
+        compiler_path=enc_compiler_dll,
+        output_dir=tmp_path / "deltas",
+    )
+
+    assert result.success is False
+    assert any("TimeProvider" in diagnostic for diagnostic in result.diagnostics)
 
 
 def test_compile_delta_reports_rude_edit_for_added_field(
@@ -290,6 +333,34 @@ public class Sample
     public int GetValue()
     {
         return System.TimeProvider.System.GetUtcNow().Year;
+    }
+}
+""",
+        encoding="utf-8",
+    )
+    return project, source
+
+
+def _write_netstandard_fixture_project(tmp_path: Path) -> tuple[Path, Path]:
+    project = tmp_path / "Sample.csproj"
+    project.write_text(
+        """<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+  </PropertyGroup>
+</Project>
+""",
+        encoding="utf-8",
+    )
+    source = tmp_path / "Sample.cs"
+    source.write_text(
+        """namespace Fixture;
+
+public class Sample
+{
+    public int GetValue()
+    {
+        return 1;
     }
 }
 """,
