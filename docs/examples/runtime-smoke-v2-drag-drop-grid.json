@@ -48,6 +48,9 @@
               "x": 0.5,
               "y": 0.82
             },
+            "identity": {
+              "column": "StableRowId"
+            },
             "duration_ms": 1600,
             "step_count": 8,
             "expect": {
@@ -119,6 +122,9 @@
               "relative_to": "viewport",
               "x": 0.98,
               "y": 0.5
+            },
+            "identity": {
+              "column": "StableRowId"
             },
             "duration_ms": 700,
             "step_count": 4,

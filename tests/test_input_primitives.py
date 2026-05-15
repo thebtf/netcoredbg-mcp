@@ -33,6 +33,21 @@ def _make_flaui() -> FlaUIBackend:
     return backend
 
 
+def _csharp_method_body(content: str, signature: str) -> str:
+    method_start = content.index(signature)
+    body_start = content.index("{", method_start)
+    depth = 0
+    for index in range(body_start, len(content)):
+        char = content[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return content[method_start : index + 1]
+    raise AssertionError(f"Could not find method body for {signature}")
+
+
 class TestFlaUIDragForwarding:
     @pytest.mark.asyncio
     async def test_drag_forwards_default_speed(self):
@@ -394,9 +409,10 @@ class TestDragInputValidation:
         assert "hold_ms must be non-negative" in command
         assert "private const int DragPathHoldPulseMs" in command
         assert "PulseHeldDragPoint(point, point.HoldMs);" in command
+        assert 'TryReadInt(paramObject, "speed_ms", out var requestedSpeedMs)' in command
         assert 'TryReadDragPathCancelKey(@params?["cancel_key"]' in command
         assert "VirtualKeyShort.ESCAPE" in command
-        drag_path_body = command[command.index("public static JsonNode DragPath(") :]
+        drag_path_body = _csharp_method_body(command, "public static JsonNode DragPath(")
         assert "Thread.Sleep(Math.Max(FinalDropSettleMs, delayMs));" in drag_path_body
         assert "SendDragPathCancel(cancelKey.Value);" in drag_path_body
 
@@ -404,8 +420,7 @@ class TestDragInputValidation:
         command = (PROJECT_ROOT / "bridge" / "Commands" / "ClickCommands.cs").read_text(
             encoding="utf-8"
         )
-        drag_path_start = command.index("public static JsonNode DragPath(")
-        drag_path_body = command[drag_path_start:]
+        drag_path_body = _csharp_method_body(command, "public static JsonNode DragPath(")
 
         assert "mouseButtonDown" in drag_path_body
         assert "mouse_event(MOUSEEVENTF_LEFTDOWN" in drag_path_body

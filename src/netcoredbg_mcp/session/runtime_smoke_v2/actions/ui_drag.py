@@ -35,6 +35,10 @@ async def handle_ui_drag(
     if blocked is not None:
         return _with_duration(blocked, context=context, started=started)
 
+    identity, blocked = _identity_from_action(action)
+    if blocked is not None:
+        return _with_duration(blocked, context=context, started=started)
+
     blocked = _zero_distance_blocked(source=source, path=path, drop=drop)
     if blocked is not None:
         return _with_duration(blocked, context=context, started=started)
@@ -46,6 +50,7 @@ async def handle_ui_drag(
         drop=drop,
         modifiers=modifiers,
         cancel=cancel,
+        identity=identity,
         duration_ms=_optional_int(action.get("duration_ms")),
         step_count=_optional_int(action.get("step_count")),
         expect=dict(action.get("expect") or {}),
@@ -57,6 +62,7 @@ async def handle_ui_drag(
         drop=drop,
         modifiers=modifiers,
         cancel=cancel,
+        identity=identity,
         expect=dict(action.get("expect") or {}),
         duration_ms=context.elapsed_ms(started),
     )
@@ -157,6 +163,20 @@ def _normalize_source(source: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
             next_step="Provide source.cached_element from earlier UI evidence.",
         )
     return {"kind": kind, "cached_element": cached_element}, None
+
+
+def _identity_from_action(action: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    raw_identity = action.get("identity")
+    if raw_identity is None:
+        return {}, None
+    if not isinstance(raw_identity, Mapping):
+        return {}, _blocked(
+            reason="invalid drag identity",
+            requested={"identity": raw_identity},
+            accepted={"identity": "object with column or columns fields"},
+            next_step="Provide identity as an object when row identity evidence is required.",
+        )
+    return dict(raw_identity), None
 
 
 def _row_index_from_source(source: dict[str, Any]) -> tuple[int, dict[str, Any] | None]:
@@ -329,6 +349,7 @@ def _action_result(
     drop: dict[str, Any],
     modifiers: list[str],
     cancel: dict[str, Any],
+    identity: dict[str, Any],
     expect: dict[str, Any],
     duration_ms: int,
 ) -> dict[str, Any]:
@@ -348,6 +369,8 @@ def _action_result(
         "backend": result.get("backend"),
         "route_evidence": route_evidence,
     }
+    if identity:
+        output["identity"] = identity
     if cancel:
         output["cancel"] = cancel
     if output["route_evidence"]:
@@ -365,7 +388,7 @@ def _action_result(
         output["no_op"] = no_op
     if cleanup is not None:
         output["cleanup"] = cleanup
-    if expect.get("selected_payload_preserved") is True:
+    if _is_passing(output) and expect.get("selected_payload_preserved") is True:
         if selected_payload is None:
             output["status"] = "BLOCKED"
             output["reason"] = "selected payload evidence unavailable"
@@ -376,10 +399,10 @@ def _action_result(
             output["next_step"] = (
                 "Use a UI backend or probe adapter that returns selected payload evidence."
             )
-        elif selected_payload.get("preserved") is not True and status == "PASS":
+        elif selected_payload.get("preserved") is not True:
             output["status"] = "FAIL"
             output["reason"] = "selected payload expectation failed"
-    if expect.get("no_op") is True:
+    if _is_passing(output) and expect.get("no_op") is True:
         expected_reason = expect.get("no_op_reason")
         if no_op is None:
             output["status"] = "BLOCKED"
@@ -407,7 +430,7 @@ def _action_result(
                 expected_reason is not None
                 and no_op.get("reason") != expected_reason
             )
-        ) and status == "PASS":
+        ):
             output["status"] = "FAIL"
             output["reason"] = "no-op expectation failed"
     if _is_passing(output) and not output["route_evidence"]:

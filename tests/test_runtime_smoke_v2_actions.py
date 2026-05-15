@@ -757,6 +757,40 @@ async def test_v2_ui_grid_select_propagates_backend_blocked() -> None:
     assert action["next_step"]
 
 
+@pytest.mark.asyncio
+async def test_v2_ui_grid_select_rejects_fractional_indices() -> None:
+    session = ActionSmokeSession()
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "grid multi-select invalid index",
+            "cases": [
+                {
+                    "id": "grid_multi_select_invalid_index",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.grid.select",
+                                "selector": {"automation_id": "CueDataGrid"},
+                                "indices": [1.5],
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == "BLOCKED"
+    assert action["status"] == "BLOCKED"
+    assert action["reason"] == "invalid grid selection index"
+    assert action["requested"] == {"index": 1.5}
+    assert session.calls == []
+
+
 @pytest.mark.parametrize(
     ("selection_mode", "selected_identities"),
     [
@@ -806,6 +840,7 @@ async def test_v2_ui_drag_preserves_selected_payload_evidence(
                                     {"relative_to": "viewport", "x": 0.5, "y": 0.75},
                                 ],
                                 "drop": {"relative_to": "viewport", "x": 0.5, "y": 0.75},
+                                "identity": {"column": "StableRowId"},
                                 "expect": {
                                     "selected_payload_preserved": True,
                                     "selected_payload": {
@@ -825,6 +860,7 @@ async def test_v2_ui_drag_preserves_selected_payload_evidence(
     action = result["cases"][0]["actions"][0]
     drag_call = next(call for call in session.calls if call[0] == "drag")
     assert result["status"] == "PASS"
+    assert drag_call[1]["identity"] == {"column": "StableRowId"}
     assert drag_call[1]["expect"]["selected_payload"]["expected_identities"] == selected_identities
     assert action["selected_payload"] == {
         "before": selected_identities,
@@ -1406,6 +1442,10 @@ async def test_v2_ui_drag_propagates_duplicate_row_identity_blocked() -> None:
                                     {"relative_to": "viewport", "x": 0.5, "y": 0.75},
                                 ],
                                 "drop": {"relative_to": "viewport", "x": 0.5, "y": 0.75},
+                                "expect": {
+                                    "selected_payload_preserved": True,
+                                    "no_op": True,
+                                },
                             },
                             "probes": [],
                         }

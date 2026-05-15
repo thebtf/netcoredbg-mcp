@@ -314,6 +314,40 @@ async def test_ui_grid_viewport_fails_when_expected_scroll_is_unchanged() -> Non
 
 
 @pytest.mark.asyncio
+async def test_ui_grid_viewport_blocks_after_expectations_without_before_snapshot() -> None:
+    session = GridViewportProbeSession()
+    session.viewport_results.append(
+        {"status": "PASS", "snapshot": _viewport_snapshot(first=4, last=8)}
+    )
+
+    result = await runner(
+        session,
+        {"ui.grid.viewport": session.grid_viewport},
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "ui.grid.viewport",
+                "name": "cue_viewport",
+                "phase": "after",
+                "selector": {"automation_id": "CueDataGrid"},
+                "identity": {"column": "PhraseId"},
+                "rows": {"visible_only": True, "max": 5},
+                "expect": {"viewport_moved": True},
+            }
+        )
+    )
+
+    probe = after_probe(result)
+    assert result["status"] == "BLOCKED"
+    assert probe["status"] == "BLOCKED"
+    assert probe["reason"] == "before snapshot unavailable"
+    assert probe["requested"] == {
+        "expect": {"viewport_moved": True},
+        "phase": "both",
+    }
+
+
+@pytest.mark.asyncio
 async def test_ui_grid_viewport_fails_on_opposite_scroll_direction() -> None:
     session = GridViewportProbeSession()
     session.viewport_results.extend(

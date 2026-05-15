@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -11,6 +12,7 @@ from .ui_drag import handle_ui_drag
 from .ui_key_sequence import handle_ui_key_sequence
 
 ActionHandler = Callable[[dict[str, Any], "ActionContext"], Awaitable[dict[str, Any]]]
+_INTEGER_TEXT = re.compile(r"-?\d+")
 
 _ACTION_REGISTRY: dict[str, ActionHandler] = {}
 
@@ -189,9 +191,11 @@ def _indices_from_action(action: dict[str, Any]) -> tuple[list[int], dict[str, A
                 next_step="Use integer row indices.",
             )
             return [], {"status": "BLOCKED", **blocked}
-        try:
+        if isinstance(raw_index, int):
+            index = raw_index
+        elif isinstance(raw_index, str) and _INTEGER_TEXT.fullmatch(raw_index.strip()):
             index = int(raw_index)
-        except (TypeError, ValueError):
+        else:
             blocked = build_blocked(
                 reason="invalid grid selection index",
                 requested={"index": raw_index},

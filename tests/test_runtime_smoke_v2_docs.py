@@ -166,6 +166,7 @@ def assert_drag_drop_docs_contract(plan: dict[str, Any]) -> None:
     drag_actions = [action for action in _actions(plan) if action.get("kind") == "ui.drag"]
     assert drag_actions
     assert any(action.get("source", {}).get("row_identity") for action in drag_actions)
+    assert all(action.get("identity", {}).get("column") for action in drag_actions)
     assert any(
         action.get("expect", {}).get("selected_payload_preserved") is True
         for action in drag_actions
@@ -209,6 +210,7 @@ def test_drag_drop_grid_example_rejects_missing_row_identity_checks() -> None:
     plan = copy.deepcopy(_load_example())
     for action in _actions(plan):
         action.get("source", {}).pop("row_identity", None)
+        action.pop("identity", None)
         action.get("expect", {}).pop("selected_payload_preserved", None)
     for probe in _probes(plan):
         probe.pop("identity", None)

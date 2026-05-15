@@ -152,7 +152,8 @@ Customer-mode setup:
 4. Run the release-critical guard:
 
 ```powershell
-python -m pytest tests/test_runtime_smoke_v2_docs.py tests/critical/test_runtime_smoke_v2_critical.py -m critical
+python -m pytest tests/test_runtime_smoke_v2_docs.py
+python -m pytest tests/critical/test_runtime_smoke_v2_critical.py -m critical
 ```
 
 Expected result:

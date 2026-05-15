@@ -221,7 +221,12 @@ public static class ClickCommands
     {
         RejectStealthMouseInput("drag_path");
 
-        var speedMs = @params?["speed_ms"]?.GetValue<int>() ?? 200;
+        var speedMs = 200;
+        if (@params is JsonObject paramObject &&
+            TryReadInt(paramObject, "speed_ms", out var requestedSpeedMs))
+        {
+            speedMs = requestedSpeedMs;
+        }
         if (speedMs < 20)
         {
             return DragPathBlocked(

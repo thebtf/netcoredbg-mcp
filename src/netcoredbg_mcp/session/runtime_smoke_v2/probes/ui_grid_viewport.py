@@ -58,6 +58,20 @@ async def handle_ui_grid_viewport(
         context.scratch[scratch_key] = snapshot
     elif phase == "after":
         previous = context.scratch.get(scratch_key)
+        if expect and (
+            not isinstance(previous, dict) or not isinstance(snapshot, dict)
+        ):
+            output["status"] = "BLOCKED"
+            output["reason"] = "before snapshot unavailable"
+            output["requested"] = {"expect": expect, "phase": "both"}
+            output["accepted"] = {
+                "phase": ["before", "after"],
+                "snapshot": "grid viewport snapshots for both phases",
+            }
+            output["next_step"] = (
+                "Run the probe in both phases so expectations can be compared."
+            )
+            return output
         if isinstance(previous, dict) and isinstance(snapshot, dict):
             comparison = _compare_snapshots(previous, snapshot)
             output["comparison"] = comparison

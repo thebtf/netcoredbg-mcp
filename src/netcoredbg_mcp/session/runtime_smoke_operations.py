@@ -370,6 +370,7 @@ def ui_operation_adapters(
         path = _mapping_list(args.get("path"))
         drop = dict(args.get("drop") or {})
         expect = dict(args.get("expect") or {})
+        identity = dict(args.get("identity") or {})
         cancel = dict(args.get("cancel") or {})
         cancel_key = _drag_cancel_key(cancel)
         route, route_evidence, blocked = await _drag_route(
@@ -377,6 +378,7 @@ def ui_operation_adapters(
             source=source,
             path=path,
             drop=drop,
+            identity=identity,
         )
         if blocked is not None:
             return blocked
@@ -395,7 +397,7 @@ def ui_operation_adapters(
             selected_payload_before, blocked = await _selected_viewport_rows_from_backend(
                 backend,
                 selected_payload_selector,
-                {"column": "Phrase"},
+                identity,
             )
             if blocked is not None:
                 return blocked
@@ -448,7 +450,7 @@ def ui_operation_adapters(
             selected_payload_after, blocked = await _selected_viewport_rows_after_drag(
                 backend,
                 selected_payload_selector,
-                {"column": "Phrase"},
+                identity,
                 expected_refs=selected_before_refs,
             )
             if blocked is not None:
@@ -497,10 +499,10 @@ def ui_operation_adapters(
             "route_evidence": route_evidence,
             "result": result,
         }
-        no_op = _drag_no_op_evidence(expect=expect, route=route)
+        no_op = _mapping_evidence_from_result(result, "no_op")
         if no_op is not None:
             output["no_op"] = no_op
-        cleanup = _drag_cleanup_evidence(result, modifiers=modifiers)
+        cleanup = _drag_cleanup_evidence(result)
         if cleanup is not None:
             output["cleanup"] = cleanup
         cancel_evidence = result.get("cancel")
@@ -696,20 +698,25 @@ async def _drag_route(
     source: dict[str, Any],
     path: list[dict[str, Any]],
     drop: dict[str, Any],
+    identity: Mapping[str, Any],
 ) -> tuple[dict[str, int], dict[str, Any], dict[str, Any] | None]:
     source_point, source_evidence, blocked = await _resolve_drag_endpoint(
         backend,
         source,
         role="source",
+        identity=identity,
     )
     if blocked is not None:
         return {}, {}, blocked
 
     target_payload = drop or (path[-1] if path else {})
+    fallback_selector = _selector_from_endpoint(source) or _selector_from_endpoint(target_payload)
     target_point, target_evidence, blocked = await _resolve_drag_endpoint(
         backend,
         target_payload,
         role="target",
+        identity=identity,
+        fallback_selector=fallback_selector,
     )
     if blocked is not None:
         return {}, {}, blocked
@@ -740,25 +747,6 @@ def _requires_path_drag(path: list[dict[str, Any]]) -> bool:
     return len(path) > 2 or any("hold_ms" in point for point in path)
 
 
-def _drag_no_op_evidence(
-    *,
-    expect: dict[str, Any],
-    route: dict[str, int],
-) -> dict[str, Any] | None:
-    if expect.get("no_op") is not True:
-        return None
-    movement_px = max(
-        abs(route.get("to_x", 0) - route.get("from_x", 0)),
-        abs(route.get("to_y", 0) - route.get("from_y", 0)),
-    )
-    return {
-        "expected": True,
-        "reason": str(expect.get("no_op_reason") or "unchanged_order"),
-        "route_attempted": True,
-        "movement_px": movement_px,
-    }
-
-
 def _drag_cancel_key(cancel: dict[str, Any]) -> str | None:
     key = cancel.get("key")
     if key is None:
@@ -769,28 +757,35 @@ def _drag_cancel_key(cancel: dict[str, Any]) -> str | None:
 
 def _drag_cleanup_evidence(
     result: dict[str, Any],
-    *,
-    modifiers: list[str],
 ) -> dict[str, Any] | None:
-    cleanup: dict[str, Any] = {}
-    modifier_cleanup = result.get("modifier_cleanup")
-    if isinstance(modifier_cleanup, Mapping):
-        cleanup["modifier_cleanup"] = dict(modifier_cleanup)
-    elif modifiers:
-        cleanup["modifier_cleanup"] = {"released": modifiers}
-    else:
-        cleanup["modifier_cleanup"] = {"released": []}
+    explicit_cleanup = _mapping_evidence_from_result(result, "cleanup")
+    if explicit_cleanup is not None:
+        return explicit_cleanup
 
-    pointer_cleanup = result.get("pointer_cleanup")
-    if isinstance(pointer_cleanup, Mapping):
-        cleanup["pointer_cleanup"] = dict(pointer_cleanup)
-    elif (
-        result.get("dragged") is True
-        or isinstance(result.get("path_points"), list)
-        or isinstance(result.get("final_pointer"), Mapping)
-    ):
-        cleanup["pointer_cleanup"] = {"left_button_released": True}
+    cleanup: dict[str, Any] = {}
+    for source in (result, result.get("result"), result.get("route_evidence")):
+        if not isinstance(source, Mapping):
+            continue
+        for key in ("modifier_cleanup", "pointer_cleanup"):
+            value = source.get(key)
+            if isinstance(value, Mapping):
+                cleanup[key] = dict(value)
     return cleanup or None
+
+
+def _mapping_evidence_from_result(
+    result: Mapping[str, Any],
+    key: str,
+) -> dict[str, Any] | None:
+    value = result.get(key)
+    if isinstance(value, Mapping):
+        return dict(value)
+    route_evidence = result.get("route_evidence")
+    if isinstance(route_evidence, Mapping):
+        nested = route_evidence.get(key)
+        if isinstance(nested, Mapping):
+            return dict(nested)
+    return None
 
 
 async def _drag_path_points(
@@ -884,6 +879,8 @@ async def _resolve_drag_endpoint(
     endpoint: dict[str, Any],
     *,
     role: str,
+    identity: Mapping[str, Any] | None = None,
+    fallback_selector: dict[str, Any] | None = None,
 ) -> tuple[dict[str, int], dict[str, Any], dict[str, Any] | None]:
     point = _screen_point(endpoint)
     if point is not None:
@@ -891,13 +888,16 @@ async def _resolve_drag_endpoint(
 
     relative_to = str(endpoint.get("relative_to") or "")
     if relative_to in {"viewport", "grid"}:
-        selector = _selector_from_endpoint(endpoint)
+        selector = _selector_from_endpoint(endpoint) or dict(fallback_selector or {})
         if not selector:
             return {}, {}, _drag_blocked(
                 reason=f"drag {role} viewport selector unavailable",
                 requested={role: endpoint},
-                accepted={f"{role}.selector": "grid selector for viewport-relative drop"},
-                next_step=f"Provide {role}.selector for viewport-relative coordinates.",
+                accepted={f"{role}.selector": "grid selector or source/drop selector fallback"},
+                next_step=(
+                    f"Provide {role}.selector or a source/drop selector for "
+                    "viewport-relative coordinates."
+                ),
             )
         _, evidence, blocked = await _resolve_selector_endpoint(backend, selector, role=role)
         if blocked is not None:
@@ -941,10 +941,22 @@ async def _resolve_drag_endpoint(
                 accepted={f"{role}.selector": "grid selector for visible row lookup"},
                 next_step=f"Provide {role}.selector with {role}.{kind}.",
             )
-        snapshot, blocked = await _grid_snapshot_for_drag(backend, selector, role=role)
+        endpoint_identity = _identity_from_endpoint(endpoint, identity)
+        snapshot, blocked = await _grid_snapshot_for_drag(
+            backend,
+            selector,
+            role=role,
+            identity=endpoint_identity,
+        )
         if blocked is not None:
             return {}, {}, blocked
-        row, blocked = _row_from_drag_endpoint(snapshot, endpoint, role=role, kind=kind)
+        row, blocked = _row_from_drag_endpoint(
+            snapshot,
+            endpoint,
+            role=role,
+            kind=kind,
+            identity=endpoint_identity,
+        )
         if blocked is not None:
             return {}, {}, blocked
         bounds = _bounds_from_mapping(row)
@@ -957,9 +969,16 @@ async def _resolve_drag_endpoint(
             )
         return (
             _center_point(bounds),
-            {"bounds": bounds, "identity": _row_identity(row), "row": _compact_row_ref(row)},
+            {
+                "bounds": bounds,
+                "identity": _row_identity(row, endpoint_identity),
+                "row": _compact_row_ref(row, endpoint_identity),
+            },
             None,
         )
+
+    if kind == "cached_element":
+        return _resolve_cached_element_endpoint(backend, endpoint, role=role)
 
     return {}, {}, _drag_blocked(
         reason=f"drag {role} requires coordinate resolution",
@@ -1004,18 +1023,77 @@ async def _resolve_selector_endpoint(
     return _center_point(bounds), {"bounds": bounds, "identity": _selector_identity(result)}, None
 
 
+def _resolve_cached_element_endpoint(
+    backend: Any,
+    endpoint: Mapping[str, Any],
+    *,
+    role: str,
+) -> tuple[dict[str, int], dict[str, Any], dict[str, Any] | None]:
+    cached_element = endpoint.get("cached_element")
+    if isinstance(cached_element, Mapping):
+        entry = dict(cached_element)
+        cache_key = entry.get("automation_id") or entry.get("automationId") or entry.get("id")
+    else:
+        cache_key = str(cached_element or "")
+        cache = _backend_element_cache(backend)
+        if cache is None:
+            return {}, {}, _drag_blocked(
+                reason=f"drag {role} cached element lookup unavailable",
+                requested={role: endpoint},
+                accepted={"backend.element_cache": "mapping of cached element refs to bounds"},
+                next_step="Populate or expose backend element_cache before using cached_element.",
+            )
+        cached_entry = cache.get(cache_key)
+        entry = dict(cached_entry) if isinstance(cached_entry, Mapping) else {}
+
+    if not entry:
+        return {}, {}, _drag_blocked(
+            reason=f"drag {role} cached element not found",
+            requested={role: endpoint},
+            accepted={"cached_element": "existing backend element cache key or bounds object"},
+            next_step="Refresh UI evidence or provide a cached_element value that exists.",
+        )
+    bounds = _bounds_from_mapping(entry)
+    if bounds is None:
+        return {}, {}, _drag_blocked(
+            reason=f"drag {role} cached element bounds unavailable",
+            requested={role: endpoint},
+            accepted={"cached_element.bounds": "element bounding rectangle"},
+            next_step="Use cached element evidence that includes bounds or rect.",
+        )
+    identity = str(
+        entry.get("name")
+        or entry.get("automation_id")
+        or entry.get("automationId")
+        or cache_key
+        or ""
+    )
+    return _center_point(bounds), {"bounds": bounds, "identity": identity}, None
+
+
+def _backend_element_cache(backend: Any) -> Mapping[str, Any] | None:
+    cache = getattr(backend, "element_cache", None)
+    if isinstance(cache, Mapping):
+        return cache
+    private_cache = getattr(backend, "_element_cache", None)
+    if isinstance(private_cache, Mapping):
+        return private_cache
+    return None
+
+
 async def _grid_snapshot_for_drag(
     backend: Any,
     selector: dict[str, Any],
     *,
     role: str,
+    identity: Mapping[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     grid_snapshot = getattr(backend, "grid_snapshot", None)
     if callable(grid_snapshot):
         result = await grid_snapshot(
             selector,
             rows={"visible_only": True},
-            columns=["Start", "End", "Character", "Phrase"],
+            columns=_viewport_columns(identity),
         )
     else:
         grid_visible_rows = getattr(backend, "grid_visible_rows", None)
@@ -1051,6 +1129,7 @@ def _row_from_drag_endpoint(
     *,
     role: str,
     kind: str,
+    identity: Mapping[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     rows = snapshot.get("visible_rows")
     if not isinstance(rows, list):
@@ -1073,7 +1152,11 @@ def _row_from_drag_endpoint(
             if not isinstance(row, Mapping):
                 continue
             try:
-                raw_visible_index = row.get("index")
+                raw_visible_index = (
+                    row.get("row_index")
+                    if row.get("row_index") is not None
+                    else row.get("index")
+                )
                 if raw_visible_index is None:
                     raise ValueError("missing row index")
                 visible_index = int(raw_visible_index)
@@ -1092,7 +1175,8 @@ def _row_from_drag_endpoint(
     matches = [
         dict(row)
         for row in rows
-        if isinstance(row, Mapping) and _row_matches_identity(row, requested_identity)
+        if isinstance(row, Mapping)
+        and _row_matches_identity(row, requested_identity, identity)
     ]
     if len(matches) == 1:
         return matches[0], None
@@ -1120,11 +1204,25 @@ def _endpoint_kind(endpoint: dict[str, Any]) -> str | None:
     return None
 
 
-def _row_matches_identity(row: Mapping[str, Any], identity: str) -> bool:
-    if not identity:
+def _identity_from_endpoint(
+    endpoint: Mapping[str, Any],
+    fallback: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    endpoint_identity = endpoint.get("identity")
+    if isinstance(endpoint_identity, Mapping):
+        return dict(endpoint_identity)
+    return dict(fallback or {})
+
+
+def _row_matches_identity(
+    row: Mapping[str, Any],
+    requested_identity: str,
+    identity: Mapping[str, Any],
+) -> bool:
+    if not requested_identity:
         return False
     candidates = {
-        _row_identity(row),
+        _row_identity(row, identity),
         str(row.get("automation_id") or ""),
         str(row.get("name") or ""),
     }
@@ -1136,33 +1234,51 @@ def _row_matches_identity(row: Mapping[str, Any], identity: str) -> bool:
         for cell in cell_values:
             if isinstance(cell, Mapping):
                 candidates.add(str(cell.get("text") or ""))
-    return identity in candidates
+    return requested_identity in candidates
 
 
-def _row_identity(row: Mapping[str, Any]) -> str:
+def _row_identity(row: Mapping[str, Any], identity: Mapping[str, Any] | None = None) -> str:
     cells = row.get("cells")
     if isinstance(cells, Mapping):
-        for key in ("Phrase", "Start", "Character", "End"):
+        for key in _viewport_columns(identity or {}):
             if cells.get(key):
                 return str(cells[key])
-    if row.get("automation_id"):
-        return str(row["automation_id"])
-    if row.get("name"):
-        return str(row["name"])
-    return f"row:{row.get('index')}"
+        for value in cells.values():
+            if value:
+                return str(value)
+    cell_values = row.get("cell_values")
+    if isinstance(cell_values, list):
+        for cell in cell_values:
+            if isinstance(cell, Mapping) and cell.get("text"):
+                return str(cell["text"])
+    for key in ("stable_id", "id", "automation_id", "automationId", "name"):
+        if row.get(key):
+            return str(row[key])
+    return f"row:{row.get('row_index', row.get('index'))}"
 
 
-def _compact_row_ref(row: Mapping[str, Any]) -> dict[str, Any]:
+def _compact_row_ref(
+    row: Mapping[str, Any],
+    identity: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     return {
-        "index": row.get("index"),
+        "index": row.get("row_index", row.get("index")),
         "automation_id": row.get("automation_id"),
-        "identity": _row_identity(row),
+        "identity": _row_identity(row, identity),
     }
 
 
 def _viewport_columns(identity: Mapping[str, Any]) -> list[str]:
+    columns: list[str] = []
     column = identity.get("column")
-    return [str(column)] if column else []
+    if column:
+        columns.append(str(column))
+    raw_columns = identity.get("columns")
+    if isinstance(raw_columns, list):
+        columns.extend(str(item) for item in raw_columns if item)
+    elif raw_columns:
+        columns.append(str(raw_columns))
+    return list(dict.fromkeys(columns))
 
 
 def _viewport_snapshot_from_rows(
