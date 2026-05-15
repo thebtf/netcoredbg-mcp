@@ -442,6 +442,10 @@ class DAPClient:
             },
         )
 
+    async def set_hot_reload(self, enable: bool) -> DAPResponse:
+        """Enable or disable netcoredbg Hot Reload before launch."""
+        return await self.send_request("setHotReload", {"enable": enable})
+
     async def set_exception_breakpoints(self, filters: list[str] | None = None) -> DAPResponse:
         """Set exception breakpoints."""
         return await self.send_request(

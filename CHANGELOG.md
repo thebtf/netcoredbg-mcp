@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-05-15
+
+### Added
+- Live Edit-and-Continue apply path that enables Hot Reload, resolves the loaded
+  target module, builds Roslyn deltas from the active module baseline, and
+  applies IL/metadata/PDB deltas without restarting the debuggee.
+- Release regression coverage for loaded-module baselines, multi-target module
+  TFM reference resolution, netstandard reference-pack selection, and line
+  update compatibility validation.
+
+### Fixed
+- `apply_code_change` now rejects line-changing edits until real `lineUpdates`
+  payloads are emitted, while preserving same-line blank replacements.
+- Framework reference resolution now derives the TFM from the loaded module path
+  before falling back to the project file and probes POSIX dotnet install roots.
+
 ## [0.16.0] - 2026-05-15
 
 ### Added

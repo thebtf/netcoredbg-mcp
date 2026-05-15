@@ -65,10 +65,132 @@ async def test_apply_code_change_stopped_success_updates_source_and_restores_sta
     session.state.modules = [
         ModuleInfo(name="Sample.dll", path=str(tmp_path / "bin" / "Debug" / "Sample.dll"))
     ]
+    applied: dict[str, object] = {}
+    compiled: dict[str, object] = {}
 
     async def fake_apply(*args, **_kwargs):
+        applied["dll_name"] = _kwargs["dll_name"]
+        applied["line_updates_path"] = _kwargs["line_updates_path"]
         session.state_during_apply = session.state.state
         return ApplyDeltasResult(success=True, message=None, body={"ok": True})
+
+    def fake_compiler(**kwargs):
+        compiled.update(kwargs)
+        return DeltaResult(
+            True,
+            str(tmp_path / "Sample.il"),
+            str(tmp_path / "Sample.metadata"),
+            str(tmp_path / "Sample.pdb"),
+            (),
+            (),
+        )
+
+    result = await apply_code_change_to_session(
+        session,
+        project,
+        "Sample.cs",
+        [{"start_line": 7, "end_line": 7, "new_text": "        return 2;"}],
+        compiler=fake_compiler,
+        apply=fake_apply,
+    )
+
+    assert result["data"]["success"] is True
+    assert compiled["module_path"] == str(tmp_path / "bin" / "Debug" / "Sample.dll")
+    assert applied["dll_name"] == "Sample.dll"
+    assert Path(applied["line_updates_path"]).read_bytes() == b"\x00\x00\x00\x00"
+    assert "return 2;" in source.read_text(encoding="utf-8")
+    assert session.state_during_apply is DebugState.APPLYING_CHANGES
+    assert session.transitions == [DebugState.APPLYING_CHANGES, DebugState.STOPPED]
+
+
+@pytest.mark.asyncio
+async def test_apply_code_change_rejects_line_changing_edit_before_compile_or_apply(
+    tmp_path: Path,
+):
+    project, source, netcoredbg = _write_project(tmp_path)
+    original_source = source.read_text(encoding="utf-8")
+    session = FakeSession(DebugState.STOPPED, project, netcoredbg)
+    compiled = False
+    applied = False
+
+    def fake_compiler(**_kwargs):
+        nonlocal compiled
+        compiled = True
+        return DeltaResult(True, "Sample.il", "Sample.metadata", "Sample.pdb", (), ())
+
+    async def fake_apply(*_args, **_kwargs):
+        nonlocal applied
+        applied = True
+        return ApplyDeltasResult(success=True, message=None, body={})
+
+    result = await apply_code_change_to_session(
+        session,
+        project,
+        "Sample.cs",
+        [
+            {
+                "start_line": 7,
+                "end_line": 7,
+                "new_text": "        var value = 2;\n        return value;",
+            }
+        ],
+        compiler=fake_compiler,
+        apply=fake_apply,
+    )
+
+    assert "Line-changing edits are not supported" in result["error"]
+    assert compiled is False
+    assert applied is False
+    assert source.read_text(encoding="utf-8") == original_source
+    assert session.transitions == []
+
+
+@pytest.mark.asyncio
+async def test_apply_code_change_treats_empty_new_text_as_blank_same_line(
+    tmp_path: Path,
+):
+    project, source, netcoredbg = _write_project(tmp_path)
+    session = FakeSession(DebugState.STOPPED, project, netcoredbg)
+    session.state.modules = [
+        ModuleInfo(name="Sample.dll", path=str(tmp_path / "bin" / "Debug" / "Sample.dll"))
+    ]
+
+    async def fake_apply(*_args, **_kwargs):
+        return ApplyDeltasResult(success=True, message=None, body={"ok": True})
+
+    result = await apply_code_change_to_session(
+        session,
+        project,
+        "Sample.cs",
+        [{"start_line": 7, "end_line": 7, "new_text": ""}],
+        compiler=lambda **_kwargs: DeltaResult(
+            True,
+            str(tmp_path / "Sample.il"),
+            str(tmp_path / "Sample.metadata"),
+            str(tmp_path / "Sample.pdb"),
+            (),
+            (),
+        ),
+        apply=fake_apply,
+    )
+
+    assert result["data"]["success"] is True
+    assert source.read_text(encoding="utf-8").splitlines()[6] == ""
+
+
+@pytest.mark.asyncio
+async def test_apply_code_change_restores_source_when_apply_deltas_fails(
+    tmp_path: Path,
+):
+    project, source, netcoredbg = _write_project(tmp_path)
+    original_source = source.read_text(encoding="utf-8")
+    session = FakeSession(DebugState.STOPPED, project, netcoredbg)
+    session.state.modules = [
+        ModuleInfo(name="Sample.dll", path=str(tmp_path / "bin" / "Debug" / "Sample.dll"))
+    ]
+
+    async def fake_apply(*_args, **_kwargs):
+        return ApplyDeltasResult(success=False, message="apply failed", body={})
 
     result = await apply_code_change_to_session(
         session,
@@ -86,9 +208,9 @@ async def test_apply_code_change_stopped_success_updates_source_and_restores_sta
         apply=fake_apply,
     )
 
-    assert result["data"]["success"] is True
-    assert "return 2;" in source.read_text(encoding="utf-8")
-    assert session.state_during_apply is DebugState.APPLYING_CHANGES
+    assert "apply failed" in result["error"]
+    assert result["state"] == DebugState.STOPPED.value
+    assert source.read_text(encoding="utf-8") == original_source
     assert session.transitions == [DebugState.APPLYING_CHANGES, DebugState.STOPPED]
 
 

@@ -60,20 +60,20 @@ else {
 
 $buildDir = Join-Path $repoDir "build-enc"
 New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
+$netcoredbgExe = Join-Path $InstallDir "netcoredbg.exe"
+$ncdbhookDll = Join-Path $InstallDir "ncdbhook.dll"
+$ncdbhookCMakePath = $ncdbhookDll.Replace("\", "/")
 
 $cmakeConfigureArgs = @(
     "-S", $repoDir,
     "-B", $buildDir,
-    "-DNCDB_DOTNET_STARTUP_HOOK=1",
+    "-DNCDB_DOTNET_STARTUP_HOOK=$ncdbhookCMakePath",
     "-DBUILD_MANAGED=1",
     "-DCMAKE_INSTALL_PREFIX=$InstallDir"
 )
 
 cmake @cmakeConfigureArgs
 cmake --build $buildDir --target install --config Debug
-
-$netcoredbgExe = Join-Path $InstallDir "netcoredbg.exe"
-$ncdbhookDll = Join-Path $InstallDir "ncdbhook.dll"
 
 if (-not (Test-Path $netcoredbgExe)) {
     Fail-WithPrerequisites "Build finished but netcoredbg.exe was not installed to $InstallDir."

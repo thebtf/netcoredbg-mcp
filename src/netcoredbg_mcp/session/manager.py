@@ -33,6 +33,7 @@ from ..dap.events import (
     ThreadEventBody,
 )
 from ..dap.protocol import Events
+from ..enc.detect import detect_enc_support
 from ..process_registry import ProcessRegistry
 from ..ui.foreground import (
     get_foreground_window,
@@ -1187,6 +1188,8 @@ class SessionManager:
         except asyncio.TimeoutError as e:
             raise RuntimeError("Timeout waiting for DAP initialization") from e
 
+        await self._enable_hot_reload_if_supported()
+
         logger.info("[launch] phase 7/9: syncing breakpoints")
         await report(70, 100, "Setting breakpoints...")
 
@@ -1338,6 +1341,18 @@ class SessionManager:
             config["pre_build"] = True
 
         return await self.launch(**config)
+
+    async def _enable_hot_reload_if_supported(self) -> None:
+        enc_support = detect_enc_support(self.netcoredbg_path)
+        if not enc_support["supported"]:
+            return
+
+        response = await self._client.set_hot_reload(True)
+        if not response.success:
+            raise RuntimeError(
+                "Failed to enable netcoredbg Hot Reload before launch: "
+                f"{response.message or 'setHotReload request failed'}"
+            )
 
     async def _sync_all_breakpoints(self) -> None:
         """Sync all breakpoints to DAP."""

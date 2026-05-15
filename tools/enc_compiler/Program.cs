@@ -37,6 +37,7 @@ try
         request.ProjectPath,
         request.FilePath,
         edits,
+        request.ModulePath,
         request.OutputDir);
 
     await WriteResponseAsync(CliResponse.FromResult(result));
@@ -57,6 +58,7 @@ internal sealed record CliRequest(
     [property: JsonPropertyName("project_path")] string ProjectPath,
     [property: JsonPropertyName("file_path")] string FilePath,
     [property: JsonPropertyName("edits")] IReadOnlyList<CliEdit> Edits,
+    [property: JsonPropertyName("module_path")] string? ModulePath = null,
     [property: JsonPropertyName("output_dir")] string? OutputDir = null);
 
 internal sealed record CliEdit(

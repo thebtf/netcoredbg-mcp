@@ -32,6 +32,7 @@ def compile_delta(
     file_path: str | os.PathLike[str],
     edits: Sequence[SourceEdit],
     *,
+    module_path: str | os.PathLike[str] | None = None,
     compiler_path: str | os.PathLike[str] | None = None,
     output_dir: str | os.PathLike[str] | None = None,
     timeout: float = 30.0,
@@ -50,6 +51,8 @@ def compile_delta(
             for edit in edits
         ],
     }
+    if module_path is not None:
+        payload["module_path"] = str(module_path)
     if output_dir is not None:
         payload["output_dir"] = str(output_dir)
 
