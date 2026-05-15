@@ -373,13 +373,16 @@ def ui_operation_adapters(
         identity = dict(args.get("identity") or {})
         cancel = dict(args.get("cancel") or {})
         cancel_key = _drag_cancel_key(cancel)
-        route, route_evidence, blocked = await _drag_route(
-            backend,
-            source=source,
-            path=path,
-            drop=drop,
-            identity=identity,
-        )
+        try:
+            route, route_evidence, blocked = await _drag_route(
+                backend,
+                source=source,
+                path=path,
+                drop=drop,
+                identity=identity,
+            )
+        except Exception as exc:
+            return _drag_backend_exception_blocked("drag route resolution", exc)
         if blocked is not None:
             return blocked
 
@@ -394,11 +397,14 @@ def ui_operation_adapters(
             or {}
         )
         if expect.get("selected_payload_preserved") is True:
-            selected_payload_before, blocked = await _selected_viewport_rows_from_backend(
-                backend,
-                selected_payload_selector,
-                identity,
-            )
+            try:
+                selected_payload_before, blocked = await _selected_viewport_rows_from_backend(
+                    backend,
+                    selected_payload_selector,
+                    identity,
+                )
+            except Exception as exc:
+                return _drag_backend_exception_blocked("selected payload preflight", exc)
             if blocked is not None:
                 return blocked
         try:
@@ -447,12 +453,15 @@ def ui_operation_adapters(
         selected_payload: dict[str, Any] | None = None
         if expect.get("selected_payload_preserved") is True:
             selected_before_refs = _selected_payload_refs(selected_payload_before)
-            selected_payload_after, blocked = await _selected_viewport_rows_after_drag(
-                backend,
-                selected_payload_selector,
-                identity,
-                expected_refs=selected_before_refs,
-            )
+            try:
+                selected_payload_after, blocked = await _selected_viewport_rows_after_drag(
+                    backend,
+                    selected_payload_selector,
+                    identity,
+                    expected_refs=selected_before_refs,
+                )
+            except Exception as exc:
+                return _drag_backend_exception_blocked("selected payload postflight", exc)
             if blocked is not None:
                 return blocked
             selected_after_refs = _selected_payload_refs(selected_payload_after)
@@ -468,6 +477,14 @@ def ui_operation_adapters(
             }
 
         backend_route = _mapping_evidence_from_result(result, "route_evidence") or {}
+        path_points = result.get("path_points")
+        hold_points = result.get("hold_points")
+        final_pointer = result.get("final_pointer")
+        if use_path_drag and _is_backend_success(result) and not _has_backend_path_evidence(
+            result,
+            backend_route,
+        ):
+            return _path_drag_blocked("path-aware drag backend did not return route evidence")
         route_evidence = {
             **route_evidence,
             **backend_route,
@@ -475,13 +492,10 @@ def ui_operation_adapters(
             "start": {"x": route["from_x"], "y": route["from_y"]},
             "drop": {"x": route["to_x"], "y": route["to_y"]},
         }
-        path_points = result.get("path_points")
         if isinstance(path_points, list):
             route_evidence["move_points"] = list(path_points)
-        hold_points = result.get("hold_points")
         if isinstance(hold_points, list):
             route_evidence["hold_points"] = list(hold_points)
-        final_pointer = result.get("final_pointer")
         if isinstance(final_pointer, Mapping):
             route_evidence["final_pointer"] = dict(final_pointer)
         if selected_payload is not None:
@@ -504,6 +518,14 @@ def ui_operation_adapters(
             output["cancel"] = dict(cancel_evidence)
         if selected_payload is not None:
             output["selected_payload"] = selected_payload
+        if (
+            status == "PASS"
+            and expect.get("selected_payload_preserved") is True
+            and selected_payload is not None
+            and selected_payload.get("preserved") is not True
+        ):
+            output["status"] = "FAIL"
+            output["reason"] = "selected payload was not preserved after drag"
         if status != "PASS":
             output["reason"] = str(result.get("reason") or "ui.drag backend did not pass")
             for key in ("reason", "requested", "accepted", "next_step"):
@@ -999,7 +1021,21 @@ async def _resolve_selector_endpoint(
             next_step="Use a UI backend that can resolve selectors to element bounds.",
         )
     result = await find_element(**_selector_kwargs(selector))
-    if not isinstance(result, Mapping) or not result.get("found", True):
+    if not isinstance(result, Mapping):
+        return {}, {}, _drag_blocked(
+            reason=f"drag {role} selector lookup returned non-object result",
+            requested={role: selector},
+            accepted={"selector": "unique visible element selector"},
+            next_step="Inspect the backend selector lookup response.",
+        )
+    if not _is_backend_success(result):
+        return {}, {}, _drag_blocked(
+            reason=str(result.get("reason") or f"drag {role} selector lookup failed"),
+            requested={role: selector},
+            accepted={"selector": "unique visible element selector"},
+            next_step="Update the selector so it resolves successfully before dragging.",
+        )
+    if not result.get("found", True):
         return {}, {}, _drag_blocked(
             reason=f"drag {role} selector not found",
             requested={role: selector},
@@ -1687,6 +1723,42 @@ def _path_drag_blocked(reason: str) -> dict[str, Any]:
             "Use the FlaUI bridge backend for release-critical path-aware drag proof."
         ),
     }
+
+
+def _drag_backend_exception_blocked(operation: str, exc: Exception) -> dict[str, Any]:
+    return {
+        "status": "BLOCKED",
+        "reason": f"{operation} raised exception",
+        "requested": {
+            "adapter": "ui.drag",
+            "operation": operation,
+        },
+        "accepted": {
+            "backend": "UI backend calls return structured PASS/BLOCKED results",
+        },
+        "next_step": "Inspect the UI backend selector and grid evidence logs.",
+        "exception": {
+            "type": type(exc).__name__,
+            "message": str(exc),
+        },
+    }
+
+
+def _has_backend_path_evidence(
+    result: Mapping[str, Any],
+    backend_route: Mapping[str, Any],
+) -> bool:
+    top_level_evidence = (
+        isinstance(result.get("path_points"), list)
+        and bool(result.get("path_points"))
+        and isinstance(result.get("final_pointer"), Mapping)
+    )
+    route_evidence = (
+        isinstance(backend_route.get("move_points"), list)
+        and bool(backend_route.get("move_points"))
+        and isinstance(backend_route.get("final_pointer"), Mapping)
+    )
+    return top_level_evidence or route_evidence
 
 
 async def _settle_after_state_change(result: dict[str, Any]) -> dict[str, Any]:
