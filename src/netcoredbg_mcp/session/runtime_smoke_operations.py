@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from ..ui.focus import assert_focus
-from ..ui.grid import assert_grid_rows, select_grid_range, snapshot_grid
+from ..ui.grid import assert_grid_rows, read_grid_selected_rows, select_grid_range, snapshot_grid
 from ..ui.key_sequence import run_scoped_key_sequence
 from ..ui.list_items import invoke_list_item, toggle_list_item_child
 
@@ -44,6 +44,52 @@ def ui_operation_adapters(
             rows=args.get("rows"),
             columns=args.get("columns"),
         )
+
+    async def grid_viewport(**args: Any) -> dict[str, Any]:
+        backend = await _backend_or_blocked(ensure_ui_connected)
+        if isinstance(backend, dict):
+            return backend
+        selector = _selector(args)
+        identity = dict(args.get("identity") or {})
+        rows = dict(args.get("rows") or {})
+        expect = dict(args.get("expect") or {})
+        columns = _viewport_columns(identity)
+        result = await snapshot_grid(backend, selector, rows=rows, columns=columns)
+        if _is_non_pass_result(result):
+            return cast(dict[str, Any], result)
+        if not isinstance(result, Mapping):
+            return _viewport_blocked(
+                reason="grid viewport snapshot returned non-object result",
+                selector=selector,
+            )
+        visible_rows = result.get("visible_rows")
+        if not isinstance(visible_rows, list):
+            return _viewport_blocked(
+                reason="grid viewport visible row evidence unavailable",
+                selector=selector,
+            )
+
+        selected_rows = _selected_viewport_rows_from_visible(visible_rows, identity)
+        if expect.get("selected_payload_preserved") is True and not selected_rows:
+            selected_rows, blocked = await _selected_viewport_rows_from_backend(
+                backend,
+                selector,
+                identity,
+            )
+            if blocked is not None:
+                return blocked
+
+        return {
+            "status": "PASS",
+            "snapshot": _viewport_snapshot_from_rows(
+                result,
+                visible_rows=visible_rows,
+                selected_rows=selected_rows,
+                identity=identity,
+            ),
+            "phase": args.get("phase"),
+            "probe_name": args.get("probe_name"),
+        }
 
     async def grid_select_range(**args: Any) -> dict[str, Any]:
         backend = await _backend_or_blocked(ensure_ui_connected)
@@ -343,6 +389,7 @@ def ui_operation_adapters(
     adapters: OperationAdapterMap = {
         "ui.ensure_connected": ensure_connected,
         "ui.grid.snapshot": grid_snapshot,
+        "ui.grid.viewport": grid_viewport,
         "ui.grid.select_range": grid_select_range,
         "ui.grid.assert_rows": grid_assert_rows,
         "ui.list.invoke_item": list_invoke,
@@ -811,6 +858,147 @@ def _compact_row_ref(row: Mapping[str, Any]) -> dict[str, Any]:
         "automation_id": row.get("automation_id"),
         "identity": _row_identity(row),
     }
+
+
+def _viewport_columns(identity: Mapping[str, Any]) -> list[str]:
+    column = identity.get("column")
+    return [str(column)] if column else []
+
+
+def _viewport_snapshot_from_rows(
+    result: Mapping[str, Any],
+    *,
+    visible_rows: list[Any],
+    selected_rows: list[dict[str, Any]],
+    identity: Mapping[str, Any],
+) -> dict[str, Any]:
+    compact_rows = [
+        _viewport_row_ref(row, identity)
+        for row in visible_rows
+        if isinstance(row, Mapping)
+    ]
+    indices: list[int] = []
+    for row in compact_rows:
+        index = row.get("index")
+        if isinstance(index, int):
+            indices.append(index)
+    identity_strategy = _viewport_identity_strategy(identity, compact_rows)
+    return {
+        "first_visible_index": min(indices) if indices else None,
+        "last_visible_index": max(indices) if indices else None,
+        "visible_rows": compact_rows,
+        "selected_rows": selected_rows,
+        "row_count": result.get("row_count"),
+        "identity_strategy": identity_strategy,
+    }
+
+
+def _viewport_row_ref(row: Mapping[str, Any], identity: Mapping[str, Any]) -> dict[str, Any]:
+    row_identity, derived = _viewport_row_identity(row, identity)
+    return {
+        "index": _int_or_none(row.get("index")),
+        "identity": row_identity,
+        "derived": derived,
+    }
+
+
+def _viewport_row_identity(
+    row: Mapping[str, Any],
+    identity: Mapping[str, Any],
+) -> tuple[str, bool]:
+    column = identity.get("column")
+    cells = row.get("cells")
+    if column and isinstance(cells, Mapping) and cells.get(str(column)):
+        return str(cells[str(column)]), False
+    for key in ("stable_id", "id", "automation_id", "name"):
+        if row.get(key):
+            return str(row[key]), False
+    if isinstance(cells, Mapping):
+        values = [str(value) for value in cells.values() if value]
+        if values:
+            return "|".join(values), False
+    return f"row:{row.get('index')}", True
+
+
+def _viewport_identity_strategy(
+    identity: Mapping[str, Any],
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    column = identity.get("column")
+    strategy: dict[str, Any] = (
+        {"kind": "configured_column", "column": str(column)}
+        if column
+        else {"kind": "row_evidence"}
+    )
+    if any(bool(row.get("derived")) for row in rows):
+        strategy["derived"] = True
+    return strategy
+
+
+def _selected_viewport_rows_from_visible(
+    visible_rows: list[Any],
+    identity: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    return [
+        _viewport_row_ref(row, identity)
+        for row in visible_rows
+        if isinstance(row, Mapping) and bool(row.get("selected"))
+    ]
+
+
+async def _selected_viewport_rows_from_backend(
+    backend: Any,
+    selector: dict[str, Any],
+    identity: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    grid_selected_rows = getattr(backend, "grid_selected_rows", None)
+    if not callable(grid_selected_rows):
+        return [], _viewport_blocked(
+            reason="selected row evidence unavailable",
+            selector=selector,
+        )
+    result = await read_grid_selected_rows(backend, selector)
+    if _is_non_pass_result(result):
+        return [], {
+            **dict(result),
+            "status": "BLOCKED",
+            "reason": str(result.get("reason") or "selected row evidence unavailable"),
+        }
+    selected_rows = result.get("selected_rows")
+    if not isinstance(selected_rows, list):
+        return [], _viewport_blocked(
+            reason="selected row evidence unavailable",
+            selector=selector,
+        )
+    return [
+        _viewport_row_ref(row, identity)
+        for row in selected_rows
+        if isinstance(row, Mapping)
+    ], None
+
+
+def _viewport_blocked(
+    *,
+    reason: str,
+    selector: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "status": "BLOCKED",
+        "reason": reason,
+        "requested": {"selector": selector, "probe": "ui.grid.viewport"},
+        "accepted": {
+            "selected_rows": "before and after selected row identities",
+            "visible_rows": "visible row identities with row bounds or indices",
+        },
+        "next_step": "Use a UI backend that returns grid viewport and selected row evidence.",
+    }
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _selector_identity(result: Mapping[str, Any]) -> str:

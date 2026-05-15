@@ -63,6 +63,20 @@ async def handle_ui_grid_viewport(
             output["comparison"] = comparison
             if expect:
                 output["expected"] = expect
+                if (
+                    expect.get("selected_payload_preserved") is True
+                    and comparison.get("selected_payload_preserved") is None
+                ):
+                    output["status"] = "BLOCKED"
+                    output["reason"] = "selected row evidence unavailable"
+                    output["requested"] = {"expect": {"selected_payload_preserved": True}}
+                    output["accepted"] = {
+                        "selected_rows": "before and after selected row identities"
+                    }
+                    output["next_step"] = (
+                        "Use a UI backend that returns selected row evidence for viewport probes."
+                    )
+                    return output
                 if status == "PASS" and not _expectation_matches(comparison, expect):
                     output["status"] = "FAIL"
                     output["reason"] = "grid viewport expectation failed"
@@ -79,16 +93,33 @@ def _compare_snapshots(before: dict[str, Any], after: dict[str, Any]) -> dict[st
     after_first = after.get("first_visible_index")
     before_last = before.get("last_visible_index")
     after_last = after.get("last_visible_index")
+    first_changed = before_first != after_first
+    last_changed = before_last != after_last
     direction = "unchanged"
     if isinstance(before_first, int) and isinstance(after_first, int):
         if after_first > before_first:
             direction = "down"
         elif after_first < before_first:
             direction = "up"
+    selected_before = _row_identity_refs(before.get("selected_rows"))
+    selected_after = _row_identity_refs(after.get("selected_rows"))
+    before_row_count = before.get("row_count")
+    after_row_count = after.get("row_count")
     return {
-        "first_visible_index_changed": before_first != after_first,
-        "last_visible_index_changed": before_last != after_last,
+        "first_visible_index_changed": first_changed,
+        "last_visible_index_changed": last_changed,
+        "viewport_moved": first_changed or last_changed,
         "direction": direction,
+        "selected_before": selected_before,
+        "selected_after": selected_after,
+        "selected_payload_preserved": selected_before == selected_after
+        if selected_before and selected_after
+        else None,
+        "before_row_count": before_row_count,
+        "after_row_count": after_row_count,
+        "row_count_preserved": before_row_count == after_row_count
+        if isinstance(before_row_count, int) and isinstance(after_row_count, int)
+        else None,
     }
 
 
@@ -97,3 +128,16 @@ def _expectation_matches(comparison: dict[str, Any], expect: dict[str, Any]) -> 
         if comparison.get(key) != expected_value:
             return False
     return True
+
+
+def _row_identity_refs(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    refs: list[str] = []
+    for row in value:
+        if not isinstance(row, dict):
+            continue
+        identity = row.get("identity")
+        if identity is not None:
+            refs.append(str(identity))
+    return refs

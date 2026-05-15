@@ -44,6 +44,7 @@ def _viewport_snapshot(
     first: int,
     last: int,
     selected: list[str] | None = None,
+    row_count: int = 600,
 ) -> dict[str, Any]:
     return {
         "first_visible_index": first,
@@ -56,7 +57,7 @@ def _viewport_snapshot(
             {"index": first + offset, "identity": identity}
             for offset, identity in enumerate(selected or [])
         ],
-        "row_count": 600,
+        "row_count": row_count,
         "identity_strategy": {
             "kind": "configured_column",
             "column": "PhraseId",
@@ -187,12 +188,251 @@ async def test_ui_grid_viewport_uses_scratch_for_changed_viewport_expectation() 
     assert result["status"] == "PASS"
     assert before["value"]["first_visible_index"] == 0
     assert after["value"]["first_visible_index"] == 3
-    assert after["comparison"] == {
-        "first_visible_index_changed": True,
-        "last_visible_index_changed": True,
-        "direction": "down",
-    }
+    assert after["comparison"]["first_visible_index_changed"] is True
+    assert after["comparison"]["last_visible_index_changed"] is True
+    assert after["comparison"]["viewport_moved"] is True
+    assert after["comparison"]["direction"] == "down"
     assert after["expected"] == {
         "first_visible_index_changed": True,
         "direction": "down",
     }
+
+
+@pytest.mark.asyncio
+async def test_ui_grid_viewport_detects_upward_scroll_direction() -> None:
+    session = GridViewportProbeSession()
+    session.viewport_results.extend(
+        [
+            {"status": "PASS", "snapshot": _viewport_snapshot(first=10, last=14)},
+            {"status": "PASS", "snapshot": _viewport_snapshot(first=6, last=10)},
+        ]
+    )
+
+    result = await runner(
+        session,
+        {"ui.grid.viewport": session.grid_viewport},
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "ui.grid.viewport",
+                "name": "cue_viewport",
+                "phase": "both",
+                "selector": {"automation_id": "CueDataGrid"},
+                "identity": {"column": "PhraseId"},
+                "rows": {"visible_only": True, "max": 5},
+                "expect": {
+                    "viewport_moved": True,
+                    "direction": "up",
+                },
+            }
+        )
+    )
+
+    after = after_probe(result)
+    assert result["status"] == "PASS"
+    assert after["comparison"]["viewport_moved"] is True
+    assert after["comparison"]["direction"] == "up"
+
+
+@pytest.mark.asyncio
+async def test_ui_grid_viewport_fails_when_expected_scroll_is_unchanged() -> None:
+    session = GridViewportProbeSession()
+    session.viewport_results.extend(
+        [
+            {"status": "PASS", "snapshot": _viewport_snapshot(first=10, last=14)},
+            {"status": "PASS", "snapshot": _viewport_snapshot(first=10, last=14)},
+        ]
+    )
+
+    result = await runner(
+        session,
+        {"ui.grid.viewport": session.grid_viewport},
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "ui.grid.viewport",
+                "name": "cue_viewport",
+                "phase": "both",
+                "selector": {"automation_id": "CueDataGrid"},
+                "identity": {"column": "PhraseId"},
+                "rows": {"visible_only": True, "max": 5},
+                "expect": {
+                    "viewport_moved": True,
+                    "direction": "down",
+                },
+            }
+        )
+    )
+
+    after = after_probe(result)
+    assert result["status"] == "FAIL"
+    assert after["status"] == "FAIL"
+    assert after["comparison"]["viewport_moved"] is False
+    assert after["comparison"]["direction"] == "unchanged"
+
+
+@pytest.mark.asyncio
+async def test_ui_grid_viewport_fails_on_opposite_scroll_direction() -> None:
+    session = GridViewportProbeSession()
+    session.viewport_results.extend(
+        [
+            {"status": "PASS", "snapshot": _viewport_snapshot(first=10, last=14)},
+            {"status": "PASS", "snapshot": _viewport_snapshot(first=5, last=9)},
+        ]
+    )
+
+    result = await runner(
+        session,
+        {"ui.grid.viewport": session.grid_viewport},
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "ui.grid.viewport",
+                "name": "cue_viewport",
+                "phase": "both",
+                "selector": {"automation_id": "CueDataGrid"},
+                "identity": {"column": "PhraseId"},
+                "rows": {"visible_only": True, "max": 5},
+                "expect": {
+                    "viewport_moved": True,
+                    "direction": "down",
+                },
+            }
+        )
+    )
+
+    after = after_probe(result)
+    assert result["status"] == "FAIL"
+    assert after["comparison"]["direction"] == "up"
+    assert after["expected"] == {"viewport_moved": True, "direction": "down"}
+
+
+@pytest.mark.asyncio
+async def test_ui_grid_viewport_compares_selected_payload_continuity() -> None:
+    session = GridViewportProbeSession()
+    session.viewport_results.extend(
+        [
+            {
+                "status": "PASS",
+                "snapshot": _viewport_snapshot(
+                    first=0,
+                    last=4,
+                    selected=["Cue 001", "Cue 002"],
+                ),
+            },
+            {
+                "status": "PASS",
+                "snapshot": _viewport_snapshot(
+                    first=2,
+                    last=6,
+                    selected=["Cue 001", "Cue 003"],
+                ),
+            },
+        ]
+    )
+
+    result = await runner(
+        session,
+        {"ui.grid.viewport": session.grid_viewport},
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "ui.grid.viewport",
+                "name": "cue_viewport",
+                "phase": "both",
+                "selector": {"automation_id": "CueDataGrid"},
+                "identity": {"column": "PhraseId"},
+                "rows": {"visible_only": True, "max": 5},
+                "expect": {
+                    "selected_payload_preserved": True,
+                },
+            }
+        )
+    )
+
+    after = after_probe(result)
+    assert result["status"] == "FAIL"
+    assert after["comparison"]["selected_before"] == ["Cue 001", "Cue 002"]
+    assert after["comparison"]["selected_after"] == ["Cue 001", "Cue 003"]
+    assert after["comparison"]["selected_payload_preserved"] is False
+
+
+@pytest.mark.asyncio
+async def test_ui_grid_viewport_blocks_selected_payload_without_selected_evidence() -> None:
+    session = GridViewportProbeSession()
+    session.viewport_results.extend(
+        [
+            {"status": "PASS", "snapshot": _viewport_snapshot(first=0, last=4)},
+            {"status": "PASS", "snapshot": _viewport_snapshot(first=2, last=6)},
+        ]
+    )
+
+    result = await runner(
+        session,
+        {"ui.grid.viewport": session.grid_viewport},
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "ui.grid.viewport",
+                "name": "cue_viewport",
+                "phase": "both",
+                "selector": {"automation_id": "CueDataGrid"},
+                "identity": {"column": "PhraseId"},
+                "rows": {"visible_only": True, "max": 5},
+                "expect": {
+                    "selected_payload_preserved": True,
+                },
+            }
+        )
+    )
+
+    after = after_probe(result)
+    assert result["status"] == "BLOCKED"
+    assert after["status"] == "BLOCKED"
+    assert after["reason"] == "selected row evidence unavailable"
+    assert after["requested"] == {"expect": {"selected_payload_preserved": True}}
+    assert after["accepted"]["selected_rows"]
+    assert after["next_step"]
+
+
+@pytest.mark.asyncio
+async def test_ui_grid_viewport_compares_row_count_preservation() -> None:
+    session = GridViewportProbeSession()
+    session.viewport_results.extend(
+        [
+            {
+                "status": "PASS",
+                "snapshot": _viewport_snapshot(first=0, last=4, row_count=600),
+            },
+            {
+                "status": "PASS",
+                "snapshot": _viewport_snapshot(first=3, last=7, row_count=599),
+            },
+        ]
+    )
+
+    result = await runner(
+        session,
+        {"ui.grid.viewport": session.grid_viewport},
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "ui.grid.viewport",
+                "name": "cue_viewport",
+                "phase": "both",
+                "selector": {"automation_id": "CueDataGrid"},
+                "identity": {"column": "PhraseId"},
+                "rows": {"visible_only": True, "max": 5},
+                "expect": {
+                    "row_count_preserved": True,
+                    "direction": "down",
+                },
+            }
+        )
+    )
+
+    after = after_probe(result)
+    assert result["status"] == "FAIL"
+    assert after["comparison"]["before_row_count"] == 600
+    assert after["comparison"]["after_row_count"] == 599
+    assert after["comparison"]["row_count_preserved"] is False

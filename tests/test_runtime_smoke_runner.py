@@ -8,7 +8,7 @@ import stat
 from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -30,6 +30,10 @@ def _set_windows_file_attributes(path: Path, attributes: int) -> None:
     if not kernel32.SetFileAttributesW(str(path), attributes):
         error = ctypes.GetLastError()
         raise OSError(error, f"SetFileAttributesW failed for {path}")
+
+
+async def _no_ui_backend() -> None:
+    return None
 
 
 class FakeRuntimeSmokeSession:
@@ -876,7 +880,7 @@ async def test_fixture_restore_returns_structured_failure_for_io_errors(
     baseline_dir.mkdir()
     target = tmp_path / "settings.json"
 
-    adapters = ui_operation_adapters(lambda: None, session=session)
+    adapters = ui_operation_adapters(_no_ui_backend, session=session)
     result = await adapters["fixture.restore"](
         path=str(target),
         baseline_file=str(baseline_dir),
@@ -896,7 +900,7 @@ async def test_fixture_restore_returns_structured_failure_for_write_errors(
     target_dir = tmp_path / "target-dir"
     target_dir.mkdir()
 
-    adapters = ui_operation_adapters(lambda: None, session=session)
+    adapters = ui_operation_adapters(_no_ui_backend, session=session)
     result = await adapters["fixture.restore"](
         path=str(target_dir),
         baseline_text="baseline",
@@ -1174,6 +1178,102 @@ async def test_ui_operation_adapters_resolve_visible_row_drag_sources_to_backend
     assert top_row_result["status"] == "PASS"
     assert backend.drag_calls[-1] == (70, 35, 70, 115, 300, [])
     assert top_row_result["route_evidence"]["source_identity"] == "Cue one"
+
+
+@pytest.mark.asyncio
+async def test_ui_operation_adapters_build_grid_viewport_snapshot_with_derived_identity() -> None:
+    class FakeBackend:
+        async def grid_snapshot(
+            self,
+            selector: dict[str, Any],
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "row_count": 2,
+                "visible_rows": [
+                    {
+                        "index": 0,
+                        "selected": True,
+                        "cells": {"PhraseId": "Cue 001"},
+                    },
+                    {
+                        "index": 1,
+                        "selected": False,
+                        "cells": {},
+                    },
+                ],
+            }
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.grid.viewport"](
+        selector={"automation_id": "dataGrid"},
+        identity={"column": "PhraseId"},
+        rows={"visible_only": True},
+        expect={},
+        phase="before",
+        probe_name="cue_viewport",
+    )
+
+    assert result["status"] == "PASS"
+    snapshot = result["snapshot"]
+    assert snapshot["first_visible_index"] == 0
+    assert snapshot["last_visible_index"] == 1
+    assert snapshot["visible_rows"] == [
+        {"index": 0, "identity": "Cue 001", "derived": False},
+        {"index": 1, "identity": "row:1", "derived": True},
+    ]
+    assert snapshot["selected_rows"] == [
+        {"index": 0, "identity": "Cue 001", "derived": False}
+    ]
+    assert snapshot["identity_strategy"] == {
+        "kind": "configured_column",
+        "column": "PhraseId",
+        "derived": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_ui_operation_adapters_block_viewport_selected_expectation_without_evidence() -> None:
+    class FakeBackend:
+        async def grid_snapshot(
+            self,
+            selector: dict[str, Any],
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "row_count": 2,
+                "visible_rows": [
+                    {"index": 0, "selected": False, "cells": {"PhraseId": "Cue 001"}},
+                    {"index": 1, "selected": False, "cells": {"PhraseId": "Cue 002"}},
+                ],
+            }
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.grid.viewport"](
+        selector={"automation_id": "dataGrid"},
+        identity={"column": "PhraseId"},
+        rows={"visible_only": True},
+        expect={"selected_payload_preserved": True},
+        phase="after",
+        probe_name="cue_viewport",
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "selected row evidence unavailable"
+    assert result["requested"] == {
+        "selector": {"automation_id": "dataGrid"},
+        "probe": "ui.grid.viewport",
+    }
+    assert result["accepted"]["selected_rows"]
+    assert result["next_step"]
 
 
 @pytest.mark.asyncio
@@ -1502,7 +1602,7 @@ async def test_runtime_smoke_tools_register_freshness_and_runner(capturing_mcp) 
     session = FakeRuntimeSmokeSession()
     register_runtime_smoke_tools(
         mcp=mcp,
-        session=session,
+        session=cast(Any, session),
         check_session_access=lambda ctx: None,
         resolve_project_root=_noop_resolve_project_root,
     )
