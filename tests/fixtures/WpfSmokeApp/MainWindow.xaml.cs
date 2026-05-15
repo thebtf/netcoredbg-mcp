@@ -6,6 +6,7 @@ using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
 using Microsoft.Win32;
 
 namespace WpfSmokeApp;
@@ -17,6 +18,8 @@ public partial class MainWindow : Window
     private readonly string? _mutableFile;
     private int _dataGridAnchorIndex;
     private int _dataGridCurrentIndex;
+    private Point? _dragStartPoint;
+    private CueRow? _dragSourceRow;
     private bool _suppressCharacterSelection;
     private bool _suppressSelectionSync;
 
@@ -98,6 +101,51 @@ public partial class MainWindow : Window
         var selected = string.Join(",", selectedNames);
         _viewModel.StatusText = $"DataGridArrow key={e.Key} shift={shiftHeld} selected={selected}";
         Console.WriteLine(_viewModel.StatusText);
+    }
+
+    private void CueDataGrid_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        _dragStartPoint = e.GetPosition(CueDataGrid);
+        _dragSourceRow = FindCueRowFromEventSource(e.OriginalSource);
+    }
+
+    private void CueDataGrid_PreviewMouseMove(object sender, MouseEventArgs e)
+    {
+        if (e.LeftButton != MouseButtonState.Pressed ||
+            _dragStartPoint is not { } startPoint ||
+            _dragSourceRow is not { } sourceRow)
+        {
+            return;
+        }
+
+        var currentPoint = e.GetPosition(CueDataGrid);
+        if (Math.Abs(currentPoint.X - startPoint.X) < SystemParameters.MinimumHorizontalDragDistance &&
+            Math.Abs(currentPoint.Y - startPoint.Y) < SystemParameters.MinimumVerticalDragDistance)
+        {
+            return;
+        }
+
+        DragDrop.DoDragDrop(CueDataGrid, sourceRow, DragDropEffects.Move);
+        _dragStartPoint = null;
+        _dragSourceRow = null;
+    }
+
+    private void CueDataGrid_Drop(object sender, DragEventArgs e)
+    {
+        if (e.Data.GetData(typeof(CueRow)) is not CueRow sourceRow)
+        {
+            return;
+        }
+
+        var targetRow = FindCueRowFromEventSource(e.OriginalSource);
+        if (targetRow is null)
+        {
+            _viewModel.StatusText = $"WpfWorkflow DragReorder blocked sourceIdentity={sourceRow.Phrase} targetIdentity=<none>";
+            Console.WriteLine(_viewModel.StatusText);
+            return;
+        }
+
+        MoveCueRow(sourceRow, targetRow);
     }
 
     private void CharactersListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -207,6 +255,49 @@ public partial class MainWindow : Window
         Keyboard.Focus(CueDataGrid);
     }
 
+    private void MoveCueRow(CueRow sourceRow, CueRow targetRow)
+    {
+        var rows = _viewModel.CueRows;
+        var sourceIndex = rows.IndexOf(sourceRow);
+        var targetIndex = rows.IndexOf(targetRow);
+        if (sourceIndex < 0 || targetIndex < 0)
+        {
+            _viewModel.StatusText =
+                $"WpfWorkflow DragReorder blocked sourceIdentity={sourceRow.Phrase} targetIdentity={targetRow.Phrase}";
+            Console.WriteLine(_viewModel.StatusText);
+            return;
+        }
+
+        if (sourceIndex != targetIndex)
+        {
+            rows.Move(sourceIndex, targetIndex);
+        }
+
+        CueDataGrid.SelectedItem = sourceRow;
+        CueDataGrid.ScrollIntoView(sourceRow);
+        var orderFingerprint = string.Join(">", rows.Select(row => row.Phrase));
+        _viewModel.StatusText =
+            $"WpfWorkflow DragReorder sourceIdentity={sourceRow.Phrase} targetIdentity={targetRow.Phrase} orderFingerprint={orderFingerprint}";
+        Console.WriteLine(_viewModel.StatusText);
+        WriteMutableState($"drag-reorder={sourceRow.Phrase}->{targetRow.Phrase};order={orderFingerprint}");
+    }
+
+    private CueRow? FindCueRowFromEventSource(object source)
+    {
+        var current = source as DependencyObject;
+        while (current is not null)
+        {
+            if (current is DataGridRow { Item: CueRow cueRow })
+            {
+                return cueRow;
+            }
+
+            current = VisualTreeHelper.GetParent(current);
+        }
+
+        return null;
+    }
+
     private void WriteMutableState(string value)
     {
         if (string.IsNullOrWhiteSpace(_mutableFile))
@@ -299,6 +390,11 @@ public class MainViewModel : INotifyPropertyChanged
         new("00:00:01.0", "00:00:03.0", "Narrator", "Fixture cue one"),
         new("00:00:04.0", "00:00:06.0", "Narrator", "Fixture cue two"),
         new("00:00:07.0", "00:00:09.0", "Narrator", "Fixture cue three"),
+        new("00:00:10.0", "00:00:12.0", "Narrator", "Fixture cue four"),
+        new("00:00:13.0", "00:00:15.0", "Narrator", "Fixture cue five"),
+        new("00:00:16.0", "00:00:18.0", "Narrator", "Fixture cue six"),
+        new("00:00:19.0", "00:00:21.0", "Narrator", "Fixture cue seven"),
+        new("00:00:22.0", "00:00:24.0", "Narrator", "Fixture cue eight"),
     };
 
     public ObservableCollection<CharacterRow> Characters { get; } = new()
