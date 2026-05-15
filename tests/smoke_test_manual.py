@@ -3856,6 +3856,276 @@ def _v2_multi_row_drag_summary(
     return compact
 
 
+async def run_wpf_v2_negative_drag_runtime_smoke() -> dict[str, Any]:
+    from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner
+    from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
+    from netcoredbg_mcp.ui.backend import create_backend
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    if sys.platform != "win32":
+        return {
+            "status": "BLOCKED",
+            "reason": "WPF v2 negative drag smoke requires Windows UI automation",
+        }
+
+    m = SessionManager(project_path=BASE)
+    backend_holder: dict[str, object | None] = {"backend": None}
+    backend_holder["backend"] = create_backend(process_registry=m.process_registry)
+    if not isinstance(backend_holder["backend"], FlaUIBackend):
+        return {
+            "status": "BLOCKED",
+            "backend": type(backend_holder["backend"]).__name__,
+            "reason": "FlaUI bridge required for WPF v2 negative drag smoke",
+            "accepted": {"backend": "FlaUI drag_path and viewport evidence"},
+            "next_step": "Build the FlaUI bridge and run on a Windows desktop session.",
+        }
+
+    async def ensure_ui_connected():
+        backend = backend_holder["backend"]
+        if backend is None:
+            backend = create_backend(process_registry=m.process_registry)
+            backend_holder["backend"] = backend
+        pid = m.state.process_id
+        if not pid:
+            raise RuntimeError("Process ID not available for WPF v2 negative drag smoke")
+        if getattr(backend, "process_id", None) != pid:
+            await backend.connect(pid)
+        return backend
+
+    plan = _v2_negative_drag_plan(
+        program=WPF_DLL,
+        build_project=os.path.join(
+            BASE,
+            "tests",
+            "fixtures",
+            "WpfSmokeApp",
+            "WpfSmokeApp.csproj",
+        ),
+    )
+
+    try:
+        result = await RuntimeSmokeRunner(
+            m,
+            service_adapters=ui_operation_adapters(ensure_ui_connected, session=m),
+        ).run(plan)
+        return _v2_negative_drag_summary(result)
+    finally:
+        if backend_holder["backend"] is not None:
+            try:
+                await backend_holder["backend"].disconnect()
+            except Exception as exc:
+                print(f"  [DEBUG] WPF v2 negative drag backend.disconnect() failed: {exc}")
+        await m.stop()
+
+
+def _v2_negative_drag_plan(
+    *,
+    program: str,
+    build_project: str,
+) -> dict[str, Any]:
+    selector = {"automation_id": "dataGrid"}
+    return {
+        "schema": "netcoredbg.runtime_smoke.v2",
+        "name": "wpf v2 negative drag no-op safety",
+        "baseline": {
+            "steps": [
+                {
+                    "id": "launch_fixture",
+                    "kind": "isolated_profile.launch",
+                    "launch": {
+                        "program": program,
+                        "cwd": os.path.dirname(program),
+                        "pre_build": True,
+                        "build_project": build_project,
+                        "build_configuration": "Debug",
+                    },
+                }
+            ]
+        },
+        "cases": [
+            {
+                "id": "wpf_negative_drag_noop_safety",
+                "transitions": [
+                    _v2_negative_drag_transition(
+                        transition_id="small_movement_noop",
+                        source={"selector": selector, "row_index": 1},
+                        path=[
+                            {"relative_to": "source", "x": 0.5, "y": 0.5},
+                            {
+                                "relative_to": "source",
+                                "x": 0.52,
+                                "y": 0.5,
+                            },
+                            {
+                                "relative_to": "source",
+                                "x": 0.5,
+                                "y": 0.5,
+                            },
+                        ],
+                        drop={
+                            "selector": selector,
+                            "row_index": 1,
+                        },
+                        no_op_reason="small_movement",
+                        viewport_probe_name="small_movement_viewport",
+                        selector=selector,
+                        modifiers=["shift"],
+                    ),
+                    _v2_negative_drag_transition(
+                        transition_id="cancel_no_drop",
+                        source={"selector": selector, "row_index": 1},
+                        path=[
+                            {"relative_to": "source", "x": 0.5, "y": 0.5},
+                            {
+                                "relative_to": "drop",
+                                "x": 0.5,
+                                "y": 0.5,
+                            },
+                            {
+                                "relative_to": "source",
+                                "x": 0.5,
+                                "y": 0.5,
+                            },
+                        ],
+                        drop={
+                            "selector": selector,
+                            "row_index": 2,
+                        },
+                        no_op_reason="cancelled",
+                        viewport_probe_name="cancel_no_drop_viewport",
+                        selector=selector,
+                        cancel={"key": "escape"},
+                        modifiers=[],
+                    ),
+                ],
+            }
+        ],
+        "cleanup": {
+            "steps": [
+                {"kind": "process.registry.assert_empty"},
+                {"kind": "debug.stop"},
+            ]
+        },
+    }
+
+
+def _v2_negative_drag_transition(
+    *,
+    transition_id: str,
+    source: dict[str, Any],
+    path: list[dict[str, Any]],
+    drop: dict[str, Any],
+    no_op_reason: str,
+    viewport_probe_name: str,
+    selector: dict[str, Any],
+    modifiers: list[str],
+    cancel: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": transition_id,
+        "action": {
+            "kind": "ui.drag",
+            "source": source,
+            "path": path,
+            "drop": drop,
+            "duration_ms": 320,
+            "modifiers": modifiers,
+            "cancel": cancel or {},
+            "expect": {
+                "no_op": True,
+                "no_op_reason": no_op_reason,
+            },
+        },
+        "settle": {"idle_ms": 500},
+        "probes": [
+            {
+                "kind": "ui.grid.viewport",
+                "name": viewport_probe_name,
+                "selector": selector,
+                "identity": {"column": "Phrase"},
+                "rows": {"visible_only": True, "max": 8},
+                "expect": {
+                    "identity_order_preserved": True,
+                    "row_count_preserved": True,
+                },
+            }
+        ],
+    }
+
+
+def _v2_negative_drag_summary(result: dict[str, Any]) -> dict[str, Any]:
+    cases = {
+        "small_movement": _v2_negative_drag_case_summary(
+            result,
+            transition_index=0,
+            probe_path="ui.grid.viewport.small_movement_viewport",
+            expected_reason="small_movement",
+        ),
+        "cancel_no_drop": _v2_negative_drag_case_summary(
+            result,
+            transition_index=1,
+            probe_path="ui.grid.viewport.cancel_no_drop_viewport",
+            expected_reason="cancelled",
+        ),
+    }
+    statuses = [case.get("status") for case in cases.values()]
+    status = (
+        "BLOCKED"
+        if result.get("status") == "BLOCKED" or any(item == "BLOCKED" for item in statuses)
+        else "PASS"
+        if result.get("status") == "PASS" and all(item == "PASS" for item in statuses)
+        else "FAIL"
+    )
+    return {
+        "status": status,
+        "reason": result.get("reason"),
+        "cases": cases,
+        "blocked": result.get("blocked"),
+    }
+
+
+def _v2_negative_drag_case_summary(
+    result: dict[str, Any],
+    *,
+    transition_index: int,
+    probe_path: str,
+    expected_reason: str,
+) -> dict[str, Any]:
+    transition = _v2_transition(result, transition_index)
+    action = _first_transition_action(transition)
+    no_op = dict(action.get("no_op") or {})
+    cleanup = dict(action.get("cleanup") or {})
+    viewport = _transition_probe_result(transition, "after", probe_path)
+    comparison = dict(viewport.get("comparison") or {})
+    order_preserved = (
+        comparison.get("identity_order_preserved") is True
+        and comparison.get("row_count_preserved") is True
+    )
+    cleanup_observed = bool(cleanup.get("modifier_cleanup")) and bool(
+        cleanup.get("pointer_cleanup")
+    )
+    status = (
+        "PASS"
+        if action.get("status") == "PASS"
+        and no_op.get("expected") is True
+        and no_op.get("reason") == expected_reason
+        and order_preserved
+        and cleanup_observed
+        else action.get("status")
+        if action.get("status") == "BLOCKED"
+        else "FAIL"
+    )
+    return {
+        "status": status,
+        "action_status": action.get("status"),
+        "no_op": no_op,
+        "cleanup": cleanup,
+        "viewport": comparison,
+        "order_preserved": order_preserved,
+        "cleanup_observed": cleanup_observed,
+    }
+
+
 def _payload_group_visible(order: list[str], payload: list[str]) -> bool:
     if not order or not payload:
         return False
@@ -4115,6 +4385,41 @@ async def test_wpf_v2_multi_row_drag_runtime_smoke():
         "WPF v2 multi-row drag keeps selected payload grouped after reorder",
         bool(contiguous.get("selected_payload_group_visible"))
         and bool(non_contiguous.get("selected_payload_group_visible")),
+        str(evidence),
+    )
+
+
+async def test_wpf_v2_negative_drag_runtime_smoke():
+    print("\nWPF V2 NEGATIVE DRAG RUNTIME SMOKE")
+    evidence = await run_wpf_v2_negative_drag_runtime_smoke()
+    print(f"  evidence: {evidence}")
+    if evidence.get("status") == "BLOCKED":
+        check("WPF v2 negative drag reports actionable BLOCKED", True, str(evidence))
+        return
+    cases = evidence.get("cases", {})
+    small_movement = cases.get("small_movement", {}) if isinstance(cases, dict) else {}
+    cancel_no_drop = cases.get("cancel_no_drop", {}) if isinstance(cases, dict) else {}
+    check(
+        "WPF v2 negative drag returned PASS",
+        evidence.get("status") == "PASS",
+        str(evidence),
+    )
+    check(
+        "WPF v2 negative drag preserves order for small movement",
+        small_movement.get("status") == "PASS"
+        and bool(small_movement.get("order_preserved")),
+        str(small_movement),
+    )
+    check(
+        "WPF v2 negative drag preserves order for cancel/no-drop",
+        cancel_no_drop.get("status") == "PASS"
+        and bool(cancel_no_drop.get("order_preserved")),
+        str(cancel_no_drop),
+    )
+    check(
+        "WPF v2 negative drag exposes cleanup evidence",
+        bool(small_movement.get("cleanup_observed"))
+        and bool(cancel_no_drop.get("cleanup_observed")),
         str(evidence),
     )
 
@@ -4407,6 +4712,10 @@ def get_scenarios():
         (
             "WPF V2 Multi-Row Drag Runtime Smoke",
             test_wpf_v2_multi_row_drag_runtime_smoke,
+        ),
+        (
+            "WPF V2 Negative Drag Runtime Smoke",
+            test_wpf_v2_negative_drag_runtime_smoke,
         ),
         (
             "Avalonia V2 State Oracle Runtime Smoke",

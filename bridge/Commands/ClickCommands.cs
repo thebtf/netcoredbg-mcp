@@ -237,9 +237,16 @@ public static class ClickCommands
             return blocked;
         }
 
+        var (cancelKey, cancelBlocked) = TryReadDragPathCancelKey(@params?["cancel_key"]);
+        if (cancelBlocked is not null)
+        {
+            return cancelBlocked;
+        }
+
         var temporaryModifiers = ModifierCommands.GetTemporaryModifierKeys(@params?["hold_modifiers"]);
         var pressedTemporaryModifiers = new List<FlaUI.Core.WindowsAPI.VirtualKeyShort>();
         var mouseButtonDown = false;
+        var cancelSent = false;
         ExceptionDispatchInfo? capturedException = null;
         Exception? cleanupException = null;
 
@@ -270,6 +277,12 @@ public static class ClickCommands
                 {
                     PulseHeldDragPoint(point, point.HoldMs);
                 }
+            }
+
+            if (cancelKey is not null)
+            {
+                SendDragPathCancel(cancelKey.Value);
+                cancelSent = true;
             }
 
             Thread.Sleep(Math.Max(FinalDropSettleMs, delayMs));
@@ -322,16 +335,23 @@ public static class ClickCommands
             releasedModifiers.Add(modifier.ToString());
         }
 
-        return new JsonObject
+        var output = new JsonObject
         {
             ["dragged"] = true,
             ["path_points"] = DragPathPointsJson(points),
             ["hold_points"] = DragPathPointsJson(points.Where(point => point.HoldMs > 0)),
             ["final_pointer"] = DragPathPointJson(points[^1]),
             ["modifier_cleanup"] = new JsonObject { ["released"] = releasedModifiers },
+            ["pointer_cleanup"] = new JsonObject { ["left_button_released"] = true },
             ["steps"] = Math.Max(0, points.Count - 1),
             ["duration_ms"] = stopwatch.ElapsedMilliseconds
         };
+        if (cancelSent)
+        {
+            output["cancel"] = new JsonObject { ["key"] = "escape", ["sent"] = true };
+        }
+
+        return output;
     }
 
     private static void MoveCursor(int x, int y)
@@ -364,6 +384,12 @@ public static class ClickCommands
         }
 
         MoveCursor(point.X, point.Y);
+    }
+
+    private static void SendDragPathCancel(FlaUI.Core.WindowsAPI.VirtualKeyShort cancelKey)
+    {
+        Keyboard.Press(cancelKey);
+        Keyboard.Release(cancelKey);
     }
 
     private static (List<DragPathPoint> Points, JsonObject? Blocked) ParseDragPathPoints(
@@ -447,6 +473,45 @@ public static class ClickCommands
         }
 
         return (points, null);
+    }
+
+    private static (FlaUI.Core.WindowsAPI.VirtualKeyShort? CancelKey, JsonObject? Blocked) TryReadDragPathCancelKey(
+        JsonNode? cancelNode)
+    {
+        if (cancelNode is null)
+        {
+            return (null, null);
+        }
+
+        string cancelText;
+        try
+        {
+            cancelText = cancelNode.GetValue<string>();
+        }
+        catch (Exception)
+        {
+            return (
+                null,
+                DragPathBlocked(
+                    "cancel_key must be a string",
+                    new JsonObject { ["cancel_key"] = cancelNode.ToJsonString() },
+                    new JsonObject { ["cancel_key"] = "escape" },
+                    "Use cancel_key: escape for path-aware drag cancellation."));
+        }
+
+        if (string.Equals(cancelText, "escape", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(cancelText, "esc", StringComparison.OrdinalIgnoreCase))
+        {
+            return (FlaUI.Core.WindowsAPI.VirtualKeyShort.ESCAPE, null);
+        }
+
+        return (
+            null,
+            DragPathBlocked(
+                "unsupported drag_path cancel_key",
+                new JsonObject { ["cancel_key"] = cancelText },
+                new JsonObject { ["cancel_key"] = "escape" },
+                "Use cancel_key: escape for path-aware drag cancellation."));
     }
 
     private static bool TryReadInt(JsonObject value, string key, out int result)

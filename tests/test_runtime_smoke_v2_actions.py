@@ -918,6 +918,279 @@ async def test_v2_ui_drag_fails_closed_for_selected_payload_expectation(
 
 
 @pytest.mark.asyncio
+async def test_v2_ui_drag_reports_no_op_and_cleanup_evidence() -> None:
+    session = ActionSmokeSession()
+    session.drag_results.append(
+        {
+            "status": "PASS",
+            "backend": "fake",
+            "route_evidence": {
+                "move_points": [
+                    {"relative_to": "source", "x": 0.5, "y": 0.5},
+                    {"relative_to": "source", "x": 0.52, "y": 0.5},
+                ],
+                "final_pointer": {"x": 102, "y": 100},
+            },
+            "no_op": {
+                "expected": True,
+                "reason": "small_movement",
+                "route_attempted": True,
+                "movement_px": 2,
+            },
+            "cleanup": {
+                "modifier_cleanup": {"released": ["SHIFT"]},
+                "pointer_cleanup": {"left_button_released": True},
+            },
+        }
+    )
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "small movement no-op",
+            "cases": [
+                {
+                    "id": "small_movement_noop",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.drag",
+                                "source": {
+                                    "selector": {"automation_id": "CueDataGrid"},
+                                    "row_identity": "Cue 001",
+                                },
+                                "path": [
+                                    {"relative_to": "source", "x": 0.5, "y": 0.5},
+                                    {"relative_to": "source", "x": 0.52, "y": 0.5},
+                                ],
+                                "drop": {"relative_to": "source", "x": 0.52, "y": 0.5},
+                                "modifiers": ["shift"],
+                                "expect": {
+                                    "no_op": True,
+                                    "no_op_reason": "small_movement",
+                                },
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == "PASS"
+    assert action["no_op"] == {
+        "expected": True,
+        "reason": "small_movement",
+        "route_attempted": True,
+        "movement_px": 2,
+    }
+    assert action["cleanup"] == {
+        "modifier_cleanup": {"released": ["SHIFT"]},
+        "pointer_cleanup": {"left_button_released": True},
+    }
+
+
+@pytest.mark.parametrize("reason", ["cancelled", "invalid_drop"])
+@pytest.mark.asyncio
+async def test_v2_ui_drag_accepts_negative_no_op_reason(reason: str) -> None:
+    session = ActionSmokeSession()
+    session.drag_results.append(
+        {
+            "status": "PASS",
+            "backend": "fake",
+            "no_op": {
+                "expected": True,
+                "reason": reason,
+                "route_attempted": True,
+            },
+            "cleanup": {
+                "modifier_cleanup": {"released": []},
+                "pointer_cleanup": {"left_button_released": True},
+            },
+        }
+    )
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": f"{reason} no-op",
+            "cases": [
+                {
+                    "id": f"{reason}_noop",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.drag",
+                                "source": {
+                                    "selector": {"automation_id": "CueDataGrid"},
+                                    "row_identity": "Cue 001",
+                                },
+                                "path": [
+                                    {"relative_to": "source", "x": 0.5, "y": 0.5},
+                                    {"relative_to": "source", "x": 0.6, "y": 0.5},
+                                ],
+                                "drop": {"relative_to": "source", "x": 0.6, "y": 0.5},
+                                "expect": {
+                                    "no_op": True,
+                                    "no_op_reason": reason,
+                                },
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == "PASS"
+    assert action["no_op"]["reason"] == reason
+    assert action["cleanup"]["pointer_cleanup"]["left_button_released"] is True
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_drag_forwards_cancel_request_to_adapter() -> None:
+    session = ActionSmokeSession()
+    session.drag_results.append(
+        {
+            "status": "PASS",
+            "backend": "fake",
+            "no_op": {"expected": True, "reason": "cancelled"},
+            "cleanup": {
+                "modifier_cleanup": {"released": []},
+                "pointer_cleanup": {"left_button_released": True},
+            },
+        }
+    )
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "cancelled drag",
+            "cases": [
+                {
+                    "id": "cancelled_drag",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.drag",
+                                "source": {
+                                    "selector": {"automation_id": "CueDataGrid"},
+                                    "row_identity": "Cue 001",
+                                },
+                                "path": [
+                                    {"relative_to": "source", "x": 0.5, "y": 0.5},
+                                    {"relative_to": "drop", "x": 0.5, "y": 0.5},
+                                ],
+                                "drop": {
+                                    "selector": {"automation_id": "CueDataGrid"},
+                                    "row_index": 2,
+                                },
+                                "cancel": {"key": "escape"},
+                                "expect": {
+                                    "no_op": True,
+                                    "no_op_reason": "cancelled",
+                                },
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    drag_call = next(call for call in session.calls if call[0] == "drag")
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == "PASS"
+    assert drag_call[1]["cancel"] == {"key": "escape"}
+    assert action["cancel"] == {"key": "escape"}
+
+
+@pytest.mark.parametrize(
+    ("adapter_result", "expected_status", "expected_reason"),
+    [
+        (
+            {"status": "PASS", "backend": "fake"},
+            "BLOCKED",
+            "no-op evidence unavailable",
+        ),
+        (
+            {
+                "status": "PASS",
+                "backend": "fake",
+                "no_op": {"expected": True, "reason": "cancelled"},
+            },
+            "BLOCKED",
+            "cleanup evidence unavailable",
+        ),
+        (
+            {
+                "status": "PASS",
+                "backend": "fake",
+                "no_op": {"expected": False, "reason": "invalid_drop"},
+                "cleanup": {
+                    "modifier_cleanup": {"released": []},
+                    "pointer_cleanup": {"left_button_released": True},
+                },
+            },
+            "FAIL",
+            "no-op expectation failed",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_v2_ui_drag_fails_closed_for_no_op_expectation(
+    adapter_result: dict[str, Any],
+    expected_status: str,
+    expected_reason: str,
+) -> None:
+    session = ActionSmokeSession()
+    session.drag_results.append(adapter_result)
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "negative drag fail closed",
+            "cases": [
+                {
+                    "id": "negative_drag_fail_closed",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.drag",
+                                "source": {
+                                    "selector": {"automation_id": "CueDataGrid"},
+                                    "row_identity": "Cue 001",
+                                },
+                                "path": [
+                                    {"relative_to": "source", "x": 0.5, "y": 0.5},
+                                    {"relative_to": "source", "x": 0.6, "y": 0.5},
+                                ],
+                                "drop": {"relative_to": "source", "x": 0.6, "y": 0.5},
+                                "expect": {
+                                    "no_op": True,
+                                    "no_op_reason": "invalid_drop",
+                                },
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == expected_status
+    assert action["status"] == expected_status
+    assert action["reason"] == expected_reason
+
+
+@pytest.mark.asyncio
 async def test_v2_ui_drag_blocks_when_adapter_is_missing() -> None:
     session = ActionSmokeSession()
 

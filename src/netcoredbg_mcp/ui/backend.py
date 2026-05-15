@@ -123,6 +123,7 @@ class UIBackend(Protocol):
         points: list[dict[str, Any]],
         speed_ms: int = 200,
         hold_modifiers: list[str] | None = None,
+        cancel_key: str | None = None,
     ) -> dict[str, Any]:
         """Drag through a path of screen points, including optional waypoint holds."""
         ...

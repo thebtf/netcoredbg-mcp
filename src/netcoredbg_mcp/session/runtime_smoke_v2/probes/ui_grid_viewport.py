@@ -77,6 +77,14 @@ async def handle_ui_grid_viewport(
                         "Use a UI backend that returns selected row evidence for viewport probes."
                     )
                     return output
+                missing_expectation = _missing_expectation_capability(comparison, expect)
+                if missing_expectation is not None:
+                    output["status"] = "BLOCKED"
+                    output["reason"] = missing_expectation["reason"]
+                    output["requested"] = missing_expectation["requested"]
+                    output["accepted"] = missing_expectation["accepted"]
+                    output["next_step"] = missing_expectation["next_step"]
+                    return output
                 if status == "PASS" and not _expectation_matches(comparison, expect):
                     output["status"] = "FAIL"
                     output["reason"] = "grid viewport expectation failed"
@@ -120,6 +128,8 @@ def _compare_snapshots(before: dict[str, Any], after: dict[str, Any]) -> dict[st
         and not selected_lost_identities
         and not selected_unexpected_identities
     )
+    before_order = _row_identity_refs(before.get("visible_rows"))
+    after_order = _row_identity_refs(after.get("visible_rows"))
     before_row_count = before.get("row_count")
     after_row_count = after.get("row_count")
     return {
@@ -127,6 +137,11 @@ def _compare_snapshots(before: dict[str, Any], after: dict[str, Any]) -> dict[st
         "last_visible_index_changed": last_changed,
         "viewport_moved": first_changed or last_changed,
         "direction": direction,
+        "before_order": before_order,
+        "after_order": after_order,
+        "identity_order_preserved": before_order == after_order
+        if before_order and after_order
+        else None,
         "selected_before": selected_before,
         "selected_after": selected_after,
         "selected_duplicate_identities": selected_duplicate_identities,
@@ -148,6 +163,39 @@ def _expectation_matches(comparison: dict[str, Any], expect: dict[str, Any]) -> 
         if comparison.get(key) != expected_value:
             return False
     return True
+
+
+def _missing_expectation_capability(
+    comparison: dict[str, Any],
+    expect: dict[str, Any],
+) -> dict[str, Any] | None:
+    if (
+        expect.get("identity_order_preserved") is True
+        and comparison.get("identity_order_preserved") is None
+    ):
+        return {
+            "reason": "visible row identity evidence unavailable",
+            "requested": {"expect": {"identity_order_preserved": True}},
+            "accepted": {
+                "visible_rows": "before and after visible row identities"
+            },
+            "next_step": (
+                "Use a UI backend that returns visible row identities for viewport probes."
+            ),
+        }
+    if (
+        expect.get("row_count_preserved") is True
+        and comparison.get("row_count_preserved") is None
+    ):
+        return {
+            "reason": "row count evidence unavailable",
+            "requested": {"expect": {"row_count_preserved": True}},
+            "accepted": {"row_count": "before and after row counts"},
+            "next_step": (
+                "Use a UI backend that returns row count evidence for viewport probes."
+            ),
+        }
+    return None
 
 
 def _row_identity_refs(value: Any) -> list[str]:

@@ -1312,6 +1312,173 @@ async def test_ui_operation_adapters_route_held_edge_drag_through_drag_path() ->
 
 
 @pytest.mark.asyncio
+async def test_ui_operation_adapters_drag_reports_no_op_cleanup_evidence() -> None:
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.drag_path_calls: list[tuple[list[dict[str, Any]], int, list[str]]] = []
+
+        async def grid_snapshot(
+            self,
+            selector: dict[str, Any],
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "row_count": 3,
+                "visible_rows": [
+                    {
+                        "index": 1,
+                        "bounds": {"x": 10, "y": 60, "width": 120, "height": 30},
+                        "cells": {"Phrase": "Cue two"},
+                    },
+                ],
+            }
+
+        async def find_element(
+            self,
+            automation_id: str | None = None,
+            name: str | None = None,
+            control_type: str | None = None,
+            root_id: str | None = None,
+            xpath: str | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "found": True,
+                "automation_id": automation_id,
+                "rect": {"x": 10, "y": 20, "width": 120, "height": 200},
+            }
+
+        async def drag_path(
+            self,
+            points: list[dict[str, Any]],
+            speed_ms: int = 200,
+            hold_modifiers: list[str] | None = None,
+        ) -> dict[str, Any]:
+            modifiers = list(hold_modifiers or [])
+            self.drag_path_calls.append((points, speed_ms, modifiers))
+            return {
+                "status": "PASS",
+                "path_points": points,
+                "final_pointer": points[-1],
+                "modifier_cleanup": {"released": modifiers},
+            }
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    result = await ui_operation_adapters(backend_provider)["ui.drag"](
+        source={"kind": "row_index", "selector": {"automation_id": "dataGrid"}, "row_index": 1},
+        path=[
+            {"relative_to": "source", "x": 0.5, "y": 0.5},
+            {
+                "relative_to": "viewport",
+                "selector": {"automation_id": "dataGrid"},
+                "x": 0.5,
+                "y": 0.27,
+            },
+            {
+                "relative_to": "viewport",
+                "selector": {"automation_id": "dataGrid"},
+                "x": 0.5,
+                "y": 0.28,
+            },
+        ],
+        drop={
+            "relative_to": "viewport",
+            "selector": {"automation_id": "dataGrid"},
+            "x": 0.5,
+            "y": 0.28,
+        },
+        modifiers=["shift"],
+        expect={"no_op": True, "no_op_reason": "small_movement"},
+    )
+
+    assert result["status"] == "PASS"
+    assert result["no_op"] == {
+        "expected": True,
+        "reason": "small_movement",
+        "route_attempted": True,
+        "movement_px": 1,
+    }
+    assert result["cleanup"] == {
+        "modifier_cleanup": {"released": ["shift"]},
+        "pointer_cleanup": {"left_button_released": True},
+    }
+
+
+@pytest.mark.asyncio
+async def test_ui_operation_adapters_drag_passes_cancel_to_path_backend() -> None:
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.cancel_key: str | None = None
+
+        async def grid_snapshot(
+            self,
+            selector: dict[str, Any],
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "row_count": 3,
+                "visible_rows": [
+                    {
+                        "index": 1,
+                        "bounds": {"x": 10, "y": 60, "width": 120, "height": 30},
+                        "cells": {"Phrase": "Cue two"},
+                    },
+                    {
+                        "index": 2,
+                        "bounds": {"x": 10, "y": 100, "width": 120, "height": 30},
+                        "cells": {"Phrase": "Cue three"},
+                    },
+                ],
+            }
+
+        async def drag_path(
+            self,
+            points: list[dict[str, Any]],
+            speed_ms: int = 200,
+            hold_modifiers: list[str] | None = None,
+            cancel_key: str | None = None,
+        ) -> dict[str, Any]:
+            self.cancel_key = cancel_key
+            return {
+                "status": "PASS",
+                "path_points": points,
+                "final_pointer": points[-1],
+                "modifier_cleanup": {"released": []},
+                "cancel": {"key": cancel_key, "sent": True},
+            }
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    result = await ui_operation_adapters(backend_provider)["ui.drag"](
+        source={"kind": "row_index", "selector": {"automation_id": "dataGrid"}, "row_index": 1},
+        path=[
+            {"relative_to": "source", "x": 0.5, "y": 0.5},
+            {"relative_to": "drop", "x": 0.5, "y": 0.5},
+            {"relative_to": "source", "x": 0.5, "y": 0.5},
+        ],
+        drop={"selector": {"automation_id": "dataGrid"}, "row_index": 2},
+        cancel={"key": "escape"},
+        expect={"no_op": True, "no_op_reason": "cancelled"},
+    )
+
+    assert result["status"] == "PASS"
+    assert backend.cancel_key == "escape"
+    assert result["cancel"] == {"key": "escape", "sent": True}
+    assert result["no_op"]["reason"] == "cancelled"
+
+
+@pytest.mark.asyncio
 async def test_ui_operation_adapters_grid_select_indices_uses_backend_multi_select() -> None:
     class FakeBackend:
         async def multi_select(self, container_id: str, indices: list[int]) -> int:

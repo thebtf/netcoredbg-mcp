@@ -370,6 +370,8 @@ def ui_operation_adapters(
         path = _mapping_list(args.get("path"))
         drop = dict(args.get("drop") or {})
         expect = dict(args.get("expect") or {})
+        cancel = dict(args.get("cancel") or {})
+        cancel_key = _drag_cancel_key(cancel)
         route, route_evidence, blocked = await _drag_route(
             backend,
             source=source,
@@ -412,11 +414,13 @@ def ui_operation_adapters(
                 )
                 if blocked is not None:
                     return blocked
-                result = await backend_drag_path(
-                    resolved_path_points,
-                    speed_ms=speed_ms,
-                    hold_modifiers=modifiers,
-                )
+                drag_path_kwargs: dict[str, Any] = {
+                    "speed_ms": speed_ms,
+                    "hold_modifiers": modifiers,
+                }
+                if cancel_key is not None:
+                    drag_path_kwargs["cancel_key"] = cancel_key
+                result = await backend_drag_path(resolved_path_points, **drag_path_kwargs)
             else:
                 backend_drag = getattr(backend, "drag", None)
                 if not callable(backend_drag):
@@ -493,6 +497,15 @@ def ui_operation_adapters(
             "route_evidence": route_evidence,
             "result": result,
         }
+        no_op = _drag_no_op_evidence(expect=expect, route=route)
+        if no_op is not None:
+            output["no_op"] = no_op
+        cleanup = _drag_cleanup_evidence(result, modifiers=modifiers)
+        if cleanup is not None:
+            output["cleanup"] = cleanup
+        cancel_evidence = result.get("cancel")
+        if isinstance(cancel_evidence, Mapping):
+            output["cancel"] = dict(cancel_evidence)
         if selected_payload is not None:
             output["selected_payload"] = selected_payload
         if status != "PASS":
@@ -725,6 +738,59 @@ async def _drag_route(
 
 def _requires_path_drag(path: list[dict[str, Any]]) -> bool:
     return len(path) > 2 or any("hold_ms" in point for point in path)
+
+
+def _drag_no_op_evidence(
+    *,
+    expect: dict[str, Any],
+    route: dict[str, int],
+) -> dict[str, Any] | None:
+    if expect.get("no_op") is not True:
+        return None
+    movement_px = max(
+        abs(route.get("to_x", 0) - route.get("from_x", 0)),
+        abs(route.get("to_y", 0) - route.get("from_y", 0)),
+    )
+    return {
+        "expected": True,
+        "reason": str(expect.get("no_op_reason") or "unchanged_order"),
+        "route_attempted": True,
+        "movement_px": movement_px,
+    }
+
+
+def _drag_cancel_key(cancel: dict[str, Any]) -> str | None:
+    key = cancel.get("key")
+    if key is None:
+        return None
+    key_text = str(key).lower()
+    return "escape" if key_text in {"escape", "esc"} else key_text
+
+
+def _drag_cleanup_evidence(
+    result: dict[str, Any],
+    *,
+    modifiers: list[str],
+) -> dict[str, Any] | None:
+    cleanup: dict[str, Any] = {}
+    modifier_cleanup = result.get("modifier_cleanup")
+    if isinstance(modifier_cleanup, Mapping):
+        cleanup["modifier_cleanup"] = dict(modifier_cleanup)
+    elif modifiers:
+        cleanup["modifier_cleanup"] = {"released": modifiers}
+    else:
+        cleanup["modifier_cleanup"] = {"released": []}
+
+    pointer_cleanup = result.get("pointer_cleanup")
+    if isinstance(pointer_cleanup, Mapping):
+        cleanup["pointer_cleanup"] = dict(pointer_cleanup)
+    elif (
+        result.get("dragged") is True
+        or isinstance(result.get("path_points"), list)
+        or isinstance(result.get("final_pointer"), Mapping)
+    ):
+        cleanup["pointer_cleanup"] = {"left_button_released": True}
+    return cleanup or None
 
 
 async def _drag_path_points(

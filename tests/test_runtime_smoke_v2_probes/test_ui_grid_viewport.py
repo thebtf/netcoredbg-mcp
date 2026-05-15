@@ -45,13 +45,17 @@ def _viewport_snapshot(
     last: int,
     selected: list[str] | None = None,
     row_count: int = 600,
+    visible: list[str] | None = None,
 ) -> dict[str, Any]:
+    visible_identities = visible if visible is not None else [
+        f"Cue {index:03d}" for index in range(first, last + 1)
+    ]
     return {
         "first_visible_index": first,
         "last_visible_index": last,
         "visible_rows": [
-            {"index": index, "identity": f"Cue {index:03d}"}
-            for index in range(first, last + 1)
+            {"index": first + offset, "identity": identity}
+            for offset, identity in enumerate(visible_identities)
         ],
         "selected_rows": [
             {"index": first + offset, "identity": identity}
@@ -527,3 +531,145 @@ async def test_ui_grid_viewport_compares_row_count_preservation() -> None:
     assert after["comparison"]["before_row_count"] == 600
     assert after["comparison"]["after_row_count"] == 599
     assert after["comparison"]["row_count_preserved"] is False
+
+
+@pytest.mark.asyncio
+async def test_ui_grid_viewport_reports_unchanged_identity_order_for_no_op() -> None:
+    session = GridViewportProbeSession()
+    unchanged = ["Cue 001", "Cue 002", "Cue 003"]
+    session.viewport_results.extend(
+        [
+            {
+                "status": "PASS",
+                "snapshot": _viewport_snapshot(first=1, last=3, visible=unchanged),
+            },
+            {
+                "status": "PASS",
+                "snapshot": _viewport_snapshot(first=1, last=3, visible=unchanged),
+            },
+        ]
+    )
+
+    result = await runner(
+        session,
+        {"ui.grid.viewport": session.grid_viewport},
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "ui.grid.viewport",
+                "name": "cue_viewport",
+                "phase": "both",
+                "selector": {"automation_id": "CueDataGrid"},
+                "identity": {"column": "PhraseId"},
+                "rows": {"visible_only": True, "max": 5},
+                "expect": {
+                    "identity_order_preserved": True,
+                    "row_count_preserved": True,
+                },
+            }
+        )
+    )
+
+    after = after_probe(result)
+    assert result["status"] == "PASS"
+    assert after["comparison"]["before_order"] == unchanged
+    assert after["comparison"]["after_order"] == unchanged
+    assert after["comparison"]["identity_order_preserved"] is True
+
+
+@pytest.mark.asyncio
+async def test_ui_grid_viewport_fails_unexpected_reorder_for_no_op() -> None:
+    session = GridViewportProbeSession()
+    session.viewport_results.extend(
+        [
+            {
+                "status": "PASS",
+                "snapshot": _viewport_snapshot(
+                    first=1,
+                    last=3,
+                    visible=["Cue 001", "Cue 002", "Cue 003"],
+                ),
+            },
+            {
+                "status": "PASS",
+                "snapshot": _viewport_snapshot(
+                    first=1,
+                    last=3,
+                    visible=["Cue 001", "Cue 003", "Cue 002"],
+                ),
+            },
+        ]
+    )
+
+    result = await runner(
+        session,
+        {"ui.grid.viewport": session.grid_viewport},
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "ui.grid.viewport",
+                "name": "cue_viewport",
+                "phase": "both",
+                "selector": {"automation_id": "CueDataGrid"},
+                "identity": {"column": "PhraseId"},
+                "rows": {"visible_only": True, "max": 5},
+                "expect": {
+                    "identity_order_preserved": True,
+                    "row_count_preserved": True,
+                },
+            }
+        )
+    )
+
+    after = after_probe(result)
+    assert result["status"] == "FAIL"
+    assert after["status"] == "FAIL"
+    assert after["reason"] == "grid viewport expectation failed"
+    assert after["comparison"]["before_order"] == ["Cue 001", "Cue 002", "Cue 003"]
+    assert after["comparison"]["after_order"] == ["Cue 001", "Cue 003", "Cue 002"]
+    assert after["comparison"]["identity_order_preserved"] is False
+
+
+@pytest.mark.asyncio
+async def test_ui_grid_viewport_blocks_missing_identity_order_evidence_for_no_op() -> None:
+    session = GridViewportProbeSession()
+    session.viewport_results.extend(
+        [
+            {
+                "status": "PASS",
+                "snapshot": _viewport_snapshot(first=1, last=3, visible=[]),
+            },
+            {
+                "status": "PASS",
+                "snapshot": _viewport_snapshot(first=1, last=3, visible=[]),
+            },
+        ]
+    )
+
+    result = await runner(
+        session,
+        {"ui.grid.viewport": session.grid_viewport},
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "ui.grid.viewport",
+                "name": "cue_viewport",
+                "phase": "both",
+                "selector": {"automation_id": "CueDataGrid"},
+                "identity": {"column": "PhraseId"},
+                "rows": {"visible_only": True, "max": 5},
+                "expect": {
+                    "identity_order_preserved": True,
+                    "row_count_preserved": True,
+                },
+            }
+        )
+    )
+
+    after = after_probe(result)
+    assert result["status"] == "BLOCKED"
+    assert after["status"] == "BLOCKED"
+    assert after["reason"] == "visible row identity evidence unavailable"
+    assert after["requested"] == {"expect": {"identity_order_preserved": True}}
+    assert after["accepted"]["visible_rows"]
+    assert after["next_step"]

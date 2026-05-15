@@ -402,6 +402,7 @@ class PywinautoBackend:
         points: list[dict[str, Any]],
         speed_ms: int = 200,
         hold_modifiers: list[str] | None = None,
+        cancel_key: str | None = None,
     ) -> dict[str, Any]:
         """Path-aware held-edge drags require the FlaUI bridge backend."""
         return {
@@ -412,6 +413,7 @@ class PywinautoBackend:
                 "points": points,
                 "speed_ms": speed_ms,
                 "hold_modifiers": hold_modifiers or [],
+                "cancel_key": cancel_key,
             },
             "accepted": {
                 "backend": "FlaUI drag_path",

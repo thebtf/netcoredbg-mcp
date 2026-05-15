@@ -108,6 +108,29 @@ class TestFlaUIDragForwarding:
         )
 
     @pytest.mark.asyncio
+    async def test_drag_path_forwards_cancel_key_when_requested(self):
+        backend = _make_flaui()
+        points = [{"x": 10, "y": 20}, {"x": 40, "y": 220}]
+        backend._client.call.return_value = {
+            "dragged": True,
+            "cancel": {"key": "escape", "sent": True},
+        }
+
+        result = await backend.drag_path(points, cancel_key="escape")
+
+        assert result["cancel"] == {"key": "escape", "sent": True}
+        backend._client.call.assert_awaited_once_with(
+            "drag_path",
+            {
+                "points": points,
+                "speed_ms": 200,
+                "hold_modifiers": [],
+                "cancel_key": "escape",
+            },
+            timeout=10.0,
+        )
+
+    @pytest.mark.asyncio
     async def test_drag_path_distinguishes_held_edge_from_direct_route(self):
         backend = _make_flaui()
         backend._client.call.return_value = {"dragged": True}
@@ -371,8 +394,11 @@ class TestDragInputValidation:
         assert "hold_ms must be non-negative" in command
         assert "private const int DragPathHoldPulseMs" in command
         assert "PulseHeldDragPoint(point, point.HoldMs);" in command
+        assert 'TryReadDragPathCancelKey(@params?["cancel_key"]' in command
+        assert "VirtualKeyShort.ESCAPE" in command
         drag_path_body = command[command.index("public static JsonNode DragPath(") :]
         assert "Thread.Sleep(Math.Max(FinalDropSettleMs, delayMs));" in drag_path_body
+        assert "SendDragPathCancel(cancelKey.Value);" in drag_path_body
 
     def test_bridge_drag_path_releases_pointer_and_modifiers_on_exceptions(self):
         command = (PROJECT_ROOT / "bridge" / "Commands" / "ClickCommands.cs").read_text(

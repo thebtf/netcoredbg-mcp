@@ -31,6 +31,10 @@ async def handle_ui_drag(
     if blocked is not None:
         return _with_duration(blocked, context=context, started=started)
 
+    cancel, blocked = _cancel_from_action(action)
+    if blocked is not None:
+        return _with_duration(blocked, context=context, started=started)
+
     blocked = _zero_distance_blocked(source=source, path=path, drop=drop)
     if blocked is not None:
         return _with_duration(blocked, context=context, started=started)
@@ -41,6 +45,7 @@ async def handle_ui_drag(
         path=path,
         drop=drop,
         modifiers=modifiers,
+        cancel=cancel,
         duration_ms=_optional_int(action.get("duration_ms")),
         step_count=_optional_int(action.get("step_count")),
         expect=dict(action.get("expect") or {}),
@@ -51,6 +56,7 @@ async def handle_ui_drag(
         path=path,
         drop=drop,
         modifiers=modifiers,
+        cancel=cancel,
         expect=dict(action.get("expect") or {}),
         duration_ms=context.elapsed_ms(started),
     )
@@ -245,6 +251,33 @@ def _modifiers_from_action(action: dict[str, Any]) -> tuple[list[str], dict[str,
     return modifiers, None
 
 
+def _cancel_from_action(action: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    cancel = action.get("cancel")
+    if cancel is None:
+        return {}, None
+    if not isinstance(cancel, Mapping):
+        return {}, _blocked(
+            reason="invalid drag cancel request",
+            requested={"cancel": cancel},
+            accepted={"cancel": {"key": "escape"}},
+            next_step="Provide cancel as an object with key: escape.",
+        )
+    normalized = dict(cancel)
+    key = normalized.get("key")
+    if key is None:
+        return {}, None
+    key_text = str(key).lower()
+    if key_text not in {"escape", "esc"}:
+        return {}, _blocked(
+            reason="unsupported drag cancel key",
+            requested={"cancel": normalized},
+            accepted={"cancel.key": "escape"},
+            next_step="Use cancel.key: escape for path-aware drag cancellation.",
+        )
+    normalized["key"] = "escape"
+    return normalized, None
+
+
 def _zero_distance_blocked(
     *,
     source: dict[str, Any],
@@ -295,11 +328,14 @@ def _action_result(
     path: list[dict[str, Any]],
     drop: dict[str, Any],
     modifiers: list[str],
+    cancel: dict[str, Any],
     expect: dict[str, Any],
     duration_ms: int,
 ) -> dict[str, Any]:
     status = str(result.get("status", "PASS"))
     selected_payload = _selected_payload_from_result(result)
+    no_op = _no_op_from_result(result)
+    cleanup = _cleanup_from_result(result)
     output: dict[str, Any] = {
         "status": status,
         "route": "drag",
@@ -311,6 +347,8 @@ def _action_result(
         "backend": result.get("backend"),
         "route_evidence": compact_evidence(dict(result.get("route_evidence") or {})),
     }
+    if cancel:
+        output["cancel"] = cancel
     if not output["route_evidence"]:
         output["route_evidence"] = _default_route_evidence(
             source=source,
@@ -329,6 +367,10 @@ def _action_result(
         output["route_evidence"].setdefault("modifiers", modifiers)
     if selected_payload is not None:
         output["selected_payload"] = selected_payload
+    if no_op is not None:
+        output["no_op"] = no_op
+    if cleanup is not None:
+        output["cleanup"] = cleanup
     if expect.get("selected_payload_preserved") is True:
         if selected_payload is None:
             output["status"] = "BLOCKED"
@@ -343,6 +385,37 @@ def _action_result(
         elif selected_payload.get("preserved") is not True and status == "PASS":
             output["status"] = "FAIL"
             output["reason"] = "selected payload expectation failed"
+    if expect.get("no_op") is True:
+        expected_reason = expect.get("no_op_reason")
+        if no_op is None:
+            output["status"] = "BLOCKED"
+            output["reason"] = "no-op evidence unavailable"
+            output["requested"] = {"expect": {"no_op": True}}
+            output["accepted"] = {
+                "no_op": "adapter evidence with expected=true and reason"
+            }
+            output["next_step"] = (
+                "Use a UI backend that reports no-op drag evidence for negative gestures."
+            )
+        elif cleanup is None:
+            output["status"] = "BLOCKED"
+            output["reason"] = "cleanup evidence unavailable"
+            output["requested"] = {"expect": {"no_op": True}}
+            output["accepted"] = {
+                "cleanup": "modifier and pointer release evidence where observable"
+            }
+            output["next_step"] = (
+                "Use a UI backend that reports cleanup evidence for drag gestures."
+            )
+        elif (
+            no_op.get("expected") is not True
+            or (
+                expected_reason is not None
+                and no_op.get("reason") != expected_reason
+            )
+        ) and status == "PASS":
+            output["status"] = "FAIL"
+            output["reason"] = "no-op expectation failed"
     if status != "PASS":
         attach_blocked_details(output, result)
     evidence_ref = result.get("evidence_ref")
@@ -387,6 +460,35 @@ def _selected_payload_from_result(result: dict[str, Any]) -> dict[str, Any] | No
             and not unexpected_identities
         )
     return output
+
+
+def _no_op_from_result(result: dict[str, Any]) -> dict[str, Any] | None:
+    no_op = result.get("no_op")
+    if not isinstance(no_op, Mapping):
+        route_evidence = result.get("route_evidence")
+        if isinstance(route_evidence, Mapping):
+            no_op = route_evidence.get("no_op")
+    if not isinstance(no_op, Mapping):
+        return None
+    output = compact_evidence(dict(no_op))
+    return output if isinstance(output, dict) else None
+
+
+def _cleanup_from_result(result: dict[str, Any]) -> dict[str, Any] | None:
+    cleanup = result.get("cleanup")
+    if isinstance(cleanup, Mapping):
+        compact_cleanup = compact_evidence(dict(cleanup))
+        return compact_cleanup if isinstance(compact_cleanup, dict) else None
+
+    output: dict[str, Any] = {}
+    for source in (result, result.get("result"), result.get("route_evidence")):
+        if not isinstance(source, Mapping):
+            continue
+        for key in ("modifier_cleanup", "pointer_cleanup"):
+            value = source.get(key)
+            if isinstance(value, Mapping):
+                output[key] = compact_evidence(dict(value))
+    return output or None
 
 
 def _string_list(value: Any) -> list[str] | None:

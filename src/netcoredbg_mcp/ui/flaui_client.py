@@ -538,15 +538,19 @@ class FlaUIBackend:
         points: list[dict[str, Any]],
         speed_ms: int = 200,
         hold_modifiers: list[str] | None = None,
+        cancel_key: str | None = None,
     ) -> dict[str, Any]:
         """Drag through a path of screen points via the FlaUI bridge."""
+        payload: dict[str, Any] = {
+            "points": points,
+            "speed_ms": speed_ms,
+            "hold_modifiers": hold_modifiers or [],
+        }
+        if cancel_key is not None:
+            payload["cancel_key"] = cancel_key
         result = await self._client.call(
             "drag_path",
-            {
-                "points": points,
-                "speed_ms": speed_ms,
-                "hold_modifiers": hold_modifiers or [],
-            },
+            payload,
             timeout=_drag_path_timeout_seconds(points, speed_ms),
         )
         if not isinstance(result, dict):
