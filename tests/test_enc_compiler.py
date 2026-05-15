@@ -49,6 +49,32 @@ def test_compile_delta_emits_files_for_method_body_change(
         assert Path(delta_path).stat().st_size > 0
 
 
+def test_compile_delta_uses_loaded_module_and_portable_pdb_baseline(
+    tmp_path: Path, enc_compiler_dll: Path
+):
+    project, source = _write_fixture_project(tmp_path)
+    subprocess.run(["dotnet", "build", project, "-v", "quiet"], check=True)
+    module_path = tmp_path / "bin" / "Debug" / "net8.0" / "Sample.dll"
+    return_line = _line_number(source, "return 1;")
+    output_dir = tmp_path / "deltas"
+
+    result = compile_delta(
+        project,
+        source,
+        [SourceEdit(start_line=return_line, end_line=return_line, new_text="        return 2;")],
+        compiler_path=enc_compiler_dll,
+        module_path=module_path,
+        output_dir=output_dir,
+    )
+
+    assert result.success, result.diagnostics
+    assert result.rude_edits == ()
+    for delta_path in (result.il_delta_path, result.metadata_delta_path, result.pdb_delta_path):
+        assert delta_path is not None
+        assert Path(delta_path).is_file()
+        assert Path(delta_path).stat().st_size > 0
+
+
 def test_compile_delta_reports_rude_edit_for_added_field(
     tmp_path: Path, enc_compiler_dll: Path
 ):

@@ -34,6 +34,7 @@ public sealed class DeltaEmitter
         string projectPath,
         string filePath,
         IReadOnlyList<SourceEdit> edits,
+        string? modulePath = null,
         string? outputDirectory = null,
         CancellationToken cancellationToken = default)
     {
@@ -53,27 +54,21 @@ public sealed class DeltaEmitter
             return new DeltaEmitResult(false, null, null, null, rudeEdits, Array.Empty<string>());
         }
 
-        var originalCompilation = CreateCompilation(projectRoot, targetFile, originalSource);
-        var editedCompilation = CreateCompilation(projectRoot, targetFile, editedSource);
-        var originalEmit = EmitInitialAssembly(originalCompilation, cancellationToken);
-        if (!originalEmit.Success)
-        {
-            return Failure(originalEmit.Diagnostics);
-        }
-
+        var originalCompilation = CreateCompilation(projectRoot, targetFile, originalSource, modulePath);
+        var editedCompilation = CreateCompilation(projectRoot, targetFile, editedSource, modulePath);
         var semanticEdits = FindSemanticEdits(originalCompilation, editedCompilation);
         if (semanticEdits.Length == 0)
         {
             return Failure("No supported method body edits found.");
         }
 
-        using var module = ModuleMetadata.CreateFromImage(originalEmit.AssemblyBytes);
+        using var baselineArtifacts = CreateBaselineArtifacts(modulePath, originalCompilation, cancellationToken);
         var baseline = EmitBaseline.CreateInitialBaseline(
             originalCompilation,
-            module,
-            _ => default,
-            _ => default,
-            hasPortableDebugInformation: true);
+            baselineArtifacts.Module,
+            baselineArtifacts.GetDebugInformation,
+            baselineArtifacts.GetLocalSignature,
+            baselineArtifacts.HasPortableDebugInformation);
 
         using var metadataDelta = new MemoryStream();
         using var ilDelta = new MemoryStream();
@@ -109,6 +104,31 @@ public sealed class DeltaEmitter
             pdbPath,
             Array.Empty<string>(),
             Array.Empty<string>());
+    }
+
+    private static BaselineArtifacts CreateBaselineArtifacts(
+        string? modulePath,
+        CSharpCompilation originalCompilation,
+        CancellationToken cancellationToken)
+    {
+        if (!string.IsNullOrWhiteSpace(modulePath))
+        {
+            var resolvedModulePath = Path.GetFullPath(modulePath);
+            if (!File.Exists(resolvedModulePath))
+            {
+                throw new FileNotFoundException($"Baseline module not found: {resolvedModulePath}", resolvedModulePath);
+            }
+
+            return BaselineArtifacts.FromModuleFile(resolvedModulePath);
+        }
+
+        var originalEmit = EmitInitialAssembly(originalCompilation, cancellationToken);
+        if (!originalEmit.Success)
+        {
+            throw new InvalidOperationException(string.Join("; ", originalEmit.Diagnostics));
+        }
+
+        return BaselineArtifacts.FromImages(originalEmit.AssemblyBytes, originalEmit.PdbBytes);
     }
 
     private static string ApplyEdits(string source, IReadOnlyList<SourceEdit> edits)
@@ -193,10 +213,14 @@ public sealed class DeltaEmitter
         return outputRoot;
     }
 
-    private static CSharpCompilation CreateCompilation(PathMap projectRoot, string targetFile, string targetSource)
+    private static CSharpCompilation CreateCompilation(
+        PathMap projectRoot,
+        string targetFile,
+        string targetSource,
+        string? modulePath)
     {
-        var sourceFiles = Directory.EnumerateFiles(projectRoot.RootDirectory, "*.cs", SearchOption.AllDirectories)
-            .Where(IsProjectSourceFile)
+        var sourceFiles = GetCompilationSourceFiles(projectRoot, modulePath)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
             .Order(StringComparer.OrdinalIgnoreCase)
             .ToArray();
         var trees = sourceFiles.Select(path =>
@@ -221,6 +245,20 @@ public sealed class DeltaEmitter
             CompilationOptions);
     }
 
+    private static IEnumerable<string> GetCompilationSourceFiles(PathMap projectRoot, string? modulePath)
+    {
+        foreach (var sourceFile in Directory.EnumerateFiles(projectRoot.RootDirectory, "*.cs", SearchOption.AllDirectories)
+            .Where(IsProjectSourceFile))
+        {
+            yield return sourceFile;
+        }
+
+        foreach (var generatedSourceFile in GetSdkGeneratedSourceFiles(projectRoot, modulePath))
+        {
+            yield return generatedSourceFile;
+        }
+    }
+
     private static bool IsProjectSourceFile(string path)
     {
         var segments = path.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
@@ -229,13 +267,85 @@ public sealed class DeltaEmitter
             || string.Equals(segment, "obj", StringComparison.OrdinalIgnoreCase));
     }
 
+    private static IEnumerable<string> GetSdkGeneratedSourceFiles(PathMap projectRoot, string? modulePath)
+    {
+        if (string.IsNullOrWhiteSpace(modulePath))
+        {
+            yield break;
+        }
+
+        var generatedDirectory = ResolveGeneratedSourceDirectory(projectRoot.RootDirectory, modulePath);
+        if (generatedDirectory is null || !Directory.Exists(generatedDirectory))
+        {
+            yield break;
+        }
+
+        var assemblyName = Path.GetFileNameWithoutExtension(modulePath);
+        if (string.IsNullOrWhiteSpace(assemblyName))
+        {
+            yield break;
+        }
+
+        foreach (var sourceFile in Directory.EnumerateFiles(generatedDirectory, "*.cs", SearchOption.TopDirectoryOnly)
+            .Where(path => IsSdkGeneratedCompilationInput(path, assemblyName))
+            .Order(StringComparer.OrdinalIgnoreCase))
+        {
+            yield return sourceFile;
+        }
+    }
+
+    private static string? ResolveGeneratedSourceDirectory(string projectRoot, string? modulePath)
+    {
+        if (string.IsNullOrWhiteSpace(modulePath))
+        {
+            return null;
+        }
+
+        var fullModulePath = Path.GetFullPath(modulePath);
+        var relativeModulePath = Path.GetRelativePath(projectRoot, fullModulePath);
+        if (relativeModulePath.StartsWith("..", StringComparison.Ordinal) || Path.IsPathRooted(relativeModulePath))
+        {
+            return null;
+        }
+
+        var segments = relativeModulePath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var binIndex = Array.FindIndex(
+            segments,
+            segment => string.Equals(segment, "bin", StringComparison.OrdinalIgnoreCase));
+        if (binIndex < 0 || segments.Length <= binIndex + 2)
+        {
+            return null;
+        }
+
+        var configuration = segments[binIndex + 1];
+        var targetFramework = segments[binIndex + 2];
+        return Path.Combine(projectRoot, "obj", configuration, targetFramework);
+    }
+
+    private static bool IsSdkGeneratedCompilationInput(string path, string assemblyName)
+    {
+        var fileName = Path.GetFileName(path);
+        return fileName.Equals($"{assemblyName}.AssemblyInfo.cs", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals($"{assemblyName}.GlobalUsings.g.cs", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals($"{assemblyName}.AssemblyAttributes.cs", StringComparison.OrdinalIgnoreCase)
+            || fileName.EndsWith(".AssemblyAttributes.cs", StringComparison.OrdinalIgnoreCase)
+            || fileName.EndsWith(".g.cs", StringComparison.OrdinalIgnoreCase)
+            || fileName.EndsWith(".g.i.cs", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static ImmutableArray<MetadataReference> GetMetadataReferences(PathMap projectRoot)
     {
         var trustedAssemblies = ((string?)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES"))
             ?.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
             ?? Array.Empty<string>();
+        var frameworkReferencePaths = FrameworkReferenceResolver
+            .GetReferencePaths(projectRoot.ProjectFile, projectRoot.ProjectFile is null ? null : GetTargetFramework(projectRoot.ProjectFile))
+            .ToArray();
+        var platformReferencePaths = frameworkReferencePaths.Length > 0
+            ? frameworkReferencePaths
+            : trustedAssemblies;
 
-        return trustedAssemblies
+        return platformReferencePaths
             .Concat(GetProjectMetadataReferencePaths(projectRoot))
             .Where(File.Exists)
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -439,8 +549,8 @@ public sealed class DeltaEmitter
             cancellationToken: cancellationToken);
 
         return result.Success
-            ? new InitialEmitResult(true, assemblyStream.ToArray(), Array.Empty<string>())
-            : new InitialEmitResult(false, Array.Empty<byte>(), FormatDiagnostics(result.Diagnostics));
+            ? new InitialEmitResult(true, assemblyStream.ToArray(), pdbStream.ToArray(), Array.Empty<string>())
+            : new InitialEmitResult(false, Array.Empty<byte>(), Array.Empty<byte>(), FormatDiagnostics(result.Diagnostics));
     }
 
     private static ImmutableArray<SemanticEdit> FindSemanticEdits(
@@ -467,12 +577,68 @@ public sealed class DeltaEmitter
                 SemanticEditKind.Update,
                 originalMethod.Symbol,
                 editedMethod.Symbol,
-                syntaxMap: null,
+                syntaxMap: CreateSyntaxMap(originalMethod.Node, editedMethod.Node),
                 runtimeRudeEdit: null,
                 instrumentation: default));
         }
 
         return edits.ToImmutable();
+    }
+
+    private static Func<SyntaxNode, SyntaxNode?> CreateSyntaxMap(
+        MethodDeclarationSyntax originalMethod,
+        MethodDeclarationSyntax editedMethod)
+    {
+        var originalNodesByKey = originalMethod.DescendantNodesAndSelf()
+            .Select(node => (Key: GetSyntaxMapKey(node), Node: node))
+            .Where(item => item.Key is not null)
+            .GroupBy(item => item.Key!, StringComparer.Ordinal)
+            .Where(group => group.Count() == 1)
+            .ToDictionary(group => group.Key, group => group.Single().Node, StringComparer.Ordinal);
+
+        return editedNode =>
+        {
+            if (editedNode == editedMethod)
+            {
+                return originalMethod;
+            }
+
+            var key = GetSyntaxMapKey(editedNode);
+            if (key is not null && originalNodesByKey.TryGetValue(key, out var originalNode))
+            {
+                return originalNode;
+            }
+
+            return FindOriginalNodeByRelativePosition(originalMethod, editedMethod, editedNode);
+        };
+    }
+
+    private static string? GetSyntaxMapKey(SyntaxNode node)
+    {
+        return node switch
+        {
+            VariableDeclaratorSyntax variable => $"variable:{variable.Identifier.ValueText}",
+            ForEachStatementSyntax forEach => $"foreach:{forEach.Identifier.ValueText}",
+            CatchDeclarationSyntax catchDeclaration => $"catch:{catchDeclaration.Identifier.ValueText}",
+            ParameterSyntax parameter => $"parameter:{parameter.Identifier.ValueText}",
+            SingleVariableDesignationSyntax designation => $"designation:{designation.Identifier.ValueText}",
+            _ => null,
+        };
+    }
+
+    private static SyntaxNode? FindOriginalNodeByRelativePosition(
+        MethodDeclarationSyntax originalMethod,
+        MethodDeclarationSyntax editedMethod,
+        SyntaxNode editedNode)
+    {
+        var relativeStart = editedNode.SpanStart - editedMethod.SpanStart;
+        var relativeLength = editedNode.Span.Length;
+
+        return originalMethod.DescendantNodesAndSelf()
+            .FirstOrDefault(originalNode =>
+                originalNode.IsKind(editedNode.Kind())
+                && originalNode.SpanStart - originalMethod.SpanStart == relativeStart
+                && originalNode.Span.Length == relativeLength);
     }
 
     private static Dictionary<string, MethodSnapshot> GetMethodsByKey(CSharpCompilation compilation)
@@ -554,7 +720,11 @@ public sealed class DeltaEmitter
 
     private sealed record PathMap(string RootDirectory, string? ProjectFile);
 
-    private sealed record InitialEmitResult(bool Success, byte[] AssemblyBytes, IReadOnlyList<string> Diagnostics);
+    private sealed record InitialEmitResult(
+        bool Success,
+        byte[] AssemblyBytes,
+        byte[] PdbBytes,
+        IReadOnlyList<string> Diagnostics);
 
     private sealed record MethodSnapshot(MethodDeclarationSyntax Node, IMethodSymbol Symbol);
 }

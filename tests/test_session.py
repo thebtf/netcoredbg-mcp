@@ -38,6 +38,45 @@ class TestSessionManagerInit:
             assert os.path.isabs(manager.project_path)
 
 
+class TestHotReloadLaunch:
+    @pytest.mark.asyncio
+    async def test_launch_enables_hot_reload_before_debuggee_launch(self, tmp_path):
+        netcoredbg = tmp_path / "netcoredbg.exe"
+        ncdbhook = tmp_path / "ncdbhook.dll"
+        program = tmp_path / "App.dll"
+        netcoredbg.write_text("exe")
+        ncdbhook.write_text("hook")
+        program.write_bytes(b"")
+
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(
+                netcoredbg_path=str(netcoredbg),
+                project_path=str(tmp_path),
+            )
+        fake_client = FakeLaunchClient(str(netcoredbg))
+        manager._client = fake_client
+        manager._initialized_event.set()
+
+        with patch(
+            "netcoredbg_mcp.session.manager.detect_enc_support",
+            return_value={
+                "supported": True,
+                "ncdbhook_path": str(ncdbhook),
+                "error": None,
+            },
+        ):
+            result = await manager.launch(program=str(program), pre_build=False)
+
+        assert result["success"] is True
+        assert fake_client.events == [
+            "set_hot_reload",
+            "set_exception_breakpoints",
+            "launch",
+            "configuration_done",
+        ]
+        assert fake_client.hot_reload_enabled is True
+
+
 class TestPathValidation:
     """Tests for path validation."""
 
@@ -630,3 +669,33 @@ class TestExecutionControl:
             result = await manager.pause()
 
             assert result["success"] is True
+
+
+class FakeLaunchClient:
+    def __init__(self, netcoredbg_path: str = "netcoredbg.exe") -> None:
+        self.netcoredbg_path = netcoredbg_path
+        self.is_running = True
+        self.capabilities: dict[str, object] = {}
+        self.events: list[str] = []
+        self.hot_reload_enabled: bool | None = None
+
+    async def set_hot_reload(self, enable: bool) -> DAPResponse:
+        self.events.append("set_hot_reload")
+        self.hot_reload_enabled = enable
+        return DAPResponse(1, 1, True, "setHotReload")
+
+    async def set_function_breakpoints(self, breakpoints: list[dict]) -> DAPResponse:
+        self.events.append("set_function_breakpoints")
+        return DAPResponse(1, 1, True, "setFunctionBreakpoints")
+
+    async def set_exception_breakpoints(self, filters: list[str] | None = None) -> DAPResponse:
+        self.events.append("set_exception_breakpoints")
+        return DAPResponse(1, 1, True, "setExceptionBreakpoints")
+
+    async def launch(self, **_kwargs) -> DAPResponse:
+        self.events.append("launch")
+        return DAPResponse(1, 1, True, "launch")
+
+    async def configuration_done(self) -> DAPResponse:
+        self.events.append("configuration_done")
+        return DAPResponse(1, 1, True, "configurationDone")

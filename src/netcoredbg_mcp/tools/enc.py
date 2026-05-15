@@ -87,11 +87,19 @@ async def apply_code_change_to_session(
     except Exception as exc:
         return build_error_response(str(exc), state=session.state.state)
 
+    target_module: ModuleInfo | None = None
+    target_module_error: Exception | None = None
+    try:
+        target_module = _resolve_target_module(session, target_file)
+    except Exception as exc:
+        target_module_error = exc
+
     delta = await asyncio.to_thread(
         compiler,
         project_path=root,
         file_path=target_file,
         edits=source_edits,
+        module_path=target_module.path if target_module is not None else None,
     )
     if not delta.success:
         if delta.rude_edits:
@@ -105,27 +113,42 @@ async def apply_code_change_to_session(
             state=session.state.state,
         )
 
-    try:
-        module_name = _resolve_target_module(session, target_file)
-    except Exception as exc:
-        return build_error_response(str(exc), state=session.state.state)
+    if target_module is None:
+        assert target_module_error is not None
+        return build_error_response(str(target_module_error), state=session.state.state)
+    module_name = _module_file_name(target_module)
 
+    original_source = target_file.read_text(encoding="utf-8")
+    source_applied = False
     _apply_source_edits(target_file, source_edits)
+    source_applied = True
 
     previous_state = session.begin_applying_changes()
+    apply_error: Exception | None = None
+    apply_result = None
     try:
+        line_updates_path = _ensure_empty_line_updates_file(delta)
         apply_result = await apply(
             session.client,
             dll_name=module_name,
             metadata_path=_require_delta_path(delta.metadata_delta_path, "metadata"),
             il_path=_require_delta_path(delta.il_delta_path, "il"),
             pdb_path=_require_delta_path(delta.pdb_delta_path, "pdb"),
-            line_updates_path=None,
+            line_updates_path=line_updates_path,
         )
+    except Exception as exc:
+        apply_error = exc
     finally:
         session.finish_applying_changes(previous_state)
 
+    if apply_error is not None:
+        if source_applied:
+            _restore_source(target_file, original_source)
+        return build_error_response(str(apply_error), state=session.state.state)
+
+    assert apply_result is not None
     if not apply_result.success:
+        _restore_source(target_file, original_source)
         return build_error_response(
             apply_result.message or "netcoredbg applyDeltas request failed.",
             state=session.state.state,
@@ -173,7 +196,7 @@ def _resolve_project_file(project_root: Path, file: str | Path) -> Path:
     return resolved
 
 
-def _resolve_target_module(session: Any, target_file: Path) -> str:
+def _resolve_target_module(session: Any, target_file: Path) -> ModuleInfo:
     modules = [
         module
         for module in getattr(session.state, "modules", [])
@@ -190,11 +213,10 @@ def _resolve_target_module(session: Any, target_file: Path) -> str:
         expected_name = f"{project_name}.dll".lower()
         for module in modules:
             if module.name.lower() == expected_name:
-                return module.path or module.name
+                return module
 
     if len(modules) == 1:
-        module = modules[0]
-        return module.path or module.name
+        return modules[0]
 
     names = ", ".join(module.name for module in modules)
     raise RuntimeError(f"Could not choose target module for {target_file}; loaded modules: {names}")
@@ -216,6 +238,15 @@ def _apply_source_edits(target_file: Path, edits: list[SourceEdit]) -> None:
     target_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _restore_source(target_file: Path, content: str) -> None:
+    target_file.write_text(content, encoding="utf-8")
+
+
+def _module_file_name(module: ModuleInfo) -> str:
+    value = module.name or module.path or ""
+    return value.replace("\\", "/").rsplit("/", 1)[-1]
+
+
 def _validate_source_edit_ranges(target_file: Path, edits: list[SourceEdit]) -> None:
     line_count = len(target_file.read_text(encoding="utf-8").splitlines())
     for edit in edits:
@@ -230,3 +261,10 @@ def _require_delta_path(value: str | None, kind: str) -> str:
     if value is None:
         raise RuntimeError(f"Delta compiler did not return {kind} delta path.")
     return value
+
+
+def _ensure_empty_line_updates_file(delta: DeltaResult) -> str:
+    metadata_path = Path(_require_delta_path(delta.metadata_delta_path, "metadata"))
+    line_updates_path = metadata_path.with_suffix(".lineupdates")
+    line_updates_path.write_bytes((0).to_bytes(4, byteorder="little", signed=False))
+    return str(line_updates_path)
