@@ -581,6 +581,92 @@ async def test_v2_ui_drag_keeps_route_evidence_compact() -> None:
 
 
 @pytest.mark.asyncio
+async def test_v2_ui_drag_distinguishes_source_forms_in_request_and_evidence() -> None:
+    session = ActionSmokeSession()
+    source_cases = [
+        (
+            "row_index_source",
+            {
+                "selector": {"automation_id": "CueDataGrid"},
+                "row_index": 2,
+            },
+            "row_index",
+        ),
+        (
+            "row_identity_source",
+            {
+                "selector": {"automation_id": "CueDataGrid"},
+                "row_identity": "Cue 042",
+            },
+            "row_identity",
+        ),
+        (
+            "selector_source",
+            {"selector": {"automation_id": "CueDragHandle"}},
+            "selector",
+        ),
+        (
+            "point_source",
+            {"point": {"relative_to": "screen", "x": 25, "y": 40}},
+            "point",
+        ),
+    ]
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "source resolution",
+            "cases": [
+                {
+                    "id": "source_resolution",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.drag",
+                                "source": source,
+                                "path": [
+                                    {"relative_to": "source", "x": 0.5, "y": 0.5},
+                                    {
+                                        "relative_to": "viewport",
+                                        "x": 0.5,
+                                        "y": 0.55 + (index * 0.1),
+                                    },
+                                ],
+                                "drop": {
+                                    "relative_to": "viewport",
+                                    "x": 0.5,
+                                    "y": 0.55 + (index * 0.1),
+                                },
+                            },
+                            "probes": [],
+                        }
+                        for index, (_case_id, source, _kind) in enumerate(source_cases)
+                    ],
+                }
+            ],
+        }
+    )
+
+    actions = result["cases"][0]["actions"]
+    drag_calls = [call for call in session.calls if call[0] == "drag"]
+    assert result["status"] == "PASS"
+    assert [call[1]["source"]["kind"] for call in drag_calls] == [
+        kind for (_case_id, _source, kind) in source_cases
+    ]
+    assert [action["route_evidence"]["source"]["kind"] for action in actions] == [
+        kind for (_case_id, _source, kind) in source_cases
+    ]
+    assert drag_calls[0][1]["source"]["row_index"] == 2
+    assert drag_calls[1][1]["source"]["row_identity"] == "Cue 042"
+    assert drag_calls[2][1]["source"]["selector"] == {"automation_id": "CueDragHandle"}
+    assert drag_calls[3][1]["source"]["point"] == {
+        "relative_to": "screen",
+        "x": 25,
+        "y": 40,
+    }
+
+
+@pytest.mark.asyncio
 async def test_v2_ui_drag_blocks_when_adapter_is_missing() -> None:
     session = ActionSmokeSession()
 
@@ -649,6 +735,19 @@ async def test_v2_ui_drag_blocks_when_adapter_is_missing() -> None:
                 "drop": {"relative_to": "screen", "x": 10, "y": 10},
             },
             "zero-distance drag route",
+        ),
+        (
+            {
+                "kind": "ui.drag",
+                "source": {
+                    "selector": {"automation_id": "CueDataGrid"},
+                    "row_index": 1,
+                    "point": {"relative_to": "screen", "x": 10, "y": 10},
+                },
+                "path": [{"relative_to": "screen", "x": 10, "y": 10}],
+                "drop": {"relative_to": "screen", "x": 20, "y": 20},
+            },
+            "ambiguous drag source",
         ),
     ],
 )

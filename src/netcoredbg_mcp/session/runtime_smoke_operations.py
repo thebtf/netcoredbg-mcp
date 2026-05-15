@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -274,6 +274,63 @@ def ui_operation_adapters(
         )
         return await _settle_after_state_change(result)
 
+    async def drag(**args: Any) -> dict[str, Any]:
+        backend = await _backend_or_blocked(ensure_ui_connected)
+        if isinstance(backend, dict):
+            return backend
+        backend_drag = getattr(backend, "drag", None)
+        if not callable(backend_drag):
+            return _adapter_blocked("ui.drag", "drag backend unavailable")
+
+        source = dict(args.get("source") or {})
+        path = _mapping_list(args.get("path"))
+        drop = dict(args.get("drop") or {})
+        route, blocked = _point_drag_route(source=source, path=path, drop=drop)
+        if blocked is not None:
+            return blocked
+
+        modifiers = [str(modifier) for modifier in args.get("modifiers") or []]
+        speed_ms = _positive_int(args.get("duration_ms"), default=200)
+        try:
+            result = await backend_drag(
+                route["from_x"],
+                route["from_y"],
+                route["to_x"],
+                route["to_y"],
+                speed_ms=speed_ms,
+                hold_modifiers=modifiers,
+            )
+        except Exception as exc:
+            return _adapter_blocked("ui.drag", str(exc))
+        if not isinstance(result, dict):
+            return {
+                "status": "FAIL",
+                "reason": "ui.drag backend returned non-object result",
+                "result": result,
+            }
+
+        route_evidence = {
+            "source": source,
+            "move_points": path,
+            "hold_points": [point for point in path if "hold_ms" in point],
+            "final_pointer": drop or (path[-1] if path else None),
+            "modifiers": modifiers,
+            "start": {"x": route["from_x"], "y": route["from_y"]},
+            "drop": {"x": route["to_x"], "y": route["to_y"]},
+        }
+        status = str(result.get("status", "PASS")).upper()
+        output: dict[str, Any] = {
+            "status": status,
+            "backend": type(backend).__name__,
+            "route_evidence": route_evidence,
+            "result": result,
+        }
+        if status != "PASS":
+            for key in ("reason", "requested", "accepted", "next_step"):
+                if key in result:
+                    output[key] = result[key]
+        return output
+
     adapters: OperationAdapterMap = {
         "ui.ensure_connected": ensure_connected,
         "ui.grid.snapshot": grid_snapshot,
@@ -288,6 +345,7 @@ def ui_operation_adapters(
         "ui.set_focus": set_focus,
         "ui.send_keys_focused": send_keys_focused,
         "ui.invoke": invoke,
+        "ui.drag": drag,
     }
     if session is not None:
         adapters.update(_session_operation_adapters(session))
@@ -443,6 +501,83 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
         "debug.stop": debug_stop,
         "process.registry.count": process_registry_count,
         "fixture.restore": fixture_restore,
+    }
+
+
+def _point_drag_route(
+    *,
+    source: dict[str, Any],
+    path: list[dict[str, Any]],
+    drop: dict[str, Any],
+) -> tuple[dict[str, int], dict[str, Any] | None]:
+    if source.get("kind") != "point":
+        return {}, _drag_blocked(
+            reason="drag source requires coordinate resolution",
+            requested={"source": source},
+            accepted={"source.kind": "point with screen coordinates"},
+            next_step="Resolve row or selector sources to screen coordinates before ui.drag.",
+        )
+
+    start = _screen_point(source.get("point"))
+    end = _screen_point(drop) or _screen_point(path[-1] if path else None)
+    if start is None or end is None:
+        return {}, _drag_blocked(
+            reason="drag route requires screen coordinates",
+            requested={"source": source, "path": path, "drop": drop},
+            accepted={
+                "source.point": "screen coordinate object",
+                "drop": "screen coordinate object or final screen waypoint",
+            },
+            next_step="Provide source.point and drop using relative_to: screen.",
+        )
+    return {
+        "from_x": start[0],
+        "from_y": start[1],
+        "to_x": end[0],
+        "to_y": end[1],
+    }, None
+
+
+def _mapping_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, Mapping)]
+
+
+def _screen_point(value: Any) -> tuple[int, int] | None:
+    if not isinstance(value, Mapping):
+        return None
+    if str(value.get("relative_to") or "screen") != "screen":
+        return None
+    try:
+        return int(round(float(value["x"]))), int(round(float(value["y"])))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _positive_int(value: Any, *, default: int) -> int:
+    if value is None:
+        return default
+    try:
+        candidate = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(1, candidate)
+
+
+def _drag_blocked(
+    *,
+    reason: str,
+    requested: dict[str, Any],
+    accepted: dict[str, Any],
+    next_step: str,
+) -> dict[str, Any]:
+    return {
+        "status": "BLOCKED",
+        "reason": reason,
+        "requested": requested,
+        "accepted": accepted,
+        "next_step": next_step,
     }
 
 

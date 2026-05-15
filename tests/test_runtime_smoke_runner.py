@@ -1023,6 +1023,60 @@ async def test_ui_operation_adapters_forward_grid_columns_and_backend_text_statu
 
 
 @pytest.mark.asyncio
+async def test_ui_operation_adapters_route_point_drag_to_backend() -> None:
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.drag_calls: list[tuple[int, int, int, int, int, list[str]]] = []
+
+        async def drag(
+            self,
+            from_x: int,
+            from_y: int,
+            to_x: int,
+            to_y: int,
+            speed_ms: int = 200,
+            hold_modifiers: list[str] | None = None,
+        ) -> dict[str, Any]:
+            modifiers = list(hold_modifiers or [])
+            self.drag_calls.append((from_x, from_y, to_x, to_y, speed_ms, modifiers))
+            return {
+                "status": "PASS",
+                "dragged": True,
+                "x1": from_x,
+                "y1": from_y,
+                "x2": to_x,
+                "y2": to_y,
+                "duration_ms": speed_ms,
+            }
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    result = await ui_operation_adapters(backend_provider)["ui.drag"](
+        source={"kind": "point", "point": {"relative_to": "screen", "x": 10, "y": 20}},
+        path=[{"relative_to": "screen", "x": 25, "y": 40}],
+        drop={"relative_to": "screen", "x": 50, "y": 80},
+        modifiers=["ctrl"],
+        duration_ms=350,
+    )
+
+    assert backend.drag_calls == [(10, 20, 50, 80, 350, ["ctrl"])]
+    assert result["status"] == "PASS"
+    assert result["backend"] == "FakeBackend"
+    assert result["route_evidence"]["source"]["kind"] == "point"
+    assert result["route_evidence"]["move_points"] == [
+        {"relative_to": "screen", "x": 25, "y": 40}
+    ]
+    assert result["route_evidence"]["final_pointer"] == {
+        "relative_to": "screen",
+        "x": 50,
+        "y": 80,
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("case", "expected_status"),
     [
