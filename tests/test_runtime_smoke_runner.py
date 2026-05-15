@@ -1168,7 +1168,6 @@ async def test_ui_operation_adapters_resolve_visible_row_drag_sources_to_backend
     class FakeBackend:
         def __init__(self) -> None:
             self.drag_calls: list[tuple[int, int, int, int, int, list[str]]] = []
-            self.drag_path_calls: list[tuple[list[dict[str, int]], int, list[str]]] = []
 
         async def grid_snapshot(
             self,
@@ -1214,20 +1213,15 @@ async def test_ui_operation_adapters_resolve_visible_row_drag_sources_to_backend
         ) -> dict[str, Any]:
             modifiers = list(hold_modifiers or [])
             self.drag_calls.append((from_x, from_y, to_x, to_y, speed_ms, modifiers))
-            return {"status": "PASS", "dragged": True}
-
-        async def drag_path(
-            self,
-            points: list[dict[str, int]],
-            speed_ms: int = 200,
-            hold_modifiers: list[str] | None = None,
-        ) -> dict[str, Any]:
-            modifiers = list(hold_modifiers or [])
-            self.drag_path_calls.append((points, speed_ms, modifiers))
             return {
                 "status": "PASS",
-                "path_points": points,
-                "final_pointer": points[-1],
+                "dragged": True,
+                "path_points": [
+                    {"x": from_x, "y": from_y},
+                    {"x": from_x, "y": to_y},
+                    {"x": to_x, "y": to_y},
+                ],
+                "final_pointer": {"x": to_x, "y": to_y},
             }
 
     backend = FakeBackend()
@@ -1245,10 +1239,7 @@ async def test_ui_operation_adapters_resolve_visible_row_drag_sources_to_backend
         duration_ms=450,
     )
 
-    assert backend.drag_calls == []
-    assert backend.drag_path_calls == [
-        ([{"x": 70, "y": 75}, {"x": 70, "y": 155}], 450, [])
-    ]
+    assert backend.drag_calls == [(70, 75, 70, 155, 450, [])]
     assert result["status"] == "PASS"
     assert result["route_evidence"]["source_bounds"] == {
         "x": 10,
@@ -1267,6 +1258,7 @@ async def test_ui_operation_adapters_resolve_visible_row_drag_sources_to_backend
     assert result["route_evidence"]["move_points"] == [
         {"x": 70, "y": 75},
         {"x": 70, "y": 155},
+        {"x": 70, "y": 155},
     ]
     assert result["route_evidence"]["final_pointer"] == {"x": 70, "y": 155}
 
@@ -1281,11 +1273,7 @@ async def test_ui_operation_adapters_resolve_visible_row_drag_sources_to_backend
     )
 
     assert top_row_result["status"] == "PASS"
-    assert backend.drag_path_calls[-1] == (
-        [{"x": 70, "y": 35}, {"x": 70, "y": 115}],
-        300,
-        [],
-    )
+    assert backend.drag_calls[-1] == (70, 35, 70, 115, 300, [])
     assert top_row_result["route_evidence"]["source_identity"] == "Cue one"
 
 

@@ -767,7 +767,7 @@ async def _drag_route(
 
 
 def _requires_path_drag(path: list[dict[str, Any]]) -> bool:
-    return len(path) >= 2 or any("hold_ms" in point for point in path)
+    return len(path) > 2 or any("hold_ms" in point for point in path)
 
 
 def _drag_cancel_key(cancel: dict[str, Any]) -> str | None:
