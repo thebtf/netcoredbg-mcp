@@ -348,3 +348,14 @@ def test_bridge_grid_builds_cell_text_evidence_for_rows() -> None:
     assert direct_children_index < descendant_fallback_index
     assert ordinal_index < increment_index < blank_continue_index
     assert pattern_value_index < pattern_placeholder_guard_index < pattern_read_text_index
+
+
+def test_bridge_multi_select_uses_data_grid_rows_not_raw_children() -> None:
+    command = (
+        PROJECT_ROOT / "bridge" / "Commands" / "SelectionCommands.cs"
+    ).read_text(encoding="utf-8")
+
+    assert "SelectionTargets(container, automation)" in command
+    assert "FindAllChildren(RowCondition(automation))" in command
+    assert "FindAllDescendants(RowCondition(automation))" in command
+    assert "var children = container.FindAllChildren();" not in command

@@ -27,7 +27,7 @@ public static class SelectionCommands
         var container = mainWindow.FindFirstDescendant(cf.ByAutomationId(automationId))
             ?? throw new InvalidOperationException($"Container not found: {automationId}");
 
-        var children = container.FindAllChildren();
+        var targets = SelectionTargets(container, automation);
         var selected = new JsonArray();
         var isFirst = true;
 
@@ -36,10 +36,10 @@ public static class SelectionCommands
             var index = indexNode?.GetValue<int>()
                 ?? throw new ArgumentException("Each index must be an integer");
 
-            if (index < 0 || index >= children.Length)
-                throw new ArgumentOutOfRangeException($"Index {index} out of range (0..{children.Length - 1})");
+            if (index < 0 || index >= targets.Length)
+                throw new ArgumentOutOfRangeException($"Index {index} out of range (0..{targets.Length - 1})");
 
-            var child = children[index];
+            var child = targets[index];
 
             if (child.Patterns.SelectionItem.TryGetPattern(out var selectionPattern))
             {
@@ -80,6 +80,48 @@ public static class SelectionCommands
             ["automationId"] = automationId,
             ["indices"] = selected
         };
+    }
+
+    private static AutomationElement[] SelectionTargets(AutomationElement container, UIA3Automation automation)
+    {
+        var rowTargets = container.FindAllChildren(RowCondition(automation))
+            .Where(IsRowLike)
+            .ToArray();
+        if (rowTargets.Length > 0)
+            return rowTargets;
+
+        var selectableChildren = container.FindAllChildren()
+            .Where(IsSelectableTarget)
+            .ToArray();
+        if (selectableChildren.Length > 0)
+            return selectableChildren;
+
+        var rowDescendants = container.FindAllDescendants(RowCondition(automation))
+            .Where(IsRowLike)
+            .ToArray();
+        return rowDescendants.Length > 0 ? rowDescendants : container.FindAllChildren();
+    }
+
+    private static ConditionBase RowCondition(UIA3Automation automation)
+    {
+        var cf = new ConditionFactory(automation.PropertyLibrary);
+        return new OrCondition(
+            cf.ByControlType(ControlType.DataItem),
+            cf.ByControlType(ControlType.Custom),
+            cf.ByControlType(ControlType.ListItem));
+    }
+
+    private static bool IsSelectableTarget(AutomationElement element)
+    {
+        return element.Patterns.SelectionItem.TryGetPattern(out _);
+    }
+
+    private static bool IsRowLike(AutomationElement element)
+    {
+        var controlType = element.ControlType;
+        return controlType == ControlType.DataItem ||
+               controlType == ControlType.Custom ||
+               controlType == ControlType.ListItem;
     }
 
     public static JsonNode ExpandCollapse(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)

@@ -51,6 +51,7 @@ async def handle_ui_drag(
         path=path,
         drop=drop,
         modifiers=modifiers,
+        expect=dict(action.get("expect") or {}),
         duration_ms=context.elapsed_ms(started),
     )
 
@@ -294,9 +295,11 @@ def _action_result(
     path: list[dict[str, Any]],
     drop: dict[str, Any],
     modifiers: list[str],
+    expect: dict[str, Any],
     duration_ms: int,
 ) -> dict[str, Any]:
     status = str(result.get("status", "PASS"))
+    selected_payload = _selected_payload_from_result(result)
     output: dict[str, Any] = {
         "status": status,
         "route": "drag",
@@ -324,12 +327,94 @@ def _action_result(
         )
         output["route_evidence"].setdefault("final_pointer", drop or (path[-1] if path else None))
         output["route_evidence"].setdefault("modifiers", modifiers)
+    if selected_payload is not None:
+        output["selected_payload"] = selected_payload
+    if expect.get("selected_payload_preserved") is True:
+        if selected_payload is None:
+            output["status"] = "BLOCKED"
+            output["reason"] = "selected payload evidence unavailable"
+            output["requested"] = {"expect": {"selected_payload_preserved": True}}
+            output["accepted"] = {
+                "selected_payload": "before and after selected row identities"
+            }
+            output["next_step"] = (
+                "Use a UI backend or probe adapter that returns selected payload evidence."
+            )
+        elif selected_payload.get("preserved") is not True and status == "PASS":
+            output["status"] = "FAIL"
+            output["reason"] = "selected payload expectation failed"
     if status != "PASS":
         attach_blocked_details(output, result)
     evidence_ref = result.get("evidence_ref")
     if evidence_ref:
         output["evidence_ref"] = str(evidence_ref)
     return output
+
+
+def _selected_payload_from_result(result: dict[str, Any]) -> dict[str, Any] | None:
+    selected_payload = result.get("selected_payload")
+    if not isinstance(selected_payload, Mapping):
+        route_evidence = result.get("route_evidence")
+        if isinstance(route_evidence, Mapping):
+            selected_payload = route_evidence.get("selected_payload")
+    if not isinstance(selected_payload, Mapping):
+        return None
+
+    output = compact_evidence(dict(selected_payload))
+    if not isinstance(output, dict):
+        return None
+    before = _string_list(output.get("before"))
+    after = _string_list(output.get("after"))
+    if before is not None:
+        output["before"] = before
+    if after is not None:
+        output["after"] = after
+    if before is not None and after is not None:
+        duplicate_identities = _duplicate_identities(before, after)
+        lost_identities = _difference(before, after)
+        unexpected_identities = _difference(after, before)
+        if duplicate_identities:
+            output["duplicate_identities"] = duplicate_identities
+        if lost_identities:
+            output["lost_identities"] = lost_identities
+        if unexpected_identities:
+            output["unexpected_identities"] = unexpected_identities
+        output["preserved"] = (
+            bool(before)
+            and bool(after)
+            and not duplicate_identities
+            and not lost_identities
+            and not unexpected_identities
+        )
+    return output
+
+
+def _string_list(value: Any) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+    return [str(item) for item in value]
+
+
+def _duplicate_identities(*groups: list[str]) -> list[str]:
+    duplicates: list[str] = []
+    for group in groups:
+        seen: set[str] = set()
+        for identity in group:
+            if identity in seen and identity not in duplicates:
+                duplicates.append(identity)
+            seen.add(identity)
+    return duplicates
+
+
+def _difference(left: list[str], right: list[str]) -> list[str]:
+    remaining = list(right)
+    missing: list[str] = []
+    for identity in left:
+        if identity in remaining:
+            remaining.remove(identity)
+        else:
+            missing.append(identity)
+    return missing
 
 
 def _default_route_evidence(

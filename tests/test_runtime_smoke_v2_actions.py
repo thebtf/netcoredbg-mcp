@@ -15,6 +15,7 @@ class ActionSmokeSession:
         self.focus_result: dict[str, Any] = {"status": "PASS"}
         self.send_keys_result: dict[str, Any] = {"status": "PASS"}
         self.drag_results: list[dict[str, Any]] = []
+        self.grid_select_indices_results: list[dict[str, Any]] = []
 
     async def find_element(self, selector: dict[str, Any]) -> dict[str, Any]:
         self.calls.append(("find_element", dict(selector)))
@@ -45,6 +46,16 @@ class ActionSmokeSession:
             },
         }
 
+    async def grid_select_indices(self, **request: Any) -> dict[str, Any]:
+        self.calls.append(("grid_select_indices", request))
+        if self.grid_select_indices_results:
+            return self.grid_select_indices_results.pop(0)
+        return {
+            "status": "PASS",
+            "selected_indices": list(request.get("indices") or []),
+            "selected_count": len(request.get("indices") or []),
+        }
+
     async def tracepoint_status(self, tracepoint_id: str) -> dict[str, Any]:
         self.calls.append(("tracepoint_status", tracepoint_id))
         hit = self.tracepoint_hits.pop(0) if self.tracepoint_hits else False
@@ -73,6 +84,7 @@ def _runner(session: ActionSmokeSession) -> RuntimeSmokeRunner:
             "ui.send_keys_focused": session.send_keys_focused,
             "ui.invoke": session.invoke,
             "ui.drag": session.drag,
+            "ui.grid.select_indices": session.grid_select_indices,
             "debug.tracepoint_status": session.tracepoint_status,
         },
     )
@@ -103,6 +115,7 @@ def _runner_with_clock(
             "ui.send_keys_focused": session.send_keys_focused,
             "ui.invoke": session.invoke,
             "ui.drag": session.drag,
+            "ui.grid.select_indices": session.grid_select_indices,
             "debug.tracepoint_status": session.tracepoint_status,
         },
         clock=clock,
@@ -664,6 +677,244 @@ async def test_v2_ui_drag_distinguishes_source_forms_in_request_and_evidence() -
         "x": 25,
         "y": 40,
     }
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_grid_select_routes_non_contiguous_indices() -> None:
+    session = ActionSmokeSession()
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "grid multi-select",
+            "cases": [
+                {
+                    "id": "grid_multi_select",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.grid.select",
+                                "selector": {"automation_id": "CueDataGrid"},
+                                "indices": [1, 4],
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    select_call = next(call for call in session.calls if call[0] == "grid_select_indices")
+    assert result["status"] == "PASS"
+    assert "ui.grid.select" in result["accepted_action_kinds"]
+    assert select_call[1]["selector"] == {"automation_id": "CueDataGrid"}
+    assert select_call[1]["indices"] == [1, 4]
+    assert action["route"] == "grid_select"
+    assert action["indices"] == [1, 4]
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_grid_select_propagates_backend_blocked() -> None:
+    session = ActionSmokeSession()
+    session.grid_select_indices_results.append(
+        {
+            "status": "BLOCKED",
+            "reason": "multi-select backend did not select all requested rows",
+            "requested": {"adapter": "ui.grid.select_indices"},
+            "accepted": {"backend": "FlaUI multi_select"},
+            "next_step": "Run with a backend that can perform real multi-select.",
+        }
+    )
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "grid multi-select blocked",
+            "cases": [
+                {
+                    "id": "grid_multi_select_blocked",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.grid.select",
+                                "selector": {"automation_id": "CueDataGrid"},
+                                "indices": [1, 4],
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == "BLOCKED"
+    assert action["status"] == "BLOCKED"
+    assert action["reason"] == "multi-select backend did not select all requested rows"
+    assert action["next_step"]
+
+
+@pytest.mark.parametrize(
+    ("selection_mode", "selected_identities"),
+    [
+        ("contiguous", ["Cue 001", "Cue 002"]),
+        ("non_contiguous", ["Cue 001", "Cue 004"]),
+    ],
+)
+@pytest.mark.asyncio
+async def test_v2_ui_drag_preserves_selected_payload_evidence(
+    selection_mode: str,
+    selected_identities: list[str],
+) -> None:
+    session = ActionSmokeSession()
+    session.drag_results.append(
+        {
+            "status": "PASS",
+            "backend": "fake",
+            "route_evidence": {
+                "move_points": [{"relative_to": "viewport", "x": 0.5, "y": 0.75}],
+            },
+            "selected_payload": {
+                "before": selected_identities,
+                "after": selected_identities,
+                "selection_mode": selection_mode,
+                "preserved": True,
+            },
+        }
+    )
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": f"{selection_mode} selected payload drag",
+            "cases": [
+                {
+                    "id": f"{selection_mode}_selected_payload",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.drag",
+                                "source": {
+                                    "selector": {"automation_id": "CueDataGrid"},
+                                    "row_identity": selected_identities[0],
+                                },
+                                "path": [
+                                    {"relative_to": "source", "x": 0.5, "y": 0.5},
+                                    {"relative_to": "viewport", "x": 0.5, "y": 0.75},
+                                ],
+                                "drop": {"relative_to": "viewport", "x": 0.5, "y": 0.75},
+                                "expect": {
+                                    "selected_payload_preserved": True,
+                                    "selected_payload": {
+                                        "expected_identities": selected_identities,
+                                        "selection_mode": selection_mode,
+                                    },
+                                },
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    drag_call = next(call for call in session.calls if call[0] == "drag")
+    assert result["status"] == "PASS"
+    assert drag_call[1]["expect"]["selected_payload"]["expected_identities"] == selected_identities
+    assert action["selected_payload"] == {
+        "before": selected_identities,
+        "after": selected_identities,
+        "selection_mode": selection_mode,
+        "preserved": True,
+    }
+
+
+@pytest.mark.parametrize(
+    ("adapter_result", "expected_status", "expected_reason"),
+    [
+        (
+            {
+                "status": "PASS",
+                "backend": "fake",
+                "selected_payload": {
+                    "before": ["Cue 001", "Cue 002"],
+                    "after": ["Cue 001", "Cue 003"],
+                },
+            },
+            "FAIL",
+            "selected payload expectation failed",
+        ),
+        (
+            {
+                "status": "PASS",
+                "backend": "fake",
+                "selected_payload": {
+                    "before": [],
+                    "after": [],
+                },
+            },
+            "FAIL",
+            "selected payload expectation failed",
+        ),
+        (
+            {
+                "status": "PASS",
+                "backend": "fake",
+                "route_evidence": {"move_points": []},
+            },
+            "BLOCKED",
+            "selected payload evidence unavailable",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_v2_ui_drag_fails_closed_for_selected_payload_expectation(
+    adapter_result: dict[str, Any],
+    expected_status: str,
+    expected_reason: str,
+) -> None:
+    session = ActionSmokeSession()
+    session.drag_results.append(adapter_result)
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "selected payload fail closed",
+            "cases": [
+                {
+                    "id": "selected_payload_fail_closed",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.drag",
+                                "source": {
+                                    "selector": {"automation_id": "CueDataGrid"},
+                                    "row_identity": "Cue 001",
+                                },
+                                "path": [
+                                    {"relative_to": "source", "x": 0.5, "y": 0.5},
+                                    {"relative_to": "viewport", "x": 0.5, "y": 0.75},
+                                ],
+                                "drop": {"relative_to": "viewport", "x": 0.5, "y": 0.75},
+                                "expect": {"selected_payload_preserved": True},
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == expected_status
+    assert action["status"] == expected_status
+    assert action["reason"] == expected_reason
 
 
 @pytest.mark.asyncio

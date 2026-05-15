@@ -65,6 +65,18 @@ def test_wpf_fixture_code_reports_deterministic_reorder_status() -> None:
     assert "orderFingerprint=" in code
 
 
+def test_wpf_fixture_reports_selected_drag_payload_evidence() -> None:
+    code = (FIXTURE_ROOT / "MainWindow.xaml.cs").read_text(encoding="utf-8")
+
+    assert "CueDragPayload" in code
+    assert "BuildCueDragPayload" in code
+    assert "MoveCueRows" in code
+    assert "selectedPayloadBefore=" in code
+    assert "selectedPayloadAfter=" in code
+    assert "selectedPayloadMode=" in code
+    assert "IsContiguousSelection" in code
+
+
 def test_wpf_fixture_seeds_enough_rows_for_edge_scroll_evidence() -> None:
     code = (FIXTURE_ROOT / "MainWindow.xaml.cs").read_text(encoding="utf-8")
 

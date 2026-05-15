@@ -112,6 +112,14 @@ def _compare_snapshots(before: dict[str, Any], after: dict[str, Any]) -> dict[st
             direction = "up"
     selected_before = _row_identity_refs(before.get("selected_rows"))
     selected_after = _row_identity_refs(after.get("selected_rows"))
+    selected_duplicate_identities = _duplicate_identities(selected_before, selected_after)
+    selected_lost_identities = _difference(selected_before, selected_after)
+    selected_unexpected_identities = _difference(selected_after, selected_before)
+    selected_payload_preserved = (
+        not selected_duplicate_identities
+        and not selected_lost_identities
+        and not selected_unexpected_identities
+    )
     before_row_count = before.get("row_count")
     after_row_count = after.get("row_count")
     return {
@@ -121,7 +129,10 @@ def _compare_snapshots(before: dict[str, Any], after: dict[str, Any]) -> dict[st
         "direction": direction,
         "selected_before": selected_before,
         "selected_after": selected_after,
-        "selected_payload_preserved": selected_before == selected_after
+        "selected_duplicate_identities": selected_duplicate_identities,
+        "selected_lost_identities": selected_lost_identities,
+        "selected_unexpected_identities": selected_unexpected_identities,
+        "selected_payload_preserved": selected_payload_preserved
         if selected_before and selected_after
         else None,
         "before_row_count": before_row_count,
@@ -150,3 +161,25 @@ def _row_identity_refs(value: Any) -> list[str]:
         if identity is not None:
             refs.append(str(identity))
     return refs
+
+
+def _duplicate_identities(*groups: list[str]) -> list[str]:
+    duplicates: list[str] = []
+    for group in groups:
+        seen: set[str] = set()
+        for identity in group:
+            if identity in seen and identity not in duplicates:
+                duplicates.append(identity)
+            seen.add(identity)
+    return duplicates
+
+
+def _difference(left: list[str], right: list[str]) -> list[str]:
+    remaining = list(right)
+    missing: list[str] = []
+    for identity in left:
+        if identity in remaining:
+            remaining.remove(identity)
+        else:
+            missing.append(identity)
+    return missing

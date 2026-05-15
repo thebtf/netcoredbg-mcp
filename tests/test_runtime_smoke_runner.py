@@ -1312,6 +1312,204 @@ async def test_ui_operation_adapters_route_held_edge_drag_through_drag_path() ->
 
 
 @pytest.mark.asyncio
+async def test_ui_operation_adapters_grid_select_indices_uses_backend_multi_select() -> None:
+    class FakeBackend:
+        async def multi_select(self, container_id: str, indices: list[int]) -> int:
+            self.container_id = container_id
+            self.indices = indices
+            return len(indices)
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    result = await ui_operation_adapters(backend_provider)["ui.grid.select_indices"](
+        selector={"automation_id": "dataGrid"},
+        indices=[1, 4],
+    )
+
+    assert result["status"] == "PASS"
+    assert backend.container_id == "dataGrid"
+    assert backend.indices == [1, 4]
+    assert result["selected_indices"] == [1, 4]
+
+
+@pytest.mark.asyncio
+async def test_ui_operation_adapters_drag_returns_selected_payload_evidence() -> None:
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.selected_results = [
+                ["Cue 001", "Cue 004"],
+                ["Cue 001", "Cue 004"],
+            ]
+
+        async def grid_snapshot(
+            self,
+            selector: dict[str, Any],
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "row_count": 6,
+                "visible_rows": [
+                    {
+                        "index": index,
+                        "selected": False,
+                        "bounds": {
+                            "x": 10,
+                            "y": 20 + (index * 30),
+                            "width": 120,
+                            "height": 25,
+                        },
+                        "cells": {"Phrase": phrase},
+                    }
+                    for index, phrase in enumerate(
+                        [
+                            "Cue 000",
+                            "Cue 001",
+                            "Cue 002",
+                            "Cue 003",
+                            "Cue 004",
+                            "Cue 005",
+                        ]
+                    )
+                ],
+            }
+
+        async def grid_selected_rows(self, selector: dict[str, Any]) -> dict[str, Any]:
+            selected = self.selected_results.pop(0)
+            return {
+                "status": "PASS",
+                "selected_rows": [
+                    {
+                        "index": index,
+                        "cells": {"Phrase": phrase},
+                    }
+                    for index, phrase in enumerate(selected)
+                ],
+            }
+
+        async def drag(
+            self,
+            from_x: int,
+            from_y: int,
+            to_x: int,
+            to_y: int,
+            speed_ms: int = 200,
+            hold_modifiers: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return {"status": "PASS", "backend": "fake"}
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.drag"](
+        source={"selector": {"automation_id": "dataGrid"}, "row_index": 1},
+        path=[{"relative_to": "source", "x": 0.5, "y": 0.5}],
+        drop={"selector": {"automation_id": "dataGrid"}, "row_index": 4},
+        expect={"selected_payload_preserved": True},
+    )
+
+    assert result["status"] == "PASS"
+    assert result["selected_payload"] == {
+        "before": ["Cue 001", "Cue 004"],
+        "after": ["Cue 001", "Cue 004"],
+        "preserved": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_ui_operation_adapters_drag_waits_for_selected_payload_to_settle() -> None:
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.selected_results = [
+                ["Cue 001", "Cue 002"],
+                ["Cue 001"],
+                ["Cue 001", "Cue 002"],
+            ]
+
+        async def grid_snapshot(
+            self,
+            selector: dict[str, Any],
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "row_count": 6,
+                "visible_rows": [
+                    {
+                        "index": index,
+                        "selected": False,
+                        "bounds": {
+                            "x": 10,
+                            "y": 20 + (index * 30),
+                            "width": 120,
+                            "height": 25,
+                        },
+                        "cells": {"Phrase": phrase},
+                    }
+                    for index, phrase in enumerate(
+                        [
+                            "Cue 000",
+                            "Cue 001",
+                            "Cue 002",
+                            "Cue 003",
+                            "Cue 004",
+                            "Cue 005",
+                        ]
+                    )
+                ],
+            }
+
+        async def grid_selected_rows(self, selector: dict[str, Any]) -> dict[str, Any]:
+            selected = self.selected_results.pop(0)
+            return {
+                "status": "PASS",
+                "selected_rows": [
+                    {
+                        "index": index,
+                        "cells": {"Phrase": phrase},
+                    }
+                    for index, phrase in enumerate(selected)
+                ],
+            }
+
+        async def drag(
+            self,
+            from_x: int,
+            from_y: int,
+            to_x: int,
+            to_y: int,
+            speed_ms: int = 200,
+            hold_modifiers: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return {"status": "PASS", "backend": "fake"}
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    result = await ui_operation_adapters(backend_provider)["ui.drag"](
+        source={"selector": {"automation_id": "dataGrid"}, "row_index": 1},
+        path=[{"relative_to": "source", "x": 0.5, "y": 0.5}],
+        drop={"selector": {"automation_id": "dataGrid"}, "row_index": 4},
+        expect={"selected_payload_preserved": True},
+    )
+
+    assert result["status"] == "PASS"
+    assert result["selected_payload"] == {
+        "before": ["Cue 001", "Cue 002"],
+        "after": ["Cue 001", "Cue 002"],
+        "preserved": True,
+    }
+    assert backend.selected_results == []
+
+
+@pytest.mark.asyncio
 async def test_ui_operation_adapters_build_grid_viewport_snapshot_with_derived_identity() -> None:
     class FakeBackend:
         async def grid_snapshot(

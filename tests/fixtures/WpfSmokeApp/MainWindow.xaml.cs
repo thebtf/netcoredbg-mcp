@@ -20,11 +20,28 @@ public partial class MainWindow : Window
     private int _dataGridCurrentIndex;
     private Point? _dragStartPoint;
     private CueRow? _dragSourceRow;
+    private CueDragPayload? _dragPayload;
     private string _lastEdgeScrollDirection = "none";
     private int _lastEdgeScrollFirstVisible = -1;
     private int _lastEdgeScrollLastVisible = -1;
     private bool _suppressCharacterSelection;
     private bool _suppressSelectionSync;
+
+    private sealed class CueDragPayload
+    {
+        public CueDragPayload(CueRow sourceRow, IReadOnlyList<CueRow> rows, string selectionMode)
+        {
+            SourceRow = sourceRow;
+            Rows = rows;
+            SelectionMode = selectionMode;
+        }
+
+        public CueRow SourceRow { get; }
+
+        public IReadOnlyList<CueRow> Rows { get; }
+
+        public string SelectionMode { get; }
+    }
 
     public MainWindow()
     {
@@ -110,6 +127,7 @@ public partial class MainWindow : Window
     {
         _dragStartPoint = e.GetPosition(CueDataGrid);
         _dragSourceRow = FindCueRowFromEventSource(e.OriginalSource);
+        _dragPayload = _dragSourceRow is null ? null : BuildCueDragPayload(_dragSourceRow);
         ResetEdgeScrollEvidence();
     }
 
@@ -117,7 +135,7 @@ public partial class MainWindow : Window
     {
         if (e.LeftButton != MouseButtonState.Pressed ||
             _dragStartPoint is not { } startPoint ||
-            _dragSourceRow is not { } sourceRow)
+            _dragPayload is not { } payload)
         {
             return;
         }
@@ -129,14 +147,15 @@ public partial class MainWindow : Window
             return;
         }
 
-        DragDrop.DoDragDrop(CueDataGrid, sourceRow, DragDropEffects.Move);
+        DragDrop.DoDragDrop(CueDataGrid, payload, DragDropEffects.Move);
         _dragStartPoint = null;
         _dragSourceRow = null;
+        _dragPayload = null;
     }
 
     private void CueDataGrid_DragOver(object sender, DragEventArgs e)
     {
-        if (e.Data.GetData(typeof(CueRow)) is not CueRow sourceRow)
+        if (!TryGetCueDragPayload(e, out var payload))
         {
             return;
         }
@@ -153,14 +172,14 @@ public partial class MainWindow : Window
         _lastEdgeScrollFirstVisible = firstVisible;
         _lastEdgeScrollLastVisible = lastVisible;
         _viewModel.StatusText =
-            $"WpfWorkflow DragEdgeScroll direction={direction} sourceIdentity={sourceRow.Phrase} firstVisible={firstVisible} lastVisible={lastVisible}";
+            $"WpfWorkflow DragEdgeScroll direction={direction} sourceIdentity={payload.SourceRow.Phrase} selectedPayloadMode={payload.SelectionMode} firstVisible={firstVisible} lastVisible={lastVisible}";
         Console.WriteLine(_viewModel.StatusText);
         e.Handled = true;
     }
 
     private void CueDataGrid_Drop(object sender, DragEventArgs e)
     {
-        if (e.Data.GetData(typeof(CueRow)) is not CueRow sourceRow)
+        if (!TryGetCueDragPayload(e, out var payload))
         {
             return;
         }
@@ -168,12 +187,12 @@ public partial class MainWindow : Window
         var targetRow = FindCueRowFromEventSource(e.OriginalSource);
         if (targetRow is null)
         {
-            _viewModel.StatusText = $"WpfWorkflow DragReorder blocked sourceIdentity={sourceRow.Phrase} targetIdentity=<none>";
+            _viewModel.StatusText = $"WpfWorkflow DragReorder blocked sourceIdentity={payload.SourceRow.Phrase} targetIdentity=<none>";
             Console.WriteLine(_viewModel.StatusText);
             return;
         }
 
-        MoveCueRow(sourceRow, targetRow);
+        MoveCueRows(payload, targetRow);
     }
 
     private void CharactersListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -283,22 +302,106 @@ public partial class MainWindow : Window
         Keyboard.Focus(CueDataGrid);
     }
 
-    private void MoveCueRow(CueRow sourceRow, CueRow targetRow)
+    private CueDragPayload BuildCueDragPayload(CueRow sourceRow)
     {
         var rows = _viewModel.CueRows;
-        var sourceIndex = rows.IndexOf(sourceRow);
+        var selectedRows = CueDataGrid.SelectedItems
+            .OfType<CueRow>()
+            .Where(row => rows.Contains(row))
+            .Distinct()
+            .OrderBy(row => rows.IndexOf(row))
+            .ToArray();
+        if (selectedRows.Length == 0 || !selectedRows.Contains(sourceRow))
+        {
+            selectedRows = new[] { sourceRow };
+        }
+
+        var selectionMode = selectedRows.Length <= 1
+            ? "single"
+            : IsContiguousSelection(selectedRows)
+                ? "contiguous"
+                : "non_contiguous";
+        return new CueDragPayload(sourceRow, selectedRows, selectionMode);
+    }
+
+    private bool TryGetCueDragPayload(DragEventArgs e, out CueDragPayload payload)
+    {
+        if (e.Data.GetData(typeof(CueDragPayload)) is CueDragPayload dragPayload)
+        {
+            payload = dragPayload;
+            return true;
+        }
+
+        if (e.Data.GetData(typeof(CueRow)) is CueRow sourceRow)
+        {
+            payload = BuildCueDragPayload(sourceRow);
+            return true;
+        }
+
+        payload = new CueDragPayload(
+            new CueRow(string.Empty, string.Empty, string.Empty, string.Empty),
+            Array.Empty<CueRow>(),
+            "none");
+        return false;
+    }
+
+    private bool IsContiguousSelection(IReadOnlyList<CueRow> selectedRows)
+    {
+        if (selectedRows.Count <= 1)
+        {
+            return true;
+        }
+
+        var rows = _viewModel.CueRows;
+        var indices = selectedRows
+            .Select(row => rows.IndexOf(row))
+            .Where(index => index >= 0)
+            .OrderBy(index => index)
+            .ToArray();
+        return indices.Length == selectedRows.Count &&
+            indices[^1] - indices[0] + 1 == selectedRows.Count;
+    }
+
+    private void MoveCueRows(CueDragPayload payload, CueRow targetRow)
+    {
+        var rows = _viewModel.CueRows;
         var targetIndex = rows.IndexOf(targetRow);
-        if (sourceIndex < 0 || targetIndex < 0)
+        var payloadRows = payload.Rows
+            .Where(row => rows.Contains(row))
+            .Distinct()
+            .OrderBy(row => rows.IndexOf(row))
+            .ToArray();
+        if (payloadRows.Length == 0 || targetIndex < 0)
         {
             _viewModel.StatusText =
-                $"WpfWorkflow DragReorder blocked sourceIdentity={sourceRow.Phrase} targetIdentity={targetRow.Phrase}";
+                $"WpfWorkflow DragReorder blocked sourceIdentity={payload.SourceRow.Phrase} targetIdentity={targetRow.Phrase}";
             Console.WriteLine(_viewModel.StatusText);
             return;
         }
 
-        if (sourceIndex != targetIndex)
+        var selectedPayloadBefore = SelectedPayloadIdentities(payloadRows);
+        if (!payloadRows.Contains(targetRow))
         {
-            rows.Move(sourceIndex, targetIndex);
+            var originalIndices = payloadRows
+                .Select(row => rows.IndexOf(row))
+                .ToArray();
+            var removedBeforeTarget = originalIndices.Count(index => index >= 0 && index < targetIndex);
+            foreach (var row in payloadRows)
+            {
+                rows.Remove(row);
+            }
+
+            var insertIndex = targetIndex - removedBeforeTarget;
+            if (removedBeforeTarget > 0)
+            {
+                insertIndex++;
+            }
+            insertIndex = Math.Clamp(insertIndex, 0, rows.Count);
+            foreach (var row in payloadRows)
+            {
+                rows.Insert(insertIndex, row);
+                insertIndex++;
+            }
         }
 
         var edgeScrollDirection = _lastEdgeScrollDirection;
@@ -306,13 +409,32 @@ public partial class MainWindow : Window
         var edgeLastVisible = _lastEdgeScrollLastVisible;
         ResetEdgeScrollEvidence();
 
-        CueDataGrid.SelectedItem = sourceRow;
-        CueDataGrid.ScrollIntoView(sourceRow);
+        _suppressSelectionSync = true;
+        try
+        {
+            CueDataGrid.SelectedItems.Clear();
+            foreach (var row in payloadRows)
+            {
+                CueDataGrid.SelectedItems.Add(row);
+            }
+        }
+        finally
+        {
+            _suppressSelectionSync = false;
+        }
+
+        CueDataGrid.ScrollIntoView(payload.SourceRow);
+        var selectedPayloadAfter = SelectedPayloadIdentities(payloadRows);
         var orderFingerprint = string.Join(">", rows.Select(row => row.Phrase));
         _viewModel.StatusText =
-            $"WpfWorkflow DragReorder sourceIdentity={sourceRow.Phrase} targetIdentity={targetRow.Phrase} edgeScrollDirection={edgeScrollDirection} edgeFirstVisible={edgeFirstVisible} edgeLastVisible={edgeLastVisible} orderFingerprint={orderFingerprint}";
+            $"WpfWorkflow DragReorder sourceIdentity={payload.SourceRow.Phrase} targetIdentity={targetRow.Phrase} selectedPayloadMode={payload.SelectionMode} selectedPayloadBefore={selectedPayloadBefore} selectedPayloadAfter={selectedPayloadAfter} edgeScrollDirection={edgeScrollDirection} edgeFirstVisible={edgeFirstVisible} edgeLastVisible={edgeLastVisible} orderFingerprint={orderFingerprint}";
         Console.WriteLine(_viewModel.StatusText);
-        WriteMutableState($"drag-reorder={sourceRow.Phrase}->{targetRow.Phrase};order={orderFingerprint}");
+        WriteMutableState($"drag-reorder={payload.SourceRow.Phrase}->{targetRow.Phrase};selected={selectedPayloadAfter};order={orderFingerprint}");
+    }
+
+    private static string SelectedPayloadIdentities(IEnumerable<CueRow> rows)
+    {
+        return string.Join("|", rows.Select(row => row.Phrase));
     }
 
     private string? ScrollCueGridNearEdge(Point point)

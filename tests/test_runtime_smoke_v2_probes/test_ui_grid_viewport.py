@@ -396,6 +396,59 @@ async def test_ui_grid_viewport_compares_selected_payload_continuity() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ui_grid_viewport_fails_duplicate_selected_payload_identities() -> None:
+    session = GridViewportProbeSession()
+    session.viewport_results.extend(
+        [
+            {
+                "status": "PASS",
+                "snapshot": _viewport_snapshot(
+                    first=0,
+                    last=4,
+                    selected=["Cue 001", "Cue 001"],
+                ),
+            },
+            {
+                "status": "PASS",
+                "snapshot": _viewport_snapshot(
+                    first=2,
+                    last=6,
+                    selected=["Cue 001", "Cue 001"],
+                ),
+            },
+        ]
+    )
+
+    result = await runner(
+        session,
+        {"ui.grid.viewport": session.grid_viewport},
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "ui.grid.viewport",
+                "name": "cue_viewport",
+                "phase": "both",
+                "selector": {"automation_id": "CueDataGrid"},
+                "identity": {"column": "PhraseId"},
+                "rows": {"visible_only": True, "max": 5},
+                "expect": {
+                    "selected_payload_preserved": True,
+                },
+            }
+        )
+    )
+
+    after = after_probe(result)
+    assert result["status"] == "FAIL"
+    assert after["status"] == "FAIL"
+    assert after["reason"] == "grid viewport expectation failed"
+    assert after["comparison"]["selected_before"] == ["Cue 001", "Cue 001"]
+    assert after["comparison"]["selected_after"] == ["Cue 001", "Cue 001"]
+    assert after["comparison"]["selected_duplicate_identities"] == ["Cue 001"]
+    assert after["comparison"]["selected_payload_preserved"] is False
+
+
+@pytest.mark.asyncio
 async def test_ui_grid_viewport_blocks_selected_payload_without_selected_evidence() -> None:
     session = GridViewportProbeSession()
     session.viewport_results.extend(

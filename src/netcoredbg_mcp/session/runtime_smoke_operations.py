@@ -15,6 +15,8 @@ from ..ui.list_items import invoke_list_item, toggle_list_item_child
 BackendProvider = Callable[[], Awaitable[Any]]
 OperationAdapterMap = dict[str, Callable[..., Awaitable[dict[str, Any]]]]
 STATE_CHANGE_SETTLE_SECONDS = 0.5
+SELECTED_PAYLOAD_SETTLE_ATTEMPTS = 10
+SELECTED_PAYLOAD_SETTLE_INTERVAL_SECONDS = 0.1
 
 
 def ui_operation_adapters(
@@ -103,6 +105,44 @@ def ui_operation_adapters(
             int(args["start_index"]),
             int(args["end_index"]),
         )
+
+    async def grid_select_indices(**args: Any) -> dict[str, Any]:
+        backend = await _backend_or_blocked(ensure_ui_connected)
+        if isinstance(backend, dict):
+            return backend
+        selector = _selector(args)
+        automation_id = selector.get("automation_id") or selector.get("automationId")
+        if not automation_id:
+            return _adapter_blocked(
+                "ui.grid.select_indices",
+                "grid selection requires an automation_id selector",
+            )
+        indices = [int(index) for index in args.get("indices") or []]
+        multi_select = getattr(backend, "multi_select", None)
+        if not callable(multi_select):
+            return _adapter_blocked(
+                "ui.grid.select_indices",
+                "multi-select backend capability unavailable",
+            )
+        try:
+            selected_count = await multi_select(str(automation_id), indices)
+        except Exception as exc:
+            return _adapter_blocked("ui.grid.select_indices", str(exc))
+        if selected_count < len(indices):
+            return {
+                **_adapter_blocked(
+                    "ui.grid.select_indices",
+                    "multi-select backend did not select all requested rows",
+                ),
+                "selected_count": selected_count,
+                "requested_indices": indices,
+            }
+        return {
+            "status": "PASS",
+            "selector": selector,
+            "selected_indices": indices,
+            "selected_count": selected_count,
+        }
 
     async def grid_assert_rows(**args: Any) -> dict[str, Any]:
         backend = await _backend_or_blocked(ensure_ui_connected)
@@ -329,6 +369,7 @@ def ui_operation_adapters(
         source = dict(args.get("source") or {})
         path = _mapping_list(args.get("path"))
         drop = dict(args.get("drop") or {})
+        expect = dict(args.get("expect") or {})
         route, route_evidence, blocked = await _drag_route(
             backend,
             source=source,
@@ -342,6 +383,20 @@ def ui_operation_adapters(
         speed_ms = _positive_int(args.get("duration_ms"), default=200)
         use_path_drag = _requires_path_drag(path)
         resolved_path_points: list[dict[str, int]] = []
+        selected_payload_before: list[dict[str, Any]] = []
+        selected_payload_selector = (
+            _selector_from_endpoint(source)
+            or _selector_from_endpoint(drop)
+            or {}
+        )
+        if expect.get("selected_payload_preserved") is True:
+            selected_payload_before, blocked = await _selected_viewport_rows_from_backend(
+                backend,
+                selected_payload_selector,
+                {"column": "Phrase"},
+            )
+            if blocked is not None:
+                return blocked
         try:
             if use_path_drag:
                 backend_drag_path = getattr(backend, "drag_path", None)
@@ -383,6 +438,29 @@ def ui_operation_adapters(
                 "result": result,
             }
 
+        selected_payload: dict[str, Any] | None = None
+        if expect.get("selected_payload_preserved") is True:
+            selected_before_refs = _selected_payload_refs(selected_payload_before)
+            selected_payload_after, blocked = await _selected_viewport_rows_after_drag(
+                backend,
+                selected_payload_selector,
+                {"column": "Phrase"},
+                expected_refs=selected_before_refs,
+            )
+            if blocked is not None:
+                return blocked
+            selected_after_refs = _selected_payload_refs(selected_payload_after)
+            selected_payload = {
+                "before": selected_before_refs,
+                "after": selected_after_refs,
+                "preserved": (
+                    bool(selected_before_refs)
+                    and selected_before_refs == selected_after_refs
+                    and len(selected_before_refs) == len(set(selected_before_refs))
+                    and len(selected_after_refs) == len(set(selected_after_refs))
+                ),
+            }
+
         route_evidence = {
             **route_evidence,
             "move_points": path,
@@ -406,6 +484,8 @@ def ui_operation_adapters(
         }
         if resolved_path_points:
             route_evidence["resolved_move_points"] = resolved_path_points
+        if selected_payload is not None:
+            route_evidence["selected_payload"] = selected_payload
         status = str(result.get("status", "PASS")).upper()
         output: dict[str, Any] = {
             "status": status,
@@ -413,6 +493,8 @@ def ui_operation_adapters(
             "route_evidence": route_evidence,
             "result": result,
         }
+        if selected_payload is not None:
+            output["selected_payload"] = selected_payload
         if status != "PASS":
             output["reason"] = str(result.get("reason") or "ui.drag backend did not pass")
             for key in ("reason", "requested", "accepted", "next_step"):
@@ -424,6 +506,7 @@ def ui_operation_adapters(
         "ui.ensure_connected": ensure_connected,
         "ui.grid.snapshot": grid_snapshot,
         "ui.grid.viewport": grid_viewport,
+        "ui.grid.select_indices": grid_select_indices,
         "ui.grid.select_range": grid_select_range,
         "ui.grid.assert_rows": grid_assert_rows,
         "ui.list.invoke_item": list_invoke,
@@ -1183,6 +1266,35 @@ async def _selected_viewport_rows_from_backend(
         for row in selected_rows
         if isinstance(row, Mapping)
     ], None
+
+
+async def _selected_viewport_rows_after_drag(
+    backend: Any,
+    selector: dict[str, Any],
+    identity: Mapping[str, Any],
+    *,
+    expected_refs: list[str],
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    last_rows: list[dict[str, Any]] = []
+    for attempt in range(SELECTED_PAYLOAD_SETTLE_ATTEMPTS):
+        rows, blocked = await _selected_viewport_rows_from_backend(
+            backend,
+            selector,
+            identity,
+        )
+        if blocked is not None:
+            return rows, blocked
+        last_rows = rows
+        refs = _selected_payload_refs(rows)
+        if refs == expected_refs and len(refs) == len(set(refs)):
+            return rows, None
+        if attempt < SELECTED_PAYLOAD_SETTLE_ATTEMPTS - 1:
+            await asyncio.sleep(SELECTED_PAYLOAD_SETTLE_INTERVAL_SECONDS)
+    return last_rows, None
+
+
+def _selected_payload_refs(rows: list[dict[str, Any]]) -> list[str]:
+    return [str(row["identity"]) for row in rows if row.get("identity") is not None]
 
 
 def _viewport_blocked(
