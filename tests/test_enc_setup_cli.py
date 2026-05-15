@@ -80,6 +80,7 @@ def test_build_netcoredbg_enc_script_contract():
     assert "Expand-Archive" in text
     assert "Assert-InstalledDebugger" in text
     assert "Save-NetcoredbgConfig" in text
+    assert "$null -eq $config" in text
     assert "thebtf/netcoredbg" in text
     assert "BuildFromSource" in text
     assert "git clone" in text

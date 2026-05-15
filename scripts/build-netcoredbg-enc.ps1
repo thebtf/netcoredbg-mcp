@@ -86,6 +86,9 @@ function Save-NetcoredbgConfig {
     if (Test-Path $configPath) {
         try {
             $config = Get-Content $configPath -Raw | ConvertFrom-Json
+            if ($null -eq $config) {
+                $config = [pscustomobject]@{}
+            }
         }
         catch {
             $config = [pscustomobject]@{}
