@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.2] - 2026-05-17
+
+### Fixed
+- Runtime-smoke v2 `ui.drag` now resolves WPF DataGrid viewport endpoints via
+  `grid_snapshot` only after selector miss/bounds miss, while preserving
+  blocked ambiguous/backend selector failures.
+- Runtime-smoke v2 cleanup now stops debug sessions before process-registry
+  assertions and preserves cleanup evidence across elapsed-time budget
+  exhaustion.
+- Runtime-smoke v2 budget validation now rejects malformed action and elapsed
+  budgets instead of coercing invalid values or raising uncaught parser errors.
+
 ## [0.17.1] - 2026-05-15
 
 ### Fixed
