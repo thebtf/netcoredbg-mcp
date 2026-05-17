@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -224,19 +225,23 @@ def _validate_budgets(plan: dict[str, Any], errors: list[str]) -> None:
     if not isinstance(budgets, dict):
         return
     if "max_actions" in budgets:
-        try:
-            max_actions = int(budgets["max_actions"])
-            if max_actions < 1:
-                errors.append("budgets.max_actions must be at least 1")
-        except (TypeError, ValueError):
+        max_actions = budgets["max_actions"]
+        if isinstance(max_actions, bool) or not isinstance(max_actions, int):
             errors.append("budgets.max_actions must be an integer")
+        elif max_actions < 1:
+            errors.append("budgets.max_actions must be at least 1")
     if "max_elapsed_seconds" in budgets:
-        try:
-            max_elapsed = float(budgets["max_elapsed_seconds"])
-            if max_elapsed <= 0:
-                errors.append("budgets.max_elapsed_seconds must be positive")
-        except (TypeError, ValueError):
+        max_elapsed = budgets["max_elapsed_seconds"]
+        if isinstance(max_elapsed, bool) or not isinstance(max_elapsed, (int, float)):
             errors.append("budgets.max_elapsed_seconds must be a number")
+        else:
+            try:
+                elapsed_value = float(max_elapsed)
+            except OverflowError:
+                errors.append("budgets.max_elapsed_seconds must be positive")
+            else:
+                if not math.isfinite(elapsed_value) or elapsed_value <= 0:
+                    errors.append("budgets.max_elapsed_seconds must be positive")
 
 
 def _validate_step_collections(plan: dict[str, Any], errors: list[str]) -> None:

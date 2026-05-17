@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import math
 import time
 from collections.abc import Callable
 from typing import Any
@@ -11,7 +13,12 @@ from ..runtime_smoke_schema import (
 from .actions import ActionContext, accepted_action_kinds
 from .baseline import execute_baseline
 from .case_executor import execute_case
-from .cleanup import cleanup_steps_from_plan, merge_cleanup_results, run_cleanup
+from .cleanup import (
+    cleanup_steps_from_case,
+    cleanup_steps_from_plan,
+    merge_cleanup_results,
+    run_cleanup,
+)
 from .generate import expand_generated_cases
 from .probe_dispatcher import accepted_probe_phases, probe_path, probe_runs_in_phase
 from .probes import accepted_probe_kinds
@@ -94,6 +101,27 @@ class RuntimeStateOracleRunner:
             clock=self._clock,
             session=self._session,
         )
+        try:
+            budgets = _budgets_from_plan(plan)
+        except ValueError as exc:
+            cleanup = await run_cleanup(cleanup_steps_from_plan(plan), context)
+            return self._finalize(
+                status="INVALID_SETUP",
+                reason="invalid plan schema",
+                started=started,
+                action_count=0,
+                cases=[],
+                generated_case_count=generated_case_count,
+                metrics_thresholds=metrics_thresholds,
+                baseline=None,
+                cleanup=cleanup,
+                extra={"validation_errors": [str(exc)]},
+            )
+        deadline = (
+            started + budgets["max_elapsed_seconds"]
+            if budgets["max_elapsed_seconds"] is not None
+            else None
+        )
         baseline_result = await execute_baseline(
             plan.get("baseline") if isinstance(plan.get("baseline"), dict) else None,
             context,
@@ -123,11 +151,45 @@ class RuntimeStateOracleRunner:
         blocked_payload: dict[str, Any] | None = None
 
         for case in cases:
-            case_result, executed_actions = await execute_case(
-                case,
-                context,
-                metrics_thresholds=metrics_thresholds,
+            if budgets["max_actions"] is not None and action_count >= budgets["max_actions"]:
+                terminal_status = "IMPASSE"
+                terminal_reason = "action budget exhausted"
+                break
+
+            remaining = None if deadline is None else deadline - self._clock()
+            if remaining is not None and remaining <= 0:
+                terminal_status = "IMPASSE"
+                terminal_reason = "elapsed time budget exhausted"
+                break
+
+            max_actions_budget = budgets["max_actions"]
+            remaining_actions = (
+                None
+                if max_actions_budget is None
+                else int(max_actions_budget) - action_count
             )
+            try:
+                case_result, executed_actions = await _execute_case_with_budget(
+                    case,
+                    context,
+                    metrics_thresholds=metrics_thresholds,
+                    timeout_seconds=remaining,
+                    max_actions=remaining_actions,
+                )
+            except asyncio.TimeoutError:
+                case_cleanup = await run_cleanup(
+                    cleanup_steps_from_case(case),
+                    context,
+                    case_id=str(case.get("id") or ""),
+                )
+                case_result = _timeout_case_result(case, cleanup=case_cleanup)
+                executed_actions = 0
+                terminal_status = "IMPASSE"
+                terminal_reason = "elapsed time budget exhausted"
+                case_results.append(case_result)
+                case_cleanups.append(case_cleanup)
+                break
+
             action_count += executed_actions
             case_results.append(case_result)
             if isinstance(case_result.get("cleanup"), dict):
@@ -139,6 +201,10 @@ class RuntimeStateOracleRunner:
                 break
             if case_result["status"] == "FAIL":
                 terminal_status = "FAIL"
+                terminal_reason = case_result["reason"]
+                break
+            if case_result["status"] == "IMPASSE":
+                terminal_status = "IMPASSE"
                 terminal_reason = case_result["reason"]
                 break
             if case_result.get("cleanup", {}).get("status") == "FAIL" and bool(
@@ -323,6 +389,75 @@ def _probe_phase_error(probe: dict[str, Any]) -> str | None:
         if invalid:
             return f"phases contains unaccepted values: {invalid}"
     return None
+
+
+def _budgets_from_plan(plan: dict[str, Any]) -> dict[str, int | float | None]:
+    budgets = plan.get("budgets")
+    if not isinstance(budgets, dict):
+        return {"max_actions": None, "max_elapsed_seconds": None}
+
+    max_actions: int | None = None
+    if "max_actions" in budgets:
+        raw_max_actions = budgets["max_actions"]
+        if isinstance(raw_max_actions, bool) or not isinstance(raw_max_actions, int):
+            raise ValueError("budgets.max_actions must be an integer")
+        if raw_max_actions < 1:
+            raise ValueError("budgets.max_actions must be at least 1")
+        max_actions = raw_max_actions
+
+    max_elapsed_seconds: float | None = None
+    if "max_elapsed_seconds" in budgets:
+        raw_max_elapsed = budgets["max_elapsed_seconds"]
+        if isinstance(raw_max_elapsed, bool) or not isinstance(raw_max_elapsed, (int, float)):
+            raise ValueError("budgets.max_elapsed_seconds must be a number")
+        try:
+            max_elapsed_seconds = float(raw_max_elapsed)
+        except OverflowError as exc:
+            raise ValueError("budgets.max_elapsed_seconds must be positive") from exc
+        if not math.isfinite(max_elapsed_seconds) or max_elapsed_seconds <= 0:
+            raise ValueError("budgets.max_elapsed_seconds must be positive")
+
+    return {
+        "max_actions": max_actions,
+        "max_elapsed_seconds": max_elapsed_seconds,
+    }
+
+
+async def _execute_case_with_budget(
+    case: dict[str, Any],
+    context: ActionContext,
+    *,
+    metrics_thresholds: dict[str, Any] | None,
+    timeout_seconds: float | None,
+    max_actions: int | None,
+) -> tuple[dict[str, Any], int]:
+    return await execute_case(
+        case,
+        context,
+        metrics_thresholds=metrics_thresholds,
+        max_actions=max_actions,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def _timeout_case_result(
+    case: dict[str, Any],
+    *,
+    cleanup: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "id": case.get("id"),
+        "status": "IMPASSE",
+        "reason": "elapsed time budget exhausted",
+        "actions": [],
+        "transitions": [],
+        "before": {},
+        "after": {},
+        "diff": {},
+        "metrics": {},
+        "failed_assertions": [],
+        "cleanup": cleanup,
+    }
 
 
 def _collect_v2_evidence_refs(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:

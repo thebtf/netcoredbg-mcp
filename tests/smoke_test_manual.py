@@ -3089,8 +3089,8 @@ def _v2_state_oracle_plan(
         ],
         "cleanup": {
             "steps": [
-                {"kind": "process.registry.assert_empty"},
                 {"kind": "debug.stop"},
+                {"kind": "process.registry.assert_empty"},
             ]
         },
     }
@@ -3254,8 +3254,8 @@ def _v2_visible_row_drag_plan(
         ],
         "cleanup": {
             "steps": [
-                {"kind": "process.registry.assert_empty"},
                 {"kind": "debug.stop"},
+                {"kind": "process.registry.assert_empty"},
             ]
         },
     }
@@ -3426,8 +3426,8 @@ def _v2_edge_scroll_drag_plan(
         ],
         "cleanup": {
             "steps": [
-                {"kind": "process.registry.assert_empty"},
                 {"kind": "debug.stop"},
+                {"kind": "process.registry.assert_empty"},
             ]
         },
     }
@@ -3795,8 +3795,8 @@ def _v2_multi_row_drag_plan(
         ],
         "cleanup": {
             "steps": [
-                {"kind": "process.registry.assert_empty"},
                 {"kind": "debug.stop"},
+                {"kind": "process.registry.assert_empty"},
             ]
         },
     }
@@ -4003,8 +4003,8 @@ def _v2_negative_drag_plan(
         ],
         "cleanup": {
             "steps": [
-                {"kind": "process.registry.assert_empty"},
                 {"kind": "debug.stop"},
+                {"kind": "process.registry.assert_empty"},
             ]
         },
     }

@@ -18,7 +18,7 @@ async def run_cleanup(
     debug_stop: dict[str, Any] | None = None
     process_registry_after: int | None = None
 
-    for step in reversed([dict(item) for item in cleanup_steps]):
+    for step in _cleanup_execution_order(cleanup_steps):
         kind = str(step.get("kind") or "")
         if kind == "fixture.restore":
             path = str(step.get("path") or "")
@@ -103,6 +103,23 @@ async def run_cleanup(
     if case_id is not None:
         cleanup["case_id"] = case_id
     return cleanup
+
+
+def _cleanup_execution_order(cleanup_steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ordered = list(reversed([dict(item) for item in cleanup_steps]))
+    registry_asserts = [
+        step
+        for step in ordered
+        if str(step.get("kind") or "") == "process.registry.assert_empty"
+    ]
+    if not registry_asserts:
+        return ordered
+    non_registry_steps = [
+        step
+        for step in ordered
+        if str(step.get("kind") or "") != "process.registry.assert_empty"
+    ]
+    return [*non_registry_steps, *registry_asserts]
 
 
 def cleanup_steps_from_plan(plan: dict[str, Any]) -> list[dict[str, Any]]:

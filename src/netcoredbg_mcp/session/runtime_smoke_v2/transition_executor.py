@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from .actions import ActionContext, dispatch_action
@@ -16,12 +18,22 @@ TRACEPOINT_POLL_MS = 50
 async def execute_transition(
     transition: dict[str, Any],
     action_context: ActionContext,
+    *,
+    timeout_seconds: float | None = None,
 ) -> tuple[dict[str, Any], int]:
     probes = [dict(probe) for probe in transition.get("probes", [])]
     probe_context = ProbeContext(action_context=action_context)
     before_probes = _probes_for_phase(probes, "before")
     after_probes = _probes_for_phase(probes, "after")
-    before_results = await _collect_probe_results(before_probes, probe_context, phase="before")
+    deadline = None if timeout_seconds is None else action_context.clock() + timeout_seconds
+    try:
+        before_results = await _with_remaining_timeout(
+            lambda: _collect_probe_results(before_probes, probe_context, phase="before"),
+            deadline=deadline,
+            context=action_context,
+        )
+    except asyncio.TimeoutError:
+        return _timeout_transition_result(transition), 0
     before = _probe_value_map(before_probes, before_results)
 
     metrics_started = capture_metric_snapshot(action_context)
@@ -29,7 +41,22 @@ async def execute_transition(
     action_count = 0
     actions: list[dict[str, Any]] = []
     if raw_action is not None:
-        action_result = await dispatch_action(dict(raw_action), action_context)
+        try:
+            action_result = await _with_remaining_timeout(
+                lambda: dispatch_action(dict(raw_action), action_context),
+                deadline=deadline,
+                context=action_context,
+            )
+        except asyncio.TimeoutError:
+            return (
+                _timeout_transition_result(
+                    transition,
+                    metrics=finish_transition_metrics(metrics_started, action_context),
+                    before=before,
+                    before_results=before_results,
+                ),
+                0,
+            )
         action_count = 1
         actions = [action_result]
         if action_result.get("status") != "PASS":
@@ -50,7 +77,23 @@ async def execute_transition(
                 result["blocked"] = _blocked_from_record(action_result)
             return result, action_count
 
-    settle = await _settle(dict(transition.get("settle") or {}), action_context)
+    try:
+        settle = await _with_remaining_timeout(
+            lambda: _settle(dict(transition.get("settle") or {}), action_context),
+            deadline=deadline,
+            context=action_context,
+        )
+    except asyncio.TimeoutError:
+        return (
+            _timeout_transition_result(
+                transition,
+                actions=actions,
+                metrics=finish_transition_metrics(metrics_started, action_context),
+                before=before,
+                before_results=before_results,
+            ),
+            action_count,
+        )
     metrics = finish_transition_metrics(metrics_started, action_context)
     if settle.get("status") != "PASS":
         status = _status_from_records([*before_results, settle])
@@ -71,7 +114,24 @@ async def execute_transition(
             },
             action_count,
         )
-    after_results = await _collect_probe_results(after_probes, probe_context, phase="after")
+    try:
+        after_results = await _with_remaining_timeout(
+            lambda: _collect_probe_results(after_probes, probe_context, phase="after"),
+            deadline=deadline,
+            context=action_context,
+        )
+    except asyncio.TimeoutError:
+        return (
+            _timeout_transition_result(
+                transition,
+                actions=actions,
+                metrics=metrics,
+                before=before,
+                before_results=before_results,
+                settle=settle,
+            ),
+            action_count,
+        )
     after = _probe_value_map(after_probes, after_results)
     diff = compute_diff(before=before, after=after)
 
@@ -94,6 +154,43 @@ async def execute_transition(
         },
         action_count,
     )
+
+
+async def _with_remaining_timeout(
+    awaitable_factory: Callable[[], Awaitable[Any]],
+    *,
+    deadline: float | None,
+    context: ActionContext,
+) -> Any:
+    if deadline is None:
+        return await awaitable_factory()
+    remaining = deadline - context.clock()
+    if remaining <= 0:
+        raise asyncio.TimeoutError()
+    return await asyncio.wait_for(awaitable_factory(), timeout=max(0.001, remaining))
+
+
+def _timeout_transition_result(
+    transition: dict[str, Any],
+    *,
+    actions: list[dict[str, Any]] | None = None,
+    metrics: dict[str, Any] | None = None,
+    before: dict[str, Any] | None = None,
+    before_results: list[dict[str, Any]] | None = None,
+    settle: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": transition.get("id"),
+        "status": "IMPASSE",
+        "reason": "elapsed time budget exhausted",
+        "actions": list(actions or []),
+        "metrics": dict(metrics or {}),
+        **({"settle": settle} if settle is not None else {}),
+        "before": dict(before or {}),
+        "after": {},
+        "diff": {},
+        "probes": {"before": list(before_results or []), "after": []},
+    }
 
 
 def _probes_for_phase(probes: list[dict[str, Any]], phase: str) -> list[dict[str, Any]]:

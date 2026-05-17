@@ -415,6 +415,41 @@ async def test_runner_rejects_invalid_budget_values_without_raising() -> None:
 
 
 @pytest.mark.asyncio
+async def test_v2_runner_rejects_invalid_budget_values_before_runner_parse() -> None:
+    session = FakeRuntimeSmokeSession()
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "bad-v2-budgets",
+            "budgets": {"max_actions": 1.5, "max_elapsed_seconds": "10"},
+            "cases": [
+                {
+                    "id": "case-a",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.invoke",
+                                "selector": {"automation_id": "button"},
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert result["status"] == "INVALID_SETUP"
+    assert result["reason"] == "invalid plan schema"
+    assert result["validation_errors"] == [
+        "budgets.max_actions must be an integer",
+        "budgets.max_elapsed_seconds must be a number",
+    ]
+    assert result["action_count"] == 0
+
+
+@pytest.mark.asyncio
 async def test_runner_compact_export_truncates_large_step_evidence() -> None:
     session = FakeRuntimeSmokeSession()
     long_text = "x" * 600
@@ -1346,6 +1381,244 @@ async def test_ui_operation_adapters_resolve_viewport_drop_from_source_selector(
         "y": 0,
         "width": 200,
         "height": 300,
+    }
+
+
+@pytest.mark.asyncio
+async def test_ui_operation_adapters_resolve_viewport_drop_from_grid_snapshot_fallback() -> None:
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.drag_path_calls: list[list[dict[str, Any]]] = []
+            self.find_element_calls: list[dict[str, Any]] = []
+            self.grid_snapshot_calls: list[dict[str, Any]] = []
+
+        async def grid_snapshot(
+            self,
+            selector: dict[str, Any],
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            self.grid_snapshot_calls.append(dict(selector))
+            return {
+                "status": "PASS",
+                "row_count": 1000,
+                "grid_bounds": {"x": 20, "y": 40, "width": 300, "height": 500},
+                "visible_rows": [
+                    {
+                        "index": 8,
+                        "bounds": {"x": 30, "y": 120, "width": 250, "height": 30},
+                        "cells": {"Phrase": "ROW-008-UNIQUE-PHRASE"},
+                    },
+                ],
+            }
+
+        async def find_element(
+            self,
+            automation_id: str | None = None,
+            name: str | None = None,
+            control_type: str | None = None,
+            root_id: str | None = None,
+            xpath: str | None = None,
+        ) -> dict[str, Any]:
+            self.find_element_calls.append(
+                {
+                    "automation_id": automation_id,
+                    "name": name,
+                    "control_type": control_type,
+                    "root_id": root_id,
+                    "xpath": xpath,
+                }
+            )
+            return {"status": "PASS", "found": False}
+
+        async def drag_path(
+            self,
+            points: list[dict[str, Any]],
+            speed_ms: int = 200,
+            hold_modifiers: list[str] | None = None,
+        ) -> dict[str, Any]:
+            self.drag_path_calls.append(points)
+            return {
+                "status": "PASS",
+                "path_points": points,
+                "hold_points": [point for point in points if point.get("hold_ms")],
+                "final_pointer": points[-1],
+            }
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    selector = {"automation_id": "CueDataGrid", "control_type": "DataGrid"}
+    result = await ui_operation_adapters(backend_provider)["ui.drag"](
+        source={
+            "kind": "row_identity",
+            "selector": selector,
+            "row_identity": "ROW-008-UNIQUE-PHRASE",
+        },
+        path=[
+            {"relative_to": "source", "x": 0.5, "y": 0.5},
+            {
+                "relative_to": "viewport",
+                "selector": selector,
+                "x": 0.5,
+                "y": 0.96,
+                "hold_ms": 350,
+            },
+        ],
+        drop={
+            "relative_to": "viewport",
+            "selector": selector,
+            "x": 0.5,
+            "y": 0.86,
+        },
+        identity={"column": "Phrase"},
+    )
+
+    assert result["status"] == "PASS"
+    assert backend.find_element_calls
+    assert backend.grid_snapshot_calls == [selector, selector, selector]
+    assert backend.drag_path_calls == [
+        [
+            {"x": 155, "y": 135},
+            {"x": 170, "y": 520, "hold_ms": 350},
+            {"x": 170, "y": 470},
+        ]
+    ]
+    assert result["route_evidence"]["target_bounds"] == {
+        "x": 20,
+        "y": 40,
+        "width": 300,
+        "height": 500,
+    }
+    assert result["route_evidence"]["target_identity"] == "CueDataGrid"
+
+
+@pytest.mark.asyncio
+async def test_ui_operation_adapters_do_not_use_grid_snapshot_for_selector_failures() -> None:
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.grid_snapshot_calls: list[dict[str, Any]] = []
+
+        async def find_element(
+            self,
+            automation_id: str | None = None,
+            name: str | None = None,
+            control_type: str | None = None,
+            root_id: str | None = None,
+            xpath: str | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "status": "BLOCKED",
+                "found": True,
+                "reason": "ambiguous selector",
+            }
+
+        async def grid_snapshot(
+            self,
+            selector: dict[str, Any],
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            self.grid_snapshot_calls.append(dict(selector))
+            return {
+                "status": "PASS",
+                "grid_bounds": {"x": 20, "y": 40, "width": 300, "height": 500},
+            }
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    selector = {"automation_id": "CueDataGrid", "control_type": "DataGrid"}
+    result = await ui_operation_adapters(backend_provider)["ui.drag"](
+        source={"kind": "point", "point": {"relative_to": "screen", "x": 10, "y": 20}},
+        path=[{"relative_to": "source", "x": 0.5, "y": 0.5}],
+        drop={"relative_to": "viewport", "selector": selector, "x": 0.5, "y": 0.86},
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "ambiguous selector"
+    assert backend.grid_snapshot_calls == []
+
+
+@pytest.mark.asyncio
+async def test_ui_operation_adapters_resolve_viewport_drop_from_nested_row_bounds() -> None:
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.drag_calls: list[tuple[int, int, int, int]] = []
+
+        async def find_element(
+            self,
+            automation_id: str | None = None,
+            name: str | None = None,
+            control_type: str | None = None,
+            root_id: str | None = None,
+            xpath: str | None = None,
+        ) -> dict[str, Any]:
+            return {"status": "PASS", "found": False}
+
+        async def grid_snapshot(
+            self,
+            selector: dict[str, Any],
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "row_count": 1000,
+                "visible_rows": [
+                    {
+                        "index": 8,
+                        "grid_bounds": {"x": 20, "y": 40, "width": 300, "height": 40},
+                        "cells": {"Phrase": "ROW-008"},
+                    },
+                    {
+                        "index": 9,
+                        "viewport_bounds": {
+                            "x": 20,
+                            "y": 80,
+                            "width": 300,
+                            "height": 40,
+                        },
+                        "cells": {"Phrase": "ROW-009"},
+                    },
+                ],
+            }
+
+        async def drag(
+            self,
+            from_x: int,
+            from_y: int,
+            to_x: int,
+            to_y: int,
+            speed_ms: int = 200,
+            hold_modifiers: list[str] | None = None,
+        ) -> dict[str, Any]:
+            self.drag_calls.append((from_x, from_y, to_x, to_y))
+            return {"status": "PASS", "dragged": True}
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    selector = {"automation_id": "CueDataGrid", "control_type": "DataGrid"}
+    result = await ui_operation_adapters(backend_provider)["ui.drag"](
+        source={"kind": "point", "point": {"relative_to": "screen", "x": 10, "y": 20}},
+        path=[{"relative_to": "source", "x": 0.5, "y": 0.5}],
+        drop={"relative_to": "viewport", "selector": selector, "x": 0.5, "y": 0.5},
+    )
+
+    assert result["status"] == "PASS"
+    assert backend.drag_calls == [(10, 20, 170, 80)]
+    assert result["route_evidence"]["target_bounds"] == {
+        "x": 20,
+        "y": 40,
+        "width": 300,
+        "height": 80,
     }
 
 

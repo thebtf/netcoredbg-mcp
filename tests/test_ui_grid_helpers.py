@@ -309,6 +309,17 @@ def test_bridge_grid_rejects_invalid_control_type_and_prevalidates_selection_ran
     assert validation_index < mutation_index
 
 
+def test_bridge_find_element_rejects_invalid_control_type() -> None:
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "ElementCommands.cs").read_text(
+        encoding="utf-8",
+    )
+
+    assert 'throw new ArgumentException($"Unknown controlType: {controlType}")' in command
+    assert "!Enum.IsDefined(typeof(ControlType), ct)" in command
+    assert command.count("ParseControlType(controlType)") >= 3
+    assert "if (!string.IsNullOrWhiteSpace(controlType) &&" not in command
+
+
 def test_bridge_grid_builds_cell_text_evidence_for_rows() -> None:
     command = (PROJECT_ROOT / "bridge" / "Commands" / "GridCommands.cs").read_text(
         encoding="utf-8",
@@ -320,6 +331,7 @@ def test_bridge_grid_builds_cell_text_evidence_for_rows() -> None:
     assert '["grid_snapshot"] = GridCommands.Snapshot' in handler
     assert '["grid_assert_rows"] = GridCommands.AssertRows' in handler
     assert '["cells"]' in command
+    assert '["grid_bounds"] = SafeRect(grid)' in command
     assert '["bounds"] = SafeRect(row)' in command
     assert '["row_index"] = RowIndex(row, index)' in command
     assert "private static int RowIndex(" in command
