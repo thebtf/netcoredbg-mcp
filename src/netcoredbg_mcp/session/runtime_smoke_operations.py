@@ -876,7 +876,7 @@ async def _resolve_drag_waypoint(
                 accepted={"selector": "viewport waypoint selector or source/drop selector"},
                 next_step="Provide selector on viewport-relative drag waypoints.",
             )
-        _, evidence, blocked = await _resolve_selector_endpoint(
+        evidence, blocked = await _resolve_viewport_bounds(
             backend,
             selector,
             role="waypoint",
@@ -922,7 +922,7 @@ async def _resolve_drag_endpoint(
                     "viewport-relative coordinates."
                 ),
             )
-        _, evidence, blocked = await _resolve_selector_endpoint(backend, selector, role=role)
+        evidence, blocked = await _resolve_viewport_bounds(backend, selector, role=role)
         if blocked is not None:
             return {}, {}, blocked
         bounds = evidence.get("bounds")
@@ -1058,6 +1058,88 @@ async def _resolve_selector_endpoint(
             next_step="Use a UI backend that returns element bounds.",
         )
     return _center_point(bounds), {"bounds": bounds, "identity": _selector_identity(result)}, None
+
+
+async def _resolve_viewport_bounds(
+    backend: Any,
+    selector: dict[str, Any],
+    *,
+    role: str,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    _, evidence, blocked = await _resolve_selector_endpoint(backend, selector, role=role)
+    if blocked is None:
+        evidence["resolution"] = "find_element"
+        return evidence, None
+
+    if not _selector_lookup_miss_allows_grid_snapshot(blocked):
+        return {}, blocked
+
+    if not _selector_allows_grid_snapshot(selector):
+        return {}, blocked
+
+    snapshot, snapshot_blocked = await _grid_snapshot_for_drag(
+        backend,
+        selector,
+        role=role,
+        identity={},
+    )
+    if snapshot_blocked is not None:
+        blocked["grid_snapshot_fallback"] = {
+            "status": "BLOCKED",
+            "reason": snapshot_blocked.get("reason", "grid snapshot fallback failed"),
+        }
+        return {}, blocked
+
+    bounds = _grid_bounds_from_snapshot(snapshot)
+    if bounds is None:
+        return {}, _drag_blocked(
+            reason=f"drag {role} viewport bounds unavailable",
+            requested={role: selector},
+            accepted={
+                "grid_snapshot": "PASS with grid_bounds or visible row bounds",
+                "selector": "unique visible element selector",
+            },
+            next_step=(
+                "Update the UI backend so grid_snapshot returns grid_bounds, "
+                "or provide a selector that find_element can resolve to bounds."
+            ),
+        )
+
+    return {
+        "bounds": bounds,
+        "identity": _grid_selector_identity(selector, snapshot),
+        "resolution": "grid_snapshot",
+    }, None
+
+
+def _selector_allows_grid_snapshot(selector: Mapping[str, Any]) -> bool:
+    control_type = selector.get("control_type") or selector.get("controlType")
+    if control_type is None:
+        return True
+    return str(control_type).lower() in {"datagrid", "data_grid", "table", "custom", "list"}
+
+
+def _selector_lookup_miss_allows_grid_snapshot(blocked: Mapping[str, Any]) -> bool:
+    reason = str(blocked.get("reason") or "").lower()
+    return any(
+        marker in reason
+        for marker in (
+            "selector not found",
+            "selector bounds unavailable",
+        )
+    )
+
+
+def _grid_selector_identity(selector: Mapping[str, Any], snapshot: Mapping[str, Any]) -> str:
+    return str(
+        selector.get("automation_id")
+        or selector.get("automationId")
+        or selector.get("name")
+        or snapshot.get("automationId")
+        or snapshot.get("automation_id")
+        or snapshot.get("name")
+        or ""
+    )
 
 
 def _resolve_cached_element_endpoint(
@@ -1554,7 +1636,46 @@ def _selector_identity(result: Mapping[str, Any]) -> str:
 
 
 def _bounds_from_mapping(value: Mapping[str, Any]) -> dict[str, int] | None:
-    raw = value.get("bounds") or value.get("rect")
+    for key in ("bounds", "rect", "grid_bounds", "viewport_bounds"):
+        bounds = _bounds_from_raw_mapping(value.get(key))
+        if bounds is not None:
+            return bounds
+    return None
+
+
+def _grid_bounds_from_snapshot(snapshot: Mapping[str, Any]) -> dict[str, int] | None:
+    for key in ("grid_bounds", "viewport_bounds", "bounds", "rect"):
+        raw = snapshot.get(key)
+        bounds = _bounds_from_raw_mapping(raw)
+        if bounds is not None:
+            return bounds
+
+    visible_rows = snapshot.get("visible_rows")
+    if not isinstance(visible_rows, list):
+        return None
+    row_bounds = [
+        bounds
+        for row in visible_rows
+        if isinstance(row, Mapping)
+        for bounds in _candidate_bounds_from_row(row)
+        if bounds is not None
+    ]
+    if not row_bounds:
+        return None
+
+    left = min(bounds["x"] for bounds in row_bounds)
+    top = min(bounds["y"] for bounds in row_bounds)
+    right = max(bounds["x"] + bounds["width"] for bounds in row_bounds)
+    bottom = max(bounds["y"] + bounds["height"] for bounds in row_bounds)
+    return {
+        "x": left,
+        "y": top,
+        "width": right - left,
+        "height": bottom - top,
+    }
+
+
+def _bounds_from_raw_mapping(raw: Any) -> dict[str, int] | None:
     if not isinstance(raw, Mapping):
         return None
     try:
@@ -1569,6 +1690,13 @@ def _bounds_from_mapping(value: Mapping[str, Any]) -> dict[str, int] | None:
     if bounds["width"] <= 0 or bounds["height"] <= 0:
         return None
     return bounds
+
+
+def _candidate_bounds_from_row(row: Mapping[str, Any]) -> list[dict[str, int] | None]:
+    return [
+        _bounds_from_raw_mapping(row.get(key))
+        for key in ("bounds", "rect", "grid_bounds", "viewport_bounds")
+    ]
 
 
 def _center_point(bounds: Mapping[str, int]) -> dict[str, int]:

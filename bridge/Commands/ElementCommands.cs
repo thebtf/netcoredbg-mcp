@@ -122,8 +122,11 @@ public static class ElementCommands
             conditions.Add(cf.ByName(name));
 
         var controlType = @params?["controlType"]?.GetValue<string>();
-        if (controlType is not null && Enum.TryParse<ControlType>(controlType, true, out var ct))
+        if (controlType is not null)
+        {
+            var ct = ParseControlType(controlType);
             conditions.Add(cf.ByControlType(ct));
+        }
 
         if (conditions.Count == 0)
         {
@@ -545,9 +548,11 @@ public static class ElementCommands
             var conditions = new List<ConditionBase>();
             if (!string.IsNullOrWhiteSpace(name))
                 conditions.Add(cf.ByName(name));
-            if (!string.IsNullOrWhiteSpace(controlType) &&
-                Enum.TryParse<ControlType>(controlType, true, out var ct))
+            if (!string.IsNullOrWhiteSpace(controlType))
+            {
+                var ct = ParseControlType(controlType);
                 conditions.Add(cf.ByControlType(ct));
+            }
 
             if (conditions.Count > 0)
             {
@@ -578,6 +583,14 @@ public static class ElementCommands
         return parts.Count > 0 ? string.Join(", ", parts) : "(no criteria)";
     }
 
+    private static ControlType ParseControlType(string controlType)
+    {
+        if (!Enum.TryParse<ControlType>(controlType, true, out var ct) ||
+            !Enum.IsDefined(typeof(ControlType), ct))
+            throw new ArgumentException($"Unknown controlType: {controlType}");
+        return ct;
+    }
+
     // ── Ranked search (FR-1) ───────────────────────────────────────
 
     public static JsonNode FindAllCascade(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
@@ -599,8 +612,11 @@ public static class ElementCommands
         var conditions = new List<ConditionBase>();
         if (!string.IsNullOrWhiteSpace(name))
             conditions.Add(cf.ByName(name));
-        if (!string.IsNullOrWhiteSpace(controlType) && Enum.TryParse<ControlType>(controlType, true, out var ct))
+        if (!string.IsNullOrWhiteSpace(controlType))
+        {
+            var ct = ParseControlType(controlType);
             conditions.Add(cf.ByControlType(ct));
+        }
 
         var condition = conditions.Count == 1
             ? conditions[0]

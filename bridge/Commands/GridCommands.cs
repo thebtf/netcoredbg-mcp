@@ -28,6 +28,7 @@ public static class GridCommands
         {
             ["status"] = "PASS",
             ["row_count"] = gridPattern.RowCount.Value,
+            ["grid_bounds"] = SafeRect(grid),
             ["visible_rows"] = BuildRows(grid, rows, columns)
         };
     }

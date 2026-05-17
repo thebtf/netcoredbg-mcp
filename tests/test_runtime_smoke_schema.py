@@ -169,3 +169,36 @@ def test_validate_plan_rejects_nested_operation_argument_type_errors() -> None:
         "steps[2].child must be an object for op ui.list.toggle_item_child",
         "steps[2].target_state must be a string for op ui.list.toggle_item_child",
     ]
+
+
+@pytest.mark.parametrize("value", [None, True, False, 1.5, "1"])
+def test_validate_plan_rejects_non_integral_max_actions(value: Any) -> None:
+    assert validate_plan({"budgets": {"max_actions": value}}) == [
+        "budgets.max_actions must be an integer"
+    ]
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_validate_plan_rejects_non_positive_max_actions(value: int) -> None:
+    assert validate_plan({"budgets": {"max_actions": value}}) == [
+        "budgets.max_actions must be at least 1"
+    ]
+
+
+@pytest.mark.parametrize("value", [None, True, False, "1", []])
+def test_validate_plan_rejects_non_numeric_max_elapsed_seconds(value: Any) -> None:
+    assert validate_plan({"budgets": {"max_elapsed_seconds": value}}) == [
+        "budgets.max_elapsed_seconds must be a number"
+    ]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [0, -1, pytest.param(10**10000, id="huge-int"), float("inf"), float("nan")],
+)
+def test_validate_plan_rejects_non_positive_or_non_finite_max_elapsed_seconds(
+    value: float,
+) -> None:
+    assert validate_plan({"budgets": {"max_elapsed_seconds": value}}) == [
+        "budgets.max_elapsed_seconds must be positive"
+    ]

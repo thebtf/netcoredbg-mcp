@@ -586,10 +586,10 @@
     "cleanup": {
         "steps": [
             {
-                "kind": "process.registry.assert_empty"
+                "kind": "debug.stop"
             },
             {
-                "kind": "debug.stop"
+                "kind": "process.registry.assert_empty"
             }
         ]
     }

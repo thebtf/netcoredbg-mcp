@@ -13,6 +13,8 @@ async def execute_case(
     context: ActionContext,
     *,
     metrics_thresholds: dict[str, Any] | None = None,
+    max_actions: int | None = None,
+    timeout_seconds: float | None = None,
 ) -> tuple[dict[str, Any], int]:
     transitions: list[dict[str, Any]] = []
     actions: list[dict[str, Any]] = []
@@ -25,11 +27,22 @@ async def execute_case(
     action_count = 0
     status = "PASS"
     reason = "case passed"
+    deadline = None if timeout_seconds is None else context.clock() + timeout_seconds
 
     for transition in case.get("transitions", []):
+        if max_actions is not None and action_count >= max_actions:
+            status = "IMPASSE"
+            reason = "action budget exhausted"
+            break
+        remaining = None if deadline is None else deadline - context.clock()
+        if remaining is not None and remaining <= 0:
+            status = "IMPASSE"
+            reason = "elapsed time budget exhausted"
+            break
         transition_result, transition_actions = await execute_transition(
             dict(transition),
             context,
+            timeout_seconds=remaining,
         )
         action_count += transition_actions
         transitions.append(transition_result)
@@ -48,6 +61,10 @@ async def execute_case(
             status = "BLOCKED"
             reason = str(transition_result.get("reason") or "transition blocked")
             blocked = transition_result.get("blocked")
+            break
+        if transition_result["status"] == "IMPASSE" and status not in {"FAIL", "BLOCKED"}:
+            status = "IMPASSE"
+            reason = str(transition_result.get("reason") or "transition impasse")
             break
 
     metrics = merge_case_metrics(metrics_records)
