@@ -19,6 +19,9 @@ class FakeMonitorBackend:
     def __init__(self) -> None:
         self.process_id = 42
         self.calls: list[dict[str, Any]] = []
+        self.active_queries = 0
+        self.max_active_queries = 0
+        self.cancel_next = False
         self.delay_s = 0.0
         self.ignore_cancellation_s = 0.0
         self.last_response: dict[str, Any] = {
@@ -36,23 +39,31 @@ class FakeMonitorBackend:
         fields: list[str],
         max_results: int = 20,
     ) -> dict[str, Any]:
-        if self.delay_s > 0:
-            try:
-                await asyncio.sleep(self.delay_s)
-            except asyncio.CancelledError:
-                if self.ignore_cancellation_s <= 0:
-                    raise
-                await asyncio.sleep(self.ignore_cancellation_s)
-        self.calls.append(
-            {
-                "selector": dict(selector),
-                "fields": list(fields),
-                "max_results": max_results,
-            }
-        )
-        if self.responses:
-            self.last_response = self.responses.pop(0)
-        return dict(self.last_response)
+        self.active_queries += 1
+        self.max_active_queries = max(self.max_active_queries, self.active_queries)
+        try:
+            if self.cancel_next:
+                self.cancel_next = False
+                raise asyncio.CancelledError()
+            if self.delay_s > 0:
+                try:
+                    await asyncio.sleep(self.delay_s)
+                except asyncio.CancelledError:
+                    if self.ignore_cancellation_s <= 0:
+                        raise
+                    await asyncio.sleep(self.ignore_cancellation_s)
+            self.calls.append(
+                {
+                    "selector": dict(selector),
+                    "fields": list(fields),
+                    "max_results": max_results,
+                }
+            )
+            if self.responses:
+                self.last_response = self.responses.pop(0)
+            return dict(self.last_response)
+        finally:
+            self.active_queries -= 1
 
 
 class FakeUiSession:
@@ -203,6 +214,31 @@ async def test_ui_monitor_wait_bounds_slow_backend_poll() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ui_monitor_wait_handles_cancelled_query_task() -> None:
+    backend = FakeMonitorBackend()
+    store = UIEventBufferStore()
+
+    await store.monitor_start(
+        backend,
+        monitor_id="flow",
+        selector={"automation_id": "grid"},
+        fields=["text"],
+    )
+    backend.cancel_next = True
+
+    result = await store.monitor_wait(
+        "flow",
+        after_cursor=0,
+        timeout_ms=100,
+        poll_interval_ms=1,
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "ui monitor wait timed out"
+    assert result["event_count"] == 0
+
+
+@pytest.mark.asyncio
 async def test_ui_monitor_wait_does_not_wait_for_cancellation_hostile_backend() -> None:
     backend = FakeMonitorBackend()
     backend.responses = [
@@ -244,6 +280,46 @@ async def test_ui_monitor_wait_does_not_wait_for_cancellation_hostile_backend() 
     assert result["reason"] == "ui monitor wait timed out"
     assert history["event_count"] == 0
     assert history["next_cursor"] == 0
+
+
+@pytest.mark.asyncio
+async def test_ui_monitor_poll_serializes_concurrent_state_updates() -> None:
+    backend = FakeMonitorBackend()
+    backend.responses = [
+        {
+            "status": "PASS",
+            "elements": [{"element_id": "row-1", "text": "A"}],
+            "element_count": 1,
+        },
+        {
+            "status": "PASS",
+            "elements": [{"element_id": "row-1", "text": "B"}],
+            "element_count": 1,
+        },
+        {
+            "status": "PASS",
+            "elements": [{"element_id": "row-1", "text": "C"}],
+            "element_count": 1,
+        },
+    ]
+    store = UIEventBufferStore()
+
+    await store.monitor_start(
+        backend,
+        monitor_id="flow",
+        selector={"automation_id": "grid"},
+        fields=["text"],
+    )
+    backend.delay_s = 0.02
+
+    await asyncio.gather(
+        store.monitor_poll("flow", after_cursor=0),
+        store.monitor_poll("flow", after_cursor=0),
+    )
+    history = store.monitor_events("flow", after_cursor=0)
+
+    assert backend.max_active_queries == 1
+    assert [event["sequence"] for event in history["events"]] == [1, 2]
 
 
 @pytest.mark.asyncio

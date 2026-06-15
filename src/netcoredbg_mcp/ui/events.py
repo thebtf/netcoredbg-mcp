@@ -21,6 +21,7 @@ class UIEventBuffer:
     events: list[dict[str, Any]] = field(default_factory=list)
     dropped_count: int = 0
     next_sequence: int = 1
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock, compare=False, repr=False)
 
     @property
     def oldest_cursor(self) -> int:
@@ -83,22 +84,23 @@ class UIEventBufferStore:
         buffer = self.buffers.get(buffer_id)
         if buffer is None:
             return _missing_buffer(buffer_id, self.buffers, include_monitor_id=False)
-        current = await _query_current(buffer)
-        if current.get("status") != "PASS":
-            return current
-        _append_current_diff(buffer, current)
-        buffer.baseline = current
-        events = [_legacy_event(event) for event in buffer.events]
-        result = {
-            "status": "PASS",
-            "buffer_id": buffer_id,
-            "source": "polling",
-            "events": events,
-            "event_count": len(events),
-            "dropped_count": buffer.dropped_count,
-        }
-        result["evidence_refs"] = [_evidence_ref(buffer_id, result)]
-        return result
+        async with buffer.lock:
+            current = await _query_current(buffer)
+            if current.get("status") != "PASS":
+                return current
+            _append_current_diff(buffer, current)
+            buffer.baseline = current
+            events = [_legacy_event(event) for event in buffer.events]
+            result = {
+                "status": "PASS",
+                "buffer_id": buffer_id,
+                "source": "polling",
+                "events": events,
+                "event_count": len(events),
+                "dropped_count": buffer.dropped_count,
+            }
+            result["evidence_refs"] = [_evidence_ref(buffer_id, result)]
+            return result
 
     def stop(self, buffer_id: str) -> dict[str, Any]:
         buffer = self.buffers.pop(buffer_id, None)
@@ -141,12 +143,13 @@ class UIEventBufferStore:
         buffer = self.buffers.get(monitor_id)
         if buffer is None:
             return _missing_buffer(monitor_id, self.buffers)
-        current = await _query_current(buffer)
-        if current.get("status") != "PASS":
-            return current
-        _append_current_diff(buffer, current)
-        buffer.baseline = current
-        return self.monitor_events(monitor_id, after_cursor=after_cursor)
+        async with buffer.lock:
+            current = await _query_current(buffer)
+            if current.get("status") != "PASS":
+                return current
+            _append_current_diff(buffer, current)
+            buffer.baseline = current
+            return self.monitor_events(monitor_id, after_cursor=after_cursor)
 
     async def monitor_wait(
         self,
@@ -187,22 +190,33 @@ class UIEventBufferStore:
         if buffer is None:
             return _missing_buffer(monitor_id, self.buffers)
 
-        query_task = asyncio.create_task(_query_current(buffer))
-        done, _pending = await asyncio.wait({query_task}, timeout=max(0.0, timeout_s))
-        if query_task not in done:
-            _cancel_without_waiting(query_task)
+        deadline = time.monotonic() + timeout_s
+        if not await _acquire_lock_with_deadline(buffer.lock, timeout_s):
             return _monitor_wait_timed_out(
                 self.monitor_events(monitor_id, after_cursor=after_cursor)
             )
+        query_task = asyncio.create_task(_query_current(buffer))
+        try:
+            done, _pending = await asyncio.wait(
+                {query_task},
+                timeout=max(0.0, deadline - time.monotonic()),
+            )
+            if query_task not in done or query_task.cancelled():
+                _cancel_without_waiting(query_task)
+                return _monitor_wait_timed_out(
+                    self.monitor_events(monitor_id, after_cursor=after_cursor)
+                )
 
-        current = query_task.result()
-        if current.get("status") != "PASS":
-            return current
-        if self.buffers.get(monitor_id) is not buffer:
-            return _missing_buffer(monitor_id, self.buffers)
-        _append_current_diff(buffer, current)
-        buffer.baseline = current
-        return self.monitor_events(monitor_id, after_cursor=after_cursor)
+            current = query_task.result()
+            if current.get("status") != "PASS":
+                return current
+            if self.buffers.get(monitor_id) is not buffer:
+                return _missing_buffer(monitor_id, self.buffers)
+            _append_current_diff(buffer, current)
+            buffer.baseline = current
+            return self.monitor_events(monitor_id, after_cursor=after_cursor)
+        finally:
+            buffer.lock.release()
 
     def monitor_events(self, monitor_id: str, *, after_cursor: int = 0) -> dict[str, Any]:
         buffer = self.buffers.get(monitor_id)
@@ -288,12 +302,24 @@ async def _query_current(buffer: UIEventBuffer) -> dict[str, Any]:
     )
 
 
-def _cancel_without_waiting(task: asyncio.Task[dict[str, Any]]) -> None:
+def _cancel_without_waiting(task: asyncio.Task[Any]) -> None:
     task.cancel()
     task.add_done_callback(_consume_late_task_result)
 
 
-def _consume_late_task_result(task: asyncio.Task[dict[str, Any]]) -> None:
+async def _acquire_lock_with_deadline(lock: asyncio.Lock, timeout_s: float) -> bool:
+    acquire_task = asyncio.create_task(lock.acquire())
+    done, _pending = await asyncio.wait({acquire_task}, timeout=max(0.0, timeout_s))
+    if acquire_task not in done:
+        _cancel_without_waiting(acquire_task)
+        return False
+    if acquire_task.cancelled():
+        _cancel_without_waiting(acquire_task)
+        return False
+    return bool(acquire_task.result())
+
+
+def _consume_late_task_result(task: asyncio.Task[Any]) -> None:
     try:
         task.result()
     except asyncio.CancelledError:
