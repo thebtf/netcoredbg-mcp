@@ -140,7 +140,7 @@ async def test_ui_right_click_uses_flaui_backend_for_dict_elements(capturing_mcp
             return_value={
                 "automationId": "dataGrid",
                 "controlType": "DataGrid",
-                "rect": {"left": 10, "top": 20, "right": 110, "bottom": 80},
+                "rect": {"x": 10, "y": 20, "width": 100, "height": 60},
             }
         ),
         right_click_at=AsyncMock(),
@@ -186,7 +186,7 @@ async def test_ui_double_click_uses_flaui_backend_for_dict_elements(capturing_mc
             return_value={
                 "automationId": "dataGrid",
                 "controlType": "DataGrid",
-                "rect": {"left": 10, "top": 20, "right": 110, "bottom": 80},
+                "rect": {"x": 10, "y": 20, "width": 100, "height": 60},
             }
         ),
         double_click_at=AsyncMock(),

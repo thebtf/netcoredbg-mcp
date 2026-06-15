@@ -423,8 +423,9 @@ async def test_flaui_backend_bring_to_front_blocks_when_no_visible_window(monkey
 async def test_ui_get_window_tree_reconnects_same_pid_after_bridge_disconnect() -> None:
     from netcoredbg_mcp.session.manager import DebugState
     from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
 
-    class DisconnectingBackend:
+    class DisconnectingBackend(FlaUIBackend):
         process_id = 42
 
         def __init__(self) -> None:
