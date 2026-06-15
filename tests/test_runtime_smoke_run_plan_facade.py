@@ -77,13 +77,31 @@ class LargeFinalResultRegistry:
         return {
             "status": "COMPLETED",
             "run_id": run_id,
-            "events": [{"cursor": 1, "kind": "completed"}],
+            "events": [{"cursor": 1, "kind": "completed", "details": "x" * 300}],
             "next_cursor": 1,
             "oldest_cursor": 1,
             "dropped_count": 0,
             "stale_cursor": False,
             "final": True,
         }
+
+
+class RenamedMissingRunRegistry:
+    async def get_result(self, run_id: str) -> dict[str, Any]:
+        return {
+            "status": "FAIL",
+            "reason": "no retained runtime smoke run",
+            "run_id": run_id,
+        }
+
+    async def tail_events(
+        self,
+        run_id: str,
+        *,
+        after_cursor: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        raise AssertionError("missing run should fail closed before tailing events")
 
 
 async def _resolve_project_root(_ctx: Any, _session: Any) -> None:
@@ -224,6 +242,10 @@ async def test_runtime_smoke_evidence_bundle_bounds_large_final_result(
 
     assert result["status"] == "PASS"
     assert result["action_count"] == 9
+    assert response["data"]["events"][0]["details_length"] == 300
+    assert response["data"]["events"][0]["omitted_fields"] == ["details"]
+    assert response["data"]["cleanup"]["attempted"][-1] == {"omitted_count": 12}
+    assert response["data"]["evidence_refs"][-1] == {"omitted_count": 4}
     assert result["cleanup"]["attempted"][-1] == {"omitted_count": 12}
     assert result["evidence_refs"][-1] == {"omitted_count": 4}
     assert "compact" in result
@@ -234,6 +256,28 @@ async def test_runtime_smoke_evidence_bundle_bounds_large_final_result(
     assert "accepted_top_level_keys_v2" not in result
     assert "accepted_action_kinds" not in result
     assert "accepted_probe_kinds" not in result
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_evidence_bundle_fails_closed_without_literal_reason_match(
+    capturing_mcp,
+) -> None:
+    session = RunPlanFacadeSession()
+    session.runtime_smoke.lifecycle_runs = RenamedMissingRunRegistry()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_evidence_bundle"](
+        ctx=None,
+        run_id="missing-run",
+    )
+    data = response["data"]
+
+    assert data["status"] == "FAIL"
+    assert data["reason"] == "no retained runtime smoke run"
+    assert data["final"] is True
+    assert data["events"] == []
+    assert data["result"] is None
+    assert data["next_actions"] == ["runtime_smoke_run_plan"]
 
 
 @pytest.mark.asyncio

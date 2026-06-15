@@ -522,10 +522,10 @@ async def _runtime_smoke_evidence_bundle(
     event_limit: int = 50,
 ) -> dict[str, Any]:
     result = await registry.get_result(run_id)
-    if result.get("status") == "FAIL" and result.get("reason") == "runtime smoke run not found":
+    if _runtime_smoke_run_missing(result):
         return {
             "status": "FAIL",
-            "reason": "runtime smoke run not found",
+            "reason": result.get("reason", "runtime smoke run not found"),
             "run_id": run_id,
             "final": True,
             "events": [],
@@ -563,7 +563,7 @@ async def _runtime_smoke_evidence_bundle(
         "plan_name": result.get("plan_name"),
         "lifecycle_status": result.get("lifecycle_status", tail.get("status")),
         "final": final,
-        "events": tail.get("events", []),
+        "events": compact_value(tail.get("events", [])),
         "event_cursor": {
             "after_cursor": max(0, int(after_cursor)),
             "next_cursor": tail.get("next_cursor"),
@@ -573,10 +573,19 @@ async def _runtime_smoke_evidence_bundle(
             "limit": max(0, int(event_limit)),
         },
         "result": _bounded_runtime_smoke_result(result) if final else None,
-        "evidence_refs": result.get("evidence_refs", []),
-        "cleanup": result.get("cleanup"),
+        "evidence_refs": compact_value(result.get("evidence_refs", [])),
+        "cleanup": compact_value(result.get("cleanup")),
         "next_actions": next_actions,
     }
+
+
+def _runtime_smoke_run_missing(result: dict[str, Any]) -> bool:
+    return (
+        result.get("status") == "FAIL"
+        and "final" not in result
+        and "next_cursor" not in result
+        and "oldest_cursor" not in result
+    )
 
 
 def _bounded_runtime_smoke_result(result: dict[str, Any]) -> dict[str, Any]:
