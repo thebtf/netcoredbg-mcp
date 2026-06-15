@@ -4676,6 +4676,70 @@ async def test_stealth_launch():
         await m.stop()
 
 
+async def test_wpf_stealth_delayed_readiness_replay():
+    """Scenario: stealth launch does not restore foreground before WPF UI readiness proof."""
+    print("\n--- WPF Stealth Delayed Readiness Replay ---")
+    if not WPF_GUI_ENABLED:
+        check("WPF fixture built", True, "skipped: build tests/fixtures/WpfSmokeApp")
+        return
+
+    from netcoredbg_mcp.session import manager as manager_mod
+    from netcoredbg_mcp.ui.backend import create_backend
+
+    original_get_foreground = manager_mod.get_foreground_window
+    original_get_window_process_id = manager_mod.get_window_process_id
+    original_restore = manager_mod.restore_foreground_window
+    foreground_values = iter([111, 222, 222, 222, 222])
+    restore_calls: list[int] = []
+
+    def fake_foreground() -> int:
+        return next(foreground_values, 222)
+
+    manager_mod.get_foreground_window = fake_foreground
+    manager_mod.get_window_process_id = lambda hwnd: None
+    manager_mod.restore_foreground_window = lambda hwnd: restore_calls.append(hwnd) is None or True
+
+    m = await new_session()
+    backend = None
+    try:
+        await m.launch(
+            program=WPF_DLL,
+            cwd=os.path.dirname(WPF_DLL),
+            stealth_mode=True,
+        )
+        check(
+            "WPF stealth readiness: launch returned before foreground restore",
+            restore_calls == [],
+            f"restore_calls={restore_calls}",
+        )
+
+        pid = m.state.process_id
+        if not pid:
+            check("WPF stealth readiness: process started", False, "no PID")
+            return
+        check("WPF stealth readiness: process started", True, f"PID={pid}")
+
+        backend = create_backend(process_registry=m.process_registry)
+        await backend.connect(pid, stealth=True)
+        tree = await backend.get_window_tree(max_depth=1)
+        windows = tree.get("windows") if isinstance(tree, dict) else None
+        check(
+            "WPF stealth readiness: MainWindow tree available",
+            isinstance(windows, list) and len(windows) > 0,
+            str(tree)[:200],
+        )
+    finally:
+        manager_mod.get_foreground_window = original_get_foreground
+        manager_mod.get_window_process_id = original_get_window_process_id
+        manager_mod.restore_foreground_window = original_restore
+        if backend is not None:
+            try:
+                await backend.disconnect()
+            except Exception:
+                pass
+        await m.stop()
+
+
 async def test_stealth_click():
     """Scenario: stealth click by automation id uses InvokePattern when available."""
     print("\n--- Stealth Click ---")
@@ -4865,6 +4929,12 @@ def get_scenarios():
             (
                 "WPF UI Grid Rows Alias Fixture Replay",
                 test_wpf_ui_grid_rows_alias_fixture_replay,
+            )
+        )
+        scenarios.append(
+            (
+                "WPF Stealth Delayed Readiness Replay",
+                test_wpf_stealth_delayed_readiness_replay,
             )
         )
         scenarios.append(
