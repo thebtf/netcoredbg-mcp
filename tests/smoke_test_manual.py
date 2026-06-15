@@ -108,7 +108,8 @@ class _CapturingMCP:
 def _grid_alias_evidence(response: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
     data = response.get("data", {}) if isinstance(response, dict) else {}
     visible_rows = data.get("visible_rows") if isinstance(data, dict) else None
-    first_cells = visible_rows[0].get("cells", {}) if visible_rows else {}
+    first_row = visible_rows[0] if isinstance(visible_rows, list) and visible_rows else None
+    first_cells = first_row.get("cells", {}) if isinstance(first_row, dict) else {}
     first_phrase = first_cells.get("Phrase") or first_cells.get("phrase")
     evidence = {
         "status": data.get("status"),

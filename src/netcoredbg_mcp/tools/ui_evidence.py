@@ -157,7 +157,7 @@ def register_ui_evidence_tools(
             elif canonical_action == "assert_range":
                 start, end = _require_range(start_index, end_index)
                 result = await assert_grid_range(backend, selector, start, end)
-            if canonical_action != action:
+            if canonical_action != action and isinstance(result, dict):
                 result = dict(result)
                 result["requested_action"] = action
                 result["canonical_action"] = canonical_action
