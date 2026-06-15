@@ -6,6 +6,7 @@ import pytest
 
 from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner, RuntimeSmokeSession
 from netcoredbg_mcp.session.runtime_smoke_v2.probe_dispatcher import probe_path
+from netcoredbg_mcp.session.runtime_smoke_v2.runner import RuntimeStateOracleRunner
 
 
 class DispatcherSmokeSession:
@@ -30,6 +31,24 @@ async def test_v2_schema_dispatches_to_v2_result_envelope() -> None:
     assert result["cases"] == []
     assert result["cleanup"]["status"] == "PASS"
     assert "accepted_schema_values" in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cases", [None, 1])
+async def test_v2_runner_reports_non_list_cases_as_invalid_setup(cases: Any) -> None:
+    result = await RuntimeStateOracleRunner(DispatcherSmokeSession()).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "non-list cases",
+            "cases": cases,
+        }
+    )
+
+    assert result["status"] == "INVALID_SETUP"
+    assert result["reason"] == "invalid plan schema"
+    assert result["validation_errors"] == ["cases must be a list"]
+    assert result["cases"] == []
+    assert result["cleanup"]["status"] == "PASS"
 
 
 @pytest.mark.asyncio

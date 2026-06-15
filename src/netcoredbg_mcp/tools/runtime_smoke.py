@@ -317,9 +317,6 @@ def register_runtime_smoke_tools(
     async def runtime_smoke_validate_plan(ctx: Context, plan: dict[str, Any]) -> dict:
         """Validate a runtime-smoke plan without launching or touching a target app."""
         try:
-            access_error = check_session_access(ctx)
-            if access_error:
-                return build_error_response(access_error, state=session.state.state)
             data = validate_runtime_smoke_plan_contract(plan)
             return _build_runtime_smoke_response(
                 session,

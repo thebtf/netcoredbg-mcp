@@ -302,13 +302,17 @@ def _cases_for_execution(
     plan: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], int, list[str]]:
     raw_cases = plan.get("cases", [])
-    cases = [
-        dict(case)
-        for case in raw_cases
-        if isinstance(raw_cases, list) and isinstance(case, dict)
-    ]
+    cases: list[dict[str, Any]] = []
+    validation_errors: list[str] = []
+    if isinstance(raw_cases, list):
+        cases = [dict(case) for case in raw_cases if isinstance(case, dict)]
+    else:
+        validation_errors.append("cases must be a list")
     generated_cases, generation_errors = expand_generated_cases(plan)
-    return [*cases, *generated_cases], len(generated_cases), generation_errors
+    return [*cases, *generated_cases], len(generated_cases), [
+        *validation_errors,
+        *generation_errors,
+    ]
 
 
 def _validate_v2_plan(

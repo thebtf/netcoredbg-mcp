@@ -33,13 +33,45 @@ async def _resolve_project_root(_ctx: Any, _session: Any) -> None:
     raise AssertionError("validate-only facade must not resolve project paths")
 
 
-def _register(capturing_mcp, session: PlanFacadeSession) -> None:
+def _register(
+    capturing_mcp,
+    session: PlanFacadeSession,
+    *,
+    check_session_access: Any | None = None,
+) -> None:
     register_runtime_smoke_tools(
         mcp=capturing_mcp,
         session=session,
-        check_session_access=lambda ctx: None,
+        check_session_access=check_session_access or (lambda ctx: None),
         resolve_project_root=_resolve_project_root,
     )
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_validate_plan_does_not_claim_session_ownership(
+    capturing_mcp,
+) -> None:
+    session = PlanFacadeSession()
+
+    def fail_access_check(_ctx: Any) -> str | None:
+        raise AssertionError("validate-only facade must not claim session ownership")
+
+    _register(capturing_mcp, session, check_session_access=fail_access_check)
+
+    response = await capturing_mcp.tools["runtime_smoke_validate_plan"](
+        ctx=None,
+        plan={
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "validate-only",
+            "cases": [{"id": "case-1", "transitions": []}],
+        },
+    )
+    data = response["data"]
+
+    assert "error" not in response
+    assert data["status"] == "PASS"
+    assert data["can_run"] is True
+    assert session.launch_calls == 0
 
 
 @pytest.mark.asyncio
