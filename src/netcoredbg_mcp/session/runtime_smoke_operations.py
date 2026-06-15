@@ -297,7 +297,14 @@ def ui_operation_adapters(
             result = {"status": "BLOCKED", "reason": str(exc)}
             if _is_selector_miss(result):
                 return _selector_blocked(selector, result=result)
-            return _adapter_blocked("ui.text.assert", str(exc))
+            return {
+                "status": "BLOCKED",
+                "reason": str(exc),
+                "requested": {"selector": selector},
+                "accepted": {"backend": "connected UI backend supporting ui.text.assert"},
+                "next_step": "Inspect UI backend or bridge transport diagnostics.",
+                "result": result,
+            }
         if not isinstance(text_result, dict):
             return {
                 "status": "FAIL",

@@ -1117,6 +1117,28 @@ async def test_ui_text_assert_selector_miss_returns_actionable_blocked() -> None
 
 
 @pytest.mark.asyncio
+async def test_ui_text_assert_backend_exception_reports_bridge_diagnostics() -> None:
+    class FakeBackend:
+        async def extract_text(self, **_: Any) -> dict[str, Any]:
+            raise RuntimeError("bridge pipe closed")
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.text.assert"](
+        selector={"automation_id": "statusText"},
+        contains="ready",
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "bridge pipe closed"
+    assert result["requested"] == {"selector": {"automation_id": "statusText"}}
+    assert result["accepted"] == {"backend": "connected UI backend supporting ui.text.assert"}
+    assert result["next_step"] == "Inspect UI backend or bridge transport diagnostics."
+    assert result["result"] == {"status": "BLOCKED", "reason": "bridge pipe closed"}
+
+
+@pytest.mark.asyncio
 async def test_ui_operation_adapters_route_point_drag_to_backend() -> None:
     class FakeBackend:
         def __init__(self) -> None:
