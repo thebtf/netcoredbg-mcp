@@ -1,0 +1,126 @@
+{
+  "schema": "netcoredbg.downstream_replay_packet.v1",
+  "id": "novascript-cr003-replay-2026-06-15",
+  "issue": "#226",
+  "status": "DOWNSTREAM_REPLAY_BLOCKED",
+  "provider_baseline": {
+    "repo": "thebtf/netcoredbg-mcp",
+    "commit": "12287e55ac8ea7415a3717f4a248d08723b93cfd",
+    "version": "0.17.2",
+    "evidence_boundary": "target-side evidence is provider readiness only; it cannot close the consumer issue"
+  },
+  "downstream": {
+    "repo_name": "NovaScript",
+    "expected_local_path": "<NOVASCRIPT_REPO>",
+    "plan_path": "NovaScript.Tests.UI/Scenarios/fixed-bug-regression.runtime-smoke-v2.json",
+    "contract_path": "NovaScript.Tests.UI/Scenarios/fixed-bug-regression.feature-cycle.json",
+    "contract_tests": [
+      "FixedBugRegressionProtocol_RecordsRuntimeSmokeV2ResumeGate",
+      "FixedBugRegressionProtocol_HasExecutableRuntimeSmokeV2Plan"
+    ],
+    "selector": {
+      "automation_id": "CueDataGrid",
+      "control_type": "DataGrid"
+    },
+    "identity": {
+      "column": "Реплика"
+    }
+  },
+  "required_variants": [
+    "visible_row_drag",
+    "downward_edge_scroll",
+    "upward_edge_scroll",
+    "multi_row_drag",
+    "invalid_drop_noop_or_cancel"
+  ],
+  "latest_replay": {
+    "timestamp": "2026-06-15T22:15:32.6566909+03:00",
+    "status": "BLOCKED",
+    "contract_test": {
+      "status": "PASS",
+      "passed": 2
+    },
+    "runtime_smoke": {
+      "baseline_status": "PASS",
+      "status": "BLOCKED",
+      "reason": "drag source row identity not visible",
+      "blocked_case": "visible-row-drag-reorder",
+      "blocked_transition": "visible_drag"
+    },
+    "visible_viewport": {
+      "first_visible_index": 26,
+      "last_visible_index": 43,
+      "first_visible_identity": "ROW-027-UNIQUE-PHRASE",
+      "last_visible_identity": "ROW-044-UNIQUE-PHRASE",
+      "selected_identity": "ROW-031-UNIQUE-PHRASE"
+    },
+    "requested_source_identity": "ROW-008-UNIQUE-PHRASE",
+    "cleanup": {
+      "status": "PASS",
+      "process_registry_after": 0
+    },
+    "issue_226_lifecycle_decision": "leave_open",
+    "next_step": "Amend the NovaScript runtime-smoke v2 plan to make the requested source row visible before the first drag, or derive source/drop identities from the current visible viewport, then rerun this replay packet."
+  },
+  "commands": {
+    "contract_test": "dotnet test NovaScript.Tests.UI/NovaScript.Tests.UI.csproj -c Debug --no-restore --filter \"FullyQualifiedName~FixedBugRegressionProtocol_RecordsRuntimeSmokeV2ResumeGate|FullyQualifiedName~FixedBugRegressionProtocol_HasExecutableRuntimeSmokeV2Plan\" -v minimal",
+    "runtime_smoke": "run_runtime_smoke with NovaScript.Tests.UI/Scenarios/fixed-bug-regression.runtime-smoke-v2.json",
+    "runtime_smoke_lifecycle": [
+      "runtime_smoke_start",
+      "runtime_smoke_tail_events",
+      "runtime_smoke_get_result",
+      "runtime_smoke_stop"
+    ]
+  },
+  "pass_criteria": [
+    "final status is PASS",
+    "all required variants have current evidence",
+    "ui.drag includes backend route_evidence",
+    "ui.grid.viewport before/after evidence proves expected row identity behavior",
+    "row count and identity set are preserved",
+    "invalid_drop_noop_or_cancel proves no mutation",
+    "cleanup reports debug stop success and empty process registry"
+  ],
+  "blocked_criteria": [
+    "missing downstream repo access",
+    "missing GUI desktop",
+    "missing deterministic fixture",
+    "missing MCP tool",
+    "known PARTIAL_PASS_INVALID_FOR_GATE route shape"
+  ],
+  "fail_criteria": [
+    "DataGrid target is found but row identity/order assertions fail",
+    "invalid-drop scenario mutates the document",
+    "cleanup cannot restore fixture or leaves debuggee processes",
+    "diagnostic fields are missing instead of actionable BLOCKED evidence"
+  ],
+  "known_invalid_evidence": [
+    ".agent/debug/source-side-runtime-smoke-t036/",
+    ".agent/reports/netcoredbg-v0.17.1-novascript-drag-check-2026-05-16.md",
+    "2026_06_15_current_drag_check: PARTIAL_PASS_INVALID_FOR_GATE"
+  ],
+  "evidence_output": {
+    "path": ".agent/specs/issue-backlog-hardening-roadmap/evidence/CR-008.downstream.json",
+    "required_fields": [
+      "status",
+      "timestamp",
+      "netcoredbg_mcp_commit",
+      "netcoredbg_mcp_version",
+      "novascript_path",
+      "novascript_branch",
+      "plan_path",
+      "contract_test_command",
+      "runtime_smoke_command_or_tool",
+      "required_variants",
+      "observed_variants",
+      "cleanup",
+      "issue_226_lifecycle_decision"
+    ],
+    "status_values": [
+      "PASS",
+      "BLOCKED",
+      "FAIL"
+    ]
+  },
+  "closure_rule": "Do not close #226 without fresh downstream PASS evidence or explicit owner-approved lifecycle decision."
+}

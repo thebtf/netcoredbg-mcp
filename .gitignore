@@ -13,6 +13,7 @@ bin/netcoredbg/
 # MCP configuration (contains secrets)
 .mcp.json
 .netcoredbg-mcp.launch.json
+.netcoredbg-mcp.pid
 
 # Debug tools
 .mcp-debug-tools/
