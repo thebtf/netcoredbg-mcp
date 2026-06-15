@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import contextlib
 import io
 import json
 from pathlib import Path
@@ -12,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+RED_REPRO_REASON = "Issue reproduction scenario; run targeted test with --runxfail to observe RED."
 
 
 class ToolRegistry:
@@ -282,6 +284,89 @@ async def test_session_manager_stealth_launch_restores_while_safe(
     assert sleep.await_count == 2
 
 
+@pytest.mark.asyncio
+@pytest.mark.xfail(strict=True, reason="Issue #251 RED: " + RED_REPRO_REASON)
+async def test_session_manager_stealth_launch_defers_foreground_restore_until_ui_ready(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """RED for #251: launch must not restore foreground before a UI readiness signal exists."""
+    from netcoredbg_mcp.dap import DAPResponse
+    from netcoredbg_mcp.session.manager import DebugState, SessionManager
+
+    class FakeLaunchClient:
+        is_running = True
+        netcoredbg_path = str(tmp_path / "netcoredbg.exe")
+        capabilities: dict[str, Any] = {}
+
+        async def set_exception_breakpoints(
+            self,
+            filters: list[str] | None = None,
+        ) -> DAPResponse:
+            return DAPResponse(1, 1, True, "setExceptionBreakpoints")
+
+        async def launch(self, **_kwargs: Any) -> DAPResponse:
+            return DAPResponse(1, 1, True, "launch")
+
+        async def configuration_done(self) -> DAPResponse:
+            return DAPResponse(1, 1, True, "configurationDone")
+
+    program = tmp_path / "WpfSmokeApp.dll"
+    program.write_bytes(b"")
+
+    manager = SessionManager.__new__(SessionManager)
+    manager._client = FakeLaunchClient()
+    manager._state = SimpleNamespace(state=DebugState.IDLE, process_id=None)
+    manager._initialized_event = asyncio.Event()
+    manager._initialized_event.set()
+    manager._breakpoints = SimpleNamespace(
+        function_breakpoints=[],
+        file_breakpoints={},
+        hit_counts={},
+    )
+    manager._state_listeners = []
+    manager._last_version_warning = None
+    manager._stealth_mode = False
+    manager._stealth_foreground_restore_task = None
+    manager._last_launch_config = None
+    manager._session_id = None
+    manager._sync_all_breakpoints = AsyncMock()
+    manager._enable_hot_reload_if_supported = AsyncMock()
+    manager.check_dbgshim_compatibility = MagicMock(return_value=None)
+
+    foregrounds = iter([111, 222, 222, 222])
+    restore_calls: list[int] = []
+    monkeypatch.setattr(
+        "netcoredbg_mcp.session.manager.get_foreground_window",
+        lambda: next(foregrounds),
+    )
+    monkeypatch.setattr(
+        "netcoredbg_mcp.session.manager.get_window_process_id",
+        lambda hwnd: None,
+    )
+    monkeypatch.setattr(
+        "netcoredbg_mcp.session.manager.restore_foreground_window",
+        lambda hwnd: restore_calls.append(hwnd) is None or True,
+    )
+
+    result = None
+    try:
+        result = await manager.launch(
+            program=str(program),
+            pre_build=False,
+            stealth_mode=True,
+        )
+    finally:
+        task = getattr(manager, "_stealth_foreground_restore_task", None)
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    assert result == {"success": True, "program": str(program)}
+    assert restore_calls == []
+
+
 def test_session_manager_stealth_launch_stops_after_user_moves_foreground(monkeypatch) -> None:
     from netcoredbg_mcp.session.manager import SessionManager
 
@@ -318,6 +403,68 @@ def test_flaui_backend_bring_to_front_reconnects_bridge_without_stealth() -> Non
     assert "await self.connect(self._process_id, stealth=False)" in backend
     assert '["activated"] = activated' not in backend
     assert '"activated": activated' in backend
+
+
+@pytest.mark.asyncio
+async def test_flaui_backend_bring_to_front_blocks_when_no_visible_window(monkeypatch) -> None:
+    """#266 overlap guard: explicit stealth exit must be blocked without a real UI stand."""
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._process_id = 42
+    monkeypatch.setattr("netcoredbg_mcp.ui.screenshot.get_hwnd_for_pid", lambda pid: None)
+
+    with pytest.raises(RuntimeError, match="No visible window for process 42"):
+        await backend.bring_to_front()
+
+
+@pytest.mark.xfail(strict=True, reason="Issue #266 RED: " + RED_REPRO_REASON)
+@pytest.mark.asyncio
+async def test_ui_get_window_tree_reconnects_same_pid_after_bridge_disconnect() -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    class DisconnectingBackend:
+        process_id = 42
+
+        def __init__(self) -> None:
+            self.connected = False
+            self.connect = AsyncMock(side_effect=self._connect)
+            self.bring_to_front = AsyncMock(return_value={"activated": True})
+
+        async def _connect(self, pid: int, stealth: bool = False) -> None:
+            self.connected = True
+
+        async def get_window_tree(self, max_depth: int = 3, max_children: int = 50) -> dict:
+            if not self.connected:
+                raise RuntimeError(
+                    "FlaUI bridge error: Internal error: Not connected. "
+                    "Call 'connect' first."
+                )
+            return {"windows": [{"automationId": "MainWindow"}], "count": 1}
+
+    backend = DisconnectingBackend()
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=True,
+    )
+    registry = ToolRegistry()
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(
+            registry,
+            session,
+            check_session_access=lambda ctx: None,
+        )
+
+        bring_response = await registry.tools["ui_bring_to_front"](SimpleNamespace())
+        tree_response = await registry.tools["ui_get_window_tree"]()
+
+    assert bring_response["data"]["activated"] is True
+    backend.connect.assert_awaited_once_with(42, stealth=False)
+    assert "error" not in tree_response
+    assert tree_response["data"]["count"] == 1
 
 
 @pytest.mark.asyncio

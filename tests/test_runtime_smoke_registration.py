@@ -32,6 +32,28 @@ async def test_existing_primitive_tool_names_remain_registered(mock_netcoredbg_p
     }.issubset(tool_names)
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Issues #267/#268/#269 RED: runtime-smoke durable lifecycle tools are not "
+        "registered yet; run with --runxfail."
+    ),
+)
+@pytest.mark.asyncio
+async def test_runtime_smoke_agent_lifecycle_tools_are_registered(mock_netcoredbg_path) -> None:
+    server = create_server(str(os.getcwd()))
+
+    tools = await server.list_tools()
+    tool_names = {tool.name for tool in tools}
+
+    assert {
+        "runtime_smoke_start",
+        "runtime_smoke_tail_events",
+        "runtime_smoke_get_result",
+        "runtime_smoke_stop",
+    }.issubset(tool_names)
+
+
 def test_success_response_keeps_existing_envelope_meaning() -> None:
     response = build_response(
         data={"value": 42},

@@ -9,6 +9,7 @@ from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -361,6 +362,46 @@ async def test_ui_evidence_tools_register_and_reject_invalid_fields_before_backe
 
     assert response["data"]["status"] == "FAIL"
     assert response["data"]["reason"] == "unknown UI fields"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Issue #254 RED: ui_grid consumer aliases need support or diagnostics; "
+        "run with --runxfail."
+    ),
+)
+@pytest.mark.asyncio
+async def test_ui_grid_accepts_rows_alias_for_visible_rows(capturing_mcp) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = SimpleNamespace(
+        process_id=42,
+        grid_visible_rows=AsyncMock(
+            return_value={
+                "status": "PASS",
+                "visible_rows": [{"index": 0, "cells": {"Phrase": "Fixture cue"}}],
+            }
+        ),
+    )
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+        register_ui_evidence_tools(
+            mcp=capturing_mcp,
+            session=session,
+            check_session_access=lambda ctx: None,
+        )
+
+        response = await capturing_mcp.tools["ui_grid"](
+            ctx=None,
+            action="rows",
+            automation_id="dataGrid",
+        )
+
+    assert response["data"]["status"] == "PASS"
+    assert response["data"]["visible_rows"][0]["index"] == 0
 
 
 def test_manual_smoke_list_includes_focused_ui_evidence_scenario() -> None:

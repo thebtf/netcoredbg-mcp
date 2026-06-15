@@ -206,6 +206,30 @@ class TestFlaUIBackendConnect:
 
 
 class TestFlaUIBridgeClient:
+    @pytest.mark.xfail(
+        strict=True,
+        reason="Issue #264 RED: cancelled bridge calls must stop the bridge; run with --runxfail.",
+    )
+    @pytest.mark.asyncio
+    async def test_call_restarts_bridge_after_cancelled_request(self):
+        import asyncio
+
+        from netcoredbg_mcp.ui.flaui_client import FlaUIBridgeClient
+
+        client = FlaUIBridgeClient("C:/fake/FlaUIBridge.exe")
+        client.ensure_alive = AsyncMock(return_value=True)
+        client.stop = AsyncMock()
+
+        async def cancelled_response(_request):
+            raise asyncio.CancelledError()
+
+        client._send_and_receive = cancelled_response
+
+        with pytest.raises(asyncio.CancelledError):
+            await client.call("get_tree", {"maxDepth": 1})
+
+        client.stop.assert_awaited_once()
+
     @pytest.mark.asyncio
     async def test_call_restarts_bridge_after_timeout(self):
         import asyncio

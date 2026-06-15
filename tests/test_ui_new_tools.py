@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -66,6 +67,104 @@ class TestFlaUIBackendInvoke:
         await backend.invoke_element(xpath="//Button[@Name='Save']")
         args = backend._client.call.call_args
         assert args[0][1]["xpath"] == "//Button[@Name='Save']"
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "Issue #265 RED: ui_invoke must reject exact AutomationId mismatch; "
+            "run with --runxfail."
+        ),
+    )
+    @pytest.mark.asyncio
+    async def test_ui_invoke_blocks_mismatched_exact_automation_id(self, capturing_mcp) -> None:
+        from netcoredbg_mcp.session.manager import DebugState
+        from netcoredbg_mcp.tools.ui import register_ui_tools
+
+        backend = SimpleNamespace(
+            process_id=42,
+            invoke_element=AsyncMock(
+                return_value={
+                    "invoked": True,
+                    "method": "InvokePattern",
+                    "automationId": "buttonCharlistRemove",
+                    "name": "Remove",
+                    "controlType": "Button",
+                }
+            ),
+        )
+        session = SimpleNamespace(
+            process_registry=None,
+            state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+            stealth_mode=False,
+        )
+
+        with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+            register_ui_tools(
+                capturing_mcp,
+                session,
+                check_session_access=lambda ctx: None,
+            )
+            response = await capturing_mcp.tools["ui_invoke"](
+                SimpleNamespace(),
+                automation_id="playButton",
+                control_type="Button",
+            )
+
+        backend.invoke_element.assert_awaited_once_with(
+            automation_id="playButton",
+            name=None,
+            control_type="Button",
+            root_id=None,
+            xpath=None,
+        )
+        assert response["data"]["status"] == "BLOCKED"
+        assert response["data"]["reason"] == "selector result did not match exact automation_id"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Issue #250 RED: FlaUI dict fallback must not call pywinauto click_input; "
+        "run with --runxfail."
+    ),
+)
+@pytest.mark.asyncio
+async def test_ui_right_click_uses_flaui_backend_for_dict_elements(capturing_mcp) -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    backend = SimpleNamespace(
+        process_id=42,
+        element_cache={},
+        find_element=AsyncMock(
+            return_value={
+                "automationId": "dataGrid",
+                "controlType": "DataGrid",
+                "rect": {"left": 10, "top": 20, "right": 110, "bottom": 80},
+            }
+        ),
+        right_click_at=AsyncMock(),
+    )
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+    )
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(
+            capturing_mcp,
+            session,
+            check_session_access=lambda ctx: None,
+        )
+        response = await capturing_mcp.tools["ui_right_click"](
+            SimpleNamespace(),
+            automation_id="dataGrid",
+        )
+
+    assert "error" not in response
+    backend.right_click_at.assert_awaited_once_with(60, 50)
+    assert response["data"]["right_clicked"] is True
 
 
 class TestFlaUIBackendToggle:
