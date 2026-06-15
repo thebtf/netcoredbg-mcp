@@ -13,9 +13,9 @@ def _read(path: Path) -> str:
 
 
 def _issue_row(backlog: str, issue: str) -> str:
-    prefix = f"| `{issue}` |"
     for line in backlog.splitlines():
-        if line.startswith(prefix):
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if cells and cells[0] == f"`{issue}`":
             return line
     raise AssertionError(f"missing backlog row for {issue}")
 
