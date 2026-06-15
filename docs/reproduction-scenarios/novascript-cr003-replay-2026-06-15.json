@@ -11,7 +11,7 @@
   },
   "downstream": {
     "repo_name": "NovaScript",
-    "expected_local_path": "D:/Dev/novascript",
+    "expected_local_path": "<NOVASCRIPT_REPO>",
     "plan_path": "NovaScript.Tests.UI/Scenarios/fixed-bug-regression.runtime-smoke-v2.json",
     "contract_path": "NovaScript.Tests.UI/Scenarios/fixed-bug-regression.feature-cycle.json",
     "contract_tests": [

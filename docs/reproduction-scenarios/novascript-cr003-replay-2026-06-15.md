@@ -44,7 +44,8 @@ derive source/drop identities from the current visible viewport.
 
 Use the NovaScript repository, not a local WPF substitute:
 
-- Expected local path when available: `D:\Dev\novascript`.
+- Set `<NOVASCRIPT_REPO>` to a local NovaScript checkout and run commands from
+  that repository root.
 - Runtime-smoke v2 plan:
   `NovaScript.Tests.UI/Scenarios/fixed-bug-regression.runtime-smoke-v2.json`.
 - Scenario contract:
@@ -78,7 +79,7 @@ Use the NovaScript repository, not a local WPF substitute:
 First, validate the downstream contract still names the runtime-smoke gate:
 
 ```powershell
-dotnet test NovaScript.Tests.UI\NovaScript.Tests.UI.csproj -c Debug --no-restore --filter "FullyQualifiedName~FixedBugRegressionProtocol_RecordsRuntimeSmokeV2ResumeGate|FullyQualifiedName~FixedBugRegressionProtocol_HasExecutableRuntimeSmokeV2Plan" -v minimal
+dotnet test NovaScript.Tests.UI/NovaScript.Tests.UI.csproj -c Debug --no-restore --filter "FullyQualifiedName~FixedBugRegressionProtocol_RecordsRuntimeSmokeV2ResumeGate|FullyQualifiedName~FixedBugRegressionProtocol_HasExecutableRuntimeSmokeV2Plan" -v minimal
 ```
 
 Then run the v2 plan through the active netcoredbg-mcp server with the plan from

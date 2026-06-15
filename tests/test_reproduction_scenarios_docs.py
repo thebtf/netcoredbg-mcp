@@ -18,7 +18,7 @@ def test_novascript_cr003_replay_packet_is_actionable() -> None:
         "#226",
         "main@12287e55ac8ea7415a3717f4a248d08723b93cfd",
         "0.17.2",
-        "D:\\Dev\\novascript",
+        "<NOVASCRIPT_REPO>",
         "NovaScript.Tests.UI/Scenarios/fixed-bug-regression.runtime-smoke-v2.json",
         "NovaScript.Tests.UI/Scenarios/fixed-bug-regression.feature-cycle.json",
         "FixedBugRegressionProtocolTests.cs",
@@ -61,7 +61,7 @@ def test_novascript_cr003_replay_packet_json_is_machine_readable() -> None:
     assert payload["status"] == "DOWNSTREAM_REPLAY_BLOCKED"
     assert payload["provider_baseline"]["commit"] == "12287e55ac8ea7415a3717f4a248d08723b93cfd"
     assert payload["provider_baseline"]["version"] == "0.17.2"
-    assert payload["downstream"]["expected_local_path"] == "D:/Dev/novascript"
+    assert payload["downstream"]["expected_local_path"] == "<NOVASCRIPT_REPO>"
     assert (
         payload["downstream"]["plan_path"]
         == "NovaScript.Tests.UI/Scenarios/fixed-bug-regression.runtime-smoke-v2.json"
