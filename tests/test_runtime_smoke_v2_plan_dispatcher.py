@@ -52,6 +52,23 @@ async def test_v2_runner_reports_non_list_cases_as_invalid_setup(cases: Any) -> 
 
 
 @pytest.mark.asyncio
+async def test_v2_runner_rejects_malformed_case_entries_before_execution() -> None:
+    result = await RuntimeStateOracleRunner(DispatcherSmokeSession()).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "malformed case entry",
+            "cases": ["bad", {"id": "ok", "transitions": []}],
+        }
+    )
+
+    assert result["status"] == "INVALID_SETUP"
+    assert result["reason"] == "invalid plan schema"
+    assert result["validation_errors"] == ["cases[0] must be an object"]
+    assert result["cases"] == []
+    assert result["cleanup"]["status"] == "PASS"
+
+
+@pytest.mark.asyncio
 async def test_v1_schema_keeps_legacy_result_envelope() -> None:
     result = await RuntimeSmokeRunner(DispatcherSmokeSession()).run(
         {

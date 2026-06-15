@@ -305,7 +305,11 @@ def _cases_for_execution(
     cases: list[dict[str, Any]] = []
     validation_errors: list[str] = []
     if isinstance(raw_cases, list):
-        cases = [dict(case) for case in raw_cases if isinstance(case, dict)]
+        for case_index, case in enumerate(raw_cases):
+            if not isinstance(case, dict):
+                validation_errors.append(f"cases[{case_index}] must be an object")
+                continue
+            cases.append(dict(case))
     else:
         validation_errors.append("cases must be a list")
     generated_cases, generation_errors = expand_generated_cases(plan)
