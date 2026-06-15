@@ -346,6 +346,37 @@ async def test_runtime_smoke_stop_finalizes_when_cleanup_raises() -> None:
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_stop_finalizes_when_stop_result_builder_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = LifecycleSmokeSession()
+
+    async def fail_stopped_result(*_: Any) -> dict[str, Any]:
+        raise RuntimeError("stop result builder exploded")
+
+    monkeypatch.setattr(
+        session.runtime_smoke.lifecycle_runs,
+        "_stopped_result",
+        fail_stopped_result,
+    )
+    started = await session.runtime_smoke.lifecycle_runs.start(
+        {
+            "name": "lifecycle-stop-builder-fails",
+            "actions": [{"name": "wait_until_released"}],
+        },
+        lambda: _runner(session),
+    )
+
+    stopped = await session.runtime_smoke.lifecycle_runs.stop(started["run_id"])
+
+    assert stopped["status"] == "FAIL"
+    assert stopped["lifecycle_status"] == "STOPPED"
+    assert stopped["reason"] == "runtime smoke stop cleanup failed"
+    assert stopped["cleanup"]["failures"][0]["reason"] == "stop result builder exploded"
+    assert session.runtime_smoke.lifecycle_runs.active_run_ids() == []
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_lifecycle_retention_is_bounded() -> None:
     session = LifecycleSmokeSession()
     session.runtime_smoke.lifecycle_runs = RuntimeSmokeRunRegistry(

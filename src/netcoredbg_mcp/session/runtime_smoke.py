@@ -818,7 +818,10 @@ class RuntimeSmokeRunRegistry:
             status = str(result.get("status") or "FAIL")
             event_kind = "completed"
         except asyncio.CancelledError:
-            result = await self._stopped_result(record, plan, runner)
+            try:
+                result = await self._stopped_result(record, plan, runner)
+            except Exception as exc:
+                result = self._stop_cleanup_exception_result(record, plan, runner, exc)
             status = "STOPPED"
             event_kind = "stopped"
         except Exception as exc:
@@ -930,6 +933,43 @@ class RuntimeSmokeRunRegistry:
             completed_steps=[],
             failed_assertions=[],
             cleanup=cleanup,
+            extra={"stopped": True},
+        )
+
+    def _stop_cleanup_exception_result(
+        self,
+        record: RuntimeSmokeRunRecord,
+        plan: Any,
+        runner: RuntimeSmokeRunner,
+        exc: Exception,
+    ) -> dict[str, Any]:
+        if isinstance(plan, dict) and plan.get("schema") == SCHEMA_VERSION_V2:
+            from .runtime_smoke_v2.runner import RuntimeStateOracleRunner
+
+            return RuntimeStateOracleRunner(
+                runner._session,
+                service_adapters=runner._service_adapters,
+                clock=runner._clock,
+            )._finalize(
+                status="FAIL",
+                reason="runtime smoke stop cleanup failed",
+                started=record.created_at,
+                action_count=0,
+                cases=[],
+                generated_case_count=0,
+                metrics_thresholds=None,
+                baseline=None,
+                cleanup=_cleanup_exception_payload("runtime_smoke_stop_cleanup", exc),
+                extra={"stopped": True},
+            )
+        return runner._finalize(
+            status="FAIL",
+            reason="runtime smoke stop cleanup failed",
+            started=record.created_at,
+            action_count=0,
+            completed_steps=[],
+            failed_assertions=[],
+            cleanup=_cleanup_exception_payload("runtime_smoke_stop_cleanup", exc),
             extra={"stopped": True},
         )
 
