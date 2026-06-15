@@ -12,6 +12,14 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _issue_row(backlog: str, issue: str) -> str:
+    prefix = f"| `{issue}` |"
+    for line in backlog.splitlines():
+        if line.startswith(prefix):
+            return line
+    raise AssertionError(f"missing backlog row for {issue}")
+
+
 def test_novascript_cr003_replay_packet_is_actionable() -> None:
     packet = _read(REPLAY_PACKET)
     required_terms = {
@@ -127,21 +135,47 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
     assert "## Historical RED Proof Commands" in backlog
     assert "## Executable RED Scenarios" not in backlog
     assert "## Blocked Or Spec-Needed Scenarios" not in backlog
-    assert "`#271` | Target evidence merged" in backlog
-    assert "`#272` | Target evidence merged" in backlog
     assert "SpecKit needed" not in backlog
     assert "`#226` | Downstream replay `BLOCKED`" in backlog
 
     for issue in (
-        "#250",
         "#251",
-        "#254",
         "#264",
         "#265",
         "#266",
-        "#267",
-        "#268",
-        "#269",
-        "#270",
     ):
         assert f"`{issue}` | Target evidence merged" in backlog
+
+    for issue in ("#250", "#254", "#267", "#268", "#269", "#270"):
+        row = _issue_row(backlog, issue)
+        assert "Target slice merged" in row
+        assert "broader" in row
+        assert "None in netcoredbg-mcp." not in row
+
+    for issue in ("#271", "#272"):
+        row = _issue_row(backlog, issue)
+        assert "Schema slice merged" in row
+        assert "executable FR remains open" in row
+        assert "None in netcoredbg-mcp." not in row
+
+
+def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+
+    expected_remaining_terms = {
+        "#250": ["focus", "selected-item", "screenshot-orientation"],
+        "#254": ["ui_query", "selected row/index/content"],
+        "#267": ["ui_monitor_start", "ui_monitor_poll", "ui_monitor_wait"],
+        "#268": ["runtime_smoke.validate_plan", "runtime_smoke.run_plan"],
+        "#269": ["agent_mode", "run_probe"],
+        "#270": ["semantic TextBox/DataGrid"],
+        "#271": ["debug_preflight", "tracepoint guard", "cleanup contract"],
+        "#272": ["app diagnostics", "oracle_pack"],
+    }
+
+    for issue, terms in expected_remaining_terms.items():
+        row = _issue_row(backlog, issue)
+        for term in terms:
+            assert term in row
+
+    assert "do not close the full Engram" in backlog

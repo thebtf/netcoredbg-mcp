@@ -13,18 +13,18 @@ work.
 | Issue | Current status | Evidence | Remaining action |
 | --- | --- | --- | --- |
 | `#226` | Downstream replay `BLOCKED` | PR #92, `docs/reproduction-scenarios/novascript-cr003-replay-2026-06-15.md`, and sidecar status `DOWNSTREAM_REPLAY_BLOCKED` | Keep open. NovaScript owner must amend `fixed-bug-regression.runtime-smoke-v2.json` so the first drag source row is visible or selected dynamically, then rerun the replay packet. |
-| `#250` | Target evidence merged | PR #86 and PR #87; FlaUI dict right-click/double-click routing stayed green in CR-003 focused checks | None in netcoredbg-mcp. |
+| `#250` | Target slice merged; broader issue remains open | PR #86 and PR #87; FlaUI dict right-click/double-click routing stayed green in CR-003 focused checks | Resolve or comment only the pointer-routing slice. Keep or split the remaining focus, selected-item, selection-confirmation, and screenshot-orientation requests before closing the full issue. |
 | `#251` | Target evidence merged | PR #88; stealth foreground restore waits for UI readiness; WPF delayed-readiness replay passed | None in netcoredbg-mcp. |
-| `#254` | Target evidence merged | PR #87; `ui_grid(action="rows")` aliases to `visible_rows`; WPF rows-alias replay passed | None in netcoredbg-mcp. |
+| `#254` | Target slice merged; broader issue remains open | PR #87; `ui_grid(action="rows")` aliases to `visible_rows`; WPF rows-alias replay passed | Resolve or comment only the `ui_grid` action/diagnostic slice. Keep or split `ui_query` consistency and selected row/index/content coverage before closing the full issue. |
 | `#264` | Target evidence merged | PR #84; cancelled FlaUI bridge calls stop/recover without stale bridge leakage | None in netcoredbg-mcp. |
 | `#265` | Target evidence merged | PR #86; exact selector mismatches return `BLOCKED` before side effects; WPF selector-safety replay passed | None in netcoredbg-mcp. |
 | `#266` | Target evidence merged | PR #84; same-PID stale backend reconnects before `ui_get_window_tree` without foreground activation | None in netcoredbg-mcp. |
-| `#267` | Target evidence merged | PR #90; `runtime_smoke_start` registered and lifecycle coverage merged | None in netcoredbg-mcp. |
-| `#268` | Target evidence merged | PR #90; `runtime_smoke_tail_events` registered and lifecycle coverage merged | None in netcoredbg-mcp. |
-| `#269` | Target evidence merged | PR #90; `runtime_smoke_get_result` and `runtime_smoke_stop` registered and lifecycle coverage merged | None in netcoredbg-mcp. |
-| `#270` | Target evidence merged | PR #89; blocked semantic probes preserve requested/accepted/next_step/backend diagnostics | None in netcoredbg-mcp. |
-| `#271` | Target evidence merged | PR #91; diagnostic schema `netcoredbg.runtime_smoke.diagnostics.v1`, oracle/app examples, and focused schema/docs/contracts tests merged | None in netcoredbg-mcp. |
-| `#272` | Target evidence merged | PR #91; semantic-probe registry contract and tracepoint guardrail vocabulary merged | None in netcoredbg-mcp. |
+| `#267` | Target slice merged; broader FR remains open | PR #90; `runtime_smoke_start` registered and lifecycle coverage merged | Keep or split the requested `ui_monitor_start` / `ui_monitor_poll` / `ui_monitor_wait` / `ui_monitor_events` semantic monitor API before closing the full FR. |
+| `#268` | Target slice merged; broader FR remains open | PR #90; `runtime_smoke_tail_events` registered and lifecycle coverage merged; existing v2 plan validation remains available | Keep or split first-class `runtime_smoke.validate_plan` / `runtime_smoke.run_plan` and evidence-bundle API work before closing the full FR. |
+| `#269` | Target slice merged; broader FR remains open | PR #90; `runtime_smoke_get_result` and `runtime_smoke_stop` registered and lifecycle coverage merged | Keep or split `agent_mode`, event cursor/delta, `run_probe`, and evidence-first probe UX before closing the full FR. |
+| `#270` | Target slice merged; broader FR remains open | PR #89; blocked semantic probes preserve requested/accepted/next_step/backend diagnostics | Keep or split semantic TextBox/DataGrid action and read-only state helpers before closing the full FR. |
+| `#271` | Schema slice merged; executable FR remains open | PR #91; diagnostic schema `netcoredbg.runtime_smoke.diagnostics.v1`, oracle/app examples, and focused schema/docs/contracts tests merged | Keep or split executable `debug_preflight`, tracepoint guard, trace cursor/delta, cleanup contract, contamination, and single-flight enforcement work before closing the full FR. |
+| `#272` | Schema slice merged; executable FR remains open | PR #91; semantic-probe registry contract and tracepoint guardrail vocabulary merged | Keep or split executable app diagnostics polling/waiting and `oracle_pack` integration before closing the full FR. |
 
 ## Historical RED Proof Commands
 
@@ -52,3 +52,7 @@ They are not the current expected behavior after the linked PRs merged.
   the NovaScript runtime-smoke plan establishes a visible source row before the
   first drag. Target-side v0.17.2 evidence is not enough to close the consumer
   issue.
+- `#250`, `#254`, and `#267` through `#272`: do not close the full Engram
+  issues from the narrow merged CR slices alone. Add an Engram comment or split
+  follow-up issue that names which sub-slice is resolved and which requested
+  capability remains open.
