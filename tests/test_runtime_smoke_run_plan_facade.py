@@ -35,6 +35,57 @@ class RunPlanFacadeSession:
         raise AssertionError("run-plan facade must not launch directly")
 
 
+class LargeFinalResultRegistry:
+    async def get_result(self, run_id: str) -> dict[str, Any]:
+        return {
+            "status": "PASS",
+            "reason": "runtime smoke v2 scenario passed",
+            "run_id": run_id,
+            "lifecycle_status": "COMPLETED",
+            "final": True,
+            "elapsed_ms": 12,
+            "action_count": 9,
+            "cleanup": {"status": "PASS", "attempted": [f"cleanup-{i}" for i in range(20)]},
+            "evidence_refs": [
+                {"kind": "case", "ref": f"case:{i}", "summary": "x" * 300}
+                for i in range(12)
+            ],
+            "compact": {
+                "status": "PASS",
+                "reason": "runtime smoke v2 scenario passed",
+                "elapsed_ms": 12,
+                "action_count": 9,
+                "generated_case_count": 0,
+                "case_count": 12,
+            },
+            "cases": [{"id": f"case-{i}", "details": "x" * 500} for i in range(12)],
+            "baseline": {"status": "PASS", "details": "x" * 500},
+            "metrics_thresholds": {"max_ms": 100},
+            "accepted_schema_values": ["netcoredbg.runtime_smoke.v1"],
+            "accepted_top_level_keys_v2": ["cases"],
+            "accepted_action_kinds": ["ui.text.assert"],
+            "accepted_probe_kinds": ["ui.text"],
+        }
+
+    async def tail_events(
+        self,
+        run_id: str,
+        *,
+        after_cursor: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        return {
+            "status": "COMPLETED",
+            "run_id": run_id,
+            "events": [{"cursor": 1, "kind": "completed"}],
+            "next_cursor": 1,
+            "oldest_cursor": 1,
+            "dropped_count": 0,
+            "stale_cursor": False,
+            "final": True,
+        }
+
+
 async def _resolve_project_root(_ctx: Any, _session: Any) -> None:
     raise AssertionError("run-plan facade test plan must not resolve project paths")
 
@@ -155,6 +206,34 @@ async def test_runtime_smoke_evidence_bundle_returns_bounded_final_packet(
     assert data["event_cursor"]["stale_cursor"] is False
     assert "runtime_smoke_evidence_bundle" in data["next_actions"]
     assert "runtime_smoke_run_plan" in data["next_actions"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_evidence_bundle_bounds_large_final_result(
+    capturing_mcp,
+) -> None:
+    session = RunPlanFacadeSession()
+    session.runtime_smoke.lifecycle_runs = LargeFinalResultRegistry()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_evidence_bundle"](
+        ctx=None,
+        run_id="large-v2-run",
+    )
+    result = response["data"]["result"]
+
+    assert result["status"] == "PASS"
+    assert result["action_count"] == 9
+    assert result["cleanup"]["attempted"][-1] == {"omitted_count": 12}
+    assert result["evidence_refs"][-1] == {"omitted_count": 4}
+    assert "compact" in result
+    assert "cases" not in result
+    assert "baseline" not in result
+    assert "metrics_thresholds" not in result
+    assert "accepted_schema_values" not in result
+    assert "accepted_top_level_keys_v2" not in result
+    assert "accepted_action_kinds" not in result
+    assert "accepted_probe_kinds" not in result
 
 
 @pytest.mark.asyncio

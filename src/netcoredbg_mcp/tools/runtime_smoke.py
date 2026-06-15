@@ -22,6 +22,7 @@ from ..session.runtime_smoke_schema import (
     schema_help_fields,
     validate_plan,
 )
+from ..session.runtime_smoke_v2.result_envelope import compact_value
 from ..session.state import DebugState
 
 _NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
@@ -571,11 +572,28 @@ async def _runtime_smoke_evidence_bundle(
             "stale_cursor": tail.get("stale_cursor", False),
             "limit": max(0, int(event_limit)),
         },
-        "result": result if final else None,
+        "result": _bounded_runtime_smoke_result(result) if final else None,
         "evidence_refs": result.get("evidence_refs", []),
         "cleanup": result.get("cleanup"),
         "next_actions": next_actions,
     }
+
+
+def _bounded_runtime_smoke_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Return bounded final result metadata for evidence bundles."""
+    bounded = {
+        "status": result.get("status"),
+        "reason": result.get("reason"),
+        "elapsed_ms": result.get("elapsed_ms", 0),
+        "action_count": result.get("action_count", 0),
+        "cleanup": compact_value(result.get("cleanup", {})),
+        "evidence_refs": compact_value(result.get("evidence_refs", [])),
+    }
+    if "failed_assertions" in result:
+        bounded["failed_assertions"] = compact_value(result["failed_assertions"])
+    if "compact" in result:
+        bounded["compact"] = compact_value(result["compact"])
+    return bounded
 
 
 def _runtime_smoke_evidence_contract() -> dict[str, Any]:
