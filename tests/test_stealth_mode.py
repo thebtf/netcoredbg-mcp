@@ -418,7 +418,6 @@ async def test_flaui_backend_bring_to_front_blocks_when_no_visible_window(monkey
         await backend.bring_to_front()
 
 
-@pytest.mark.xfail(strict=True, reason="Issue #266 RED: " + RED_REPRO_REASON)
 @pytest.mark.asyncio
 async def test_ui_get_window_tree_reconnects_same_pid_after_bridge_disconnect() -> None:
     from netcoredbg_mcp.session.manager import DebugState
@@ -463,6 +462,54 @@ async def test_ui_get_window_tree_reconnects_same_pid_after_bridge_disconnect() 
 
     assert bring_response["data"]["activated"] is True
     backend.connect.assert_awaited_once_with(42, stealth=False)
+    assert "error" not in tree_response
+    assert tree_response["data"]["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_ui_get_window_tree_reconnects_same_pid_without_foreground_activation() -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    class PassiveDisconnectingBackend:
+        process_id = 42
+
+        def __init__(self) -> None:
+            self.connected = False
+            self.connect = AsyncMock(side_effect=self._connect)
+            self.bring_to_front = AsyncMock(return_value={"activated": True})
+
+        async def _connect(self, pid: int, stealth: bool = False) -> None:
+            self.connected = True
+
+        async def get_window_tree(self, max_depth: int = 3, max_children: int = 50) -> dict:
+            if not self.connected:
+                raise RuntimeError(
+                    "FlaUI bridge error: Internal error: Not connected. "
+                    "Call 'connect' first."
+                )
+            return {"windows": [{"automationId": "MainWindow"}], "count": 1}
+
+    backend = PassiveDisconnectingBackend()
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=True,
+    )
+    registry = ToolRegistry()
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(
+            registry,
+            session,
+            check_session_access=lambda ctx: None,
+        )
+
+        tree_response = await registry.tools["ui_get_window_tree"]()
+
+    backend.connect.assert_awaited_once_with(42, stealth=True)
+    backend.bring_to_front.assert_not_awaited()
+    assert session.stealth_mode is True
     assert "error" not in tree_response
     assert tree_response["data"]["count"] == 1
 

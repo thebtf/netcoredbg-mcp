@@ -193,6 +193,13 @@ class FlaUIBridgeClient:
                     self._send_and_receive(request),
                     timeout=timeout,
                 )
+            except asyncio.CancelledError:
+                logger.warning(
+                    "FlaUI bridge call '%s' was cancelled; restarting bridge",
+                    method,
+                )
+                await self.stop()
+                raise
             except asyncio.TimeoutError:
                 logger.warning(
                     "FlaUI bridge call '%s' timed out after %.1fs; restarting bridge",

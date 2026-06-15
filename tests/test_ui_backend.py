@@ -206,10 +206,6 @@ class TestFlaUIBackendConnect:
 
 
 class TestFlaUIBridgeClient:
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Issue #264 RED: cancelled bridge calls must stop the bridge; run with --runxfail.",
-    )
     @pytest.mark.asyncio
     async def test_call_restarts_bridge_after_cancelled_request(self):
         import asyncio

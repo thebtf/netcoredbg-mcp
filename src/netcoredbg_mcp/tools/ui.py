@@ -17,6 +17,11 @@ _SUPPORTED_MODIFIERS = {"ctrl", "shift", "alt", "win"}
 _SUPPORTED_SYSTEM_EVENTS = {"theme_change"}
 _SUPPORTED_THEME_MODES = {"toggle", "light", "dark"}
 UI_TREE_DISCOVERY_TIMEOUT_SECONDS = 10.0
+BRIDGE_NOT_CONNECTED_DIAGNOSTIC = "Not connected. Call 'connect' first."
+
+
+def _is_bridge_not_connected_error(error: BaseException) -> bool:
+    return isinstance(error, RuntimeError) and BRIDGE_NOT_CONNECTED_DIAGNOSTIC in str(error)
 
 
 def _normalize_modifier_list(modifiers: list[str] | None) -> list[str]:
@@ -112,6 +117,24 @@ def register_ui_tools(
                 stealth_mode=getattr(session, "stealth_mode", False),
             )
         return backend
+
+    async def _reconnect_ui_backend(backend: Any, process_id: int) -> None:
+        stealth_mode = getattr(session, "stealth_mode", False)
+        try:
+            await backend.connect(process_id, stealth=stealth_mode)
+        except TypeError as exc:
+            if "stealth" not in str(exc):
+                raise
+
+            from ..ui.backend import connect_backend
+
+            await connect_backend(backend, process_id, stealth_mode=stealth_mode)
+
+    async def _read_window_tree(ui: Any, max_depth: int, max_children: int) -> Any:
+        return await asyncio.wait_for(
+            ui.get_window_tree(max_depth, max_children),
+            timeout=UI_TREE_DISCOVERY_TIMEOUT_SECONDS,
+        )
 
     def _ui_tree_timeout_payload(error: BaseException, *, session: SessionManager, ui: Any) -> dict:
         backend_name = type(ui).__name__ if ui is not None else "unknown"
@@ -271,10 +294,23 @@ def register_ui_tools(
         try:
             ui = await _ensure_ui_connected()
             try:
-                tree = await asyncio.wait_for(
-                    ui.get_window_tree(max_depth, max_children),
-                    timeout=UI_TREE_DISCOVERY_TIMEOUT_SECONDS,
-                )
+                tree = await _read_window_tree(ui, max_depth, max_children)
+            except RuntimeError as e:
+                if not _is_bridge_not_connected_error(e):
+                    raise
+
+                process_id = session.state.process_id
+                if not process_id:
+                    raise
+
+                await _reconnect_ui_backend(ui, process_id)
+                try:
+                    tree = await _read_window_tree(ui, max_depth, max_children)
+                except (asyncio.TimeoutError, TimeoutError) as retry_timeout:
+                    return build_response(
+                        data=_ui_tree_timeout_payload(retry_timeout, session=session, ui=ui),
+                        state=session.state.state,
+                    )
             except (asyncio.TimeoutError, TimeoutError) as e:
                 return build_response(
                     data=_ui_tree_timeout_payload(e, session=session, ui=ui),
