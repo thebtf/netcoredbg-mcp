@@ -270,6 +270,7 @@ def _selector_from_action(
 
 
 register_action("noop", _handle_noop)
+register_action("ui.noop", _handle_noop)
 register_action("ui.click", _handle_ui_click)
 register_action("ui.drag", handle_ui_drag)
 register_action("ui.grid.select", _handle_ui_grid_select)
