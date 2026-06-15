@@ -77,13 +77,6 @@ async def test_ui_text_probe_blocks_when_execution_is_unavailable() -> None:
     assert probe["reason"] == "probe execution not available"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Issue #270 RED: blocked semantic probes need actionable backend diagnostics; "
-        "run with --runxfail."
-    ),
-)
 @pytest.mark.asyncio
 async def test_ui_text_probe_preserves_blocked_backend_diagnostics() -> None:
     session = TextProbeSession()

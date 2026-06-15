@@ -1062,6 +1062,83 @@ async def test_ui_operation_adapters_forward_grid_columns_and_backend_text_statu
 
 
 @pytest.mark.asyncio
+async def test_ui_text_assert_selector_miss_returns_actionable_blocked() -> None:
+    class FakeBackend:
+        async def extract_text(self, **_: Any) -> dict[str, Any]:
+            return {
+                "status": "FAIL",
+                "found": False,
+                "reason": "Element not found",
+                "tree": {"children": [{"automation_id": "txtOutput"}]},
+            }
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await RuntimeSmokeRunner(
+        FakeRuntimeSmokeSession(),
+        service_adapters=ui_operation_adapters(backend_provider),
+    ).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "cases": [
+                {
+                    "id": "missing_text",
+                    "transitions": [
+                        {
+                            "probes": [
+                                {
+                                    "kind": "ui.text",
+                                    "name": "missing_output",
+                                    "phase": "after",
+                                    "selector": {"automation_id": "missingTxtOutput"},
+                                    "expected": "Done",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["blocked"]["reason"] == "selector not found"
+    assert result["blocked"]["requested"] == {
+        "selector": {"automation_id": "missingTxtOutput"}
+    }
+    assert result["blocked"]["accepted"]["selector_keys"]
+    assert result["blocked"]["next_step"]
+    assert result["blocked"]["backend_result"] == {
+        "status": "FAIL",
+        "found": False,
+        "reason": "Element not found",
+    }
+
+
+@pytest.mark.asyncio
+async def test_ui_text_assert_backend_exception_reports_bridge_diagnostics() -> None:
+    class FakeBackend:
+        async def extract_text(self, **_: Any) -> dict[str, Any]:
+            raise RuntimeError("bridge pipe closed")
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.text.assert"](
+        selector={"automation_id": "statusText"},
+        contains="ready",
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "bridge pipe closed"
+    assert result["requested"] == {"selector": {"automation_id": "statusText"}}
+    assert result["accepted"] == {"backend": "connected UI backend supporting ui.text.assert"}
+    assert result["next_step"] == "Inspect UI backend or bridge transport diagnostics."
+    assert result["result"] == {"status": "BLOCKED", "reason": "bridge pipe closed"}
+
+
+@pytest.mark.asyncio
 async def test_ui_operation_adapters_route_point_drag_to_backend() -> None:
     class FakeBackend:
         def __init__(self) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..blocked import build_blocked, selector_guidance
+from ..evidence import attach_blocked_details
 
 
 async def handle_ui_property(
@@ -42,9 +43,7 @@ async def handle_ui_property(
             "value": result.get("value"),
             "reason": _failure_reason(result),
         }
-        for key in ("requested", "accepted", "next_step"):
-            if key in result:
-                output[key] = result[key]
+        attach_blocked_details(output, result)
         return output
 
     status = str(result.get("status", "PASS"))

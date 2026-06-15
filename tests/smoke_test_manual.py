@@ -3014,6 +3014,128 @@ async def run_wpf_v2_state_oracle_runtime_smoke() -> dict[str, Any]:
     )
 
 
+async def run_wpf_v2_text_probe_missing_selector_runtime_smoke() -> dict[str, Any]:
+    return await _run_v2_text_probe_missing_selector_runtime_smoke(
+        label="WPF",
+        program=WPF_DLL,
+        build_project=os.path.join(
+            BASE,
+            "tests",
+            "fixtures",
+            "WpfSmokeApp",
+            "WpfSmokeApp.csproj",
+        ),
+    )
+
+
+async def run_avalonia_v2_text_probe_missing_selector_runtime_smoke() -> dict[str, Any]:
+    return await _run_v2_text_probe_missing_selector_runtime_smoke(
+        label="Avalonia",
+        program=AVALONIA_DLL,
+        build_project=os.path.join(
+            BASE,
+            "tests",
+            "fixtures",
+            "AvaloniaSmokeApp",
+            "AvaloniaSmokeApp.csproj",
+        ),
+    )
+
+
+async def _run_v2_text_probe_missing_selector_runtime_smoke(
+    *,
+    label: str,
+    program: str,
+    build_project: str,
+) -> dict[str, Any]:
+    from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner
+    from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
+    from netcoredbg_mcp.ui.backend import create_backend
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    if sys.platform != "win32":
+        return {
+            "status": "BLOCKED",
+            "reason": f"{label} v2 text-probe selector-miss smoke requires Windows UI automation",
+        }
+
+    m = SessionManager(project_path=BASE)
+    backend_holder: dict[str, object | None] = {"backend": None}
+    backend_holder["backend"] = create_backend(process_registry=m.process_registry)
+    if not isinstance(backend_holder["backend"], FlaUIBackend):
+        return {
+            "status": "BLOCKED",
+            "backend": type(backend_holder["backend"]).__name__,
+            "reason": f"FlaUI bridge required for {label} v2 text-probe selector-miss smoke",
+        }
+
+    async def ensure_ui_connected():
+        backend = backend_holder["backend"]
+        if backend is None:
+            backend = create_backend(process_registry=m.process_registry)
+            backend_holder["backend"] = backend
+        pid = m.state.process_id
+        if not pid:
+            raise RuntimeError(f"Process ID not available for {label} v2 text-probe smoke")
+        if getattr(backend, "process_id", None) != pid:
+            await backend.connect(pid)
+        return backend
+
+    plan = _v2_text_probe_missing_selector_plan(
+        label=label,
+        program=program,
+        build_project=build_project,
+    )
+
+    try:
+        result = await RuntimeSmokeRunner(
+            m,
+            service_adapters=ui_operation_adapters(ensure_ui_connected, session=m),
+        ).run(plan)
+        transition = _v2_transition(result, 0)
+        probe = _transition_probe_result(
+            transition,
+            "after",
+            "ui.text.missing_output",
+        )
+        blocked = dict(result.get("blocked") or {})
+        cleanup = dict(result.get("cleanup") or {})
+        has_diagnostics = (
+            probe.get("status") == "BLOCKED"
+            and probe.get("requested") == {"selector": {"automation_id": "missingTxtOutput"}}
+            and bool(probe.get("accepted"))
+            and bool(probe.get("next_step"))
+            and isinstance(probe.get("backend_result"), dict)
+            and bool(blocked.get("backend_result"))
+        )
+        return {
+            "status": "PASS"
+            if (
+                result.get("status") == "BLOCKED"
+                and blocked.get("reason") == "selector not found"
+                and has_diagnostics
+                and cleanup.get("process_registry_after") == 0
+            )
+            else "FAIL",
+            "result": _v2_smoke_summary(result),
+            "probe": {
+                "status": probe.get("status"),
+                "reason": probe.get("reason"),
+                "requested": probe.get("requested"),
+                "accepted": probe.get("accepted"),
+                "next_step": probe.get("next_step"),
+                "backend_result": probe.get("backend_result"),
+            },
+        }
+    finally:
+        if backend_holder["backend"] is not None:
+            try:
+                await backend_holder["backend"].disconnect()
+            except Exception as exc:
+                print(f"  [DEBUG] {label} v2 text-probe backend.disconnect() failed: {exc}")
+        await m.stop()
+
+
 async def run_avalonia_v2_state_oracle_runtime_smoke() -> dict[str, Any]:
     return await _run_v2_state_oracle_runtime_smoke(
         label="Avalonia",
@@ -3167,6 +3289,61 @@ def _v2_state_oracle_plan(
     }
 
 
+def _v2_text_probe_missing_selector_plan(
+    *,
+    label: str,
+    program: str,
+    build_project: str,
+) -> dict[str, Any]:
+    return {
+        "schema": "netcoredbg.runtime_smoke.v2",
+        "name": f"{label.lower()} v2 text probe selector miss diagnostics",
+        "baseline": {
+            "steps": [
+                {
+                    "id": "launch_fixture",
+                    "kind": "isolated_profile.launch",
+                    "launch": {
+                        "program": program,
+                        "cwd": os.path.dirname(program),
+                        "pre_build": True,
+                        "build_project": build_project,
+                        "build_configuration": "Debug",
+                    },
+                }
+            ]
+        },
+        "cases": [
+            {
+                "id": "missing_text_probe",
+                "transitions": [
+                    {
+                        "action": {
+                            "kind": "ui.invoke",
+                            "selector": {"automation_id": "btnInvoke"},
+                        },
+                        "probes": [
+                            {
+                                "kind": "ui.text",
+                                "name": "missing_output",
+                                "phase": "after",
+                                "selector": {"automation_id": "missingTxtOutput"},
+                                "expected": "Clicked",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+        "cleanup": {
+            "steps": [
+                {"kind": "debug.stop"},
+                {"kind": "process.registry.assert_empty"},
+            ]
+        },
+    }
+
+
 def _v2_smoke_summary(result: dict[str, Any]) -> dict[str, Any]:
     return {
         "status": result.get("status"),
@@ -3194,6 +3371,34 @@ async def test_wpf_v2_state_oracle_runtime_smoke():
         "WPF v2 state oracle cleanup proof has zero leaked processes",
         evidence.get("happy", {}).get("cleanup", {}).get("process_registry_after") == 0
         and evidence.get("blocked", {}).get("cleanup", {}).get("process_registry_after") == 0,
+        str(evidence),
+    )
+
+
+async def test_wpf_v2_text_probe_missing_selector_runtime_smoke():
+    print("\nWPF V2 TEXT PROBE MISSING SELECTOR RUNTIME SMOKE")
+    evidence = await run_wpf_v2_text_probe_missing_selector_runtime_smoke()
+    print(f"  evidence: {evidence}")
+    if evidence.get("status") == "BLOCKED":
+        check("WPF v2 text-probe selector miss reports BLOCKED", True, str(evidence))
+        return
+    check(
+        "WPF v2 text-probe selector miss preserves diagnostics",
+        evidence.get("status") == "PASS",
+        str(evidence),
+    )
+
+
+async def test_avalonia_v2_text_probe_missing_selector_runtime_smoke():
+    print("\nAVALONIA V2 TEXT PROBE MISSING SELECTOR RUNTIME SMOKE")
+    evidence = await run_avalonia_v2_text_probe_missing_selector_runtime_smoke()
+    print(f"  evidence: {evidence}")
+    if evidence.get("status") == "BLOCKED":
+        check("Avalonia v2 text-probe selector miss reports BLOCKED", True, str(evidence))
+        return
+    check(
+        "Avalonia v2 text-probe selector miss preserves diagnostics",
+        evidence.get("status") == "PASS",
         str(evidence),
     )
 
@@ -4949,11 +5154,23 @@ def get_scenarios():
                 test_wpf_one_call_runtime_smoke_workflow,
             )
         )
+        scenarios.append(
+            (
+                "WPF V2 Text Probe Missing Selector Runtime Smoke",
+                test_wpf_v2_text_probe_missing_selector_runtime_smoke,
+            )
+        )
     if AVALONIA_GUI_ENABLED:
         scenarios.append(
             (
                 "Avalonia UI Fixture Compatibility",
                 test_avalonia_ui_fixture_compatibility,
+            )
+        )
+        scenarios.append(
+            (
+                "Avalonia V2 Text Probe Missing Selector Runtime Smoke",
+                test_avalonia_v2_text_probe_missing_selector_runtime_smoke,
             )
         )
     return scenarios

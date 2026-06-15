@@ -125,6 +125,10 @@ async def test_v2_transition_blocked_payload_comes_from_blocked_probe() -> None:
                 "requested": {"adapter": "ui.get_property"},
                 "accepted": {"adapter_names": ["ui.get_property"]},
                 "next_step": "Reconnect UI bridge.",
+                "backend_result": {
+                    "error": "bridge disconnected",
+                    "tree": {"children": [{"automation_id": "sensitive"}]},
+                },
             },
         ]
     )
@@ -152,6 +156,8 @@ async def test_v2_transition_blocked_payload_comes_from_blocked_probe() -> None:
     assert result["status"] == "BLOCKED"
     assert transition["blocked"]["reason"] == "backend bridge disconnected"
     assert transition["blocked"]["next_step"] == "Reconnect UI bridge."
+    assert transition["blocked"]["backend_result"] == {"error": "bridge disconnected"}
+    assert result["blocked"]["backend_result"] == {"error": "bridge disconnected"}
 
 
 def test_compute_diff_omits_unchanged_values() -> None:
