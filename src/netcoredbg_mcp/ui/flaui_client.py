@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Callable
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -61,17 +62,29 @@ def _int_or_zero(value: Any) -> int:
 class FlaUIBridgeClient:
     """Manages FlaUIBridge.exe subprocess lifecycle."""
 
-    def __init__(self, bridge_path: str, process_registry: Any = None) -> None:
+    def __init__(
+        self,
+        bridge_path: str,
+        process_registry: Any = None,
+        invalidate_connection: Callable[[], None] | None = None,
+    ) -> None:
         self._bridge_path = bridge_path
         self._process: asyncio.subprocess.Process | None = None
         self._request_id = 0
         self._restart_times: list[float] = []
         self._process_registry = process_registry
         self._lock = asyncio.Lock()
+        self._cleanup_tasks: set[asyncio.Task[None]] = set()
+        self._invalidate_connection = invalidate_connection
+        self._stop_tasks: dict[asyncio.subprocess.Process, asyncio.Task[None]] = {}
+
+    def _mark_connection_invalid(self) -> None:
+        if self._invalidate_connection is not None:
+            self._invalidate_connection()
 
     async def start(self) -> None:
         """Start the bridge subprocess."""
-        if self._process is not None and self._process.returncode is None:
+        if self.is_running:
             return  # Already running
 
         self._process = await asyncio.create_subprocess_exec(
@@ -91,38 +104,71 @@ class FlaUIBridgeClient:
 
     async def stop(self) -> None:
         """Stop the bridge subprocess."""
-        if self._process is None:
+        process = self._process
+        if process is None:
             return
 
-        pid = self._process.pid
+        self._mark_connection_invalid()
+        existing_task = self._stop_tasks.get(process)
+        if existing_task is not None and not existing_task.done():
+            await asyncio.shield(existing_task)
+            return
+
+        cleanup_task = asyncio.create_task(self._stop_process(process))
+        self._stop_tasks[process] = cleanup_task
+        self._cleanup_tasks.add(cleanup_task)
+        cleanup_task.add_done_callback(self._cleanup_tasks.discard)
+        cleanup_task.add_done_callback(
+            lambda _task, stopped=process: self._stop_tasks.pop(stopped, None)
+        )
+        await asyncio.shield(cleanup_task)
+
+    async def _stop_process(self, process: asyncio.subprocess.Process) -> None:
+        """Stop one captured bridge process and clear state after cleanup."""
+        pid = process.pid
 
         try:
-            if self._process.stdin and not self._process.stdin.is_closing():
-                # Send shutdown as notification (no id, no response expected)
-                shutdown_msg = json.dumps({"jsonrpc": "2.0", "method": "shutdown"}) + "\n"
-                self._process.stdin.write(shutdown_msg.encode("utf-8"))
-                await self._process.stdin.drain()
-                self._process.stdin.close()
-        except Exception:
-            pass
+            try:
+                if process.stdin and not process.stdin.is_closing():
+                    # Send shutdown as notification (no id, no response expected)
+                    shutdown_msg = json.dumps({"jsonrpc": "2.0", "method": "shutdown"}) + "\n"
+                    process.stdin.write(shutdown_msg.encode("utf-8"))
+                    await process.stdin.drain()
+                    process.stdin.close()
+            except Exception:
+                pass
 
-        try:
-            await asyncio.wait_for(self._process.wait(), timeout=5.0)
-        except asyncio.TimeoutError:
-            self._process.kill()
-            await self._process.wait()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
 
-        # Unregister from reaper
-        if self._process_registry and pid:
-            self._process_registry.unregister(pid)
+            # Unregister from reaper
+            if self._process_registry and pid:
+                self._process_registry.unregister(pid)
 
-        logger.info("FlaUI bridge stopped")
-        self._process = None
+            logger.info("FlaUI bridge stopped")
+        finally:
+            if self._process is process:
+                self._process = None
+
+    async def _stop_after_interrupted_call(self) -> None:
+        """Stop the bridge without letting caller cancellation cancel cleanup."""
+        self._mark_connection_invalid()
+        cleanup_task = asyncio.create_task(self.stop())
+        self._cleanup_tasks.add(cleanup_task)
+        cleanup_task.add_done_callback(self._cleanup_tasks.discard)
+        await asyncio.shield(cleanup_task)
 
     @property
     def is_running(self) -> bool:
         """Check if bridge subprocess is alive."""
-        return self._process is not None and self._process.returncode is None
+        return (
+            self._process is not None
+            and self._process not in self._stop_tasks
+            and self._process.returncode is None
+        )
 
     @property
     def pid(self) -> int | None:
@@ -193,6 +239,13 @@ class FlaUIBridgeClient:
                     self._send_and_receive(request),
                     timeout=timeout,
                 )
+            except asyncio.CancelledError:
+                logger.warning(
+                    "FlaUI bridge call '%s' was cancelled; restarting bridge",
+                    method,
+                )
+                await self._stop_after_interrupted_call()
+                raise
             except asyncio.TimeoutError:
                 logger.warning(
                     "FlaUI bridge call '%s' timed out after %.1fs; restarting bridge",
@@ -269,9 +322,13 @@ class FlaUIBackend:
     """UIBackend implementation using FlaUI bridge subprocess."""
 
     def __init__(self, bridge_path: str, process_registry: Any = None) -> None:
-        self._client = FlaUIBridgeClient(bridge_path, process_registry)
         self._element_cache: dict[str, dict] = {}
         self._process_id: int | None = None
+        self._client = FlaUIBridgeClient(
+            bridge_path,
+            process_registry,
+            invalidate_connection=self._invalidate_connection,
+        )
 
     @property
     def client(self) -> FlaUIBridgeClient:
@@ -286,7 +343,13 @@ class FlaUIBackend:
     @property
     def process_id(self) -> int | None:
         """Connected process ID."""
+        if self._process_id is not None and not self._client.is_running:
+            self._invalidate_connection()
         return self._process_id
+
+    def _invalidate_connection(self) -> None:
+        self._process_id = None
+        self._element_cache.clear()
 
     async def connect(self, pid: int, stealth: bool = False) -> None:
         """Connect to process via FlaUI bridge."""

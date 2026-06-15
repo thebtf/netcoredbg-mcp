@@ -419,7 +419,6 @@ async def test_flaui_backend_bring_to_front_blocks_when_no_visible_window(monkey
         await backend.bring_to_front()
 
 
-@pytest.mark.xfail(strict=True, reason="Issue #266 RED: " + RED_REPRO_REASON)
 @pytest.mark.asyncio
 async def test_ui_get_window_tree_reconnects_same_pid_after_bridge_disconnect() -> None:
     from netcoredbg_mcp.session.manager import DebugState
@@ -467,6 +466,102 @@ async def test_ui_get_window_tree_reconnects_same_pid_after_bridge_disconnect() 
     assert "error" not in tree_response
     assert tree_response["data"]["count"] == 1
     assert call(42, stealth=False) in backend.connect.await_args_list
+
+
+@pytest.mark.asyncio
+async def test_ui_get_window_tree_reconnects_same_pid_without_foreground_activation() -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    class PassiveDisconnectingBackend(FlaUIBackend):
+        process_id = 42
+
+        def __init__(self) -> None:
+            self.connected = False
+            self.connect = AsyncMock(side_effect=self._connect)
+            self.bring_to_front = AsyncMock(return_value={"activated": True})
+
+        async def _connect(self, pid: int, stealth: bool = False) -> None:
+            self.connected = True
+
+        async def get_window_tree(self, max_depth: int = 3, max_children: int = 50) -> dict:
+            if not self.connected:
+                raise RuntimeError(
+                    "FlaUI bridge error: Internal error: Not connected. "
+                    "Call 'connect' first."
+                )
+            return {"windows": [{"automationId": "MainWindow"}], "count": 1}
+
+    backend = PassiveDisconnectingBackend()
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=True,
+    )
+    registry = ToolRegistry()
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(
+            registry,
+            session,
+            check_session_access=lambda ctx: None,
+        )
+
+        tree_response = await registry.tools["ui_get_window_tree"]()
+
+    backend.connect.assert_awaited_once_with(42, stealth=True)
+    backend.bring_to_front.assert_not_awaited()
+    assert session.stealth_mode is True
+    assert "error" not in tree_response
+    assert tree_response["data"]["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_ui_find_element_reconnects_same_pid_after_bridge_stop() -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._client = SimpleNamespace(is_running=False)
+    backend._process_id = 42
+    backend._element_cache = {"stale": {"runtimeId": "old-bridge"}}
+
+    async def connect(pid: int, stealth: bool = False) -> None:
+        backend._client.is_running = True
+        backend._process_id = pid
+
+    async def find_element(**_: Any) -> dict[str, Any]:
+        if not backend._client.is_running:
+            raise RuntimeError(
+                "FlaUI bridge error: Internal error: Not connected. "
+                "Call 'connect' first."
+            )
+        return {"automationId": "btnInvoke", "name": "Invoke", "controlType": "Button"}
+
+    backend.connect = AsyncMock(side_effect=connect)
+    backend.find_element = AsyncMock(side_effect=find_element)
+
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=True,
+    )
+    registry = ToolRegistry()
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(
+            registry,
+            session,
+            check_session_access=lambda ctx: None,
+        )
+
+        response = await registry.tools["ui_find_element"](automation_id="btnInvoke")
+
+    backend.connect.assert_awaited_once_with(42, stealth=True)
+    assert "error" not in response
+    assert response["data"]["automationId"] == "btnInvoke"
 
 
 @pytest.mark.asyncio
