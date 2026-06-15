@@ -102,6 +102,21 @@ If solution contains "simple", "quick", "temporary", "workaround" — **STOP and
 - GUI tests require `dotnet build tests/fixtures/SmokeTestApp -c Debug` first
 - When fixing a bug: add smoke test BEFORE the fix, verify it fails, then fix, verify it passes
 
+**Reproduction-First Debugging Protocol:**
+- Behavior bugs MUST be reproduced on a controlled test program, fixture, smoke
+  scenario, or regression test before product-code edits.
+- Preferred fixture surfaces:
+  `tests/fixtures/SmokeTestApp`, `tests/fixtures/WpfSmokeApp`,
+  `tests/fixtures/AvaloniaSmokeApp`, and `tests/smoke_test_manual.py`.
+- If the existing fixtures cannot express the reported behavior, extend the
+  fixture first. Do not patch product code around an unmodeled symptom.
+- Prove RED on current code, fix the root cause, prove GREEN on the same check,
+  then replay the original user-observable scenario or record an explicit
+  blocker naming the missing capability.
+- `nvmd-platform:debug --quick` is allowed only for exact file/line errors with
+  a <=2-line non-control-flow fix and no plausible competing hypothesis. The
+  smallest regression test still belongs with the fix.
+
 **Coverage Targets:** (customize per project)
 - Core Domain: 80%
 - Critical Paths: 100%
