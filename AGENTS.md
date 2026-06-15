@@ -71,6 +71,45 @@ If solution contains "simple", "quick", "temporary", "workaround" — **STOP and
 
 ---
 
+## 🧾 AGENT-GENERATED WORKTREE TRACES
+
+The repository owner does not manually edit this checkout during agent work.
+Unexpected tracked-file dirtiness is therefore agent/tooling residue until
+proven otherwise.
+
+**Before source edits, commits, release work, or tests that may regenerate
+tracked files:**
+
+1. Run `git status --short --branch`.
+2. For every dirty tracked path, capture `git diff -- <path>`.
+3. Classify each path:
+   - **intended work** — belongs to the current task.
+   - **known generated churn** — expected output from a named command/tool.
+   - **unknown residue** — not explained by the active task.
+   - **blocker** — may affect tests, release, branch switching, or verification.
+4. Record command, path, diff summary, and classification in `.agent/CONTINUITY.md`
+   when the residue affects future agents.
+
+**Forbidden without explicit user decision:**
+
+- `git restore`, `git checkout --`, `git reset`, `git clean`, stash, or branch
+  deletion against unknown residue.
+- Committing generated residue just because the worktree is dirty.
+- Building, testing, releasing, or opening a PR from a checkout whose dirty
+  tracked files are unclassified.
+
+**Lockfile rule:** `uv.lock` is a reproducibility artifact. Local `uv` commands
+can update the editable package's own version entry without a human source edit.
+Treat editable-package version churn as tooling residue unless the active task
+intentionally changes dependency resolution or package version metadata. Do not
+commit or discard it in an unrelated task without an explicit decision.
+
+**Clean implementation rule:** If unknown residue exists on `main`, create a
+clean sibling worktree/feature branch for implementation work and keep the
+residue documented in the original checkout.
+
+---
+
 ## 📍 KEY PATHS
 
 | What | Where |
