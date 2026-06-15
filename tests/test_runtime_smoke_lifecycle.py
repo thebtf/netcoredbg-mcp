@@ -35,6 +35,7 @@ class LifecycleSmokeSession:
         self.cleanup_started_event = asyncio.Event()
         self.cleanup_release_event = asyncio.Event()
         self.block_cleanup = False
+        self.fail_cleanup = False
         self.cleanup_calls = 0
 
     async def append_output(self, text: str = "ready\n") -> dict[str, Any]:
@@ -57,6 +58,8 @@ class LifecycleSmokeSession:
         if self.block_cleanup:
             self.cleanup_started_event.set()
             await self.cleanup_release_event.wait()
+        if self.fail_cleanup:
+            raise RuntimeError("cleanup exploded")
         self.runtime_smoke.instrumentation_groups.pop(name, None)
         return {"status": "PASS", "reason": "instrumentation group cleared"}
 
@@ -301,6 +304,40 @@ async def test_runtime_smoke_concurrent_stop_waits_for_cleanup_without_recancell
     next_run = await session.runtime_smoke.lifecycle_runs.start(
         {
             "name": "after-concurrent-stop",
+            "actions": [{"name": "append_output", "args": {"text": "ready\n"}}],
+        },
+        lambda: _runner(session),
+    )
+    assert next_run["status"] == "RUNNING"
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_stop_finalizes_when_cleanup_raises() -> None:
+    session = LifecycleSmokeSession()
+    session.fail_cleanup = True
+    session.runtime_smoke.instrumentation_groups["flow"] = {"breakpoints": [1]}
+
+    started = await session.runtime_smoke.lifecycle_runs.start(
+        {
+            "name": "lifecycle-stop-cleanup-fails",
+            "actions": [{"name": "wait_until_released"}],
+            "teardown": {"instrumentation_groups": ["flow"]},
+        },
+        lambda: _runner(session),
+    )
+
+    stopped = await session.runtime_smoke.lifecycle_runs.stop(started["run_id"])
+
+    assert stopped["status"] == "FAIL"
+    assert stopped["lifecycle_status"] == "STOPPED"
+    assert stopped["reason"] == "runtime smoke stop cleanup failed"
+    assert stopped["cleanup"]["status"] == "FAIL"
+    assert stopped["cleanup"]["failures"][0]["reason"] == "cleanup exploded"
+    assert session.runtime_smoke.lifecycle_runs.active_run_ids() == []
+
+    next_run = await session.runtime_smoke.lifecycle_runs.start(
+        {
+            "name": "after-cleanup-failure",
             "actions": [{"name": "append_output", "args": {"text": "ready\n"}}],
         },
         lambda: _runner(session),

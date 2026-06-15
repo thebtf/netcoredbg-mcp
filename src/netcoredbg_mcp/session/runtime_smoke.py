@@ -858,26 +858,41 @@ class RuntimeSmokeRunRegistry:
                 clock=runner._clock,
                 session=runner._session,
             )
-            cases, generated_case_count, _generation_errors = _cases_for_execution(plan)
-            case_cleanups = []
-            for case in cases:
-                case_cleanup_steps = cleanup_steps_from_case(case)
-                if not case_cleanup_steps:
-                    continue
-                case_cleanups.append(
-                    await run_cleanup(
-                        case_cleanup_steps,
-                        context,
-                        case_id=str(case.get("id") or ""),
-                    )
-                )
-            plan_cleanup = await run_cleanup(cleanup_steps_from_plan(plan), context)
-            cleanup = merge_cleanup_results(plan_cleanup, case_cleanups)
-            return RuntimeStateOracleRunner(
+            v2_runner = RuntimeStateOracleRunner(
                 runner._session,
                 service_adapters=runner._service_adapters,
                 clock=runner._clock,
-            )._finalize(
+            )
+            try:
+                cases, generated_case_count, _generation_errors = _cases_for_execution(plan)
+                case_cleanups = []
+                for case in cases:
+                    case_cleanup_steps = cleanup_steps_from_case(case)
+                    if not case_cleanup_steps:
+                        continue
+                    case_cleanups.append(
+                        await run_cleanup(
+                            case_cleanup_steps,
+                            context,
+                            case_id=str(case.get("id") or ""),
+                        )
+                    )
+                plan_cleanup = await run_cleanup(cleanup_steps_from_plan(plan), context)
+                cleanup = merge_cleanup_results(plan_cleanup, case_cleanups)
+            except Exception as exc:
+                return v2_runner._finalize(
+                    status="FAIL",
+                    reason="runtime smoke stop cleanup failed",
+                    started=record.created_at,
+                    action_count=0,
+                    cases=[],
+                    generated_case_count=0,
+                    metrics_thresholds=None,
+                    baseline=None,
+                    cleanup=_cleanup_exception_payload("runtime_smoke_stop_cleanup", exc),
+                    extra={"stopped": True},
+                )
+            return v2_runner._finalize(
                 status="IMPASSE",
                 reason="runtime smoke run stopped",
                 started=record.created_at,
@@ -890,11 +905,23 @@ class RuntimeSmokeRunRegistry:
                 extra={"stopped": True},
             )
 
-        cleanup = await runner._teardown(
-            plan if isinstance(plan, dict) else {},
-            allow_restore=isinstance(plan, dict),
-            allow_plan_cleanup=isinstance(plan, dict),
-        )
+        try:
+            cleanup = await runner._teardown(
+                plan if isinstance(plan, dict) else {},
+                allow_restore=isinstance(plan, dict),
+                allow_plan_cleanup=isinstance(plan, dict),
+            )
+        except Exception as exc:
+            return runner._finalize(
+                status="FAIL",
+                reason="runtime smoke stop cleanup failed",
+                started=record.created_at,
+                action_count=0,
+                completed_steps=[],
+                failed_assertions=[],
+                cleanup=_cleanup_exception_payload("runtime_smoke_stop_cleanup", exc),
+                extra={"stopped": True},
+            )
         return runner._finalize(
             status="IMPASSE",
             reason="runtime smoke run stopped",
@@ -999,6 +1026,23 @@ def _run_not_found(run_id: str) -> dict[str, Any]:
         "status": "FAIL",
         "reason": "runtime smoke run not found",
         "run_id": run_id,
+    }
+
+
+def _cleanup_exception_payload(operation: str, exc: Exception) -> dict[str, Any]:
+    return {
+        "status": "FAIL",
+        "attempted": [operation],
+        "failures": [
+            {
+                "operation": operation,
+                "reason": str(exc),
+                "exception": {
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            }
+        ],
     }
 
 
