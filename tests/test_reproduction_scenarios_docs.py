@@ -132,5 +132,16 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
     assert "SpecKit needed" not in backlog
     assert "`#226` | Downstream replay `BLOCKED`" in backlog
 
-    for issue in ("#250", "#251", "#254", "#265", "#267", "#268", "#269", "#270"):
+    for issue in (
+        "#250",
+        "#251",
+        "#254",
+        "#264",
+        "#265",
+        "#266",
+        "#267",
+        "#268",
+        "#269",
+        "#270",
+    ):
         assert f"`{issue}` | Target evidence merged" in backlog
