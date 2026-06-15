@@ -137,12 +137,27 @@ class SessionManager:
         return True
 
     async def _restore_foreground_after_stealth_launch(self, saved_hwnd: int | None) -> None:
-        for delay_seconds in (0.0, 0.05, 0.2, 0.5):
+        for delay_seconds in (0.0, 0.05, 0.2, 0.5, 1.0, 1.5, 2.0):
             if delay_seconds:
                 await asyncio.sleep(delay_seconds)
 
             if not self._restore_foreground_if_safe(saved_hwnd):
                 return
+
+    async def _cancel_stealth_foreground_restore_task(self) -> None:
+        task = self._stealth_foreground_restore_task
+        if task is None:
+            return
+
+        self._stealth_foreground_restore_task = None
+        try:
+            if not task.done():
+                task.cancel()
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.debug("[launch] stealth foreground restore task ended during cleanup: %s", exc)
 
     @property
     def state(self) -> SessionState:
@@ -1290,6 +1305,8 @@ class SessionManager:
 
     async def stop(self) -> dict[str, Any]:
         """Stop debug session."""
+        await self._cancel_stealth_foreground_restore_task()
+
         if self._client.is_running:
             try:
                 await self._client.disconnect(terminate=True)

@@ -315,6 +315,35 @@ def test_session_manager_stealth_restore_waits_for_known_foreground_owner(monkey
 
 
 @pytest.mark.asyncio
+async def test_session_manager_stop_cancels_stealth_foreground_restore_task() -> None:
+    from netcoredbg_mcp.session.manager import DebugState, SessionManager
+
+    async def sleepy_restore() -> None:
+        await asyncio.sleep(60)
+
+    manager = SessionManager.__new__(SessionManager)
+    task = asyncio.create_task(sleepy_restore())
+    manager._stealth_foreground_restore_task = task
+    manager._client = SimpleNamespace(is_running=False)
+    manager._process_registry = SimpleNamespace(cleanup_all=MagicMock())
+    manager._session_id = None
+    manager._state = SimpleNamespace(state=DebugState.RUNNING)
+    manager._state_listeners = []
+    manager._initialized_event = asyncio.Event()
+    manager._execution_event = asyncio.Event()
+    manager._runtime_smoke = SimpleNamespace(reset=MagicMock())
+    manager._output_bytes = 1
+
+    result = await manager.stop()
+
+    assert result == {"success": True}
+    assert task.cancelled()
+    assert manager._stealth_foreground_restore_task is None
+    manager._process_registry.cleanup_all.assert_called_once_with()
+    manager._runtime_smoke.reset.assert_called_once_with()
+
+
+@pytest.mark.asyncio
 async def test_session_manager_stealth_launch_defers_foreground_restore_until_ui_ready(
     tmp_path,
     monkeypatch,
