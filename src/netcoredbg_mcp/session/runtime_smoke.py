@@ -7,6 +7,7 @@ import inspect
 import os
 import stat
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,6 +46,10 @@ class RuntimeSmokeSession:
     ui_snapshots: dict[str, Any] = field(default_factory=dict)
     ui_event_buffers: dict[str, Any] = field(default_factory=dict)
     evidence_refs: list[EvidenceRef] = field(default_factory=list)
+    lifecycle_runs: RuntimeSmokeRunRegistry = field(
+        default_factory=lambda: RuntimeSmokeRunRegistry(),
+        repr=False,
+    )
     last_reset_failures: tuple[CleanupFailure, ...] = ()
     _cleanup_callbacks: dict[str, CleanupCallback] = field(default_factory=dict)
 
@@ -593,6 +598,387 @@ class RuntimeSmokeRunner:
             compact_builder=compact_runtime_smoke_result,
             extra=extra,
         )
+
+
+@dataclass
+class RuntimeSmokeRunRecord:
+    """Bounded state for one durable runtime-smoke lifecycle run."""
+
+    run_id: str
+    plan_name: str
+    created_at: float
+    max_events: int
+    status: str = "RUNNING"
+    task: asyncio.Task | None = None
+    result: dict[str, Any] | None = None
+    events: list[dict[str, Any]] = field(default_factory=list)
+    next_cursor: int = 1
+    dropped_count: int = 0
+    stop_requested: bool = False
+    updated_at: float = 0.0
+
+    def __post_init__(self) -> None:
+        self.updated_at = self.created_at
+
+    @property
+    def oldest_cursor(self) -> int:
+        if self.events:
+            return int(self.events[0]["cursor"])
+        return self.next_cursor
+
+    def append_event(self, kind: str, clock: Callable[[], float], **payload: Any) -> None:
+        event = {
+            "cursor": self.next_cursor,
+            "kind": kind,
+            "status": self.status,
+            "run_id": self.run_id,
+            "timestamp": int(clock() * 1000),
+            **payload,
+        }
+        self.next_cursor += 1
+        self.updated_at = clock()
+        self.events.append(event)
+        if len(self.events) > self.max_events:
+            excess = len(self.events) - self.max_events
+            del self.events[:excess]
+            self.dropped_count += excess
+
+    def tail(self, after_cursor: int, limit: int) -> dict[str, Any]:
+        bounded_limit = max(0, min(limit, self.max_events))
+        events = [
+            dict(event)
+            for event in self.events
+            if int(event.get("cursor", 0)) > after_cursor
+        ][:bounded_limit]
+        stale_cursor = bool(self.events) and after_cursor < self.oldest_cursor - 1
+        return {
+            "status": self.status,
+            "run_id": self.run_id,
+            "events": events,
+            "next_cursor": self.next_cursor - 1,
+            "oldest_cursor": self.oldest_cursor,
+            "dropped_count": self.dropped_count,
+            "stale_cursor": stale_cursor,
+            "final": self.result is not None,
+        }
+
+
+class RuntimeSmokeRunRegistry:
+    """Per-session durable runtime-smoke lifecycle run registry."""
+
+    def __init__(
+        self,
+        *,
+        max_runs: int = 8,
+        max_events_per_run: int = 128,
+        stop_timeout_seconds: float = 5.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._max_runs = max(1, max_runs)
+        self._max_events_per_run = max(1, max_events_per_run)
+        self._stop_timeout_seconds = max(0.1, stop_timeout_seconds)
+        self._clock = clock
+        self._runs: dict[str, RuntimeSmokeRunRecord] = {}
+        self._lock = asyncio.Lock()
+
+    async def start(
+        self,
+        plan: Any,
+        runner_factory: Callable[[], RuntimeSmokeRunner],
+    ) -> dict[str, Any]:
+        async with self._lock:
+            active = self._active_run_locked()
+            if active is not None:
+                return {
+                    "status": "BLOCKED",
+                    "reason": "runtime smoke run already active",
+                    "active_run_id": active.run_id,
+                    "next_cursor": active.next_cursor - 1,
+                }
+
+            run_id = uuid.uuid4().hex
+            record = RuntimeSmokeRunRecord(
+                run_id=run_id,
+                plan_name=_plan_name(plan),
+                created_at=self._clock(),
+                max_events=self._max_events_per_run,
+            )
+            record.append_event(
+                "started",
+                self._clock,
+                reason="runtime smoke run started",
+                plan_name=record.plan_name,
+            )
+            record.task = asyncio.create_task(
+                self._execute(record, plan, runner_factory),
+                name=f"runtime-smoke:{run_id}",
+            )
+            self._runs[run_id] = record
+            self._prune_locked()
+            return self._running_payload(record)
+
+    async def tail_events(
+        self,
+        run_id: str,
+        *,
+        after_cursor: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None:
+                return _run_not_found(run_id)
+            return record.tail(max(0, int(after_cursor)), max(0, int(limit)))
+
+    async def get_result(self, run_id: str) -> dict[str, Any]:
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None:
+                return _run_not_found(run_id)
+            if record.result is None:
+                return self._running_payload(record)
+            return self._final_payload(record)
+
+    async def stop(
+        self,
+        run_id: str,
+        *,
+        reason: str = "runtime smoke stop requested",
+    ) -> dict[str, Any]:
+        task: asyncio.Task | None = None
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None:
+                return _run_not_found(run_id)
+            if record.result is not None:
+                return self._final_payload(record)
+            if not record.stop_requested:
+                record.stop_requested = True
+                record.status = "STOPPING"
+                record.append_event("stop_requested", self._clock, reason=reason)
+            task = record.task
+
+        if task is not None:
+            if not task.done():
+                await asyncio.sleep(0)
+            if not task.done():
+                task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=self._stop_timeout_seconds)
+            except TimeoutError:
+                async with self._lock:
+                    record = self._runs.get(run_id)
+                    if record is None:
+                        return _run_not_found(run_id)
+                    record.status = "STOPPING"
+                    record.append_event(
+                        "stop_timeout",
+                        self._clock,
+                        reason="runtime smoke stop is still cleaning up",
+                    )
+                    return self._running_payload(record)
+
+        return await self.get_result(run_id)
+
+    async def stop_all(
+        self,
+        *,
+        reason: str = "runtime smoke session stopped",
+    ) -> list[dict[str, Any]]:
+        current_task = asyncio.current_task()
+        async with self._lock:
+            run_ids = [
+                run_id
+                for run_id, record in self._runs.items()
+                if record.result is None and record.task is not current_task
+            ]
+        return [await self.stop(run_id, reason=reason) for run_id in run_ids]
+
+    def active_run_ids(self) -> list[str]:
+        return [
+            run_id
+            for run_id, record in self._runs.items()
+            if record.result is None
+        ]
+
+    def retained_run_ids(self) -> list[str]:
+        return list(self._runs)
+
+    async def _execute(
+        self,
+        record: RuntimeSmokeRunRecord,
+        plan: Any,
+        runner_factory: Callable[[], RuntimeSmokeRunner],
+    ) -> None:
+        runner = runner_factory()
+        try:
+            result = await runner.run(plan)
+            status = str(result.get("status") or "FAIL")
+            event_kind = "completed"
+        except asyncio.CancelledError:
+            result = await self._stopped_result(record, plan, runner)
+            status = "STOPPED"
+            event_kind = "stopped"
+        except Exception as exc:
+            result = await self._failure_result(record, plan, runner, exc)
+            status = str(result.get("status") or "FAIL")
+            event_kind = "failed"
+
+        async with self._lock:
+            record.result = result
+            record.status = status
+            record.append_event(
+                event_kind,
+                self._clock,
+                reason=result.get("reason"),
+                result_compact=result.get("compact"),
+            )
+            self._prune_locked()
+
+    async def _stopped_result(
+        self,
+        record: RuntimeSmokeRunRecord,
+        plan: Any,
+        runner: RuntimeSmokeRunner,
+    ) -> dict[str, Any]:
+        if isinstance(plan, dict) and plan.get("schema") == SCHEMA_VERSION_V2:
+            from .runtime_smoke_v2.actions import ActionContext
+            from .runtime_smoke_v2.cleanup import cleanup_steps_from_plan, run_cleanup
+            from .runtime_smoke_v2.runner import RuntimeStateOracleRunner
+
+            context = ActionContext(
+                service_adapters=runner._service_adapters,
+                clock=runner._clock,
+                session=runner._session,
+            )
+            cleanup = await run_cleanup(cleanup_steps_from_plan(plan), context)
+            return RuntimeStateOracleRunner(
+                runner._session,
+                service_adapters=runner._service_adapters,
+                clock=runner._clock,
+            )._finalize(
+                status="IMPASSE",
+                reason="runtime smoke run stopped",
+                started=record.created_at,
+                action_count=0,
+                cases=[],
+                generated_case_count=0,
+                metrics_thresholds=None,
+                baseline=None,
+                cleanup=cleanup,
+                extra={"stopped": True},
+            )
+
+        cleanup = await runner._teardown(
+            plan if isinstance(plan, dict) else {},
+            allow_restore=isinstance(plan, dict),
+            allow_plan_cleanup=isinstance(plan, dict),
+        )
+        return runner._finalize(
+            status="IMPASSE",
+            reason="runtime smoke run stopped",
+            started=record.created_at,
+            action_count=0,
+            completed_steps=[],
+            failed_assertions=[],
+            cleanup=cleanup,
+            extra={"stopped": True},
+        )
+
+    async def _failure_result(
+        self,
+        record: RuntimeSmokeRunRecord,
+        plan: Any,
+        runner: RuntimeSmokeRunner,
+        exc: Exception,
+    ) -> dict[str, Any]:
+        try:
+            cleanup = await runner._teardown(
+                plan if isinstance(plan, dict) else {},
+                allow_restore=isinstance(plan, dict),
+                allow_plan_cleanup=isinstance(plan, dict),
+            )
+        except Exception as cleanup_exc:
+            cleanup = {
+                "status": "FAIL",
+                "attempted": ["runtime_smoke_failure_cleanup"],
+                "failures": [
+                    {
+                        "operation": "runtime_smoke_failure_cleanup",
+                        "reason": str(cleanup_exc),
+                    }
+                ],
+            }
+        return runner._finalize(
+            status="FAIL",
+            reason="runtime smoke runner raised exception",
+            started=record.created_at,
+            action_count=0,
+            completed_steps=[],
+            failed_assertions=[],
+            cleanup=cleanup,
+            extra={
+                "exception": {
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                }
+            },
+        )
+
+    def _active_run_locked(self) -> RuntimeSmokeRunRecord | None:
+        for record in self._runs.values():
+            if record.result is None:
+                return record
+        return None
+
+    def _prune_locked(self) -> None:
+        for run_id, record in list(self._runs.items()):
+            if len(self._runs) <= self._max_runs:
+                break
+            if record.result is None:
+                continue
+            del self._runs[run_id]
+
+    def _running_payload(self, record: RuntimeSmokeRunRecord) -> dict[str, Any]:
+        return {
+            "status": record.status,
+            "reason": "runtime smoke run is still running",
+            "run_id": record.run_id,
+            "plan_name": record.plan_name,
+            "next_cursor": record.next_cursor - 1,
+            "oldest_cursor": record.oldest_cursor,
+            "dropped_count": record.dropped_count,
+            "final": False,
+        }
+
+    def _final_payload(self, record: RuntimeSmokeRunRecord) -> dict[str, Any]:
+        assert record.result is not None
+        payload = dict(record.result)
+        payload.update(
+            {
+                "run_id": record.run_id,
+                "lifecycle_status": record.status,
+                "next_cursor": record.next_cursor - 1,
+                "oldest_cursor": record.oldest_cursor,
+                "dropped_count": record.dropped_count,
+                "final": True,
+            }
+        )
+        return payload
+
+
+def _plan_name(plan: Any) -> str:
+    if isinstance(plan, dict):
+        return str(plan.get("name") or plan.get("id") or "runtime-smoke")
+    return "runtime-smoke"
+
+
+def _run_not_found(run_id: str) -> dict[str, Any]:
+    return {
+        "status": "FAIL",
+        "reason": "runtime smoke run not found",
+        "run_id": run_id,
+    }
 
 
 def _clear_windows_hidden_attribute(target: Path) -> int | None:
