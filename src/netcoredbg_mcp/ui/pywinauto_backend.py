@@ -109,11 +109,30 @@ class PywinautoBackend:
     def _blocked_identity_result(
         *,
         action_key: str,
+        requested_automation_id: str | None,
         info: Any,
     ) -> dict[str, Any]:
         return {
+            "status": "BLOCKED",
+            "reason": "selector result did not match exact automation_id",
             action_key: False,
             "method": "ExactAutomationIdMismatch",
+            "requested": {
+                "automationId": requested_automation_id,
+            },
+            "candidate": {
+                "automationId": info.automation_id,
+                "name": info.name,
+                "controlType": info.control_type,
+            },
+            "accepted": {
+                "selector_policy": "exact automation_id match",
+            },
+            "next_step": (
+                "Inspect the scoped tree with ui_get_window_tree or adjust the selector; "
+                "side-effecting UI actions require the returned element to match the "
+                "requested exact automation_id."
+            ),
             "automationId": info.automation_id,
             "name": info.name,
             "controlType": info.control_type,
@@ -158,7 +177,11 @@ class PywinautoBackend:
         element = await self._find_element_scoped(automation_id, name, control_type, root_id)
         info = await self._get_element_info(element)
         if self._exact_id_mismatch(automation_id, info.automation_id):
-            return self._blocked_identity_result(action_key="invoked", info=info)
+            return self._blocked_identity_result(
+                action_key="invoked",
+                requested_automation_id=automation_id,
+                info=info,
+            )
 
         loop = asyncio.get_running_loop()
 
@@ -203,7 +226,11 @@ class PywinautoBackend:
         element = await self._find_element_scoped(automation_id, name, control_type, root_id)
         info = await self._get_element_info(element)
         if self._exact_id_mismatch(automation_id, info.automation_id):
-            return self._blocked_identity_result(action_key="toggled", info=info)
+            return self._blocked_identity_result(
+                action_key="toggled",
+                requested_automation_id=automation_id,
+                info=info,
+            )
 
         loop = asyncio.get_running_loop()
 

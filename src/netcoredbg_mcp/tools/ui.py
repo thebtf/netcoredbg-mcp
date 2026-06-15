@@ -228,6 +228,43 @@ def register_ui_tools(
             payload["backend_result"] = result
         return payload
 
+    def _exact_automation_id_exception_payload(
+        *,
+        action: str,
+        requested_automation_id: str | None,
+        error: Exception,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+    ) -> dict[str, Any] | None:
+        if not requested_automation_id:
+            return None
+        message = str(error)
+        if "selector result did not match exact automation_id" not in message:
+            return None
+        return {
+            "status": "BLOCKED",
+            "reason": "selector result did not match exact automation_id",
+            "action": action,
+            "requested": {
+                "automationId": requested_automation_id,
+                "name": name,
+                "controlType": control_type,
+                "rootAutomationId": root_id,
+                "xpath": xpath,
+            },
+            "accepted": {
+                "selector_policy": "exact automation_id match",
+            },
+            "next_step": (
+                "Inspect the scoped tree with ui_get_window_tree or adjust the selector; "
+                "side-effecting UI actions require the returned element to match the "
+                "requested exact automation_id."
+            ),
+            "backend_error": message,
+        }
+
     def _has_secondary_selector_constraints(
         *,
         name: str | None = None,
@@ -993,6 +1030,17 @@ def register_ui_tools(
                 return build_response(data=mismatch, state=session.state.state)
             return build_response(data=result, state=session.state.state)
         except Exception as e:
+            mismatch = _exact_automation_id_exception_payload(
+                action="ui_invoke",
+                requested_automation_id=automation_id,
+                error=e,
+                name=name,
+                control_type=control_type,
+                root_id=root_id,
+                xpath=xpath,
+            )
+            if mismatch is not None:
+                return build_response(data=mismatch, state=session.state.state)
             return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
@@ -1046,6 +1094,17 @@ def register_ui_tools(
                 return build_response(data=mismatch, state=session.state.state)
             return build_response(data=result, state=session.state.state)
         except Exception as e:
+            mismatch = _exact_automation_id_exception_payload(
+                action="ui_toggle",
+                requested_automation_id=automation_id,
+                error=e,
+                name=name,
+                control_type=control_type,
+                root_id=root_id,
+                xpath=xpath,
+            )
+            if mismatch is not None:
+                return build_response(data=mismatch, state=session.state.state)
             return build_error_response(str(e), state=session.state.state)
 
     def _escape_sendkeys_path(path: str) -> str:

@@ -113,6 +113,45 @@ class TestFlaUIBackendInvoke:
         assert response["data"]["status"] == "BLOCKED"
         assert response["data"]["reason"] == "selector result did not match exact automation_id"
 
+    @pytest.mark.asyncio
+    async def test_ui_invoke_maps_exact_miss_exception_to_blocked(self, capturing_mcp) -> None:
+        from netcoredbg_mcp.session.manager import DebugState
+        from netcoredbg_mcp.tools.ui import register_ui_tools
+
+        backend = SimpleNamespace(
+            process_id=42,
+            invoke_element=AsyncMock(
+                side_effect=RuntimeError(
+                    "selector result did not match exact automation_id. "
+                    "Requested automationId='playButton'. Search: automationId='playButton'"
+                )
+            ),
+        )
+        session = SimpleNamespace(
+            process_registry=None,
+            state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+            stealth_mode=False,
+        )
+
+        with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+            register_ui_tools(
+                capturing_mcp,
+                session,
+                check_session_access=lambda ctx: None,
+            )
+            response = await capturing_mcp.tools["ui_invoke"](
+                SimpleNamespace(),
+                automation_id="playButton",
+                control_type="Button",
+                root_id="selectorSafetyPanel",
+            )
+
+        assert "error" not in response
+        assert response["data"]["status"] == "BLOCKED"
+        assert response["data"]["reason"] == "selector result did not match exact automation_id"
+        assert response["data"]["requested"]["automationId"] == "playButton"
+        assert response["data"]["requested"]["rootAutomationId"] == "selectorSafetyPanel"
+
 
 def _pywinauto_backend_with_element(element: MagicMock) -> tuple[object, SimpleNamespace]:
     from netcoredbg_mcp.ui.pywinauto_backend import PywinautoBackend
@@ -768,6 +807,8 @@ class TestPywinautoBackendInvoke:
         mock_element.iface_invoke.Invoke.assert_not_called()
         mock_element.click.assert_not_called()
         assert result["invoked"] is False
+        assert result["status"] == "BLOCKED"
+        assert result["reason"] == "selector result did not match exact automation_id"
         assert result["automationId"] == "buttonCharlistRemove"
 
     @pytest.mark.asyncio
@@ -798,6 +839,8 @@ class TestPywinautoBackendInvoke:
         mock_element.iface_invoke.Invoke.assert_not_called()
         mock_element.click.assert_not_called()
         assert result["invoked"] is False
+        assert result["status"] == "BLOCKED"
+        assert result["reason"] == "selector result did not match exact automation_id"
         assert result["automationId"] == ""
 
     @pytest.mark.asyncio
@@ -856,6 +899,8 @@ class TestPywinautoBackendInvoke:
 
         mock_toggle.Toggle.assert_not_called()
         assert result["toggled"] is False
+        assert result["status"] == "BLOCKED"
+        assert result["reason"] == "selector result did not match exact automation_id"
         assert result["automationId"] == "buttonCharlistRemove"
 
     @pytest.mark.asyncio
@@ -886,6 +931,8 @@ class TestPywinautoBackendInvoke:
 
         mock_toggle.Toggle.assert_not_called()
         assert result["toggled"] is False
+        assert result["status"] == "BLOCKED"
+        assert result["reason"] == "selector result did not match exact automation_id"
         assert result["automationId"] == ""
 
     @pytest.mark.asyncio

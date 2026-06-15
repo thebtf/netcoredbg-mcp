@@ -533,9 +533,8 @@ public static class ElementCommands
                 return element;
             if (strictAutomationId)
             {
-                throw new InvalidOperationException(
-                    "selector result did not match exact automation_id. " +
-                    $"Requested automationId='{automationId}'. Search: {DescribeSearch(@params)}");
+                throw new ExactAutomationIdMismatchException(
+                    BuildExactAutomationIdMismatchPayload(@params));
             }
         }
 
@@ -964,4 +963,49 @@ public static class ElementCommands
             };
         }
     }
+
+    internal static JsonObject BuildExactAutomationIdMismatchPayload(JsonNode? @params)
+    {
+        var requested = new JsonObject
+        {
+            ["automationId"] = ParamString(@params, "automationId"),
+            ["name"] = ParamString(@params, "name"),
+            ["controlType"] = ParamString(@params, "controlType"),
+            ["rootAutomationId"] = ParamString(@params, "rootAutomationId"),
+            ["xpath"] = ParamString(@params, "xpath"),
+        };
+
+        return new JsonObject
+        {
+            ["status"] = "BLOCKED",
+            ["reason"] = "selector result did not match exact automation_id",
+            ["requested"] = requested,
+            ["accepted"] = new JsonObject
+            {
+                ["selector_policy"] = "exact automation_id match",
+            },
+            ["next_step"] =
+                "Inspect the scoped tree with ui_get_window_tree or adjust the selector; " +
+                "side-effecting UI actions require the returned element to match the " +
+                "requested exact automation_id.",
+            ["search"] = DescribeSearch(@params),
+        };
+    }
+
+    private static string? ParamString(JsonNode? @params, string key)
+    {
+        try { return @params?[key]?.GetValue<string>(); }
+        catch { return null; }
+    }
+}
+
+internal sealed class ExactAutomationIdMismatchException : InvalidOperationException
+{
+    public ExactAutomationIdMismatchException(JsonObject payload)
+        : base("selector result did not match exact automation_id")
+    {
+        Payload = payload;
+    }
+
+    public JsonObject Payload { get; }
 }
