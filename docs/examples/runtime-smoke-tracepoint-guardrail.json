@@ -1,0 +1,28 @@
+{
+  "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
+  "id": "tracepoint-output-capture",
+  "status": "PASS",
+  "mode": "allow",
+  "allowed_when": [
+    "debug session is stopped or safely configurable",
+    "tracepoint expression is side-effect free",
+    "cleanup removes the tracepoint before final result"
+  ],
+  "blocked_when": [
+    "target process is stale",
+    "source location cannot be resolved",
+    "cleanup ownership cannot be recorded"
+  ],
+  "unsafe_when": [
+    "expression mutates program state",
+    "tracepoint would run in a hot loop without output limits"
+  ],
+  "cleanup": {
+    "owner": "runtime_smoke.tracepoint_guardrail",
+    "required": true,
+    "operations": [
+      "debug.tracepoint.remove",
+      "process.registry.assert_empty"
+    ]
+  }
+}

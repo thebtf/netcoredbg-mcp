@@ -9,7 +9,10 @@ from typing import Any
 import pytest
 
 from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner, RuntimeSmokeSession
-from netcoredbg_mcp.session.runtime_smoke_schema import validate_plan
+from netcoredbg_mcp.session.runtime_smoke_schema import (
+    validate_diagnostic_schema_example,
+    validate_plan,
+)
 
 EXAMPLE_PATH = Path("docs/examples/runtime-smoke-v2-drag-drop-grid.json")
 SELECTOR_SAFETY_EXAMPLE_PATH = Path("docs/examples/runtime-smoke-v2-selector-safety.json")
@@ -371,3 +374,100 @@ def test_readme_and_playbook_document_customer_mode_drag_drop_gate() -> None:
     assert "PARTIALLY_WORKS" in playbook
     assert "BROKEN" in playbook
     assert "BLOCK_RELEASE" in playbook
+
+
+def test_readme_and_playbook_document_diagnostic_schema_gate() -> None:
+    readme = README_PATH.read_text(encoding="utf-8")
+    playbook = PLAYBOOK_PATH.read_text(encoding="utf-8")
+    diagnostic_examples = {
+        "docs/examples/runtime-smoke-oracle-pack.json",
+        "docs/examples/runtime-smoke-app-diagnostics.json",
+        "docs/examples/runtime-smoke-semantic-probe.json",
+        "docs/examples/runtime-smoke-tracepoint-guardrail.json",
+    }
+    required_terms = {
+        "netcoredbg.runtime_smoke.diagnostics.v1",
+        "PASS",
+        "BLOCKED",
+        "FAIL",
+        "max_text_length",
+        "max_list_items",
+        "max_json_bytes",
+        "raw_tree",
+        "window_tree",
+        "ui_tree",
+        "screenshot_base64",
+        "access_token",
+        "api_key",
+        "password",
+        "secret",
+        "backend_result",
+        "exception",
+        "raw_output",
+        "stack",
+        "allowed_when",
+        "blocked_when",
+        "unsafe_when",
+        "debug.tracepoint.remove",
+    }
+    winforms_boundary = (
+        "WinForms `dragList` primitive smoke is not a substitute for WPF DataGrid "
+        "CR-001 acceptance"
+    )
+
+    for document in (readme, playbook):
+        for example_path in diagnostic_examples:
+            assert example_path in document
+        for term in required_terms:
+            assert term in document
+    collapsed_playbook = _collapsed(playbook)
+    assert collapsed_playbook.index(_collapsed(winforms_boundary)) < collapsed_playbook.index(
+        "### 8. Runtime-Smoke Diagnostic Schema Gate"
+    )
+
+
+def test_runtime_smoke_examples_remain_schema_compatible() -> None:
+    examples = [
+        Path("docs/examples/runtime-smoke-v2-drag-drop-grid.json"),
+        Path("docs/examples/runtime-smoke-v2-selector-safety.json"),
+        Path("docs/examples/runtime-smoke-v2-handwritten.json"),
+        Path("docs/examples/runtime-smoke-v2-matrix-toggle.json"),
+        Path("docs/examples/runtime-smoke-v2-state-only-file-json-matrix.json"),
+        Path("docs/examples/runtime-smoke-wpf-workflow-plan.json"),
+    ]
+
+    for path in examples:
+        plan = json.loads(path.read_text(encoding="utf-8"))
+        assert validate_plan(plan) == []
+
+
+def test_diagnostic_examples_remain_schema_compatible() -> None:
+    examples = {
+        "oracle_pack": Path("docs/examples/runtime-smoke-oracle-pack.json"),
+        "app_diagnostics": Path("docs/examples/runtime-smoke-app-diagnostics.json"),
+        "semantic_probe": Path("docs/examples/runtime-smoke-semantic-probe.json"),
+        "tracepoint_guardrail": Path("docs/examples/runtime-smoke-tracepoint-guardrail.json"),
+    }
+    payloads: dict[str, dict[str, Any]] = {}
+
+    for kind, path in examples.items():
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payloads[kind] = payload
+        assert validate_diagnostic_schema_example(payload, kind=kind) == []
+
+    limits = {"max_text_length": 240, "max_list_items": 8, "max_json_bytes": 32768}
+    assert payloads["oracle_pack"]["limits"] == limits
+    assert payloads["app_diagnostics"]["limits"] == limits
+    assert {"PASS", "BLOCKED", "FAIL"}.issubset(
+        {
+            payloads["oracle_pack"]["status"],
+            payloads["app_diagnostics"]["status"],
+            payloads["semantic_probe"]["status"],
+            payloads["semantic_probe"]["backend_result"]["status"],
+            payloads["tracepoint_guardrail"]["status"],
+        }
+    )
+    assert (
+        "debug.tracepoint.remove"
+        in payloads["tracepoint_guardrail"]["cleanup"]["operations"]
+    )
