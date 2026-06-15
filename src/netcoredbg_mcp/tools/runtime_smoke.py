@@ -16,6 +16,12 @@ from ..session.instrumentation import InstrumentationGroupService
 from ..session.output_assertions import OutputAssertionService
 from ..session.runtime_smoke import RuntimeSmokeRunner
 from ..session.runtime_smoke_operations import ui_operation_adapters
+from ..session.runtime_smoke_schema import (
+    SCHEMA_VERSION_V2,
+    diagnostic_schema_contract,
+    schema_help_fields,
+    validate_plan,
+)
 from ..session.state import DebugState
 
 _NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
@@ -308,6 +314,19 @@ def register_runtime_smoke_tools(
             return build_error_response(str(exc), state=session.state.state)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+    async def runtime_smoke_validate_plan(ctx: Context, plan: dict[str, Any]) -> dict:
+        """Validate a runtime-smoke plan without launching or touching a target app."""
+        try:
+            data = validate_runtime_smoke_plan_contract(plan)
+            return _build_runtime_smoke_response(
+                session,
+                data,
+                ["runtime_smoke_start", "run_runtime_smoke"],
+            )
+        except Exception as exc:
+            return build_error_response(str(exc), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
     async def runtime_smoke_tail_events(
         ctx: Context,
         run_id: str,
@@ -393,6 +412,53 @@ def register_runtime_smoke_tools(
             )
         except Exception as exc:
             return build_error_response(str(exc), state=session.state.state)
+
+
+def validate_runtime_smoke_plan_contract(plan: dict[str, Any]) -> dict[str, Any]:
+    """Return validate-only runtime-smoke plan readiness and evidence metadata."""
+    validation_errors = validate_plan(plan)
+    result: dict[str, Any] = {
+        "validation_errors": list(validation_errors),
+        **schema_help_fields(plan if isinstance(plan, dict) else None),
+    }
+
+    if isinstance(plan, dict) and plan.get("schema") == SCHEMA_VERSION_V2:
+        from ..session.runtime_smoke_v2.runner import validate_v2_plan_contract
+
+        v2_contract = validate_v2_plan_contract(plan)
+        result.update(
+            {
+                key: value
+                for key, value in v2_contract.items()
+                if key != "validation_errors"
+            }
+        )
+        result["validation_errors"].extend(v2_contract["validation_errors"])
+    else:
+        result.setdefault("case_count", 0)
+        result.setdefault("generated_case_count", 0)
+
+    result["can_run"] = not result["validation_errors"]
+    result["status"] = "PASS" if result["can_run"] else "INVALID_SETUP"
+    result["evidence_contract"] = _runtime_smoke_evidence_contract()
+    return result
+
+
+def _runtime_smoke_evidence_contract() -> dict[str, Any]:
+    diagnostics = diagnostic_schema_contract()
+    return {
+        "result_keys": [
+            "status",
+            "reason",
+            "elapsed_ms",
+            "action_count",
+            "cleanup",
+            "evidence_refs",
+            "compact",
+        ],
+        "compact_limits": dict(diagnostics["evidence_limits"]),
+        "diagnostics": diagnostics,
+    }
 
 
 def _build_hygiene_response(

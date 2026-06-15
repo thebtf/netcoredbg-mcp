@@ -49,6 +49,16 @@ async def test_runtime_smoke_agent_lifecycle_tools_are_registered(mock_netcoredb
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_validate_plan_tool_is_registered(mock_netcoredbg_path) -> None:
+    server = create_server(str(os.getcwd()))
+
+    tools = await server.list_tools()
+    tool_names = {tool.name for tool in tools}
+
+    assert "runtime_smoke_validate_plan" in tool_names
+
+
+@pytest.mark.asyncio
 async def test_ui_monitor_tools_are_registered(mock_netcoredbg_path) -> None:
     server = create_server(str(os.getcwd()))
 
