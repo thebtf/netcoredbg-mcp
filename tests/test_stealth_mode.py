@@ -249,8 +249,9 @@ def test_session_manager_launch_stores_stealth_mode_source_contract() -> None:
     assert "stealth_mode: bool = False" in manager
     assert "self._stealth_mode = stealth_mode" in manager
     assert "saved_foreground_hwnd = get_foreground_window() if stealth_mode else None" in manager
-    assert "self._restore_foreground_if_safe(saved_foreground_hwnd)" in manager
+    assert "_restore_foreground_after_stealth_launch(saved_foreground_hwnd)" in manager
     assert "asyncio.create_task(" in manager
+    assert "if debuggee_pid is None:" in manager
 
 
 @pytest.mark.asyncio
@@ -285,8 +286,35 @@ async def test_session_manager_stealth_launch_restores_while_safe(
     assert sleep.await_count == 2
 
 
+def test_session_manager_stealth_restore_waits_for_process_id(monkeypatch) -> None:
+    from netcoredbg_mcp.session.manager import SessionManager
+
+    manager = SessionManager.__new__(SessionManager)
+    manager._state = SimpleNamespace(process_id=None)
+
+    restore = MagicMock(return_value=True)
+    monkeypatch.setattr("netcoredbg_mcp.session.manager.restore_foreground_window", restore)
+
+    assert manager._restore_foreground_if_safe(123) is True
+    restore.assert_not_called()
+
+
+def test_session_manager_stealth_restore_waits_for_known_foreground_owner(monkeypatch) -> None:
+    from netcoredbg_mcp.session.manager import SessionManager
+
+    manager = SessionManager.__new__(SessionManager)
+    manager._state = SimpleNamespace(process_id=42)
+
+    monkeypatch.setattr("netcoredbg_mcp.session.manager.get_foreground_window", lambda: 900)
+    monkeypatch.setattr("netcoredbg_mcp.session.manager.get_window_process_id", lambda hwnd: None)
+    restore = MagicMock(return_value=True)
+    monkeypatch.setattr("netcoredbg_mcp.session.manager.restore_foreground_window", restore)
+
+    assert manager._restore_foreground_if_safe(123) is True
+    restore.assert_not_called()
+
+
 @pytest.mark.asyncio
-@pytest.mark.xfail(strict=True, reason="Issue #251 RED: " + RED_REPRO_REASON)
 async def test_session_manager_stealth_launch_defers_foreground_restore_until_ui_ready(
     tmp_path,
     monkeypatch,
