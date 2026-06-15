@@ -746,6 +746,7 @@ class RuntimeSmokeRunRegistry:
         reason: str = "runtime smoke stop requested",
     ) -> dict[str, Any]:
         task: asyncio.Task | None = None
+        should_cancel = False
         async with self._lock:
             record = self._runs.get(run_id)
             if record is None:
@@ -756,16 +757,17 @@ class RuntimeSmokeRunRegistry:
                 record.stop_requested = True
                 record.status = "STOPPING"
                 record.append_event("stop_requested", self._clock, reason=reason)
+                should_cancel = True
             task = record.task
 
         if task is not None:
             if not task.done():
                 await asyncio.sleep(0)
-            if not task.done():
+            if should_cancel and not task.done():
                 task.cancel()
             try:
                 await asyncio.wait_for(asyncio.shield(task), timeout=self._stop_timeout_seconds)
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 async with self._lock:
                     record = self._runs.get(run_id)
                     if record is None:

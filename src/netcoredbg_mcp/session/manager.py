@@ -1325,7 +1325,12 @@ class SessionManager:
         self._set_state(DebugState.IDLE)
         self._initialized_event.clear()
         self._execution_event.clear()
-        await self._runtime_smoke.lifecycle_runs.stop_all(reason="debug session stopped")
+        lifecycle_runs = getattr(self._runtime_smoke, "lifecycle_runs", None)
+        stop_lifecycle_runs = getattr(lifecycle_runs, "stop_all", None)
+        if stop_lifecycle_runs is not None:
+            lifecycle_stop_result = stop_lifecycle_runs(reason="debug session stopped")
+            if isinstance(lifecycle_stop_result, Awaitable):
+                await lifecycle_stop_result
         self._runtime_smoke.reset()
         self._state = SessionState()
         self._output_bytes = 0  # Reset output tracking for next session

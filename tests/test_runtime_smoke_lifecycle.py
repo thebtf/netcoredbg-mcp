@@ -32,6 +32,9 @@ class LifecycleSmokeSession:
             loaded_sources={},
         )
         self.release_event = asyncio.Event()
+        self.cleanup_started_event = asyncio.Event()
+        self.cleanup_release_event = asyncio.Event()
+        self.block_cleanup = False
         self.cleanup_calls = 0
 
     async def append_output(self, text: str = "ready\n") -> dict[str, Any]:
@@ -51,6 +54,9 @@ class LifecycleSmokeSession:
 
     async def clear_group(self, name: str) -> dict[str, Any]:
         self.cleanup_calls += 1
+        if self.block_cleanup:
+            self.cleanup_started_event.set()
+            await self.cleanup_release_event.wait()
         self.runtime_smoke.instrumentation_groups.pop(name, None)
         return {"status": "PASS", "reason": "instrumentation group cleared"}
 
@@ -259,6 +265,47 @@ async def test_runtime_smoke_stop_is_idempotent_and_runs_cleanup() -> None:
     assert session.cleanup_calls == 1
     assert session.runtime_smoke.instrumentation_groups == {}
     assert session.runtime_smoke.lifecycle_runs.active_run_ids() == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_concurrent_stop_waits_for_cleanup_without_recancelling() -> None:
+    session = LifecycleSmokeSession()
+    session.block_cleanup = True
+    session.runtime_smoke.instrumentation_groups["flow"] = {"breakpoints": [1]}
+
+    started = await session.runtime_smoke.lifecycle_runs.start(
+        {
+            "name": "lifecycle-concurrent-stop",
+            "actions": [{"name": "wait_until_released"}],
+            "teardown": {"instrumentation_groups": ["flow"]},
+        },
+        lambda: _runner(session),
+    )
+
+    first_stop = asyncio.create_task(session.runtime_smoke.lifecycle_runs.stop(started["run_id"]))
+    await asyncio.wait_for(session.cleanup_started_event.wait(), timeout=1.0)
+    second_stop = asyncio.create_task(session.runtime_smoke.lifecycle_runs.stop(started["run_id"]))
+
+    await asyncio.sleep(0)
+    session.cleanup_release_event.set()
+    first_result, second_result = await asyncio.gather(first_stop, second_stop)
+
+    assert first_result["status"] == "IMPASSE"
+    assert second_result["status"] == "IMPASSE"
+    assert first_result["lifecycle_status"] == "STOPPED"
+    assert second_result["lifecycle_status"] == "STOPPED"
+    assert session.cleanup_calls == 1
+    assert session.runtime_smoke.instrumentation_groups == {}
+    assert session.runtime_smoke.lifecycle_runs.active_run_ids() == []
+
+    next_run = await session.runtime_smoke.lifecycle_runs.start(
+        {
+            "name": "after-concurrent-stop",
+            "actions": [{"name": "append_output", "args": {"text": "ready\n"}}],
+        },
+        lambda: _runner(session),
+    )
+    assert next_run["status"] == "RUNNING"
 
 
 @pytest.mark.asyncio
