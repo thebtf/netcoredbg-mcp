@@ -372,7 +372,7 @@ async def test_ui_evidence_tools_register_and_reject_invalid_fields_before_backe
     ),
 )
 @pytest.mark.asyncio
-async def test_ui_grid_accepts_rows_alias_for_visible_rows(capturing_mcp) -> None:
+async def test_ui_grid_accepts_rows_alias_for_visible_rows(capturing_mcp, monkeypatch) -> None:
     session = FakeUiSession()
     session.state.state = DebugState.RUNNING
     session.state.process_id = 42
@@ -386,19 +386,18 @@ async def test_ui_grid_accepts_rows_alias_for_visible_rows(capturing_mcp) -> Non
         ),
     )
 
-    with pytest.MonkeyPatch.context() as monkeypatch:
-        monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
-        register_ui_evidence_tools(
-            mcp=capturing_mcp,
-            session=session,
-            check_session_access=lambda ctx: None,
-        )
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
 
-        response = await capturing_mcp.tools["ui_grid"](
-            ctx=None,
-            action="rows",
-            automation_id="dataGrid",
-        )
+    response = await capturing_mcp.tools["ui_grid"](
+        ctx=None,
+        action="rows",
+        automation_id="dataGrid",
+    )
 
     assert response["data"]["status"] == "PASS"
     assert response["data"]["visible_rows"][0]["index"] == 0

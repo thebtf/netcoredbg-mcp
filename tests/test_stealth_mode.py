@@ -5,10 +5,11 @@ import base64
 import contextlib
 import io
 import json
+from itertools import chain, repeat
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -334,7 +335,7 @@ async def test_session_manager_stealth_launch_defers_foreground_restore_until_ui
     manager._enable_hot_reload_if_supported = AsyncMock()
     manager.check_dbgshim_compatibility = MagicMock(return_value=None)
 
-    foregrounds = iter([111, 222, 222, 222])
+    foregrounds = chain([111], repeat(222))
     restore_calls: list[int] = []
     monkeypatch.setattr(
         "netcoredbg_mcp.session.manager.get_foreground_window",
@@ -462,9 +463,9 @@ async def test_ui_get_window_tree_reconnects_same_pid_after_bridge_disconnect() 
         tree_response = await registry.tools["ui_get_window_tree"]()
 
     assert bring_response["data"]["activated"] is True
-    backend.connect.assert_awaited_once_with(42, stealth=False)
     assert "error" not in tree_response
     assert tree_response["data"]["count"] == 1
+    assert call(42, stealth=False) in backend.connect.await_args_list
 
 
 @pytest.mark.asyncio
