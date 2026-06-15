@@ -27,6 +27,10 @@ from ..ui.snapshots import (
     query_ui_fields,
 )
 
+_GRID_ACTION_ALIASES = {"rows": "visible_rows"}
+_GRID_CANONICAL_ACTIONS = ("visible_rows", "selected_rows", "select_range", "assert_range")
+_GRID_ACCEPTED_ACTIONS = ("visible_rows", "rows", "selected_rows", "select_range", "assert_range")
+
 
 def register_ui_evidence_tools(
     mcp: FastMCP,
@@ -128,23 +132,35 @@ def register_ui_evidence_tools(
                     state=session.state.state,
                 )
 
+            canonical_action = _GRID_ACTION_ALIASES.get(action, action)
+            if canonical_action not in _GRID_CANONICAL_ACTIONS:
+                return build_response(
+                    data={
+                        "status": "FAIL",
+                        "reason": "unknown grid action",
+                        "action": action,
+                        "accepted_actions": list(_GRID_ACCEPTED_ACTIONS),
+                        "aliases": dict(_GRID_ACTION_ALIASES),
+                        "next_step": "Use one of the accepted ui_grid actions.",
+                    },
+                    state=session.state.state,
+                )
+
             backend = await _ensure_ui_connected()
-            if action == "visible_rows":
+            if canonical_action == "visible_rows":
                 result = await read_grid_visible_rows(backend, selector)
-            elif action == "selected_rows":
+            elif canonical_action == "selected_rows":
                 result = await read_grid_selected_rows(backend, selector)
-            elif action == "select_range":
+            elif canonical_action == "select_range":
                 start, end = _require_range(start_index, end_index)
                 result = await select_grid_range(backend, selector, start, end)
-            elif action == "assert_range":
+            elif canonical_action == "assert_range":
                 start, end = _require_range(start_index, end_index)
                 result = await assert_grid_range(backend, selector, start, end)
-            else:
-                result = {
-                    "status": "FAIL",
-                    "reason": "unknown grid action",
-                    "action": action,
-                }
+            if canonical_action != action:
+                result = dict(result)
+                result["requested_action"] = action
+                result["canonical_action"] = canonical_action
             return build_response(data=result, state=session.state.state)
         except ValueError as exc:
             return build_response(
