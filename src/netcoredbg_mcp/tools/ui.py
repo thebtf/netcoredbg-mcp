@@ -119,16 +119,13 @@ def register_ui_tools(
         return backend
 
     async def _reconnect_ui_backend(backend: Any, process_id: int) -> None:
-        stealth_mode = getattr(session, "stealth_mode", False)
-        try:
-            await backend.connect(process_id, stealth=stealth_mode)
-        except TypeError as exc:
-            if "stealth" not in str(exc):
-                raise
+        from ..ui.backend import connect_backend
 
-            from ..ui.backend import connect_backend
-
-            await connect_backend(backend, process_id, stealth_mode=stealth_mode)
+        await connect_backend(
+            backend,
+            process_id,
+            stealth_mode=getattr(session, "stealth_mode", False),
+        )
 
     async def _read_window_tree(ui: Any, max_depth: int, max_children: int) -> Any:
         return await asyncio.wait_for(

@@ -207,7 +207,7 @@ class TestFlaUIBackendConnect:
 
 class TestFlaUIBridgeClient:
     @pytest.mark.asyncio
-    async def test_call_restarts_bridge_after_cancelled_request(self):
+    async def test_call_restarts_bridge_after_cancelled_request(self, monkeypatch):
         import asyncio
 
         from netcoredbg_mcp.ui.flaui_client import FlaUIBridgeClient
@@ -215,6 +215,13 @@ class TestFlaUIBridgeClient:
         client = FlaUIBridgeClient("C:/fake/FlaUIBridge.exe")
         client.ensure_alive = AsyncMock(return_value=True)
         client.stop = AsyncMock()
+        shielded_cleanup = []
+
+        def shield_probe(awaitable):
+            shielded_cleanup.append(awaitable)
+            return awaitable
+
+        monkeypatch.setattr(asyncio, "shield", shield_probe)
 
         async def cancelled_response(_request):
             raise asyncio.CancelledError()
@@ -225,6 +232,21 @@ class TestFlaUIBridgeClient:
             await client.call("get_tree", {"maxDepth": 1})
 
         client.stop.assert_awaited_once()
+        assert len(shielded_cleanup) == 1
+
+    def test_process_id_invalidates_when_bridge_is_stopped(self):
+        from types import SimpleNamespace
+
+        from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+        backend = FlaUIBackend.__new__(FlaUIBackend)
+        backend._client = SimpleNamespace(is_running=False)
+        backend._process_id = 42
+        backend._element_cache = {"stale": {"runtimeId": "old-bridge"}}
+
+        assert backend.process_id is None
+        assert backend._process_id is None
+        assert backend._element_cache == {}
 
     @pytest.mark.asyncio
     async def test_call_restarts_bridge_after_timeout(self):
