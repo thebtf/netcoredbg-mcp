@@ -341,8 +341,12 @@ For repeatable agent-side verification, use the runtime smoke tools together:
 `debug_hygiene_preflight` clears stale debugger state, `output_checkpoint` and
 `output_assert_since` prove output changed after a known point,
 `verify_debug_freshness` checks that the live process still matches the expected
-workspace and artifacts, and `run_runtime_smoke` executes a bounded scenario
-plan with cleanup.
+workspace and artifacts, and `run_runtime_smoke` executes a bounded one-shot
+scenario plan with cleanup. Longer agent-driven runs can use the durable
+lifecycle surface: `runtime_smoke_start` returns a `run_id`,
+`runtime_smoke_tail_events` reads bounded cursor events,
+`runtime_smoke_get_result` returns the final scenario envelope, and
+`runtime_smoke_stop` idempotently stops an active run with cleanup evidence.
 
 The manual smoke fixtures now cover the baseline console/WinForms app,
 `tests/fixtures/WpfSmokeApp`, and `tests/fixtures/AvaloniaSmokeApp`. Build all
@@ -428,7 +432,7 @@ generics are rejected before runtime application. Use
 | Snapshots and object analysis | 5 | `create_snapshot`, `diff_snapshots`, `list_snapshots`, `analyze_collection`, `summarize_object` |
 | Memory | 2 | `read_memory`, `write_memory` |
 | Output and build diagnostics | 4 | `get_output`, `search_output`, `get_output_tail`, `get_build_diagnostics` |
-| Runtime smoke orchestration | 8 | `debug_hygiene_preflight`, `instrumentation_group_create`, `instrumentation_group_inspect`, `instrumentation_group_clear`, `output_checkpoint`, `output_assert_since`, `verify_debug_freshness`, `run_runtime_smoke` |
+| Runtime smoke orchestration | 12 | `debug_hygiene_preflight`, `instrumentation_group_create`, `instrumentation_group_inspect`, `instrumentation_group_clear`, `output_checkpoint`, `output_assert_since`, `verify_debug_freshness`, `run_runtime_smoke`, `runtime_smoke_start`, `runtime_smoke_tail_events`, `runtime_smoke_get_result`, `runtime_smoke_stop` |
 | UI automation | 46 | Window tree, element search, focus, keyboard, mouse, screenshots, annotations, selection, clipboard, window management, expand/collapse, value setting, virtualization, grid evidence, UI snapshots, UI events |
 | Code search | 4 | `find_code_symbol`, `find_code_references`, `get_source_context`, `search_source` |
 | Edit-and-Continue | 1 | `apply_code_change` |

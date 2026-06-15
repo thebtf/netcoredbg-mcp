@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ctypes
 import os
 import stat
@@ -3221,6 +3222,12 @@ async def test_runtime_smoke_tools_register_freshness_and_runner(capturing_mcp) 
 
     assert "verify_debug_freshness" in mcp.tools
     assert "run_runtime_smoke" in mcp.tools
+    assert {
+        "runtime_smoke_start",
+        "runtime_smoke_tail_events",
+        "runtime_smoke_get_result",
+        "runtime_smoke_stop",
+    }.issubset(mcp.tools)
 
     freshness = await mcp.tools["verify_debug_freshness"](
         ctx=None,
@@ -3267,3 +3274,35 @@ async def test_runtime_smoke_tools_register_freshness_and_runner(capturing_mcp) 
     assert non_object["data"]["completed_steps"] == []
     assert failed["data"]["status"] == "FAIL"
     assert failed["data"]["cleanup"]["status"] == "PASS"
+
+    lifecycle = await mcp.tools["runtime_smoke_start"](
+        ctx=None,
+        plan={"name": "tool-invalid", "actions": "not-a-list"},
+    )
+    run_id = lifecycle["data"]["run_id"]
+    for _ in range(20):
+        lifecycle_result = await mcp.tools["runtime_smoke_get_result"](
+            ctx=None,
+            run_id=run_id,
+        )
+        if lifecycle_result["data"].get("final"):
+            break
+        await asyncio.sleep(0)
+    else:
+        raise AssertionError("runtime_smoke_get_result did not observe final result")
+    lifecycle_tail = await mcp.tools["runtime_smoke_tail_events"](
+        ctx=None,
+        run_id=run_id,
+    )
+    lifecycle_stop = await mcp.tools["runtime_smoke_stop"](ctx=None, run_id=run_id)
+
+    assert lifecycle["data"]["status"] == "RUNNING"
+    assert lifecycle_result["data"]["status"] == "FAIL"
+    assert lifecycle_result["data"]["reason"] == "invalid plan schema"
+    assert lifecycle_result["data"]["final"] is True
+    assert [event["kind"] for event in lifecycle_tail["data"]["events"]] == [
+        "started",
+        "completed",
+    ]
+    assert lifecycle_stop["data"]["run_id"] == run_id
+    assert lifecycle_stop["data"]["status"] == lifecycle_result["data"]["status"]

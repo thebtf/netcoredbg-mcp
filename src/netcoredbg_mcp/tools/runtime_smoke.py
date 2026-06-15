@@ -64,6 +64,15 @@ def register_runtime_smoke_tools(
             )
         return backend
 
+    def _runner() -> RuntimeSmokeRunner:
+        return RuntimeSmokeRunner(
+            session,
+            service_adapters=ui_operation_adapters(
+                _ensure_ui_connected,
+                session=session,
+            ),
+        )
+
     @mcp.tool(annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
     async def debug_hygiene_preflight(
         ctx: Context,
@@ -278,6 +287,97 @@ def register_runtime_smoke_tools(
         except Exception as exc:
             return build_error_response(str(exc), state=session.state.state)
 
+    @mcp.tool(annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
+    async def runtime_smoke_start(ctx: Context, plan: dict[str, Any]) -> dict:
+        """Start a durable runtime smoke run and return a run id."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+            data = await session.runtime_smoke.lifecycle_runs.start(plan, _runner)
+            return _build_runtime_smoke_response(
+                session,
+                data,
+                [
+                    "runtime_smoke_tail_events",
+                    "runtime_smoke_get_result",
+                    "runtime_smoke_stop",
+                ],
+            )
+        except Exception as exc:
+            return build_error_response(str(exc), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+    async def runtime_smoke_tail_events(
+        ctx: Context,
+        run_id: str,
+        after_cursor: int = 0,
+        limit: int = 50,
+    ) -> dict:
+        """Tail bounded lifecycle events for a durable runtime smoke run."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+            data = await session.runtime_smoke.lifecycle_runs.tail_events(
+                run_id,
+                after_cursor=after_cursor,
+                limit=limit,
+            )
+            return _build_runtime_smoke_response(
+                session,
+                data,
+                [
+                    "runtime_smoke_tail_events",
+                    "runtime_smoke_get_result",
+                    "runtime_smoke_stop",
+                ],
+            )
+        except Exception as exc:
+            return build_error_response(str(exc), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+    async def runtime_smoke_get_result(ctx: Context, run_id: str) -> dict:
+        """Return the final runtime smoke envelope when a durable run completes."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+            data = await session.runtime_smoke.lifecycle_runs.get_result(run_id)
+            return _build_runtime_smoke_response(
+                session,
+                data,
+                [
+                    "runtime_smoke_tail_events",
+                    "runtime_smoke_stop",
+                    "runtime_smoke_start",
+                ],
+            )
+        except Exception as exc:
+            return build_error_response(str(exc), state=session.state.state)
+
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            destructiveHint=True,
+            idempotentHint=True,
+            openWorldHint=False,
+        )
+    )
+    async def runtime_smoke_stop(ctx: Context, run_id: str) -> dict:
+        """Idempotently stop a durable runtime smoke run and return cleanup evidence."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+            data = await session.runtime_smoke.lifecycle_runs.stop(run_id)
+            return _build_runtime_smoke_response(
+                session,
+                data,
+                ["runtime_smoke_get_result", "runtime_smoke_tail_events"],
+            )
+        except Exception as exc:
+            return build_error_response(str(exc), state=session.state.state)
+
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def run_runtime_smoke(ctx: Context, plan: dict[str, Any]) -> dict:
         """Run a bounded runtime smoke scenario plan with cleanup evidence."""
@@ -285,13 +385,7 @@ def register_runtime_smoke_tools(
             access_error = check_session_access(ctx)
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
-            data = await RuntimeSmokeRunner(
-                session,
-                service_adapters=ui_operation_adapters(
-                    _ensure_ui_connected,
-                    session=session,
-                ),
-            ).run(plan)
+            data = await _runner().run(plan)
             return _build_runtime_smoke_response(
                 session,
                 data,

@@ -32,13 +32,6 @@ async def test_existing_primitive_tool_names_remain_registered(mock_netcoredbg_p
     }.issubset(tool_names)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Issues #267/#268/#269 RED: runtime-smoke durable lifecycle tools are not "
-        "registered yet; run with --runxfail."
-    ),
-)
 @pytest.mark.asyncio
 async def test_runtime_smoke_agent_lifecycle_tools_are_registered(mock_netcoredbg_path) -> None:
     server = create_server(str(os.getcwd()))
@@ -51,6 +44,7 @@ async def test_runtime_smoke_agent_lifecycle_tools_are_registered(mock_netcoredb
         "runtime_smoke_tail_events",
         "runtime_smoke_get_result",
         "runtime_smoke_stop",
+        "run_runtime_smoke",
     }.issubset(tool_names)
 
 
