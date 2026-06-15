@@ -4640,6 +4640,7 @@ async def test_wpf_selector_safety_no_side_effect():
             return
 
         before = await backend.find_element(automation_id="selectorSafetyStatus")
+        blocked = False
         blocked_detail = ""
         try:
             result = await backend.invoke_element(
@@ -4647,9 +4648,14 @@ async def test_wpf_selector_safety_no_side_effect():
                 control_type="Button",
                 root_id="selectorSafetyPanel",
             )
-            blocked = False
             blocked_detail = str(result)
-        except Exception as exc:
+            if isinstance(result, dict):
+                blocked = (
+                    result.get("status") == "BLOCKED"
+                    or result.get("reason")
+                    == "selector result did not match exact automation_id"
+                )
+        except (RuntimeError, LookupError) as exc:
             blocked_detail = str(exc)
             blocked = "selector result did not match exact automation_id" in blocked_detail
 

@@ -166,16 +166,12 @@ def register_ui_tools(
         if element_info is None:
             return None
 
-        automation_id = (
-            getattr(element_info, "automation_id")
-            if hasattr(element_info, "automation_id")
-            else getattr(element_info, "automationId", None)
-        )
-        control_type = (
-            getattr(element_info, "control_type")
-            if hasattr(element_info, "control_type")
-            else getattr(element_info, "controlType", None)
-        )
+        automation_id = getattr(element_info, "automation_id", None)
+        if automation_id is None:
+            automation_id = getattr(element_info, "automationId", None)
+        control_type = getattr(element_info, "control_type", None)
+        if control_type is None:
+            control_type = getattr(element_info, "controlType", None)
         return {
             "automationId": automation_id,
             "name": getattr(element_info, "name", None),
@@ -1879,14 +1875,25 @@ def register_ui_tools(
             if mismatch is not None:
                 return build_response(data=mismatch, state=session.state.state)
 
-            def _right_click() -> None:
-                element.click_input(button="right")
+            if isinstance(element, dict):
+                rect = element.get("rect", {})
+                if not rect:
+                    return build_error_response(
+                        "right_click: selected element has no rectangle",
+                        state=session.state.state,
+                    )
+                cx = int(rect.get("x", 0) + rect.get("width", 0) / 2)
+                cy = int(rect.get("y", 0) + rect.get("height", 0) / 2)
+                await ui.right_click_at(cx, cy)
+            else:
+                def _right_click() -> None:
+                    element.click_input(button="right")
 
-            loop = asyncio.get_running_loop()
-            await asyncio.wait_for(
-                loop.run_in_executor(None, _right_click),
-                timeout=5.0,
-            )
+                loop = asyncio.get_running_loop()
+                await asyncio.wait_for(
+                    loop.run_in_executor(None, _right_click),
+                    timeout=5.0,
+                )
 
             return build_response(
                 data={"right_clicked": True, "method": "element_search"}, state=session.state.state
@@ -1957,14 +1964,25 @@ def register_ui_tools(
             if mismatch is not None:
                 return build_response(data=mismatch, state=session.state.state)
 
-            def _double_click() -> None:
-                element.double_click_input()
+            if isinstance(element, dict):
+                rect = element.get("rect", {})
+                if not rect:
+                    return build_error_response(
+                        "double_click: selected element has no rectangle",
+                        state=session.state.state,
+                    )
+                cx = int(rect.get("x", 0) + rect.get("width", 0) / 2)
+                cy = int(rect.get("y", 0) + rect.get("height", 0) / 2)
+                await ui.double_click_at(cx, cy)
+            else:
+                def _double_click() -> None:
+                    element.double_click_input()
 
-            loop = asyncio.get_running_loop()
-            await asyncio.wait_for(
-                loop.run_in_executor(None, _double_click),
-                timeout=5.0,
-            )
+                loop = asyncio.get_running_loop()
+                await asyncio.wait_for(
+                    loop.run_in_executor(None, _double_click),
+                    timeout=5.0,
+                )
 
             return build_response(
                 data={"double_clicked": True, "method": "element_search"}, state=session.state.state

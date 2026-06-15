@@ -356,13 +356,6 @@ async def test_ui_click_with_secondary_selector_skips_cache_before_guard(
     assert response["data"]["candidate"]["automationId"] == "buttonCharlistRemove"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Issue #250 RED: FlaUI dict fallback must not call pywinauto click_input; "
-        "run with --runxfail."
-    ),
-)
 @pytest.mark.asyncio
 async def test_ui_right_click_uses_flaui_backend_for_dict_elements(capturing_mcp) -> None:
     from netcoredbg_mcp.session.manager import DebugState
@@ -463,6 +456,7 @@ async def test_ui_right_click_with_secondary_selector_skips_cache_before_guard(
             SimpleNamespace(),
             automation_id="playButton",
             control_type="Button",
+            root_id="selectorSafetyPanel",
         )
 
     inner._right_click_at_coords.assert_not_awaited()
@@ -471,13 +465,6 @@ async def test_ui_right_click_with_secondary_selector_skips_cache_before_guard(
     assert response["data"]["action"] == "ui_right_click"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Issue #250 RED: FlaUI dict fallback must not call pywinauto "
-        "double_click_input; run with --runxfail."
-    ),
-)
 @pytest.mark.asyncio
 async def test_ui_double_click_uses_flaui_backend_for_dict_elements(capturing_mcp) -> None:
     from netcoredbg_mcp.session.manager import DebugState
@@ -578,6 +565,7 @@ async def test_ui_double_click_with_secondary_selector_skips_cache_before_guard(
             SimpleNamespace(),
             automation_id="playButton",
             control_type="Button",
+            root_id="selectorSafetyPanel",
         )
 
     inner._double_click_at_coords.assert_not_awaited()
