@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..evidence import attach_blocked_details
 from ._common import (
     attach_expected_and_status,
     blocked_probe,
@@ -42,6 +43,7 @@ async def handle_ui_text(
     }
     if status != "PASS":
         output["reason"] = result.get("reason", "text assertion failed")
+        attach_blocked_details(output, result)
     ref = evidence_ref(result)
     if ref:
         output["evidence_ref"] = ref

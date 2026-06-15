@@ -6,6 +6,7 @@ from typing import Any
 
 from .actions import ActionContext, dispatch_action
 from .diff import compute_diff
+from .evidence import blocked_details_from_record
 from .metrics import capture_metric_snapshot, finish_transition_metrics
 from .probe_dispatcher import ProbeContext, dispatch_probe, probe_path, probe_runs_in_phase
 from .timing import sleep_ms
@@ -346,12 +347,7 @@ def _reason_from_records(records: list[dict[str, Any]]) -> str:
 
 
 def _blocked_from_record(record: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "reason": str(record.get("reason") or "blocked"),
-        "requested": dict(record.get("requested") or {}),
-        "accepted": dict(record.get("accepted") or {}),
-        "next_step": str(record.get("next_step") or "Inspect the blocked transition."),
-    }
+    return blocked_details_from_record(record)
 
 
 def _find_blocked_record(records: list[dict[str, Any]]) -> dict[str, Any]:

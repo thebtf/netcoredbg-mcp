@@ -291,7 +291,13 @@ def ui_operation_adapters(
         if isinstance(backend, dict):
             return backend
         selector = _selector(args)
-        text_result = await backend.extract_text(**_selector_kwargs(selector))
+        try:
+            text_result = await backend.extract_text(**_selector_kwargs(selector))
+        except Exception as exc:
+            result = {"status": "BLOCKED", "reason": str(exc)}
+            if _is_selector_miss(result):
+                return _selector_blocked(selector, result=result)
+            return _adapter_blocked("ui.text.assert", str(exc))
         if not isinstance(text_result, dict):
             return {
                 "status": "FAIL",
@@ -301,6 +307,8 @@ def ui_operation_adapters(
             }
         backend_status = str(text_result.get("status", "PASS")).upper()
         if backend_status not in {"PASS", "OK", "SUCCESS"}:
+            if _is_selector_miss(text_result):
+                return _selector_blocked(selector, result=text_result)
             result = dict(text_result)
             result.setdefault("matched", False)
             result.setdefault("result", text_result)
