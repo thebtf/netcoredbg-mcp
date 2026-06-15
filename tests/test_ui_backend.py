@@ -259,10 +259,62 @@ class TestFlaUIBridgeClient:
             await caller
 
         assert client._process is process
-        assert client._stop_task is not None
+        assert process in client._stop_tasks
+        cleanup_task = client._stop_tasks[process]
 
         process.wait_release.set()
-        await client._stop_task
+        await cleanup_task
+
+        assert client._process is None
+
+    @pytest.mark.asyncio
+    async def test_stop_cleans_current_process_while_old_cleanup_is_running(self):
+        import asyncio
+
+        from netcoredbg_mcp.ui.flaui_client import FlaUIBridgeClient
+
+        class FakeProcess:
+            def __init__(self, pid: int) -> None:
+                self.pid = pid
+                self.stdin = None
+                self.returncode: int | None = None
+                self.wait_started = asyncio.Event()
+                self.wait_release = asyncio.Event()
+
+            async def wait(self) -> None:
+                self.wait_started.set()
+                await self.wait_release.wait()
+                self.returncode = 0
+
+            def kill(self) -> None:
+                self.returncode = -9
+                self.wait_release.set()
+
+        old_process = FakeProcess(123)
+        new_process = FakeProcess(456)
+        client = FlaUIBridgeClient("C:/fake/FlaUIBridge.exe")
+        client._process = old_process  # type: ignore[assignment]
+
+        old_stop = asyncio.create_task(client.stop())
+        await old_process.wait_started.wait()
+        old_stop.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await old_stop
+
+        client._process = new_process  # type: ignore[assignment]
+
+        new_stop = asyncio.create_task(client.stop())
+        await new_process.wait_started.wait()
+
+        assert old_process in client._stop_tasks
+        assert new_process in client._stop_tasks
+        old_cleanup = client._stop_tasks[old_process]
+        new_cleanup = client._stop_tasks[new_process]
+
+        old_process.wait_release.set()
+        new_process.wait_release.set()
+        await asyncio.gather(old_cleanup, new_cleanup, return_exceptions=True)
+        await new_stop
 
         assert client._process is None
 

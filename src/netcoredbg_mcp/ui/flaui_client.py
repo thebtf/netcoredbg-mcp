@@ -76,8 +76,7 @@ class FlaUIBridgeClient:
         self._lock = asyncio.Lock()
         self._cleanup_tasks: set[asyncio.Task[None]] = set()
         self._invalidate_connection = invalidate_connection
-        self._stopping_process: asyncio.subprocess.Process | None = None
-        self._stop_task: asyncio.Task[None] | None = None
+        self._stop_tasks: dict[asyncio.subprocess.Process, asyncio.Task[None]] = {}
 
     def _mark_connection_invalid(self) -> None:
         if self._invalidate_connection is not None:
@@ -110,15 +109,18 @@ class FlaUIBridgeClient:
             return
 
         self._mark_connection_invalid()
-        if self._stop_task is not None and not self._stop_task.done():
-            await asyncio.shield(self._stop_task)
+        existing_task = self._stop_tasks.get(process)
+        if existing_task is not None and not existing_task.done():
+            await asyncio.shield(existing_task)
             return
 
-        self._stopping_process = process
         cleanup_task = asyncio.create_task(self._stop_process(process))
-        self._stop_task = cleanup_task
+        self._stop_tasks[process] = cleanup_task
         self._cleanup_tasks.add(cleanup_task)
         cleanup_task.add_done_callback(self._cleanup_tasks.discard)
+        cleanup_task.add_done_callback(
+            lambda _task, stopped=process: self._stop_tasks.pop(stopped, None)
+        )
         await asyncio.shield(cleanup_task)
 
     async def _stop_process(self, process: asyncio.subprocess.Process) -> None:
@@ -150,8 +152,6 @@ class FlaUIBridgeClient:
         finally:
             if self._process is process:
                 self._process = None
-            if self._stopping_process is process:
-                self._stopping_process = None
 
     async def _stop_after_interrupted_call(self) -> None:
         """Stop the bridge without letting caller cancellation cancel cleanup."""
@@ -166,7 +166,7 @@ class FlaUIBridgeClient:
         """Check if bridge subprocess is alive."""
         return (
             self._process is not None
-            and self._process is not self._stopping_process
+            and self._process not in self._stop_tasks
             and self._process.returncode is None
         )
 
