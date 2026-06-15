@@ -1,0 +1,67 @@
+{
+  "schema": "netcoredbg.runtime_smoke.v2",
+  "name": "WpfSmokeApp selector safety exact miss",
+  "baseline": {
+    "steps": [
+      {
+        "id": "launch_wpf_fixture",
+        "kind": "isolated_profile.launch",
+        "launch": {
+          "program": "tests/fixtures/WpfSmokeApp/bin/Debug/net8.0-windows/WpfSmokeApp.dll",
+          "cwd": "tests/fixtures/WpfSmokeApp/bin/Debug/net8.0-windows",
+          "pre_build": true,
+          "build_project": "tests/fixtures/WpfSmokeApp/WpfSmokeApp.csproj",
+          "build_configuration": "Debug"
+        }
+      }
+    ]
+  },
+  "cases": [
+    {
+      "id": "exact_missing_play_button_does_not_remove_character",
+      "notes": [
+        "Expected result is BLOCKED, not PASS: playButton is intentionally absent under selectorSafetyPanel.",
+        "No-mutation proof is selectorSafetyStatus staying at 'Selector side effects: 0'."
+      ],
+      "transitions": [
+        {
+          "action": {
+            "kind": "ui.invoke",
+            "selector": {
+              "automation_id": "playButton",
+              "control_type": "Button",
+              "root_id": "selectorSafetyPanel"
+            },
+            "expect": {
+              "status": "BLOCKED",
+              "reason": "selector result did not match exact automation_id",
+              "no_mutation": true
+            }
+          },
+          "probes": [
+            {
+              "kind": "ui.property",
+              "name": "selector_sentinel_after",
+              "phase": "both",
+              "selector": {
+                "automation_id": "selectorSafetyStatus"
+              },
+              "property": "Name",
+              "expected": "Selector side effects: 0"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "cleanup": {
+    "steps": [
+      {
+        "kind": "debug.stop"
+      },
+      {
+        "kind": "process.registry.assert_empty"
+      }
+    ]
+  }
+}

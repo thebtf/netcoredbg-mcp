@@ -4629,6 +4629,53 @@ async def test_stealth_click():
             await m.stop()
 
 
+async def test_wpf_selector_safety_no_side_effect():
+    """Scenario: exact selector miss is blocked before a side-effecting fallback."""
+    print("\n--- WPF Selector Safety No Side Effect ---")
+    m = None
+    backend = None
+    try:
+        m, backend = await _launch_wpf_stealth_backend()
+        if m is None or backend is None:
+            return
+
+        before = await backend.find_element(automation_id="selectorSafetyStatus")
+        blocked = False
+        blocked_detail = ""
+        try:
+            result = await backend.invoke_element(
+                automation_id="playButton",
+                control_type="Button",
+                root_id="selectorSafetyPanel",
+            )
+            blocked_detail = str(result)
+            if isinstance(result, dict):
+                blocked = (
+                    result.get("status") == "BLOCKED"
+                    or result.get("reason")
+                    == "selector result did not match exact automation_id"
+                )
+        except (RuntimeError, LookupError) as exc:
+            blocked_detail = str(exc)
+            blocked = "selector result did not match exact automation_id" in blocked_detail
+
+        after = await backend.find_element(automation_id="selectorSafetyStatus")
+        before_name = before.get("name")
+        after_name = after.get("name")
+
+        check("Exact selector miss blocked", blocked, blocked_detail)
+        check(
+            "Selector side-effect sentinel unchanged",
+            before_name == "Selector side effects: 0" and after_name == before_name,
+            f"before={before_name!r} after={after_name!r}",
+        )
+    finally:
+        if backend is not None:
+            await backend.disconnect()
+        if m is not None:
+            await m.stop()
+
+
 async def test_stealth_screenshot():
     """Scenario: stealth screenshot uses PrintWindow or documented flash-focus fallback."""
     print("\n--- Stealth Screenshot ---")
@@ -4743,6 +4790,12 @@ def get_scenarios():
         )
     if WPF_GUI_ENABLED:
         scenarios.append(("WPF Shift/DataGrid Evidence", test_wpf_shift_datagrid_evidence))
+        scenarios.append(
+            (
+                "WPF Selector Safety No Side Effect",
+                test_wpf_selector_safety_no_side_effect,
+            )
+        )
         scenarios.append(
             (
                 "WPF One-Call Runtime Smoke Workflow",

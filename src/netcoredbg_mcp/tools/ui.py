@@ -149,6 +149,127 @@ def register_ui_tools(
             ),
         }
 
+    def _element_identity_payload(result: Any) -> dict[str, Any] | None:
+        if isinstance(result, dict):
+            automation_id = (
+                result["automationId"]
+                if "automationId" in result
+                else result.get("automation_id")
+            )
+            return {
+                "automationId": automation_id,
+                "name": result.get("name"),
+                "controlType": result.get("controlType") or result.get("control_type"),
+            }
+
+        element_info = getattr(result, "element_info", None)
+        if element_info is None:
+            return None
+
+        automation_id = getattr(element_info, "automation_id", None)
+        if automation_id is None:
+            automation_id = getattr(element_info, "automationId", None)
+        control_type = getattr(element_info, "control_type", None)
+        if control_type is None:
+            control_type = getattr(element_info, "controlType", None)
+        return {
+            "automationId": automation_id,
+            "name": getattr(element_info, "name", None),
+            "controlType": control_type,
+        }
+
+    def _exact_automation_id_mismatch_payload(
+        *,
+        action: str,
+        requested_automation_id: str | None,
+        result: Any,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+    ) -> dict[str, Any] | None:
+        if not requested_automation_id:
+            return None
+
+        candidate = _element_identity_payload(result)
+        if candidate is None:
+            return None
+
+        candidate_automation_id = candidate.get("automationId")
+        if candidate_automation_id == requested_automation_id:
+            return None
+
+        payload = {
+            "status": "BLOCKED",
+            "reason": "selector result did not match exact automation_id",
+            "action": action,
+            "requested": {
+                "automationId": requested_automation_id,
+                "name": name,
+                "controlType": control_type,
+                "rootAutomationId": root_id,
+                "xpath": xpath,
+            },
+            "candidate": candidate,
+            "accepted": {
+                "selector_policy": "exact automation_id match",
+            },
+            "next_step": (
+                "Inspect the scoped tree with ui_get_window_tree or adjust the selector; "
+                "side-effecting UI actions require the returned element to match the "
+                "requested exact automation_id."
+            ),
+        }
+        if isinstance(result, dict):
+            payload["backend_result"] = result
+        return payload
+
+    def _exact_automation_id_exception_payload(
+        *,
+        action: str,
+        requested_automation_id: str | None,
+        error: Exception,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+    ) -> dict[str, Any] | None:
+        if not requested_automation_id:
+            return None
+        message = str(error)
+        if "selector result did not match exact automation_id" not in message:
+            return None
+        return {
+            "status": "BLOCKED",
+            "reason": "selector result did not match exact automation_id",
+            "action": action,
+            "requested": {
+                "automationId": requested_automation_id,
+                "name": name,
+                "controlType": control_type,
+                "rootAutomationId": root_id,
+                "xpath": xpath,
+            },
+            "accepted": {
+                "selector_policy": "exact automation_id match",
+            },
+            "next_step": (
+                "Inspect the scoped tree with ui_get_window_tree or adjust the selector; "
+                "side-effecting UI actions require the returned element to match the "
+                "requested exact automation_id."
+            ),
+            "backend_error": message,
+        }
+
+    def _has_secondary_selector_constraints(
+        *,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+    ) -> bool:
+        return any((name, control_type, root_id, xpath))
+
     def _stealth_response_mode(result: Any) -> str | None:
         if not getattr(session, "stealth_mode", False):
             return None
@@ -756,12 +877,22 @@ def register_ui_tools(
 
             if isinstance(ui, FlaUIBackend):
                 params: dict = {}
-                if automation_id:
+                if automation_id and not _has_secondary_selector_constraints(
+                    name=name,
+                    control_type=control_type,
+                    root_id=root_id,
+                    xpath=xpath,
+                ):
                     params["automationId"] = automation_id
                 elif automation_id is None and name is None:
                     # Coordinate click from cache
                     pass
-                if not params:
+                if not params and not _has_secondary_selector_constraints(
+                    name=name,
+                    control_type=control_type,
+                    root_id=root_id,
+                    xpath=xpath,
+                ):
                     # Try cache coordinates
                     if automation_id:
                         rect = (ui.element_cache.get(automation_id) or {}).get("rect")
@@ -788,6 +919,17 @@ def register_ui_tools(
                 ui, element, _ = await _find_ui_element(
                     automation_id, name, control_type, root_id, xpath
                 )
+                mismatch = _exact_automation_id_mismatch_payload(
+                    action="ui_click",
+                    requested_automation_id=automation_id,
+                    result=element,
+                    name=name,
+                    control_type=control_type,
+                    root_id=root_id,
+                    xpath=xpath,
+                )
+                if mismatch is not None:
+                    return build_response(data=mismatch, state=session.state.state)
                 from ..ui.pywinauto_backend import PywinautoBackend
 
                 if isinstance(ui, PywinautoBackend):
@@ -808,7 +950,15 @@ def register_ui_tools(
                 # try coordinate click from element's bounding rectangle
                 if automation_id:
                     ui = await _ensure_ui_connected()
-                    rect = (ui.element_cache.get(automation_id) or {}).get("rect")
+                    if not _has_secondary_selector_constraints(
+                        name=name,
+                        control_type=control_type,
+                        root_id=root_id,
+                        xpath=xpath,
+                    ):
+                        rect = (ui.element_cache.get(automation_id) or {}).get("rect")
+                    else:
+                        rect = None
                     if rect:
                         cx = (rect["left"] + rect["right"]) // 2
                         cy = (rect["top"] + rect["bottom"]) // 2
@@ -863,8 +1013,30 @@ def register_ui_tools(
                 root_id=root_id,
                 xpath=xpath,
             )
+            mismatch = _exact_automation_id_mismatch_payload(
+                action="ui_invoke",
+                requested_automation_id=automation_id,
+                result=result,
+                name=name,
+                control_type=control_type,
+                root_id=root_id,
+                xpath=xpath,
+            )
+            if mismatch is not None:
+                return build_response(data=mismatch, state=session.state.state)
             return build_response(data=result, state=session.state.state)
         except Exception as e:
+            mismatch = _exact_automation_id_exception_payload(
+                action="ui_invoke",
+                requested_automation_id=automation_id,
+                error=e,
+                name=name,
+                control_type=control_type,
+                root_id=root_id,
+                xpath=xpath,
+            )
+            if mismatch is not None:
+                return build_response(data=mismatch, state=session.state.state)
             return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
@@ -905,8 +1077,30 @@ def register_ui_tools(
                 root_id=root_id,
                 xpath=xpath,
             )
+            mismatch = _exact_automation_id_mismatch_payload(
+                action="ui_toggle",
+                requested_automation_id=automation_id,
+                result=result,
+                name=name,
+                control_type=control_type,
+                root_id=root_id,
+                xpath=xpath,
+            )
+            if mismatch is not None:
+                return build_response(data=mismatch, state=session.state.state)
             return build_response(data=result, state=session.state.state)
         except Exception as e:
+            mismatch = _exact_automation_id_exception_payload(
+                action="ui_toggle",
+                requested_automation_id=automation_id,
+                error=e,
+                name=name,
+                control_type=control_type,
+                root_id=root_id,
+                xpath=xpath,
+            )
+            if mismatch is not None:
+                return build_response(data=mismatch, state=session.state.state)
             return build_error_response(str(e), state=session.state.state)
 
     def _escape_sendkeys_path(path: str) -> str:
@@ -1644,7 +1838,12 @@ def register_ui_tools(
                 return build_error_response(access_error, state=session.state.state)
 
             # Try cache first
-            if automation_id:
+            if automation_id and not _has_secondary_selector_constraints(
+                name=name,
+                control_type=control_type,
+                root_id=root_id,
+                xpath=xpath,
+            ):
                 ui = await _ensure_ui_connected()
                 rect = (ui.element_cache.get(automation_id) or {}).get("rect")
                 if rect:
@@ -1664,15 +1863,37 @@ def register_ui_tools(
             ui, element, _ = await _find_ui_element(
                 automation_id, name, control_type, root_id, xpath
             )
-
-            def _right_click() -> None:
-                element.click_input(button="right")
-
-            loop = asyncio.get_running_loop()
-            await asyncio.wait_for(
-                loop.run_in_executor(None, _right_click),
-                timeout=5.0,
+            mismatch = _exact_automation_id_mismatch_payload(
+                action="ui_right_click",
+                requested_automation_id=automation_id,
+                result=element,
+                name=name,
+                control_type=control_type,
+                root_id=root_id,
+                xpath=xpath,
             )
+            if mismatch is not None:
+                return build_response(data=mismatch, state=session.state.state)
+
+            if isinstance(element, dict):
+                rect = element.get("rect", {})
+                if not rect:
+                    return build_error_response(
+                        "right_click: selected element has no rectangle",
+                        state=session.state.state,
+                    )
+                cx = int(rect.get("x", 0) + rect.get("width", 0) / 2)
+                cy = int(rect.get("y", 0) + rect.get("height", 0) / 2)
+                await ui.right_click_at(cx, cy)
+            else:
+                def _right_click() -> None:
+                    element.click_input(button="right")
+
+                loop = asyncio.get_running_loop()
+                await asyncio.wait_for(
+                    loop.run_in_executor(None, _right_click),
+                    timeout=5.0,
+                )
 
             return build_response(
                 data={"right_clicked": True, "method": "element_search"}, state=session.state.state
@@ -1706,7 +1927,12 @@ def register_ui_tools(
                 return build_error_response(access_error, state=session.state.state)
 
             # Try cache first
-            if automation_id:
+            if automation_id and not _has_secondary_selector_constraints(
+                name=name,
+                control_type=control_type,
+                root_id=root_id,
+                xpath=xpath,
+            ):
                 ui = await _ensure_ui_connected()
                 rect = (ui.element_cache.get(automation_id) or {}).get("rect")
                 if rect:
@@ -1726,15 +1952,37 @@ def register_ui_tools(
             ui, element, _ = await _find_ui_element(
                 automation_id, name, control_type, root_id, xpath
             )
-
-            def _double_click() -> None:
-                element.double_click_input()
-
-            loop = asyncio.get_running_loop()
-            await asyncio.wait_for(
-                loop.run_in_executor(None, _double_click),
-                timeout=5.0,
+            mismatch = _exact_automation_id_mismatch_payload(
+                action="ui_double_click",
+                requested_automation_id=automation_id,
+                result=element,
+                name=name,
+                control_type=control_type,
+                root_id=root_id,
+                xpath=xpath,
             )
+            if mismatch is not None:
+                return build_response(data=mismatch, state=session.state.state)
+
+            if isinstance(element, dict):
+                rect = element.get("rect", {})
+                if not rect:
+                    return build_error_response(
+                        "double_click: selected element has no rectangle",
+                        state=session.state.state,
+                    )
+                cx = int(rect.get("x", 0) + rect.get("width", 0) / 2)
+                cy = int(rect.get("y", 0) + rect.get("height", 0) / 2)
+                await ui.double_click_at(cx, cy)
+            else:
+                def _double_click() -> None:
+                    element.double_click_input()
+
+                loop = asyncio.get_running_loop()
+                await asyncio.wait_for(
+                    loop.run_in_executor(None, _double_click),
+                    timeout=5.0,
+                )
 
             return build_response(
                 data={"double_clicked": True, "method": "element_search"}, state=session.state.state

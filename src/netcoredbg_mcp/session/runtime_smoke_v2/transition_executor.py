@@ -62,6 +62,66 @@ async def execute_transition(
         if action_result.get("status") != "PASS":
             status = _status_from_records([action_result])
             reason = str(action_result.get("reason") or "action failed")
+            if _action_status_expected(dict(raw_action), status):
+                try:
+                    settle = await _with_remaining_timeout(
+                        lambda: _settle(dict(transition.get("settle") or {}), action_context),
+                        deadline=deadline,
+                        context=action_context,
+                    )
+                except asyncio.TimeoutError:
+                    return (
+                        _timeout_transition_result(
+                            transition,
+                            actions=actions,
+                            metrics=finish_transition_metrics(metrics_started, action_context),
+                            before=before,
+                            before_results=before_results,
+                        ),
+                        action_count,
+                    )
+                metrics = finish_transition_metrics(metrics_started, action_context)
+                try:
+                    after_results = await _with_remaining_timeout(
+                        lambda: _collect_probe_results(after_probes, probe_context, phase="after"),
+                        deadline=deadline,
+                        context=action_context,
+                    )
+                except asyncio.TimeoutError:
+                    return (
+                        _timeout_transition_result(
+                            transition,
+                            actions=actions,
+                            metrics=metrics,
+                            before=before,
+                            before_results=before_results,
+                            settle=settle,
+                        ),
+                        action_count,
+                    )
+                after = _probe_value_map(after_probes, after_results)
+                diff = compute_diff(before=before, after=after)
+                evidence_status = _status_from_records(
+                    [*before_results, *after_results, settle]
+                )
+                if evidence_status == "FAIL":
+                    status = "FAIL"
+                    reason = _reason_from_records([*after_results, *before_results, settle])
+                result = {
+                    "id": transition.get("id"),
+                    "status": status,
+                    "reason": reason,
+                    "actions": actions,
+                    "metrics": metrics,
+                    "settle": settle,
+                    "before": before,
+                    "after": after,
+                    "diff": diff,
+                    "probes": {"before": before_results, "after": after_results},
+                }
+                if status == "BLOCKED":
+                    result["blocked"] = _blocked_from_record(action_result)
+                return result, action_count
             result = {
                 "id": transition.get("id"),
                 "status": status,
@@ -257,6 +317,13 @@ async def _settle(
 
 async def _sleep_ms(context: ActionContext, idle_ms: int) -> None:
     await sleep_ms(context.clock, idle_ms)
+
+
+def _action_status_expected(action: dict[str, Any], status: str) -> bool:
+    expect = action.get("expect")
+    if not isinstance(expect, dict):
+        return False
+    return str(expect.get("status") or "") == status
 
 
 def _status_from_records(records: list[dict[str, Any]]) -> str:

@@ -517,7 +517,10 @@ public static class ElementCommands
     /// Throws if element not found.
     /// </summary>
     internal static AutomationElement FindElementCascade(
-        AutomationElement root, JsonNode? @params, UIA3Automation automation)
+        AutomationElement root,
+        JsonNode? @params,
+        UIA3Automation automation,
+        bool strictAutomationId = false)
     {
         var cf = new ConditionFactory(automation.PropertyLibrary);
 
@@ -528,6 +531,11 @@ public static class ElementCommands
             var element = root.FindFirstDescendant(cf.ByAutomationId(automationId));
             if (element is not null)
                 return element;
+            if (strictAutomationId)
+            {
+                throw new ExactAutomationIdMismatchException(
+                    BuildExactAutomationIdMismatchPayload(@params));
+            }
         }
 
         // Priority 2: XPath
@@ -955,4 +963,49 @@ public static class ElementCommands
             };
         }
     }
+
+    internal static JsonObject BuildExactAutomationIdMismatchPayload(JsonNode? @params)
+    {
+        var requested = new JsonObject
+        {
+            ["automationId"] = ParamString(@params, "automationId"),
+            ["name"] = ParamString(@params, "name"),
+            ["controlType"] = ParamString(@params, "controlType"),
+            ["rootAutomationId"] = ParamString(@params, "rootAutomationId"),
+            ["xpath"] = ParamString(@params, "xpath"),
+        };
+
+        return new JsonObject
+        {
+            ["status"] = "BLOCKED",
+            ["reason"] = "selector result did not match exact automation_id",
+            ["requested"] = requested,
+            ["accepted"] = new JsonObject
+            {
+                ["selector_policy"] = "exact automation_id match",
+            },
+            ["next_step"] =
+                "Inspect the scoped tree with ui_get_window_tree or adjust the selector; " +
+                "side-effecting UI actions require the returned element to match the " +
+                "requested exact automation_id.",
+            ["search"] = DescribeSearch(@params),
+        };
+    }
+
+    private static string? ParamString(JsonNode? @params, string key)
+    {
+        try { return @params?[key]?.GetValue<string>(); }
+        catch { return null; }
+    }
+}
+
+internal sealed class ExactAutomationIdMismatchException : InvalidOperationException
+{
+    public ExactAutomationIdMismatchException(JsonObject payload)
+        : base("selector result did not match exact automation_id")
+    {
+        Payload = payload;
+    }
+
+    public JsonObject Payload { get; }
 }

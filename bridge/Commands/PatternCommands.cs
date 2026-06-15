@@ -16,7 +16,20 @@ public static class PatternCommands
             throw new InvalidOperationException("Not connected. Call 'connect' first.");
 
         var searchRoot = ElementCommands.ResolveSearchRoot(mainWindow, @params, automation);
-        var element = ElementCommands.FindElementCascade(searchRoot, @params, automation);
+        AutomationElement element;
+        try
+        {
+            element = ElementCommands.FindElementCascade(
+                searchRoot,
+                @params,
+                automation,
+                strictAutomationId: true);
+        }
+        catch (ExactAutomationIdMismatchException ex)
+        {
+            ex.Payload["action"] = "ui_invoke";
+            return ex.Payload;
+        }
 
         string method;
         if (element.Patterns.Invoke.IsSupported)
@@ -48,7 +61,20 @@ public static class PatternCommands
             throw new InvalidOperationException("Not connected. Call 'connect' first.");
 
         var searchRoot = ElementCommands.ResolveSearchRoot(mainWindow, @params, automation);
-        var element = ElementCommands.FindElementCascade(searchRoot, @params, automation);
+        AutomationElement element;
+        try
+        {
+            element = ElementCommands.FindElementCascade(
+                searchRoot,
+                @params,
+                automation,
+                strictAutomationId: true);
+        }
+        catch (ExactAutomationIdMismatchException ex)
+        {
+            ex.Payload["action"] = "ui_toggle";
+            return ex.Payload;
+        }
 
         if (!element.Patterns.Toggle.IsSupported)
         {
