@@ -378,6 +378,20 @@ selected payload identity checks, negative no-op expectations, and fail-closed
 WinForms `dragList` primitive smoke is not a substitute for WPF DataGrid CR-001
 acceptance.
 
+Diagnostic schemas use `netcoredbg.runtime_smoke.diagnostics.v1`. Start from
+the examples under `docs/examples/runtime-smoke-oracle-pack.json`,
+`docs/examples/runtime-smoke-app-diagnostics.json`,
+`docs/examples/runtime-smoke-semantic-probe.json`, and
+`docs/examples/runtime-smoke-tracepoint-guardrail.json` when adding oracle
+packs, app diagnostics, semantic probes, or instrumentation guardrails.
+Diagnostic payloads use only `PASS`, `BLOCKED`, and `FAIL`; evidence is bounded
+by `max_text_length`, `max_list_items`, and `max_json_bytes`; `raw_tree`,
+`window_tree`, `ui_tree`, `screenshot_base64`, `access_token`, `api_key`,
+`password`, and `secret` must be omitted before evidence is returned;
+`backend_result`, `exception`, `raw_output`, and `stack` must be summarized.
+Tracepoint guardrails must name `allowed_when`, `blocked_when`, `unsafe_when`,
+and cleanup ownership with `debug.tracepoint.remove`.
+
 ## Edit-and-Continue
 
 `apply_code_change` applies supported source edits to a stopped .NET debug

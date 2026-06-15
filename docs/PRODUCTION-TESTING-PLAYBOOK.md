@@ -174,6 +174,36 @@ Expected result:
 WinForms `dragList` primitive smoke is not a substitute for WPF DataGrid CR-001
 acceptance.
 
+### 8. Runtime-Smoke Diagnostic Schema Gate
+
+Contract sources:
+
+- `docs/examples/runtime-smoke-oracle-pack.json`
+- `docs/examples/runtime-smoke-app-diagnostics.json`
+- `docs/examples/runtime-smoke-semantic-probe.json`
+- `docs/examples/runtime-smoke-tracepoint-guardrail.json`
+
+Expected result:
+
+- Oracle packs, app diagnostics, semantic probes, and tracepoint guardrails use
+  schema `netcoredbg.runtime_smoke.diagnostics.v1`.
+- Status vocabulary is limited to `PASS`, `BLOCKED`, and `FAIL`.
+- Evidence stays bounded by `max_text_length`, `max_list_items`, and
+  `max_json_bytes`.
+- `raw_tree`, `window_tree`, `ui_tree`, `screenshot_base64`, `access_token`,
+  `api_key`, `password`, and `secret` are omitted before results leave the
+  runtime-smoke boundary; `backend_result`, `exception`, `raw_output`, and
+  `stack` are summarized.
+- Tracepoint guardrails name `allowed_when`, `blocked_when`, `unsafe_when`, and
+  cleanup ownership with `debug.tracepoint.remove` before
+  instrumentation-dependent runtime behavior is added.
+
+Verification:
+
+```powershell
+python -m pytest tests/test_runtime_smoke_diagnostics_schema.py
+```
+
 ## Failure-Mode Catalog
 
 - CLI exits non-zero or fails to import the package.

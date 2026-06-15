@@ -1,0 +1,30 @@
+{
+  "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
+  "kind": "ui.text",
+  "status": "BLOCKED",
+  "selector": {
+    "automation_id": "MissingTextBox",
+    "control_type": "TextBox"
+  },
+  "expect": {
+    "text_contains": "Ready"
+  },
+  "on_blocked": {
+    "reason": "selector not found",
+    "requested": {
+      "automation_id": "MissingTextBox"
+    },
+    "accepted": {
+      "selector_fields": [
+        "automation_id",
+        "name",
+        "control_type"
+      ]
+    },
+    "next_step": "Verify the fixture exposes the requested AutomationId before treating this as product failure."
+  },
+  "backend_result": {
+    "status": "FAIL",
+    "reason": "Element not found"
+  }
+}
