@@ -321,7 +321,64 @@ def register_runtime_smoke_tools(
             return _build_runtime_smoke_response(
                 session,
                 data,
-                ["runtime_smoke_start", "run_runtime_smoke"],
+                ["runtime_smoke_run_plan", "runtime_smoke_start", "run_runtime_smoke"],
+            )
+        except Exception as exc:
+            return build_error_response(str(exc), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
+    async def runtime_smoke_run_plan(ctx: Context, plan: dict[str, Any]) -> dict:
+        """Validate then start a durable runtime smoke run."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            validation = validate_runtime_smoke_plan_contract(plan)
+            if not validation["can_run"]:
+                return _build_runtime_smoke_response(
+                    session,
+                    validation,
+                    ["runtime_smoke_validate_plan", "runtime_smoke_run_plan"],
+                )
+
+            data = await session.runtime_smoke.lifecycle_runs.start(plan, _runner)
+            data["validation"] = _runtime_smoke_validation_summary(validation)
+            return _build_runtime_smoke_response(
+                session,
+                data,
+                [
+                    "runtime_smoke_evidence_bundle",
+                    "runtime_smoke_tail_events",
+                    "runtime_smoke_get_result",
+                    "runtime_smoke_stop",
+                ],
+            )
+        except Exception as exc:
+            return build_error_response(str(exc), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+    async def runtime_smoke_evidence_bundle(
+        ctx: Context,
+        run_id: str,
+        after_cursor: int = 0,
+        event_limit: int = 50,
+    ) -> dict:
+        """Return a compact evidence packet for a durable runtime smoke run."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+            data = await _runtime_smoke_evidence_bundle(
+                session.runtime_smoke.lifecycle_runs,
+                run_id,
+                after_cursor=after_cursor,
+                event_limit=event_limit,
+            )
+            return _build_runtime_smoke_response(
+                session,
+                data,
+                list(data.get("next_actions", ["runtime_smoke_run_plan"])),
             )
         except Exception as exc:
             return build_error_response(str(exc), state=session.state.state)
@@ -442,6 +499,83 @@ def validate_runtime_smoke_plan_contract(plan: dict[str, Any]) -> dict[str, Any]
     result["status"] = "PASS" if result["can_run"] else "INVALID_SETUP"
     result["evidence_contract"] = _runtime_smoke_evidence_contract()
     return result
+
+
+def _runtime_smoke_validation_summary(validation: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "status",
+        "can_run",
+        "validation_errors",
+        "case_count",
+        "generated_case_count",
+        "evidence_contract",
+    )
+    return {key: validation[key] for key in keys if key in validation}
+
+
+async def _runtime_smoke_evidence_bundle(
+    registry: Any,
+    run_id: str,
+    *,
+    after_cursor: int = 0,
+    event_limit: int = 50,
+) -> dict[str, Any]:
+    result = await registry.get_result(run_id)
+    if result.get("status") == "FAIL" and result.get("reason") == "runtime smoke run not found":
+        return {
+            "status": "FAIL",
+            "reason": "runtime smoke run not found",
+            "run_id": run_id,
+            "final": True,
+            "events": [],
+            "event_cursor": {
+                "after_cursor": max(0, int(after_cursor)),
+                "next_cursor": max(0, int(after_cursor)),
+                "oldest_cursor": None,
+                "dropped_count": 0,
+                "stale_cursor": False,
+                "limit": max(0, int(event_limit)),
+            },
+            "result": None,
+            "evidence_refs": [],
+            "cleanup": None,
+            "next_actions": ["runtime_smoke_run_plan"],
+        }
+
+    tail = await registry.tail_events(
+        run_id,
+        after_cursor=max(0, int(after_cursor)),
+        limit=max(0, int(event_limit)),
+    )
+    final = bool(result.get("final"))
+    next_actions = [
+        "runtime_smoke_evidence_bundle",
+        "runtime_smoke_tail_events",
+        "runtime_smoke_get_result",
+    ]
+    next_actions.append("runtime_smoke_run_plan" if final else "runtime_smoke_stop")
+
+    return {
+        "status": result.get("status", tail.get("status", "UNKNOWN")),
+        "reason": result.get("reason"),
+        "run_id": run_id,
+        "plan_name": result.get("plan_name"),
+        "lifecycle_status": result.get("lifecycle_status", tail.get("status")),
+        "final": final,
+        "events": tail.get("events", []),
+        "event_cursor": {
+            "after_cursor": max(0, int(after_cursor)),
+            "next_cursor": tail.get("next_cursor"),
+            "oldest_cursor": tail.get("oldest_cursor"),
+            "dropped_count": tail.get("dropped_count", 0),
+            "stale_cursor": tail.get("stale_cursor", False),
+            "limit": max(0, int(event_limit)),
+        },
+        "result": result if final else None,
+        "evidence_refs": result.get("evidence_refs", []),
+        "cleanup": result.get("cleanup"),
+        "next_actions": next_actions,
+    }
 
 
 def _runtime_smoke_evidence_contract() -> dict[str, Any]:

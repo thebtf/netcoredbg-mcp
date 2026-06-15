@@ -166,8 +166,21 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
     expected_remaining_terms = {
         "#250": ["focus", "selected-item", "screenshot-orientation"],
         "#254": ["ui_query", "selected row/index/content"],
-        "#268": ["runtime_smoke_validate_plan", "runtime_smoke.run_plan", "evidence-bundle API"],
-        "#269": ["agent_mode", "run_probe"],
+        "#268": [
+            "runtime_smoke_validate_plan",
+            "runtime_smoke_run_plan",
+            "runtime_smoke_evidence_bundle",
+            "runtime_smoke.run_probe",
+            "oracle-pack",
+            "app diagnostics",
+        ],
+        "#269": [
+            "runtime_smoke_get_result",
+            "runtime_smoke_stop",
+            "evidence-bundle API",
+            "agent_mode",
+            "run_probe",
+        ],
         "#270": ["semantic TextBox/DataGrid"],
         "#271": ["debug_preflight", "tracepoint guard", "cleanup contract"],
         "#272": ["app diagnostics", "oracle_pack"],
