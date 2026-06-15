@@ -345,6 +345,11 @@ async def test_v2_wait_and_noop_actions_require_no_selector() -> None:
                             "settle": {"idle_ms": 0},
                             "probes": [],
                         },
+                        {
+                            "action": {"kind": "ui.noop"},
+                            "settle": {"idle_ms": 0},
+                            "probes": [],
+                        },
                     ],
                 }
             ],
@@ -353,10 +358,12 @@ async def test_v2_wait_and_noop_actions_require_no_selector() -> None:
 
     actions = result["cases"][0]["actions"]
     assert result["status"] == "PASS"
-    assert result["action_count"] == 2
-    assert [action["route"] for action in actions] == ["wait", "noop"]
+    assert result["action_count"] == 3
+    assert [action["route"] for action in actions] == ["wait", "noop", "noop"]
     assert actions[0]["idle_ms"] == 300
-    assert clock.sleeps_ms == [300, 0, 0]
+    assert "noop" in result["accepted_action_kinds"]
+    assert "ui.noop" in result["accepted_action_kinds"]
+    assert clock.sleeps_ms == [300, 0, 0, 0]
     assert session.calls == []
 
 

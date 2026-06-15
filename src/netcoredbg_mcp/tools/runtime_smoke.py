@@ -358,6 +358,57 @@ def register_runtime_smoke_tools(
         except Exception as exc:
             return build_error_response(str(exc), state=session.state.state)
 
+    @mcp.tool(annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
+    async def runtime_smoke_run_probe(
+        ctx: Context,
+        probe: dict[str, Any],
+        name: str | None = None,
+        phase: str = "after",
+        budgets: dict[str, Any] | None = None,
+    ) -> dict:
+        """Validate then start a durable runtime-smoke v2 run for one probe."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            plan, generated = _runtime_smoke_probe_plan(
+                probe,
+                name=name,
+                phase=phase,
+                budgets=budgets,
+            )
+            validation = validate_runtime_smoke_plan_contract(plan)
+            if not validation["can_run"]:
+                return _build_runtime_smoke_response(
+                    session,
+                    {
+                        **validation,
+                        "run_created": False,
+                        "probe": _runtime_smoke_probe_summary(probe),
+                        "generated_plan": generated,
+                    },
+                    ["runtime_smoke_validate_plan", "runtime_smoke_run_probe"],
+                )
+
+            data = await session.runtime_smoke.lifecycle_runs.start(plan, _runner)
+            data["validation"] = _runtime_smoke_validation_summary(validation)
+            data["probe"] = _runtime_smoke_probe_summary(probe)
+            data["generated_plan"] = generated
+            data["run_created"] = bool(data.get("run_id"))
+            return _build_runtime_smoke_response(
+                session,
+                data,
+                [
+                    "runtime_smoke_evidence_bundle",
+                    "runtime_smoke_tail_events",
+                    "runtime_smoke_get_result",
+                    "runtime_smoke_stop",
+                ],
+            )
+        except Exception as exc:
+            return build_error_response(str(exc), state=session.state.state)
+
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
     async def runtime_smoke_evidence_bundle(
         ctx: Context,
@@ -512,6 +563,72 @@ def _runtime_smoke_validation_summary(validation: dict[str, Any]) -> dict[str, A
         "evidence_contract",
     )
     return {key: validation[key] for key in keys if key in validation}
+
+
+def _runtime_smoke_probe_plan(
+    probe: dict[str, Any],
+    *,
+    name: str | None = None,
+    phase: str = "after",
+    budgets: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Wrap a single probe in the smallest executable v2 runtime-smoke plan."""
+    probe_payload = dict(probe) if isinstance(probe, dict) else {"kind": ""}
+    if "phase" not in probe_payload and "phases" not in probe_payload:
+        probe_payload["phase"] = str(phase or "after")
+
+    kind = str(probe_payload.get("kind") or "")
+    probe_name = str(probe_payload.get("name") or kind or "probe")
+    plan_name = str(name or f"run-probe-{probe_name}")
+    plan = {
+        "schema": SCHEMA_VERSION_V2,
+        "name": plan_name,
+        "cases": [
+            {
+                "id": "run_probe",
+                "transitions": [
+                    {
+                        "id": "probe",
+                        "action": {"kind": "ui.noop"},
+                        "settle": {"idle_ms": 0},
+                        "probes": [probe_payload],
+                    }
+                ],
+            }
+        ],
+        "budgets": dict(budgets or {"max_actions": 1, "max_elapsed_seconds": 5}),
+    }
+    generated = {
+        "schema": SCHEMA_VERSION_V2,
+        "plan_name": plan_name,
+        "case_count": 1,
+        "transition_count": 1,
+        "action_kind": "ui.noop",
+        "probe_kind": kind,
+        "probe_name": probe_name,
+        "probe_phase": _runtime_smoke_probe_phase(probe_payload),
+    }
+    return plan, generated
+
+
+def _runtime_smoke_probe_phase(probe: dict[str, Any]) -> str:
+    if "phases" in probe:
+        raw = probe["phases"]
+        if isinstance(raw, str):
+            return raw
+        if isinstance(raw, (list, tuple, set)):
+            return ",".join(str(item) for item in raw)
+        return str(raw)
+    return str(probe.get("phase") or "both")
+
+
+def _runtime_smoke_probe_summary(probe: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(probe, dict):
+        return {"kind": "", "name": ""}
+    return {
+        "kind": str(probe.get("kind") or ""),
+        "name": str(probe.get("name") or probe.get("kind") or ""),
+    }
 
 
 async def _runtime_smoke_evidence_bundle(
