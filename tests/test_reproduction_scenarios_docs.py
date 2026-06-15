@@ -116,4 +116,32 @@ def test_issues_backlog_links_novascript_replay_packet() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
 
     assert "docs/reproduction-scenarios/novascript-cr003-replay-2026-06-15.md" in backlog
-    assert "target-side v0.17.2 evidence is not enough" in backlog
+    assert "target-side v0.17.2 evidence is not enough" in backlog.lower()
+    assert "DOWNSTREAM_REPLAY_BLOCKED" in backlog
+
+
+def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+
+    assert "## Current Issue Status" in backlog
+    assert "## Historical RED Proof Commands" in backlog
+    assert "## Executable RED Scenarios" not in backlog
+    assert "## Blocked Or Spec-Needed Scenarios" not in backlog
+    assert "`#271` | Target evidence merged" in backlog
+    assert "`#272` | Target evidence merged" in backlog
+    assert "SpecKit needed" not in backlog
+    assert "`#226` | Downstream replay `BLOCKED`" in backlog
+
+    for issue in (
+        "#250",
+        "#251",
+        "#254",
+        "#264",
+        "#265",
+        "#266",
+        "#267",
+        "#268",
+        "#269",
+        "#270",
+    ):
+        assert f"`{issue}` | Target evidence merged" in backlog
