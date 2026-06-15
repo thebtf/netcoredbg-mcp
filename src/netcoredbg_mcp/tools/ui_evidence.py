@@ -183,6 +183,9 @@ def register_ui_evidence_tools(
     ) -> dict:
         """Read selected UI fields without dumping the full tree."""
         try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
             invalid = invalid_ui_fields(fields)
             if invalid:
                 return build_response(
@@ -194,9 +197,6 @@ def register_ui_evidence_tools(
                     },
                     state=session.state.state,
                 )
-            access_error = check_session_access(ctx)
-            if access_error:
-                return build_error_response(access_error, state=session.state.state)
             backend = await _ensure_ui_connected()
             result = await query_ui_fields(
                 backend,
@@ -222,6 +222,9 @@ def register_ui_evidence_tools(
     ) -> dict:
         """Capture a named field-limited UI snapshot."""
         try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
             invalid = invalid_ui_fields(fields)
             if invalid:
                 return build_response(
@@ -233,9 +236,6 @@ def register_ui_evidence_tools(
                     },
                     state=session.state.state,
                 )
-            access_error = check_session_access(ctx)
-            if access_error:
-                return build_error_response(access_error, state=session.state.state)
             backend = await _ensure_ui_connected()
             result = await capture_ui_snapshot(
                 backend,
@@ -302,7 +302,7 @@ def register_ui_evidence_tools(
                             "allowed_fields": list(ALLOWED_UI_FIELDS),
                         },
                         state=session.state.state,
-                    )
+                )
                 backend = await _ensure_ui_connected()
                 result = await store.start(
                     backend,
@@ -312,7 +312,8 @@ def register_ui_evidence_tools(
                     max_events=max_events,
                 )
             elif action == "read":
-                result = await store.read(buffer_id)
+                backend = await _ensure_ui_connected()
+                result = await store.read(buffer_id, backend=backend)
             elif action == "stop":
                 result = store.stop(buffer_id)
             else:
@@ -321,6 +322,111 @@ def register_ui_evidence_tools(
                     "reason": "unknown UI events action",
                     "action": action,
                 }
+            return build_response(data=result, state=session.state.state)
+        except Exception as exc:
+            return build_error_response(str(exc), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def ui_monitor_start(
+        ctx: Context,
+        monitor_id: str,
+        fields: list[str] | None = None,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+        max_events: int = 20,
+    ) -> dict:
+        """Start a selector-scoped semantic UI monitor."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+            requested_fields = list(fields or ["focus", "selection", "text"])
+            invalid = invalid_ui_fields(requested_fields)
+            if invalid:
+                return build_response(
+                    data={
+                        "status": "FAIL",
+                        "reason": "unknown UI fields",
+                        "invalid_fields": invalid,
+                        "allowed_fields": list(ALLOWED_UI_FIELDS),
+                    },
+                    state=session.state.state,
+                )
+            backend = await _ensure_ui_connected()
+            result = await _event_store().monitor_start(
+                backend,
+                monitor_id=monitor_id,
+                selector=_selector(automation_id, name, control_type, root_id, xpath),
+                fields=requested_fields,
+                max_events=max_events,
+            )
+            return build_response(data=result, state=session.state.state)
+        except Exception as exc:
+            return build_error_response(str(exc), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def ui_monitor_poll(
+        ctx: Context,
+        monitor_id: str,
+        after_cursor: int = 0,
+    ) -> dict:
+        """Poll a semantic UI monitor once and return cursor-filtered events."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+            backend = await _ensure_ui_connected()
+            result = await _event_store().monitor_poll(
+                monitor_id,
+                after_cursor=after_cursor,
+                backend=backend,
+            )
+            return build_response(data=result, state=session.state.state)
+        except Exception as exc:
+            return build_error_response(str(exc), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def ui_monitor_wait(
+        ctx: Context,
+        monitor_id: str,
+        after_cursor: int = 0,
+        timeout_ms: int = 1000,
+        poll_interval_ms: int = 100,
+    ) -> dict:
+        """Wait for a semantic UI monitor event or return a bounded timeout."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+            result = await _event_store().monitor_wait(
+                monitor_id,
+                after_cursor=after_cursor,
+                timeout_ms=timeout_ms,
+                poll_interval_ms=poll_interval_ms,
+                backend_provider=_ensure_ui_connected,
+            )
+            return build_response(data=result, state=session.state.state)
+        except Exception as exc:
+            return build_error_response(str(exc), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+    async def ui_monitor_events(
+        ctx: Context,
+        monitor_id: str,
+        after_cursor: int = 0,
+    ) -> dict:
+        """Return retained semantic UI monitor history without polling."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+            result = _event_store().monitor_events(
+                monitor_id,
+                after_cursor=after_cursor,
+            )
             return build_response(data=result, state=session.state.state)
         except Exception as exc:
             return build_error_response(str(exc), state=session.state.state)

@@ -143,10 +143,11 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
         "#264",
         "#265",
         "#266",
+        "#267",
     ):
         assert f"`{issue}` | Target evidence merged" in backlog
 
-    for issue in ("#250", "#254", "#267", "#268", "#269", "#270"):
+    for issue in ("#250", "#254", "#268", "#269", "#270"):
         row = _issue_row(backlog, issue)
         assert "Target slice merged" in row
         assert "broader" in row
@@ -165,7 +166,6 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
     expected_remaining_terms = {
         "#250": ["focus", "selected-item", "screenshot-orientation"],
         "#254": ["ui_query", "selected row/index/content"],
-        "#267": ["ui_monitor_start", "ui_monitor_poll", "ui_monitor_wait"],
         "#268": ["runtime_smoke.validate_plan", "runtime_smoke.run_plan"],
         "#269": ["agent_mode", "run_probe"],
         "#270": ["semantic TextBox/DataGrid"],
