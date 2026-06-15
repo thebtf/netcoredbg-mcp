@@ -19,7 +19,7 @@ work.
 | `#264` | Target evidence merged | PR #84; cancelled FlaUI bridge calls stop/recover without stale bridge leakage | None in netcoredbg-mcp. |
 | `#265` | Target evidence merged | PR #86; exact selector mismatches return `BLOCKED` before side effects; WPF selector-safety replay passed | None in netcoredbg-mcp. |
 | `#266` | Target evidence merged | PR #84; same-PID stale backend reconnects before `ui_get_window_tree` without foreground activation | None in netcoredbg-mcp. |
-| `#267` | Target slice merged; broader FR remains open | PR #90; `runtime_smoke_start` registered and lifecycle coverage merged | Keep or split the requested `ui_monitor_start` / `ui_monitor_poll` / `ui_monitor_wait` / `ui_monitor_events` semantic monitor API before closing the full FR. |
+| `#267` | Target evidence merged | PR #90 plus CR-011; runtime-smoke lifecycle tools remain registered and `ui_monitor_start` / `ui_monitor_poll` / `ui_monitor_wait` / `ui_monitor_events` provide the requested semantic monitor API | None in netcoredbg-mcp. |
 | `#268` | Target slice merged; broader FR remains open | PR #90; `runtime_smoke_tail_events` registered and lifecycle coverage merged; existing v2 plan validation remains available | Keep or split first-class `runtime_smoke.validate_plan` / `runtime_smoke.run_plan` and evidence-bundle API work before closing the full FR. |
 | `#269` | Target slice merged; broader FR remains open | PR #90; `runtime_smoke_get_result` and `runtime_smoke_stop` registered and lifecycle coverage merged | Keep or split `agent_mode`, event cursor/delta, `run_probe`, and evidence-first probe UX before closing the full FR. |
 | `#270` | Target slice merged; broader FR remains open | PR #89; blocked semantic probes preserve requested/accepted/next_step/backend diagnostics | Keep or split semantic TextBox/DataGrid action and read-only state helpers before closing the full FR. |
@@ -39,7 +39,7 @@ They are not the current expected behavior after the linked PRs merged.
 | `#254` | `tests/test_ui_evidence.py::test_ui_grid_accepts_rows_alias_for_visible_rows` | `uv run pytest --runxfail tests/test_ui_evidence.py::test_ui_grid_accepts_rows_alias_for_visible_rows -q` | `ui_grid(action="rows")` returned `unknown grid action`. |
 | `#265` | `tests/test_ui_new_tools.py::TestFlaUIBackendInvoke::test_ui_invoke_blocks_mismatched_exact_automation_id` | `uv run pytest --runxfail tests/test_ui_new_tools.py::TestFlaUIBackendInvoke::test_ui_invoke_blocks_mismatched_exact_automation_id -q` | `ui_invoke` accepted a returned `automationId` that differed from the requested exact id. |
 | `#266` | `tests/test_stealth_mode.py::test_ui_get_window_tree_reconnects_same_pid_after_bridge_disconnect` | `uv run pytest --runxfail tests/test_stealth_mode.py::test_ui_get_window_tree_reconnects_same_pid_after_bridge_disconnect -q` | Same-PID stale backend was not reconnected before `ui_get_window_tree`. |
-| `#267` | `tests/test_runtime_smoke_registration.py::test_runtime_smoke_agent_lifecycle_tools_are_registered` | `uv run pytest --runxfail tests/test_runtime_smoke_registration.py::test_runtime_smoke_agent_lifecycle_tools_are_registered -q` | `runtime_smoke_start` was not registered. |
+| `#267` | `tests/test_runtime_smoke_registration.py::test_ui_monitor_tools_are_registered` and `tests/test_ui_monitor.py` | `uv run pytest --runxfail tests/test_runtime_smoke_registration.py::test_ui_monitor_tools_are_registered tests/test_ui_monitor.py -q` | `ui_monitor_start` / `ui_monitor_poll` / `ui_monitor_wait` / `ui_monitor_events` were not registered or implemented. |
 | `#268` | `tests/test_runtime_smoke_registration.py::test_runtime_smoke_agent_lifecycle_tools_are_registered` | Same as `#267` | `runtime_smoke_tail_events` was not registered. |
 | `#269` | `tests/test_runtime_smoke_registration.py::test_runtime_smoke_agent_lifecycle_tools_are_registered` | Same as `#267` | `runtime_smoke_get_result` and `runtime_smoke_stop` were not registered. |
 | `#270` | `tests/test_runtime_smoke_v2_probes/test_ui_text.py::test_ui_text_probe_preserves_blocked_backend_diagnostics` | `uv run pytest --runxfail tests/test_runtime_smoke_v2_probes/test_ui_text.py::test_ui_text_probe_preserves_blocked_backend_diagnostics -q` | Blocked semantic probes dropped actionable backend diagnostics. |
@@ -52,7 +52,7 @@ They are not the current expected behavior after the linked PRs merged.
   the NovaScript runtime-smoke plan establishes a visible source row before the
   first drag. Target-side v0.17.2 evidence is not enough to close the consumer
   issue.
-- `#250`, `#254`, and `#267` through `#272`: do not close the full Engram
+- `#250`, `#254`, and `#268` through `#272`: do not close the full Engram
   issues from the narrow merged CR slices alone. Add an Engram comment or split
   follow-up issue that names which sub-slice is resolved and which requested
   capability remains open.
