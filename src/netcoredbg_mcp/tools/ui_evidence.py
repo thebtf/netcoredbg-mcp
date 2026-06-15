@@ -401,13 +401,12 @@ def register_ui_evidence_tools(
             access_error = check_session_access(ctx)
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
-            backend = await _ensure_ui_connected()
             result = await _event_store().monitor_wait(
                 monitor_id,
                 after_cursor=after_cursor,
                 timeout_ms=timeout_ms,
                 poll_interval_ms=poll_interval_ms,
-                backend=backend,
+                backend_provider=_ensure_ui_connected,
             )
             return build_response(data=result, state=session.state.state)
         except Exception as exc:

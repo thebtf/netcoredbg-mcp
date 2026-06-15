@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
@@ -167,6 +168,7 @@ class UIEventBufferStore:
         timeout_ms: int = 1000,
         poll_interval_ms: int = 100,
         backend: Any | None = None,
+        backend_provider: Callable[[], Awaitable[Any]] | None = None,
     ) -> dict[str, Any]:
         deadline = time.monotonic() + max(0, timeout_ms) / 1000
         interval = max(1, poll_interval_ms) / 1000
@@ -182,6 +184,7 @@ class UIEventBufferStore:
                 after_cursor=after_cursor,
                 timeout_s=remaining,
                 backend=backend,
+                backend_provider=backend_provider,
             )
             if result.get("status") != "PASS" or result.get("events"):
                 return result
@@ -196,6 +199,7 @@ class UIEventBufferStore:
         after_cursor: int,
         timeout_s: float,
         backend: Any | None,
+        backend_provider: Callable[[], Awaitable[Any]] | None,
     ) -> dict[str, Any]:
         buffer = self.buffers.get(monitor_id)
         if buffer is None:
@@ -206,9 +210,17 @@ class UIEventBufferStore:
             return _monitor_wait_timed_out(
                 self.monitor_events(monitor_id, after_cursor=after_cursor)
             )
-        _refresh_backend(buffer, backend)
-        query_task = asyncio.create_task(_query_current(buffer))
         try:
+            provider_ok, provided_backend = await _resolve_backend_with_deadline(
+                backend_provider,
+                max(0.0, deadline - time.monotonic()),
+            )
+            if not provider_ok:
+                return _monitor_wait_timed_out(
+                    self.monitor_events(monitor_id, after_cursor=after_cursor)
+                )
+            _refresh_backend(buffer, provided_backend if backend_provider is not None else backend)
+            query_task = asyncio.create_task(_query_current(buffer))
             done, _pending = await asyncio.wait(
                 {query_task},
                 timeout=max(0.0, deadline - time.monotonic()),
@@ -308,6 +320,21 @@ def _legacy_event(event: dict[str, Any]) -> dict[str, Any]:
 def _refresh_backend(buffer: UIEventBuffer, backend: Any | None) -> None:
     if backend is not None:
         buffer.backend = backend
+
+
+async def _resolve_backend_with_deadline(
+    backend_provider: Callable[[], Awaitable[Any]] | None,
+    timeout_s: float,
+) -> tuple[bool, Any | None]:
+    if backend_provider is None:
+        return True, None
+
+    backend_task = asyncio.create_task(backend_provider())
+    done, _pending = await asyncio.wait({backend_task}, timeout=max(0.0, timeout_s))
+    if backend_task not in done or backend_task.cancelled():
+        _cancel_without_waiting(backend_task)
+        return False, None
+    return True, backend_task.result()
 
 
 async def _query_current(buffer: UIEventBuffer) -> dict[str, Any]:

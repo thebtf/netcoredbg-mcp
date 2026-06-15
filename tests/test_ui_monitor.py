@@ -421,3 +421,66 @@ async def test_ui_monitor_poll_reconnects_backend_before_query(
 
     assert connect_calls == [42, 42]
     assert polled["data"]["events"][0]["changes"]["text"] == {"before": "A", "after": "B"}
+
+
+@pytest.mark.asyncio
+async def test_ui_monitor_wait_bounds_reconnect_inside_timeout_budget(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    backend = FakeMonitorBackend()
+    backend.responses = [
+        {
+            "status": "PASS",
+            "elements": [{"element_id": "row-1", "text": "A"}],
+            "element_count": 1,
+        },
+        {
+            "status": "PASS",
+            "elements": [{"element_id": "row-1", "text": "B"}],
+            "element_count": 1,
+        },
+    ]
+    connect_calls: list[int] = []
+
+    async def connect_backend(backend_arg: FakeMonitorBackend, process_id: int, **_kwargs) -> None:
+        connect_calls.append(process_id)
+        try:
+            await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.05)
+        backend_arg.process_id = process_id
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.connect_backend", connect_backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    await capturing_mcp.tools["ui_monitor_start"](
+        ctx=None,
+        monitor_id="flow",
+        fields=["text"],
+        automation_id="grid",
+    )
+    backend.process_id = None
+
+    waited = await asyncio.wait_for(
+        capturing_mcp.tools["ui_monitor_wait"](
+            ctx=None,
+            monitor_id="flow",
+            after_cursor=0,
+            timeout_ms=10,
+            poll_interval_ms=1,
+        ),
+        timeout=0.2,
+    )
+    await asyncio.sleep(0.06)
+
+    assert connect_calls == [42]
+    assert waited["data"]["status"] == "BLOCKED"
+    assert waited["data"]["reason"] == "ui monitor wait timed out"
+    assert waited["data"]["event_count"] == 0
