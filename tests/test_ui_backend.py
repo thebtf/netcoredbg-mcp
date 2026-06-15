@@ -207,6 +207,66 @@ class TestFlaUIBackendConnect:
 
 class TestFlaUIBridgeClient:
     @pytest.mark.asyncio
+    async def test_stop_preserves_process_handle_until_cleanup_finishes(self):
+        import asyncio
+
+        from netcoredbg_mcp.ui.flaui_client import FlaUIBridgeClient
+
+        class FakeStdin:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def is_closing(self) -> bool:
+                return self.closed
+
+            def write(self, _data: bytes) -> None:
+                pass
+
+            async def drain(self) -> None:
+                pass
+
+            def close(self) -> None:
+                self.closed = True
+
+        class FakeProcess:
+            pid = 123
+
+            def __init__(self) -> None:
+                self.stdin = FakeStdin()
+                self.returncode: int | None = None
+                self.wait_started = asyncio.Event()
+                self.wait_release = asyncio.Event()
+
+            async def wait(self) -> None:
+                self.wait_started.set()
+                await self.wait_release.wait()
+                self.returncode = 0
+
+            def kill(self) -> None:
+                self.returncode = -9
+                self.wait_release.set()
+
+        process = FakeProcess()
+        client = FlaUIBridgeClient("C:/fake/FlaUIBridge.exe")
+        client._process = process  # type: ignore[assignment]
+
+        caller = asyncio.create_task(client.stop())
+        await process.wait_started.wait()
+
+        assert client._process is process
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+
+        assert client._process is process
+        assert client._stop_task is not None
+
+        process.wait_release.set()
+        await client._stop_task
+
+        assert client._process is None
+
+    @pytest.mark.asyncio
     async def test_call_restarts_bridge_after_cancelled_request(self, monkeypatch):
         import asyncio
 

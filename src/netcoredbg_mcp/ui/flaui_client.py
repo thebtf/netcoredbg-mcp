@@ -76,6 +76,8 @@ class FlaUIBridgeClient:
         self._lock = asyncio.Lock()
         self._cleanup_tasks: set[asyncio.Task[None]] = set()
         self._invalidate_connection = invalidate_connection
+        self._stopping_process: asyncio.subprocess.Process | None = None
+        self._stop_task: asyncio.Task[None] | None = None
 
     def _mark_connection_invalid(self) -> None:
         if self._invalidate_connection is not None:
@@ -83,7 +85,7 @@ class FlaUIBridgeClient:
 
     async def start(self) -> None:
         """Start the bridge subprocess."""
-        if self._process is not None and self._process.returncode is None:
+        if self.is_running:
             return  # Already running
 
         self._process = await asyncio.create_subprocess_exec(
@@ -108,30 +110,48 @@ class FlaUIBridgeClient:
             return
 
         self._mark_connection_invalid()
-        self._process = None
+        if self._stop_task is not None and not self._stop_task.done():
+            await asyncio.shield(self._stop_task)
+            return
+
+        self._stopping_process = process
+        cleanup_task = asyncio.create_task(self._stop_process(process))
+        self._stop_task = cleanup_task
+        self._cleanup_tasks.add(cleanup_task)
+        cleanup_task.add_done_callback(self._cleanup_tasks.discard)
+        await asyncio.shield(cleanup_task)
+
+    async def _stop_process(self, process: asyncio.subprocess.Process) -> None:
+        """Stop one captured bridge process and clear state after cleanup."""
         pid = process.pid
 
         try:
-            if process.stdin and not process.stdin.is_closing():
-                # Send shutdown as notification (no id, no response expected)
-                shutdown_msg = json.dumps({"jsonrpc": "2.0", "method": "shutdown"}) + "\n"
-                process.stdin.write(shutdown_msg.encode("utf-8"))
-                await process.stdin.drain()
-                process.stdin.close()
-        except Exception:
-            pass
+            try:
+                if process.stdin and not process.stdin.is_closing():
+                    # Send shutdown as notification (no id, no response expected)
+                    shutdown_msg = json.dumps({"jsonrpc": "2.0", "method": "shutdown"}) + "\n"
+                    process.stdin.write(shutdown_msg.encode("utf-8"))
+                    await process.stdin.drain()
+                    process.stdin.close()
+            except Exception:
+                pass
 
-        try:
-            await asyncio.wait_for(process.wait(), timeout=5.0)
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
 
-        # Unregister from reaper
-        if self._process_registry and pid:
-            self._process_registry.unregister(pid)
+            # Unregister from reaper
+            if self._process_registry and pid:
+                self._process_registry.unregister(pid)
 
-        logger.info("FlaUI bridge stopped")
+            logger.info("FlaUI bridge stopped")
+        finally:
+            if self._process is process:
+                self._process = None
+            if self._stopping_process is process:
+                self._stopping_process = None
 
     async def _stop_after_interrupted_call(self) -> None:
         """Stop the bridge without letting caller cancellation cancel cleanup."""
@@ -144,7 +164,11 @@ class FlaUIBridgeClient:
     @property
     def is_running(self) -> bool:
         """Check if bridge subprocess is alive."""
-        return self._process is not None and self._process.returncode is None
+        return (
+            self._process is not None
+            and self._process is not self._stopping_process
+            and self._process.returncode is None
+        )
 
     @property
     def pid(self) -> int | None:
