@@ -80,11 +80,12 @@ class UIEventBufferStore:
             "stale_cursor": False,
         }
 
-    async def read(self, buffer_id: str) -> dict[str, Any]:
+    async def read(self, buffer_id: str, *, backend: Any | None = None) -> dict[str, Any]:
         buffer = self.buffers.get(buffer_id)
         if buffer is None:
             return _missing_buffer(buffer_id, self.buffers, include_monitor_id=False)
         async with buffer.lock:
+            _refresh_backend(buffer, backend)
             current = await _query_current(buffer)
             if current.get("status") != "PASS":
                 return current
@@ -139,11 +140,18 @@ class UIEventBufferStore:
             )
         return result
 
-    async def monitor_poll(self, monitor_id: str, *, after_cursor: int = 0) -> dict[str, Any]:
+    async def monitor_poll(
+        self,
+        monitor_id: str,
+        *,
+        after_cursor: int = 0,
+        backend: Any | None = None,
+    ) -> dict[str, Any]:
         buffer = self.buffers.get(monitor_id)
         if buffer is None:
             return _missing_buffer(monitor_id, self.buffers)
         async with buffer.lock:
+            _refresh_backend(buffer, backend)
             current = await _query_current(buffer)
             if current.get("status") != "PASS":
                 return current
@@ -158,6 +166,7 @@ class UIEventBufferStore:
         after_cursor: int = 0,
         timeout_ms: int = 1000,
         poll_interval_ms: int = 100,
+        backend: Any | None = None,
     ) -> dict[str, Any]:
         deadline = time.monotonic() + max(0, timeout_ms) / 1000
         interval = max(1, poll_interval_ms) / 1000
@@ -172,6 +181,7 @@ class UIEventBufferStore:
                 monitor_id,
                 after_cursor=after_cursor,
                 timeout_s=remaining,
+                backend=backend,
             )
             if result.get("status") != "PASS" or result.get("events"):
                 return result
@@ -185,6 +195,7 @@ class UIEventBufferStore:
         *,
         after_cursor: int,
         timeout_s: float,
+        backend: Any | None,
     ) -> dict[str, Any]:
         buffer = self.buffers.get(monitor_id)
         if buffer is None:
@@ -195,6 +206,7 @@ class UIEventBufferStore:
             return _monitor_wait_timed_out(
                 self.monitor_events(monitor_id, after_cursor=after_cursor)
             )
+        _refresh_backend(buffer, backend)
         query_task = asyncio.create_task(_query_current(buffer))
         try:
             done, _pending = await asyncio.wait(
@@ -291,6 +303,11 @@ def _legacy_event(event: dict[str, Any]) -> dict[str, Any]:
     result = deepcopy(event)
     result.pop("sequence", None)
     return result
+
+
+def _refresh_backend(buffer: UIEventBuffer, backend: Any | None) -> None:
+    if backend is not None:
+        buffer.backend = backend
 
 
 async def _query_current(buffer: UIEventBuffer) -> dict[str, Any]:

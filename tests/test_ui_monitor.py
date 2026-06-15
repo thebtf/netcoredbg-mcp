@@ -370,3 +370,54 @@ async def test_ui_monitor_tools_wrap_existing_access_and_response_contract(
     assert started["data"]["monitor_id"] == "flow"
     assert polled["data"]["events"][0]["changes"]["text"] == {"before": "A", "after": "B"}
     assert history["data"]["next_cursor"] == polled["data"]["next_cursor"]
+
+
+@pytest.mark.asyncio
+async def test_ui_monitor_poll_reconnects_backend_before_query(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    backend = FakeMonitorBackend()
+    backend.process_id = None
+    backend.responses = [
+        {
+            "status": "PASS",
+            "elements": [{"element_id": "row-1", "text": "A"}],
+            "element_count": 1,
+        },
+        {
+            "status": "PASS",
+            "elements": [{"element_id": "row-1", "text": "B"}],
+            "element_count": 1,
+        },
+    ]
+    connect_calls: list[int] = []
+
+    async def connect_backend(backend_arg: FakeMonitorBackend, process_id: int, **_kwargs) -> None:
+        connect_calls.append(process_id)
+        backend_arg.process_id = process_id
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.connect_backend", connect_backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    await capturing_mcp.tools["ui_monitor_start"](
+        ctx=None,
+        monitor_id="flow",
+        fields=["text"],
+        automation_id="grid",
+    )
+    backend.process_id = None
+    polled = await capturing_mcp.tools["ui_monitor_poll"](
+        ctx=None,
+        monitor_id="flow",
+        after_cursor=0,
+    )
+
+    assert connect_calls == [42, 42]
+    assert polled["data"]["events"][0]["changes"]["text"] == {"before": "A", "after": "B"}
