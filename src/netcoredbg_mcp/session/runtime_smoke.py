@@ -845,15 +845,34 @@ class RuntimeSmokeRunRegistry:
     ) -> dict[str, Any]:
         if isinstance(plan, dict) and plan.get("schema") == SCHEMA_VERSION_V2:
             from .runtime_smoke_v2.actions import ActionContext
-            from .runtime_smoke_v2.cleanup import cleanup_steps_from_plan, run_cleanup
-            from .runtime_smoke_v2.runner import RuntimeStateOracleRunner
+            from .runtime_smoke_v2.cleanup import (
+                cleanup_steps_from_case,
+                cleanup_steps_from_plan,
+                merge_cleanup_results,
+                run_cleanup,
+            )
+            from .runtime_smoke_v2.runner import RuntimeStateOracleRunner, _cases_for_execution
 
             context = ActionContext(
                 service_adapters=runner._service_adapters,
                 clock=runner._clock,
                 session=runner._session,
             )
-            cleanup = await run_cleanup(cleanup_steps_from_plan(plan), context)
+            cases, generated_case_count, _generation_errors = _cases_for_execution(plan)
+            case_cleanups = []
+            for case in cases:
+                case_cleanup_steps = cleanup_steps_from_case(case)
+                if not case_cleanup_steps:
+                    continue
+                case_cleanups.append(
+                    await run_cleanup(
+                        case_cleanup_steps,
+                        context,
+                        case_id=str(case.get("id") or ""),
+                    )
+                )
+            plan_cleanup = await run_cleanup(cleanup_steps_from_plan(plan), context)
+            cleanup = merge_cleanup_results(plan_cleanup, case_cleanups)
             return RuntimeStateOracleRunner(
                 runner._session,
                 service_adapters=runner._service_adapters,
@@ -864,7 +883,7 @@ class RuntimeSmokeRunRegistry:
                 started=record.created_at,
                 action_count=0,
                 cases=[],
-                generated_case_count=0,
+                generated_case_count=generated_case_count,
                 metrics_thresholds=None,
                 baseline=None,
                 cleanup=cleanup,

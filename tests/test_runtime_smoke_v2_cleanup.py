@@ -70,6 +70,71 @@ def _v2_runner(session: CleanupSmokeSession) -> RuntimeStateOracleRunner:
 
 
 @pytest.mark.asyncio
+async def test_v2_lifecycle_stop_runs_case_and_plan_cleanup() -> None:
+    class SlowInvokeSession(CleanupSmokeSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.invoke_started = asyncio.Event()
+
+        async def invoke(self, selector: dict[str, Any]) -> dict[str, Any]:
+            self.calls.append(("ui.invoke", dict(selector)))
+            self.invoke_started.set()
+            await asyncio.sleep(60)
+            return {"status": "PASS"}
+
+    session = SlowInvokeSession()
+    plan = {
+        "schema": "netcoredbg.runtime_smoke.v2",
+        "cleanup": {
+            "steps": [
+                {"kind": "debug.stop"},
+                {"kind": "process.registry.assert_empty"},
+            ]
+        },
+        "cases": [
+            {
+                "id": "case_a",
+                "transitions": [
+                    {
+                        "action": {
+                            "kind": "ui.invoke",
+                            "selector": {"automation_id": "caseA"},
+                        },
+                        "probes": [],
+                    }
+                ],
+                "cleanup": [
+                    {
+                        "kind": "fixture.restore",
+                        "path": "case-a.txt",
+                        "baseline_file": "baseline-a.txt",
+                    },
+                    {"kind": "debug.tracepoint.remove", "id": "tp-a"},
+                ],
+            }
+        ],
+    }
+
+    started = await session.runtime_smoke.lifecycle_runs.start(plan, lambda: _runner(session))
+    await asyncio.wait_for(session.invoke_started.wait(), timeout=1.0)
+    stopped = await session.runtime_smoke.lifecycle_runs.stop(started["run_id"])
+
+    assert stopped["status"] == "IMPASSE"
+    assert stopped["reason"] == "runtime smoke run stopped"
+    assert stopped["cleanup"]["status"] == "PASS"
+    assert stopped["cleanup"]["attempted"] == [
+        "case:case_a:debug.tracepoint.remove:tp-a",
+        "case:case_a:fixture.restore:case-a.txt",
+        "debug.stop:graceful",
+        "process.registry.assert_empty",
+    ]
+    assert stopped["cleanup"]["tracepoints_removed"] == 1
+    assert stopped["cleanup"]["process_registry_after"] == 0
+    assert ("fixture.restore", "case-a.txt", "baseline-a.txt") in session.calls
+    assert ("debug.tracepoint.remove", "tp-a") in session.calls
+
+
+@pytest.mark.asyncio
 async def test_v2_runner_converts_budget_parse_errors_to_invalid_setup() -> None:
     session = CleanupSmokeSession()
 
