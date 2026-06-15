@@ -28,7 +28,7 @@ fix.
 
 | Issue | Status | Required next step |
 | --- | --- | --- |
-| `#226` | Downstream replay blocked | Re-run the NovaScript CR-003 gate; target-side v0.17.2 evidence is not enough to close the consumer issue. |
+| `#226` | Downstream replay blocked | Re-run the NovaScript CR-003 gate with `docs/reproduction-scenarios/novascript-cr003-replay-2026-06-15.md`; target-side v0.17.2 evidence is not enough to close the consumer issue. |
 | `#271` | SpecKit needed | Define oracle-pack and app-diagnostics schema before writing executable tests. |
 | `#272` | SpecKit needed for full scope | Define semantic-probe and tracepoint-guardrail vocabulary before full executable tests. `#270` covers the immediate blocked-diagnostics slice. |
 
@@ -40,5 +40,6 @@ fix.
   root_id="selectorSafetyPanel")` produces a selector miss and no side effect.
 - `#254`: add a controlled `dataGrid2` fixture before reproducing the
   downstream `dataGrid2` semantic evidence locally.
-- `#226`: replay the downstream WPF/NovaScript gate rather than substituting a
-  target-only local smoke.
+- `#226`: replay the downstream WPF/NovaScript gate with
+  `docs/reproduction-scenarios/novascript-cr003-replay-2026-06-15.md` rather
+  than substituting a target-only local smoke.

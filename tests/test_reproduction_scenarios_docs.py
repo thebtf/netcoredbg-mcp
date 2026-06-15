@@ -1,0 +1,119 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+REPLAY_PACKET = Path("docs/reproduction-scenarios/novascript-cr003-replay-2026-06-15.md")
+REPLAY_PACKET_JSON = Path("docs/reproduction-scenarios/novascript-cr003-replay-2026-06-15.json")
+BACKLOG_SCENARIOS = Path("docs/reproduction-scenarios/issues-backlog-2026-06-15.md")
+
+
+def _read(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def test_novascript_cr003_replay_packet_is_actionable() -> None:
+    packet = _read(REPLAY_PACKET)
+    required_terms = {
+        "#226",
+        "main@12287e55ac8ea7415a3717f4a248d08723b93cfd",
+        "0.17.2",
+        "D:\\Dev\\novascript",
+        "NovaScript.Tests.UI/Scenarios/fixed-bug-regression.runtime-smoke-v2.json",
+        "NovaScript.Tests.UI/Scenarios/fixed-bug-regression.feature-cycle.json",
+        "FixedBugRegressionProtocolTests.cs",
+        "CueDataGrid",
+        "DataGrid",
+        "Реплика",
+        "visible_row_drag",
+        "downward_edge_scroll",
+        "upward_edge_scroll",
+        "multi_row_drag",
+        "invalid_drop_noop_or_cancel",
+        "PASS",
+        "BLOCKED",
+        "FAIL",
+        "route_evidence",
+        "ui.grid.viewport",
+        "debug stop",
+        "process registry",
+        "PARTIAL_PASS_INVALID_FOR_GATE",
+        "CR-008.downstream.json",
+        "issue_226_lifecycle_decision",
+        "docs/reproduction-scenarios/novascript-cr003-replay-2026-06-15.json",
+        "ROW-008-UNIQUE-PHRASE",
+        "ROW-031-UNIQUE-PHRASE",
+        "ROW-027-UNIQUE-PHRASE",
+        "ROW-044-UNIQUE-PHRASE",
+    }
+
+    for term in required_terms:
+        assert term in packet
+    assert "target-side netcoredbg-mcp evidence alone" in packet
+    assert "Do not mark issue `#226` closed" in packet
+
+
+def test_novascript_cr003_replay_packet_json_is_machine_readable() -> None:
+    payload = json.loads(REPLAY_PACKET_JSON.read_text(encoding="utf-8"))
+
+    assert payload["schema"] == "netcoredbg.downstream_replay_packet.v1"
+    assert payload["issue"] == "#226"
+    assert payload["status"] == "DOWNSTREAM_REPLAY_BLOCKED"
+    assert payload["provider_baseline"]["commit"] == "12287e55ac8ea7415a3717f4a248d08723b93cfd"
+    assert payload["provider_baseline"]["version"] == "0.17.2"
+    assert payload["downstream"]["expected_local_path"] == "D:/Dev/novascript"
+    assert (
+        payload["downstream"]["plan_path"]
+        == "NovaScript.Tests.UI/Scenarios/fixed-bug-regression.runtime-smoke-v2.json"
+    )
+    assert payload["downstream"]["selector"] == {
+        "automation_id": "CueDataGrid",
+        "control_type": "DataGrid",
+    }
+    assert payload["downstream"]["identity"] == {"column": "Реплика"}
+    assert set(payload["required_variants"]) == {
+        "visible_row_drag",
+        "downward_edge_scroll",
+        "upward_edge_scroll",
+        "multi_row_drag",
+        "invalid_drop_noop_or_cancel",
+    }
+    assert "PARTIAL_PASS_INVALID_FOR_GATE" in " ".join(payload["known_invalid_evidence"])
+    assert payload["latest_replay"]["status"] == "BLOCKED"
+    assert payload["latest_replay"]["runtime_smoke"]["baseline_status"] == "PASS"
+    assert (
+        payload["latest_replay"]["runtime_smoke"]["reason"]
+        == "drag source row identity not visible"
+    )
+    assert payload["latest_replay"]["requested_source_identity"] == "ROW-008-UNIQUE-PHRASE"
+    assert payload["latest_replay"]["visible_viewport"] == {
+        "first_visible_index": 26,
+        "last_visible_index": 43,
+        "first_visible_identity": "ROW-027-UNIQUE-PHRASE",
+        "last_visible_identity": "ROW-044-UNIQUE-PHRASE",
+        "selected_identity": "ROW-031-UNIQUE-PHRASE",
+    }
+    assert payload["latest_replay"]["issue_226_lifecycle_decision"] == "leave_open"
+    assert payload["evidence_output"]["status_values"] == ["PASS", "BLOCKED", "FAIL"]
+    assert set(payload["evidence_output"]["required_fields"]) >= {
+        "status",
+        "timestamp",
+        "netcoredbg_mcp_commit",
+        "netcoredbg_mcp_version",
+        "novascript_path",
+        "novascript_branch",
+        "plan_path",
+        "contract_test_command",
+        "runtime_smoke_command_or_tool",
+        "required_variants",
+        "observed_variants",
+        "cleanup",
+        "issue_226_lifecycle_decision",
+    }
+
+
+def test_issues_backlog_links_novascript_replay_packet() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+
+    assert "docs/reproduction-scenarios/novascript-cr003-replay-2026-06-15.md" in backlog
+    assert "target-side v0.17.2 evidence is not enough" in backlog
