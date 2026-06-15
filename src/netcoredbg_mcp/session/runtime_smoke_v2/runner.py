@@ -38,6 +38,34 @@ def compact_v2_result(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def validate_v2_plan_contract(plan: dict[str, Any]) -> dict[str, Any]:
+    """Validate v2-only planning semantics without executing the plan."""
+    raw_cases = plan.get("cases", [])
+    declared_cases = list(raw_cases) if isinstance(raw_cases, list) else []
+    executable_declared_cases = [
+        dict(case) for case in declared_cases if isinstance(case, dict)
+    ]
+    generated_cases, generation_errors = expand_generated_cases(plan)
+    validation_cases = [*declared_cases, *generated_cases]
+    cases = [*executable_declared_cases, *generated_cases]
+    validation_errors = [
+        *generation_errors,
+        *_validate_v2_plan(plan, cases=validation_cases),
+    ]
+    generated_case_count = len(generated_cases)
+    cases_shape_is_valid = "cases" not in plan or isinstance(raw_cases, list)
+    if not validation_errors and not cases and cases_shape_is_valid:
+        validation_errors.append("runtime smoke v2 plan has no cases to execute")
+    return {
+        "case_count": len(cases),
+        "generated_case_count": generated_case_count,
+        "validation_errors": validation_errors,
+        "accepted_action_kinds": accepted_action_kinds(),
+        "accepted_probe_kinds": accepted_probe_kinds(),
+        "accepted_probe_phases": accepted_probe_phases(),
+    }
+
+
 class RuntimeStateOracleRunner:
     def __init__(
         self,
@@ -274,7 +302,11 @@ def _cases_for_execution(
     plan: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], int, list[str]]:
     raw_cases = plan.get("cases", [])
-    cases = [dict(case) for case in raw_cases] if isinstance(raw_cases, list) else []
+    cases = [
+        dict(case)
+        for case in raw_cases
+        if isinstance(raw_cases, list) and isinstance(case, dict)
+    ]
     generated_cases, generation_errors = expand_generated_cases(plan)
     return [*cases, *generated_cases], len(generated_cases), generation_errors
 
