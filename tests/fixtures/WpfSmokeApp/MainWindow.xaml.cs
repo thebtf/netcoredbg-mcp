@@ -61,6 +61,13 @@ public partial class MainWindow : Window
         _viewModel.StatusText = "Scoped button clicked";
     }
 
+    private void ButtonCharlistRemove_Click(object sender, RoutedEventArgs e)
+    {
+        _viewModel.SelectorSafetyCount++;
+        _viewModel.SelectorSafetyStatusText =
+            $"Selector side effects: {_viewModel.SelectorSafetyCount}";
+    }
+
     private void BtnOpenFile_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new OpenFileDialog
@@ -597,8 +604,10 @@ public class MainViewModel : INotifyPropertyChanged
 {
     private string _statusText = "Ready";
     private string _genderStatusText = "No gender change";
+    private string _selectorSafetyStatusText = "Selector side effects: 0";
     private bool _isFeatureEnabled;
     private int _invokeCount;
+    private int _selectorSafetyCount;
 
     public string StatusText
     {
@@ -622,6 +631,18 @@ public class MainViewModel : INotifyPropertyChanged
     {
         get => _genderStatusText;
         set { _genderStatusText = value; OnPropertyChanged(); }
+    }
+
+    public int SelectorSafetyCount
+    {
+        get => _selectorSafetyCount;
+        set { _selectorSafetyCount = value; OnPropertyChanged(); }
+    }
+
+    public string SelectorSafetyStatusText
+    {
+        get => _selectorSafetyStatusText;
+        set { _selectorSafetyStatusText = value; OnPropertyChanged(); }
     }
 
     public ObservableCollection<string> Items { get; } = new()

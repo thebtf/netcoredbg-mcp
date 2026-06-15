@@ -517,7 +517,10 @@ public static class ElementCommands
     /// Throws if element not found.
     /// </summary>
     internal static AutomationElement FindElementCascade(
-        AutomationElement root, JsonNode? @params, UIA3Automation automation)
+        AutomationElement root,
+        JsonNode? @params,
+        UIA3Automation automation,
+        bool strictAutomationId = false)
     {
         var cf = new ConditionFactory(automation.PropertyLibrary);
 
@@ -528,6 +531,12 @@ public static class ElementCommands
             var element = root.FindFirstDescendant(cf.ByAutomationId(automationId));
             if (element is not null)
                 return element;
+            if (strictAutomationId)
+            {
+                throw new InvalidOperationException(
+                    "selector result did not match exact automation_id. " +
+                    $"Requested automationId='{automationId}'. Search: {DescribeSearch(@params)}");
+            }
         }
 
         // Priority 2: XPath

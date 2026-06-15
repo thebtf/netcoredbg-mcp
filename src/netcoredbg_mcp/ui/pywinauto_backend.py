@@ -92,6 +92,33 @@ class PywinautoBackend:
             control_type=control_type,
         )
 
+    async def _get_element_info(self, element: Any) -> Any:
+        return await self._ui.get_element_info(element)
+
+    @staticmethod
+    def _exact_id_mismatch(
+        requested_automation_id: str | None,
+        actual_automation_id: str | None,
+    ) -> bool:
+        return bool(
+            requested_automation_id
+            and actual_automation_id != requested_automation_id
+        )
+
+    @staticmethod
+    def _blocked_identity_result(
+        *,
+        action_key: str,
+        info: Any,
+    ) -> dict[str, Any]:
+        return {
+            action_key: False,
+            "method": "ExactAutomationIdMismatch",
+            "automationId": info.automation_id,
+            "name": info.name,
+            "controlType": info.control_type,
+        }
+
     async def find_element(
         self,
         automation_id: str | None = None,
@@ -129,6 +156,10 @@ class PywinautoBackend:
                 "Use automationId/name/controlType for invoke on pywinauto."
             )
         element = await self._find_element_scoped(automation_id, name, control_type, root_id)
+        info = await self._get_element_info(element)
+        if self._exact_id_mismatch(automation_id, info.automation_id):
+            return self._blocked_identity_result(action_key="invoked", info=info)
+
         loop = asyncio.get_running_loop()
 
         def _invoke():
@@ -147,7 +178,6 @@ class PywinautoBackend:
             return method
 
         method = await loop.run_in_executor(self._ui._executor, _invoke)
-        info = await self._ui.get_element_info(element)
         return {
             "invoked": True,
             "method": method,
@@ -171,6 +201,10 @@ class PywinautoBackend:
                 "Use automationId/name/controlType for toggle on pywinauto."
             )
         element = await self._find_element_scoped(automation_id, name, control_type, root_id)
+        info = await self._get_element_info(element)
+        if self._exact_id_mismatch(automation_id, info.automation_id):
+            return self._blocked_identity_result(action_key="toggled", info=info)
+
         loop = asyncio.get_running_loop()
 
         def _toggle():
@@ -185,7 +219,6 @@ class PywinautoBackend:
             return _TOGGLE_STATE_NAMES.get(new_state_int, str(new_state_int))
 
         new_state = await loop.run_in_executor(self._ui._executor, _toggle)
-        info = await self._ui.get_element_info(element)
         return {
             "toggled": True,
             "newState": new_state,

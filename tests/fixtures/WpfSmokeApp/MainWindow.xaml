@@ -55,6 +55,18 @@
                         AutomationProperties.AutomationId="btnScoped"
                         Click="BtnScoped_Click"/>
 
+                <!-- Selector safety panel intentionally omits playButton (#265) -->
+                <GroupBox Header="Selector Safety" Margin="0,5"
+                          AutomationProperties.AutomationId="selectorSafetyPanel">
+                    <StackPanel Margin="5">
+                        <Button Content="Remove Character" Margin="0,0,0,5"
+                                AutomationProperties.AutomationId="buttonCharlistRemove"
+                                Click="ButtonCharlistRemove_Click"/>
+                        <TextBlock Text="{Binding SelectorSafetyStatusText}"
+                                   AutomationProperties.AutomationId="selectorSafetyStatus"/>
+                    </StackPanel>
+                </GroupBox>
+
                 <!-- ListView for collection testing -->
                 <ListView Margin="0,5" Height="80"
                           AutomationProperties.AutomationId="lstItems"

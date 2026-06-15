@@ -16,7 +16,11 @@ public static class PatternCommands
             throw new InvalidOperationException("Not connected. Call 'connect' first.");
 
         var searchRoot = ElementCommands.ResolveSearchRoot(mainWindow, @params, automation);
-        var element = ElementCommands.FindElementCascade(searchRoot, @params, automation);
+        var element = ElementCommands.FindElementCascade(
+            searchRoot,
+            @params,
+            automation,
+            strictAutomationId: true);
 
         string method;
         if (element.Patterns.Invoke.IsSupported)
@@ -48,7 +52,11 @@ public static class PatternCommands
             throw new InvalidOperationException("Not connected. Call 'connect' first.");
 
         var searchRoot = ElementCommands.ResolveSearchRoot(mainWindow, @params, automation);
-        var element = ElementCommands.FindElementCascade(searchRoot, @params, automation);
+        var element = ElementCommands.FindElementCascade(
+            searchRoot,
+            @params,
+            automation,
+            strictAutomationId: true);
 
         if (!element.Patterns.Toggle.IsSupported)
         {

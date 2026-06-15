@@ -12,6 +12,7 @@ from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner, RuntimeSmok
 from netcoredbg_mcp.session.runtime_smoke_schema import validate_plan
 
 EXAMPLE_PATH = Path("docs/examples/runtime-smoke-v2-drag-drop-grid.json")
+SELECTOR_SAFETY_EXAMPLE_PATH = Path("docs/examples/runtime-smoke-v2-selector-safety.json")
 README_PATH = Path("README.md")
 PLAYBOOK_PATH = Path("docs/PRODUCTION-TESTING-PLAYBOOK.md")
 
@@ -109,8 +110,46 @@ class DocsExampleSmokeSession:
         return self.viewport_results.popleft()
 
 
+class SelectorSafetySmokeSession:
+    def __init__(self) -> None:
+        self.runtime_smoke = RuntimeSmokeSession()
+        self.launch_requests: list[dict[str, Any]] = []
+        self.invoke_requests: list[dict[str, Any]] = []
+        self.property_requests: list[dict[str, Any]] = []
+
+    async def launch(self, **request: Any) -> dict[str, Any]:
+        self.launch_requests.append(request)
+        return {"status": "PASS", "profile": "selector-safety"}
+
+    async def invoke(self, **request: Any) -> dict[str, Any]:
+        self.invoke_requests.append(request)
+        return {
+            "status": "BLOCKED",
+            "reason": "selector result did not match exact automation_id",
+            "requested": {
+                "selector": request.get("selector"),
+            },
+            "accepted": {"selector_policy": "exact automation_id match"},
+            "next_step": "Inspect the scoped tree and adjust the selector.",
+        }
+
+    async def get_property(self, **request: Any) -> dict[str, Any]:
+        self.property_requests.append(request)
+        return {"status": "PASS", "value": "Selector side effects: 0"}
+
+    async def debug_stop(self, **_request: Any) -> dict[str, Any]:
+        return {"status": "PASS"}
+
+    async def process_registry_count(self) -> dict[str, Any]:
+        return {"status": "PASS", "count": 0}
+
+
 def _load_example() -> dict[str, Any]:
     return json.loads(EXAMPLE_PATH.read_text(encoding="utf-8"))
+
+
+def _load_selector_safety_example() -> dict[str, Any]:
+    return json.loads(SELECTOR_SAFETY_EXAMPLE_PATH.read_text(encoding="utf-8"))
 
 
 def _viewport_snapshot(
@@ -204,6 +243,78 @@ def assert_drag_drop_docs_contract(plan: dict[str, Any]) -> None:
 
 def test_drag_drop_grid_example_declares_documented_protocol_contract() -> None:
     assert_drag_drop_docs_contract(_load_example())
+
+
+def test_selector_safety_example_declares_blocked_no_mutation_contract() -> None:
+    plan = _load_selector_safety_example()
+
+    assert plan["schema"] == "netcoredbg.runtime_smoke.v2"
+    assert validate_plan(plan) == []
+
+    actions = _actions(plan)
+    assert len(actions) == 1
+    action = actions[0]
+    assert action["kind"] == "ui.invoke"
+    assert action["selector"] == {
+        "automation_id": "playButton",
+        "control_type": "Button",
+        "root_id": "selectorSafetyPanel",
+    }
+    assert action["expect"]["status"] == "BLOCKED"
+    assert action["expect"]["no_mutation"] is True
+
+    probes = _probes(plan)
+    assert len(probes) == 1
+    assert probes[0]["kind"] == "ui.property"
+    assert probes[0]["phase"] == "both"
+    assert probes[0]["selector"]["automation_id"] == "selectorSafetyStatus"
+    assert probes[0]["expected"] == "Selector side effects: 0"
+
+    notes = " ".join(
+        str(note)
+        for case in plan.get("cases", [])
+        for note in case.get("notes", [])
+    )
+    assert "BLOCKED" in notes
+    assert "No-mutation proof" in notes
+
+
+@pytest.mark.asyncio
+async def test_selector_safety_example_runs_through_v2_parser_with_blocked_evidence() -> None:
+    session = SelectorSafetySmokeSession()
+
+    result = await RuntimeSmokeRunner(
+        session,
+        service_adapters={
+            "launch": session.launch,
+            "ui.invoke": session.invoke,
+            "ui.get_property": session.get_property,
+            "debug.stop": session.debug_stop,
+            "process.registry.count": session.process_registry_count,
+        },
+    ).run(_load_selector_safety_example())
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "selector result did not match exact automation_id"
+    assert result["action_count"] == 1
+    assert result["baseline"]["status"] == "PASS"
+    assert result["cleanup"]["status"] == "PASS"
+    assert result["cleanup"]["process_registry_after"] == 0
+    transition = result["cases"][0]["transitions"][0]
+    assert transition["before"]["ui.property.selector_sentinel_after"] == "Selector side effects: 0"
+    assert transition["after"]["ui.property.selector_sentinel_after"] == "Selector side effects: 0"
+    assert "ui.property.selector_sentinel_after" not in transition["diff"]
+    assert session.launch_requests
+    assert len(session.property_requests) == 2
+    assert session.invoke_requests == [
+        {
+            "selector": {
+                "automation_id": "playButton",
+                "control_type": "Button",
+                "root_id": "selectorSafetyPanel",
+            }
+        }
+    ]
 
 
 def test_drag_drop_grid_example_rejects_missing_row_identity_checks() -> None:

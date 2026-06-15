@@ -68,13 +68,6 @@ class TestFlaUIBackendInvoke:
         args = backend._client.call.call_args
         assert args[0][1]["xpath"] == "//Button[@Name='Save']"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Issue #265 RED: ui_invoke must reject exact AutomationId mismatch; "
-            "run with --runxfail."
-        ),
-    )
     @pytest.mark.asyncio
     async def test_ui_invoke_blocks_mismatched_exact_automation_id(self, capturing_mcp) -> None:
         from netcoredbg_mcp.session.manager import DebugState
@@ -119,6 +112,209 @@ class TestFlaUIBackendInvoke:
         )
         assert response["data"]["status"] == "BLOCKED"
         assert response["data"]["reason"] == "selector result did not match exact automation_id"
+
+
+def _pywinauto_backend_with_element(element: MagicMock) -> tuple[object, SimpleNamespace]:
+    from netcoredbg_mcp.ui.pywinauto_backend import PywinautoBackend
+
+    backend = PywinautoBackend.__new__(PywinautoBackend)
+    inner = SimpleNamespace(
+        process_id=42,
+        _element_cache={},
+        find_element=AsyncMock(return_value=element),
+        get_element_info=AsyncMock(return_value=element.element_info),
+        _executor=None,
+        click=AsyncMock(),
+        _right_click_at_coords=AsyncMock(),
+        _double_click_at_coords=AsyncMock(),
+    )
+    backend._ui = inner
+    return backend, inner
+
+
+def _mismatched_pywinauto_element() -> MagicMock:
+    element = MagicMock()
+    element.element_info = SimpleNamespace(
+        automation_id="buttonCharlistRemove",
+        name="Remove",
+        control_type="Button",
+    )
+    return element
+
+
+def _blank_id_pywinauto_element() -> MagicMock:
+    element = MagicMock()
+    element.element_info = SimpleNamespace(
+        automation_id="",
+        name="Remove",
+        control_type="Button",
+    )
+    return element
+
+
+@pytest.mark.asyncio
+async def test_ui_click_blocks_mismatched_exact_automation_id_before_side_effect(
+    capturing_mcp,
+) -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    element = _mismatched_pywinauto_element()
+    backend, inner = _pywinauto_backend_with_element(element)
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+    )
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(
+            capturing_mcp,
+            session,
+            check_session_access=lambda ctx: None,
+        )
+        response = await capturing_mcp.tools["ui_click"](
+            SimpleNamespace(),
+            automation_id="playButton",
+            control_type="Button",
+        )
+
+    inner.click.assert_not_awaited()
+    assert response["data"]["status"] == "BLOCKED"
+    assert response["data"]["action"] == "ui_click"
+    assert response["data"]["candidate"]["automationId"] == "buttonCharlistRemove"
+
+
+@pytest.mark.asyncio
+async def test_ui_click_blocks_blank_candidate_automation_id_before_side_effect(
+    capturing_mcp,
+) -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    element = _blank_id_pywinauto_element()
+    backend, inner = _pywinauto_backend_with_element(element)
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+    )
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(
+            capturing_mcp,
+            session,
+            check_session_access=lambda ctx: None,
+        )
+        response = await capturing_mcp.tools["ui_click"](
+            SimpleNamespace(),
+            automation_id="playButton",
+            control_type="Button",
+        )
+
+    inner.click.assert_not_awaited()
+    assert response["data"]["status"] == "BLOCKED"
+    assert response["data"]["candidate"]["automationId"] == ""
+
+
+@pytest.mark.asyncio
+async def test_ui_click_with_secondary_selector_uses_guard_before_flaui_click(
+    capturing_mcp,
+) -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._process_id = 42
+    backend._element_cache = {}
+    backend._client = AsyncMock()
+    backend.find_element = AsyncMock(
+        return_value={
+            "automationId": "buttonCharlistRemove",
+            "name": "Remove",
+            "controlType": "Button",
+            "rect": {"x": 10, "y": 20, "width": 100, "height": 60},
+        }
+    )
+    backend.click_at = AsyncMock()
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+    )
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(
+            capturing_mcp,
+            session,
+            check_session_access=lambda ctx: None,
+        )
+        response = await capturing_mcp.tools["ui_click"](
+            SimpleNamespace(),
+            automation_id="playButton",
+            control_type="Button",
+            root_id="selectorSafetyPanel",
+        )
+
+    backend._client.call.assert_not_awaited()
+    backend.click_at.assert_not_awaited()
+    backend.find_element.assert_awaited_once_with(
+        automation_id="playButton",
+        name=None,
+        control_type="Button",
+        root_id="selectorSafetyPanel",
+        xpath=None,
+    )
+    assert response["data"]["status"] == "BLOCKED"
+    assert response["data"]["action"] == "ui_click"
+
+
+@pytest.mark.asyncio
+async def test_ui_click_with_secondary_selector_skips_cache_before_guard(
+    capturing_mcp,
+) -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._process_id = 42
+    backend._element_cache = {
+        "playButton": {"rect": {"left": 10, "right": 30, "top": 20, "bottom": 40}}
+    }
+    backend._client = AsyncMock()
+    backend.find_element = AsyncMock(
+        return_value={
+            "automationId": "buttonCharlistRemove",
+            "name": "Remove",
+            "controlType": "Button",
+            "rect": {"x": 10, "y": 20, "width": 100, "height": 60},
+        }
+    )
+    backend.click_at = AsyncMock()
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+    )
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(
+            capturing_mcp,
+            session,
+            check_session_access=lambda ctx: None,
+        )
+        response = await capturing_mcp.tools["ui_click"](
+            SimpleNamespace(),
+            automation_id="playButton",
+            control_type="Button",
+        )
+
+    backend._client.call.assert_not_awaited()
+    backend.click_at.assert_not_awaited()
+    assert response["data"]["status"] == "BLOCKED"
+    assert response["data"]["candidate"]["automationId"] == "buttonCharlistRemove"
 
 
 @pytest.mark.xfail(
@@ -167,6 +363,75 @@ async def test_ui_right_click_uses_flaui_backend_for_dict_elements(capturing_mcp
     assert response["data"]["right_clicked"] is True
 
 
+@pytest.mark.asyncio
+async def test_ui_right_click_blocks_mismatched_exact_automation_id_before_side_effect(
+    capturing_mcp,
+) -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    element = _mismatched_pywinauto_element()
+    backend, _ = _pywinauto_backend_with_element(element)
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+    )
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(
+            capturing_mcp,
+            session,
+            check_session_access=lambda ctx: None,
+        )
+        response = await capturing_mcp.tools["ui_right_click"](
+            SimpleNamespace(),
+            automation_id="playButton",
+            control_type="Button",
+        )
+
+    element.click_input.assert_not_called()
+    assert response["data"]["status"] == "BLOCKED"
+    assert response["data"]["action"] == "ui_right_click"
+    assert response["data"]["candidate"]["automationId"] == "buttonCharlistRemove"
+
+
+@pytest.mark.asyncio
+async def test_ui_right_click_with_secondary_selector_skips_cache_before_guard(
+    capturing_mcp,
+) -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    element = _mismatched_pywinauto_element()
+    backend, inner = _pywinauto_backend_with_element(element)
+    inner._element_cache["playButton"] = {
+        "rect": {"left": 10, "right": 30, "top": 20, "bottom": 40}
+    }
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+    )
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(
+            capturing_mcp,
+            session,
+            check_session_access=lambda ctx: None,
+        )
+        response = await capturing_mcp.tools["ui_right_click"](
+            SimpleNamespace(),
+            automation_id="playButton",
+            control_type="Button",
+        )
+
+    inner._right_click_at_coords.assert_not_awaited()
+    element.click_input.assert_not_called()
+    assert response["data"]["status"] == "BLOCKED"
+    assert response["data"]["action"] == "ui_right_click"
+
+
 @pytest.mark.xfail(
     strict=True,
     reason=(
@@ -213,6 +478,75 @@ async def test_ui_double_click_uses_flaui_backend_for_dict_elements(capturing_mc
     assert response["data"]["double_clicked"] is True
 
 
+@pytest.mark.asyncio
+async def test_ui_double_click_blocks_mismatched_exact_automation_id_before_side_effect(
+    capturing_mcp,
+) -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    element = _mismatched_pywinauto_element()
+    backend, _ = _pywinauto_backend_with_element(element)
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+    )
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(
+            capturing_mcp,
+            session,
+            check_session_access=lambda ctx: None,
+        )
+        response = await capturing_mcp.tools["ui_double_click"](
+            SimpleNamespace(),
+            automation_id="playButton",
+            control_type="Button",
+        )
+
+    element.double_click_input.assert_not_called()
+    assert response["data"]["status"] == "BLOCKED"
+    assert response["data"]["action"] == "ui_double_click"
+    assert response["data"]["candidate"]["automationId"] == "buttonCharlistRemove"
+
+
+@pytest.mark.asyncio
+async def test_ui_double_click_with_secondary_selector_skips_cache_before_guard(
+    capturing_mcp,
+) -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    element = _mismatched_pywinauto_element()
+    backend, inner = _pywinauto_backend_with_element(element)
+    inner._element_cache["playButton"] = {
+        "rect": {"left": 10, "right": 30, "top": 20, "bottom": 40}
+    }
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+    )
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(
+            capturing_mcp,
+            session,
+            check_session_access=lambda ctx: None,
+        )
+        response = await capturing_mcp.tools["ui_double_click"](
+            SimpleNamespace(),
+            automation_id="playButton",
+            control_type="Button",
+        )
+
+    inner._double_click_at_coords.assert_not_awaited()
+    element.double_click_input.assert_not_called()
+    assert response["data"]["status"] == "BLOCKED"
+    assert response["data"]["action"] == "ui_double_click"
+
+
 class TestFlaUIBackendToggle:
     """Tests for FlaUIBackend.toggle_element."""
 
@@ -253,6 +587,54 @@ class TestFlaUIBackendToggle:
         await backend.toggle_element(name="Debug", root_id="settingsPanel")
         args = backend._client.call.call_args
         assert args[0][1]["rootAutomationId"] == "settingsPanel"
+
+    @pytest.mark.asyncio
+    async def test_ui_toggle_blocks_mismatched_exact_automation_id(
+        self,
+        capturing_mcp,
+    ) -> None:
+        from netcoredbg_mcp.session.manager import DebugState
+        from netcoredbg_mcp.tools.ui import register_ui_tools
+
+        backend = SimpleNamespace(
+            process_id=42,
+            toggle_element=AsyncMock(
+                return_value={
+                    "toggled": True,
+                    "newState": "On",
+                    "automationId": "buttonCharlistRemove",
+                    "name": "Remove",
+                    "controlType": "Button",
+                }
+            ),
+        )
+        session = SimpleNamespace(
+            process_registry=None,
+            state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+            stealth_mode=False,
+        )
+
+        with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+            register_ui_tools(
+                capturing_mcp,
+                session,
+                check_session_access=lambda ctx: None,
+            )
+            response = await capturing_mcp.tools["ui_toggle"](
+                SimpleNamespace(),
+                automation_id="playButton",
+                control_type="Button",
+            )
+
+        backend.toggle_element.assert_awaited_once_with(
+            automation_id="playButton",
+            name=None,
+            control_type="Button",
+            root_id=None,
+            xpath=None,
+        )
+        assert response["data"]["status"] == "BLOCKED"
+        assert response["data"]["action"] == "ui_toggle"
 
 
 class TestFlaUIBackendXPath:
@@ -359,6 +741,66 @@ class TestPywinautoBackendInvoke:
         assert result["method"] == "Click"
 
     @pytest.mark.asyncio
+    async def test_invoke_blocks_mismatched_exact_automation_id_before_side_effect(self):
+        """invoke_element does not invoke/click when exact id resolves to another element."""
+        from netcoredbg_mcp.ui.pywinauto_backend import PywinautoBackend
+
+        backend = PywinautoBackend.__new__(PywinautoBackend)
+        mock_ui = MagicMock()
+        mock_element = MagicMock()
+        mock_element.iface_invoke = MagicMock()
+        mock_element.iface_invoke.Invoke = MagicMock()
+        mock_element.click = MagicMock()
+
+        mock_ui.find_element = AsyncMock(return_value=mock_element)
+        mock_ui.get_element_info = AsyncMock(
+            return_value=MagicMock(
+                automation_id="buttonCharlistRemove",
+                name="Remove",
+                control_type="Button",
+            )
+        )
+        mock_ui._executor = None
+        backend._ui = mock_ui
+
+        result = await backend.invoke_element(automation_id="playButton")
+
+        mock_element.iface_invoke.Invoke.assert_not_called()
+        mock_element.click.assert_not_called()
+        assert result["invoked"] is False
+        assert result["automationId"] == "buttonCharlistRemove"
+
+    @pytest.mark.asyncio
+    async def test_invoke_blocks_blank_candidate_automation_id_before_side_effect(self):
+        """invoke_element treats a blank candidate id as unsafe for an exact id request."""
+        from netcoredbg_mcp.ui.pywinauto_backend import PywinautoBackend
+
+        backend = PywinautoBackend.__new__(PywinautoBackend)
+        mock_ui = MagicMock()
+        mock_element = MagicMock()
+        mock_element.iface_invoke = MagicMock()
+        mock_element.iface_invoke.Invoke = MagicMock()
+        mock_element.click = MagicMock()
+
+        mock_ui.find_element = AsyncMock(return_value=mock_element)
+        mock_ui.get_element_info = AsyncMock(
+            return_value=MagicMock(
+                automation_id="",
+                name="Remove",
+                control_type="Button",
+            )
+        )
+        mock_ui._executor = None
+        backend._ui = mock_ui
+
+        result = await backend.invoke_element(automation_id="playButton")
+
+        mock_element.iface_invoke.Invoke.assert_not_called()
+        mock_element.click.assert_not_called()
+        assert result["invoked"] is False
+        assert result["automationId"] == ""
+
+    @pytest.mark.asyncio
     async def test_toggle_returns_state(self):
         """toggle_element returns On/Off/Indeterminate."""
         from netcoredbg_mcp.ui.pywinauto_backend import PywinautoBackend
@@ -387,6 +829,66 @@ class TestPywinautoBackendInvoke:
         assert result["newState"] == "On"
 
     @pytest.mark.asyncio
+    async def test_toggle_blocks_mismatched_exact_automation_id_before_side_effect(self):
+        """toggle_element does not toggle when exact id resolves to another element."""
+        from netcoredbg_mcp.ui.pywinauto_backend import PywinautoBackend
+
+        backend = PywinautoBackend.__new__(PywinautoBackend)
+        mock_ui = MagicMock()
+        mock_element = MagicMock()
+        mock_toggle = MagicMock()
+        mock_toggle.Toggle = MagicMock()
+        mock_toggle.CurrentToggleState = 1
+        mock_element.iface_toggle = mock_toggle
+
+        mock_ui.find_element = AsyncMock(return_value=mock_element)
+        mock_ui.get_element_info = AsyncMock(
+            return_value=MagicMock(
+                automation_id="buttonCharlistRemove",
+                name="Remove",
+                control_type="Button",
+            )
+        )
+        mock_ui._executor = None
+        backend._ui = mock_ui
+
+        result = await backend.toggle_element(automation_id="playButton")
+
+        mock_toggle.Toggle.assert_not_called()
+        assert result["toggled"] is False
+        assert result["automationId"] == "buttonCharlistRemove"
+
+    @pytest.mark.asyncio
+    async def test_toggle_blocks_blank_candidate_automation_id_before_side_effect(self):
+        """toggle_element treats a blank candidate id as unsafe for an exact id request."""
+        from netcoredbg_mcp.ui.pywinauto_backend import PywinautoBackend
+
+        backend = PywinautoBackend.__new__(PywinautoBackend)
+        mock_ui = MagicMock()
+        mock_element = MagicMock()
+        mock_toggle = MagicMock()
+        mock_toggle.Toggle = MagicMock()
+        mock_toggle.CurrentToggleState = 1
+        mock_element.iface_toggle = mock_toggle
+
+        mock_ui.find_element = AsyncMock(return_value=mock_element)
+        mock_ui.get_element_info = AsyncMock(
+            return_value=MagicMock(
+                automation_id="",
+                name="Remove",
+                control_type="Button",
+            )
+        )
+        mock_ui._executor = None
+        backend._ui = mock_ui
+
+        result = await backend.toggle_element(automation_id="playButton")
+
+        mock_toggle.Toggle.assert_not_called()
+        assert result["toggled"] is False
+        assert result["automationId"] == ""
+
+    @pytest.mark.asyncio
     async def test_toggle_no_pattern_raises(self):
         """toggle_element raises when element has no TogglePattern."""
         from netcoredbg_mcp.ui.pywinauto_backend import PywinautoBackend
@@ -398,6 +900,13 @@ class TestPywinautoBackendInvoke:
         mock_element.element_info.control_type = "TextBox"
 
         mock_ui.find_element = AsyncMock(return_value=mock_element)
+        mock_ui.get_element_info = AsyncMock(
+            return_value=MagicMock(
+                automation_id="txt1",
+                name="Text",
+                control_type="TextBox",
+            )
+        )
         mock_ui._executor = None
         backend._ui = mock_ui
 
