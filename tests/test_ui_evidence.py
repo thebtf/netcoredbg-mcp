@@ -364,13 +364,6 @@ async def test_ui_evidence_tools_register_and_reject_invalid_fields_before_backe
     assert response["data"]["reason"] == "unknown UI fields"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Issue #254 RED: ui_grid consumer aliases need support or diagnostics; "
-        "run with --runxfail."
-    ),
-)
 @pytest.mark.asyncio
 async def test_ui_grid_accepts_rows_alias_for_visible_rows(capturing_mcp, monkeypatch) -> None:
     session = FakeUiSession()
@@ -401,6 +394,48 @@ async def test_ui_grid_accepts_rows_alias_for_visible_rows(capturing_mcp, monkey
 
     assert response["data"]["status"] == "PASS"
     assert response["data"]["visible_rows"][0]["index"] == 0
+    assert response["data"]["requested_action"] == "rows"
+    assert response["data"]["canonical_action"] == "visible_rows"
+
+
+@pytest.mark.asyncio
+async def test_ui_grid_unknown_action_reports_accepted_actions_without_backend(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    create_backend = AsyncMock()
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", create_backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_grid"](
+        ctx=None,
+        action="row",
+        automation_id="dataGrid",
+    )
+
+    assert response["data"] == {
+        "status": "FAIL",
+        "reason": "unknown grid action",
+        "action": "row",
+        "accepted_actions": [
+            "visible_rows",
+            "rows",
+            "selected_rows",
+            "select_range",
+            "assert_range",
+        ],
+        "aliases": {"rows": "visible_rows"},
+        "next_step": "Use one of the accepted ui_grid actions.",
+    }
+    create_backend.assert_not_called()
 
 
 def test_manual_smoke_list_includes_focused_ui_evidence_scenario() -> None:
@@ -413,6 +448,9 @@ def test_manual_smoke_list_includes_focused_ui_evidence_scenario() -> None:
 
     assert result.returncode == 0, result.stderr
     assert "UI Focused Evidence" in result.stdout
+    wpf_fixture = Path("tests/fixtures/WpfSmokeApp/bin/Debug/net8.0-windows/WpfSmokeApp.dll")
+    if wpf_fixture.exists():
+        assert "WPF UI Grid Rows Alias Fixture Replay" in result.stdout
 
 
 def test_bridge_snapshot_query_uses_bounded_child_scan() -> None:

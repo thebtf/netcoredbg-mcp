@@ -91,6 +91,36 @@ def check(name: str, condition: bool, detail: str = "") -> None:
     print(f"  [{status}] {name}{suffix}")
 
 
+class _CapturingMCP:
+    """Minimal MCP test double for live smoke helpers."""
+
+    def __init__(self) -> None:
+        self.tools: dict[str, Any] = {}
+
+    def tool(self, *args: Any, **kwargs: Any) -> Any:
+        def decorator(fn: Any) -> Any:
+            self.tools[fn.__name__] = fn
+            return fn
+
+        return decorator
+
+
+def _grid_alias_evidence(response: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    data = response.get("data", {}) if isinstance(response, dict) else {}
+    visible_rows = data.get("visible_rows") if isinstance(data, dict) else None
+    first_row = visible_rows[0] if isinstance(visible_rows, list) and visible_rows else None
+    first_cells = first_row.get("cells", {}) if isinstance(first_row, dict) else {}
+    first_phrase = first_cells.get("Phrase") or first_cells.get("phrase")
+    evidence = {
+        "status": data.get("status"),
+        "requested_action": data.get("requested_action"),
+        "canonical_action": data.get("canonical_action"),
+        "row_count": len(visible_rows) if isinstance(visible_rows, list) else None,
+        "first_phrase": first_phrase,
+    }
+    return evidence, first_phrase if isinstance(first_phrase, str) else None
+
+
 async def new_session() -> SessionManager:
     return SessionManager()
 
@@ -2695,6 +2725,47 @@ async def test_wpf_shift_datagrid_evidence():
         await m.stop()
 
 
+async def test_wpf_ui_grid_rows_alias_fixture_replay():
+    print("\nWPF UI_GRID ROWS ALIAS FIXTURE REPLAY")
+    from netcoredbg_mcp.tools.ui_evidence import register_ui_evidence_tools
+
+    m = SessionManager()
+    try:
+        await m.launch(program=WPF_DLL)
+        await asyncio.sleep(2.0)
+
+        mcp = _CapturingMCP()
+        register_ui_evidence_tools(
+            mcp=mcp,
+            session=m,
+            check_session_access=lambda ctx: None,
+        )
+
+        response = await mcp.tools["ui_grid"](
+            ctx=None,
+            action="rows",
+            automation_id="dataGrid",
+        )
+
+        evidence, first_phrase = _grid_alias_evidence(response)
+        print(f"  evidence: {evidence}")
+        check(
+            "WPF ui_grid rows alias returns visible rows",
+            evidence["status"] == "PASS"
+            and evidence["requested_action"] == "rows"
+            and evidence["canonical_action"] == "visible_rows"
+            and bool(evidence["row_count"]),
+            str(evidence),
+        )
+        check(
+            "WPF ui_grid rows alias preserves stable row identity",
+            isinstance(first_phrase, str) and first_phrase.startswith("Fixture cue"),
+            str(evidence),
+        )
+    finally:
+        await m.stop()
+
+
 async def test_wpf_one_call_runtime_smoke_workflow():
     print("\nWPF ONE-CALL RUNTIME SMOKE WORKFLOW")
     import tempfile
@@ -4790,6 +4861,12 @@ def get_scenarios():
         )
     if WPF_GUI_ENABLED:
         scenarios.append(("WPF Shift/DataGrid Evidence", test_wpf_shift_datagrid_evidence))
+        scenarios.append(
+            (
+                "WPF UI Grid Rows Alias Fixture Replay",
+                test_wpf_ui_grid_rows_alias_fixture_replay,
+            )
+        )
         scenarios.append(
             (
                 "WPF Selector Safety No Side Effect",
