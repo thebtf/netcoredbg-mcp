@@ -167,6 +167,52 @@ async def test_ui_right_click_uses_flaui_backend_for_dict_elements(capturing_mcp
     assert response["data"]["right_clicked"] is True
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Issue #250 RED: FlaUI dict fallback must not call pywinauto "
+        "double_click_input; run with --runxfail."
+    ),
+)
+@pytest.mark.asyncio
+async def test_ui_double_click_uses_flaui_backend_for_dict_elements(capturing_mcp) -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    backend = SimpleNamespace(
+        process_id=42,
+        element_cache={},
+        find_element=AsyncMock(
+            return_value={
+                "automationId": "dataGrid",
+                "controlType": "DataGrid",
+                "rect": {"left": 10, "top": 20, "right": 110, "bottom": 80},
+            }
+        ),
+        double_click_at=AsyncMock(),
+    )
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+    )
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(
+            capturing_mcp,
+            session,
+            check_session_access=lambda ctx: None,
+        )
+        response = await capturing_mcp.tools["ui_double_click"](
+            SimpleNamespace(),
+            automation_id="dataGrid",
+        )
+
+    assert "error" not in response
+    backend.double_click_at.assert_awaited_once_with(60, 50)
+    assert response["data"]["double_clicked"] is True
+
+
 class TestFlaUIBackendToggle:
     """Tests for FlaUIBackend.toggle_element."""
 
