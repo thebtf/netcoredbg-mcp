@@ -5,6 +5,7 @@ import base64
 import contextlib
 import io
 import json
+from itertools import chain, repeat
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -334,7 +335,7 @@ async def test_session_manager_stealth_launch_defers_foreground_restore_until_ui
     manager._enable_hot_reload_if_supported = AsyncMock()
     manager.check_dbgshim_compatibility = MagicMock(return_value=None)
 
-    foregrounds = iter([111, 222, 222, 222])
+    foregrounds = chain([111], repeat(222))
     restore_calls: list[int] = []
     monkeypatch.setattr(
         "netcoredbg_mcp.session.manager.get_foreground_window",
