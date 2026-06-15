@@ -165,6 +165,37 @@ def test_oracle_pack_schema_rejects_unactionable_checks() -> None:
     )
     assert "ui.colorscheme" not in accepted_probe_kinds()
 
+    payload["checks"][0]["probe"] = "ui.text"
+    payload["checks"][0]["expect"] = {}
+    payload["checks"][0]["on_blocked"] = "inspect the selector"
+    errors = validate_diagnostic_schema_example(payload, kind="oracle_pack")
+
+    assert "oracle_pack.checks[0].on_blocked must be an object" in errors
+
+
+def test_diagnostic_schema_rejects_negative_evidence_limits() -> None:
+    from netcoredbg_mcp.session.runtime_smoke_schema import (
+        validate_diagnostic_schema_example,
+    )
+
+    payload = {
+        "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
+        "id": "bad-limits",
+        "status": "BLOCKED",
+        "checks": [],
+        "limits": {
+            "max_text_length": -1,
+            "max_list_items": -1,
+            "max_json_bytes": -1,
+        },
+    }
+
+    errors = validate_diagnostic_schema_example(payload, kind="oracle_pack")
+
+    assert "oracle_pack.limits.max_text_length must be >= 0" in errors
+    assert "oracle_pack.limits.max_list_items must be >= 0" in errors
+    assert "oracle_pack.limits.max_json_bytes must be >= 0" in errors
+
 
 def test_app_diagnostics_schema_rejects_unactionable_blocked_observations() -> None:
     from netcoredbg_mcp.session.runtime_smoke_schema import (
@@ -265,3 +296,12 @@ def test_tracepoint_guardrail_requires_cleanup_ownership() -> None:
         "tracepoint_guardrail.cleanup.operations must include debug.tracepoint.remove"
         in errors
     )
+
+    payload["allowed_when"] = ["safe", 123]
+    payload["blocked_when"] = ["blocked", {"reason": "bad"}]
+    payload["unsafe_when"] = ["unsafe", None]
+    errors = validate_diagnostic_schema_example(payload, kind="tracepoint_guardrail")
+
+    assert "tracepoint_guardrail.allowed_when must be a list of strings" in errors
+    assert "tracepoint_guardrail.blocked_when must be a list of strings" in errors
+    assert "tracepoint_guardrail.unsafe_when must be a list of strings" in errors

@@ -325,6 +325,8 @@ def _validate_diagnostic_limits(
             errors.append(f"{kind}.limits.{field_name} is required")
         elif isinstance(value, bool) or not isinstance(value, int):
             errors.append(f"{kind}.limits.{field_name} must be an integer")
+        elif value < 0:
+            errors.append(f"{kind}.limits.{field_name} must be >= 0")
         elif value > max_value:
             errors.append(f"{kind}.limits.{field_name} must be <= {max_value}")
 
@@ -363,6 +365,8 @@ def _validate_oracle_pack_schema(payload: dict[str, Any], errors: list[str]) -> 
         _validate_probe_name(f"{prefix}.probe", check.get("probe"), errors)
         if "expect" in check and not isinstance(check["expect"], dict):
             errors.append(f"{prefix}.expect must be an object")
+        if "on_blocked" in check and not isinstance(check["on_blocked"], dict):
+            errors.append(f"{prefix}.on_blocked must be an object")
         _validate_next_step(prefix, check.get("on_blocked"), errors)
 
 
@@ -393,8 +397,11 @@ def _validate_semantic_probe_schema(payload: dict[str, Any], errors: list[str]) 
 def _validate_tracepoint_guardrail_schema(payload: dict[str, Any], errors: list[str]) -> None:
     for field_name in ("allowed_when", "blocked_when", "unsafe_when"):
         value = payload.get(field_name)
-        if isinstance(value, list) and not value:
-            errors.append(f"tracepoint_guardrail.{field_name} must not be empty")
+        if isinstance(value, list):
+            if not value:
+                errors.append(f"tracepoint_guardrail.{field_name} must not be empty")
+            elif any(not isinstance(item, str) for item in value):
+                errors.append(f"tracepoint_guardrail.{field_name} must be a list of strings")
     cleanup = payload.get("cleanup")
     if not isinstance(cleanup, dict):
         return
