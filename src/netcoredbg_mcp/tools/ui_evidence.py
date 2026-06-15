@@ -183,6 +183,9 @@ def register_ui_evidence_tools(
     ) -> dict:
         """Read selected UI fields without dumping the full tree."""
         try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
             invalid = invalid_ui_fields(fields)
             if invalid:
                 return build_response(
@@ -194,9 +197,6 @@ def register_ui_evidence_tools(
                     },
                     state=session.state.state,
                 )
-            access_error = check_session_access(ctx)
-            if access_error:
-                return build_error_response(access_error, state=session.state.state)
             backend = await _ensure_ui_connected()
             result = await query_ui_fields(
                 backend,
@@ -222,6 +222,9 @@ def register_ui_evidence_tools(
     ) -> dict:
         """Capture a named field-limited UI snapshot."""
         try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
             invalid = invalid_ui_fields(fields)
             if invalid:
                 return build_response(
@@ -233,9 +236,6 @@ def register_ui_evidence_tools(
                     },
                     state=session.state.state,
                 )
-            access_error = check_session_access(ctx)
-            if access_error:
-                return build_error_response(access_error, state=session.state.state)
             backend = await _ensure_ui_connected()
             result = await capture_ui_snapshot(
                 backend,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -79,22 +80,30 @@ class UIEventBufferStore:
         }
 
     async def read(self, buffer_id: str) -> dict[str, Any]:
-        result = await self.monitor_poll(buffer_id, after_cursor=0)
-        if result.get("status") == "PASS":
-            result["buffer_id"] = buffer_id
-            result["evidence_refs"] = [_evidence_ref(buffer_id, result)]
+        buffer = self.buffers.get(buffer_id)
+        if buffer is None:
+            return _missing_buffer(buffer_id, self.buffers, include_monitor_id=False)
+        current = await _query_current(buffer)
+        if current.get("status") != "PASS":
+            return current
+        _append_current_diff(buffer, current)
+        buffer.baseline = current
+        events = [_legacy_event(event) for event in buffer.events]
+        result = {
+            "status": "PASS",
+            "buffer_id": buffer_id,
+            "source": "polling",
+            "events": events,
+            "event_count": len(events),
+            "dropped_count": buffer.dropped_count,
+        }
+        result["evidence_refs"] = [_evidence_ref(buffer_id, result)]
         return result
 
     def stop(self, buffer_id: str) -> dict[str, Any]:
-        buffer = self.buffers.get(buffer_id)
+        buffer = self.buffers.pop(buffer_id, None)
         if buffer is None:
-            return {
-                "status": "FAIL",
-                "reason": "event buffer not found",
-                "buffer_id": buffer_id,
-                "available_buffers": sorted(self.buffers),
-            }
-        self.buffers.pop(buffer_id)
+            return _missing_buffer(buffer_id, self.buffers, include_monitor_id=False)
         return {
             "status": "PASS",
             "buffer_id": buffer_id,
@@ -200,9 +209,9 @@ class UIEventBufferStore:
         if buffer is None:
             return _missing_buffer(monitor_id, self.buffers)
         events = [
-            dict(event)
+            deepcopy(event)
             for event in buffer.events
-            if int(event.get("sequence", 0)) > after_cursor
+            if int(event["sequence"]) > after_cursor
         ]
         stale_cursor = bool(buffer.events) and after_cursor < buffer.oldest_cursor - 1
         return {
@@ -220,7 +229,10 @@ class UIEventBufferStore:
             "evidence_refs": [
                 _evidence_ref(
                     monitor_id,
-                    {"event_count": len(events), **vars(buffer)},
+                    {
+                        "event_count": len(events),
+                        "dropped_count": buffer.dropped_count,
+                    },
                     kind="ui_monitor",
                 )
             ],
@@ -261,6 +273,12 @@ def _append_current_diff(buffer: UIEventBuffer, current: dict[str, Any]) -> None
         buffer.dropped_count += overflow
 
 
+def _legacy_event(event: dict[str, Any]) -> dict[str, Any]:
+    result = deepcopy(event)
+    result.pop("sequence", None)
+    return result
+
+
 async def _query_current(buffer: UIEventBuffer) -> dict[str, Any]:
     return await query_ui_fields(
         buffer.backend,
@@ -284,14 +302,21 @@ def _consume_late_task_result(task: asyncio.Task[dict[str, Any]]) -> None:
         pass
 
 
-def _missing_buffer(buffer_id: str, buffers: dict[str, UIEventBuffer]) -> dict[str, Any]:
-    return {
+def _missing_buffer(
+    buffer_id: str,
+    buffers: dict[str, UIEventBuffer],
+    *,
+    include_monitor_id: bool = True,
+) -> dict[str, Any]:
+    result = {
         "status": "FAIL",
         "reason": "event buffer not found",
         "buffer_id": buffer_id,
-        "monitor_id": buffer_id,
         "available_buffers": sorted(buffers),
     }
+    if include_monitor_id:
+        result["monitor_id"] = buffer_id
+    return result
 
 
 def _monitor_wait_timed_out(result: dict[str, Any]) -> dict[str, Any]:

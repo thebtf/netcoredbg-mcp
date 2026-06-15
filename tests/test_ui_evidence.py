@@ -322,10 +322,14 @@ async def test_event_buffer_polls_diff_and_enforces_max_size() -> None:
     assert started["status"] == "PASS"
     assert started["source"] == "polling"
     assert first_read["events"][0]["changes"]["text"] == {"before": "A", "after": "B"}
+    assert "monitor_id" not in first_read
+    assert "sequence" not in first_read["events"][0]
     assert second_read["status"] == "PASS"
     assert len(second_read["events"]) == 1
     assert second_read["dropped_count"] == 1
     assert second_read["events"][0]["changes"]["focus"] == {"before": False, "after": True}
+    second_read["events"][0]["changes"]["focus"]["after"] = False
+    assert store.buffers["flow"].events[0]["changes"]["focus"]["after"] is True
 
 
 @pytest.mark.asyncio

@@ -121,6 +121,9 @@ async def test_ui_monitor_store_returns_cursor_filtered_events_and_stale_metadat
         }
     ]
     assert [event["sequence"] for event in history["events"]] == [2]
+    history["events"][0]["changes"]["focus"]["after"] = False
+    fresh_history = store.monitor_events("flow", after_cursor=0)
+    assert fresh_history["events"][0]["changes"]["focus"]["after"] is True
 
 
 @pytest.mark.asyncio
