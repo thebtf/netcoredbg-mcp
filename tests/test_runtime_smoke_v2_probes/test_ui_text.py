@@ -75,3 +75,50 @@ async def test_ui_text_probe_blocks_when_execution_is_unavailable() -> None:
     assert result["status"] == "BLOCKED"
     assert probe["status"] == "BLOCKED"
     assert probe["reason"] == "probe execution not available"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Issue #270 RED: blocked semantic probes need actionable backend diagnostics; "
+        "run with --runxfail."
+    ),
+)
+@pytest.mark.asyncio
+async def test_ui_text_probe_preserves_blocked_backend_diagnostics() -> None:
+    session = TextProbeSession()
+    session.text_results.extend(
+        [
+            {"status": "PASS", "text": "Pending"},
+            {
+                "status": "BLOCKED",
+                "reason": "Element not found",
+                "requested": {"selector": {"automation_id": "txtOutput"}},
+                "accepted": {"fields": ["text", "value"]},
+                "next_step": "Call ui_get_window_tree and verify the selector.",
+                "backend_result": {"error": "Element not found"},
+            },
+        ]
+    )
+
+    result = await runner(
+        session,
+        {"ui.text.assert": session.text_assert},
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "ui.text",
+                "name": "txt_output",
+                "selector": {"automation_id": "txtOutput"},
+                "expected": "Done",
+            }
+        )
+    )
+
+    probe = after_probe(result)
+    assert probe["status"] == "BLOCKED"
+    assert probe["reason"] == "Element not found"
+    assert probe["requested"] == {"selector": {"automation_id": "txtOutput"}}
+    assert probe["accepted"] == {"fields": ["text", "value"]}
+    assert probe["next_step"].startswith("Call ui_get_window_tree")
+    assert probe["backend_result"] == {"error": "Element not found"}
