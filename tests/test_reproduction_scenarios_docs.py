@@ -147,11 +147,20 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
     ):
         assert f"`{issue}` | Target evidence merged" in backlog
 
-    for issue in ("#250", "#254", "#268", "#269", "#270"):
+    for issue in ("#250", "#254", "#268", "#269"):
         row = _issue_row(backlog, issue)
         assert "Target slice merged" in row
         assert "broader" in row
         assert "None in netcoredbg-mcp." not in row
+
+    row = _issue_row(backlog, "#270")
+    assert "Target helper slice covered" in row
+    assert "broader FR remains open" in row
+    assert 'ui_text(action="read")' in row
+    assert 'ui_grid(action="snapshot")' in row
+    assert "cells" in row
+    assert "cell_values" in row
+    assert "None in netcoredbg-mcp." not in row
 
     for issue in ("#271", "#272"):
         row = _issue_row(backlog, issue)
@@ -185,7 +194,7 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "agent_mode",
             "broad lifecycle/orchestration closure",
         ],
-        "#270": ["semantic TextBox/DataGrid"],
+        "#270": ["CR-017", "ui_property", "TextBox mutation/set-text"],
         "#271": ["debug_preflight", "tracepoint guard", "cleanup contract"],
         "#272": ["app diagnostics", "oracle_pack", "polling/waiting"],
     }

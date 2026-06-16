@@ -16,6 +16,7 @@ from ..ui.grid import (
     read_grid_selected_rows,
     read_grid_visible_rows,
     select_grid_range,
+    snapshot_grid,
 )
 from ..ui.key_sequence import run_scoped_key_sequence
 from ..ui.snapshots import (
@@ -27,9 +28,29 @@ from ..ui.snapshots import (
     query_ui_fields,
 )
 
-_GRID_ACTION_ALIASES = {"rows": "visible_rows"}
-_GRID_CANONICAL_ACTIONS = ("visible_rows", "selected_rows", "select_range", "assert_range")
-_GRID_ACCEPTED_ACTIONS = ("visible_rows", "rows", "selected_rows", "select_range", "assert_range")
+_GRID_ACTION_ALIASES = {
+    "rows": "visible_rows",
+    "cells": "snapshot",
+    "cell_values": "snapshot",
+}
+_GRID_CANONICAL_ACTIONS = (
+    "visible_rows",
+    "snapshot",
+    "selected_rows",
+    "select_range",
+    "assert_range",
+)
+_GRID_ACCEPTED_ACTIONS = (
+    "visible_rows",
+    "rows",
+    "snapshot",
+    "cells",
+    "cell_values",
+    "selected_rows",
+    "select_range",
+    "assert_range",
+)
+_TEXT_READ_ACTIONS = ("read",)
 
 
 def register_ui_evidence_tools(
@@ -107,6 +128,68 @@ def register_ui_evidence_tools(
         except Exception as exc:
             return build_error_response(str(exc), state=session.state.state)
 
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+    async def ui_text(
+        ctx: Context,
+        action: str,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+    ) -> dict:
+        """Read bounded TextBox/text evidence without assertion side effects."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            if action not in _TEXT_READ_ACTIONS:
+                return build_response(
+                    data={
+                        "status": "FAIL",
+                        "reason": "unknown text action",
+                        "action": action,
+                        "accepted_actions": list(_TEXT_READ_ACTIONS),
+                        "next_step": "Use ui_text(action=\"read\") for read-only text evidence.",
+                    },
+                    state=session.state.state,
+                )
+
+            selector = _selector(automation_id, name, control_type, root_id, xpath)
+            if not selector:
+                return build_response(
+                    data={"status": "FAIL", "reason": "invalid selector"},
+                    state=session.state.state,
+                )
+
+            backend = await _ensure_ui_connected()
+            result = await backend.extract_text(
+                automation_id=automation_id,
+                name=name,
+                control_type=control_type,
+                root_id=root_id,
+                xpath=xpath,
+            )
+            if _is_selector_miss(result):
+                return build_response(
+                    data=_selector_blocked(selector, result=_bounded_text_result(result)),
+                    state=session.state.state,
+                )
+            return build_response(
+                data=_bounded_text_read_result(selector, result),
+                state=session.state.state,
+            )
+        except Exception as exc:
+            result = {"status": "BLOCKED", "reason": str(exc)}
+            selector = _selector(automation_id, name, control_type, root_id, xpath)
+            if _is_selector_miss(result):
+                return build_response(
+                    data=_selector_blocked(selector, result=result),
+                    state=session.state.state,
+                )
+            return build_error_response(str(exc), state=session.state.state)
+
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def ui_grid(
         ctx: Context,
@@ -118,6 +201,8 @@ def register_ui_evidence_tools(
         xpath: str | None = None,
         start_index: int | None = None,
         end_index: int | None = None,
+        rows: dict[str, Any] | None = None,
+        columns: list[str] | None = None,
     ) -> dict:
         """Read, select, or assert WPF DataGrid row evidence."""
         try:
@@ -149,15 +234,17 @@ def register_ui_evidence_tools(
             backend = await _ensure_ui_connected()
             if canonical_action == "visible_rows":
                 result = await read_grid_visible_rows(backend, selector)
+            elif canonical_action == "snapshot":
+                result = await snapshot_grid(backend, selector, rows=rows, columns=columns)
             elif canonical_action == "selected_rows":
-                result = await read_grid_selected_rows(backend, selector)
+                result = await read_grid_selected_rows(backend, selector, columns=columns)
             elif canonical_action == "select_range":
                 start, end = _require_range(start_index, end_index)
                 result = await select_grid_range(backend, selector, start, end)
             elif canonical_action == "assert_range":
                 start, end = _require_range(start_index, end_index)
                 result = await assert_grid_range(backend, selector, start, end)
-            if canonical_action != action and isinstance(result, dict):
+            if isinstance(result, dict):
                 result = dict(result)
                 result["requested_action"] = action
                 result["canonical_action"] = canonical_action
@@ -457,6 +544,83 @@ def _selector(
     if xpath:
         result["xpath"] = xpath
     return result
+
+
+def _is_selector_miss(result: Any) -> bool:
+    if not isinstance(result, dict):
+        return False
+    status = str(result.get("status", "PASS")).upper()
+    if status not in {"FAIL", "BLOCKED", "NOT_FOUND"}:
+        return False
+    if result.get("found") is False:
+        return True
+    reason = str(result.get("reason") or result.get("error") or "").lower()
+    return any(
+        marker in reason
+        for marker in (
+            "not found",
+            "not_found",
+            "no element",
+            "no such element",
+            "no matching element",
+            "selector not found",
+            "unable to find",
+        )
+    )
+
+
+def _selector_blocked(
+    selector: dict[str, Any],
+    *,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "status": "BLOCKED",
+        "reason": "selector not found",
+        "requested": {"selector": selector},
+        "accepted": {
+            "selector_keys": [
+                "automation_id",
+                "name",
+                "control_type",
+                "root_id",
+                "xpath",
+            ]
+        },
+        "next_step": "Inspect the fixture UI tree and update the selector.",
+        "result": result,
+    }
+
+
+def _bounded_text_read_result(selector: dict[str, Any], result: Any) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        return {
+            "status": "FAIL",
+            "reason": "text backend returned non-object result",
+            "selector": selector,
+            "result": result,
+        }
+    bounded = _bounded_text_result(result)
+    bounded.setdefault("status", "PASS")
+    bounded.setdefault("text", str(result.get("text", "")))
+    bounded["selector"] = selector
+    return bounded
+
+
+def _bounded_text_result(result: dict[str, Any]) -> dict[str, Any]:
+    allowed_keys = (
+        "status",
+        "text",
+        "source",
+        "found",
+        "reason",
+        "error",
+        "matched",
+        "automation_id",
+        "name",
+        "control_type",
+    )
+    return {key: result[key] for key in allowed_keys if key in result}
 
 
 def _require_range(start_index: int | None, end_index: int | None) -> tuple[int, int]:

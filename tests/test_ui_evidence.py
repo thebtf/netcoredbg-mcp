@@ -73,6 +73,55 @@ class FakeEvidenceBackend:
         )
         return response
 
+    async def extract_text(
+        self,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {
+                "extract_text": {
+                    "automation_id": automation_id,
+                    "name": name,
+                    "control_type": control_type,
+                    "root_id": root_id,
+                    "xpath": xpath,
+                }
+            }
+        )
+        return {
+            "status": "PASS",
+            "text": "Fixture cue one",
+            "source": "ValuePattern",
+            "full_tree": {"must": "not leak"},
+        }
+
+    async def grid_snapshot(
+        self,
+        selector: dict[str, Any],
+        rows: dict[str, Any] | None = None,
+        columns: list[str] | None = None,
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {
+                "grid_snapshot": {
+                    "selector": dict(selector),
+                    "rows": dict(rows or {}),
+                    "columns": list(columns or []),
+                }
+            }
+        )
+        return {
+            "status": "PASS",
+            "visible_rows": [
+                {"index": 0, "cells": {"Phrase": "Fixture cue one", "Start": "00:00:01"}}
+            ],
+            "row_count": 1,
+        }
+
 
 class UnsupportedEvidenceBackend:
     async def query_ui(
@@ -348,7 +397,9 @@ async def test_ui_evidence_tools_register_and_reject_invalid_fields_before_backe
     server = create_server(str(os.getcwd()))
     tool_names = {tool.name for tool in await server.list_tools()}
 
-    assert {"ui_query", "ui_snapshot", "ui_diff", "ui_events"}.issubset(tool_names)
+    assert {"ui_text", "ui_query", "ui_snapshot", "ui_diff", "ui_events"}.issubset(
+        tool_names
+    )
 
     mcp = capturing_mcp
     session = FakeUiSession()
@@ -366,6 +417,90 @@ async def test_ui_evidence_tools_register_and_reject_invalid_fields_before_backe
 
     assert response["data"]["status"] == "FAIL"
     assert response["data"]["reason"] == "unknown UI fields"
+
+
+@pytest.mark.asyncio
+async def test_ui_text_tool_reads_text_without_assertion(capturing_mcp, monkeypatch) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = FakeEvidenceBackend()
+    backend.process_id = 42
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_text"](
+        ctx=None,
+        action="read",
+        automation_id="CueTextBox",
+        control_type="TextBox",
+    )
+
+    assert response["data"]["status"] == "PASS"
+    assert response["data"]["text"] == "Fixture cue one"
+    assert response["data"]["source"] == "ValuePattern"
+    assert response["data"]["selector"] == {
+        "automation_id": "CueTextBox",
+        "control_type": "TextBox",
+    }
+    assert "full_tree" not in str(response["data"])
+    assert backend.calls[-1]["extract_text"] == {
+        "automation_id": "CueTextBox",
+        "name": None,
+        "control_type": "TextBox",
+        "root_id": None,
+        "xpath": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_ui_text_tool_maps_selector_miss_to_blocked(capturing_mcp, monkeypatch) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = SimpleNamespace(
+        process_id=42,
+        extract_text=AsyncMock(
+            return_value={
+                "status": "FAIL",
+                "reason": "Element not found",
+                "full_tree": {"must": "not leak"},
+            }
+        ),
+    )
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_text"](
+        ctx=None,
+        action="read",
+        automation_id="MissingCueTextBox",
+    )
+
+    assert response["data"]["status"] == "BLOCKED"
+    assert response["data"]["reason"] == "selector not found"
+    assert response["data"]["requested"] == {
+        "selector": {"automation_id": "MissingCueTextBox"}
+    }
+    assert response["data"]["accepted"]["selector_keys"] == [
+        "automation_id",
+        "name",
+        "control_type",
+        "root_id",
+        "xpath",
+    ]
+    assert response["data"]["next_step"]
+    assert "full_tree" not in str(response["data"])
 
 
 @pytest.mark.asyncio
@@ -403,6 +538,120 @@ async def test_ui_grid_accepts_rows_alias_for_visible_rows(capturing_mcp, monkey
 
 
 @pytest.mark.asyncio
+async def test_ui_grid_accepts_snapshot_alias_with_columns(capturing_mcp, monkeypatch) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = FakeEvidenceBackend()
+    backend.process_id = 42
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_grid"](
+        ctx=None,
+        action="snapshot",
+        automation_id="CueGrid",
+        columns=["Phrase", "Start"],
+    )
+
+    assert response["data"]["status"] == "PASS"
+    assert response["data"]["visible_rows"][0]["cells"] == {
+        "Phrase": "Fixture cue one",
+        "Start": "00:00:01",
+    }
+    assert response["data"]["requested_action"] == "snapshot"
+    assert response["data"]["canonical_action"] == "snapshot"
+    assert backend.calls[-1]["grid_snapshot"] == {
+        "selector": {"automation_id": "CueGrid"},
+        "rows": {},
+        "columns": ["Phrase", "Start"],
+    }
+
+
+@pytest.mark.parametrize("action", ["cells", "cell_values"])
+@pytest.mark.asyncio
+async def test_ui_grid_accepts_cell_snapshot_aliases(
+    capturing_mcp,
+    monkeypatch,
+    action: str,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = FakeEvidenceBackend()
+    backend.process_id = 42
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_grid"](
+        ctx=None,
+        action=action,
+        automation_id="CueGrid",
+        rows={"start": 0, "count": 2},
+        columns=["Phrase"],
+    )
+
+    assert response["data"]["status"] == "PASS"
+    assert response["data"]["requested_action"] == action
+    assert response["data"]["canonical_action"] == "snapshot"
+    assert backend.calls[-1]["grid_snapshot"] == {
+        "selector": {"automation_id": "CueGrid"},
+        "rows": {"start": 0, "count": 2},
+        "columns": ["Phrase"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_ui_grid_selected_rows_forwards_columns(capturing_mcp, monkeypatch) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = SimpleNamespace(
+        process_id=42,
+        grid_selected_rows=AsyncMock(
+            return_value={
+                "status": "PASS",
+                "selected_rows": [
+                    {"index": 1, "cells": {"Phrase": "Fixture cue two"}},
+                ],
+            }
+        ),
+    )
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_grid"](
+        ctx=None,
+        action="selected_rows",
+        automation_id="CueGrid",
+        columns=["Phrase"],
+    )
+
+    assert response["data"]["status"] == "PASS"
+    assert response["data"]["requested_action"] == "selected_rows"
+    assert response["data"]["canonical_action"] == "selected_rows"
+    backend.grid_selected_rows.assert_awaited_once_with(
+        {"automation_id": "CueGrid"},
+        columns=["Phrase"],
+    )
+
+
+@pytest.mark.asyncio
 async def test_ui_grid_unknown_action_reports_accepted_actions_without_backend(
     capturing_mcp,
     monkeypatch,
@@ -432,11 +681,18 @@ async def test_ui_grid_unknown_action_reports_accepted_actions_without_backend(
         "accepted_actions": [
             "visible_rows",
             "rows",
+            "snapshot",
+            "cells",
+            "cell_values",
             "selected_rows",
             "select_range",
             "assert_range",
         ],
-        "aliases": {"rows": "visible_rows"},
+        "aliases": {
+            "rows": "visible_rows",
+            "cells": "snapshot",
+            "cell_values": "snapshot",
+        },
         "next_step": "Use one of the accepted ui_grid actions.",
     }
     create_backend.assert_not_called()
