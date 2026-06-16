@@ -846,7 +846,7 @@ async def _runtime_smoke_get_event_delta(
         "status": "PASS",
         "reason": "runtime smoke event delta read",
         "run_id": run_id,
-        "events": compact_value(tail.get("events", [])),
+        "events": _runtime_smoke_compact_event_delta(tail.get("events", [])),
         "event_cursor": _runtime_smoke_event_cursor(
             after_cursor=after_cursor,
             tail=tail,
@@ -888,6 +888,12 @@ def _runtime_smoke_invalid_event_delta(
         "final": True,
         "next_actions": ["runtime_smoke_mark_event_cursor", "runtime_smoke_run_plan"],
     }
+
+
+def _runtime_smoke_compact_event_delta(events: Any) -> Any:
+    if isinstance(events, list):
+        return [compact_value(event) for event in events]
+    return compact_value(events)
 
 
 def _runtime_smoke_missing_event_delta(

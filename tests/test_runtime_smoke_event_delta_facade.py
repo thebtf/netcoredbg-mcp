@@ -110,6 +110,24 @@ class CursorFacadeRegistry:
                 "stale_cursor": False,
                 "final": True,
             }
+        if run_id == "many-events-run":
+            events = [
+                {"cursor": cursor, "kind": "progress", "status": "RUNNING"}
+                for cursor in range(1, 11)
+            ]
+            events = [event for event in events if int(event["cursor"]) > after_cursor][
+                :limit
+            ]
+            return {
+                "status": "COMPLETED",
+                "run_id": run_id,
+                "events": events,
+                "next_cursor": 10,
+                "oldest_cursor": 1,
+                "dropped_count": 0,
+                "stale_cursor": False,
+                "final": True,
+            }
         if limit == 0:
             return {
                 "status": "RUNNING",
@@ -325,6 +343,27 @@ async def test_runtime_smoke_get_event_delta_cursorless_events_fall_back_to_tail
     assert data["events"] == [{"kind": "progress", "status": "RUNNING"}]
     assert data["event_cursor"]["next_cursor"] == 9
     assert data["cursor"]["after_cursor"] == 9
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_get_event_delta_returns_all_events_within_limit(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor={"run_id": "many-events-run", "after_cursor": 0},
+        event_limit=10,
+    )
+    data = response["data"]
+
+    assert data["status"] == "PASS"
+    assert len(data["events"]) == 10
+    assert [event["cursor"] for event in data["events"]] == list(range(1, 11))
+    assert {"omitted_count": 2} not in data["events"]
+    assert data["cursor"]["after_cursor"] == 10
 
 
 @pytest.mark.asyncio
