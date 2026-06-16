@@ -379,13 +379,13 @@ def ui_operation_adapters(
             return _selector_blocked(selector, result=_bounded_text_result(text_result))
         if not _is_backend_success(text_result):
             result = _bounded_text_result(text_result)
-            result.setdefault("status", text_result.get("status", "FAIL"))
-            result.setdefault("reason", str(text_result.get("reason") or "text read failed"))
-            result.setdefault("selector", selector)
+            result["status"] = str(text_result.get("status") or "FAIL")
+            result["reason"] = str(text_result.get("reason") or "text read failed")
+            result["selector"] = selector
             return result
         result = _bounded_text_result(text_result)
-        result.setdefault("status", "PASS")
-        result.setdefault("text", str(text_result.get("text", "")))
+        result["status"] = "PASS"
+        result["text"] = str(text_result.get("text", ""))
         result["selector"] = selector
         return result
 

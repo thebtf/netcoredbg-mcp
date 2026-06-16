@@ -812,7 +812,7 @@ async def _confirm_grid_selection(
     result["confirmed_selection"] = True
     result["selected_range"] = requested_range
     result["observed_selected_indices"] = observed_indices
-    result["selected_rows"] = selected_rows
+    result["selected_rows"] = _strip_unbounded_evidence_value(selected_rows)
     return result
 
 
