@@ -171,6 +171,22 @@ def test_validate_plan_rejects_nested_operation_argument_type_errors() -> None:
     ]
 
 
+def test_runtime_smoke_schema_accepts_ui_text_read_operation() -> None:
+    assert (
+        validate_plan(
+            {
+                "steps": [
+                    {
+                        "op": "ui.text.read",
+                        "selector": {"automation_id": "CueTextBox"},
+                    }
+                ]
+            }
+        )
+        == []
+    )
+
+
 @pytest.mark.parametrize("value", [None, True, False, 1.5, "1"])
 def test_validate_plan_rejects_non_integral_max_actions(value: Any) -> None:
     assert validate_plan({"budgets": {"max_actions": value}}) == [

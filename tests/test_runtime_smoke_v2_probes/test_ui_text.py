@@ -12,6 +12,7 @@ class TextProbeSession(ProbeSmokeSession):
     def __init__(self) -> None:
         super().__init__()
         self.text_results: deque[dict[str, Any]] = deque()
+        self.read_results: deque[dict[str, Any]] = deque()
 
     async def text_assert(
         self,
@@ -23,6 +24,14 @@ class TextProbeSession(ProbeSmokeSession):
     ) -> dict[str, Any]:
         self.calls.append(("ui.text.assert", dict(selector), contains, equals, must_exist))
         return self.text_results.popleft()
+
+    async def text_read(
+        self,
+        *,
+        selector: dict[str, Any],
+    ) -> dict[str, Any]:
+        self.calls.append(("ui.text.read", dict(selector)))
+        return self.read_results.popleft()
 
 
 @pytest.mark.asyncio
@@ -75,6 +84,44 @@ async def test_ui_text_probe_blocks_when_execution_is_unavailable() -> None:
     assert result["status"] == "BLOCKED"
     assert probe["status"] == "BLOCKED"
     assert probe["reason"] == "probe execution not available"
+
+
+@pytest.mark.asyncio
+async def test_ui_text_probe_read_mode_uses_read_adapter_without_expected() -> None:
+    session = TextProbeSession()
+    session.read_results.append(
+        {
+            "status": "PASS",
+            "text": "Fixture cue one",
+            "source": "ValuePattern",
+            "full_tree": {"must": "not leak"},
+        }
+    )
+
+    result = await runner(
+        session,
+        {"ui.text.read": session.text_read},
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "ui.text",
+                "name": "cue_text",
+                "action": "read",
+                "selector": {"automation_id": "CueTextBox"},
+            }
+        )
+    )
+
+    probe = after_probe(result)
+    assert result["status"] == "PASS"
+    assert probe["status"] == "PASS"
+    assert probe["value"] == "Fixture cue one"
+    assert probe["source"] == "ValuePattern"
+    assert session.calls == [
+        ("ui.invoke", {"automation_id": "ToggleSetting"}),
+        ("ui.text.read", {"automation_id": "CueTextBox"}),
+    ]
+    assert "full_tree" not in str(probe)
 
 
 @pytest.mark.asyncio

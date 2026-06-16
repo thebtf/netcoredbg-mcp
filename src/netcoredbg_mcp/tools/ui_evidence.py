@@ -11,6 +11,7 @@ from ..response import build_error_response, build_response
 from ..session import SessionManager
 from ..session.state import DebugState
 from ..ui.events import UIEventBufferStore
+from ..ui.focus import assert_focus
 from ..ui.grid import (
     assert_grid_range,
     read_grid_selected_rows,
@@ -32,6 +33,8 @@ _GRID_ACTION_ALIASES = {
     "rows": "visible_rows",
     "cells": "snapshot",
     "cell_values": "snapshot",
+    "selected": "selected_rows",
+    "selection": "selected_rows",
 }
 _GRID_CANONICAL_ACTIONS = (
     "visible_rows",
@@ -47,9 +50,12 @@ _GRID_ACCEPTED_ACTIONS = (
     "cells",
     "cell_values",
     "selected_rows",
+    "selected",
+    "selection",
     "select_range",
     "assert_range",
 )
+_FOCUS_READ_ACTIONS = ("assert",)
 _TEXT_READ_ACTIONS = ("read",)
 
 
@@ -190,6 +196,62 @@ def register_ui_evidence_tools(
                 )
             return build_error_response(str(exc), state=session.state.state)
 
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+    async def ui_focus(
+        ctx: Context,
+        action: str,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+    ) -> dict:
+        """Read bounded focus evidence for a selector without moving focus."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            if action not in _FOCUS_READ_ACTIONS:
+                return build_response(
+                    data={
+                        "status": "FAIL",
+                        "reason": "unknown focus action",
+                        "action": action,
+                        "accepted_actions": list(_FOCUS_READ_ACTIONS),
+                        "next_step": "Use ui_focus(action=\"assert\") for read-only focus proof.",
+                    },
+                    state=session.state.state,
+                )
+
+            selector = _selector(automation_id, name, control_type, root_id, xpath)
+            if not selector:
+                return build_response(
+                    data={"status": "FAIL", "reason": "invalid selector"},
+                    state=session.state.state,
+                )
+
+            backend = await _ensure_ui_connected()
+            result = await assert_focus(backend, selector)
+            if _is_selector_miss(result):
+                return build_response(
+                    data=_selector_blocked(selector, result=_bounded_focus_result(result)),
+                    state=session.state.state,
+                )
+            return build_response(
+                data=_bounded_focus_result(result, selector=selector),
+                state=session.state.state,
+            )
+        except Exception as exc:
+            result = {"status": "BLOCKED", "reason": str(exc)}
+            selector = _selector(automation_id, name, control_type, root_id, xpath)
+            if _is_selector_miss(result):
+                return build_response(
+                    data=_selector_blocked(selector, result=result),
+                    state=session.state.state,
+                )
+            return build_error_response(str(exc), state=session.state.state)
+
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def ui_grid(
         ctx: Context,
@@ -241,6 +303,15 @@ def register_ui_evidence_tools(
             elif canonical_action == "select_range":
                 start, end = _require_range(start_index, end_index)
                 result = await select_grid_range(backend, selector, start, end)
+                if _passes(result):
+                    result = await _confirm_grid_selection(
+                        backend,
+                        selector,
+                        start=start,
+                        end=end,
+                        columns=columns,
+                        selection_result=result,
+                    )
             elif canonical_action == "assert_range":
                 start, end = _require_range(start_index, end_index)
                 result = await assert_grid_range(backend, selector, start, end)
@@ -621,6 +692,150 @@ def _bounded_text_result(result: dict[str, Any]) -> dict[str, Any]:
         "control_type",
     )
     return {key: result[key] for key in allowed_keys if key in result}
+
+
+def _bounded_focus_result(
+    result: Any,
+    *,
+    selector: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        return {
+            "status": "FAIL",
+            "reason": "focus backend returned non-object result",
+            "selector": selector or {},
+            "result": result,
+        }
+    allowed_keys = (
+        "status",
+        "focused",
+        "reason",
+        "unsupported",
+        "backend",
+        "expected",
+        "actual",
+        "requested",
+        "accepted",
+        "next_step",
+        "error",
+    )
+    bounded = {
+        key: _strip_unbounded_evidence_value(result[key])
+        for key in allowed_keys
+        if key in result
+    }
+    bounded.setdefault("status", "PASS")
+    if selector is not None:
+        bounded["selector"] = selector
+    return bounded
+
+
+def _strip_unbounded_evidence_value(value: Any) -> Any:
+    unbounded_keys = {"full_tree", "raw_tree", "ui_tree", "window_tree"}
+    if isinstance(value, dict):
+        return {
+            key: _strip_unbounded_evidence_value(item)
+            for key, item in value.items()
+            if key not in unbounded_keys
+        }
+    if isinstance(value, list):
+        return [_strip_unbounded_evidence_value(item) for item in value]
+    return value
+
+
+async def _confirm_grid_selection(
+    backend: Any,
+    selector: dict[str, Any],
+    *,
+    start: int,
+    end: int,
+    columns: list[str] | None,
+    selection_result: Any,
+) -> dict[str, Any]:
+    confirmation = await read_grid_selected_rows(backend, selector, columns=columns)
+    requested_range = {"start": start, "end": end}
+    if not isinstance(confirmation, dict):
+        return {
+            "status": "BLOCKED",
+            "confirmed_selection": False,
+            "reason": "selected row confirmation returned non-object result",
+            "requested_range": requested_range,
+            "selection_result": _strip_unbounded_evidence_value(selection_result),
+            "confirmation_result": _strip_unbounded_evidence_value(confirmation),
+        }
+    if not _passes(confirmation):
+        result = _strip_unbounded_evidence_value(confirmation)
+        if not isinstance(result, dict):
+            result = {}
+        result["status"] = str(result.get("status") or "BLOCKED")
+        if result["status"].upper() == "PASS":
+            result["status"] = "BLOCKED"
+        result.setdefault("reason", "selected row confirmation failed")
+        result["confirmed_selection"] = False
+        result["requested_range"] = requested_range
+        result["selection_result"] = _strip_unbounded_evidence_value(selection_result)
+        return result
+
+    selected_rows = confirmation.get("selected_rows")
+    if not isinstance(selected_rows, list):
+        return {
+            "status": "BLOCKED",
+            "confirmed_selection": False,
+            "reason": "selected row confirmation did not include selected_rows",
+            "requested_range": requested_range,
+            "selection_result": _strip_unbounded_evidence_value(selection_result),
+            "confirmation_result": _strip_unbounded_evidence_value(confirmation),
+        }
+
+    observed_indices = sorted(
+        index
+        for row in selected_rows
+        if isinstance(row, dict)
+        for index in [_row_index(row)]
+        if index is not None
+    )
+    expected_indices = _inclusive_range_indices(start, end)
+    if observed_indices != expected_indices:
+        return {
+            "status": "FAIL",
+            "confirmed_selection": False,
+            "reason": "selected row confirmation failed",
+            "requested_range": requested_range,
+            "observed_selected_indices": observed_indices,
+            "selected_rows": _strip_unbounded_evidence_value(selected_rows),
+            "selection_result": _strip_unbounded_evidence_value(selection_result),
+            "confirmation_result": _strip_unbounded_evidence_value(confirmation),
+        }
+
+    result = dict(selection_result) if isinstance(selection_result, dict) else {}
+    result["status"] = "PASS"
+    result["confirmed_selection"] = True
+    result["selected_range"] = requested_range
+    result["observed_selected_indices"] = observed_indices
+    result["selected_rows"] = selected_rows
+    return result
+
+
+def _passes(result: Any) -> bool:
+    if not isinstance(result, dict):
+        return False
+    return str(result.get("status", "PASS")).upper() in {"PASS", "OK", "SUCCESS"}
+
+
+def _inclusive_range_indices(start: int, end: int) -> list[int]:
+    lower, upper = sorted((start, end))
+    return list(range(lower, upper + 1))
+
+
+def _row_index(row: dict[str, Any]) -> int | None:
+    raw_index = row.get("row_index", row.get("index"))
+    if isinstance(raw_index, bool):
+        return None
+    if isinstance(raw_index, int):
+        return raw_index
+    if isinstance(raw_index, str) and raw_index.strip().lstrip("-").isdigit():
+        return int(raw_index)
+    return None
 
 
 def _require_range(start_index: int | None, end_index: int | None) -> tuple[int, int]:

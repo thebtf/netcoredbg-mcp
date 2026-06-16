@@ -19,6 +19,44 @@ async def handle_ui_text(
     phase: str,
 ) -> dict[str, Any]:
     kind = "ui.text"
+    action = str(probe.get("action") or "assert")
+    if action == "read":
+        if phase != "after":
+            return {
+                "name": probe_name(probe, kind),
+                "kind": kind,
+                "status": "PASS",
+                "value": None,
+            }
+        if not service_available(context, "ui.text.read"):
+            return blocked_probe(
+                probe,
+                kind=kind,
+                requested={"selector": dict(probe.get("selector") or {})},
+                next_step="Connect a UI backend that exposes ui.text.read.",
+            )
+        result = await context.call_adapter(
+            "ui.text.read",
+            selector=dict(probe.get("selector") or {}),
+        )
+        status = str(result.get("status", "PASS"))
+        value = result.get("text", result.get("value"))
+        output = {
+            "name": probe_name(probe, kind),
+            "kind": kind,
+            "status": status,
+            "value": value,
+        }
+        if "source" in result:
+            output["source"] = result["source"]
+        if status != "PASS":
+            output["reason"] = result.get("reason", "text read failed")
+            attach_blocked_details(output, result)
+        ref = evidence_ref(result)
+        if ref:
+            output["evidence_ref"] = ref
+        return attach_expected_and_status(output, probe=probe, phase=phase, value=value)
+
     if not service_available(context, "ui.text.assert"):
         return blocked_probe(
             probe,

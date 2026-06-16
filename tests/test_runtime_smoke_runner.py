@@ -704,6 +704,47 @@ async def test_ui_get_property_propagates_backend_failure_status() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ui_text_read_adapter_extracts_bounded_text_without_assertion_args() -> None:
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.extract_text_calls: list[dict[str, Any]] = []
+
+        async def extract_text(self, **kwargs: Any) -> dict[str, Any]:
+            self.extract_text_calls.append(dict(kwargs))
+            return {
+                "status": "PASS",
+                "text": "Fixture cue one",
+                "source": "ValuePattern",
+                "full_tree": {"must": "not leak"},
+            }
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    result = await ui_operation_adapters(backend_provider)["ui.text.read"](
+        selector={"automation_id": "CueTextBox"},
+    )
+
+    assert result == {
+        "status": "PASS",
+        "text": "Fixture cue one",
+        "source": "ValuePattern",
+        "selector": {"automation_id": "CueTextBox"},
+    }
+    assert backend.extract_text_calls == [
+        {
+            "automation_id": "CueTextBox",
+            "name": None,
+            "control_type": None,
+            "root_id": None,
+            "xpath": None,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_ui_get_property_name_reads_element_property_not_text() -> None:
     class FakeBackend:
         def __init__(self) -> None:
