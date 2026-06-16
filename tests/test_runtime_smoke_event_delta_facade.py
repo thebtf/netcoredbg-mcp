@@ -54,6 +54,12 @@ class CursorFacadeRegistry:
                 "reason": "runtime smoke run not found",
                 "run_id": run_id,
             }
+        if run_id == "renamed-missing-run":
+            return {
+                "status": "FAIL",
+                "reason": "no retained runtime smoke run",
+                "run_id": run_id,
+            }
         if run_id == "stale-run":
             return {
                 "status": "COMPLETED",
@@ -90,6 +96,17 @@ class CursorFacadeRegistry:
                 "next_cursor": 8,
                 "oldest_cursor": 3,
                 "dropped_count": 1,
+                "stale_cursor": False,
+                "final": True,
+            }
+        if run_id == "cursorless-run":
+            return {
+                "status": "COMPLETED",
+                "run_id": run_id,
+                "events": [{"kind": "progress", "status": "RUNNING"}],
+                "next_cursor": 9,
+                "oldest_cursor": 9,
+                "dropped_count": 0,
                 "stale_cursor": False,
                 "final": True,
             }
@@ -197,6 +214,30 @@ async def test_runtime_smoke_mark_event_cursor_returns_cursor_token(
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_mark_event_cursor_agent_mode_adds_delta_request(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_mark_event_cursor"](
+        ctx=None,
+        run_id="run-1",
+        agent_mode=True,
+    )
+    data = response["data"]
+    agent = data["agent_mode"]
+
+    assert data["status"] == "PASS"
+    assert agent["primary_next_action"] == "runtime_smoke_get_event_delta"
+    assert agent["cursor"] == data["cursor"]
+    assert agent["next_request"] == {
+        "tool": "runtime_smoke_get_event_delta",
+        "arguments": {"cursor": data["cursor"], "agent_mode": True},
+    }
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_get_event_delta_returns_bounded_events_after_mark(
     capturing_mcp,
 ) -> None:
@@ -244,6 +285,46 @@ async def test_runtime_smoke_get_event_delta_returns_bounded_events_after_mark(
         {"cursor": 6, "kind": "completed", "status": "COMPLETED"}
     ]
     assert next_response["data"]["cursor"]["after_cursor"] == 6
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_get_event_delta_zero_limit_does_not_advance_cursor(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor={"run_id": "run-1", "after_cursor": 4},
+        event_limit=0,
+    )
+    data = response["data"]
+
+    assert data["status"] == "PASS"
+    assert data["events"] == []
+    assert data["cursor"]["after_cursor"] == 4
+    assert data["cursor"]["next_cursor"] == 4
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_get_event_delta_cursorless_events_fall_back_to_tail_cursor(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor={"run_id": "cursorless-run", "after_cursor": 4},
+        event_limit=1,
+    )
+    data = response["data"]
+
+    assert data["status"] == "PASS"
+    assert data["events"] == [{"kind": "progress", "status": "RUNNING"}]
+    assert data["event_cursor"]["next_cursor"] == 9
+    assert data["cursor"]["after_cursor"] == 9
 
 
 @pytest.mark.asyncio
@@ -350,6 +431,44 @@ async def test_runtime_smoke_get_event_delta_missing_run_fails_closed(
     }
     assert data["final"] is True
     assert "runtime_smoke_run_plan" in response["next_actions"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_get_event_delta_missing_run_without_literal_reason_fails_closed(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor={"run_id": "renamed-missing-run", "after_cursor": 2},
+    )
+    data = response["data"]
+
+    assert data["status"] == "FAIL"
+    assert data["reason"] == "no retained runtime smoke run"
+    assert data["events"] == []
+    assert data["next_actions"] == ["runtime_smoke_run_plan"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_mark_event_cursor_missing_run_without_literal_reason_fails_closed(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_mark_event_cursor"](
+        ctx=None,
+        run_id="renamed-missing-run",
+    )
+    data = response["data"]
+
+    assert data["status"] == "FAIL"
+    assert data["reason"] == "no retained runtime smoke run"
+    assert data["events"] == []
+    assert data["next_actions"] == ["runtime_smoke_run_plan"]
 
 
 @pytest.mark.asyncio

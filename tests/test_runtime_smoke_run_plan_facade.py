@@ -161,6 +161,29 @@ async def test_runtime_smoke_run_plan_rejects_invalid_plan_without_starting_run(
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_run_plan_agent_mode_invalid_plan_fails_closed(
+    capturing_mcp,
+) -> None:
+    session = RunPlanFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_run_plan"](
+        ctx=None,
+        plan={"name": "invalid", "actions": "not-a-list"},
+        agent_mode=True,
+    )
+    data = response["data"]
+    agent = data["agent_mode"]
+
+    assert data["status"] == "INVALID_SETUP"
+    assert data["can_run"] is False
+    assert agent["primary_next_action"] == "runtime_smoke_run_plan"
+    assert "next_request" not in agent
+    assert "cursor" not in agent
+    assert session.runtime_smoke.lifecycle_runs.retained_run_ids() == []
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_run_plan_starts_durable_run_after_validation(
     capturing_mcp,
 ) -> None:

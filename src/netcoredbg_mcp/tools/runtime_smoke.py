@@ -341,6 +341,8 @@ def register_runtime_smoke_tools(
 
             validation = validate_runtime_smoke_plan_contract(plan)
             if not validation["can_run"]:
+                if agent_mode:
+                    _apply_runtime_smoke_agent_mode(validation, "runtime_smoke_run_plan")
                 return _build_runtime_smoke_response(
                     session,
                     validation,
@@ -387,14 +389,17 @@ def register_runtime_smoke_tools(
             )
             validation = validate_runtime_smoke_plan_contract(plan)
             if not validation["can_run"]:
+                data = {
+                    **validation,
+                    "run_created": False,
+                    "probe": _runtime_smoke_probe_summary(probe),
+                    "generated_plan": generated,
+                }
+                if agent_mode:
+                    _apply_runtime_smoke_agent_mode(data, "runtime_smoke_run_plan")
                 return _build_runtime_smoke_response(
                     session,
-                    {
-                        **validation,
-                        "run_created": False,
-                        "probe": _runtime_smoke_probe_summary(probe),
-                        "generated_plan": generated,
-                    },
+                    data,
                     ["runtime_smoke_validate_plan", "runtime_smoke_run_probe"],
                 )
 
@@ -910,7 +915,6 @@ def _runtime_smoke_missing_event_delta(
 def _runtime_smoke_tail_missing(tail: dict[str, Any]) -> bool:
     return (
         tail.get("status") == "FAIL"
-        and tail.get("reason") == "runtime smoke run not found"
         and not any(
             key in tail
             for key in (
@@ -938,6 +942,7 @@ def _runtime_smoke_tail_continuation_cursor(tail: dict[str, Any], fallback: int)
             cursor = _runtime_smoke_parse_nonnegative_int(event.get("cursor"))
             if cursor is not None:
                 return max(0, cursor)
+        return _runtime_smoke_tail_next_cursor(tail, fallback)
     return max(0, int(fallback))
 
 
