@@ -58,29 +58,47 @@ def compact_runtime_smoke_result(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def compact_value(value: Any) -> Any:
+def compact_value(
+    value: Any,
+    *,
+    max_text_length: int = MAX_COMPACT_TEXT_LENGTH,
+    max_list_items: int = MAX_COMPACT_LIST_ITEMS,
+) -> Any:
+    text_limit = max(0, max_text_length)
+    list_limit = max(0, max_list_items)
     if isinstance(value, dict):
         compact: dict[str, Any] = {}
         omitted: list[str] = []
         for key, item in value.items():
-            if isinstance(item, str) and len(item) > MAX_COMPACT_TEXT_LENGTH:
+            if isinstance(item, str) and len(item) > text_limit:
                 omitted.append(key)
                 compact[f"{key}_length"] = len(item)
                 continue
-            compact[key] = compact_value(item)
+            compact[key] = compact_value(
+                item,
+                max_text_length=text_limit,
+                max_list_items=list_limit,
+            )
         if omitted:
             compact["omitted_fields"] = omitted
         return compact
     if isinstance(value, list):
-        compact_items = [compact_value(item) for item in value[:MAX_COMPACT_LIST_ITEMS]]
-        if len(value) > MAX_COMPACT_LIST_ITEMS:
+        compact_items = [
+            compact_value(
+                item,
+                max_text_length=text_limit,
+                max_list_items=list_limit,
+            )
+            for item in value[:list_limit]
+        ]
+        if len(value) > list_limit:
             compact_items.append(
                 {
-                    "omitted_count": len(value) - MAX_COMPACT_LIST_ITEMS,
+                    "omitted_count": len(value) - list_limit,
                 }
             )
         return compact_items
-    if isinstance(value, str) and len(value) > MAX_COMPACT_TEXT_LENGTH:
+    if isinstance(value, str) and len(value) > text_limit:
         return {
             "text_length": len(value),
         }

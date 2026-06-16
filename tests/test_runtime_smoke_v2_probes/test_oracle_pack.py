@@ -65,6 +65,42 @@ async def test_oracle_pack_probe_executes_checks_and_returns_bounded_value() -> 
 
 
 @pytest.mark.asyncio
+async def test_oracle_pack_probe_applies_probe_specific_evidence_limits() -> None:
+    long_text = "selector diagnostic text exceeds strict limit"
+    result = await runner(ProbeSmokeSession()).run(
+        one_probe_plan(
+            _oracle_pack(
+                checks=[
+                    {
+                        "id": "strict-first-check",
+                        "probe": "ui.grid",
+                        "expect": {"diagnostic": long_text},
+                        "on_blocked": {"next_step": "Inspect the bounded evidence."},
+                    },
+                    {
+                        "id": "strict-second-check",
+                        "probe": "ui.grid",
+                        "expect": {"min_rows": 1},
+                        "on_blocked": {"next_step": "Inspect the second check."},
+                    },
+                ],
+                limits={
+                    **_limits(),
+                    "max_text_length": 12,
+                    "max_list_items": 1,
+                },
+            )
+        )
+    )
+
+    checks = after_probe(result)["value"]["checks"]
+    assert "diagnostic" not in checks[0]["expect"]
+    assert checks[0]["expect"]["diagnostic_length"] == len(long_text)
+    assert checks[0]["expect"]["omitted_fields"] == ["diagnostic"]
+    assert checks[1] == {"omitted_count": 1}
+
+
+@pytest.mark.asyncio
 async def test_oracle_pack_probe_blocks_invalid_pack_with_schema_errors() -> None:
     result = await runner(ProbeSmokeSession()).run(
         one_probe_plan(
