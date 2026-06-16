@@ -244,6 +244,46 @@ async def test_v2_cleanup_aggregates_plan_and_case_cleanup_without_stopping_next
 
 
 @pytest.mark.asyncio
+async def test_v2_cleanup_does_not_count_idempotent_tracepoint_remove() -> None:
+    class MissingTracepointCleanupSession(CleanupSmokeSession):
+        async def remove_tracepoint(self, tracepoint_id: str) -> dict[str, Any]:
+            self.calls.append(("debug.tracepoint.remove", tracepoint_id))
+            return {
+                "status": "PASS",
+                "removed": False,
+                "tracepoint_id": tracepoint_id,
+            }
+
+    session = MissingTracepointCleanupSession()
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "cleanup": {"steps": [{"kind": "debug.tracepoint.remove", "id": "missing"}]},
+            "cases": [
+                {
+                    "id": "case_a",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.invoke",
+                                "selector": {"automation_id": "caseA"},
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert result["status"] == "PASS"
+    assert result["cleanup"]["status"] == "PASS"
+    assert result["cleanup"]["tracepoints_removed"] == 0
+    assert ("debug.tracepoint.remove", "missing") in session.calls
+
+
+@pytest.mark.asyncio
 async def test_v2_cleanup_reports_invalid_process_registry_count() -> None:
     session = CleanupSmokeSession()
     session.process_registry_result = {"status": "PASS", "count": "not-a-number"}

@@ -377,6 +377,8 @@ def register_runtime_smoke_tools(
         name: str | None = None,
         phase: str = "after",
         budgets: dict[str, Any] | None = None,
+        debug_preflight: bool = False,
+        tracepoint_guard: dict[str, Any] | None = None,
         agent_mode: bool = False,
     ) -> dict:
         """Validate then start a durable runtime-smoke v2 run for one probe."""
@@ -390,6 +392,8 @@ def register_runtime_smoke_tools(
                 name=name,
                 phase=phase,
                 budgets=budgets,
+                debug_preflight=debug_preflight,
+                tracepoint_guard=tracepoint_guard,
             )
             validation = validate_runtime_smoke_plan_contract(plan)
             if not validation["can_run"]:
@@ -683,6 +687,8 @@ def _runtime_smoke_probe_plan(
     name: str | None = None,
     phase: str = "after",
     budgets: dict[str, Any] | None = None,
+    debug_preflight: bool = False,
+    tracepoint_guard: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Wrap a single probe in the smallest executable v2 runtime-smoke plan."""
     probe_payload = dict(probe) if isinstance(probe, dict) else {"kind": ""}
@@ -692,24 +698,44 @@ def _runtime_smoke_probe_plan(
     kind = str(probe_payload.get("kind") or "")
     probe_name = str(probe_payload.get("name") or kind or "probe")
     plan_name = str(name or f"run-probe-{probe_name}")
+    case: dict[str, Any] = {
+        "id": "run_probe",
+        "transitions": [
+            {
+                "id": "probe",
+                "action": {"kind": "ui.noop"},
+                "settle": {"idle_ms": 0},
+                "probes": [probe_payload],
+            }
+        ],
+    }
+    guard_cleanup = _runtime_smoke_tracepoint_guard_cleanup(
+        probe_payload,
+        tracepoint_guard=tracepoint_guard,
+    )
+    if guard_cleanup:
+        case["cleanup"] = guard_cleanup
+
     plan = {
         "schema": SCHEMA_VERSION_V2,
         "name": plan_name,
-        "cases": [
-            {
-                "id": "run_probe",
-                "transitions": [
-                    {
-                        "id": "probe",
-                        "action": {"kind": "ui.noop"},
-                        "settle": {"idle_ms": 0},
-                        "probes": [probe_payload],
-                    }
-                ],
-            }
-        ],
+        "cases": [case],
         "budgets": dict(budgets or {"max_actions": 1, "max_elapsed_seconds": 5}),
     }
+    if debug_preflight:
+        plan["baseline"] = {
+            "steps": [
+                {
+                    "id": "debug_preflight",
+                    "kind": "debug_hygiene_preflight",
+                    "file": probe_payload.get("file"),
+                    "clear_breakpoints": True,
+                    "clear_trace_log": True,
+                    "clear_exception_filters": False,
+                }
+            ]
+        }
+
     generated = {
         "schema": SCHEMA_VERSION_V2,
         "plan_name": plan_name,
@@ -720,7 +746,56 @@ def _runtime_smoke_probe_plan(
         "probe_name": probe_name,
         "probe_phase": _runtime_smoke_probe_phase(probe_payload),
     }
+    if debug_preflight:
+        generated["debug_preflight"] = True
+    if guard_cleanup:
+        generated["tracepoint_guard"] = {
+            "cleanup_operations": _runtime_smoke_tracepoint_cleanup_operations(
+                guard_cleanup
+            )
+        }
     return plan, generated
+
+
+def _runtime_smoke_tracepoint_guard_cleanup(
+    probe_payload: dict[str, Any],
+    *,
+    tracepoint_guard: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if str(probe_payload.get("kind") or "") != "debug.tracepoint":
+        return []
+
+    cleanup = dict((tracepoint_guard or {}).get("cleanup") or {})
+    raw_operations = cleanup.get("operations")
+    if not isinstance(raw_operations, list):
+        return []
+    operations = [str(operation) for operation in raw_operations]
+    guard_steps: list[dict[str, Any]] = []
+    if "debug.trace_log.clear" in operations:
+        guard_steps.append({"kind": "debug.trace_log.clear"})
+    if "debug.tracepoint.remove" in operations:
+        guard_steps.append(
+            {
+                "kind": "debug.tracepoint.remove",
+                "id": _runtime_smoke_tracepoint_cleanup_id(probe_payload),
+                "file": probe_payload.get("file"),
+                "line": probe_payload.get("line"),
+            }
+        )
+    return guard_steps
+
+
+def _runtime_smoke_tracepoint_cleanup_id(probe_payload: dict[str, Any]) -> str:
+    file_name = str(probe_payload.get("file") or "tracepoint").replace("\\", "/")
+    file_name = file_name.rsplit("/", 1)[-1] or "tracepoint"
+    line = probe_payload.get("line")
+    return f"{file_name}:{line}"
+
+
+def _runtime_smoke_tracepoint_cleanup_operations(
+    cleanup_steps: list[dict[str, Any]],
+) -> list[str]:
+    return [str(step.get("kind") or "") for step in reversed(cleanup_steps)]
 
 
 def _runtime_smoke_probe_phase(probe: dict[str, Any]) -> str:
@@ -1332,7 +1407,41 @@ def _bounded_runtime_smoke_result(result: dict[str, Any]) -> dict[str, Any]:
         bounded["failed_assertions"] = compact_value(result["failed_assertions"])
     if "compact" in result:
         bounded["compact"] = compact_value(result["compact"])
+    debug_preflight = _bounded_debug_preflight_result(result)
+    if debug_preflight is not None:
+        bounded["debug_preflight"] = debug_preflight
     return bounded
+
+
+def _bounded_debug_preflight_result(result: dict[str, Any]) -> dict[str, Any] | None:
+    baseline = result.get("baseline")
+    if not isinstance(baseline, dict):
+        return None
+    steps: list[dict[str, Any]] = []
+    for raw_step in baseline.get("steps", []):
+        if not isinstance(raw_step, dict):
+            continue
+        if raw_step.get("kind") != "debug_hygiene_preflight":
+            continue
+        step_result = raw_step.get("result")
+        if not isinstance(step_result, dict):
+            step_result = {}
+        steps.append(
+            {
+                "id": raw_step.get("id"),
+                "kind": "debug_hygiene_preflight",
+                "status": raw_step.get("status", step_result.get("status")),
+                "cleared": compact_value(step_result.get("cleared", {})),
+                "tracepoints_removed": step_result.get("tracepoints_removed", 0),
+                "remaining_breakpoints": compact_value(
+                    step_result.get("remaining_breakpoints", [])
+                ),
+                "cleanup_errors": compact_value(step_result.get("cleanup_errors", [])),
+            }
+        )
+    if not steps:
+        return None
+    return {"status": baseline.get("status"), "steps": compact_value(steps)}
 
 
 def _runtime_smoke_evidence_contract() -> dict[str, Any]:
@@ -1346,6 +1455,7 @@ def _runtime_smoke_evidence_contract() -> dict[str, Any]:
             "cleanup",
             "evidence_refs",
             "compact",
+            "debug_preflight",
         ],
         "compact_limits": dict(diagnostics["evidence_limits"]),
         "diagnostics": diagnostics,

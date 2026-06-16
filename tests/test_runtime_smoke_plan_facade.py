@@ -153,6 +153,7 @@ async def test_runtime_smoke_validate_plan_reports_runnable_v2_contract(
         "cleanup",
         "evidence_refs",
         "compact",
+        "debug_preflight",
     ]
     assert data["evidence_contract"]["diagnostics"]["schema"] == (
         "netcoredbg.runtime_smoke.diagnostics.v1"

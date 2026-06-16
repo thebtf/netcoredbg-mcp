@@ -73,6 +73,14 @@ async def _execute_step(step: dict[str, Any], context: ActionContext) -> dict[st
     if kind == "control_set":
         action = dict(step.get("action") or {})
         return await dispatch_action(action, context)
+    if kind == "debug_hygiene_preflight":
+        return await context.call_adapter(
+            "debug_hygiene_preflight",
+            file=step.get("file"),
+            clear_breakpoints=bool(step.get("clear_breakpoints", True)),
+            clear_trace_log=bool(step.get("clear_trace_log", True)),
+            clear_exception_filters=bool(step.get("clear_exception_filters", False)),
+        )
     return {
         "status": "BLOCKED",
         "reason": "unsupported baseline step kind",
@@ -92,4 +100,9 @@ def _cleanup_step_for(step: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _accepted_step_kinds() -> list[str]:
-    return ["control_set", "fixture.restore", "isolated_profile.launch"]
+    return [
+        "control_set",
+        "debug_hygiene_preflight",
+        "fixture.restore",
+        "isolated_profile.launch",
+    ]

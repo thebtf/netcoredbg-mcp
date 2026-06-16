@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from collections import deque
 from types import SimpleNamespace
 from typing import Any
@@ -11,7 +12,8 @@ from typing import Any
 import pytest
 
 from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeSession
-from netcoredbg_mcp.session.state import DebugState
+from netcoredbg_mcp.session.state import Breakpoint, BreakpointRegistry, DebugState, TraceEntry
+from netcoredbg_mcp.session.tracepoints import TracepointManager
 from netcoredbg_mcp.tools.runtime_smoke import register_runtime_smoke_tools
 
 
@@ -34,6 +36,49 @@ class RunProbeFacadeSession:
     async def launch(self, **_: Any) -> dict[str, Any]:
         self.launch_calls += 1
         raise AssertionError("run-probe facade must not launch directly")
+
+
+class GuardedTracepointRunProbeSession(RunProbeFacadeSession):
+    def __init__(self) -> None:
+        super().__init__()
+        self.breakpoints = BreakpointRegistry()
+        self._tracepoint_manager = TracepointManager()
+        self.hygiene_preflight_calls: list[dict[str, Any]] = []
+        self.add_breakpoint_calls: list[tuple[str, int]] = []
+
+    async def add_breakpoint(self, file: str, line: int) -> Breakpoint:
+        self.add_breakpoint_calls.append((file, line))
+        breakpoint = Breakpoint(file=file, line=line, verified=True)
+        self.breakpoints.add(breakpoint)
+        return breakpoint
+
+    async def remove_breakpoint(self, file: str, line: int) -> bool:
+        return self.breakpoints.remove(file, line)
+
+    async def clear_breakpoints(self, file: str | None = None) -> int:
+        return self.breakpoints.clear(file)
+
+    async def configure_exception_breakpoints(self, filters: list[str]) -> bool:
+        return filters == []
+
+    def record_trace_hit(self, tracepoint_id: str) -> None:
+        tracepoint = self._tracepoint_manager.tracepoints[tracepoint_id]
+        self._tracepoint_manager._trace_buffer.append(
+            TraceEntry(
+                timestamp=time.monotonic(),
+                file=tracepoint.file,
+                line=tracepoint.line,
+                expression=tracepoint.expression,
+                value="guarded-route",
+                thread_id=1,
+                tracepoint_id=tracepoint_id,
+            )
+        )
+
+
+class FailingBreakpointTracepointRunProbeSession(GuardedTracepointRunProbeSession):
+    async def add_breakpoint(self, file: str, line: int) -> Breakpoint:
+        raise RuntimeError(f"adapter refused breakpoint at {file}:{line}")
 
 
 async def _resolve_project_root(_ctx: Any, _session: Any) -> None:
@@ -212,6 +257,153 @@ async def test_runtime_smoke_run_probe_result_is_readable_as_evidence_bundle(
     assert [event["kind"] for event in data["events"]] == ["started", "completed"]
     assert "runtime_smoke_evidence_bundle" in data["next_actions"]
     assert "runtime_smoke_run_plan" in data["next_actions"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_run_probe_debug_tracepoint_guard_preflights_and_cleans(
+    capturing_mcp,
+) -> None:
+    session = GuardedTracepointRunProbeSession()
+    _register(capturing_mcp, session)
+    source = "C:/repo/SettingsViewModel.cs"
+    session.breakpoints.add(Breakpoint(file=source, line=42, verified=True))
+    stale_tracepoint = session._tracepoint_manager.add(source, 42, "stale")
+    stale_tracepoint.breakpoint_id = 9001
+    session._tracepoint_manager._trace_buffer.append(
+        TraceEntry(
+            timestamp=time.monotonic(),
+            file=source,
+            line=42,
+            expression="stale",
+            value="old",
+            thread_id=1,
+            tracepoint_id="stale-tp",
+        )
+    )
+
+    started = await capturing_mcp.tools["runtime_smoke_run_probe"](
+        ctx=None,
+        probe={
+            "kind": "debug.tracepoint",
+            "name": "settings_route_guard",
+            "file": source,
+            "line": 42,
+            "expression": "Mode.SpellCheckInput",
+            "expected_hit_count": 0,
+        },
+        name="debug-tracepoint-guard",
+        phase="both",
+        debug_preflight=True,
+        tracepoint_guard={
+            "cleanup": {
+                "owner": "runtime_smoke_run_probe",
+                "operations": ["debug.tracepoint.remove", "debug.trace_log.clear"],
+            }
+        },
+        agent_mode=True,
+    )
+    data = started["data"]
+
+    assert data["status"] == "RUNNING"
+    assert data["run_created"] is True
+    assert data["probe"]["kind"] == "debug.tracepoint"
+    assert data["generated_plan"]["debug_preflight"] is True
+    assert data["generated_plan"]["tracepoint_guard"]["cleanup_operations"] == [
+        "debug.tracepoint.remove",
+        "debug.trace_log.clear",
+    ]
+    assert data["agent_mode"]["primary_next_action"] == "runtime_smoke_evidence_bundle"
+
+    active_blocked = await capturing_mcp.tools["runtime_smoke_run_probe"](
+        ctx=None,
+        probe={
+            "kind": "debug.tracepoint",
+            "name": "second_guard",
+            "file": source,
+            "line": 42,
+            "expression": "Mode.SpellCheckInput",
+        },
+        name="debug-tracepoint-overlap",
+        phase="both",
+        debug_preflight=True,
+        agent_mode=True,
+    )
+    active_data = active_blocked["data"]
+
+    assert active_data["status"] == "BLOCKED"
+    assert active_data["active_run_id"] == data["run_id"]
+    assert active_data["agent_mode"]["primary_next_action"] == "runtime_smoke_evidence_bundle"
+    assert active_data["agent_mode"]["next_request"]["arguments"]["run_id"] == data["run_id"]
+
+    bundle = await _wait_for_bundle(capturing_mcp, data["run_id"])
+
+    assert bundle["status"] == "PASS"
+    assert bundle["final"] is True
+    assert bundle["result"]["status"] == "PASS"
+    assert "baseline" not in bundle["result"]
+    preflight_step = bundle["result"]["debug_preflight"]["steps"][0]
+    assert preflight_step["kind"] == "debug_hygiene_preflight"
+    assert preflight_step["cleared"] == {
+        "breakpoints": 1,
+        "trace_log_entries": 1,
+        "exception_filters": 0,
+    }
+    assert preflight_step["tracepoints_removed"] == 1
+    assert session.add_breakpoint_calls == [(source, 42)]
+    assert bundle["cleanup"]["status"] == "PASS"
+    assert bundle["cleanup"]["tracepoints_removed"] == 1
+    assert bundle["cleanup"]["attempted"] == [
+        "case:run_probe:debug.tracepoint.remove:SettingsViewModel.cs:42",
+        "case:run_probe:debug.trace_log.clear",
+    ]
+    delta = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor={"run_id": data["run_id"], "after_cursor": 0},
+        event_limit=10,
+    )
+    delta_data = delta["data"]
+
+    assert delta_data["status"] == "PASS"
+    assert delta_data["run_id"] == data["run_id"]
+    assert [event["kind"] for event in delta_data["events"]] == ["started", "completed"]
+    assert delta_data["final"] is True
+    assert session.breakpoints.get_for_file(source) == []
+    assert session._tracepoint_manager.tracepoints == {}
+    assert session._tracepoint_manager.get_log() == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_run_probe_debug_tracepoint_rolls_back_failed_breakpoint_arm(
+    capturing_mcp,
+) -> None:
+    session = FailingBreakpointTracepointRunProbeSession()
+    _register(capturing_mcp, session)
+    source = "C:/repo/SettingsViewModel.cs"
+
+    started = await capturing_mcp.tools["runtime_smoke_run_probe"](
+        ctx=None,
+        probe={
+            "kind": "debug.tracepoint",
+            "name": "settings_route_guard",
+            "file": source,
+            "line": 42,
+            "expression": "Mode.SpellCheckInput",
+            "expected_hit_count": 0,
+        },
+        name="debug-tracepoint-arm-failure",
+        phase="both",
+        debug_preflight=True,
+        agent_mode=True,
+    )
+    data = started["data"]
+
+    assert data["status"] == "RUNNING"
+    bundle = await _wait_for_bundle(capturing_mcp, data["run_id"])
+
+    assert bundle["status"] == "BLOCKED"
+    assert bundle["result"]["status"] == "BLOCKED"
+    assert "breakpoint arming failed" in bundle["result"]["reason"]
+    assert session._tracepoint_manager.tracepoints == {}
 
 
 @pytest.mark.asyncio

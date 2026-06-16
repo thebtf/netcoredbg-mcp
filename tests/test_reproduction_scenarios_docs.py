@@ -196,7 +196,7 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "broad lifecycle/orchestration closure",
         ],
         "#270": ["CR-017", "ui_property", "TextBox mutation/set-text"],
-        "#271": ["debug_preflight", "tracepoint guard", "cleanup contract"],
+        "#271": ["CR-019", "debug_preflight", "tracepoint guard", "cleanup contract"],
         "#272": [
             "app diagnostics",
             "oracle_pack",
