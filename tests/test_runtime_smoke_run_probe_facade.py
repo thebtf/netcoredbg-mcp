@@ -130,6 +130,36 @@ async def test_runtime_smoke_run_probe_starts_durable_probe_run(
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_run_probe_agent_mode_adds_evidence_guidance(
+    capturing_mcp,
+) -> None:
+    session = RunProbeFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_run_probe"](
+        ctx=None,
+        probe={
+            "kind": "process.metric",
+            "name": "process_memory",
+            "pid": os.getpid(),
+        },
+        name="agent-probe",
+        agent_mode=True,
+    )
+    data = response["data"]
+
+    assert data["agent_mode"]["primary_next_action"] == "runtime_smoke_evidence_bundle"
+    assert data["agent_mode"]["next_request"] == {
+        "tool": "runtime_smoke_evidence_bundle",
+        "arguments": {"run_id": data["run_id"], "agent_mode": True},
+    }
+    assert data["agent_mode"]["event_cursor_tools"] == [
+        "runtime_smoke_mark_event_cursor",
+        "runtime_smoke_get_event_delta",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_run_probe_result_is_readable_as_evidence_bundle(
     capturing_mcp,
 ) -> None:
