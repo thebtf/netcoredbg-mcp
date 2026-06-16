@@ -14,6 +14,7 @@ import pytest
 from netcoredbg_mcp.server import create_server
 from netcoredbg_mcp.session.hygiene import RuntimeHygieneService
 from netcoredbg_mcp.session.state import Breakpoint, BreakpointRegistry, DebugState
+from netcoredbg_mcp.session.tracepoints import TracepointManager
 from netcoredbg_mcp.tools.runtime_smoke import register_runtime_smoke_tools
 
 
@@ -155,6 +156,45 @@ async def test_scoped_file_cleanup_preserves_unrelated_breakpoints() -> None:
     assert result["remaining_breakpoints"] == []
     assert session.breakpoints.get_for_file(target) == []
     assert [bp.line for bp in session.breakpoints.get_for_file(unrelated)] == [20]
+
+
+@pytest.mark.asyncio
+async def test_preflight_removes_stale_tracepoint_definitions_for_file_scope() -> None:
+    target = "C:/repo/Target.cs"
+    unrelated = "C:/repo/Other.cs"
+    session = FakeHygieneSession()
+    manager = TracepointManager()
+    manager.add(target, 10, "stale target")
+    unrelated_tracepoint = manager.add(unrelated, 20, "keep")
+    session._tracepoint_manager = manager
+    session.breakpoints.add(Breakpoint(file=target, line=10))
+
+    result = _as_dict(await RuntimeHygieneService(session).preflight(file=target))
+
+    assert result["status"] == "PASS"
+    assert result["cleared"]["breakpoints"] == 1
+    assert result["tracepoints_removed"] == 1
+    assert manager.find_tracepoint_for_location(target, 10) is None
+    assert manager.find_tracepoint_for_location(unrelated, 20).id == unrelated_tracepoint.id
+
+
+@pytest.mark.asyncio
+async def test_preflight_file_scope_does_not_remove_same_filename_tracepoint() -> None:
+    target = "C:/repo/src/Program.cs"
+    same_name = "C:/repo/tests/Program.cs"
+    session = FakeHygieneSession()
+    manager = TracepointManager()
+    manager.add(target, 10, "target")
+    same_name_tracepoint = manager.add(same_name, 20, "keep")
+    session._tracepoint_manager = manager
+    session.breakpoints.add(Breakpoint(file=target, line=10))
+
+    result = _as_dict(await RuntimeHygieneService(session).preflight(file=target))
+
+    assert result["status"] == "PASS"
+    assert result["tracepoints_removed"] == 1
+    assert manager.find_tracepoint_for_location(target, 10) is None
+    assert manager.tracepoints == {same_name_tracepoint.id: same_name_tracepoint}
 
 
 @pytest.mark.asyncio

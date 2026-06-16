@@ -721,13 +721,207 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
             "byte_count": len(content.encode("utf-8")),
         }
 
+    async def debug_hygiene_preflight(**args: Any) -> dict[str, Any]:
+        from .hygiene import RuntimeHygieneService
+
+        service = getattr(session, "hygiene", None) or RuntimeHygieneService(session)
+        result = await service.preflight(
+            file=str(args["file"]) if args.get("file") else None,
+            clear_breakpoints=bool(args.get("clear_breakpoints", True)),
+            clear_trace_log=bool(args.get("clear_trace_log", True)),
+            clear_exception_filters=bool(args.get("clear_exception_filters", False)),
+        )
+        return result.to_dict()
+
+    async def debug_tracepoint(**args: Any) -> dict[str, Any]:
+        file = str(args.get("file") or "")
+        line = _int_or_none(args.get("line"))
+        expression = str(args.get("expression") or "")
+        if not file or line is None:
+            return _adapter_blocked(
+                "debug.tracepoint",
+                "debug.tracepoint requires file and integer line",
+            )
+        manager = _session_tracepoint_manager(session, create=True)
+        if manager is None:
+            return _adapter_blocked(
+                "debug.tracepoint",
+                "tracepoint manager service unavailable",
+            )
+
+        tracepoint = manager.find_tracepoint_for_location(file, line)
+        created_tracepoint = False
+        if tracepoint is None:
+            tracepoint = manager.add(file, line, expression)
+            created_tracepoint = True
+        had_live_breakpoint = _tracepoint_has_live_breakpoint(session, tracepoint)
+        try:
+            if not had_live_breakpoint:
+                await _arm_tracepoint_breakpoint(session, tracepoint, file=file, line=line)
+        except Exception as exc:
+            should_rollback = created_tracepoint or not had_live_breakpoint
+            if should_rollback:
+                manager.remove(tracepoint.id)
+            return {
+                **_adapter_blocked(
+                    "debug.tracepoint",
+                    f"debug.tracepoint breakpoint arming failed: {exc}",
+                ),
+                "file": file,
+                "line": line,
+            }
+
+        logs = [
+            _trace_entry_payload(entry)
+            for entry in manager.get_log(tracepoint_id=tracepoint.id)
+        ]
+        hit_count = max(int(getattr(tracepoint, "hit_count", 0)), len(logs))
+        return {
+            "status": "PASS",
+            "tracepoint_id": tracepoint.id,
+            "file": tracepoint.file,
+            "line": tracepoint.line,
+            "expression": tracepoint.expression,
+            "phase": str(args.get("phase") or ""),
+            "hit_count": hit_count,
+            "logs": logs,
+            "evidence_ref": f"tracepoint:{tracepoint.id}",
+        }
+
+    async def debug_tracepoint_remove(**args: Any) -> dict[str, Any]:
+        manager = _session_tracepoint_manager(session, create=False)
+        if manager is None:
+            return _adapter_blocked(
+                "debug.tracepoint.remove",
+                "tracepoint manager service unavailable",
+            )
+        tracepoint_id = str(args.get("tracepoint_id") or "")
+        file = str(args.get("file") or "")
+        line = _int_or_none(args.get("line"))
+        tracepoint = manager.remove(tracepoint_id)
+        if tracepoint is None and file and line is not None:
+            candidate = manager.find_tracepoint_for_location(file, line)
+            if candidate is not None:
+                tracepoint = manager.remove(candidate.id)
+        if tracepoint is None and ":" in tracepoint_id:
+            raw_file, raw_line = tracepoint_id.rsplit(":", 1)
+            parsed_line = _int_or_none(raw_line)
+            if parsed_line is not None:
+                candidate = manager.find_tracepoint_for_location(raw_file, parsed_line)
+                if candidate is not None:
+                    tracepoint = manager.remove(candidate.id)
+        if tracepoint is None:
+            return {
+                "status": "PASS",
+                "removed": False,
+                "tracepoint_id": tracepoint_id,
+            }
+
+        remove_breakpoint = getattr(session, "remove_breakpoint", None)
+        if callable(remove_breakpoint):
+            await remove_breakpoint(tracepoint.file, int(tracepoint.line))
+        return {
+            "status": "PASS",
+            "removed": True,
+            "tracepoint_id": tracepoint.id,
+            "file": tracepoint.file,
+            "line": tracepoint.line,
+            "hit_count": int(getattr(tracepoint, "hit_count", 0)),
+        }
+
+    async def debug_trace_log_clear(**_: Any) -> dict[str, Any]:
+        manager = _session_tracepoint_manager(session, create=False)
+        if manager is None:
+            return {"status": "PASS", "cleared": 0}
+        return {"status": "PASS", "cleared": manager.clear_log()}
+
     return {
         "launch": launch,
         "debug.evaluate": debug_evaluate,
+        "debug.tracepoint": debug_tracepoint,
+        "debug.tracepoint.remove": debug_tracepoint_remove,
+        "debug.trace_log.clear": debug_trace_log_clear,
+        "debug_hygiene_preflight": debug_hygiene_preflight,
         "debug.stop": debug_stop,
         "process.registry.count": process_registry_count,
         "fixture.restore": fixture_restore,
     }
+
+
+def _session_tracepoint_manager(session: Any, *, create: bool) -> Any:
+    manager = getattr(session, "_tracepoint_manager", None)
+    if manager is None and create:
+        from .tracepoints import TracepointManager
+
+        manager = TracepointManager()
+        setattr(session, "_tracepoint_manager", manager)
+    return manager
+
+
+async def _arm_tracepoint_breakpoint(
+    session: Any,
+    tracepoint: Any,
+    *,
+    file: str,
+    line: int,
+) -> None:
+    add_breakpoint = getattr(session, "add_breakpoint", None)
+    if not callable(add_breakpoint):
+        raise RuntimeError("debug breakpoint arming service unavailable")
+    bp = await add_breakpoint(file, line)
+    tracepoint.breakpoint_id = getattr(bp, "id", None)
+    tracepoint.dap_line = getattr(bp, "dap_line", None)
+
+
+def _tracepoint_has_live_breakpoint(session: Any, tracepoint: Any) -> bool:
+    registry = getattr(session, "breakpoints", None)
+    get_for_file = getattr(registry, "get_for_file", None)
+    if not callable(get_for_file):
+        return False
+    try:
+        breakpoints = get_for_file(str(getattr(tracepoint, "file", "")))
+    except (AttributeError, TypeError):
+        return False
+    tracepoint_line = _int_or_none(getattr(tracepoint, "line", None))
+    tracepoint_dap_line = _int_or_none(getattr(tracepoint, "dap_line", None))
+    tracepoint_lines = {
+        line for line in (tracepoint_line, tracepoint_dap_line) if line is not None
+    }
+    if not tracepoint_lines:
+        return False
+    for bp in breakpoints:
+        breakpoint_lines = {
+            line
+            for line in (
+                _int_or_none(getattr(bp, "line", None)),
+                _int_or_none(getattr(bp, "dap_line", None)),
+            )
+            if line is not None
+        }
+        if tracepoint_lines & breakpoint_lines:
+            return True
+    return False
+
+
+def _trace_entry_payload(entry: Any) -> dict[str, Any]:
+    return {
+        "timestamp": getattr(entry, "timestamp", None),
+        "file": getattr(entry, "file", None),
+        "line": getattr(entry, "line", None),
+        "expression": getattr(entry, "expression", None),
+        "value": getattr(entry, "value", None),
+        "thread_id": getattr(entry, "thread_id", None),
+        "tracepoint_id": getattr(entry, "tracepoint_id", None),
+    }
+
+
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 async def _drag_route(
@@ -1634,11 +1828,6 @@ def _viewport_blocked(
     }
 
 
-def _int_or_none(value: Any) -> int | None:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _selector_identity(result: Mapping[str, Any]) -> str:

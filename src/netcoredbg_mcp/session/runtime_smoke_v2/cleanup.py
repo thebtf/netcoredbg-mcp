@@ -31,12 +31,23 @@ async def run_cleanup(
         elif kind == "debug.tracepoint.remove":
             tracepoint_id = str(step.get("id") or step.get("tracepoint_id") or "")
             attempted.append(f"debug.tracepoint.remove:{tracepoint_id}")
+            remove_args: dict[str, Any] = {"tracepoint_id": tracepoint_id}
+            if step.get("file"):
+                remove_args["file"] = str(step.get("file") or "")
+            if step.get("line") is not None:
+                remove_args["line"] = step.get("line")
             result = await context.call_adapter(
                 "debug.tracepoint.remove",
-                tracepoint_id=tracepoint_id,
+                **remove_args,
             )
-            if str(result.get("status", "PASS")) == "PASS":
+            if (
+                str(result.get("status", "PASS")) == "PASS"
+                and result.get("removed") is True
+            ):
                 tracepoints_removed += 1
+        elif kind == "debug.trace_log.clear":
+            attempted.append("debug.trace_log.clear")
+            result = await context.call_adapter("debug.trace_log.clear")
         elif kind == "isolated_profile.teardown":
             profile = str(step.get("profile") or "auto")
             attempted.append(f"isolated_profile.teardown:{profile}")

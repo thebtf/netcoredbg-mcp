@@ -377,6 +377,7 @@ async def test_runtime_smoke_evidence_bundle_bounds_large_final_result(
     assert "compact" in result
     assert "cases" not in result
     assert "baseline" not in result
+    assert "debug_preflight" not in result
     assert "metrics_thresholds" not in result
     assert "accepted_schema_values" not in result
     assert "accepted_top_level_keys_v2" not in result
