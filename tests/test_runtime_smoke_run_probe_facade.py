@@ -158,3 +158,122 @@ async def test_runtime_smoke_run_probe_result_is_readable_as_evidence_bundle(
     assert [event["kind"] for event in data["events"]] == ["started", "completed"]
     assert "runtime_smoke_evidence_bundle" in data["next_actions"]
     assert "runtime_smoke_run_plan" in data["next_actions"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_run_probe_starts_oracle_pack_probe_run(
+    capturing_mcp,
+) -> None:
+    session = RunProbeFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_run_probe"](
+        ctx=None,
+        probe={
+            "kind": "oracle_pack",
+            "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
+            "id": "wpf-grid-oracle-pack",
+            "status": "PASS",
+            "checks": [
+                {
+                    "id": "visible-row-count",
+                    "probe": "ui.grid",
+                    "expect": {"min_rows": 1},
+                    "on_blocked": {"next_step": "Run WPF fixture replay."},
+                }
+            ],
+            "limits": {
+                "max_text_length": 240,
+                "max_list_items": 8,
+                "max_json_bytes": 32768,
+            },
+        },
+        name="oracle-pack-probe",
+    )
+    data = response["data"]
+
+    assert data["status"] == "RUNNING"
+    assert data["run_created"] is True
+    assert data["probe"]["kind"] == "oracle_pack"
+    assert data["generated_plan"]["probe_kind"] == "oracle_pack"
+    assert data["validation"]["can_run"] is True
+
+    bundle = await _wait_for_bundle(capturing_mcp, data["run_id"])
+    assert bundle["status"] == "PASS"
+    assert bundle["result"]["status"] == "PASS"
+    assert "runtime_smoke_evidence_bundle" in bundle["next_actions"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_run_probe_rejects_invalid_oracle_pack_before_run(
+    capturing_mcp,
+) -> None:
+    session = RunProbeFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_run_probe"](
+        ctx=None,
+        probe={
+            "kind": "oracle_pack",
+            "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
+            "id": "broken-oracle-pack",
+            "status": "PASS",
+            "checks": [],
+        },
+    )
+    data = response["data"]
+
+    assert data["status"] == "INVALID_SETUP"
+    assert data["can_run"] is False
+    assert data["run_created"] is False
+    assert any("oracle_pack.limits is required" in error for error in data["validation_errors"])
+    assert "oracle_pack" in data["accepted_probe_kinds"]
+    assert session.runtime_smoke.lifecycle_runs.active_run_ids() == []
+    assert session.runtime_smoke.lifecycle_runs.retained_run_ids() == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_run_probe_starts_app_diagnostics_probe_run(
+    capturing_mcp,
+) -> None:
+    session = RunProbeFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_run_probe"](
+        ctx=None,
+        probe={
+            "kind": "app_diagnostics",
+            "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
+            "app": {"name": "WpfSmokeApp", "process_name": "dotnet"},
+            "status": "BLOCKED",
+            "observations": [
+                {
+                    "kind": "ui.backend",
+                    "status": "BLOCKED",
+                    "reason": "GridPattern unavailable",
+                    "requested": {"control_type": "DataGrid"},
+                    "accepted": {"fallback": "bounded descendant text"},
+                    "next_step": "Run WPF fixture replay on a GUI worker.",
+                }
+            ],
+            "redaction": {"omit_fields": ["raw_tree", "screenshot_base64", "secret"]},
+            "limits": {
+                "max_text_length": 240,
+                "max_list_items": 8,
+                "max_json_bytes": 32768,
+            },
+        },
+        name="app-diagnostics-probe",
+    )
+    data = response["data"]
+
+    assert data["status"] == "RUNNING"
+    assert data["run_created"] is True
+    assert data["probe"]["kind"] == "app_diagnostics"
+    assert data["generated_plan"]["probe_kind"] == "app_diagnostics"
+    assert data["validation"]["can_run"] is True
+
+    bundle = await _wait_for_bundle(capturing_mcp, data["run_id"])
+    assert bundle["status"] == "BLOCKED"
+    assert bundle["result"]["status"] == "BLOCKED"
+    assert "runtime_smoke_evidence_bundle" in bundle["next_actions"]

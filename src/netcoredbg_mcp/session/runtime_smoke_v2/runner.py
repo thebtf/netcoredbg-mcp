@@ -9,6 +9,7 @@ from typing import Any
 from ..runtime_smoke_schema import (
     ACCEPTED_SCHEMA_VALUES,
     ACCEPTED_TOP_LEVEL_KEYS_V2,
+    validate_diagnostic_schema_example,
 )
 from .actions import ActionContext, accepted_action_kinds
 from .baseline import execute_baseline
@@ -393,6 +394,13 @@ def _validate_v2_plan(
                         f"probes[{probe_index}].kind is not accepted: {probe.get('kind')}"
                     )
                     continue
+                if probe.get("kind") in {"oracle_pack", "app_diagnostics"}:
+                    errors.extend(
+                        validate_diagnostic_schema_example(
+                            probe,
+                            kind=str(probe["kind"]),
+                        )
+                    )
                 path = probe_path(probe)
                 for phase in ("before", "after"):
                     if not probe_runs_in_phase(probe, phase):

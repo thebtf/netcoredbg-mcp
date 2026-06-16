@@ -156,7 +156,7 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
     for issue in ("#271", "#272"):
         row = _issue_row(backlog, issue)
         assert "Schema slice merged" in row
-        assert "executable FR remains open" in row
+        assert "broader FR remains open" in row
         assert "None in netcoredbg-mcp." not in row
 
 
@@ -184,7 +184,7 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
         ],
         "#270": ["semantic TextBox/DataGrid"],
         "#271": ["debug_preflight", "tracepoint guard", "cleanup contract"],
-        "#272": ["app diagnostics", "oracle_pack"],
+        "#272": ["app diagnostics", "oracle_pack", "polling/waiting"],
     }
 
     for issue, terms in expected_remaining_terms.items():
