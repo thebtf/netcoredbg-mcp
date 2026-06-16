@@ -6,9 +6,11 @@ from typing import Any
 from .actions import ActionContext
 from .blocked import build_blocked
 from .probes import accepted_probe_kinds
+from .probes.app_diagnostics import handle_app_diagnostics
 from .probes.debug_evaluate import handle_debug_evaluate
 from .probes.debug_tracepoint import handle_debug_tracepoint
 from .probes.file_json import handle_file_json
+from .probes.oracle_pack import handle_oracle_pack
 from .probes.output_field import handle_output_field
 from .probes.output_since import handle_output_since
 from .probes.process_metric import handle_process_metric
@@ -79,8 +81,12 @@ async def dispatch_probe(
         return await handle_debug_evaluate(probe, context, phase=phase)
     if kind == "debug.tracepoint":
         return await handle_debug_tracepoint(probe, context, phase=phase)
+    if kind == "app_diagnostics":
+        return await handle_app_diagnostics(probe, context, phase=phase)
     if kind == "file.json":
         return await handle_file_json(probe, context, phase=phase)
+    if kind == "oracle_pack":
+        return await handle_oracle_pack(probe, context, phase=phase)
     if kind == "output.field":
         return await handle_output_field(probe, context, phase=phase)
     if kind == "output.since":
