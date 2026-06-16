@@ -868,9 +868,9 @@ async def _arm_tracepoint_breakpoint(
     add_breakpoint = getattr(session, "add_breakpoint", None)
     if not callable(add_breakpoint):
         raise RuntimeError("debug breakpoint arming service unavailable")
-    breakpoint = await add_breakpoint(file, line)
-    tracepoint.breakpoint_id = getattr(breakpoint, "id", None)
-    tracepoint.dap_line = getattr(breakpoint, "dap_line", None)
+    bp = await add_breakpoint(file, line)
+    tracepoint.breakpoint_id = getattr(bp, "id", None)
+    tracepoint.dap_line = getattr(bp, "dap_line", None)
 
 
 def _tracepoint_has_live_breakpoint(session: Any, tracepoint: Any) -> bool:
@@ -889,12 +889,12 @@ def _tracepoint_has_live_breakpoint(session: Any, tracepoint: Any) -> bool:
     }
     if not tracepoint_lines:
         return False
-    for breakpoint in breakpoints:
+    for bp in breakpoints:
         breakpoint_lines = {
             line
             for line in (
-                _int_or_none(getattr(breakpoint, "line", None)),
-                _int_or_none(getattr(breakpoint, "dap_line", None)),
+                _int_or_none(getattr(bp, "line", None)),
+                _int_or_none(getattr(bp, "dap_line", None)),
             )
             if line is not None
         }
@@ -1828,11 +1828,6 @@ def _viewport_blocked(
     }
 
 
-def _int_or_none(value: Any) -> int | None:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _selector_identity(result: Mapping[str, Any]) -> str:

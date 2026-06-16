@@ -48,9 +48,9 @@ class GuardedTracepointRunProbeSession(RunProbeFacadeSession):
 
     async def add_breakpoint(self, file: str, line: int) -> Breakpoint:
         self.add_breakpoint_calls.append((file, line))
-        breakpoint = Breakpoint(file=file, line=line, verified=True)
-        self.breakpoints.add(breakpoint)
-        return breakpoint
+        new_breakpoint = Breakpoint(file=file, line=line, verified=True)
+        self.breakpoints.add(new_breakpoint)
+        return new_breakpoint
 
     async def remove_breakpoint(self, file: str, line: int) -> bool:
         return self.breakpoints.remove(file, line)
