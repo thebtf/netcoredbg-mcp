@@ -759,7 +759,8 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
             if not had_live_breakpoint:
                 await _arm_tracepoint_breakpoint(session, tracepoint, file=file, line=line)
         except Exception as exc:
-            if created_tracepoint or not had_live_breakpoint:
+            should_rollback = created_tracepoint or not had_live_breakpoint
+            if should_rollback:
                 manager.remove(tracepoint.id)
             return {
                 **_adapter_blocked(
@@ -879,16 +880,25 @@ def _tracepoint_has_live_breakpoint(session: Any, tracepoint: Any) -> bool:
         return False
     try:
         breakpoints = get_for_file(str(getattr(tracepoint, "file", "")))
-    except Exception:
+    except (AttributeError, TypeError):
         return False
     tracepoint_line = _int_or_none(getattr(tracepoint, "line", None))
     tracepoint_dap_line = _int_or_none(getattr(tracepoint, "dap_line", None))
+    tracepoint_lines = {
+        line for line in (tracepoint_line, tracepoint_dap_line) if line is not None
+    }
+    if not tracepoint_lines:
+        return False
     for breakpoint in breakpoints:
-        breakpoint_line = _int_or_none(getattr(breakpoint, "line", None))
-        breakpoint_dap_line = _int_or_none(getattr(breakpoint, "dap_line", None))
-        if breakpoint_line in {tracepoint_line, tracepoint_dap_line}:
-            return True
-        if breakpoint_dap_line in {tracepoint_line, tracepoint_dap_line}:
+        breakpoint_lines = {
+            line
+            for line in (
+                _int_or_none(getattr(breakpoint, "line", None)),
+                _int_or_none(getattr(breakpoint, "dap_line", None)),
+            )
+            if line is not None
+        }
+        if tracepoint_lines & breakpoint_lines:
             return True
     return False
 

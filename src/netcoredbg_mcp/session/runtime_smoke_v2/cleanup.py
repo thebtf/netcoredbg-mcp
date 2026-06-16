@@ -42,7 +42,7 @@ async def run_cleanup(
             )
             if (
                 str(result.get("status", "PASS")) == "PASS"
-                and result.get("removed", True) is not False
+                and result.get("removed") is True
             ):
                 tracepoints_removed += 1
         elif kind == "debug.trace_log.clear":

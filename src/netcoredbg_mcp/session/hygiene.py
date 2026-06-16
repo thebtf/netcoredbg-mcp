@@ -238,14 +238,8 @@ def _tracepoint_in_scope(tracepoint: Any, file: str | None) -> bool:
     tracepoint_file = str(getattr(tracepoint, "file", "") or "")
     if not tracepoint_file:
         return False
-    if _normalize_tracepoint_path(tracepoint_file) == _normalize_tracepoint_path(file):
-        return True
-    return _tracepoint_filename(tracepoint_file) == _tracepoint_filename(file)
+    return _normalize_tracepoint_path(tracepoint_file) == _normalize_tracepoint_path(file)
 
 
 def _normalize_tracepoint_path(path: str) -> str:
     return os.path.normcase(path.replace("\\", "/"))
-
-
-def _tracepoint_filename(path: str) -> str:
-    return os.path.normcase(path.replace("\\", "/").rsplit("/", 1)[-1])

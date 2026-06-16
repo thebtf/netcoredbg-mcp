@@ -407,6 +407,45 @@ async def test_runtime_smoke_run_probe_debug_tracepoint_rolls_back_failed_breakp
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_run_probe_debug_tracepoint_ignores_unrelated_breakpoint(
+    capturing_mcp,
+) -> None:
+    session = GuardedTracepointRunProbeSession()
+    _register(capturing_mcp, session)
+    source = "C:/repo/SettingsViewModel.cs"
+    session.breakpoints.add(Breakpoint(file=source, line=99, verified=True))
+
+    started = await capturing_mcp.tools["runtime_smoke_run_probe"](
+        ctx=None,
+        probe={
+            "kind": "debug.tracepoint",
+            "name": "settings_route_guard",
+            "file": source,
+            "line": 42,
+            "expression": "Mode.SpellCheckInput",
+            "expected_hit_count": 0,
+        },
+        name="debug-tracepoint-unrelated-breakpoint",
+        phase="both",
+        tracepoint_guard={
+            "cleanup": {
+                "owner": "runtime_smoke_run_probe",
+                "operations": ["debug.tracepoint.remove"],
+            }
+        },
+        agent_mode=True,
+    )
+    data = started["data"]
+
+    assert data["status"] == "RUNNING"
+    bundle = await _wait_for_bundle(capturing_mcp, data["run_id"])
+
+    assert bundle["status"] == "PASS"
+    assert session.add_breakpoint_calls == [(source, 42)]
+    assert [bp.line for bp in session.breakpoints.get_for_file(source)] == [99]
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_run_probe_starts_oracle_pack_probe_run(
     capturing_mcp,
 ) -> None:

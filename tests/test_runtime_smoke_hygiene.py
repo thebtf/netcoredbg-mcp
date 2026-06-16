@@ -179,6 +179,25 @@ async def test_preflight_removes_stale_tracepoint_definitions_for_file_scope() -
 
 
 @pytest.mark.asyncio
+async def test_preflight_file_scope_does_not_remove_same_filename_tracepoint() -> None:
+    target = "C:/repo/src/Program.cs"
+    same_name = "C:/repo/tests/Program.cs"
+    session = FakeHygieneSession()
+    manager = TracepointManager()
+    manager.add(target, 10, "target")
+    same_name_tracepoint = manager.add(same_name, 20, "keep")
+    session._tracepoint_manager = manager
+    session.breakpoints.add(Breakpoint(file=target, line=10))
+
+    result = _as_dict(await RuntimeHygieneService(session).preflight(file=target))
+
+    assert result["status"] == "PASS"
+    assert result["tracepoints_removed"] == 1
+    assert manager.find_tracepoint_for_location(target, 10) is None
+    assert manager.tracepoints == {same_name_tracepoint.id: same_name_tracepoint}
+
+
+@pytest.mark.asyncio
 async def test_debug_hygiene_preflight_tool_returns_fail_for_invalid_file_scope(
     capturing_mcp,
 ) -> None:
