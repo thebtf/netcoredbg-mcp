@@ -734,6 +734,11 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
         return result.to_dict()
 
     async def debug_tracepoint(**args: Any) -> dict[str, Any]:
+        from .tracepoint_policy import (
+            SAFE_TRACEPOINT_EXPRESSION_GUIDANCE,
+            tracepoint_expression_policy_error,
+        )
+
         file = str(args.get("file") or "")
         line = _int_or_none(args.get("line"))
         expression = str(args.get("expression") or "")
@@ -742,6 +747,16 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
                 "debug.tracepoint",
                 "debug.tracepoint requires file and integer line",
             )
+        policy_error = tracepoint_expression_policy_error(expression)
+        if policy_error is not None:
+            return {
+                "status": "FAIL",
+                "operation": "debug.tracepoint",
+                "classification": "UNSAFE_EXPRESSION",
+                "reason": "unsafe tracepoint expression",
+                "file": file,
+                "line": line,
+            }
         manager = _session_tracepoint_manager(session, create=True)
         if manager is None:
             return _adapter_blocked(
@@ -754,6 +769,28 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
         if tracepoint is None:
             tracepoint = manager.add(file, line, expression)
             created_tracepoint = True
+        else:
+            existing_expression = str(getattr(tracepoint, "expression", "") or "")
+            if (
+                existing_expression != expression
+                or tracepoint_expression_policy_error(existing_expression) is not None
+            ):
+                return {
+                    "status": "BLOCKED",
+                    "operation": "debug.tracepoint",
+                    "classification": "TRACEPOINT_POLICY_CONFLICT",
+                    "reason": "existing tracepoint expression conflicts with requested expression",
+                    "file": file,
+                    "line": line,
+                    "existing_tracepoint_id": tracepoint.id,
+                    "accepted": {
+                        "expression": SAFE_TRACEPOINT_EXPRESSION_GUIDANCE,
+                    },
+                    "next_step": (
+                        "Run debug_hygiene_preflight or remove the existing tracepoint "
+                        "before retrying."
+                    ),
+                }
         had_live_breakpoint = _tracepoint_has_live_breakpoint(session, tracepoint)
         try:
             if not had_live_breakpoint:

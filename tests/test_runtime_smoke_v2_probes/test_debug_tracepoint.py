@@ -144,3 +144,150 @@ async def test_debug_tracepoint_probe_rejects_invalid_numeric_fields() -> None:
     assert invalid_expected["status"] == "FAIL"
     assert expected_probe["status"] == "FAIL"
     assert expected_probe["reason"] == "invalid expected_hit_count"
+
+
+@pytest.mark.asyncio
+async def test_debug_tracepoint_probe_rejects_unsafe_expression_before_adapter() -> None:
+    session = TracepointProbeSession()
+
+    result = await runner(
+        session,
+        {"debug.tracepoint": session.tracepoint_probe},
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "debug.tracepoint",
+                "name": "unsafe_expression",
+                "file": "SettingsViewModel.cs",
+                "line": 42,
+                "expression": "Mode.Reset(); Mode.SpellCheckInput",
+                "expected_hit_count": 1,
+            }
+        )
+    )
+
+    assert result["status"] == "INVALID_SETUP"
+    assert result["reason"] == "invalid plan schema"
+    assert any("unsafe tracepoint expression" in error for error in result["validation_errors"])
+    assert result["cases"] == []
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_debug_tracepoint_probe_classifies_zero_hit_expected_route() -> None:
+    session = TracepointProbeSession()
+    session.tracepoint_results.extend(
+        [
+            {"status": "PASS", "hit_count": 0, "logs": []},
+            {"status": "PASS", "hit_count": 0, "logs": [], "evidence_ref": "tracepoint:route"},
+        ]
+    )
+
+    result = await runner(
+        session,
+        {"debug.tracepoint": session.tracepoint_probe},
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "debug.tracepoint",
+                "name": "settings_route",
+                "file": "SettingsViewModel.cs",
+                "line": 42,
+                "expression": "Mode.SpellCheckInput",
+                "expected_hit_count": 1,
+                "expected_route": "SettingsViewModel.ApplyMode",
+            }
+        )
+    )
+
+    probe = after_probe(result)
+    assert result["status"] == "BLOCKED"
+    assert probe["status"] == "BLOCKED"
+    assert probe["classification"] == "NO_ROUTE_HIT"
+    assert probe["reason"] == "expected tracepoint route was not hit"
+    assert probe["expected"] == {
+        "hit_count": 1,
+        "route": "SettingsViewModel.ApplyMode",
+    }
+    assert probe["next_step"] == "Verify handler routing before blaming the debugger."
+    assert probe["evidence_ref"] == "tracepoint:route"
+
+
+@pytest.mark.asyncio
+async def test_debug_tracepoint_probe_classifies_expression_errors() -> None:
+    session = TracepointProbeSession()
+    session.tracepoint_results.extend(
+        [
+            {"status": "PASS", "hit_count": 0, "logs": []},
+            {
+                "status": "PASS",
+                "hit_count": 1,
+                "logs": [{"value": "<error: evaluation failed>"}],
+                "evidence_ref": "tracepoint:error",
+            },
+        ]
+    )
+
+    result = await runner(
+        session,
+        {"debug.tracepoint": session.tracepoint_probe},
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "debug.tracepoint",
+                "name": "settings_route",
+                "file": "SettingsViewModel.cs",
+                "line": 42,
+                "expression": "Mode.SpellCheckInput",
+                "expected_hit_count": 1,
+            }
+        )
+    )
+
+    probe = after_probe(result)
+    assert result["status"] == "BLOCKED"
+    assert probe["status"] == "BLOCKED"
+    assert probe["classification"] == "TRACEPOINT_EXPRESSION_ERROR"
+    assert probe["reason"] == "tracepoint expression evaluation failed"
+    assert probe["value"]["hit_count"] == 1
+    assert probe["evidence_ref"] == "tracepoint:error"
+
+
+@pytest.mark.asyncio
+async def test_debug_tracepoint_probe_classifies_rate_limited_entries() -> None:
+    session = TracepointProbeSession()
+    session.tracepoint_results.extend(
+        [
+            {"status": "PASS", "hit_count": 0, "logs": []},
+            {
+                "status": "PASS",
+                "hit_count": 4,
+                "logs": [{"value": "<rate limited>"}],
+                "evidence_ref": "tracepoint:rate-limit",
+            },
+        ]
+    )
+
+    result = await runner(
+        session,
+        {"debug.tracepoint": session.tracepoint_probe},
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "debug.tracepoint",
+                "name": "settings_route",
+                "file": "SettingsViewModel.cs",
+                "line": 42,
+                "expression": "Mode.SpellCheckInput",
+                "expected_hit_count": 4,
+            }
+        )
+    )
+
+    probe = after_probe(result)
+    assert result["status"] == "BLOCKED"
+    assert probe["status"] == "BLOCKED"
+    assert probe["classification"] == "TRACEPOINT_RATE_LIMITED"
+    assert probe["reason"] == "tracepoint rate limit prevented reliable route evidence"
+    assert probe["value"]["hit_count"] == 4
+    assert probe["evidence_ref"] == "tracepoint:rate-limit"

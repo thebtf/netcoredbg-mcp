@@ -11,6 +11,7 @@ from ..runtime_smoke_schema import (
     ACCEPTED_TOP_LEVEL_KEYS_V2,
     validate_diagnostic_schema_example,
 )
+from ..tracepoint_policy import tracepoint_expression_policy_error
 from .actions import ActionContext, accepted_action_kinds
 from .baseline import execute_baseline
 from .case_executor import execute_case
@@ -401,6 +402,15 @@ def _validate_v2_plan(
                             kind=str(probe["kind"]),
                         )
                     )
+                if probe.get("kind") == "debug.tracepoint":
+                    policy_error = tracepoint_expression_policy_error(
+                        probe.get("expression")
+                    )
+                    if policy_error is not None:
+                        errors.append(
+                            f"cases[{case_index}].transitions[{transition_index}]."
+                            f"probes[{probe_index}].expression {policy_error}"
+                        )
                 path = probe_path(probe)
                 for phase in ("before", "after"):
                     if not probe_runs_in_phase(probe, phase):

@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...tracepoint_policy import (
+    SAFE_TRACEPOINT_EXPRESSION_GUIDANCE,
+    classify_tracepoint_logs,
+    tracepoint_expression_policy_error,
+)
 from ._common import (
     attach_expected_and_status,
     blocked_probe,
@@ -33,12 +38,26 @@ async def handle_debug_tracepoint(
     line, line_error = _optional_int(probe.get("line"), field_name="line")
     if line_error is not None:
         return _invalid_numeric_probe(probe, kind=kind, reason=line_error)
+    expression = str(probe.get("expression") or "")
+    policy_error = tracepoint_expression_policy_error(expression)
+    if policy_error is not None:
+        return {
+            "name": probe_name(probe, kind),
+            "kind": kind,
+            "status": "FAIL",
+            "classification": "UNSAFE_EXPRESSION",
+            "reason": "unsafe tracepoint expression",
+            "value": None,
+            "accepted": {
+                "expression": SAFE_TRACEPOINT_EXPRESSION_GUIDANCE,
+            },
+        }
 
     result = await context.call_adapter(
         kind,
         file=str(probe.get("file") or ""),
         line=line,
-        expression=str(probe.get("expression") or ""),
+        expression=expression,
         phase=phase,
     )
     status = str(result.get("status", "PASS"))
@@ -57,6 +76,12 @@ async def handle_debug_tracepoint(
     ref = evidence_ref(result)
     if ref:
         output["evidence_ref"] = ref
+    classification, classification_reason = classify_tracepoint_logs(value["logs"])
+    if classification is not None:
+        output["status"] = "BLOCKED"
+        output["classification"] = classification
+        output["reason"] = classification_reason
+        return output
     if "expected_hit_count" in probe:
         expected, expected_error = _required_int(
             probe["expected_hit_count"],
@@ -66,7 +91,22 @@ async def handle_debug_tracepoint(
             output["status"] = "FAIL"
             output["reason"] = expected_error
             return output
-        output["expected"] = {"hit_count": expected}
+        expected_payload: dict[str, Any] = {"hit_count": expected}
+        if probe.get("expected_route"):
+            expected_payload["route"] = str(probe["expected_route"])
+        output["expected"] = expected_payload
+        if (
+            phase == "after"
+            and status == "PASS"
+            and expected > 0
+            and value["hit_count"] == 0
+            and probe.get("expected_route")
+        ):
+            output["status"] = "BLOCKED"
+            output["classification"] = "NO_ROUTE_HIT"
+            output["reason"] = "expected tracepoint route was not hit"
+            output["next_step"] = "Verify handler routing before blaming the debugger."
+            return output
         if phase == "after" and status == "PASS" and value["hit_count"] != expected:
             output["status"] = "FAIL"
             output["reason"] = "tracepoint hit count did not match"
