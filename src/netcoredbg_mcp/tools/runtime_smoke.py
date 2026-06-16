@@ -328,7 +328,11 @@ def register_runtime_smoke_tools(
             return build_error_response(str(exc), state=session.state.state)
 
     @mcp.tool(annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
-    async def runtime_smoke_run_plan(ctx: Context, plan: dict[str, Any]) -> dict:
+    async def runtime_smoke_run_plan(
+        ctx: Context,
+        plan: dict[str, Any],
+        agent_mode: bool = False,
+    ) -> dict:
         """Validate then start a durable runtime smoke run."""
         try:
             access_error = check_session_access(ctx)
@@ -337,6 +341,8 @@ def register_runtime_smoke_tools(
 
             validation = validate_runtime_smoke_plan_contract(plan)
             if not validation["can_run"]:
+                if agent_mode:
+                    _apply_runtime_smoke_agent_mode(validation, "runtime_smoke_run_plan")
                 return _build_runtime_smoke_response(
                     session,
                     validation,
@@ -345,6 +351,8 @@ def register_runtime_smoke_tools(
 
             data = await session.runtime_smoke.lifecycle_runs.start(plan, _runner)
             data["validation"] = _runtime_smoke_validation_summary(validation)
+            if agent_mode:
+                _apply_runtime_smoke_agent_mode(data, "runtime_smoke_evidence_bundle")
             return _build_runtime_smoke_response(
                 session,
                 data,
@@ -365,6 +373,7 @@ def register_runtime_smoke_tools(
         name: str | None = None,
         phase: str = "after",
         budgets: dict[str, Any] | None = None,
+        agent_mode: bool = False,
     ) -> dict:
         """Validate then start a durable runtime-smoke v2 run for one probe."""
         try:
@@ -380,14 +389,17 @@ def register_runtime_smoke_tools(
             )
             validation = validate_runtime_smoke_plan_contract(plan)
             if not validation["can_run"]:
+                data = {
+                    **validation,
+                    "run_created": False,
+                    "probe": _runtime_smoke_probe_summary(probe),
+                    "generated_plan": generated,
+                }
+                if agent_mode:
+                    _apply_runtime_smoke_agent_mode(data, "runtime_smoke_run_plan")
                 return _build_runtime_smoke_response(
                     session,
-                    {
-                        **validation,
-                        "run_created": False,
-                        "probe": _runtime_smoke_probe_summary(probe),
-                        "generated_plan": generated,
-                    },
+                    data,
                     ["runtime_smoke_validate_plan", "runtime_smoke_run_probe"],
                 )
 
@@ -396,6 +408,8 @@ def register_runtime_smoke_tools(
             data["probe"] = _runtime_smoke_probe_summary(probe)
             data["generated_plan"] = generated
             data["run_created"] = bool(data.get("run_id"))
+            if agent_mode:
+                _apply_runtime_smoke_agent_mode(data, "runtime_smoke_evidence_bundle")
             return _build_runtime_smoke_response(
                 session,
                 data,
@@ -415,6 +429,7 @@ def register_runtime_smoke_tools(
         run_id: str,
         after_cursor: int = 0,
         event_limit: int = 50,
+        agent_mode: bool = False,
     ) -> dict:
         """Return a compact evidence packet for a durable runtime smoke run."""
         try:
@@ -427,6 +442,60 @@ def register_runtime_smoke_tools(
                 after_cursor=after_cursor,
                 event_limit=event_limit,
             )
+            if agent_mode:
+                _apply_runtime_smoke_agent_mode(data, "runtime_smoke_get_event_delta")
+            return _build_runtime_smoke_response(
+                session,
+                data,
+                list(data.get("next_actions", ["runtime_smoke_run_plan"])),
+            )
+        except Exception as exc:
+            return build_error_response(str(exc), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+    async def runtime_smoke_mark_event_cursor(
+        ctx: Context,
+        run_id: str,
+        agent_mode: bool = False,
+    ) -> dict:
+        """Return a compact cursor token for the current durable run event position."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+            data = await _runtime_smoke_mark_event_cursor(
+                session.runtime_smoke.lifecycle_runs,
+                run_id,
+            )
+            if agent_mode:
+                _apply_runtime_smoke_agent_mode(data, "runtime_smoke_get_event_delta")
+            return _build_runtime_smoke_response(
+                session,
+                data,
+                list(data.get("next_actions", ["runtime_smoke_run_plan"])),
+            )
+        except Exception as exc:
+            return build_error_response(str(exc), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+    async def runtime_smoke_get_event_delta(
+        ctx: Context,
+        cursor: dict[str, Any],
+        event_limit: int = 50,
+        agent_mode: bool = False,
+    ) -> dict:
+        """Return bounded lifecycle events after a cursor token."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+            data = await _runtime_smoke_get_event_delta(
+                session.runtime_smoke.lifecycle_runs,
+                cursor,
+                event_limit=event_limit,
+            )
+            if agent_mode:
+                _apply_runtime_smoke_agent_mode(data, "runtime_smoke_get_event_delta")
             return _build_runtime_smoke_response(
                 session,
                 data,
@@ -693,6 +762,343 @@ async def _runtime_smoke_evidence_bundle(
         "evidence_refs": compact_value(result.get("evidence_refs", [])),
         "cleanup": compact_value(result.get("cleanup")),
         "next_actions": next_actions,
+    }
+
+
+async def _runtime_smoke_mark_event_cursor(registry: Any, run_id: str) -> dict[str, Any]:
+    tail = await registry.tail_events(run_id, after_cursor=0, limit=0)
+    if _runtime_smoke_tail_missing(tail):
+        return _runtime_smoke_missing_event_delta(run_id, 0, tail, limit=0)
+
+    next_cursor = _runtime_smoke_tail_next_cursor(tail, 0)
+    cursor = _runtime_smoke_cursor_token(
+        run_id,
+        after_cursor=next_cursor,
+        tail=tail,
+    )
+    return {
+        "status": "PASS",
+        "reason": "runtime smoke event cursor marked",
+        "run_id": run_id,
+        "cursor": cursor,
+        "final": bool(tail.get("final")),
+        "next_actions": [
+            "runtime_smoke_get_event_delta",
+            "runtime_smoke_evidence_bundle",
+            "runtime_smoke_tail_events",
+        ],
+    }
+
+
+async def _runtime_smoke_get_event_delta(
+    registry: Any,
+    cursor: dict[str, Any],
+    *,
+    event_limit: int = 50,
+) -> dict[str, Any]:
+    if not isinstance(cursor, dict):
+        return _runtime_smoke_invalid_event_delta(
+            "cursor token must be an object",
+            after_cursor=0,
+            limit=event_limit,
+        )
+
+    parsed_after_cursor = _runtime_smoke_parse_nonnegative_int(
+        cursor.get("after_cursor", cursor.get("next_cursor", 0))
+    )
+    if parsed_after_cursor is None:
+        return _runtime_smoke_invalid_event_delta(
+            "cursor token after_cursor must be an integer",
+            after_cursor=0,
+            limit=event_limit,
+            run_id=str(cursor.get("run_id") or ""),
+        )
+    parsed_limit = _runtime_smoke_parse_nonnegative_int(event_limit)
+    if parsed_limit is None:
+        return _runtime_smoke_invalid_event_delta(
+            "event_limit must be an integer",
+            after_cursor=parsed_after_cursor,
+            limit=0,
+            run_id=str(cursor.get("run_id") or ""),
+        )
+
+    run_id = str(cursor.get("run_id") or "")
+    after_cursor = parsed_after_cursor
+    limit = parsed_limit
+    if not run_id:
+        return _runtime_smoke_invalid_event_delta(
+            "cursor token requires run_id",
+            after_cursor=after_cursor,
+            limit=limit,
+            run_id=run_id,
+        )
+
+    tail = await registry.tail_events(
+        run_id,
+        after_cursor=after_cursor,
+        limit=limit,
+    )
+    if _runtime_smoke_tail_missing(tail):
+        return _runtime_smoke_missing_event_delta(run_id, after_cursor, tail, limit=limit)
+
+    continuation_cursor = _runtime_smoke_tail_continuation_cursor(tail, after_cursor)
+    return {
+        "status": "PASS",
+        "reason": "runtime smoke event delta read",
+        "run_id": run_id,
+        "events": _runtime_smoke_compact_event_delta(tail.get("events", [])),
+        "event_cursor": _runtime_smoke_event_cursor(
+            after_cursor=after_cursor,
+            tail=tail,
+            limit=limit,
+        ),
+        "cursor": _runtime_smoke_cursor_token(
+            run_id,
+            after_cursor=continuation_cursor,
+            tail=tail,
+        ),
+        "final": bool(tail.get("final")),
+        "next_actions": [
+            "runtime_smoke_get_event_delta",
+            "runtime_smoke_mark_event_cursor",
+            "runtime_smoke_evidence_bundle",
+            "runtime_smoke_tail_events",
+        ],
+    }
+
+
+def _runtime_smoke_invalid_event_delta(
+    reason: str,
+    *,
+    after_cursor: int,
+    limit: Any,
+    run_id: str = "",
+) -> dict[str, Any]:
+    parsed_limit = _runtime_smoke_parse_nonnegative_int(limit)
+    return {
+        "status": "INVALID_SETUP",
+        "reason": reason,
+        "run_id": run_id,
+        "events": [],
+        "event_cursor": _runtime_smoke_event_cursor(
+            after_cursor=after_cursor,
+            tail={},
+            limit=parsed_limit if parsed_limit is not None else 0,
+        ),
+        "final": True,
+        "next_actions": ["runtime_smoke_mark_event_cursor", "runtime_smoke_run_plan"],
+    }
+
+
+def _runtime_smoke_compact_event_delta(events: Any) -> Any:
+    if isinstance(events, list):
+        return [compact_value(event) for event in events]
+    return compact_value(events)
+
+
+def _runtime_smoke_missing_event_delta(
+    run_id: str,
+    after_cursor: int,
+    tail: dict[str, Any],
+    *,
+    limit: int,
+) -> dict[str, Any]:
+    return {
+        "status": "FAIL",
+        "reason": tail.get("reason", "runtime smoke run not found"),
+        "run_id": run_id,
+        "events": [],
+        "event_cursor": _runtime_smoke_event_cursor(
+            after_cursor=after_cursor,
+            tail=tail,
+            limit=limit,
+        ),
+        "final": True,
+        "next_actions": ["runtime_smoke_run_plan"],
+    }
+
+
+def _runtime_smoke_tail_missing(tail: dict[str, Any]) -> bool:
+    return (
+        tail.get("status") == "FAIL"
+        and not any(
+            key in tail
+            for key in (
+                "events",
+                "next_cursor",
+                "oldest_cursor",
+                "dropped_count",
+                "stale_cursor",
+                "final",
+            )
+        )
+    )
+
+
+def _runtime_smoke_tail_next_cursor(tail: dict[str, Any], fallback: int) -> int:
+    return max(0, int(tail.get("next_cursor", fallback)))
+
+
+def _runtime_smoke_tail_continuation_cursor(tail: dict[str, Any], fallback: int) -> int:
+    events = tail.get("events")
+    if isinstance(events, list):
+        for event in reversed(events):
+            if not isinstance(event, dict):
+                continue
+            cursor = _runtime_smoke_parse_nonnegative_int(event.get("cursor"))
+            if cursor is not None:
+                return max(0, cursor)
+        return _runtime_smoke_tail_next_cursor(tail, fallback)
+    return max(0, int(fallback))
+
+
+def _runtime_smoke_parse_nonnegative_int(value: Any) -> int | None:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _runtime_smoke_event_cursor(
+    *,
+    after_cursor: int,
+    tail: dict[str, Any],
+    limit: int,
+) -> dict[str, Any]:
+    return {
+        "after_cursor": max(0, int(after_cursor)),
+        "next_cursor": _runtime_smoke_tail_next_cursor(tail, after_cursor),
+        "oldest_cursor": tail.get("oldest_cursor"),
+        "dropped_count": tail.get("dropped_count", 0),
+        "stale_cursor": tail.get("stale_cursor", False),
+        "limit": max(0, int(limit)),
+    }
+
+
+def _runtime_smoke_cursor_token(
+    run_id: str,
+    *,
+    after_cursor: int,
+    tail: dict[str, Any],
+) -> dict[str, Any]:
+    cursor = max(0, int(after_cursor))
+    return {
+        "run_id": run_id,
+        "after_cursor": cursor,
+        "next_cursor": cursor,
+        "oldest_cursor": tail.get("oldest_cursor"),
+        "dropped_count": tail.get("dropped_count", 0),
+        "stale_cursor": tail.get("stale_cursor", False),
+    }
+
+
+def _apply_runtime_smoke_agent_mode(
+    data: dict[str, Any],
+    primary_next_action: str,
+) -> dict[str, Any]:
+    if _runtime_smoke_agent_fail_closed(data):
+        data["agent_mode"] = _runtime_smoke_agent_mode_payload(
+            "runtime_smoke_run_plan",
+        )
+        return data
+
+    cursor = _runtime_smoke_agent_cursor(data)
+    run_id = _runtime_smoke_agent_run_id(data)
+    next_request: dict[str, Any] | None = None
+    if primary_next_action == "runtime_smoke_get_event_delta":
+        if cursor:
+            next_request = {
+                "tool": primary_next_action,
+                "arguments": {"cursor": cursor, "agent_mode": True},
+            }
+        else:
+            primary_next_action = "runtime_smoke_run_plan"
+    elif run_id:
+        next_request = {
+            "tool": primary_next_action,
+            "arguments": {"run_id": run_id, "agent_mode": True},
+        }
+    else:
+        primary_next_action = "runtime_smoke_run_plan"
+
+    data["agent_mode"] = _runtime_smoke_agent_mode_payload(
+        primary_next_action,
+        next_request=next_request,
+        cursor=cursor,
+    )
+    return data
+
+
+def _runtime_smoke_agent_mode_payload(
+    primary_next_action: str,
+    *,
+    next_request: dict[str, Any] | None = None,
+    cursor: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "profile": "compact",
+        "primary_next_action": primary_next_action,
+        "event_cursor_tools": [
+            "runtime_smoke_mark_event_cursor",
+            "runtime_smoke_get_event_delta",
+        ],
+    }
+    if next_request is not None:
+        payload["next_request"] = next_request
+    if cursor:
+        payload["cursor"] = cursor
+    return payload
+
+
+def _runtime_smoke_agent_fail_closed(data: dict[str, Any]) -> bool:
+    if data.get("status") == "INVALID_SETUP":
+        return True
+    if data.get("reason") == "runtime smoke run not found":
+        return True
+    return (
+        data.get("status") == "FAIL"
+        and data.get("result") is None
+        and not data.get("events")
+        and data.get("next_actions") == ["runtime_smoke_run_plan"]
+    )
+
+
+def _runtime_smoke_agent_run_id(data: dict[str, Any]) -> str:
+    return str(data.get("run_id") or data.get("active_run_id") or "")
+
+
+def _runtime_smoke_agent_cursor(data: dict[str, Any]) -> dict[str, Any]:
+    cursor = data.get("cursor")
+    if isinstance(cursor, dict):
+        return dict(cursor)
+
+    run_id = _runtime_smoke_agent_run_id(data)
+    if not run_id:
+        return {}
+
+    if isinstance(data.get("event_cursor"), dict):
+        event_cursor = data["event_cursor"]
+        next_cursor = _runtime_smoke_tail_next_cursor(
+            event_cursor,
+            event_cursor.get("after_cursor", 0),
+        )
+        return {
+            "run_id": run_id,
+            "after_cursor": next_cursor,
+            "next_cursor": next_cursor,
+            "oldest_cursor": event_cursor.get("oldest_cursor"),
+            "dropped_count": event_cursor.get("dropped_count", 0),
+            "stale_cursor": event_cursor.get("stale_cursor", False),
+        }
+
+    next_cursor = _runtime_smoke_tail_next_cursor(data, 0)
+    return {
+        "run_id": run_id,
+        "after_cursor": next_cursor,
+        "next_cursor": next_cursor,
+        "oldest_cursor": data.get("oldest_cursor"),
+        "dropped_count": data.get("dropped_count", 0),
+        "stale_cursor": data.get("stale_cursor", False),
     }
 
 

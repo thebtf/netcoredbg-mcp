@@ -161,6 +161,29 @@ async def test_runtime_smoke_run_plan_rejects_invalid_plan_without_starting_run(
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_run_plan_agent_mode_invalid_plan_fails_closed(
+    capturing_mcp,
+) -> None:
+    session = RunPlanFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_run_plan"](
+        ctx=None,
+        plan={"name": "invalid", "actions": "not-a-list"},
+        agent_mode=True,
+    )
+    data = response["data"]
+    agent = data["agent_mode"]
+
+    assert data["status"] == "INVALID_SETUP"
+    assert data["can_run"] is False
+    assert agent["primary_next_action"] == "runtime_smoke_run_plan"
+    assert "next_request" not in agent
+    assert "cursor" not in agent
+    assert session.runtime_smoke.lifecycle_runs.retained_run_ids() == []
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_run_plan_starts_durable_run_after_validation(
     capturing_mcp,
 ) -> None:
@@ -185,6 +208,76 @@ async def test_runtime_smoke_run_plan_starts_durable_run_after_validation(
     assert session.runtime_smoke.lifecycle_runs.active_run_ids() == [data["run_id"]]
     assert session.launch_calls == 0
     assert len(access_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_run_plan_agent_mode_adds_cursor_guidance(
+    capturing_mcp,
+) -> None:
+    session = RunPlanFacadeSession()
+    _register(capturing_mcp, session)
+
+    default_response = await capturing_mcp.tools["runtime_smoke_run_plan"](
+        ctx=None,
+        plan={
+            "name": "facade-default-shape",
+            "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}],
+        },
+    )
+    assert "agent_mode" not in default_response["data"]
+
+    await _wait_for_final_bundle(capturing_mcp, default_response["data"]["run_id"])
+    agent_response = await capturing_mcp.tools["runtime_smoke_run_plan"](
+        ctx=None,
+        plan={
+            "name": "facade-agent-shape",
+            "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}],
+        },
+        agent_mode=True,
+    )
+    data = agent_response["data"]
+
+    assert data["agent_mode"]["primary_next_action"] == "runtime_smoke_evidence_bundle"
+    assert data["agent_mode"]["event_cursor_tools"] == [
+        "runtime_smoke_mark_event_cursor",
+        "runtime_smoke_get_event_delta",
+    ]
+    assert data["agent_mode"]["next_request"] == {
+        "tool": "runtime_smoke_evidence_bundle",
+        "arguments": {"run_id": data["run_id"], "agent_mode": True},
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_run_plan_agent_mode_uses_active_run_for_blocked_start(
+    capturing_mcp,
+) -> None:
+    session = RunPlanFacadeSession()
+    _register(capturing_mcp, session)
+
+    first = await capturing_mcp.tools["runtime_smoke_run_plan"](
+        ctx=None,
+        plan={
+            "name": "already-active",
+            "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}],
+        },
+    )
+    blocked = await capturing_mcp.tools["runtime_smoke_run_plan"](
+        ctx=None,
+        plan={
+            "name": "blocked-agent-shape",
+            "actions": [{"name": "output_checkpoint", "args": {"name": "second"}}],
+        },
+        agent_mode=True,
+    )
+    data = blocked["data"]
+
+    assert data["status"] == "BLOCKED"
+    assert data["active_run_id"] == first["data"]["run_id"]
+    assert data["agent_mode"]["next_request"] == {
+        "tool": "runtime_smoke_evidence_bundle",
+        "arguments": {"run_id": first["data"]["run_id"], "agent_mode": True},
+    }
 
 
 @pytest.mark.asyncio
@@ -224,6 +317,39 @@ async def test_runtime_smoke_evidence_bundle_returns_bounded_final_packet(
     assert data["event_cursor"]["stale_cursor"] is False
     assert "runtime_smoke_evidence_bundle" in data["next_actions"]
     assert "runtime_smoke_run_plan" in data["next_actions"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_evidence_bundle_agent_mode_adds_delta_guidance(
+    capturing_mcp,
+) -> None:
+    session = RunPlanFacadeSession()
+    _register(capturing_mcp, session)
+
+    started = await capturing_mcp.tools["runtime_smoke_run_plan"](
+        ctx=None,
+        plan={
+            "name": "facade-agent-bundle",
+            "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}],
+        },
+    )
+    run_id = started["data"]["run_id"]
+    data = await _wait_for_final_bundle(capturing_mcp, run_id)
+    response = await capturing_mcp.tools["runtime_smoke_evidence_bundle"](
+        ctx=None,
+        run_id=run_id,
+        after_cursor=data["event_cursor"]["next_cursor"],
+        agent_mode=True,
+    )
+    agent = response["data"]["agent_mode"]
+
+    assert agent["primary_next_action"] == "runtime_smoke_get_event_delta"
+    assert agent["cursor"]["run_id"] == run_id
+    assert agent["cursor"]["after_cursor"] == response["data"]["event_cursor"]["next_cursor"]
+    assert agent["next_request"] == {
+        "tool": "runtime_smoke_get_event_delta",
+        "arguments": {"cursor": agent["cursor"], "agent_mode": True},
+    }
 
 
 @pytest.mark.asyncio
@@ -300,3 +426,24 @@ async def test_runtime_smoke_evidence_bundle_fails_closed_for_missing_run_id(
     assert data["events"] == []
     assert data["result"] is None
     assert data["next_actions"] == ["runtime_smoke_run_plan"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_evidence_bundle_agent_mode_missing_run_has_no_delta_request(
+    capturing_mcp,
+) -> None:
+    session = RunPlanFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_evidence_bundle"](
+        ctx=None,
+        run_id="missing-run",
+        agent_mode=True,
+    )
+    data = response["data"]
+    agent = data["agent_mode"]
+
+    assert data["status"] == "FAIL"
+    assert agent["primary_next_action"] == "runtime_smoke_run_plan"
+    assert "next_request" not in agent
+    assert "cursor" not in agent
