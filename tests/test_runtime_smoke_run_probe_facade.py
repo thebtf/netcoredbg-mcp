@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeSession
+from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
 from netcoredbg_mcp.session.state import Breakpoint, BreakpointRegistry, DebugState, TraceEntry
 from netcoredbg_mcp.session.tracepoints import TracepointManager
 from netcoredbg_mcp.tools.runtime_smoke import register_runtime_smoke_tools
@@ -443,6 +444,140 @@ async def test_runtime_smoke_run_probe_debug_tracepoint_ignores_unrelated_breakp
     assert bundle["status"] == "PASS"
     assert session.add_breakpoint_calls == [(source, 42)]
     assert [bp.line for bp in session.breakpoints.get_for_file(source)] == [99]
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_run_probe_debug_tracepoint_rejects_unsafe_expression_before_arming(
+    capturing_mcp,
+) -> None:
+    session = GuardedTracepointRunProbeSession()
+    _register(capturing_mcp, session)
+    source = "C:/repo/SettingsViewModel.cs"
+
+    started = await capturing_mcp.tools["runtime_smoke_run_probe"](
+        ctx=None,
+        probe={
+            "kind": "debug.tracepoint",
+            "name": "settings_route_guard",
+            "file": source,
+            "line": 42,
+            "expression": "Mode.Reset(); Mode.SpellCheckInput",
+            "expected_hit_count": 1,
+        },
+        name="debug-tracepoint-unsafe-expression",
+        phase="both",
+        debug_preflight=True,
+        agent_mode=True,
+    )
+    data = started["data"]
+
+    assert data["status"] == "INVALID_SETUP"
+    assert data["can_run"] is False
+    assert data["run_created"] is False
+    assert any("unsafe tracepoint expression" in error for error in data["validation_errors"])
+    assert session.runtime_smoke.lifecycle_runs.active_run_ids() == []
+    assert session.runtime_smoke.lifecycle_runs.retained_run_ids() == []
+    assert session.add_breakpoint_calls == []
+    assert session.breakpoints.get_for_file(source) == []
+
+
+@pytest.mark.asyncio
+async def test_debug_tracepoint_adapter_rejects_unsafe_expression_before_arming() -> None:
+    session = GuardedTracepointRunProbeSession()
+    source = "C:/repo/SettingsViewModel.cs"
+
+    async def unused_backend() -> None:
+        raise AssertionError("debug.tracepoint must not need the UI backend")
+
+    adapters = ui_operation_adapters(unused_backend, session=session)
+    result = await adapters["debug.tracepoint"](
+        file=source,
+        line=42,
+        expression="Mode.Reset(); Mode.SpellCheckInput",
+    )
+
+    assert result["status"] == "FAIL"
+    assert result["classification"] == "UNSAFE_EXPRESSION"
+    assert result["reason"] == "unsafe tracepoint expression"
+    assert session.add_breakpoint_calls == []
+    assert session._tracepoint_manager.tracepoints == {}
+    assert session.breakpoints.get_for_file(source) == []
+
+
+@pytest.mark.asyncio
+async def test_debug_tracepoint_adapter_fails_closed_on_stale_same_location_expression() -> None:
+    session = GuardedTracepointRunProbeSession()
+    source = "C:/repo/SettingsViewModel.cs"
+    session.breakpoints.add(Breakpoint(file=source, line=42, verified=True, id=9001))
+    stale_tracepoint = session._tracepoint_manager.add(
+        source,
+        42,
+        "Mode.Reset(); Mode.SpellCheckInput",
+    )
+    stale_tracepoint.breakpoint_id = 9001
+
+    async def unused_backend() -> None:
+        raise AssertionError("debug.tracepoint must not need the UI backend")
+
+    adapters = ui_operation_adapters(unused_backend, session=session)
+    result = await adapters["debug.tracepoint"](
+        file=source,
+        line=42,
+        expression="Mode.SpellCheckInput",
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["classification"] == "TRACEPOINT_POLICY_CONFLICT"
+    assert result["existing_tracepoint_id"] == stale_tracepoint.id
+    assert result["next_step"]
+    tracepoints = session._tracepoint_manager.tracepoints
+    assert list(tracepoints) == [stale_tracepoint.id]
+    assert tracepoints[stale_tracepoint.id].expression == "Mode.Reset(); Mode.SpellCheckInput"
+    assert session.add_breakpoint_calls == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_validate_plan_rejects_unsafe_debug_tracepoint_expression(
+    capturing_mcp,
+) -> None:
+    session = GuardedTracepointRunProbeSession()
+    _register(capturing_mcp, session)
+    source = "C:/repo/SettingsViewModel.cs"
+
+    response = await capturing_mcp.tools["runtime_smoke_validate_plan"](
+        ctx=None,
+        plan={
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "unsafe-tracepoint-plan",
+            "cases": [
+                {
+                    "id": "unsafe_tracepoint_case",
+                    "transitions": [
+                        {
+                            "id": "probe",
+                            "action": {"kind": "ui.noop"},
+                            "probes": [
+                                {
+                                    "kind": "debug.tracepoint",
+                                    "name": "unsafe_tracepoint",
+                                    "file": source,
+                                    "line": 42,
+                                    "expression": "Mode.Reset(); Mode.SpellCheckInput",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+    data = response["data"]
+
+    assert data["status"] == "INVALID_SETUP"
+    assert data["can_run"] is False
+    assert any("unsafe tracepoint expression" in error for error in data["validation_errors"])
+    assert session.runtime_smoke.lifecycle_runs.active_run_ids() == []
+    assert session.add_breakpoint_calls == []
 
 
 @pytest.mark.asyncio
