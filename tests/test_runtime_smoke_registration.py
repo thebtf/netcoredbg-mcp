@@ -95,6 +95,16 @@ async def test_runtime_smoke_event_delta_tools_are_registered(mock_netcoredbg_pa
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_wait_for_result_tool_is_registered(mock_netcoredbg_path) -> None:
+    server = create_server(str(os.getcwd()))
+
+    tools = await server.list_tools()
+    tool_names = {tool.name for tool in tools}
+
+    assert "runtime_smoke_wait_for_result" in tool_names
+
+
+@pytest.mark.asyncio
 async def test_ui_monitor_tools_are_registered(mock_netcoredbg_path) -> None:
     server = create_server(str(os.getcwd()))
 

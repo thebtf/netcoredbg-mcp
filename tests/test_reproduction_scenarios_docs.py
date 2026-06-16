@@ -180,8 +180,9 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "runtime_smoke_run_plan",
             "runtime_smoke_evidence_bundle",
             "runtime_smoke_run_probe",
+            "runtime_smoke_wait_for_result",
             "oracle-pack",
-            "app diagnostics",
+            "remaining lifecycle/orchestration closure",
         ],
         "#269": [
             "runtime_smoke_get_result",
@@ -196,7 +197,12 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
         ],
         "#270": ["CR-017", "ui_property", "TextBox mutation/set-text"],
         "#271": ["debug_preflight", "tracepoint guard", "cleanup contract"],
-        "#272": ["app diagnostics", "oracle_pack", "polling/waiting"],
+        "#272": [
+            "app diagnostics",
+            "oracle_pack",
+            "runtime_smoke_wait_for_result",
+            "remaining app diagnostics orchestration",
+        ],
     }
 
     for issue, terms in expected_remaining_terms.items():

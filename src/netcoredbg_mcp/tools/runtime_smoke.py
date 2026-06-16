@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -306,6 +308,7 @@ def register_runtime_smoke_tools(
                 session,
                 data,
                 [
+                    "runtime_smoke_wait_for_result",
                     "runtime_smoke_tail_events",
                     "runtime_smoke_get_result",
                     "runtime_smoke_stop",
@@ -358,6 +361,7 @@ def register_runtime_smoke_tools(
                 data,
                 [
                     "runtime_smoke_evidence_bundle",
+                    "runtime_smoke_wait_for_result",
                     "runtime_smoke_tail_events",
                     "runtime_smoke_get_result",
                     "runtime_smoke_stop",
@@ -415,6 +419,7 @@ def register_runtime_smoke_tools(
                 data,
                 [
                     "runtime_smoke_evidence_bundle",
+                    "runtime_smoke_wait_for_result",
                     "runtime_smoke_tail_events",
                     "runtime_smoke_get_result",
                     "runtime_smoke_stop",
@@ -444,6 +449,44 @@ def register_runtime_smoke_tools(
             )
             if agent_mode:
                 _apply_runtime_smoke_agent_mode(data, "runtime_smoke_get_event_delta")
+            return _build_runtime_smoke_response(
+                session,
+                data,
+                list(data.get("next_actions", ["runtime_smoke_run_plan"])),
+            )
+        except Exception as exc:
+            return build_error_response(str(exc), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+    async def runtime_smoke_wait_for_result(
+        ctx: Context,
+        run_id: str,
+        timeout_ms: int = 1000,
+        poll_interval_ms: int = 100,
+        after_cursor: int = 0,
+        event_limit: int = 50,
+        agent_mode: bool = False,
+    ) -> dict:
+        """Wait for a durable runtime smoke run and return compact evidence."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+            data = await _runtime_smoke_wait_for_result(
+                session.runtime_smoke.lifecycle_runs,
+                run_id,
+                timeout_ms=timeout_ms,
+                poll_interval_ms=poll_interval_ms,
+                after_cursor=after_cursor,
+                event_limit=event_limit,
+            )
+            if agent_mode:
+                primary = (
+                    "runtime_smoke_get_event_delta"
+                    if data.get("final")
+                    else "runtime_smoke_wait_for_result"
+                )
+                _apply_runtime_smoke_agent_mode(data, primary)
             return _build_runtime_smoke_response(
                 session,
                 data,
@@ -734,8 +777,11 @@ async def _runtime_smoke_evidence_bundle(
         after_cursor=max(0, int(after_cursor)),
         limit=max(0, int(event_limit)),
     )
+    if tail.get("final") and not result.get("final"):
+        result = await registry.get_result(run_id)
     final = bool(result.get("final"))
     next_actions = [
+        "runtime_smoke_wait_for_result",
         "runtime_smoke_evidence_bundle",
         "runtime_smoke_tail_events",
         "runtime_smoke_get_result",
@@ -763,6 +809,153 @@ async def _runtime_smoke_evidence_bundle(
         "cleanup": compact_value(result.get("cleanup")),
         "next_actions": next_actions,
     }
+
+
+async def _runtime_smoke_wait_for_result(
+    registry: Any,
+    run_id: str,
+    *,
+    timeout_ms: int = 1000,
+    poll_interval_ms: int = 100,
+    after_cursor: int = 0,
+    event_limit: int = 50,
+) -> dict[str, Any]:
+    timeout = _runtime_smoke_parse_nonnegative_int(timeout_ms)
+    if timeout is None:
+        return _runtime_smoke_invalid_wait(
+            "timeout_ms must be a non-negative integer",
+            run_id=run_id,
+            after_cursor=after_cursor,
+            event_limit=event_limit,
+        )
+    interval = _runtime_smoke_parse_nonnegative_int(poll_interval_ms)
+    if interval is None:
+        return _runtime_smoke_invalid_wait(
+            "poll_interval_ms must be a non-negative integer",
+            run_id=run_id,
+            after_cursor=after_cursor,
+            event_limit=event_limit,
+        )
+    parsed_after_cursor = _runtime_smoke_parse_nonnegative_int(after_cursor)
+    if parsed_after_cursor is None:
+        return _runtime_smoke_invalid_wait(
+            "after_cursor must be a non-negative integer",
+            run_id=run_id,
+            after_cursor=0,
+            event_limit=event_limit,
+        )
+    parsed_event_limit = _runtime_smoke_parse_nonnegative_int(event_limit)
+    if parsed_event_limit is None:
+        return _runtime_smoke_invalid_wait(
+            "event_limit must be a non-negative integer",
+            run_id=run_id,
+            after_cursor=parsed_after_cursor,
+            event_limit=0,
+        )
+
+    deadline = time.monotonic() + timeout / 1000
+    sleep_s = max(1, interval) / 1000
+    data = await _runtime_smoke_evidence_bundle(
+        registry,
+        run_id,
+        after_cursor=parsed_after_cursor,
+        event_limit=parsed_event_limit,
+    )
+    if data.get("final"):
+        return _runtime_smoke_wait_ready(data)
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return _runtime_smoke_wait_timed_out(data)
+        await asyncio.sleep(min(sleep_s, max(0.0, remaining)))
+        data = await _runtime_smoke_evidence_bundle(
+            registry,
+            run_id,
+            after_cursor=parsed_after_cursor,
+            event_limit=parsed_event_limit,
+        )
+        if data.get("final"):
+            return _runtime_smoke_wait_ready(data)
+
+
+def _runtime_smoke_wait_ready(data: dict[str, Any]) -> dict[str, Any]:
+    if _runtime_smoke_wait_missing(data):
+        return data
+    return _runtime_smoke_wait_with_next_actions(data)
+
+
+def _runtime_smoke_wait_timed_out(data: dict[str, Any]) -> dict[str, Any]:
+    return _runtime_smoke_wait_with_next_actions(
+        {
+            **data,
+            "status": "BLOCKED",
+            "reason": "runtime smoke wait timed out",
+            "final": False,
+            "next_step": (
+                "Poll again with runtime_smoke_evidence_bundle or increase timeout_ms."
+            ),
+        },
+        include_stop=True,
+    )
+
+
+def _runtime_smoke_invalid_wait(
+    reason: str,
+    *,
+    run_id: str,
+    after_cursor: Any,
+    event_limit: Any,
+) -> dict[str, Any]:
+    safe_after_cursor = _runtime_smoke_parse_nonnegative_int(after_cursor) or 0
+    safe_event_limit = _runtime_smoke_parse_nonnegative_int(event_limit) or 0
+    return _runtime_smoke_wait_with_next_actions(
+        {
+            "status": "FAIL",
+            "reason": reason,
+            "run_id": run_id,
+            "final": True,
+            "events": [],
+            "event_cursor": {
+                "after_cursor": safe_after_cursor,
+                "next_cursor": safe_after_cursor,
+                "oldest_cursor": None,
+                "dropped_count": 0,
+                "stale_cursor": False,
+                "limit": safe_event_limit,
+            },
+            "result": None,
+            "evidence_refs": [],
+            "cleanup": None,
+        }
+    )
+
+
+def _runtime_smoke_wait_missing(data: dict[str, Any]) -> bool:
+    return (
+        data.get("status") == "FAIL"
+        and data.get("reason") == "runtime smoke run not found"
+        and data.get("events") == []
+        and data.get("result") is None
+    )
+
+
+def _runtime_smoke_wait_with_next_actions(
+    data: dict[str, Any],
+    *,
+    include_stop: bool = False,
+) -> dict[str, Any]:
+    actions = list(data.get("next_actions") or [])
+    for action in (
+        "runtime_smoke_wait_for_result",
+        "runtime_smoke_evidence_bundle",
+        "runtime_smoke_tail_events",
+    ):
+        if action not in actions:
+            actions.append(action)
+    if include_stop and "runtime_smoke_stop" not in actions:
+        actions.append("runtime_smoke_stop")
+    return {**data, "next_actions": actions}
 
 
 async def _runtime_smoke_mark_event_cursor(registry: Any, run_id: str) -> dict[str, Any]:
@@ -1010,6 +1203,20 @@ def _apply_runtime_smoke_agent_mode(
             next_request = {
                 "tool": primary_next_action,
                 "arguments": {"cursor": cursor, "agent_mode": True},
+            }
+        else:
+            primary_next_action = "runtime_smoke_run_plan"
+    elif primary_next_action == "runtime_smoke_wait_for_result":
+        if run_id:
+            arguments: dict[str, Any] = {"run_id": run_id, "agent_mode": True}
+            if cursor:
+                arguments["after_cursor"] = _runtime_smoke_tail_next_cursor(
+                    cursor,
+                    cursor.get("after_cursor", 0),
+                )
+            next_request = {
+                "tool": primary_next_action,
+                "arguments": arguments,
             }
         else:
             primary_next_action = "runtime_smoke_run_plan"

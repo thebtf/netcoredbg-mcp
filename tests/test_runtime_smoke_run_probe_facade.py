@@ -326,8 +326,10 @@ async def test_runtime_smoke_run_probe_starts_app_diagnostics_probe_run(
     assert data["probe"]["kind"] == "app_diagnostics"
     assert data["generated_plan"]["probe_kind"] == "app_diagnostics"
     assert data["validation"]["can_run"] is True
+    assert "runtime_smoke_wait_for_result" in response["next_actions"]
 
     bundle = await _wait_for_bundle(capturing_mcp, data["run_id"])
     assert bundle["status"] == "BLOCKED"
     assert bundle["result"]["status"] == "BLOCKED"
+    assert "runtime_smoke_wait_for_result" in bundle["next_actions"]
     assert "runtime_smoke_evidence_bundle" in bundle["next_actions"]
