@@ -62,12 +62,14 @@ class RuntimeSmokeSession:
     def reset(self) -> tuple[CleanupFailure, ...]:
         """Run cleanup callbacks and clear all runtime smoke state."""
         failures: list[CleanupFailure] = []
+        failed_names: set[str] = set()
         for name, callback in list(self._cleanup_callbacks.items()):
             try:
                 callback()
             except Exception as exc:
                 # Continue teardown so one failed cleanup cannot hide later failures.
                 failures.append({"name": name, "error": str(exc)})
+                failed_names.add(name)
 
         self.instrumentation_groups.clear()
         self.output_checkpoints.clear()
@@ -75,7 +77,9 @@ class RuntimeSmokeSession:
         self.ui_snapshots.clear()
         self.ui_event_buffers.clear()
         self.evidence_refs.clear()
-        self._cleanup_callbacks.clear()
+        for name in list(self._cleanup_callbacks):
+            if name not in failed_names:
+                self._cleanup_callbacks.pop(name, None)
         self.last_reset_failures = tuple(failures)
         return self.last_reset_failures
 

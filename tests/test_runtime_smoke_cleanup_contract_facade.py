@@ -37,6 +37,7 @@ class CleanupContractFacadeSession:
         self.release_event = asyncio.Event()
         self.cleanup_release_event = asyncio.Event()
         self.block_cleanup = False
+        self.fail_cleanup = False
 
     async def launch(self, **_: Any) -> dict[str, Any]:
         self.launch_calls += 1
@@ -50,6 +51,8 @@ class CleanupContractFacadeSession:
         self.cleanup_calls.append(name)
         if self.block_cleanup:
             await self.cleanup_release_event.wait()
+        if self.fail_cleanup:
+            raise RuntimeError("cleanup exploded")
         self.runtime_smoke.instrumentation_groups.pop(name, None)
         return {"status": "PASS", "reason": "instrumentation group cleared"}
 
@@ -75,6 +78,18 @@ async def _wait_for_final(registry: RuntimeSmokeRunRegistry, run_id: str) -> dic
             return result
         await asyncio.sleep(0)
     raise AssertionError("runtime smoke lifecycle run did not finish")
+
+
+async def _wait_for_evidence_bundle(capturing_mcp, run_id: str) -> dict[str, Any]:
+    for _ in range(20):
+        response = await capturing_mcp.tools["runtime_smoke_evidence_bundle"](
+            ctx=None,
+            run_id=run_id,
+        )
+        if response["data"].get("final"):
+            return response
+        await asyncio.sleep(0)
+    raise AssertionError("runtime smoke evidence bundle did not finish")
 
 
 def _register(capturing_mcp, session: CleanupContractFacadeSession) -> list[Any]:
@@ -210,3 +225,38 @@ async def test_runtime_smoke_stop_points_contaminated_runs_at_cleanup_contract(
 
     session.cleanup_release_event.set()
     await _wait_for_final(session.runtime_smoke.lifecycle_runs, started["run_id"])
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_evidence_and_wait_preserve_contamination_guidance(
+    capturing_mcp,
+) -> None:
+    session = CleanupContractFacadeSession()
+    session.fail_cleanup = True
+    session.runtime_smoke.instrumentation_groups["flow"] = {"breakpoints": [1]}
+    _register(capturing_mcp, session)
+    started = await session.runtime_smoke.lifecycle_runs.start(
+        {
+            "name": "cleanup-failure-evidence",
+            "actions": [{"name": "wait_until_released"}],
+            "teardown": {"instrumentation_groups": ["flow"]},
+        },
+        lambda: _runner(session),
+    )
+
+    session.release_event.set()
+    bundle = await _wait_for_evidence_bundle(capturing_mcp, started["run_id"])
+    wait = await capturing_mcp.tools["runtime_smoke_wait_for_result"](
+        ctx=None,
+        run_id=started["run_id"],
+        timeout_ms=100,
+    )
+
+    assert bundle["data"]["contaminated"] is True
+    assert bundle["data"]["cleanup_contract"]["next_action"] == "runtime_smoke_cleanup_contract"
+    assert "runtime_smoke_cleanup_contract" in bundle["next_actions"]
+    assert "runtime_smoke_run_plan" not in bundle["next_actions"]
+    assert wait["data"]["contaminated"] is True
+    assert wait["data"]["cleanup_contract"]["next_action"] == "runtime_smoke_cleanup_contract"
+    assert "runtime_smoke_cleanup_contract" in wait["next_actions"]
+    assert "runtime_smoke_run_plan" not in wait["next_actions"]

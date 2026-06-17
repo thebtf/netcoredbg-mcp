@@ -133,6 +133,28 @@ def test_runtime_smoke_session_records_cleanup_failure_without_leaking_state() -
     assert smoke.output_checkpoints == {}
 
 
+def test_runtime_smoke_session_preserves_failed_cleanup_callbacks_for_retry() -> None:
+    smoke = RuntimeSmokeSession()
+    calls = 0
+
+    def flaky_cleanup() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("release still locked")
+
+    smoke.register_cleanup("release-modifier", flaky_cleanup)
+
+    first = smoke.reset()
+    second = smoke.reset()
+    third = smoke.reset()
+
+    assert first == ({"name": "release-modifier", "error": "release still locked"},)
+    assert second == ()
+    assert third == ()
+    assert calls == 2
+
+
 @pytest.mark.asyncio
 async def test_session_manager_stop_resets_runtime_smoke_state(mock_netcoredbg_path) -> None:
     from netcoredbg_mcp.session import SessionManager

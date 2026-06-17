@@ -875,13 +875,16 @@ async def _runtime_smoke_evidence_bundle(
     if tail.get("final") and not result.get("final"):
         result = await registry.get_result(run_id)
     final = bool(result.get("final"))
-    next_actions = [
-        "runtime_smoke_wait_for_result",
-        "runtime_smoke_evidence_bundle",
-        "runtime_smoke_tail_events",
-        "runtime_smoke_get_result",
-    ]
-    next_actions.append("runtime_smoke_run_plan" if final else "runtime_smoke_stop")
+    if result.get("contaminated") is True:
+        next_actions = _runtime_smoke_lifecycle_next_actions(result)
+    else:
+        next_actions = [
+            "runtime_smoke_wait_for_result",
+            "runtime_smoke_evidence_bundle",
+            "runtime_smoke_tail_events",
+            "runtime_smoke_get_result",
+        ]
+        next_actions.append("runtime_smoke_run_plan" if final else "runtime_smoke_stop")
     diagnostic_launch = result.get("diagnostic_launch")
 
     bundle = {
@@ -907,6 +910,11 @@ async def _runtime_smoke_evidence_bundle(
     }
     if isinstance(diagnostic_launch, dict):
         bundle["diagnostic_launch"] = compact_value(diagnostic_launch)
+    if result.get("contaminated") is True:
+        bundle["contaminated"] = True
+        cleanup_contract = result.get("cleanup_contract")
+        if isinstance(cleanup_contract, dict):
+            bundle["cleanup_contract"] = compact_value(cleanup_contract)
     return bundle
 
 
@@ -980,6 +988,8 @@ async def _runtime_smoke_wait_for_result(
 
 def _runtime_smoke_wait_ready(data: dict[str, Any]) -> dict[str, Any]:
     if _runtime_smoke_wait_missing(data):
+        return data
+    if data.get("contaminated") is True:
         return data
     return _runtime_smoke_wait_with_next_actions(data)
 
