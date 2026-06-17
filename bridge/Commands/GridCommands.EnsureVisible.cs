@@ -292,7 +292,6 @@ public static partial class GridCommands
 
     private static bool TryScrollToVerticalStart(IScrollPattern scrollPattern, int settleMs)
     {
-        var before = SafeVerticalScrollPercent(scrollPattern);
         try
         {
             scrollPattern.SetScrollPercent(ScrollPatternConstants.NoScroll, 0);

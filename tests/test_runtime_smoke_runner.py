@@ -2584,14 +2584,14 @@ async def test_grid_select_indices_uses_grid_select_range_for_contiguous_indices
 
     result = await ui_operation_adapters(backend_provider)["ui.grid.select_indices"](
         selector={"automation_id": "dataGrid", "control_type": "DataGrid"},
-        indices=[1, 2, 3],
+        indices=[3, 1, 2],
     )
 
     assert result["status"] == "PASS"
     assert backend.selector == {"automation_id": "dataGrid", "control_type": "DataGrid"}
     assert backend.start_index == 1
     assert backend.end_index == 3
-    assert result["selected_indices"] == [1, 2, 3]
+    assert result["selected_indices"] == [3, 1, 2]
     assert result["selected_count"] == 3
     assert result["selected_range"] == {"start": 1, "end": 3}
 

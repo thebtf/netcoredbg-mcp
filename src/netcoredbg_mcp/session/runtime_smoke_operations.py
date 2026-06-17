@@ -2409,11 +2409,11 @@ def _grid_selection_indices(value: Any) -> tuple[list[int], dict[str, Any] | Non
 def _contiguous_index_range(indices: list[int]) -> tuple[int, int] | None:
     if not indices:
         return None
-    start = indices[0]
-    end = indices[-1]
-    if indices == list(range(start, end + 1)):
-        return start, end
-    return None
+    start = min(indices)
+    end = max(indices)
+    if sorted(indices) != list(range(start, end + 1)):
+        return None
+    return start, end
 
 
 def _drag_blocked(
