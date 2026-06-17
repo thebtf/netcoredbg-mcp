@@ -111,7 +111,7 @@ def _diagnostic_json_source(
 
 
 def _launch_diagnostic_json_source(context: Any) -> dict[str, Any] | None:
-    action_context = getattr(context, "action_context", None)
+    action_context = getattr(context, "action_context", context)
     diagnostic_launch = getattr(action_context, "diagnostic_launch", None)
     if not isinstance(diagnostic_launch, dict):
         return None

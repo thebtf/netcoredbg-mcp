@@ -181,7 +181,7 @@ class RuntimeStateOracleRunner:
             _diagnostic_launch_from_baseline_result(baseline_result)
             or self._diagnostic_launch
         )
-        if effective_diagnostic_launch is not self._diagnostic_launch:
+        if effective_diagnostic_launch != self._diagnostic_launch:
             self._diagnostic_launch = effective_diagnostic_launch
             context = ActionContext(
                 service_adapters=self._service_adapters,
