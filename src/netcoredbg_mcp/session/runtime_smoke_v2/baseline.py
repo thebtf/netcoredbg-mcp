@@ -14,6 +14,8 @@ from .cleanup import run_cleanup
 async def execute_baseline(
     baseline: dict[str, Any] | None,
     context: ActionContext,
+    *,
+    diagnostic_launch: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if not baseline:
         return None
@@ -24,7 +26,11 @@ async def execute_baseline(
         step = dict(raw_step)
         step_id = str(step.get("id") or f"baseline-{len(outcomes) + 1}")
         kind = str(step.get("kind") or "")
-        result = await _execute_step(step, context)
+        result = await _execute_step(
+            step,
+            context,
+            diagnostic_launch=diagnostic_launch,
+        )
         status = str(result.get("status", "PASS"))
         outcome = {
             "id": step_id,
@@ -63,7 +69,12 @@ async def execute_baseline(
     }
 
 
-async def _execute_step(step: dict[str, Any], context: ActionContext) -> dict[str, Any]:
+async def _execute_step(
+    step: dict[str, Any],
+    context: ActionContext,
+    *,
+    diagnostic_launch: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     kind = str(step.get("kind") or "")
     if kind == "fixture.restore":
         return await context.call_adapter(
@@ -73,15 +84,18 @@ async def _execute_step(step: dict[str, Any], context: ActionContext) -> dict[st
         )
     if kind == "isolated_profile.launch":
         launch_args = dict(step.get("launch") or {})
-        diagnostic_launch = _diagnostic_launch_for_step(step)
-        if diagnostic_launch:
+        effective_diagnostic_launch = _diagnostic_launch_for_step(
+            step,
+            fallback=diagnostic_launch,
+        )
+        if effective_diagnostic_launch:
             launch_args["env"] = {
                 **dict(launch_args.get("env") or {}),
-                **app_diagnostics_launch_env(diagnostic_launch),
+                **app_diagnostics_launch_env(effective_diagnostic_launch),
             }
         result = await context.call_adapter("launch", **launch_args)
-        if diagnostic_launch and isinstance(result, dict):
-            return {**result, "diagnostic_launch": diagnostic_launch}
+        if effective_diagnostic_launch and isinstance(result, dict):
+            return {**result, "diagnostic_launch": effective_diagnostic_launch}
         return result
     if kind == "control_set":
         action = dict(step.get("action") or {})
@@ -112,10 +126,14 @@ def _cleanup_step_for(step: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def _diagnostic_launch_for_step(step: dict[str, Any]) -> dict[str, Any] | None:
+def _diagnostic_launch_for_step(
+    step: dict[str, Any],
+    *,
+    fallback: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     app_diagnostics = step.get("app_diagnostics")
     if not isinstance(app_diagnostics, dict):
-        return None
+        return fallback
     return app_diagnostics_launch_contract(
         evidence_dir=str(app_diagnostics.get("evidence_dir") or ""),
         file_name=str(app_diagnostics.get("file_name") or ""),

@@ -158,6 +158,7 @@ class RuntimeStateOracleRunner:
         baseline_result = await execute_baseline(
             plan.get("baseline") if isinstance(plan.get("baseline"), dict) else None,
             context,
+            diagnostic_launch=self._diagnostic_launch,
         )
         if baseline_result is not None and baseline_result.get("status") != "PASS":
             baseline_blocked_payload = baseline_result.get("blocked")

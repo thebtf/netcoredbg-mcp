@@ -335,11 +335,26 @@ def app_diagnostics_launch_env(contract: dict[str, Any]) -> dict[str, str]:
 
 def _normalize_diagnostic_path(value: str) -> str:
     raw = str(value or APP_DIAGNOSTICS_DEFAULT_EVIDENCE_DIRECTORY).replace("\\", "/")
+    if len(raw) >= 3 and raw[0].isalpha() and raw[1:3] == ":/":
+        raw = raw[3:]
     is_absolute = raw.startswith("/")
-    normalized = "/".join(part for part in raw.split("/") if part)
+    safe_parts = [
+        _diagnostic_path_part(part)
+        for part in raw.split("/")
+        if part and part not in {".", ".."}
+    ]
+    normalized = "/".join(part for part in safe_parts if part)
     if is_absolute and normalized:
         normalized = f"/{normalized}"
     return normalized or APP_DIAGNOSTICS_DEFAULT_EVIDENCE_DIRECTORY
+
+
+def _diagnostic_path_part(value: str) -> str:
+    safe = "".join(
+        char if char.isalnum() or char in {"-", "_", "."} else "-"
+        for char in str(value or "")
+    ).strip("-")
+    return "" if safe in {"", ".", ".."} else safe
 
 
 def _diagnostic_path_segment(value: str) -> str:

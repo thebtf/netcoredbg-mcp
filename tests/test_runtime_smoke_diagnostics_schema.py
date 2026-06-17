@@ -116,6 +116,22 @@ def test_app_diagnostics_launch_contract_preserves_absolute_evidence_directory()
     }
 
 
+def test_app_diagnostics_launch_contract_sanitizes_traversal_and_drive_letters() -> None:
+    from netcoredbg_mcp.session.runtime_smoke_schema import (
+        app_diagnostics_launch_contract,
+    )
+
+    contract = app_diagnostics_launch_contract(
+        evidence_dir=r"C:\tmp\..\secret diagnostics",
+        file_name="../unsafe:name.json",
+    )
+
+    assert contract["evidence"] == {
+        "directory": "tmp/secret-diagnostics",
+        "path": "tmp/secret-diagnostics/unsafe-name.json",
+    }
+
+
 def test_diagnostic_schema_contract_matches_runtime_probe_registry() -> None:
     from netcoredbg_mcp.session.runtime_smoke_schema import diagnostic_schema_contract
     from netcoredbg_mcp.session.runtime_smoke_v2.probes import accepted_probe_kinds

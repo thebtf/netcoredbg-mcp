@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner, RuntimeSmokeSession
+from netcoredbg_mcp.session.runtime_smoke_schema import app_diagnostics_launch_contract
 
 
 class BaselineSmokeSession:
@@ -96,6 +97,19 @@ def _diagnostic_launch_baseline_plan() -> dict[str, Any]:
     return plan
 
 
+def _top_level_diagnostic_launch_baseline_plan() -> dict[str, Any]:
+    plan = _baseline_plan()
+    plan["diagnostics"] = {
+        "app_diagnostics": {
+            "diagnostic_launch": app_diagnostics_launch_contract(
+                evidence_dir="work/top-level-diagnostics",
+                file_name="app-diagnostics.json",
+            )
+        }
+    }
+    return plan
+
+
 @pytest.mark.asyncio
 async def test_v2_baseline_runs_before_first_case() -> None:
     session = BaselineSmokeSession()
@@ -144,6 +158,28 @@ async def test_v2_baseline_launch_merges_app_diagnostics_advertisement_env() -> 
     assert launch_result["diagnostic_launch"]["redacted_env_values"] is True
     assert "env" not in launch_result["diagnostic_launch"]
     assert "env_values" not in launch_result["diagnostic_launch"]
+
+
+@pytest.mark.asyncio
+async def test_v2_baseline_launch_uses_top_level_app_diagnostics_advertisement_env() -> None:
+    session = BaselineSmokeSession()
+
+    result = await _runner(session).run(_top_level_diagnostic_launch_baseline_plan())
+
+    launch_call = [call for call in session.calls if call[1] == "launch"][0]
+    launch_env = launch_call[2]["env"]
+    assert launch_env == {
+        "NETCOREDBG_MCP_APP_DIAGNOSTICS_DIR": "work/top-level-diagnostics",
+        "NETCOREDBG_MCP_APP_DIAGNOSTICS_PATH": (
+            "work/top-level-diagnostics/app-diagnostics.json"
+        ),
+        "NETCOREDBG_MCP_APP_DIAGNOSTICS_SCHEMA": (
+            "netcoredbg.runtime_smoke.diagnostics.v1"
+        ),
+    }
+    assert result["diagnostic_launch"] == result["baseline"]["steps"][1]["result"][
+        "diagnostic_launch"
+    ]
 
 
 @pytest.mark.asyncio
