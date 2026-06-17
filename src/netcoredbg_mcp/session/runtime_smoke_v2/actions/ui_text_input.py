@@ -222,6 +222,14 @@ def _select_all_precondition(result: dict[str, Any]) -> dict[str, Any]:
         }
 
     actual = _selection_evidence(selection)
+    if result.get("focus_within") is False:
+        return {
+            "selected": False,
+            "reason": "TextBox focus evidence reports focus outside target",
+            "expected": {"focus_within": True},
+            "actual": {**actual, "focus_within": False},
+            "state": _bounded_state_evidence(result),
+        }
     actual["text_length"] = text_length
     selected = (
         actual["selection_start"] == 0

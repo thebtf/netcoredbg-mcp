@@ -380,6 +380,58 @@ async def test_v2_ui_text_type_replace_selection_blocks_on_bad_select_all() -> N
 
 
 @pytest.mark.asyncio
+async def test_v2_ui_text_type_replace_selection_blocks_when_focus_is_not_within_textbox() -> None:
+    session = ActionSmokeSession()
+    session.text_get_state_result = {
+        "status": "PASS",
+        "text": "Original text",
+        "selection": {"start": 0, "end": 13, "length": 13},
+        "focus_within": False,
+    }
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "cases": [
+                {
+                    "id": "replace_text_focus_stolen_after_select_all",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.text.type_replace_selection",
+                                "selector": {"automation_id": "CueTextBox"},
+                                "text": "Must not type",
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == "BLOCKED"
+    assert action["status"] == "BLOCKED"
+    assert action["reason"] == "select-all precondition failed"
+    assert action["precondition"]["selected"] is False
+    assert action["precondition"]["reason"] == "TextBox focus evidence reports focus outside target"
+    assert action["precondition"]["expected"] == {"focus_within": True}
+    assert action["precondition"]["actual"] == {
+        "selection_start": 0,
+        "selection_end": 13,
+        "selection_length": 13,
+        "focus_within": False,
+    }
+    assert session.calls == [
+        ("find_element", {"automation_id": "CueTextBox"}),
+        ("set_focus", {"automation_id": "CueTextBox"}),
+        ("send_keys_focused", "^a"),
+        ("text_get_state", {"automation_id": "CueTextBox"}),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_v2_ui_text_type_replace_selection_blocks_without_text_state() -> None:
     session = ActionSmokeSession()
     session.text_get_state_result = {
