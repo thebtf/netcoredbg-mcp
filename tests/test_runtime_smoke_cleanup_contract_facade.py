@@ -231,6 +231,52 @@ async def test_runtime_smoke_stop_points_contaminated_runs_at_cleanup_contract(
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_running_contaminated_surfaces_keep_stop_route(
+    capturing_mcp,
+) -> None:
+    session = CleanupContractFacadeSession()
+    session.runtime_smoke.instrumentation_groups["flow"] = {"breakpoints": [1]}
+    _register(capturing_mcp, session)
+    started = await session.runtime_smoke.lifecycle_runs.start(
+        {
+            "name": "running-contaminated",
+            "actions": [{"name": "wait_until_released"}],
+            "teardown": {"instrumentation_groups": ["flow"]},
+        },
+        lambda: _runner(session),
+    )
+    run_id = started["run_id"]
+    session.runtime_smoke.lifecycle_runs.mark_contaminated(
+        reason="external contamination while active",
+        run_id=run_id,
+        cleanup={"status": "FAIL", "failures": [{"reason": "external"}]},
+    )
+
+    tail = await capturing_mcp.tools["runtime_smoke_tail_events"](
+        ctx=None,
+        run_id=run_id,
+    )
+    result = await capturing_mcp.tools["runtime_smoke_get_result"](
+        ctx=None,
+        run_id=run_id,
+    )
+
+    for response in (tail, result):
+        assert response["data"]["status"] == "RUNNING"
+        assert response["data"]["contaminated"] is True
+        assert "runtime_smoke_wait_for_result" in response["next_actions"]
+        assert "runtime_smoke_evidence_bundle" in response["next_actions"]
+        assert "runtime_smoke_tail_events" in response["next_actions"]
+        assert "runtime_smoke_get_result" in response["next_actions"]
+        assert "runtime_smoke_stop" in response["next_actions"]
+        assert "runtime_smoke_cleanup_contract" in response["next_actions"]
+        assert "debug_hygiene_preflight" in response["next_actions"]
+
+    session.release_event.set()
+    await _wait_for_final(session.runtime_smoke.lifecycle_runs, run_id)
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_stopping_surfaces_preserve_cleanup_guidance(
     capturing_mcp,
 ) -> None:

@@ -1445,7 +1445,7 @@ def _runtime_smoke_run_missing(result: dict[str, Any]) -> bool:
 
 def _runtime_smoke_lifecycle_next_actions(data: dict[str, Any]) -> list[str]:
     if data.get("contaminated") is True:
-        if data.get("run_id") and not data.get("final") and data.get("status") == "STOPPING":
+        if data.get("run_id") and not data.get("final"):
             return [
                 "runtime_smoke_wait_for_result",
                 "runtime_smoke_evidence_bundle",
