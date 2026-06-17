@@ -348,7 +348,7 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
         "#271": [
             "comment already current",
             "CR-020",
-            "trace cursor/delta",
+            "trace-specific cursor/delta",
             "cleanup_contract",
             "contaminated",
             "single-flight",
@@ -436,12 +436,19 @@ def test_issue_271_records_cleanup_contamination_contract_slice() -> None:
     assert "cleanup contamination contract" in row
     assert "runtime_smoke_cleanup_contract" in row
     assert "contaminated-state surfacing" in row
-    assert "trace cursor/delta APIs" in row
+    assert "trace-specific cursor/delta APIs" in row
     assert "broader" in row
     assert "CR-028" in lifecycle_row
     assert "cleanup_contract" in lifecycle_row
     assert "runtime_smoke_cleanup_contract" in lifecycle_row
-    assert "trace cursor/delta" in lifecycle_row
+    assert "CR-036" in row
+    assert "CR-036" in lifecycle_row
+    assert "active_run_id" in row
+    assert "active_status" in row
+    assert "run_created=false" in row
+    assert "STOPPING" in lifecycle_row
+    assert "evidence_bundle" in lifecycle_row
+    assert "trace-specific cursor/delta" in lifecycle_row
 
 
 def test_cr022_broad_issues_require_split_or_comment_evidence_before_closure() -> None:

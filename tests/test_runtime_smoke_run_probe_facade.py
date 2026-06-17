@@ -225,6 +225,46 @@ async def test_runtime_smoke_run_probe_starts_durable_probe_run(
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_run_probe_rejects_overlapping_process_metric_run(
+    capturing_mcp,
+) -> None:
+    session = RunProbeFacadeSession()
+    _register(capturing_mcp, session)
+
+    first = await capturing_mcp.tools["runtime_smoke_run_probe"](
+        ctx=None,
+        probe={
+            "kind": "process.metric",
+            "name": "process_memory",
+            "pid": os.getpid(),
+        },
+        name="active-process-metric",
+    )
+    blocked = await capturing_mcp.tools["runtime_smoke_run_probe"](
+        ctx=None,
+        probe={
+            "kind": "process.metric",
+            "name": "process_memory",
+            "pid": os.getpid(),
+        },
+        name="blocked-process-metric",
+        agent_mode=True,
+    )
+    data = blocked["data"]
+
+    assert data["status"] == "BLOCKED"
+    assert data["reason"] == "runtime smoke run already active"
+    assert data["active_run_id"] == first["data"]["run_id"]
+    assert data["active_status"] == "RUNNING"
+    assert data["run_created"] is False
+    assert data["probe"]["kind"] == "process.metric"
+    assert data["agent_mode"]["primary_next_action"] == "runtime_smoke_evidence_bundle"
+    assert data["agent_mode"]["next_request"]["arguments"]["run_id"] == first["data"]["run_id"]
+    assert session.runtime_smoke.lifecycle_runs.active_run_ids() == [first["data"]["run_id"]]
+    assert session.launch_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_run_probe_agent_mode_adds_evidence_guidance(
     capturing_mcp,
 ) -> None:
@@ -394,8 +434,12 @@ async def test_runtime_smoke_run_probe_debug_tracepoint_guard_preflights_and_cle
 
     assert active_data["status"] == "BLOCKED"
     assert active_data["active_run_id"] == data["run_id"]
+    assert active_data["active_status"] == "RUNNING"
+    assert active_data["run_created"] is False
     assert active_data["agent_mode"]["primary_next_action"] == "runtime_smoke_evidence_bundle"
     assert active_data["agent_mode"]["next_request"]["arguments"]["run_id"] == data["run_id"]
+    assert session.runtime_smoke.lifecycle_runs.active_run_ids() == [data["run_id"]]
+    assert session.launch_calls == 0
 
     bundle = await _wait_for_bundle(capturing_mcp, data["run_id"])
 
