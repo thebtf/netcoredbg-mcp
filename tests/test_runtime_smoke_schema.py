@@ -187,6 +187,62 @@ def test_runtime_smoke_schema_accepts_ui_text_read_operation() -> None:
     )
 
 
+def test_runtime_smoke_schema_accepts_ui_get_property_operation() -> None:
+    assert (
+        validate_plan(
+            {
+                "steps": [
+                    {
+                        "op": "ui.get_property",
+                        "selector": {"automation_id": "CueTextBox"},
+                        "property": "Name",
+                    },
+                    {
+                        "op": "ui.get_property",
+                        "selector": {"automation_id": "CueTextBox"},
+                        "property_name": "Value",
+                    }
+                ]
+            }
+        )
+        == []
+    )
+
+
+def test_runtime_smoke_schema_requires_ui_get_property_property_argument() -> None:
+    assert validate_plan(
+        {
+            "steps": [
+                {
+                    "op": "ui.get_property",
+                    "selector": {"automation_id": "CueTextBox"},
+                }
+            ]
+        }
+    ) == [
+        "steps[0].property or property_name is required for op ui.get_property"
+    ]
+
+
+@pytest.mark.parametrize("field_name", ["property", "property_name"])
+def test_runtime_smoke_schema_rejects_non_string_ui_get_property_property(
+    field_name: str,
+) -> None:
+    assert validate_plan(
+        {
+            "steps": [
+                {
+                    "op": "ui.get_property",
+                    "selector": {"automation_id": "CueTextBox"},
+                    field_name: 42,
+                }
+            ]
+        }
+    ) == [
+        f"steps[0].{field_name} must be a string for op ui.get_property"
+    ]
+
+
 @pytest.mark.parametrize("value", [None, True, False, 1.5, "1"])
 def test_validate_plan_rejects_non_integral_max_actions(value: Any) -> None:
     assert validate_plan({"budgets": {"max_actions": value}}) == [

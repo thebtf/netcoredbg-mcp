@@ -137,6 +137,10 @@ OPERATION_SCHEMAS: dict[str, OperationSchema] = {
         "ui.text.read",
         ("selector",),
     ),
+    "ui.get_property": OperationSchema(
+        "ui.get_property",
+        ("selector",),
+    ),
     "ui.invoke": OperationSchema(
         "ui.invoke",
         ("selector",),
@@ -666,6 +670,18 @@ def _validate_op_args(
     elif op_name == "ui.key_sequence":
         if "keys" in args and not isinstance(args["keys"], list):
             errors.append(f"{prefix}.keys must be a list for op {op_name}")
+    elif op_name == "ui.get_property":
+        if args.get("property") is None and args.get("property_name") is None:
+            errors.append(
+                f"{prefix}.property or property_name is required for op {op_name}"
+            )
+        for field_name in ("property", "property_name"):
+            if (
+                field_name in args
+                and args[field_name] is not None
+                and not isinstance(args[field_name], str)
+            ):
+                errors.append(f"{prefix}.{field_name} must be a string for op {op_name}")
 
 
 def _validate_int_arg(

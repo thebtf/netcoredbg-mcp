@@ -57,6 +57,17 @@ _GRID_ACCEPTED_ACTIONS = (
 )
 _FOCUS_READ_ACTIONS = ("assert",)
 _TEXT_READ_ACTIONS = ("read",)
+_PROPERTY_READ_ACTIONS = ("read",)
+_TEXT_PROPERTY_NAMES = {"text", "value", "valuetext"}
+_PROPERTY_KEY_ALIASES = {
+    "automationid": "automationId",
+    "automation_id": "automationId",
+    "name": "name",
+    "controltype": "controlType",
+    "control_type": "controlType",
+    "classname": "className",
+    "class_name": "className",
+}
 
 
 def register_ui_evidence_tools(
@@ -184,6 +195,116 @@ def register_ui_evidence_tools(
                 )
             return build_response(
                 data=_bounded_text_read_result(selector, result),
+                state=session.state.state,
+            )
+        except Exception as exc:
+            result = {"status": "BLOCKED", "reason": str(exc)}
+            selector = _selector(automation_id, name, control_type, root_id, xpath)
+            if _is_selector_miss(result):
+                return build_response(
+                    data=_selector_blocked(selector, result=result),
+                    state=session.state.state,
+                )
+            return build_error_response(str(exc), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+    async def ui_property(
+        ctx: Context,
+        action: str,
+        property: str | None = None,
+        property_name: str | None = None,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+    ) -> dict:
+        """Read bounded UI property evidence without mutation side effects."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            if action not in _PROPERTY_READ_ACTIONS:
+                return build_response(
+                    data={
+                        "status": "FAIL",
+                        "reason": "unknown property action",
+                        "action": action,
+                        "accepted_actions": list(_PROPERTY_READ_ACTIONS),
+                        "next_step": (
+                            "Use ui_property(action=\"read\") for read-only "
+                            "property evidence."
+                        ),
+                    },
+                    state=session.state.state,
+                )
+
+            requested_property = str(property_name or property or "")
+            if not requested_property:
+                return build_response(
+                    data={
+                        "status": "FAIL",
+                        "reason": "invalid property",
+                        "accepted_properties": _accepted_property_names(),
+                        "next_step": "Provide property or property_name to read.",
+                    },
+                    state=session.state.state,
+                )
+
+            selector = _selector(automation_id, name, control_type, root_id, xpath)
+            if not selector:
+                return build_response(
+                    data={"status": "FAIL", "reason": "invalid selector"},
+                    state=session.state.state,
+                )
+
+            backend = await _ensure_ui_connected()
+            selector_kwargs = {
+                "automation_id": automation_id,
+                "name": name,
+                "control_type": control_type,
+                "root_id": root_id,
+                "xpath": xpath,
+            }
+            if requested_property.lower() in _TEXT_PROPERTY_NAMES:
+                result = await backend.extract_text(**selector_kwargs)
+                if _is_selector_miss(result):
+                    return build_response(
+                        data=_selector_blocked(
+                            selector,
+                            result=_bounded_property_backend_result(result),
+                        ),
+                        state=session.state.state,
+                    )
+                return build_response(
+                    data=_bounded_property_result(
+                        selector,
+                        requested_property,
+                        result,
+                        value=str(result.get("text", "")) if isinstance(result, dict) else None,
+                        source=result.get("source") if isinstance(result, dict) else None,
+                    ),
+                    state=session.state.state,
+                )
+
+            result = await backend.find_element(**selector_kwargs)
+            if _is_selector_miss(result):
+                return build_response(
+                    data=_selector_blocked(
+                        selector,
+                        result=_bounded_property_backend_result(result),
+                    ),
+                    state=session.state.state,
+                )
+            key = _PROPERTY_KEY_ALIASES.get(requested_property.lower(), requested_property)
+            return build_response(
+                data=_bounded_property_result(
+                    selector,
+                    requested_property,
+                    result,
+                    value=result.get(key) if isinstance(result, dict) else None,
+                ),
                 state=session.state.state,
             )
         except Exception as exc:
@@ -692,6 +813,72 @@ def _bounded_text_result(result: dict[str, Any]) -> dict[str, Any]:
         "control_type",
     )
     return {key: result[key] for key in allowed_keys if key in result}
+
+
+def _accepted_property_names() -> list[str]:
+    return [
+        "AutomationId",
+        "Name",
+        "ControlType",
+        "ClassName",
+        "Text",
+        "Value",
+        "ValueText",
+    ]
+
+
+def _bounded_property_backend_result(result: Any) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        return {
+            "status": "FAIL",
+            "reason": "property backend returned non-object result",
+            "result": _strip_unbounded_evidence_value(result),
+        }
+    allowed_keys = (
+        "status",
+        "found",
+        "reason",
+        "error",
+        "matched",
+        "unsupported",
+        "backend",
+        "requested",
+        "accepted",
+        "next_step",
+        "source",
+    )
+    return {
+        key: _strip_unbounded_evidence_value(result[key])
+        for key in allowed_keys
+        if key in result
+    }
+
+
+def _bounded_property_result(
+    selector: dict[str, Any],
+    property_name: str,
+    result: Any,
+    *,
+    value: Any,
+    source: Any | None = None,
+) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        return {
+            "status": "FAIL",
+            "reason": "property backend returned non-object result",
+            "property": property_name,
+            "value": value,
+            "selector": selector,
+            "result": _strip_unbounded_evidence_value(result),
+        }
+    bounded = _bounded_property_backend_result(result)
+    bounded.setdefault("status", "PASS")
+    bounded["property"] = property_name
+    bounded["value"] = _strip_unbounded_evidence_value(value)
+    if source is not None:
+        bounded["source"] = _strip_unbounded_evidence_value(source)
+    bounded["selector"] = selector
+    return bounded
 
 
 def _bounded_focus_result(
