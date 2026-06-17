@@ -533,7 +533,7 @@ def test_bridge_grid_builds_cell_text_evidence_for_rows() -> None:
     assert "SetScrollPercent(ScrollPatternConstants.NoScroll, 0)" in ensure_visible_command
     assert '"rewind_to_start"' in ensure_visible_command
     assert "grid rewind-to-start failed before bounded scroll scan" in ensure_visible_command
-    assert "var rewindLimit = maxScrolls + currentDownwardScrolls;" not in ensure_visible_command
+    assert "var rewindLimit = maxScrolls + currentDownwardScrolls;" in ensure_visible_command
     current_scan_index = ensure_visible_command.index('"current_downward"')
     rewind_index = ensure_visible_command.index("TryScrollToVerticalStart(scrollPattern, settleMs)")
     rewound_scan_index = ensure_visible_command.index('"rewound_downward"')

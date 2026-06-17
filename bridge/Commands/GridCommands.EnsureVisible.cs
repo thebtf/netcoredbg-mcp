@@ -192,7 +192,8 @@ public static partial class GridCommands
             ["vertical_scroll_percent"] = ScrollPercent(grid)
         });
 
-        for (var rewindStep = 0; !rewound && rewindStep < maxScrolls; rewindStep++)
+        var rewindLimit = maxScrolls + currentDownwardScrolls;
+        for (var rewindStep = 0; !rewound && rewindStep < rewindLimit; rewindStep++)
         {
             if (!ScrollOneViewport(scrollPattern, ScrollAmount.LargeDecrement, settleMs))
                 break;
