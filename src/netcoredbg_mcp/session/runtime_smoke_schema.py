@@ -334,8 +334,11 @@ def app_diagnostics_launch_env(contract: dict[str, Any]) -> dict[str, str]:
 
 
 def _normalize_diagnostic_path(value: str) -> str:
-    normalized = str(value or APP_DIAGNOSTICS_DEFAULT_EVIDENCE_DIRECTORY).replace("\\", "/")
-    normalized = "/".join(part for part in normalized.split("/") if part)
+    raw = str(value or APP_DIAGNOSTICS_DEFAULT_EVIDENCE_DIRECTORY).replace("\\", "/")
+    is_absolute = raw.startswith("/")
+    normalized = "/".join(part for part in raw.split("/") if part)
+    if is_absolute and normalized:
+        normalized = f"/{normalized}"
     return normalized or APP_DIAGNOSTICS_DEFAULT_EVIDENCE_DIRECTORY
 
 

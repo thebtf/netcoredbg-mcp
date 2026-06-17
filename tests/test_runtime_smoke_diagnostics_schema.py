@@ -100,6 +100,22 @@ def test_diagnostic_schema_contract_exposes_app_diagnostics_launch_contract() ->
     }
 
 
+def test_app_diagnostics_launch_contract_preserves_absolute_evidence_directory() -> None:
+    from netcoredbg_mcp.session.runtime_smoke_schema import (
+        app_diagnostics_launch_contract,
+    )
+
+    contract = app_diagnostics_launch_contract(
+        evidence_dir="/tmp/runtime-smoke-diagnostics",
+        file_name="app-diagnostics.json",
+    )
+
+    assert contract["evidence"] == {
+        "directory": "/tmp/runtime-smoke-diagnostics",
+        "path": "/tmp/runtime-smoke-diagnostics/app-diagnostics.json",
+    }
+
+
 def test_diagnostic_schema_contract_matches_runtime_probe_registry() -> None:
     from netcoredbg_mcp.session.runtime_smoke_schema import diagnostic_schema_contract
     from netcoredbg_mcp.session.runtime_smoke_v2.probes import accepted_probe_kinds

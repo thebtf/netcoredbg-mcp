@@ -102,9 +102,28 @@ async def test_runtime_smoke_validate_plan_reports_invalid_v2_without_execution(
     assert "completed_steps" not in data
 
 
+@pytest.mark.parametrize(
+    ("diagnostics", "expected_error"),
+    [
+        (
+            "app diagnostics requested but malformed",
+            "diagnostics must be an object",
+        ),
+        (
+            {"app_diagnostics": []},
+            "diagnostics.app_diagnostics must be an object",
+        ),
+        (
+            {"app_diagnostics": {"diagnostic_launch": []}},
+            "diagnostics.app_diagnostics.diagnostic_launch must be an object",
+        ),
+    ],
+)
 @pytest.mark.asyncio
 async def test_runtime_smoke_validate_plan_rejects_malformed_diagnostics_contract(
     capturing_mcp,
+    diagnostics: Any,
+    expected_error: str,
 ) -> None:
     session = PlanFacadeSession()
     _register(capturing_mcp, session)
@@ -113,7 +132,7 @@ async def test_runtime_smoke_validate_plan_rejects_malformed_diagnostics_contrac
         ctx=None,
         plan={
             "schema": "netcoredbg.runtime_smoke.v2",
-            "diagnostics": "app diagnostics requested but malformed",
+            "diagnostics": diagnostics,
             "cases": [{"id": "case-1", "transitions": []}],
         },
     )
@@ -121,7 +140,7 @@ async def test_runtime_smoke_validate_plan_rejects_malformed_diagnostics_contrac
 
     assert data["status"] == "INVALID_SETUP"
     assert data["can_run"] is False
-    assert data["validation_errors"] == ["diagnostics must be an object"]
+    assert data["validation_errors"] == [expected_error]
     assert data["case_count"] == 1
     assert session.launch_calls == 0
 
