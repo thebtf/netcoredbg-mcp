@@ -49,7 +49,13 @@ async def read_grid_state(
     identity: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Read bounded DataGrid visible and selected-row state."""
-    snapshot = await snapshot_grid(backend, selector, rows=rows, columns=columns)
+    evidence_columns = _identity_columns(identity, columns)
+    snapshot = await snapshot_grid(
+        backend,
+        selector,
+        rows=rows,
+        columns=evidence_columns,
+    )
     if not _passes(snapshot):
         return dict(snapshot) if isinstance(snapshot, dict) else {
             "status": "BLOCKED",
@@ -63,7 +69,11 @@ async def read_grid_state(
             "snapshot_result": snapshot,
         }
 
-    selected = await read_grid_selected_rows(backend, selector, columns=columns)
+    selected = await read_grid_selected_rows(
+        backend,
+        selector,
+        columns=evidence_columns,
+    )
     if not _passes(selected):
         result = dict(selected) if isinstance(selected, dict) else {}
         result["status"] = _blocked_status(result)

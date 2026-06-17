@@ -184,6 +184,28 @@ async def test_grid_helpers_preserve_selector() -> None:
 
 
 @pytest.mark.asyncio
+async def test_read_grid_state_requests_identity_columns() -> None:
+    backend = FakeGridBackend()
+    selector = {"automation_id": "CueGrid"}
+
+    state = await grid_helpers.read_grid_state(
+        backend,
+        selector,
+        identity={"column": "PhraseId"},
+    )
+
+    assert state["identity_strategy"] == {
+        "kind": "configured_column",
+        "derived": True,
+        "column": "PhraseId",
+    }
+    assert state["requested_columns"] == ["PhraseId"]
+    assert ("selected", {"automation_id": "CueGrid", "columns": ["PhraseId"]}) in (
+        backend.calls
+    )
+
+
+@pytest.mark.asyncio
 async def test_grid_snapshot_and_assert_rows_require_cell_text_evidence() -> None:
     backend = FakeGridBackend()
     selector = {"automation_id": "CueGrid"}
