@@ -11,6 +11,7 @@ from ..ui.focus import assert_focus
 from ..ui.grid import assert_grid_rows, read_grid_selected_rows, select_grid_range, snapshot_grid
 from ..ui.key_sequence import run_scoped_key_sequence
 from ..ui.list_items import invoke_list_item, toggle_list_item_child
+from ..ui.text import assert_text_selection, read_textbox_state
 
 BackendProvider = Callable[[], Awaitable[Any]]
 OperationAdapterMap = dict[str, Callable[..., Awaitable[dict[str, Any]]]]
@@ -389,6 +390,33 @@ def ui_operation_adapters(
         result["selector"] = selector
         return result
 
+    async def text_get_state(**args: Any) -> dict[str, Any]:
+        backend = await _backend_or_blocked(ensure_ui_connected)
+        if isinstance(backend, dict):
+            return backend
+        return await read_textbox_state(backend, _selector(args))
+
+    async def text_assert_selection(**args: Any) -> dict[str, Any]:
+        backend = await _backend_or_blocked(ensure_ui_connected)
+        if isinstance(backend, dict):
+            return backend
+        selector = _selector(args)
+        selection_start = _non_bool_int(args.get("selection_start"))
+        selection_end = _non_bool_int(args.get("selection_end"))
+        if selection_start is None or selection_end is None:
+            return {
+                "status": "FAIL",
+                "matched": False,
+                "reason": "selection_start and selection_end are required",
+                "selector": selector,
+            }
+        return await assert_text_selection(
+            backend,
+            selector,
+            selection_start=selection_start,
+            selection_end=selection_end,
+        )
+
     async def invoke(**args: Any) -> dict[str, Any]:
         backend = await _backend_or_blocked(ensure_ui_connected)
         if isinstance(backend, dict):
@@ -607,6 +635,8 @@ def ui_operation_adapters(
         "ui.focus.assert": focus_assert,
         "ui.text.assert": text_assert,
         "ui.text.read": text_read,
+        "ui.text.get_state": text_get_state,
+        "ui.text.assert_selection": text_assert_selection,
         "ui.get_property": get_property,
         "ui.find_element": find_element,
         "ui.set_focus": set_focus,
@@ -2100,6 +2130,21 @@ def _non_negative_int(value: Any) -> int:
     except (TypeError, ValueError):
         return 0
     return max(0, candidate)
+
+
+def _non_bool_int(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
 
 
 def _positive_int(value: Any, *, default: int) -> int:

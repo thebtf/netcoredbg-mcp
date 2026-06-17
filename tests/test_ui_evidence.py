@@ -25,6 +25,7 @@ from netcoredbg_mcp.ui.snapshots import (
     diff_ui_snapshots,
     query_ui_fields,
 )
+from netcoredbg_mcp.ui.text import assert_text_selection, read_textbox_state
 
 
 class FakeEvidenceBackend:
@@ -124,6 +125,27 @@ class FakeEvidenceBackend:
             "name": "Cue text",
             "controlType": control_type or "TextBox",
             "className": "TextBox",
+            "full_tree": {"must": "not leak"},
+            "raw_tree": {"must": "not leak"},
+        }
+
+    async def textbox_state(self, selector: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append({"textbox_state": {"selector": dict(selector)}})
+        return {
+            "status": "PASS",
+            "text": "Fixture cue one",
+            "value": "Fixture cue one",
+            "selection": {
+                "start": 3,
+                "end": 10,
+                "length": 7,
+                "selected_text": "ture cu",
+            },
+            "caret_index": 10,
+            "focus_within": True,
+            "enabled": True,
+            "visible": True,
+            "source": "TextPattern",
             "full_tree": {"must": "not leak"},
             "raw_tree": {"must": "not leak"},
         }
@@ -241,6 +263,45 @@ class UnsupportedGridFallbackBackend(FakeEvidenceBackend):
             "unsupported": True,
             "backend": "pywinauto",
             "reason": "DataGrid selection evidence requires the FlaUI bridge backend.",
+        }
+
+
+class RaisingTextStateBackend:
+    async def textbox_state(self, selector: dict[str, Any]) -> dict[str, Any]:
+        raise RuntimeError("closed pipe")
+
+
+class RaisingTextQueryBackend:
+    async def query_ui(
+        self,
+        selector: dict[str, Any],
+        fields: list[str],
+        max_results: int = 20,
+    ) -> dict[str, Any]:
+        raise TimeoutError("bridge timeout")
+
+
+class UnsupportedTextQueryBackend:
+    async def query_ui(
+        self,
+        selector: dict[str, Any],
+        fields: list[str],
+        max_results: int = 20,
+    ) -> dict[str, Any]:
+        return {
+            "status": "UNSUPPORTED",
+            "unsupported": True,
+            "backend": "pywinauto",
+            "reason": "TextBox state requires FlaUI bridge",
+        }
+
+
+class UnsupportedSelectionStateBackend:
+    async def textbox_state(self, selector: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "status": "PASS",
+            "selection": {"supported": False},
+            "source": "SelectionItemPattern",
         }
 
 
@@ -777,6 +838,218 @@ async def test_ui_text_tool_reads_text_without_assertion(capturing_mcp, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_ui_text_tool_get_state_returns_textbox_selection_state(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = FakeEvidenceBackend()
+    backend.process_id = 42
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_text"](
+        ctx=None,
+        action="get_state",
+        automation_id="CueTextBox",
+        control_type="TextBox",
+    )
+
+    assert response["data"]["status"] == "PASS"
+    assert response["data"]["text"] == "Fixture cue one"
+    assert response["data"]["value"] == "Fixture cue one"
+    assert response["data"]["selection"] == {
+        "start": 3,
+        "end": 10,
+        "length": 7,
+        "selected_text": "ture cu",
+    }
+    assert response["data"]["caret_index"] == 10
+    assert response["data"]["focus_within"] is True
+    assert response["data"]["enabled"] is True
+    assert response["data"]["visible"] is True
+    assert response["data"]["source"] == "TextPattern"
+    assert response["data"]["selector"] == {
+        "automation_id": "CueTextBox",
+        "control_type": "TextBox",
+    }
+    assert "full_tree" not in str(response["data"])
+    assert "raw_tree" not in str(response["data"])
+    assert backend.calls[-1]["textbox_state"] == {
+        "selector": {
+            "automation_id": "CueTextBox",
+            "control_type": "TextBox",
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_read_textbox_state_blocks_when_textbox_state_reader_raises() -> None:
+    result = await read_textbox_state(
+        RaisingTextStateBackend(),
+        {"automation_id": "CueTextBox"},
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "TextBox state reader raised exception: closed pipe"
+    assert result["requested"] == {
+        "selector": {"automation_id": "CueTextBox"},
+        "fields": ["focus", "selection", "value", "text", "enabled", "visible"],
+    }
+    assert result["accepted"] == {
+        "backend": "connected UI backend supporting textbox_state"
+    }
+    assert result["next_step"] == "Inspect UI backend or bridge transport diagnostics."
+
+
+@pytest.mark.asyncio
+async def test_read_textbox_state_blocks_when_query_ui_raises() -> None:
+    result = await read_textbox_state(
+        RaisingTextQueryBackend(),
+        {"automation_id": "CueTextBox"},
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "TextBox state query_ui raised exception: bridge timeout"
+    assert result["requested"] == {
+        "selector": {"automation_id": "CueTextBox"},
+        "fields": ["focus", "selection", "value", "text", "enabled", "visible"],
+    }
+    assert result["accepted"] == {"backend": "connected UI backend supporting query_ui"}
+    assert result["next_step"] == "Inspect UI backend or bridge transport diagnostics."
+
+
+@pytest.mark.asyncio
+async def test_read_textbox_state_normalizes_unsupported_query_to_blocked() -> None:
+    result = await read_textbox_state(
+        UnsupportedTextQueryBackend(),
+        {"automation_id": "CueTextBox"},
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["unsupported"] is True
+    assert result["backend"] == "pywinauto"
+    assert result["reason"] == "TextBox state requires FlaUI bridge"
+    assert result["selector"] == {"automation_id": "CueTextBox"}
+
+
+@pytest.mark.asyncio
+async def test_assert_text_selection_blocks_when_range_endpoints_are_absent() -> None:
+    result = await assert_text_selection(
+        UnsupportedSelectionStateBackend(),
+        {"automation_id": "NotATextBox"},
+        selection_start=0,
+        selection_end=0,
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["matched"] is False
+    assert result["reason"] == "TextBox selection evidence unavailable"
+    assert result["expected_selection"] == {"start": 0, "end": 0}
+    assert result["actual_selection"] == {
+        "supported": False,
+        "source": "SelectionItemPattern",
+    }
+    assert result["selector"] == {"automation_id": "NotATextBox"}
+
+
+@pytest.mark.asyncio
+async def test_ui_text_tool_assert_selection_passes_with_expected_range(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = FakeEvidenceBackend()
+    backend.process_id = 42
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_text"](
+        ctx=None,
+        action="assert_selection",
+        automation_id="CueTextBox",
+        control_type="TextBox",
+        selection_start=3,
+        selection_end=10,
+    )
+
+    assert response["data"]["status"] == "PASS"
+    assert response["data"]["matched"] is True
+    assert response["data"]["expected_selection"] == {"start": 3, "end": 10}
+    assert response["data"]["actual_selection"] == {
+        "start": 3,
+        "end": 10,
+        "length": 7,
+        "selected_text": "ture cu",
+    }
+
+
+@pytest.mark.asyncio
+async def test_ui_text_tool_assert_selection_fails_with_observed_range(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    class MismatchTextBackend(FakeEvidenceBackend):
+        async def textbox_state(self, selector: dict[str, Any]) -> dict[str, Any]:
+            result = await super().textbox_state(selector)
+            result["selection"] = {
+                "start": 0,
+                "end": 0,
+                "length": 0,
+                "selected_text": "",
+            }
+            result["caret_index"] = 0
+            return result
+
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = MismatchTextBackend()
+    backend.process_id = 42
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_text"](
+        ctx=None,
+        action="assert_selection",
+        automation_id="CueTextBox",
+        control_type="TextBox",
+        selection_start=3,
+        selection_end=10,
+    )
+
+    assert response["data"]["status"] == "FAIL"
+    assert response["data"]["matched"] is False
+    assert response["data"]["reason"] == "selection mismatch"
+    assert response["data"]["expected_selection"] == {"start": 3, "end": 10}
+    assert response["data"]["actual_selection"] == {
+        "start": 0,
+        "end": 0,
+        "length": 0,
+        "selected_text": "",
+    }
+
+
+@pytest.mark.asyncio
 async def test_ui_text_tool_maps_selector_miss_to_blocked(capturing_mcp, monkeypatch) -> None:
     session = FakeUiSession()
     session.state.state = DebugState.RUNNING
@@ -819,6 +1092,42 @@ async def test_ui_text_tool_maps_selector_miss_to_blocked(capturing_mcp, monkeyp
     ]
     assert response["data"]["next_step"]
     assert "full_tree" not in str(response["data"])
+
+
+@pytest.mark.asyncio
+async def test_ui_text_unknown_action_reports_state_actions_without_backend(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    create_backend = AsyncMock()
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", create_backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_text"](
+        ctx=None,
+        action="type",
+        automation_id="CueTextBox",
+    )
+
+    assert response["data"] == {
+        "status": "FAIL",
+        "reason": "unknown text action",
+        "action": "type",
+        "accepted_actions": ["read", "get_state", "state", "assert_selection"],
+        "next_step": (
+            'Use ui_text(action="read"|"get_state"|"assert_selection") '
+            "for bounded TextBox evidence."
+        ),
+    }
+    create_backend.assert_not_called()
 
 
 @pytest.mark.asyncio

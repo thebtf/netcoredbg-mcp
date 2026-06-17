@@ -187,6 +187,76 @@ def test_runtime_smoke_schema_accepts_ui_text_read_operation() -> None:
     )
 
 
+def test_runtime_smoke_schema_accepts_ui_text_get_state_operation() -> None:
+    assert (
+        validate_plan(
+            {
+                "steps": [
+                    {
+                        "op": "ui.text.get_state",
+                        "selector": {"automation_id": "CueTextBox"},
+                    }
+                ]
+            }
+        )
+        == []
+    )
+
+
+def test_runtime_smoke_schema_accepts_ui_text_assert_selection_operation() -> None:
+    assert (
+        validate_plan(
+            {
+                "steps": [
+                    {
+                        "op": "ui.text.assert_selection",
+                        "selector": {"automation_id": "CueTextBox"},
+                        "selection_start": 3,
+                        "selection_end": 10,
+                    }
+                ]
+            }
+        )
+        == []
+    )
+
+
+def test_runtime_smoke_schema_requires_ui_text_assert_selection_range() -> None:
+    assert validate_plan(
+        {
+            "steps": [
+                {
+                    "op": "ui.text.assert_selection",
+                    "selector": {"automation_id": "CueTextBox"},
+                }
+            ]
+        }
+    ) == [
+        (
+            "steps[0].selection_start and selection_end are required "
+            "for op ui.text.assert_selection"
+        )
+    ]
+
+
+def test_runtime_smoke_schema_rejects_bool_ui_text_assert_selection_range() -> None:
+    assert validate_plan(
+        {
+            "steps": [
+                {
+                    "op": "ui.text.assert_selection",
+                    "selector": {"automation_id": "CueTextBox"},
+                    "selection_start": True,
+                    "selection_end": False,
+                }
+            ]
+        }
+    ) == [
+        "steps[0].selection_start must be an integer for op ui.text.assert_selection",
+        "steps[0].selection_end must be an integer for op ui.text.assert_selection",
+    ]
+
+
 def test_runtime_smoke_schema_accepts_ui_get_property_operation() -> None:
     assert (
         validate_plan(

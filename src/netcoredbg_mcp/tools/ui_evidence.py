@@ -28,6 +28,7 @@ from ..ui.snapshots import (
     invalid_ui_fields,
     query_ui_fields,
 )
+from ..ui.text import assert_text_selection, read_textbox_state
 
 _GRID_ACTION_ALIASES = {
     "rows": "visible_rows",
@@ -56,7 +57,8 @@ _GRID_ACCEPTED_ACTIONS = (
     "assert_range",
 )
 _FOCUS_READ_ACTIONS = ("assert",)
-_TEXT_READ_ACTIONS = ("read",)
+_TEXT_ACTION_ALIASES = {"state": "get_state"}
+_TEXT_ACTIONS = ("read", "get_state", "state", "assert_selection")
 _PROPERTY_READ_ACTIONS = ("read",)
 _TEXT_PROPERTY_NAMES = {"text", "value", "valuetext"}
 _PROPERTY_KEY_ALIASES = {
@@ -154,6 +156,8 @@ def register_ui_evidence_tools(
         control_type: str | None = None,
         root_id: str | None = None,
         xpath: str | None = None,
+        selection_start: int | None = None,
+        selection_end: int | None = None,
     ) -> dict:
         """Read bounded TextBox/text evidence without assertion side effects."""
         try:
@@ -161,14 +165,18 @@ def register_ui_evidence_tools(
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
 
-            if action not in _TEXT_READ_ACTIONS:
+            canonical_action = _TEXT_ACTION_ALIASES.get(action, action)
+            if action not in _TEXT_ACTIONS:
                 return build_response(
                     data={
                         "status": "FAIL",
                         "reason": "unknown text action",
                         "action": action,
-                        "accepted_actions": list(_TEXT_READ_ACTIONS),
-                        "next_step": "Use ui_text(action=\"read\") for read-only text evidence.",
+                        "accepted_actions": list(_TEXT_ACTIONS),
+                        "next_step": (
+                            'Use ui_text(action="read"|"get_state"|"assert_selection") '
+                            "for bounded TextBox evidence."
+                        ),
                     },
                     state=session.state.state,
                 )
@@ -181,6 +189,31 @@ def register_ui_evidence_tools(
                 )
 
             backend = await _ensure_ui_connected()
+            if canonical_action == "get_state":
+                return build_response(
+                    data=await read_textbox_state(backend, selector),
+                    state=session.state.state,
+                )
+            if canonical_action == "assert_selection":
+                if selection_start is None or selection_end is None:
+                    return build_response(
+                        data={
+                            "status": "FAIL",
+                            "reason": "selection_start and selection_end are required",
+                            "action": action,
+                        },
+                        state=session.state.state,
+                    )
+                return build_response(
+                    data=await assert_text_selection(
+                        backend,
+                        selector,
+                        selection_start=selection_start,
+                        selection_end=selection_end,
+                    ),
+                    state=session.state.state,
+                )
+
             result = await backend.extract_text(
                 automation_id=automation_id,
                 name=name,

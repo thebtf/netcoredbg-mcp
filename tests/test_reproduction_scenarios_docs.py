@@ -200,8 +200,11 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
     assert 'ui_grid(action="snapshot")' in row
     assert "CR-021" in row
     assert "CR-025" in row
+    assert "CR-029" in row
     assert "ui.text.read" in row
     assert "ui.text.type_replace_selection" in row
+    assert "ui.text.get_state" in row
+    assert "ui.text.assert_selection" in row
     assert "ui_focus" in row
     assert "confirmed DataGrid selection" in row
     assert "cells" in row
@@ -240,7 +243,14 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "agent_mode",
             "broad lifecycle/orchestration closure",
         ],
-        "#270": ["CR-017", "CR-021", "CR-025", "ui_property", "TextBox state/selection helpers"],
+        "#270": [
+            "CR-017",
+            "CR-021",
+            "CR-025",
+            "CR-029",
+            "ui_property",
+            "public TextBox mutation/set-text helpers",
+        ],
         "#271": ["CR-019", "debug_preflight", "tracepoint guard", "cleanup contract"],
         "#272": [
             "app diagnostics",
@@ -309,6 +319,9 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
         "#270": [
             "commented",
             "ui.text.read",
+            "ui.text.get_state",
+            "ui.text.assert_selection",
+            "CR-029",
             "ui_focus",
             "confirmed DataGrid selection",
             "ui_property",
