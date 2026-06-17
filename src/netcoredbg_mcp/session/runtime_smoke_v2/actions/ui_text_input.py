@@ -204,7 +204,7 @@ def _select_all_precondition(result: dict[str, Any]) -> dict[str, Any]:
             "actual": _selection_evidence(selection),
             "state": _bounded_state_evidence(result),
         }
-    text_length = len(text)
+    text_length = _text_selection_extent(text)
     expected = {
         "selection_start": 0,
         "selection_end": text_length,
@@ -241,6 +241,10 @@ def _text_evidence(result: dict[str, Any]) -> tuple[str, bool]:
         if key in result and result[key] is not None:
             return str(result[key]), True
     return "", False
+
+
+def _text_selection_extent(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
 
 
 def _is_success(result: dict[str, Any]) -> bool:

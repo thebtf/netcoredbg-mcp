@@ -474,6 +474,49 @@ async def test_v2_ui_text_type_replace_selection_accepts_float_string_selection_
 
 
 @pytest.mark.asyncio
+async def test_v2_ui_text_type_replace_selection_uses_utf16_selection_offsets() -> None:
+    session = ActionSmokeSession()
+    session.text_get_state_result = {
+        "status": "PASS",
+        "text": "😀",
+        "selection": {"start": 0, "end": 2, "length": 2},
+    }
+    session.text_read_result = {"status": "PASS", "text": "Replaced text"}
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "cases": [
+                {
+                    "id": "replace_text_utf16_offsets",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.text.type_replace_selection",
+                                "selector": {"automation_id": "CueTextBox"},
+                                "text": "Replaced text",
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == "PASS"
+    assert action["precondition"]["selected"] is True
+    assert action["precondition"]["expected"] == {
+        "selection_start": 0,
+        "selection_end": 2,
+        "selection_length": 2,
+        "text_length": 2,
+    }
+    assert ("send_keys_focused", "Replaced text") in session.calls
+
+
+@pytest.mark.asyncio
 async def test_v2_ui_text_type_replace_selection_infers_start_from_end_and_length() -> None:
     session = ActionSmokeSession()
     session.text_get_state_result = {
