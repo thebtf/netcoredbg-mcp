@@ -1703,6 +1703,72 @@ async def test_ui_operation_adapters_resolve_visible_row_drag_sources_to_backend
 
 
 @pytest.mark.asyncio
+async def test_ui_operation_adapters_drag_preserves_row_identity_source_offset() -> None:
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.drag_calls: list[tuple[int, int, int, int]] = []
+
+        async def grid_snapshot(
+            self,
+            selector: dict[str, Any],
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "row_count": 4,
+                "visible_rows": [
+                    {
+                        "index": 1,
+                        "bounds": {"x": 10, "y": 60, "width": 120, "height": 30},
+                        "cells": {"Phrase": "Cue two"},
+                    },
+                    {
+                        "index": 3,
+                        "bounds": {"x": 10, "y": 140, "width": 120, "height": 30},
+                        "cells": {"Phrase": "Cue four"},
+                    },
+                ],
+            }
+
+        async def drag(
+            self,
+            from_x: int,
+            from_y: int,
+            to_x: int,
+            to_y: int,
+            speed_ms: int = 200,
+            hold_modifiers: list[str] | None = None,
+        ) -> dict[str, Any]:
+            self.drag_calls.append((from_x, from_y, to_x, to_y))
+            return {"status": "PASS", "dragged": True}
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    result = await ui_operation_adapters(backend_provider)["ui.drag"](
+        source={
+            "kind": "row_identity",
+            "selector": {"automation_id": "dataGrid"},
+            "row_identity": "Cue two",
+        },
+        path=[
+            {"relative_to": "source", "x": -0.01, "y": 0.5},
+            {"relative_to": "drop", "x": 0.5, "y": 0.5},
+        ],
+        drop={"selector": {"automation_id": "dataGrid"}, "row_identity": "Cue four"},
+        identity={"column": "Phrase"},
+    )
+
+    assert result["status"] == "PASS"
+    assert backend.drag_calls == [(10, 75, 70, 155)]
+    assert result["route_evidence"]["source_point"] == {"x": 10, "y": 75}
+    assert result["route_evidence"]["target_point"] == {"x": 70, "y": 155}
+
+
+@pytest.mark.asyncio
 async def test_ui_operation_adapters_resolve_viewport_drop_from_source_selector() -> None:
     class FakeBackend:
         def __init__(self) -> None:
@@ -2473,7 +2539,6 @@ async def test_ui_operation_adapters_drag_passes_cancel_to_path_backend() -> Non
         path=[
             {"relative_to": "source", "x": 0.5, "y": 0.5},
             {"relative_to": "drop", "x": 0.5, "y": 0.5},
-            {"relative_to": "source", "x": 0.5, "y": 0.5},
         ],
         drop={"selector": {"automation_id": "dataGrid"}, "row_index": 2},
         cancel={"key": "escape"},
@@ -2487,7 +2552,52 @@ async def test_ui_operation_adapters_drag_passes_cancel_to_path_backend() -> Non
 
 
 @pytest.mark.asyncio
-async def test_ui_operation_adapters_grid_select_indices_uses_backend_multi_select() -> None:
+async def test_grid_select_indices_uses_grid_select_range_for_contiguous_indices() -> None:
+    class FakeBackend:
+        async def grid_select_range(
+            self,
+            selector: dict[str, Any],
+            start_index: int,
+            end_index: int,
+        ) -> dict[str, Any]:
+            self.selector = selector
+            self.start_index = start_index
+            self.end_index = end_index
+            return {
+                "status": "PASS",
+                "selected_range": {"start": start_index, "end": end_index},
+                "selected_rows": [
+                    {"row_index": index}
+                    for index in range(start_index, end_index + 1)
+                ],
+            }
+
+        async def multi_select(self, container_id: str, indices: list[int]) -> int:
+            raise AssertionError(
+                "contiguous DataGrid selection must use selector-aware grid_select_range"
+            )
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    result = await ui_operation_adapters(backend_provider)["ui.grid.select_indices"](
+        selector={"automation_id": "dataGrid", "control_type": "DataGrid"},
+        indices=[1, 2, 3],
+    )
+
+    assert result["status"] == "PASS"
+    assert backend.selector == {"automation_id": "dataGrid", "control_type": "DataGrid"}
+    assert backend.start_index == 1
+    assert backend.end_index == 3
+    assert result["selected_indices"] == [1, 2, 3]
+    assert result["selected_count"] == 3
+    assert result["selected_range"] == {"start": 1, "end": 3}
+
+
+@pytest.mark.asyncio
+async def test_grid_select_indices_uses_backend_multi_select_for_sparse_indices() -> None:
     class FakeBackend:
         async def multi_select(self, container_id: str, indices: list[int]) -> int:
             self.container_id = container_id
@@ -3200,6 +3310,81 @@ async def test_ui_operation_adapters_grid_select_row_resolves_visible_identity()
         "row_index": 19,
         "identity": "Cue 019",
     }
+    assert result["confirmed_selection"] is True
+
+
+@pytest.mark.asyncio
+async def test_ui_operation_adapters_grid_select_identities_resolves_visible_indices() -> None:
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.selector: dict[str, Any] | None = None
+            self.start_index: int | None = None
+            self.end_index: int | None = None
+
+        async def grid_snapshot(
+            self,
+            selector: dict[str, Any],
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "visible_rows": [
+                    {"index": 5, "row_index": 16, "cells": {"PhraseId": "Cue 016"}},
+                    {"index": 6, "row_index": 17, "cells": {"PhraseId": "Cue 017"}},
+                    {"index": 7, "row_index": 18, "cells": {"PhraseId": "Cue 018"}},
+                ],
+                "rows": dict(rows or {}),
+                "columns": list(columns or []),
+            }
+
+        async def grid_select_range(
+            self,
+            selector: dict[str, Any],
+            start_index: int,
+            end_index: int,
+        ) -> dict[str, Any]:
+            self.selector = dict(selector)
+            self.start_index = start_index
+            self.end_index = end_index
+            return {
+                "status": "PASS",
+                "selected_range": {"start": start_index, "end": end_index},
+            }
+
+        async def grid_selected_rows(
+            self,
+            selector: dict[str, Any],
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "selected_rows": [
+                    {"index": 5, "row_index": 16, "cells": {"PhraseId": "Cue 016"}},
+                    {"index": 6, "row_index": 17, "cells": {"PhraseId": "Cue 017"}},
+                    {"index": 7, "row_index": 18, "cells": {"PhraseId": "Cue 018"}},
+                ],
+                "columns": list(columns or []),
+            }
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    result = await ui_operation_adapters(backend_provider)["ui.grid.select_identities"](
+        selector={"automation_id": "dataGrid"},
+        row_identities=["Cue 016", "Cue 017", "Cue 018"],
+        identity={"column": "PhraseId"},
+        columns=["PhraseId"],
+    )
+
+    assert result["status"] == "PASS"
+    assert backend.selector == {"automation_id": "dataGrid"}
+    assert backend.start_index == 5
+    assert backend.end_index == 7
+    assert result["selected_indices"] == [5, 6, 7]
+    assert result["selected_identities"] == ["Cue 016", "Cue 017", "Cue 018"]
     assert result["confirmed_selection"] is True
 
 

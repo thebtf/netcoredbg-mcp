@@ -25,6 +25,7 @@ class ActionSmokeSession:
         }
         self.drag_results: list[dict[str, Any]] = []
         self.grid_select_indices_results: list[dict[str, Any]] = []
+        self.grid_select_identities_results: list[dict[str, Any]] = []
         self.grid_state_results: list[dict[str, Any]] = []
         self.grid_ensure_visible_results: list[dict[str, Any]] = []
         self.grid_select_row_results: list[dict[str, Any]] = []
@@ -75,6 +76,16 @@ class ActionSmokeSession:
             "status": "PASS",
             "selected_indices": list(request.get("indices") or []),
             "selected_count": len(request.get("indices") or []),
+        }
+
+    async def grid_select_identities(self, **request: Any) -> dict[str, Any]:
+        self.calls.append(("grid_select_identities", request))
+        if self.grid_select_identities_results:
+            return self.grid_select_identities_results.pop(0)
+        return {
+            "status": "PASS",
+            "selected_identities": list(request.get("row_identities") or []),
+            "selected_count": len(request.get("row_identities") or []),
         }
 
     async def grid_get_state(self, **request: Any) -> dict[str, Any]:
@@ -140,6 +151,7 @@ def _runner(session: ActionSmokeSession) -> RuntimeSmokeRunner:
             "ui.grid.select_row": session.grid_select_row,
             "ui.grid.click_row": session.grid_click_row,
             "ui.grid.select_indices": session.grid_select_indices,
+            "ui.grid.select_identities": session.grid_select_identities,
             "debug.tracepoint_status": session.tracepoint_status,
         },
     )
@@ -1556,6 +1568,44 @@ async def test_v2_ui_grid_select_routes_non_contiguous_indices() -> None:
     assert select_call[1]["indices"] == [1, 4]
     assert action["route"] == "grid_select"
     assert action["indices"] == [1, 4]
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_grid_select_routes_row_identities_to_adapter() -> None:
+    session = ActionSmokeSession()
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "grid identity multi-select",
+            "cases": [
+                {
+                    "id": "grid_identity_multi_select",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.grid.select",
+                                "selector": {"automation_id": "CueDataGrid"},
+                                "row_identities": ["Cue 016", "Cue 017", "Cue 018"],
+                                "identity": {"column": "PhraseId"},
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    select_call = next(call for call in session.calls if call[0] == "grid_select_identities")
+    assert result["status"] == "PASS"
+    assert "ui.grid.select" in result["accepted_action_kinds"]
+    assert select_call[1]["selector"] == {"automation_id": "CueDataGrid"}
+    assert select_call[1]["row_identities"] == ["Cue 016", "Cue 017", "Cue 018"]
+    assert select_call[1]["identity"] == {"column": "PhraseId"}
+    assert action["route"] == "grid_select"
+    assert action["row_identities"] == ["Cue 016", "Cue 017", "Cue 018"]
 
 
 @pytest.mark.asyncio

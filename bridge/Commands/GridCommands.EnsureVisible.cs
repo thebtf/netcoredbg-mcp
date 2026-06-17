@@ -184,17 +184,33 @@ public static partial class GridCommands
         if (currentScan.Blocked is not null || currentScan.Match is not null)
             return currentScan;
 
-        var rewindLimit = maxScrolls + currentDownwardScrolls;
-        var rewound = false;
-        for (var rewindStep = 0; rewindStep < rewindLimit; rewindStep++)
+        var rewound = TryScrollToVerticalStart(scrollPattern, settleMs);
+        attempts.Add(new JsonObject
+        {
+            ["phase"] = "rewind_to_start",
+            ["succeeded"] = rewound,
+            ["vertical_scroll_percent"] = ScrollPercent(grid)
+        });
+
+        for (var rewindStep = 0; !rewound && rewindStep < maxScrolls; rewindStep++)
         {
             if (!ScrollOneViewport(scrollPattern, ScrollAmount.LargeDecrement, settleMs))
                 break;
-            rewound = true;
+            var percent = SafeVerticalScrollPercent(scrollPattern);
+            rewound = percent is not null && percent.Value <= ScrollPercentEpsilon;
         }
 
         if (!rewound)
-            return new RowSearchResult(null, null, attempts);
+        {
+            return new RowSearchResult(
+                null,
+                Blocked(
+                    "grid rewind-to-start failed before bounded scroll scan",
+                    RequestedRow(rowIndex, rowKey),
+                    new JsonObject { ["vertical_scroll_percent"] = ScrollPercent(grid) },
+                    "Use a DataGrid provider that supports ScrollPattern.SetScrollPercent, increase setup reliability, or choose a currently visible row."),
+                attempts);
+        }
 
         return ScanDownward(
             grid,
@@ -272,6 +288,25 @@ public static partial class GridCommands
         if (before is null || after is null)
             return false;
         return Math.Abs(after.Value - before.Value) > ScrollPercentEpsilon;
+    }
+
+    private static bool TryScrollToVerticalStart(IScrollPattern scrollPattern, int settleMs)
+    {
+        var before = SafeVerticalScrollPercent(scrollPattern);
+        try
+        {
+            scrollPattern.SetScrollPercent(ScrollPatternConstants.NoScroll, 0);
+        }
+        catch
+        {
+            return false;
+        }
+        if (settleMs > 0)
+            Thread.Sleep(settleMs);
+        var after = SafeVerticalScrollPercent(scrollPattern);
+        if (after is null)
+            return false;
+        return after.Value <= ScrollPercentEpsilon;
     }
 
     private static double? SafeVerticalScrollPercent(IScrollPattern scrollPattern)

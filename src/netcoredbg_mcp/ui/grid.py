@@ -300,6 +300,224 @@ async def select_grid_row(
     return result
 
 
+async def select_grid_rows_by_identities(
+    backend: Any,
+    selector: dict[str, Any],
+    row_identities: list[str],
+    *,
+    columns: list[str] | None = None,
+    identity: Mapping[str, Any] | None = None,
+    rows: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Select visible DataGrid rows by stable identity and confirm the selection."""
+    requested_identities = [str(item) for item in row_identities if str(item)]
+    identity_payload = _identity_payload(identity, columns)
+    evidence_columns = _identity_columns(identity_payload, columns)
+    if not requested_identities:
+        return {
+            "status": "BLOCKED",
+            "reason": "grid identity selection requires row identities",
+            "requested": {"row_identities": row_identities},
+            "accepted": {"row_identities": "non-empty list of unique row identities"},
+        }
+    if len(set(requested_identities)) != len(requested_identities):
+        return {
+            "status": "BLOCKED",
+            "reason": "grid identity selection contains duplicate identities",
+            "requested": {"row_identities": requested_identities},
+            "accepted": {"row_identities": "unique row identities"},
+        }
+
+    snapshot = await snapshot_grid(
+        backend,
+        selector,
+        rows=rows or {"visible_only": True},
+        columns=evidence_columns,
+    )
+    if not _passes(snapshot):
+        result = dict(snapshot) if isinstance(snapshot, dict) else {}
+        result["status"] = _blocked_status(result)
+        result.setdefault("reason", "grid identity selection visible row lookup failed")
+        result["requested"] = {"row_identities": requested_identities}
+        return result
+    if not isinstance(snapshot, dict):
+        return {
+            "status": "BLOCKED",
+            "reason": "grid identity selection snapshot returned non-object result",
+            "requested": {"row_identities": requested_identities},
+            "snapshot_result": snapshot,
+        }
+    visible_rows = snapshot.get("visible_rows")
+    if not isinstance(visible_rows, list):
+        return {
+            "status": "BLOCKED",
+            "reason": "grid visible row evidence unavailable",
+            "requested": {"row_identities": requested_identities},
+            "accepted": {"visible_rows": "list of visible row objects"},
+            "next_step": "Use a DataGrid backend that returns visible row evidence.",
+        }
+
+    resolved_rows: list[dict[str, Any]] = []
+    for row_identity in requested_identities:
+        matches = _matching_visible_rows(
+            visible_rows,
+            row_index=None,
+            row_key=row_identity,
+            identity=identity_payload,
+        )
+        if not matches:
+            return {
+                "status": "BLOCKED",
+                "reason": "grid row identity is not visible",
+                "requested": {
+                    "row_identity": row_identity,
+                    "row_identities": requested_identities,
+                },
+                "accepted": {"row": "currently visible unique row identity"},
+                "next_step": "Scroll the grid or choose visible row identities before selecting.",
+            }
+        if len(matches) > 1:
+            return {
+                "status": "AMBIGUOUS",
+                "reason": "grid row identity is ambiguous",
+                "requested": {
+                    "row_identity": row_identity,
+                    "row_identities": requested_identities,
+                },
+                "matches": [_compact_row_ref(row, identity_payload) for row in matches],
+                "next_step": "Disambiguate the row with a unique identity column.",
+            }
+        resolved_rows.append(matches[0])
+
+    selected_indices = [_visible_index(row) for row in resolved_rows]
+    if any(index is None for index in selected_indices):
+        return {
+            "status": "BLOCKED",
+            "reason": "resolved identity row has no visible index",
+            "requested": {"row_identities": requested_identities},
+            "resolved_rows": [_compact_row_ref(row, identity_payload) for row in resolved_rows],
+        }
+    indices = [int(index) for index in selected_indices if index is not None]
+    if len(set(indices)) != len(indices):
+        return {
+            "status": "BLOCKED",
+            "reason": "grid identity selection resolved duplicate visible indices",
+            "requested": {"row_identities": requested_identities},
+            "selected_indices": indices,
+            "resolved_rows": [_compact_row_ref(row, identity_payload) for row in resolved_rows],
+        }
+
+    selection = await _select_visible_indices(backend, selector, indices)
+    if not _passes(selection):
+        result = dict(selection) if isinstance(selection, dict) else {}
+        result["status"] = _blocked_status(result)
+        result.setdefault("reason", "grid identity selection failed")
+        result["requested"] = {"row_identities": requested_identities}
+        result["selected_indices"] = indices
+        result["resolved_rows"] = [_compact_row_ref(row, identity_payload) for row in resolved_rows]
+        return result
+
+    confirmation = await read_grid_selected_rows(backend, selector, columns=evidence_columns)
+    if not _passes(confirmation):
+        result = dict(confirmation) if isinstance(confirmation, dict) else {}
+        result["status"] = _blocked_status(result)
+        result.setdefault("reason", "selected identity confirmation failed")
+        result["confirmed_selection"] = False
+        result["selection_result"] = selection
+        return result
+    if not isinstance(confirmation, dict):
+        return {
+            "status": "BLOCKED",
+            "reason": "selected identity confirmation returned non-object result",
+            "confirmed_selection": False,
+            "selection_result": selection,
+            "confirmation_result": confirmation,
+        }
+    selected_rows = confirmation.get("selected_rows")
+    if not isinstance(selected_rows, list):
+        return {
+            "status": "BLOCKED",
+            "reason": "selected identity confirmation did not include selected_rows",
+            "confirmed_selection": False,
+            "selection_result": selection,
+            "confirmation_result": confirmation,
+        }
+    observed_identities = [
+        _row_identity(row, identity_payload)
+        for row in selected_rows
+        if isinstance(row, Mapping)
+    ]
+    if observed_identities != requested_identities:
+        return {
+            "status": "FAIL",
+            "reason": "selected identity confirmation failed",
+            "confirmed_selection": False,
+            "selected_identities": requested_identities,
+            "observed_selected_identities": observed_identities,
+            "selected_rows": selected_rows,
+            "selection_result": selection,
+            "confirmation_result": confirmation,
+        }
+
+    result = dict(selection) if isinstance(selection, dict) else {}
+    result["status"] = "PASS"
+    result["confirmed_selection"] = True
+    result["selected_indices"] = indices
+    result["selected_identities"] = requested_identities
+    result["resolved_rows"] = [_compact_row_ref(row, identity_payload) for row in resolved_rows]
+    result["selected_rows"] = selected_rows
+    return result
+
+
+async def _select_visible_indices(
+    backend: Any,
+    selector: dict[str, Any],
+    indices: list[int],
+) -> dict[str, Any]:
+    contiguous = _contiguous_index_range(indices)
+    if contiguous is not None:
+        start_index, end_index = contiguous
+        return await select_grid_range(backend, selector, start_index, end_index)
+
+    automation_id = selector.get("automation_id") or selector.get("automationId")
+    multi_select = getattr(backend, "multi_select", None)
+    if not automation_id or not callable(multi_select):
+        return {
+            "status": "BLOCKED",
+            "reason": "non-contiguous grid identity selection requires multi-select backend",
+            "requested": {"selected_indices": indices},
+            "accepted": {
+                "backend": (
+                    "grid_select_range for contiguous rows or multi_select "
+                    "for non-contiguous rows"
+                )
+            },
+        }
+    selected_count = await multi_select(str(automation_id), indices)
+    if selected_count < len(indices):
+        return {
+            "status": "BLOCKED",
+            "reason": "multi-select backend did not select all requested identity rows",
+            "requested_indices": indices,
+            "selected_count": selected_count,
+        }
+    return {
+        "status": "PASS",
+        "selected_indices": indices,
+        "selected_count": selected_count,
+    }
+
+
+def _contiguous_index_range(indices: list[int]) -> tuple[int, int] | None:
+    if not indices:
+        return None
+    start = min(indices)
+    end = max(indices)
+    if sorted(indices) != list(range(start, end + 1)):
+        return None
+    return start, end
+
+
 async def click_grid_row(
     backend: Any,
     selector: dict[str, Any],
