@@ -145,6 +145,14 @@ OPERATION_SCHEMAS: dict[str, OperationSchema] = {
         "ui.text.read",
         ("selector",),
     ),
+    "ui.text.get_state": OperationSchema(
+        "ui.text.get_state",
+        ("selector",),
+    ),
+    "ui.text.assert_selection": OperationSchema(
+        "ui.text.assert_selection",
+        ("selector",),
+    ),
     "ui.get_property": OperationSchema(
         "ui.get_property",
         ("selector",),
@@ -899,6 +907,13 @@ def _validate_op_args(
     elif op_name == "ui.key_sequence":
         if "keys" in args and not isinstance(args["keys"], list):
             errors.append(f"{prefix}.keys must be a list for op {op_name}")
+    elif op_name == "ui.text.assert_selection":
+        if args.get("selection_start") is None or args.get("selection_end") is None:
+            errors.append(
+                f"{prefix}.selection_start and selection_end are required for op {op_name}"
+            )
+        _validate_int_arg(prefix, op_name, args, "selection_start", errors)
+        _validate_int_arg(prefix, op_name, args, "selection_end", errors)
     elif op_name == "ui.get_property":
         has_property_argument = args.get("property") is not None
         has_property_name_argument = args.get("property_name") is not None
@@ -924,7 +939,9 @@ def _validate_int_arg(
     field_name: str,
     errors: list[str],
 ) -> None:
-    if field_name in args and not isinstance(args[field_name], int):
+    if field_name in args and (
+        isinstance(args[field_name], bool) or not isinstance(args[field_name], int)
+    ):
         errors.append(f"{prefix}.{field_name} must be an integer for op {op_name}")
 
 

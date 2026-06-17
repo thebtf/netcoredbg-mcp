@@ -1,5 +1,7 @@
 using System.Text.Json.Nodes;
+using FlaUI.Core;
 using FlaUI.Core.AutomationElements;
+using FlaUI.Core.Definitions;
 using FlaUI.UIA3;
 
 namespace FlaUIBridge.Commands;
@@ -131,11 +133,57 @@ public static class SnapshotCommands
     {
         try
         {
+            if (element.Patterns.Text.TryGetPattern(out var textPattern))
+            {
+                var ranges = textPattern.GetSelection();
+                if (ranges is not null && ranges.Length > 0)
+                {
+                    var range = ranges[0];
+                    var start = TextOffset(
+                        textPattern.DocumentRange,
+                        range,
+                        TextPatternRangeEndpoint.Start);
+                    var end = TextOffset(
+                        textPattern.DocumentRange,
+                        range,
+                        TextPatternRangeEndpoint.End);
+                    var selectedText = range.GetText(-1) ?? "";
+                    return new JsonObject
+                    {
+                        ["supported"] = true,
+                        ["source"] = "TextPattern",
+                        ["start"] = start,
+                        ["end"] = end,
+                        ["length"] = Math.Max(0, end - start),
+                        ["selected_text"] = selectedText,
+                        ["caret_index"] = end,
+                        ["range_count"] = ranges.Length,
+                    };
+                }
+            }
+        }
+        catch { /* unsupported */ }
+
+        try
+        {
             if (element.Patterns.SelectionItem.TryGetPattern(out var pattern))
                 return new JsonObject { ["selected"] = pattern.IsSelected.Value };
         }
         catch { /* unsupported */ }
         return new JsonObject { ["supported"] = false };
+    }
+
+    private static int TextOffset(
+        ITextRange documentRange,
+        ITextRange targetRange,
+        TextPatternRangeEndpoint targetEndpoint)
+    {
+        var prefix = documentRange.Clone();
+        prefix.MoveEndpointByRange(
+            TextPatternRangeEndpoint.End,
+            targetRange,
+            targetEndpoint);
+        return (prefix.GetText(-1) ?? "").Length;
     }
 
     private static string? ValueState(AutomationElement element)

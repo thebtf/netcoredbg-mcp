@@ -745,6 +745,141 @@ async def test_ui_text_read_adapter_extracts_bounded_text_without_assertion_args
 
 
 @pytest.mark.asyncio
+async def test_ui_text_get_state_adapter_reads_bounded_textbox_state() -> None:
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.state_calls: list[dict[str, Any]] = []
+
+        async def textbox_state(self, selector: dict[str, Any]) -> dict[str, Any]:
+            self.state_calls.append(dict(selector))
+            return {
+                "status": "PASS",
+                "text": "Fixture cue one",
+                "value": "Fixture cue one",
+                "selection": {
+                    "start": 3,
+                    "end": 10,
+                    "length": 7,
+                    "selected_text": "ture cu",
+                },
+                "caret_index": 10,
+                "focus_within": True,
+                "enabled": True,
+                "visible": True,
+                "source": "TextPattern",
+                "full_tree": {"must": "not leak"},
+            }
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    result = await ui_operation_adapters(backend_provider)["ui.text.get_state"](
+        selector={"automation_id": "CueTextBox"},
+    )
+
+    assert result == {
+        "status": "PASS",
+        "text": "Fixture cue one",
+        "value": "Fixture cue one",
+        "selection": {
+            "start": 3,
+            "end": 10,
+            "length": 7,
+            "selected_text": "ture cu",
+        },
+        "caret_index": 10,
+        "focus_within": True,
+        "enabled": True,
+        "visible": True,
+        "source": "TextPattern",
+        "selector": {"automation_id": "CueTextBox"},
+    }
+    assert backend.state_calls == [{"automation_id": "CueTextBox"}]
+
+
+@pytest.mark.asyncio
+async def test_ui_text_assert_selection_adapter_reports_expected_and_actual_ranges() -> None:
+    class FakeBackend:
+        async def textbox_state(self, selector: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "text": "Fixture cue one",
+                "selection": {
+                    "start": 3,
+                    "end": 10,
+                    "length": 7,
+                    "selected_text": "ture cu",
+                },
+                "source": "TextPattern",
+                "full_tree": {"must": "not leak"},
+            }
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.text.assert_selection"](
+        selector={"automation_id": "CueTextBox"},
+        selection_start=3,
+        selection_end=10,
+    )
+
+    assert result == {
+        "status": "PASS",
+        "matched": True,
+        "expected_selection": {"start": 3, "end": 10},
+        "actual_selection": {
+            "start": 3,
+            "end": 10,
+            "length": 7,
+            "selected_text": "ture cu",
+        },
+        "selector": {"automation_id": "CueTextBox"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_ui_text_assert_selection_adapter_fails_with_observed_range() -> None:
+    class FakeBackend:
+        async def textbox_state(self, selector: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "text": "Fixture cue one",
+                "selection": {
+                    "start": 0,
+                    "end": 0,
+                    "length": 0,
+                    "selected_text": "",
+                },
+                "source": "TextPattern",
+            }
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.text.assert_selection"](
+        selector={"automation_id": "CueTextBox"},
+        selection_start=3,
+        selection_end=10,
+    )
+
+    assert result == {
+        "status": "FAIL",
+        "matched": False,
+        "reason": "selection mismatch",
+        "expected_selection": {"start": 3, "end": 10},
+        "actual_selection": {
+            "start": 0,
+            "end": 0,
+            "length": 0,
+            "selected_text": "",
+        },
+        "selector": {"automation_id": "CueTextBox"},
+    }
+
+
+@pytest.mark.asyncio
 async def test_ui_get_property_name_reads_element_property_not_text() -> None:
     class FakeBackend:
         def __init__(self) -> None:
