@@ -30,7 +30,9 @@ class DocsExampleSmokeSession:
     def __init__(self) -> None:
         self.runtime_smoke = RuntimeSmokeSession()
         self.drag_requests: list[dict[str, Any]] = []
+        self.ensure_visible_requests: list[dict[str, Any]] = []
         self.viewport_requests: list[dict[str, Any]] = []
+        self.operation_order: list[str] = []
         self.drag_results: deque[dict[str, Any]] = deque(
             [
                 {
@@ -111,10 +113,24 @@ class DocsExampleSmokeSession:
         )
 
     async def drag(self, **request: Any) -> dict[str, Any]:
+        self.operation_order.append("ui.drag")
         self.drag_requests.append(request)
         return self.drag_results.popleft()
 
+    async def grid_ensure_visible(self, **request: Any) -> dict[str, Any]:
+        self.operation_order.append("ui.grid.ensure_visible")
+        self.ensure_visible_requests.append(request)
+        return {
+            "status": "PASS",
+            "already_visible": False,
+            "resolved_row": {
+                "identity": request.get("row", {}).get("identity"),
+                "index": 10,
+            },
+        }
+
     async def grid_viewport(self, **request: Any) -> dict[str, Any]:
+        self.operation_order.append("ui.grid.viewport")
         self.viewport_requests.append(request)
         return self.viewport_results.popleft()
 
@@ -211,10 +227,27 @@ def assert_drag_drop_docs_contract(plan: dict[str, Any]) -> None:
     assert plan["schema"] == "netcoredbg.runtime_smoke.v2"
     assert validate_plan(plan) == []
 
+    actions = _actions(plan)
     drag_actions = [action for action in _actions(plan) if action.get("kind") == "ui.drag"]
     assert drag_actions
     assert any(action.get("source", {}).get("row_identity") for action in drag_actions)
     assert all(action.get("identity", {}).get("column") for action in drag_actions)
+    first_row_drag_index, first_row_drag = next(
+        (index, action)
+        for index, action in enumerate(actions)
+        if action.get("kind") == "ui.drag" and action.get("source", {}).get("row_identity")
+    )
+    first_drag_selector = first_row_drag.get("source", {}).get("selector")
+    first_drag_identity = first_row_drag.get("source", {}).get("row_identity")
+    first_drag_identity_column = first_row_drag.get("identity", {}).get("column")
+    assert any(
+        index < first_row_drag_index
+        and action.get("kind") == "ui.grid.ensure_visible"
+        and action.get("selector") == first_drag_selector
+        and action.get("row", {}).get("identity") == first_drag_identity
+        and action.get("identity", {}).get("column") == first_drag_identity_column
+        for index, action in enumerate(actions)
+    )
     assert any(
         action.get("expect", {}).get("selected_payload_preserved") is True
         for action in drag_actions
@@ -341,6 +374,19 @@ def test_drag_drop_grid_example_rejects_missing_row_identity_checks() -> None:
         assert_drag_drop_docs_contract(plan)
 
 
+def test_drag_drop_grid_example_rejects_missing_ensure_visible_setup() -> None:
+    plan = copy.deepcopy(_load_example())
+    transitions = plan["cases"][0]["transitions"]
+    plan["cases"][0]["transitions"] = [
+        transition
+        for transition in transitions
+        if transition.get("action", {}).get("kind") != "ui.grid.ensure_visible"
+    ]
+
+    with pytest.raises(AssertionError):
+        assert_drag_drop_docs_contract(plan)
+
+
 @pytest.mark.asyncio
 async def test_drag_drop_grid_example_runs_through_v2_parser_with_fake_ui_evidence() -> None:
     session = DocsExampleSmokeSession()
@@ -349,16 +395,30 @@ async def test_drag_drop_grid_example_runs_through_v2_parser_with_fake_ui_eviden
         session,
         service_adapters={
             "ui.drag": session.drag,
+            "ui.grid.ensure_visible": session.grid_ensure_visible,
             "ui.grid.viewport": session.grid_viewport,
         },
     ).run(_load_example())
 
     assert result["status"] == "PASS"
+    assert "ui.grid.ensure_visible" in result["accepted_action_kinds"]
     assert "ui.drag" in result["accepted_action_kinds"]
     assert "ui.grid.viewport" in result["accepted_probe_kinds"]
-    assert result["action_count"] == 2
+    assert result["action_count"] == 3
+    assert len(session.ensure_visible_requests) == 1
     assert len(session.drag_requests) == 2
     assert len(session.viewport_requests) == 4
+    assert session.operation_order.index("ui.grid.ensure_visible") < session.operation_order.index(
+        "ui.drag"
+    )
+    assert session.ensure_visible_requests[0]["selector"] == {
+        "automation_id": "DataGridUnderTest",
+        "control_type": "DataGrid",
+    }
+    assert session.ensure_visible_requests[0]["row"] == {"identity": "ROW-010"}
+    assert session.ensure_visible_requests[0]["identity"] == {"column": "StableRowId"}
+    assert session.ensure_visible_requests[0]["rows"] == {"visible_only": True, "max": 20}
+    assert session.ensure_visible_requests[0]["columns"] == ["StableRowId"]
     assert session.drag_requests[0]["source"]["row_identity"] == "ROW-010"
     assert session.drag_requests[0]["path"] != session.drag_requests[1]["path"]
 

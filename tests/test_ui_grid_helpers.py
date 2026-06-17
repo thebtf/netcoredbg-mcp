@@ -233,6 +233,29 @@ async def test_click_grid_row_forwards_columns_to_backend() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ensure_grid_row_visible_returns_already_visible_without_backend_realize() -> None:
+    backend = FakeGridBackend()
+    selector = {"automation_id": "CueGrid"}
+
+    result = await grid_helpers.ensure_grid_row_visible(
+        backend,
+        selector,
+        row_key="Fixture cue two",
+        identity={"column": "Phrase"},
+        rows={"visible_only": True},
+        columns=["Phrase"],
+    )
+
+    assert result["status"] == "PASS"
+    assert result["already_visible"] is True
+    assert result["resolved_row"] == {
+        "index": 1,
+        "identity": "Fixture cue two",
+    }
+    assert ("snapshot", {"automation_id": "CueGrid"}) in backend.calls
+
+
+@pytest.mark.asyncio
 async def test_grid_snapshot_and_assert_rows_require_cell_text_evidence() -> None:
     backend = FakeGridBackend()
     selector = {"automation_id": "CueGrid"}
@@ -336,6 +359,25 @@ async def test_pywinauto_backend_returns_unsupported_for_grid_helpers() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pywinauto_backend_returns_unsupported_for_grid_ensure_visible() -> None:
+    backend = PywinautoBackend()
+
+    result = await backend.grid_ensure_visible(
+        {"automation_id": "CueGrid"},
+        row_key="Cue 042",
+        identity={"column": "PhraseId"},
+        rows={"visible_only": True},
+        columns=["PhraseId"],
+        max_scrolls=11,
+        scroll_settle_ms=30,
+    )
+
+    assert result["status"] == "UNSUPPORTED"
+    assert result["unsupported"] is True
+    assert result["backend"] == "pywinauto"
+
+
+@pytest.mark.asyncio
 async def test_flaui_backend_forwards_grid_helpers_to_bridge() -> None:
     backend = _make_flaui()
     backend._client.call.return_value = {"status": "PASS", "visible_rows": []}
@@ -371,6 +413,40 @@ async def test_flaui_backend_forwards_grid_helpers_to_bridge() -> None:
     assert calls[5].args[1]["columns"] == ["Start"]
     assert calls[6].args[0] == "grid_assert_rows"
     assert calls[6].args[1]["columns"] == ["Start"]
+
+
+@pytest.mark.asyncio
+async def test_flaui_backend_forwards_grid_ensure_visible_to_bridge() -> None:
+    backend = _make_flaui()
+    backend._client.call.return_value = {
+        "status": "PASS",
+        "already_visible": False,
+        "resolved_row": {"index": 0, "row_index": 42, "cells": {"PhraseId": "Cue 042"}},
+    }
+
+    result = await backend.grid_ensure_visible(
+        {"automation_id": "CueGrid"},
+        row_key="Cue 042",
+        identity={"column": "PhraseId"},
+        rows={"visible_only": True},
+        columns=["PhraseId"],
+        max_scrolls=11,
+        scroll_settle_ms=30,
+    )
+
+    assert result["status"] == "PASS"
+    backend._client.call.assert_awaited_once_with(
+        "grid_ensure_visible",
+        {
+            "selector": {"automationId": "CueGrid"},
+            "row_key": "Cue 042",
+            "identity": {"column": "PhraseId"},
+            "rows": {"visible_only": True},
+            "columns": ["PhraseId"],
+            "max_scrolls": 11,
+            "scroll_settle_ms": 30,
+        },
+    )
 
 
 @pytest.mark.asyncio
@@ -414,16 +490,25 @@ def test_bridge_find_element_rejects_invalid_control_type() -> None:
 
 
 def test_bridge_grid_builds_cell_text_evidence_for_rows() -> None:
-    command = (PROJECT_ROOT / "bridge" / "Commands" / "GridCommands.cs").read_text(
+    grid_command = (PROJECT_ROOT / "bridge" / "Commands" / "GridCommands.cs").read_text(
         encoding="utf-8",
     )
+    ensure_visible_command = (
+        PROJECT_ROOT / "bridge" / "Commands" / "GridCommands.EnsureVisible.cs"
+    ).read_text(
+        encoding="utf-8",
+    )
+    command = grid_command + "\n" + ensure_visible_command
     handler = (PROJECT_ROOT / "bridge" / "JsonRpcHandler.cs").read_text(
         encoding="utf-8",
     )
 
+    assert "public static partial class GridCommands" in grid_command
+    assert "public static partial class GridCommands" in ensure_visible_command
     assert '["grid_snapshot"] = GridCommands.Snapshot' in handler
     assert '["grid_assert_rows"] = GridCommands.AssertRows' in handler
     assert '["grid_click_row"] = GridCommands.ClickRow' in handler
+    assert '["grid_ensure_visible"] = GridCommands.EnsureVisible' in handler
     assert '["cells"]' in command
     assert '["grid_bounds"] = SafeRect(grid)' in command
     assert '["bounds"] = SafeRect(row)' in command
@@ -433,6 +518,21 @@ def test_bridge_grid_builds_cell_text_evidence_for_rows() -> None:
     assert "new Grid(grid.FrameworkAutomationElement)" in command
     assert "gridElement.ColumnHeaders" in command
     assert "public static JsonNode ClickRow(" in command
+    assert "public static JsonNode EnsureVisible(" in command
+    assert "ScrollIntoView()" in command
+    assert "ScanForRowWithBoundedScroll" in command
+    assert "DefaultMaxEnsureVisibleScrolls" in command
+    assert "ReadBoundedInt(" in command
+    assert "ScrollAmount.LargeDecrement" in command
+    assert "ScrollAmount.LargeIncrement" in command
+    assert "SafeVerticallyScrollable(scrollPattern)" in command
+    assert "grid vertical scrollability evidence unavailable" in command
+    assert "grid row ScrollItemPattern failed" in command
+    assert "scrollItemPattern.ScrollIntoView();" in command
+    assert "grid row identity is not present after bounded scroll scan" in command
+    assert "grid bounded ensure-visible scan requires ScrollPattern" in command
+    assert "grid row identity is not present in realized rows" not in command
+    assert "if (!scrollPattern.VerticallyScrollable.Value)" not in command
     assert "row bounds are empty" in command
     assert "new GridRow(row.FrameworkAutomationElement)" in command
     assert "gridRow.Cells" in command

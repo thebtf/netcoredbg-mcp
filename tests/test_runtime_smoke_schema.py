@@ -36,6 +36,14 @@ class SchemaSmokeSession:
         self.adapter_calls.append(("ui.grid.get_state", request))
         return {"status": "PASS", "visible_rows": [], "selected_rows": []}
 
+    async def grid_ensure_visible(self, **request: Any) -> dict[str, Any]:
+        self.adapter_calls.append(("ui.grid.ensure_visible", request))
+        return {
+            "status": "PASS",
+            "already_visible": False,
+            "resolved_row": dict(request.get("row") or {}),
+        }
+
     async def grid_select_row(self, **request: Any) -> dict[str, Any]:
         self.adapter_calls.append(("ui.grid.select_row", request))
         return {"status": "PASS", "selected_row": dict(request.get("row") or {})}
@@ -217,6 +225,49 @@ def test_runtime_smoke_schema_accepts_ui_text_get_state_operation() -> None:
 
 
 @pytest.mark.asyncio
+async def test_legacy_runtime_smoke_grid_ensure_visible_reaches_adapter() -> None:
+    session = SchemaSmokeSession()
+    plan = {
+        "schema": "netcoredbg.runtime_smoke.v1",
+        "steps": [
+            {
+                "op": "ui.grid.ensure_visible",
+                "selector": {"automation_id": "CueDataGrid"},
+                "row": {"identity": "Cue 042"},
+                "identity": {"column": "PhraseId"},
+                "rows": {"visible_only": True},
+                "columns": ["PhraseId"],
+                "max_scrolls": 11,
+                "scroll_settle_ms": 30,
+            }
+        ],
+    }
+
+    result = await RuntimeSmokeRunner(
+        session,
+        service_adapters={"ui.grid.ensure_visible": session.grid_ensure_visible},
+    ).run(plan)
+
+    assert validate_plan(plan) == []
+    assert result["status"] == "PASS"
+    assert "validation_errors" not in result
+    assert session.adapter_calls == [
+        (
+            "ui.grid.ensure_visible",
+            {
+                "selector": {"automation_id": "CueDataGrid"},
+                "row": {"identity": "Cue 042"},
+                "identity": {"column": "PhraseId"},
+                "rows": {"visible_only": True},
+                "columns": ["PhraseId"],
+                "max_scrolls": 11,
+                "scroll_settle_ms": 30,
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_legacy_runtime_smoke_grid_state_actions_reach_adapters() -> None:
     session = SchemaSmokeSession()
     plan = {
@@ -315,6 +366,33 @@ def test_legacy_runtime_smoke_grid_state_actions_validate_arguments() -> None:
         "steps[0].identity must be an object for op ui.grid.get_state",
         "steps[1].row must be an object for op ui.grid.select_row",
         "steps[2].column must be a string for op ui.grid.click_row",
+    ]
+
+
+def test_legacy_runtime_smoke_grid_ensure_visible_validates_arguments() -> None:
+    assert validate_plan(
+        {
+            "steps": [
+                {
+                    "op": "ui.grid.ensure_visible",
+                    "selector": [],
+                    "row": "Cue 042",
+                    "identity": [],
+                    "rows": [],
+                    "columns": ["PhraseId", 7],
+                    "max_scrolls": "far",
+                    "scroll_settle_ms": False,
+                },
+            ],
+        }
+    ) == [
+        "steps[0].selector must be an object for op ui.grid.ensure_visible",
+        "steps[0].rows must be an object for op ui.grid.ensure_visible",
+        "steps[0].columns must be a list of strings for op ui.grid.ensure_visible",
+        "steps[0].identity must be an object for op ui.grid.ensure_visible",
+        "steps[0].row must be an object for op ui.grid.ensure_visible",
+        "steps[0].max_scrolls must be an integer for op ui.grid.ensure_visible",
+        "steps[0].scroll_settle_ms must be an integer for op ui.grid.ensure_visible",
     ]
 
 

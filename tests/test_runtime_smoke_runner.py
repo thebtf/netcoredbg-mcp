@@ -3236,6 +3236,105 @@ async def test_ui_operation_adapters_grid_click_row_requires_backend_click_primi
 
 
 @pytest.mark.asyncio
+async def test_ui_operation_adapters_grid_ensure_visible_confirms_after_backend_setup() -> None:
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.snapshots = [
+                {
+                    "status": "PASS",
+                    "visible_rows": [
+                        {
+                            "index": 0,
+                            "row_index": 18,
+                            "cells": {"PhraseId": "Cue 018"},
+                        }
+                    ],
+                },
+                {
+                    "status": "PASS",
+                    "visible_rows": [
+                        {
+                            "index": 0,
+                            "row_index": 42,
+                            "cells": {"PhraseId": "Cue 042"},
+                        }
+                    ],
+                },
+            ]
+            self.ensure_calls: list[dict[str, Any]] = []
+
+        async def grid_snapshot(
+            self,
+            selector: dict[str, Any],
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            snapshot = self.snapshots.pop(0)
+            snapshot["selector"] = dict(selector)
+            snapshot["rows"] = dict(rows or {})
+            snapshot["columns"] = list(columns or [])
+            return snapshot
+
+        async def grid_ensure_visible(
+            self,
+            selector: dict[str, Any],
+            *,
+            row_key: str,
+            identity: dict[str, Any],
+            rows: dict[str, Any],
+            columns: list[str],
+            max_scrolls: int | None = None,
+            scroll_settle_ms: int | None = None,
+        ) -> dict[str, Any]:
+            self.ensure_calls.append(
+                {
+                    "selector": dict(selector),
+                    "row_key": row_key,
+                    "identity": dict(identity),
+                    "rows": dict(rows),
+                    "columns": list(columns),
+                    "max_scrolls": max_scrolls,
+                    "scroll_settle_ms": scroll_settle_ms,
+                }
+            )
+            return {"status": "PASS", "realized": True}
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    result = await ui_operation_adapters(backend_provider)["ui.grid.ensure_visible"](
+        selector={"automation_id": "dataGrid"},
+        row={"identity": "Cue 042"},
+        identity={"column": "PhraseId"},
+        rows={"visible_only": True},
+        columns=["PhraseId"],
+        max_scrolls=11,
+        scroll_settle_ms=30,
+    )
+
+    assert result["status"] == "PASS"
+    assert result["already_visible"] is False
+    assert result["resolved_row"] == {
+        "index": 0,
+        "row_index": 42,
+        "identity": "Cue 042",
+    }
+    assert backend.ensure_calls == [
+        {
+            "selector": {"automation_id": "dataGrid"},
+            "row_key": "Cue 042",
+            "identity": {"column": "PhraseId"},
+            "rows": {"visible_only": True},
+            "columns": ["PhraseId"],
+            "max_scrolls": 11,
+            "scroll_settle_ms": 30,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_ui_operation_adapters_filter_grid_viewport_rows_by_grid_bounds() -> None:
     class FakeBackend:
         async def grid_snapshot(

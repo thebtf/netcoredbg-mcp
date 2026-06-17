@@ -95,6 +95,106 @@ async def read_grid_state(
     return result
 
 
+async def ensure_grid_row_visible(
+    backend: Any,
+    selector: dict[str, Any],
+    row_index: int | None = None,
+    *,
+    row_key: str | None = None,
+    identity: Mapping[str, Any] | None = None,
+    rows: dict[str, Any] | None = None,
+    columns: list[str] | None = None,
+    max_scrolls: int | None = None,
+    scroll_settle_ms: int | None = None,
+) -> dict[str, Any]:
+    """Make a DataGrid row visible by explicit row request and confirm it."""
+    identity_payload = _identity_payload(identity, columns)
+    evidence_columns = _identity_columns(identity_payload, columns)
+    requested = {"row_index": row_index, "row_key": row_key}
+
+    resolved, blocked = await resolve_visible_grid_row(
+        backend,
+        selector,
+        row_index=row_index,
+        row_key=row_key,
+        identity=identity_payload,
+        rows=rows,
+        columns=evidence_columns,
+    )
+    if blocked is None:
+        return {
+            "status": "PASS",
+            "already_visible": True,
+            "resolved_row": _compact_row_ref(resolved, identity_payload),
+        }
+    if blocked.get("reason") != "grid row is not visible":
+        return blocked
+
+    ensure_visible = getattr(backend, "grid_ensure_visible", None)
+    if not callable(ensure_visible):
+        return {
+            "status": "BLOCKED",
+            "reason": "grid ensure-visible unavailable",
+            "requested": {"adapter": "ui.grid.ensure_visible", **requested},
+            "accepted": {"backend": "DataGrid backend with grid_ensure_visible"},
+            "next_step": "Use a FlaUI bridge backend that can realize or scroll grid rows.",
+            "lookup_result": blocked,
+        }
+
+    ensure_kwargs: dict[str, Any] = {
+        "identity": identity_payload,
+        "rows": dict(rows or {"visible_only": True}),
+        "columns": evidence_columns,
+    }
+    if row_key is not None:
+        ensure_kwargs["row_key"] = row_key
+    if row_index is not None:
+        ensure_kwargs["row_index"] = row_index
+    if max_scrolls is not None:
+        ensure_kwargs["max_scrolls"] = max_scrolls
+    if scroll_settle_ms is not None:
+        ensure_kwargs["scroll_settle_ms"] = scroll_settle_ms
+
+    ensure_result = await ensure_visible(dict(selector), **ensure_kwargs)
+    if not isinstance(ensure_result, dict):
+        return {
+            "status": "BLOCKED",
+            "reason": "grid ensure-visible returned non-object result",
+            "requested": requested,
+            "ensure_result": ensure_result,
+        }
+    if not _passes(ensure_result):
+        result = dict(ensure_result)
+        result["status"] = _blocked_status(result)
+        result.setdefault("reason", "grid ensure-visible backend did not pass")
+        result.setdefault("requested", requested)
+        return result
+
+    confirmed, confirm_blocked = await resolve_visible_grid_row(
+        backend,
+        selector,
+        row_index=row_index,
+        row_key=row_key,
+        identity=identity_payload,
+        rows=rows,
+        columns=evidence_columns,
+    )
+    if confirm_blocked is not None:
+        result = dict(confirm_blocked)
+        result["status"] = _blocked_status(result)
+        if result.get("reason") == "grid row is not visible":
+            result["reason"] = "grid row is not visible after ensure_visible"
+        result["requested"] = requested
+        result["ensure_result"] = ensure_result
+        return result
+
+    output = dict(ensure_result)
+    output["status"] = "PASS"
+    output["already_visible"] = False
+    output["resolved_row"] = _compact_row_ref(confirmed, identity_payload)
+    return output
+
+
 async def select_grid_range(
     backend: Any,
     selector: dict[str, Any],
@@ -116,14 +216,16 @@ async def select_grid_row(
     rows: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Select one currently visible DataGrid row and confirm the selection."""
+    identity_payload = _identity_payload(identity, columns)
+    evidence_columns = _identity_columns(identity_payload, columns)
     resolved, blocked = await resolve_visible_grid_row(
         backend,
         selector,
         row_index=row_index,
         row_key=row_key,
-        identity=identity,
+        identity=identity_payload,
         rows=rows,
-        columns=columns,
+        columns=evidence_columns,
     )
     if blocked is not None:
         return blocked
@@ -132,7 +234,7 @@ async def select_grid_row(
         return {
             "status": "BLOCKED",
             "reason": "resolved row has no visible index",
-            "resolved_row": _compact_row_ref(resolved, identity),
+            "resolved_row": _compact_row_ref(resolved, identity_payload),
         }
 
     selection = await select_grid_range(backend, selector, visible_index, visible_index)
@@ -140,16 +242,16 @@ async def select_grid_row(
         result = dict(selection) if isinstance(selection, dict) else {}
         result["status"] = _blocked_status(result)
         result.setdefault("reason", "grid row selection failed")
-        result["resolved_row"] = _compact_row_ref(resolved, identity)
+        result["resolved_row"] = _compact_row_ref(resolved, identity_payload)
         return result
 
-    confirmation = await read_grid_selected_rows(backend, selector, columns=columns)
+    confirmation = await read_grid_selected_rows(backend, selector, columns=evidence_columns)
     if not _passes(confirmation):
         result = dict(confirmation) if isinstance(confirmation, dict) else {}
         result["status"] = _blocked_status(result)
         result.setdefault("reason", "selected row confirmation failed")
         result["confirmed_selection"] = False
-        result["resolved_row"] = _compact_row_ref(resolved, identity)
+        result["resolved_row"] = _compact_row_ref(resolved, identity_payload)
         result["selection_result"] = selection
         return result
     if not isinstance(confirmation, dict):
@@ -157,7 +259,7 @@ async def select_grid_row(
             "status": "BLOCKED",
             "reason": "selected row confirmation returned non-object result",
             "confirmed_selection": False,
-            "resolved_row": _compact_row_ref(resolved, identity),
+            "resolved_row": _compact_row_ref(resolved, identity_payload),
             "selection_result": selection,
             "confirmation_result": confirmation,
         }
@@ -168,7 +270,7 @@ async def select_grid_row(
             "status": "BLOCKED",
             "reason": "selected row confirmation did not include selected_rows",
             "confirmed_selection": False,
-            "resolved_row": _compact_row_ref(resolved, identity),
+            "resolved_row": _compact_row_ref(resolved, identity_payload),
             "selection_result": selection,
             "confirmation_result": confirmation,
         }
@@ -182,7 +284,7 @@ async def select_grid_row(
             "status": "FAIL",
             "reason": "selected row confirmation failed",
             "confirmed_selection": False,
-            "resolved_row": _compact_row_ref(resolved, identity),
+            "resolved_row": _compact_row_ref(resolved, identity_payload),
             "observed_selected_indices": observed,
             "selected_rows": selected_rows,
             "selection_result": selection,
@@ -192,7 +294,7 @@ async def select_grid_row(
     result = dict(selection) if isinstance(selection, dict) else {}
     result["status"] = "PASS"
     result["confirmed_selection"] = True
-    result["resolved_row"] = _compact_row_ref(resolved, identity)
+    result["resolved_row"] = _compact_row_ref(resolved, identity_payload)
     result["selected_rows"] = selected_rows
     result["observed_selected_indices"] = observed
     return result
@@ -210,13 +312,14 @@ async def click_grid_row(
     rows: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Click one currently visible DataGrid row through a backend primitive."""
-    evidence_columns = _identity_columns(identity, columns)
+    identity_payload = _identity_payload(identity, columns)
+    evidence_columns = _identity_columns(identity_payload, columns)
     resolved, blocked = await resolve_visible_grid_row(
         backend,
         selector,
         row_index=row_index,
         row_key=row_key,
-        identity=identity,
+        identity=identity_payload,
         rows=rows,
         columns=evidence_columns,
     )
@@ -227,7 +330,7 @@ async def click_grid_row(
         return {
             "status": "BLOCKED",
             "reason": "resolved row has no visible index",
-            "resolved_row": _compact_row_ref(resolved, identity),
+            "resolved_row": _compact_row_ref(resolved, identity_payload),
         }
 
     click_row = getattr(backend, "grid_click_row", None)
@@ -238,7 +341,7 @@ async def click_grid_row(
             "requested": {"adapter": "ui.grid.click_row"},
             "accepted": {"backend": "DataGrid backend with grid_click_row"},
             "next_step": "Use a FlaUI bridge backend that can click resolved grid rows.",
-            "resolved_row": _compact_row_ref(resolved, identity),
+            "resolved_row": _compact_row_ref(resolved, identity_payload),
         }
     result = await click_row(
         dict(selector),
@@ -250,12 +353,12 @@ async def click_grid_row(
         return {
             "status": "BLOCKED",
             "reason": "grid row click returned non-object result",
-            "resolved_row": _compact_row_ref(resolved, identity),
+            "resolved_row": _compact_row_ref(resolved, identity_payload),
             "click_result": result,
         }
     output = dict(result)
     output.setdefault("status", "PASS")
-    output["resolved_row"] = _compact_row_ref(resolved, identity)
+    output["resolved_row"] = _compact_row_ref(resolved, identity_payload)
     return output
 
 
@@ -544,6 +647,20 @@ def _identity_columns(
         elif raw_columns:
             requested.append(str(raw_columns))
     return list(dict.fromkeys(requested))
+
+
+def _identity_payload(
+    identity: Mapping[str, Any] | None,
+    columns: list[str] | None,
+) -> dict[str, Any]:
+    if identity:
+        return dict(identity)
+    identity_columns = _identity_columns(None, columns)
+    if len(identity_columns) == 1:
+        return {"column": identity_columns[0]}
+    if identity_columns:
+        return {"columns": identity_columns}
+    return {}
 
 
 def _identity_strategy(identity: Mapping[str, Any]) -> dict[str, Any]:

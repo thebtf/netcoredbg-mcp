@@ -592,6 +592,21 @@ class PywinautoBackend:
         """DataGrid row click evidence requires the FlaUI bridge backend."""
         return self._unsupported_grid()
 
+    async def grid_ensure_visible(
+        self,
+        selector: dict[str, Any],
+        *,
+        row_key: str | None = None,
+        row_index: int | None = None,
+        identity: dict[str, Any] | None = None,
+        rows: dict[str, Any] | None = None,
+        columns: list[str] | None = None,
+        max_scrolls: int | None = None,
+        scroll_settle_ms: int | None = None,
+    ) -> dict[str, Any]:
+        """DataGrid row realization/scroll support requires the FlaUI bridge backend."""
+        return self._unsupported_grid()
+
     async def grid_assert_range(
         self,
         selector: dict[str, Any],

@@ -2532,6 +2532,259 @@ async def test_ui_grid_selected_rows_forwards_columns(capturing_mcp, monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_ui_grid_ensure_visible_realizes_identity_and_confirms_visible(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    class EnsureVisibleGridBackend:
+        def __init__(self) -> None:
+            self.process_id = 42
+            self.snapshot_calls: list[dict[str, Any]] = []
+            self.ensure_calls: list[dict[str, Any]] = []
+
+        async def grid_snapshot(
+            self,
+            selector: dict[str, Any],
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            self.snapshot_calls.append(
+                {
+                    "selector": dict(selector),
+                    "rows": dict(rows or {}),
+                    "columns": list(columns or []),
+                }
+            )
+            if len(self.snapshot_calls) == 1:
+                return {
+                    "status": "PASS",
+                    "visible_rows": [
+                        {
+                            "index": 0,
+                            "row_index": 18,
+                            "cells": {"PhraseId": "Cue 018"},
+                        }
+                    ],
+                }
+            return {
+                "status": "PASS",
+                "visible_rows": [
+                    {
+                        "index": 0,
+                        "row_index": 42,
+                        "cells": {"PhraseId": "Cue 042"},
+                    }
+                ],
+            }
+
+        async def grid_ensure_visible(
+            self,
+            selector: dict[str, Any],
+            *,
+            row_key: str,
+            identity: dict[str, Any],
+            rows: dict[str, Any],
+            columns: list[str],
+            max_scrolls: int | None = None,
+            scroll_settle_ms: int | None = None,
+        ) -> dict[str, Any]:
+            self.ensure_calls.append(
+                {
+                    "selector": dict(selector),
+                    "row_key": row_key,
+                    "identity": dict(identity),
+                    "rows": dict(rows),
+                    "columns": list(columns),
+                    "max_scrolls": max_scrolls,
+                    "scroll_settle_ms": scroll_settle_ms,
+                }
+            )
+            return {"status": "PASS", "realized": True}
+
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = EnsureVisibleGridBackend()
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_grid"](
+        ctx=None,
+        action="ensure_visible",
+        automation_id="CueGrid",
+        row_key="Cue 042",
+        rows={"visible_only": True},
+        columns=["PhraseId"],
+        max_scrolls=12,
+        scroll_settle_ms=25,
+    )
+
+    assert response["data"]["status"] == "PASS"
+    assert response["data"]["already_visible"] is False
+    assert response["data"]["resolved_row"] == {
+        "index": 0,
+        "row_index": 42,
+        "identity": "Cue 042",
+    }
+    assert response["data"]["requested_action"] == "ensure_visible"
+    assert response["data"]["canonical_action"] == "ensure_visible"
+    assert backend.ensure_calls == [
+        {
+            "selector": {"automation_id": "CueGrid"},
+            "row_key": "Cue 042",
+            "identity": {"column": "PhraseId"},
+            "rows": {"visible_only": True},
+            "columns": ["PhraseId"],
+            "max_scrolls": 12,
+            "scroll_settle_ms": 25,
+        }
+    ]
+    assert len(backend.snapshot_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_ui_grid_identity_is_forwarded_to_state_select_and_click(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    class IdentityGridBackend:
+        def __init__(self) -> None:
+            self.process_id = 42
+            self.snapshot_calls: list[dict[str, Any]] = []
+            self.selected_calls: list[dict[str, Any]] = []
+            self.select_range_calls: list[dict[str, Any]] = []
+            self.click_calls: list[dict[str, Any]] = []
+
+        async def grid_snapshot(
+            self,
+            selector: dict[str, Any],
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            self.snapshot_calls.append(
+                {
+                    "selector": dict(selector),
+                    "rows": dict(rows or {}),
+                    "columns": list(columns or []),
+                }
+            )
+            return {
+                "status": "PASS",
+                "visible_rows": [
+                    {
+                        "index": 1,
+                        "row_index": 42,
+                        "cells": {"PhraseId": "Cue 042", "Phrase": "Target"},
+                    }
+                ],
+            }
+
+        async def grid_selected_rows(
+            self,
+            selector: dict[str, Any],
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            self.selected_calls.append(
+                {
+                    "selector": dict(selector),
+                    "columns": list(columns or []),
+                }
+            )
+            return {
+                "status": "PASS",
+                "selected_rows": [
+                    {
+                        "index": 1,
+                        "row_index": 42,
+                        "cells": {"PhraseId": "Cue 042"},
+                    }
+                ],
+            }
+
+        async def grid_select_range(
+            self,
+            selector: dict[str, Any],
+            start_index: int,
+            end_index: int,
+        ) -> dict[str, Any]:
+            self.select_range_calls.append(
+                {
+                    "selector": dict(selector),
+                    "start_index": start_index,
+                    "end_index": end_index,
+                }
+            )
+            return {"status": "PASS", "selected_range": {"start": start_index, "end": end_index}}
+
+        async def grid_click_row(
+            self,
+            selector: dict[str, Any],
+            row_index: int,
+            column: str | None = None,
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            self.click_calls.append(
+                {
+                    "selector": dict(selector),
+                    "row_index": row_index,
+                    "column": column,
+                    "columns": list(columns or []),
+                }
+            )
+            return {"status": "PASS", "clicked": True}
+
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = IdentityGridBackend()
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    common = {
+        "ctx": None,
+        "automation_id": "CueGrid",
+        "row_key": "Cue 042",
+        "identity": {"column": "PhraseId"},
+        "rows": {"visible_only": True},
+        "columns": ["Phrase"],
+    }
+
+    state_response = await capturing_mcp.tools["ui_grid"](action="get_state", **common)
+    select_response = await capturing_mcp.tools["ui_grid"](action="select_row", **common)
+    click_response = await capturing_mcp.tools["ui_grid"](
+        action="click_row",
+        column="Phrase",
+        **common,
+    )
+
+    assert state_response["data"]["status"] == "PASS"
+    assert select_response["data"]["status"] == "PASS"
+    assert click_response["data"]["status"] == "PASS"
+    assert backend.snapshot_calls[0]["columns"] == ["Phrase", "PhraseId"]
+    assert backend.snapshot_calls[1]["columns"] == ["Phrase", "PhraseId"]
+    assert backend.snapshot_calls[2]["columns"] == ["Phrase", "PhraseId"]
+    assert backend.selected_calls[0]["columns"] == ["Phrase", "PhraseId"]
+    assert backend.click_calls == [
+        {
+            "selector": {"automation_id": "CueGrid"},
+            "row_index": 1,
+            "column": "Phrase",
+            "columns": ["Phrase", "PhraseId"],
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_ui_grid_unknown_action_reports_accepted_actions_without_backend(
     capturing_mcp,
     monkeypatch,
@@ -2567,6 +2820,7 @@ async def test_ui_grid_unknown_action_reports_accepted_actions_without_backend(
             "selected_rows",
             "selected",
             "selection",
+            "ensure_visible",
             "select_range",
             "select_row",
             "click_row",

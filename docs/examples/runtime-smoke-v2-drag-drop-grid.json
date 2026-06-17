@@ -16,6 +16,29 @@
       "transitions": [
         {
           "action": {
+            "kind": "ui.grid.ensure_visible",
+            "selector": {
+              "automation_id": "DataGridUnderTest",
+              "control_type": "DataGrid"
+            },
+            "row": {
+              "identity": "ROW-010"
+            },
+            "identity": {
+              "column": "StableRowId"
+            },
+            "rows": {
+              "visible_only": true,
+              "max": 20
+            },
+            "columns": [
+              "StableRowId"
+            ]
+          },
+          "probes": []
+        },
+        {
+          "action": {
             "kind": "ui.drag",
             "source": {
               "selector": {

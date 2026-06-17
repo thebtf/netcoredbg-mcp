@@ -762,6 +762,34 @@ class FlaUIBackend:
             columns=columns or [],
         )
 
+    async def grid_ensure_visible(
+        self,
+        selector: dict[str, Any],
+        *,
+        row_key: str | None = None,
+        row_index: int | None = None,
+        identity: dict[str, Any] | None = None,
+        rows: dict[str, Any] | None = None,
+        columns: list[str] | None = None,
+        max_scrolls: int | None = None,
+        scroll_settle_ms: int | None = None,
+    ) -> dict[str, Any]:
+        """Make a DataGrid row visible via FlaUI bridge-owned support."""
+        payload: dict[str, Any] = {
+            "identity": dict(identity or {}),
+            "rows": dict(rows or {}),
+            "columns": list(columns or []),
+        }
+        if row_key is not None:
+            payload["row_key"] = row_key
+        if row_index is not None:
+            payload["row_index"] = row_index
+        if max_scrolls is not None:
+            payload["max_scrolls"] = max_scrolls
+        if scroll_settle_ms is not None:
+            payload["scroll_settle_ms"] = scroll_settle_ms
+        return await self._call_grid("grid_ensure_visible", selector, **payload)
+
     async def grid_assert_range(
         self,
         selector: dict[str, Any],

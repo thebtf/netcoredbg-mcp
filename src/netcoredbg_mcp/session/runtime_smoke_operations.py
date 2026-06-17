@@ -12,6 +12,7 @@ from ..ui.focus import assert_focus
 from ..ui.grid import (
     assert_grid_rows,
     click_grid_row,
+    ensure_grid_row_visible,
     read_grid_selected_rows,
     read_grid_state,
     select_grid_range,
@@ -148,6 +149,28 @@ def ui_operation_adapters(
             rows=args.get("rows"),
             columns=args.get("columns"),
             identity=dict(args.get("identity") or {}),
+        )
+
+    async def grid_ensure_visible(**args: Any) -> dict[str, Any]:
+        backend = await _backend_or_blocked(ensure_ui_connected)
+        if isinstance(backend, dict):
+            return backend
+        row_index, row_key, blocked = _grid_row_request(
+            args.get("row"),
+            adapter="ui.grid.ensure_visible",
+        )
+        if blocked is not None:
+            return blocked
+        return await ensure_grid_row_visible(
+            backend,
+            _selector(args),
+            row_index=row_index,
+            row_key=row_key,
+            rows=args.get("rows"),
+            columns=args.get("columns"),
+            identity=dict(args.get("identity") or {}),
+            max_scrolls=args.get("max_scrolls"),
+            scroll_settle_ms=args.get("scroll_settle_ms"),
         )
 
     async def grid_click_row(**args: Any) -> dict[str, Any]:
@@ -699,6 +722,7 @@ def ui_operation_adapters(
         "ui.grid.get_state": grid_get_state,
         "ui.grid.snapshot": grid_snapshot,
         "ui.grid.viewport": grid_viewport,
+        "ui.grid.ensure_visible": grid_ensure_visible,
         "ui.grid.select_indices": grid_select_indices,
         "ui.grid.select_range": grid_select_range,
         "ui.grid.select_row": grid_select_row,

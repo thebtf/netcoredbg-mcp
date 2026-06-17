@@ -26,6 +26,7 @@ class ActionSmokeSession:
         self.drag_results: list[dict[str, Any]] = []
         self.grid_select_indices_results: list[dict[str, Any]] = []
         self.grid_state_results: list[dict[str, Any]] = []
+        self.grid_ensure_visible_results: list[dict[str, Any]] = []
         self.grid_select_row_results: list[dict[str, Any]] = []
         self.grid_click_row_results: list[dict[str, Any]] = []
 
@@ -82,6 +83,16 @@ class ActionSmokeSession:
             return self.grid_state_results.pop(0)
         return {"status": "PASS", "visible_rows": [], "selected_rows": []}
 
+    async def grid_ensure_visible(self, **request: Any) -> dict[str, Any]:
+        self.calls.append(("grid_ensure_visible", request))
+        if self.grid_ensure_visible_results:
+            return self.grid_ensure_visible_results.pop(0)
+        return {
+            "status": "PASS",
+            "already_visible": False,
+            "resolved_row": {"identity": request.get("row", {}).get("identity")},
+        }
+
     async def grid_select_row(self, **request: Any) -> dict[str, Any]:
         self.calls.append(("grid_select_row", request))
         if self.grid_select_row_results:
@@ -125,6 +136,7 @@ def _runner(session: ActionSmokeSession) -> RuntimeSmokeRunner:
             "ui.invoke": session.invoke,
             "ui.drag": session.drag,
             "ui.grid.get_state": session.grid_get_state,
+            "ui.grid.ensure_visible": session.grid_ensure_visible,
             "ui.grid.select_row": session.grid_select_row,
             "ui.grid.click_row": session.grid_click_row,
             "ui.grid.select_indices": session.grid_select_indices,
@@ -1659,6 +1671,51 @@ async def test_v2_ui_grid_get_state_routes_selector_identity_to_adapter() -> Non
     assert state_call[1]["identity"] == {"column": "PhraseId"}
     assert state_call[1]["rows"] == {"visible_only": True}
     assert state_call[1]["columns"] == ["PhraseId"]
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_grid_ensure_visible_routes_selector_identity_to_adapter() -> None:
+    session = ActionSmokeSession()
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "grid ensure visible",
+            "cases": [
+                {
+                    "id": "grid_ensure_visible",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.grid.ensure_visible",
+                                "selector": {"automation_id": "CueDataGrid"},
+                                "row": {"identity": "Cue 042"},
+                                "identity": {"column": "PhraseId"},
+                                "rows": {"visible_only": True},
+                                "columns": ["PhraseId"],
+                                "max_scrolls": 11,
+                                "scroll_settle_ms": 30,
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    ensure_call = next(call for call in session.calls if call[0] == "grid_ensure_visible")
+    assert result["status"] == "PASS"
+    assert "ui.grid.ensure_visible" in result["accepted_action_kinds"]
+    assert action["route"] == "grid_ensure_visible"
+    assert ensure_call[1]["selector"] == {"automation_id": "CueDataGrid"}
+    assert ensure_call[1]["row"] == {"identity": "Cue 042"}
+    assert ensure_call[1]["identity"] == {"column": "PhraseId"}
+    assert ensure_call[1]["rows"] == {"visible_only": True}
+    assert ensure_call[1]["columns"] == ["PhraseId"]
+    assert ensure_call[1]["max_scrolls"] == 11
+    assert ensure_call[1]["scroll_settle_ms"] == 30
 
 
 @pytest.mark.asyncio

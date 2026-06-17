@@ -16,6 +16,7 @@ from ..ui.focus import assert_focus
 from ..ui.grid import (
     assert_grid_range,
     click_grid_row,
+    ensure_grid_row_visible,
     read_grid_selected_rows,
     read_grid_state,
     read_grid_visible_rows,
@@ -46,6 +47,7 @@ _GRID_CANONICAL_ACTIONS = (
     "visible_rows",
     "snapshot",
     "selected_rows",
+    "ensure_visible",
     "select_range",
     "select_row",
     "click_row",
@@ -61,6 +63,7 @@ _GRID_ACCEPTED_ACTIONS = (
     "selected_rows",
     "selected",
     "selection",
+    "ensure_visible",
     "select_range",
     "select_row",
     "click_row",
@@ -452,6 +455,9 @@ def register_ui_evidence_tools(
         column: str | None = None,
         rows: dict[str, Any] | None = None,
         columns: list[str] | None = None,
+        identity: dict[str, Any] | None = None,
+        max_scrolls: int | None = None,
+        scroll_settle_ms: int | None = None,
     ) -> dict:
         """Read, select, or assert WPF DataGrid row evidence."""
         try:
@@ -493,6 +499,19 @@ def register_ui_evidence_tools(
                     selector,
                     rows=rows,
                     columns=columns,
+                    identity=identity,
+                )
+            elif canonical_action == "ensure_visible":
+                result = await ensure_grid_row_visible(
+                    backend,
+                    selector,
+                    row_index=row_index,
+                    row_key=row_key,
+                    rows=rows,
+                    columns=columns,
+                    identity=identity,
+                    max_scrolls=max_scrolls,
+                    scroll_settle_ms=scroll_settle_ms,
                 )
             elif canonical_action == "select_range":
                 start, end = _require_range(start_index, end_index)
@@ -514,6 +533,7 @@ def register_ui_evidence_tools(
                     row_key=row_key,
                     columns=columns,
                     rows=rows,
+                    identity=identity,
                 )
             elif canonical_action == "click_row":
                 result = await click_grid_row(
@@ -524,6 +544,7 @@ def register_ui_evidence_tools(
                     column=column,
                     columns=columns,
                     rows=rows,
+                    identity=identity,
                 )
             elif canonical_action == "assert_range":
                 start, end = _require_range(start_index, end_index)

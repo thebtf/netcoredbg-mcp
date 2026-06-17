@@ -9,7 +9,7 @@ using FlaUI.UIA3;
 
 namespace FlaUIBridge.Commands;
 
-public static class GridCommands
+public static partial class GridCommands
 {
     private static readonly string[] CellPlaceholderSubstrings =
     {
@@ -354,6 +354,17 @@ public static class GridCommands
 
         var timeoutMs = Math.Clamp(timeoutNode.GetValue<int>(), 0, 30_000);
         return TimeSpan.FromMilliseconds(timeoutMs);
+    }
+
+    private static int? ReadOptionalInt(JsonNode? @params, string key)
+    {
+        return IntValue(@params?[key]);
+    }
+
+    private static int ReadBoundedInt(JsonNode? @params, string key, int fallback, int min, int max)
+    {
+        var value = IntValue(@params?[key]) ?? fallback;
+        return Math.Clamp(value, min, max);
     }
 
     private static AutomationElement[] GridRows(AutomationElement grid, UIA3Automation automation)
