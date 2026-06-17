@@ -184,13 +184,36 @@ def diagnostic_schema_contract() -> dict[str, Any]:
         },
         "oracle_pack": {
             "required_fields": list(DIAGNOSTIC_REQUIRED_FIELDS["oracle_pack"]),
-            "optional_fields": ["description", "probes", "failure_modes", "redaction"],
-            "failure_modes": ["missing_probe", "unsupported_probe", "unsafe_evidence"],
+            "optional_fields": [
+                "description",
+                "probes",
+                "sources",
+                "failure_modes",
+                "redaction",
+            ],
+            "failure_modes": [
+                "missing_probe",
+                "unsupported_probe",
+                "unsafe_evidence",
+                "DISAGREEING_SOURCES",
+            ],
         },
         "app_diagnostics": {
             "required_fields": list(DIAGNOSTIC_REQUIRED_FIELDS["app_diagnostics"]),
-            "optional_fields": ["workspace", "artifacts", "process", "modules"],
-            "failure_modes": ["stale_process", "missing_artifact", "redacted_evidence"],
+            "optional_fields": [
+                "workspace",
+                "artifacts",
+                "process",
+                "modules",
+                "wait_json",
+                "poll",
+            ],
+            "failure_modes": [
+                "stale_process",
+                "missing_artifact",
+                "redacted_evidence",
+                "diagnostic JSON not observed",
+            ],
         },
         "semantic_probe": {
             "required_fields": list(DIAGNOSTIC_REQUIRED_FIELDS["semantic_probe"]),
@@ -362,26 +385,56 @@ def _validate_unsafe_diagnostic_evidence(
 
 def _validate_oracle_pack_schema(payload: dict[str, Any], errors: list[str]) -> None:
     checks = payload.get("checks")
-    if not isinstance(checks, list):
+    if isinstance(checks, list):
+        for index, check in enumerate(checks):
+            prefix = f"oracle_pack.checks[{index}]"
+            if not isinstance(check, dict):
+                errors.append(f"{prefix} must be an object")
+                continue
+            _require_fields(prefix, check, ("id", "probe", "expect", "on_blocked"), errors)
+            _validate_probe_name(f"{prefix}.probe", check.get("probe"), errors)
+            if "expect" in check and not isinstance(check["expect"], dict):
+                errors.append(f"{prefix}.expect must be an object")
+            if "on_blocked" in check and not isinstance(check["on_blocked"], dict):
+                errors.append(f"{prefix}.on_blocked must be an object")
+            _validate_next_step(prefix, check.get("on_blocked"), errors)
+
+    sources = payload.get("sources")
+    if sources is None:
         return
-    for index, check in enumerate(checks):
-        prefix = f"oracle_pack.checks[{index}]"
-        if not isinstance(check, dict):
+    if not isinstance(sources, list):
+        errors.append("oracle_pack.sources must be a list")
+        return
+    seen_source_ids: set[str] = set()
+    for index, source in enumerate(sources):
+        prefix = f"oracle_pack.sources[{index}]"
+        if not isinstance(source, dict):
             errors.append(f"{prefix} must be an object")
             continue
-        _require_fields(prefix, check, ("id", "probe", "expect", "on_blocked"), errors)
-        _validate_probe_name(f"{prefix}.probe", check.get("probe"), errors)
-        if "expect" in check and not isinstance(check["expect"], dict):
-            errors.append(f"{prefix}.expect must be an object")
-        if "on_blocked" in check and not isinstance(check["on_blocked"], dict):
-            errors.append(f"{prefix}.on_blocked must be an object")
-        _validate_next_step(prefix, check.get("on_blocked"), errors)
+        source_id = source.get("id")
+        if not isinstance(source_id, str) or not source_id:
+            errors.append(f"{prefix}.id is required")
+        elif source_id in seen_source_ids:
+            errors.append(f"{prefix}.id duplicates earlier source id: {source_id}")
+        else:
+            seen_source_ids.add(source_id)
+        source_probe = source.get("probe")
+        if not isinstance(source_probe, dict):
+            errors.append(f"{prefix}.probe must be an object")
+            continue
+        source_kind = source_probe.get("kind")
+        if source_kind is None:
+            errors.append(f"{prefix}.probe.kind is required")
+        elif source_kind == "oracle_pack":
+            errors.append(f"{prefix}.probe.kind must not be oracle_pack")
+        else:
+            _validate_probe_name(f"{prefix}.probe.kind", source_kind, errors)
 
 
 def _validate_app_diagnostics_schema(payload: dict[str, Any], errors: list[str]) -> None:
     observations = payload.get("observations")
     if not isinstance(observations, list):
-        return
+        observations = []
     for index, observation in enumerate(observations):
         prefix = f"app_diagnostics.observations[{index}]"
         if not isinstance(observation, dict):
@@ -390,6 +443,37 @@ def _validate_app_diagnostics_schema(payload: dict[str, Any], errors: list[str])
         _validate_optional_status(prefix, observation.get("status"), errors)
         if observation.get("status") == "BLOCKED":
             _require_blocked_diagnostics(prefix, observation, errors)
+    if payload.get("wait_json") is not None and payload.get("poll") is not None:
+        errors.append("app_diagnostics.wait_json and app_diagnostics.poll are mutually exclusive")
+    _validate_wait_json_schema(payload, errors, field_name="wait_json")
+    _validate_wait_json_schema(payload, errors, field_name="poll")
+
+
+def _validate_wait_json_schema(
+    payload: dict[str, Any],
+    errors: list[str],
+    *,
+    field_name: str,
+) -> None:
+    wait_json = payload.get(field_name)
+    if wait_json is None:
+        return
+    if not isinstance(wait_json, dict):
+        errors.append(f"app_diagnostics.{field_name} must be an object")
+        return
+    path = wait_json.get("path")
+    if not isinstance(path, str) or not path:
+        errors.append(f"app_diagnostics.{field_name}.path is required")
+    for numeric_field in ("timeout_ms", "poll_interval_ms"):
+        if numeric_field not in wait_json:
+            continue
+        value = wait_json[numeric_field]
+        if isinstance(value, bool) or not isinstance(value, int):
+            errors.append(
+                f"app_diagnostics.{field_name}.{numeric_field} must be an integer"
+            )
+        elif value < 0:
+            errors.append(f"app_diagnostics.{field_name}.{numeric_field} must be >= 0")
 
 
 def _validate_semantic_probe_schema(payload: dict[str, Any], errors: list[str]) -> None:

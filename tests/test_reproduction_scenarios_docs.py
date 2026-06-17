@@ -238,6 +238,8 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "app diagnostics",
             "oracle_pack",
             "runtime_smoke_wait_for_result",
+            "CR-024",
+            "DISAGREEING_SOURCES",
             "remaining app diagnostics orchestration",
         ],
     }
@@ -321,6 +323,20 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
         decision_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", issue)
         for term in terms:
             assert term in decision_row, f"term {term!r} missing from {issue} CR-022 row"
+
+
+def test_issue_272_records_cr024_diagnostic_orchestration_slice() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#272")
+
+    assert "diagnostic orchestration source slice covered" in row
+    assert "CR-024" in row
+    assert "oracle_pack.sources" in row
+    assert "DISAGREEING_SOURCES" in row
+    assert "app_diagnostics.wait_json" in row
+    assert "poll" in row
+    assert "broader FR remains open" in row
+    assert "before closing the full FR" in row
 
 
 def test_cr022_broad_issues_require_split_or_comment_evidence_before_closure() -> None:

@@ -70,6 +70,18 @@ def test_diagnostic_schema_contract_exposes_status_limits_and_redaction() -> Non
     }
 
 
+def test_diagnostic_schema_contract_exposes_orchestration_vocabulary() -> None:
+    from netcoredbg_mcp.session.runtime_smoke_schema import diagnostic_schema_contract
+
+    contract = diagnostic_schema_contract()
+
+    assert "sources" in contract["oracle_pack"]["optional_fields"]
+    assert "DISAGREEING_SOURCES" in contract["oracle_pack"]["failure_modes"]
+    assert "wait_json" in contract["app_diagnostics"]["optional_fields"]
+    assert "poll" in contract["app_diagnostics"]["optional_fields"]
+    assert "diagnostic JSON not observed" in contract["app_diagnostics"]["failure_modes"]
+
+
 def test_diagnostic_schema_contract_matches_runtime_probe_registry() -> None:
     from netcoredbg_mcp.session.runtime_smoke_schema import diagnostic_schema_contract
     from netcoredbg_mcp.session.runtime_smoke_v2.probes import accepted_probe_kinds
@@ -173,6 +185,74 @@ def test_oracle_pack_schema_rejects_unactionable_checks() -> None:
     assert "oracle_pack.checks[0].on_blocked must be an object" in errors
 
 
+def test_oracle_pack_schema_rejects_invalid_sources() -> None:
+    from netcoredbg_mcp.session.runtime_smoke_schema import (
+        validate_diagnostic_schema_example,
+    )
+
+    payload = {
+        "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
+        "id": "bad-source-pack",
+        "status": "PASS",
+        "checks": [],
+        "sources": [
+            {"probe": {"kind": "oracle_pack"}},
+            {"id": "missing-kind", "probe": {}},
+        ],
+        "limits": {
+            "max_text_length": 240,
+            "max_list_items": 8,
+            "max_json_bytes": 32768,
+        },
+    }
+
+    errors = validate_diagnostic_schema_example(payload, kind="oracle_pack")
+
+    assert "oracle_pack.sources[0].id is required" in errors
+    assert "oracle_pack.sources[0].probe.kind must not be oracle_pack" in errors
+    assert "oracle_pack.sources[1].probe.kind is required" in errors
+
+
+def test_oracle_pack_schema_rejects_duplicate_source_ids() -> None:
+    from netcoredbg_mcp.session.runtime_smoke_schema import (
+        validate_diagnostic_schema_example,
+    )
+
+    payload = {
+        "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
+        "id": "duplicate-source-pack",
+        "status": "PASS",
+        "checks": [],
+        "sources": [
+            {
+                "id": "status",
+                "probe": {
+                    "kind": "file.json",
+                    "path": "status-a.json",
+                    "jsonpath": "$.status",
+                },
+            },
+            {
+                "id": "status",
+                "probe": {
+                    "kind": "file.json",
+                    "path": "status-b.json",
+                    "jsonpath": "$.status",
+                },
+            },
+        ],
+        "limits": {
+            "max_text_length": 240,
+            "max_list_items": 8,
+            "max_json_bytes": 32768,
+        },
+    }
+
+    errors = validate_diagnostic_schema_example(payload, kind="oracle_pack")
+
+    assert "oracle_pack.sources[1].id duplicates earlier source id: status" in errors
+
+
 def test_diagnostic_schema_rejects_negative_evidence_limits() -> None:
     from netcoredbg_mcp.session.runtime_smoke_schema import (
         validate_diagnostic_schema_example,
@@ -233,6 +313,99 @@ def test_app_diagnostics_schema_rejects_unactionable_blocked_observations() -> N
         "app_diagnostics.observations[0].screenshot_base64 must be omitted or summarized"
         in errors
     )
+
+
+def test_app_diagnostics_schema_rejects_invalid_wait_json() -> None:
+    from netcoredbg_mcp.session.runtime_smoke_schema import (
+        validate_diagnostic_schema_example,
+    )
+
+    payload = {
+        "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
+        "app": {"name": "WpfSmokeApp"},
+        "status": "PASS",
+        "observations": [],
+        "wait_json": {
+            "path": "",
+            "timeout_ms": -1,
+            "poll_interval_ms": "soon",
+        },
+        "redaction": {"omit_fields": ["raw_tree"]},
+        "limits": {
+            "max_text_length": 240,
+            "max_list_items": 8,
+            "max_json_bytes": 32768,
+        },
+    }
+
+    errors = validate_diagnostic_schema_example(payload, kind="app_diagnostics")
+
+    assert "app_diagnostics.wait_json.path is required" in errors
+    assert "app_diagnostics.wait_json.timeout_ms must be >= 0" in errors
+    assert "app_diagnostics.wait_json.poll_interval_ms must be an integer" in errors
+
+
+def test_app_diagnostics_schema_rejects_invalid_poll() -> None:
+    from netcoredbg_mcp.session.runtime_smoke_schema import (
+        validate_diagnostic_schema_example,
+    )
+
+    payload = {
+        "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
+        "app": {"name": "WpfSmokeApp"},
+        "status": "PASS",
+        "observations": [],
+        "poll": {
+            "path": "",
+            "timeout_ms": -1,
+            "poll_interval_ms": "soon",
+        },
+        "redaction": {"omit_fields": ["raw_tree"]},
+        "limits": {
+            "max_text_length": 240,
+            "max_list_items": 8,
+            "max_json_bytes": 32768,
+        },
+    }
+
+    errors = validate_diagnostic_schema_example(payload, kind="app_diagnostics")
+
+    assert "app_diagnostics.poll.path is required" in errors
+    assert "app_diagnostics.poll.timeout_ms must be >= 0" in errors
+    assert "app_diagnostics.poll.poll_interval_ms must be an integer" in errors
+
+
+def test_app_diagnostics_schema_rejects_wait_json_and_poll_together() -> None:
+    from netcoredbg_mcp.session.runtime_smoke_schema import (
+        validate_diagnostic_schema_example,
+    )
+
+    payload = {
+        "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
+        "app": {"name": "WpfSmokeApp"},
+        "status": "PASS",
+        "observations": [],
+        "wait_json": {
+            "path": ".agent/runtime-smoke/app-diagnostics.json",
+            "timeout_ms": 0,
+            "poll_interval_ms": 0,
+        },
+        "poll": {
+            "path": ".agent/runtime-smoke/app-diagnostics.json",
+            "timeout_ms": 0,
+            "poll_interval_ms": 0,
+        },
+        "redaction": {"omit_fields": ["raw_tree"]},
+        "limits": {
+            "max_text_length": 240,
+            "max_list_items": 8,
+            "max_json_bytes": 32768,
+        },
+    }
+
+    errors = validate_diagnostic_schema_example(payload, kind="app_diagnostics")
+
+    assert "app_diagnostics.wait_json and app_diagnostics.poll are mutually exclusive" in errors
 
 
 def test_semantic_probe_schema_rejects_unknown_probe_and_incomplete_on_blocked() -> None:
