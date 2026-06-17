@@ -255,6 +255,42 @@ async def test_runtime_smoke_run_probe_agent_mode_adds_evidence_guidance(
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_run_probe_contamination_points_at_cleanup_contract(
+    capturing_mcp,
+) -> None:
+    session = RunProbeFacadeSession()
+    _register(capturing_mcp, session)
+    session.runtime_smoke.lifecycle_runs.mark_contaminated(
+        reason="runtime smoke cleanup contract required",
+        run_id="previous-run",
+    )
+
+    response = await capturing_mcp.tools["runtime_smoke_run_probe"](
+        ctx=None,
+        probe={
+            "kind": "process.metric",
+            "name": "process_memory",
+            "pid": os.getpid(),
+        },
+        name="blocked-probe",
+        agent_mode=True,
+    )
+    data = response["data"]
+
+    assert data["status"] == "BLOCKED"
+    assert data["run_created"] is False
+    assert data["contaminated"] is True
+    assert data["agent_mode"]["primary_next_action"] == "runtime_smoke_cleanup_contract"
+    assert data["agent_mode"]["next_request"] == {
+        "tool": "runtime_smoke_cleanup_contract",
+        "arguments": {},
+    }
+    assert "runtime_smoke_cleanup_contract" in response["next_actions"]
+    assert "runtime_smoke_evidence_bundle" not in response["next_actions"]
+    assert "runtime_smoke_wait_for_result" not in response["next_actions"]
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_run_probe_result_is_readable_as_evidence_bundle(
     capturing_mcp,
 ) -> None:

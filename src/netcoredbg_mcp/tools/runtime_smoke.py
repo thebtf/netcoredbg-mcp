@@ -308,12 +308,7 @@ def register_runtime_smoke_tools(
             return _build_runtime_smoke_response(
                 session,
                 data,
-                [
-                    "runtime_smoke_wait_for_result",
-                    "runtime_smoke_tail_events",
-                    "runtime_smoke_get_result",
-                    "runtime_smoke_stop",
-                ],
+                _runtime_smoke_lifecycle_next_actions(data),
             )
         except Exception as exc:
             return build_error_response(str(exc), state=session.state.state)
@@ -355,18 +350,13 @@ def register_runtime_smoke_tools(
 
             data = await session.runtime_smoke.lifecycle_runs.start(plan, _runner)
             data["validation"] = _runtime_smoke_validation_summary(validation)
+            next_actions = _runtime_smoke_lifecycle_next_actions(data)
             if agent_mode:
-                _apply_runtime_smoke_agent_mode(data, "runtime_smoke_evidence_bundle")
+                _apply_runtime_smoke_agent_mode(data, next_actions[0])
             return _build_runtime_smoke_response(
                 session,
                 data,
-                [
-                    "runtime_smoke_evidence_bundle",
-                    "runtime_smoke_wait_for_result",
-                    "runtime_smoke_tail_events",
-                    "runtime_smoke_get_result",
-                    "runtime_smoke_stop",
-                ],
+                next_actions,
             )
         except Exception as exc:
             return build_error_response(str(exc), state=session.state.state)
@@ -417,18 +407,13 @@ def register_runtime_smoke_tools(
             data["probe"] = _runtime_smoke_probe_summary(probe)
             data["generated_plan"] = generated
             data["run_created"] = bool(data.get("run_id"))
+            next_actions = _runtime_smoke_lifecycle_next_actions(data)
             if agent_mode:
-                _apply_runtime_smoke_agent_mode(data, "runtime_smoke_evidence_bundle")
+                _apply_runtime_smoke_agent_mode(data, next_actions[0])
             return _build_runtime_smoke_response(
                 session,
                 data,
-                [
-                    "runtime_smoke_evidence_bundle",
-                    "runtime_smoke_wait_for_result",
-                    "runtime_smoke_tail_events",
-                    "runtime_smoke_get_result",
-                    "runtime_smoke_stop",
-                ],
+                next_actions,
             )
         except Exception as exc:
             return build_error_response(str(exc), state=session.state.state)
@@ -618,7 +603,31 @@ def register_runtime_smoke_tools(
             return _build_runtime_smoke_response(
                 session,
                 data,
-                ["runtime_smoke_get_result", "runtime_smoke_tail_events"],
+                _runtime_smoke_lifecycle_next_actions(data),
+            )
+        except Exception as exc:
+            return build_error_response(str(exc), state=session.state.state)
+
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            destructiveHint=True,
+            idempotentHint=True,
+            openWorldHint=False,
+        )
+    )
+    async def runtime_smoke_cleanup_contract(ctx: Context) -> dict:
+        """Clear runtime-smoke contamination after failed or timed-out cleanup."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+            data = await session.runtime_smoke.lifecycle_runs.cleanup_contract(
+                reset=session.runtime_smoke.reset,
+            )
+            return _build_runtime_smoke_response(
+                session,
+                data,
+                _runtime_smoke_cleanup_contract_next_actions(data),
             )
         except Exception as exc:
             return build_error_response(str(exc), state=session.state.state)
@@ -867,13 +876,16 @@ async def _runtime_smoke_evidence_bundle(
     if tail.get("final") and not result.get("final"):
         result = await registry.get_result(run_id)
     final = bool(result.get("final"))
-    next_actions = [
-        "runtime_smoke_wait_for_result",
-        "runtime_smoke_evidence_bundle",
-        "runtime_smoke_tail_events",
-        "runtime_smoke_get_result",
-    ]
-    next_actions.append("runtime_smoke_run_plan" if final else "runtime_smoke_stop")
+    if result.get("contaminated") is True:
+        next_actions = _runtime_smoke_lifecycle_next_actions(result)
+    else:
+        next_actions = [
+            "runtime_smoke_wait_for_result",
+            "runtime_smoke_evidence_bundle",
+            "runtime_smoke_tail_events",
+            "runtime_smoke_get_result",
+        ]
+        next_actions.append("runtime_smoke_run_plan" if final else "runtime_smoke_stop")
     diagnostic_launch = result.get("diagnostic_launch")
 
     bundle = {
@@ -899,6 +911,11 @@ async def _runtime_smoke_evidence_bundle(
     }
     if isinstance(diagnostic_launch, dict):
         bundle["diagnostic_launch"] = compact_value(diagnostic_launch)
+    if result.get("contaminated") is True:
+        bundle["contaminated"] = True
+        cleanup_contract = result.get("cleanup_contract")
+        if isinstance(cleanup_contract, dict):
+            bundle["cleanup_contract"] = compact_value(cleanup_contract)
     return bundle
 
 
@@ -972,6 +989,8 @@ async def _runtime_smoke_wait_for_result(
 
 def _runtime_smoke_wait_ready(data: dict[str, Any]) -> dict[str, Any]:
     if _runtime_smoke_wait_missing(data):
+        return data
+    if data.get("contaminated") is True:
         return data
     return _runtime_smoke_wait_with_next_actions(data)
 
@@ -1311,6 +1330,11 @@ def _apply_runtime_smoke_agent_mode(
             }
         else:
             primary_next_action = "runtime_smoke_run_plan"
+    elif primary_next_action == "runtime_smoke_cleanup_contract":
+        next_request = {
+            "tool": primary_next_action,
+            "arguments": {},
+        }
     elif run_id:
         next_request = {
             "tool": primary_next_action,
@@ -1407,6 +1431,41 @@ def _runtime_smoke_run_missing(result: dict[str, Any]) -> bool:
         and "next_cursor" not in result
         and "oldest_cursor" not in result
     )
+
+
+def _runtime_smoke_lifecycle_next_actions(data: dict[str, Any]) -> list[str]:
+    if data.get("contaminated") is True:
+        if data.get("run_id") and not data.get("final") and data.get("status") == "STOPPING":
+            return [
+                "runtime_smoke_wait_for_result",
+                "runtime_smoke_evidence_bundle",
+                "runtime_smoke_tail_events",
+                "runtime_smoke_get_result",
+                "runtime_smoke_stop",
+                "runtime_smoke_cleanup_contract",
+                "debug_hygiene_preflight",
+            ]
+        return ["runtime_smoke_cleanup_contract", "debug_hygiene_preflight"]
+    return [
+        "runtime_smoke_evidence_bundle",
+        "runtime_smoke_wait_for_result",
+        "runtime_smoke_tail_events",
+        "runtime_smoke_get_result",
+        "runtime_smoke_stop",
+    ]
+
+
+def _runtime_smoke_cleanup_contract_next_actions(data: dict[str, Any]) -> list[str]:
+    if data.get("contaminated") is True:
+        return ["runtime_smoke_cleanup_contract", "debug_hygiene_preflight"]
+    if data.get("status") == "BLOCKED" and data.get("run_id"):
+        return [
+            "runtime_smoke_wait_for_result",
+            "runtime_smoke_tail_events",
+            "runtime_smoke_get_result",
+            "runtime_smoke_stop",
+        ]
+    return ["runtime_smoke_run_plan", "runtime_smoke_start", "debug_hygiene_preflight"]
 
 
 def _bounded_runtime_smoke_result(result: dict[str, Any]) -> dict[str, Any]:
