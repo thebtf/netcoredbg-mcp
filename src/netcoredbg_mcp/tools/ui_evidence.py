@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from collections.abc import Callable
 from typing import Any
 
@@ -11,10 +10,6 @@ from mcp.server.fastmcp import Context, FastMCP
 from ..response import build_error_response, build_response
 from ..session import SessionManager
 from ..session.runtime_smoke_operations import ui_operation_adapters
-from ..session.runtime_smoke_v2.actions import ActionContext
-from ..session.runtime_smoke_v2.actions.ui_text_input import (
-    handle_ui_text_type_replace_selection,
-)
 from ..session.state import DebugState
 from ..ui.events import UIEventBufferStore
 from ..ui.focus import assert_focus
@@ -219,10 +214,7 @@ def register_ui_evidence_tools(
                     )
                 backend_provider = _static_backend_provider(backend)
                 adapters = ui_operation_adapters(backend_provider)
-                result = await handle_ui_text_type_replace_selection(
-                    {"selector": selector, "text": text},
-                    ActionContext(service_adapters=adapters, clock=time.monotonic),
-                )
+                result = await adapters["ui.text.set_text"](selector=selector, text=text)
                 return build_response(data=result, state=session.state.state)
             if canonical_action == "get_state":
                 return build_response(
