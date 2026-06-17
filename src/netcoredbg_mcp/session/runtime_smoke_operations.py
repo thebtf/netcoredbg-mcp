@@ -8,7 +8,15 @@ from pathlib import Path
 from typing import Any, cast
 
 from ..ui.focus import assert_focus
-from ..ui.grid import assert_grid_rows, read_grid_selected_rows, select_grid_range, snapshot_grid
+from ..ui.grid import (
+    assert_grid_rows,
+    click_grid_row,
+    read_grid_selected_rows,
+    read_grid_state,
+    select_grid_range,
+    select_grid_row,
+    snapshot_grid,
+)
 from ..ui.key_sequence import run_scoped_key_sequence
 from ..ui.list_items import invoke_list_item, toggle_list_item_child
 from ..ui.text import assert_text_selection, read_textbox_state
@@ -46,6 +54,18 @@ def ui_operation_adapters(
             _selector(args),
             rows=args.get("rows"),
             columns=args.get("columns"),
+        )
+
+    async def grid_get_state(**args: Any) -> dict[str, Any]:
+        backend = await _backend_or_blocked(ensure_ui_connected)
+        if isinstance(backend, dict):
+            return backend
+        return await read_grid_state(
+            backend,
+            _selector(args),
+            rows=args.get("rows"),
+            columns=args.get("columns"),
+            identity=dict(args.get("identity") or {}),
         )
 
     async def grid_viewport(**args: Any) -> dict[str, Any]:
@@ -105,6 +125,47 @@ def ui_operation_adapters(
             _selector(args),
             int(args["start_index"]),
             int(args["end_index"]),
+        )
+
+    async def grid_select_row(**args: Any) -> dict[str, Any]:
+        backend = await _backend_or_blocked(ensure_ui_connected)
+        if isinstance(backend, dict):
+            return backend
+        row_index, row_key, blocked = _grid_row_request(
+            args.get("row"),
+            adapter="ui.grid.select_row",
+        )
+        if blocked is not None:
+            return blocked
+        return await select_grid_row(
+            backend,
+            _selector(args),
+            row_index=row_index,
+            row_key=row_key,
+            rows=args.get("rows"),
+            columns=args.get("columns"),
+            identity=dict(args.get("identity") or {}),
+        )
+
+    async def grid_click_row(**args: Any) -> dict[str, Any]:
+        backend = await _backend_or_blocked(ensure_ui_connected)
+        if isinstance(backend, dict):
+            return backend
+        row_index, row_key, blocked = _grid_row_request(
+            args.get("row"),
+            adapter="ui.grid.click_row",
+        )
+        if blocked is not None:
+            return blocked
+        return await click_grid_row(
+            backend,
+            _selector(args),
+            row_index=row_index,
+            row_key=row_key,
+            column=args.get("column"),
+            rows=args.get("rows"),
+            columns=args.get("columns"),
+            identity=dict(args.get("identity") or {}),
         )
 
     async def grid_select_indices(**args: Any) -> dict[str, Any]:
@@ -625,10 +686,13 @@ def ui_operation_adapters(
 
     adapters: OperationAdapterMap = {
         "ui.ensure_connected": ensure_connected,
+        "ui.grid.get_state": grid_get_state,
         "ui.grid.snapshot": grid_snapshot,
         "ui.grid.viewport": grid_viewport,
         "ui.grid.select_indices": grid_select_indices,
         "ui.grid.select_range": grid_select_range,
+        "ui.grid.select_row": grid_select_row,
+        "ui.grid.click_row": grid_click_row,
         "ui.grid.assert_rows": grid_assert_rows,
         "ui.list.invoke_item": list_invoke,
         "ui.list.toggle_item_child": list_toggle_child,
@@ -1933,6 +1997,51 @@ def _viewport_blocked(
             "visible_rows": "visible row identities with row bounds or indices",
         },
         "next_step": "Use a UI backend that returns grid viewport and selected row evidence.",
+    }
+
+
+def _grid_row_request(
+    raw_row: Any,
+    *,
+    adapter: str,
+) -> tuple[int | None, str | None, dict[str, Any] | None]:
+    if not isinstance(raw_row, Mapping):
+        return None, None, _grid_row_blocked(
+            adapter=adapter,
+            reason="invalid grid row payload",
+            requested={"row": raw_row},
+        )
+    if "index" in raw_row:
+        row_index = _int_or_none(raw_row.get("index"))
+        if row_index is None:
+            return None, None, _grid_row_blocked(
+                adapter=adapter,
+                reason="invalid grid row index",
+                requested={"index": raw_row.get("index")},
+            )
+        return row_index, None, None
+    row_key = raw_row.get("identity", raw_row.get("key"))
+    if row_key is None or not str(row_key):
+        return None, None, _grid_row_blocked(
+            adapter=adapter,
+            reason="invalid grid row identity",
+            requested={"row": dict(raw_row)},
+        )
+    return None, str(row_key), None
+
+
+def _grid_row_blocked(
+    *,
+    adapter: str,
+    reason: str,
+    requested: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "status": "BLOCKED",
+        "reason": reason,
+        "requested": requested,
+        "accepted": {"row": "object with integer index or string identity"},
+        "next_step": f"Provide a visible row payload for {adapter}.",
     }
 
 

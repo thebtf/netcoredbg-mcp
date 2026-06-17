@@ -139,6 +139,129 @@ async def _handle_ui_grid_select(action: dict[str, Any], context: ActionContext)
     )
 
 
+async def _handle_ui_grid_get_state(
+    action: dict[str, Any],
+    context: ActionContext,
+) -> dict[str, Any]:
+    started = context.clock()
+    selector, blocked = _selector_from_action(action)
+    if blocked is not None:
+        return {
+            **blocked,
+            "duration_ms": context.elapsed_ms(started),
+            "route": "grid_get_state",
+        }
+    identity = _mapping_from_action(action, "identity")
+    rows = _mapping_from_action(action, "rows")
+    columns = _list_from_action(action, "columns")
+    result = await context.call_adapter(
+        "ui.grid.get_state",
+        selector=selector,
+        identity=identity,
+        rows=rows,
+        columns=columns,
+    )
+    return _action_result(
+        status=result.get("status", "PASS"),
+        route="grid_get_state",
+        selector=selector,
+        identity=identity,
+        rows=rows,
+        columns=columns,
+        duration_ms=context.elapsed_ms(started),
+        result=result,
+    )
+
+
+async def _handle_ui_grid_select_row(
+    action: dict[str, Any],
+    context: ActionContext,
+) -> dict[str, Any]:
+    started = context.clock()
+    selector, blocked = _selector_from_action(action)
+    if blocked is not None:
+        return {
+            **blocked,
+            "duration_ms": context.elapsed_ms(started),
+            "route": "grid_select_row",
+        }
+    row, blocked = _row_from_action(action)
+    if blocked is not None:
+        return {
+            **blocked,
+            "duration_ms": context.elapsed_ms(started),
+            "route": "grid_select_row",
+        }
+    identity = _mapping_from_action(action, "identity")
+    rows = _mapping_from_action(action, "rows")
+    columns = _list_from_action(action, "columns")
+    result = await context.call_adapter(
+        "ui.grid.select_row",
+        selector=selector,
+        row=row,
+        identity=identity,
+        rows=rows,
+        columns=columns,
+    )
+    return _action_result(
+        status=result.get("status", "PASS"),
+        route="grid_select_row",
+        selector=selector,
+        row=row,
+        identity=identity,
+        rows=rows,
+        columns=columns,
+        duration_ms=context.elapsed_ms(started),
+        result=result,
+    )
+
+
+async def _handle_ui_grid_click_row(
+    action: dict[str, Any],
+    context: ActionContext,
+) -> dict[str, Any]:
+    started = context.clock()
+    selector, blocked = _selector_from_action(action)
+    if blocked is not None:
+        return {
+            **blocked,
+            "duration_ms": context.elapsed_ms(started),
+            "route": "grid_click_row",
+        }
+    row, blocked = _row_from_action(action)
+    if blocked is not None:
+        return {
+            **blocked,
+            "duration_ms": context.elapsed_ms(started),
+            "route": "grid_click_row",
+        }
+    identity = _mapping_from_action(action, "identity")
+    rows = _mapping_from_action(action, "rows")
+    columns = _list_from_action(action, "columns")
+    column = action.get("column")
+    result = await context.call_adapter(
+        "ui.grid.click_row",
+        selector=selector,
+        row=row,
+        identity=identity,
+        rows=rows,
+        columns=columns,
+        column=str(column) if column is not None else None,
+    )
+    return _action_result(
+        status=result.get("status", "PASS"),
+        route="grid_click_row",
+        selector=selector,
+        row=row,
+        identity=identity,
+        rows=rows,
+        columns=columns,
+        column=str(column) if column is not None else None,
+        duration_ms=context.elapsed_ms(started),
+        result=result,
+    )
+
+
 async def _handle_wait(action: dict[str, Any], context: ActionContext) -> dict[str, Any]:
     started = context.clock()
     idle_ms, blocked = _idle_ms_from_action(action)
@@ -216,6 +339,61 @@ def _indices_from_action(action: dict[str, Any]) -> tuple[list[int], dict[str, A
     return indices, None
 
 
+def _row_from_action(action: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    raw_row = action.get("row")
+    if not isinstance(raw_row, Mapping):
+        blocked = build_blocked(
+            reason="invalid grid row payload",
+            requested={"row": raw_row},
+            accepted={"row": "object with integer index or string identity"},
+            next_step="Provide row.index or row.identity for a visible DataGrid row.",
+        )
+        return {}, {"status": "BLOCKED", **blocked}
+    if "index" in raw_row:
+        raw_index = raw_row.get("index")
+        if isinstance(raw_index, bool):
+            return {}, _invalid_grid_row_index(raw_index)
+        if isinstance(raw_index, int):
+            index = raw_index
+        elif isinstance(raw_index, str) and _INTEGER_TEXT.fullmatch(raw_index.strip()):
+            index = int(raw_index)
+        else:
+            return {}, _invalid_grid_row_index(raw_index)
+        if index < 0:
+            return {}, _invalid_grid_row_index(raw_index)
+        return {"index": index}, None
+    identity = raw_row.get("identity", raw_row.get("key"))
+    if identity is None or not str(identity):
+        blocked = build_blocked(
+            reason="invalid grid row identity",
+            requested={"row": dict(raw_row)},
+            accepted={"row": "object with integer index or string identity"},
+            next_step="Provide row.identity for a unique visible DataGrid row.",
+        )
+        return {}, {"status": "BLOCKED", **blocked}
+    return {"identity": str(identity)}, None
+
+
+def _invalid_grid_row_index(raw_index: Any) -> dict[str, Any]:
+    blocked = build_blocked(
+        reason="invalid grid row index",
+        requested={"index": raw_index},
+        accepted={"index": "non-negative integer"},
+        next_step="Use an integer row index for visible DataGrid row actions.",
+    )
+    return {"status": "BLOCKED", **blocked}
+
+
+def _mapping_from_action(action: dict[str, Any], key: str) -> dict[str, Any]:
+    value = action.get(key)
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _list_from_action(action: dict[str, Any], key: str) -> list[Any]:
+    value = action.get(key)
+    return list(value) if isinstance(value, list) else []
+
+
 def _idle_ms_from_action(action: dict[str, Any]) -> tuple[int, dict[str, Any] | None]:
     raw_idle_ms = action.get("idle_ms", 0)
     if isinstance(raw_idle_ms, bool) or (
@@ -274,6 +452,9 @@ register_action("noop", _handle_noop)
 register_action("ui.noop", _handle_noop)
 register_action("ui.click", _handle_ui_click)
 register_action("ui.drag", handle_ui_drag)
+register_action("ui.grid.get_state", _handle_ui_grid_get_state)
+register_action("ui.grid.select_row", _handle_ui_grid_select_row)
+register_action("ui.grid.click_row", _handle_ui_grid_click_row)
 register_action("ui.grid.select", _handle_ui_grid_select)
 register_action("ui.invoke", _handle_ui_invoke)
 register_action("ui.key_sequence", handle_ui_key_sequence)

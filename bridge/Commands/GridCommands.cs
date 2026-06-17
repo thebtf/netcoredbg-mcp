@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using System.Threading;
+using System.Drawing;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Conditions;
 using FlaUI.Core.Definitions;
@@ -187,6 +188,70 @@ public static class GridCommands
             ["selected_range"] = new JsonObject { ["start"] = start, ["end"] = end },
             ["selected_rows"] = BuildSelectedRows(grid, rows, ReadColumns(@params))
         };
+    }
+
+    public static JsonNode ClickRow(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
+    {
+        if (JsonRpcHandler.Stealth)
+        {
+            return Blocked(
+                "grid row click requires foreground mouse input",
+                new JsonObject { ["mode"] = "stealth" },
+                new JsonObject { ["mode"] = "non-stealth FlaUI bridge" },
+                "Disable stealth mode or use a non-coordinate UIA action.");
+        }
+
+        var grid = ResolveGrid(@params, automation, mainWindow);
+        if (!grid.Patterns.Grid.TryGetPattern(out _))
+            return Unsupported("GridPattern");
+
+        var rowIndex = @params?["row_index"]?.GetValue<int>()
+            ?? throw new ArgumentException("Missing required parameter: row_index");
+        var rows = GridRows(grid, automation);
+        if (rowIndex < 0 || rowIndex >= rows.Length)
+        {
+            return Blocked(
+                "grid row is outside visible rows",
+                new JsonObject { ["row_index"] = rowIndex, ["visible_count"] = rows.Length },
+                new JsonObject { ["row_index"] = "currently visible row index" },
+                "Scroll the grid or choose a currently visible row before clicking.");
+        }
+
+        var row = rows[rowIndex];
+        var columns = ReadColumns(@params);
+        var requestedColumn = @params?["column"]?.GetValue<string>();
+        var targetResult = ResolveClickTarget(grid, row, requestedColumn, columns);
+        if (targetResult.Blocked is not null)
+            return targetResult.Blocked;
+
+        var target = targetResult.Target ?? row;
+        var pointResult = ClickPoint(target);
+        if (pointResult.Blocked is not null)
+            return pointResult.Blocked;
+
+        var clickResult = ClickCommands.Click(
+            new JsonObject { ["x"] = pointResult.Point.X, ["y"] = pointResult.Point.Y },
+            automation,
+            mainWindow);
+
+        var output = new JsonObject
+        {
+            ["status"] = "PASS",
+            ["clicked"] = true,
+            ["row_index"] = rowIndex,
+            ["x"] = pointResult.Point.X,
+            ["y"] = pointResult.Point.Y,
+            ["click_result"] = clickResult.DeepClone(),
+            ["row"] = BuildRow(row, rowIndex, columns, ColumnHeaders(grid))
+        };
+        if (clickResult is JsonObject clickObject &&
+            clickObject["method"] is JsonNode methodNode)
+            output["method"] = methodNode.DeepClone();
+        if (!string.IsNullOrWhiteSpace(requestedColumn))
+            output["column"] = requestedColumn;
+        if (!string.IsNullOrWhiteSpace(targetResult.ActualColumn))
+            output["actual_column"] = targetResult.ActualColumn;
+        return output;
     }
 
     public static JsonNode AssertRange(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
@@ -690,6 +755,122 @@ public static class GridCommands
             ["unsupported"] = true,
             ["reason"] = $"DataGrid target does not support {pattern}"
         };
+    }
+
+    private static JsonObject Blocked(
+        string reason,
+        JsonObject requested,
+        JsonObject accepted,
+        string nextStep)
+    {
+        return new JsonObject
+        {
+            ["status"] = "BLOCKED",
+            ["reason"] = reason,
+            ["requested"] = requested,
+            ["accepted"] = accepted,
+            ["next_step"] = nextStep
+        };
+    }
+
+    private static (AutomationElement? Target, string? ActualColumn, JsonObject? Blocked) ResolveClickTarget(
+        AutomationElement grid,
+        AutomationElement row,
+        string? requestedColumn,
+        List<string> columns)
+    {
+        if (string.IsNullOrWhiteSpace(requestedColumn))
+            return (row, null, null);
+
+        var headers = ColumnHeaders(grid);
+        AutomationElement[] cells;
+        try
+        {
+            var gridRow = new GridRow(row.FrameworkAutomationElement);
+            cells = gridRow.Cells;
+        }
+        catch
+        {
+            return (
+                null,
+                null,
+                Blocked(
+                    "grid row column evidence unavailable",
+                    new JsonObject { ["column"] = requestedColumn },
+                    new JsonObject { ["column"] = "visible GridRow cell column" },
+                    "Use a visible column with GridItem evidence or omit column to click the row."));
+        }
+
+        for (var ordinal = 0; ordinal < cells.Length; ordinal++)
+        {
+            var cell = cells[ordinal];
+            var columnIndex = CellColumnIndex(cell, ordinal);
+            var actualColumn = CellKey(cell, columnIndex, columns, headers);
+            if (string.Equals(actualColumn, requestedColumn, StringComparison.Ordinal))
+                return (cell, actualColumn, null);
+        }
+
+        return (
+            null,
+            null,
+            Blocked(
+                "grid row column is not visible",
+                new JsonObject { ["column"] = requestedColumn },
+                new JsonObject { ["column"] = "visible GridRow cell column" },
+                "Choose a visible column name or omit column to click the row."));
+    }
+
+    private static (Point Point, JsonObject? Blocked) ClickPoint(AutomationElement element)
+    {
+        try
+        {
+            if (element.TryGetClickablePoint(out var clickable))
+                return (clickable, null);
+        }
+        catch
+        {
+            // Fall back to center point from bounds below.
+        }
+
+        try
+        {
+            var rect = element.BoundingRectangle;
+            if (rect.Width <= 0 || rect.Height <= 0)
+            {
+                return (
+                    Point.Empty,
+                    Blocked(
+                        "row bounds are empty",
+                        new JsonObject
+                        {
+                            ["bounds"] = new JsonObject
+                            {
+                                ["x"] = rect.X,
+                                ["y"] = rect.Y,
+                                ["width"] = rect.Width,
+                                ["height"] = rect.Height
+                            }
+                        },
+                        new JsonObject { ["bounds"] = "non-empty visible row bounds" },
+                        "Ensure the row is visible before clicking it."));
+            }
+
+            return (
+                new Point(
+                    (int)(rect.X + rect.Width / 2),
+                    (int)(rect.Y + rect.Height / 2)),
+                null);
+        }
+        catch
+        {
+            return (
+                Point.Empty,
+                Blocked(
+                    "row bounds are empty",
+                    new JsonObject { ["bounds"] = "unavailable" },
+                    new JsonObject { ["bounds"] = "non-empty visible row bounds" },
+                    "Ensure the row is visible before clicking it."));
+        }
     }
 
     private static JsonArray ToJsonArray(IEnumerable<int> values)

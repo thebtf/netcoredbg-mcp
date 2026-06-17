@@ -89,6 +89,18 @@ class FakeRuntimeSmokeSession:
         self.workflow_calls.append("ui.grid.snapshot")
         return {"status": "PASS", "visible_rows": [{"index": 0, "cells": {"Phrase": "one"}}]}
 
+    async def grid_get_state(self, **_: Any) -> dict[str, Any]:
+        self.workflow_calls.append("ui.grid.get_state")
+        return {"status": "PASS", "visible_rows": [], "selected_rows": []}
+
+    async def grid_select_row(self, **_: Any) -> dict[str, Any]:
+        self.workflow_calls.append("ui.grid.select_row")
+        return {"status": "PASS", "selected_row": {"index": 0}}
+
+    async def grid_click_row(self, **_: Any) -> dict[str, Any]:
+        self.workflow_calls.append("ui.grid.click_row")
+        return {"status": "PASS", "clicked": True, "row": {"index": 0}}
+
     async def ui_ensure_connected(self, **_: Any) -> dict[str, Any]:
         self.workflow_calls.append("ui.ensure_connected")
         return {"status": "PASS", "reason": "ui backend connected"}
@@ -2951,6 +2963,152 @@ async def test_ui_operation_adapters_prefers_backend_row_index_for_viewport_snap
     assert snapshot["selected_rows"] == [
         {"index": 19, "identity": "Cue 019", "derived": False}
     ]
+
+
+@pytest.mark.asyncio
+async def test_ui_operation_adapters_grid_get_state_combines_visible_and_selected_rows() -> None:
+    class FakeBackend:
+        async def grid_snapshot(
+            self,
+            selector: dict[str, Any],
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "row_count": 2,
+                "visible_rows": [
+                    {"index": 0, "row_index": 18, "cells": {"PhraseId": "Cue 018"}},
+                    {"index": 1, "row_index": 19, "cells": {"PhraseId": "Cue 019"}},
+                ],
+                "rows": dict(rows or {}),
+                "columns": list(columns or []),
+            }
+
+        async def grid_selected_rows(
+            self,
+            selector: dict[str, Any],
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "selected_rows": [
+                    {"index": 1, "row_index": 19, "cells": {"PhraseId": "Cue 019"}}
+                ],
+                "columns": list(columns or []),
+            }
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.grid.get_state"](
+        selector={"automation_id": "dataGrid"},
+        identity={"column": "PhraseId"},
+        rows={"visible_only": True},
+        columns=["PhraseId"],
+    )
+
+    assert result["status"] == "PASS"
+    assert result["visible_rows"][1]["row_index"] == 19
+    assert result["selected_rows"] == [
+        {"index": 1, "row_index": 19, "cells": {"PhraseId": "Cue 019"}}
+    ]
+    assert result["identity_strategy"] == {
+        "kind": "configured_column",
+        "column": "PhraseId",
+        "derived": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_ui_operation_adapters_grid_select_row_resolves_visible_identity() -> None:
+    class FakeBackend:
+        async def grid_snapshot(
+            self,
+            selector: dict[str, Any],
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "visible_rows": [
+                    {"index": 0, "row_index": 18, "cells": {"PhraseId": "Cue 018"}},
+                    {"index": 1, "row_index": 19, "cells": {"PhraseId": "Cue 019"}},
+                ],
+            }
+
+        async def grid_select_range(
+            self,
+            selector: dict[str, Any],
+            start_index: int,
+            end_index: int,
+        ) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "selected_range": {"start": start_index, "end": end_index},
+            }
+
+        async def grid_selected_rows(
+            self,
+            selector: dict[str, Any],
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "selected_rows": [
+                    {"index": 1, "row_index": 19, "cells": {"PhraseId": "Cue 019"}}
+                ],
+            }
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.grid.select_row"](
+        selector={"automation_id": "dataGrid"},
+        row={"identity": "Cue 019"},
+        identity={"column": "PhraseId"},
+        columns=["PhraseId"],
+    )
+
+    assert result["status"] == "PASS"
+    assert result["resolved_row"] == {
+        "index": 1,
+        "row_index": 19,
+        "identity": "Cue 019",
+    }
+    assert result["confirmed_selection"] is True
+
+
+@pytest.mark.asyncio
+async def test_ui_operation_adapters_grid_click_row_requires_backend_click_primitive() -> None:
+    class FakeBackend:
+        async def grid_snapshot(
+            self,
+            selector: dict[str, Any],
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "visible_rows": [
+                    {"index": 0, "row_index": 18, "cells": {"PhraseId": "Cue 018"}},
+                    {"index": 1, "row_index": 19, "cells": {"PhraseId": "Cue 019"}},
+                ],
+            }
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.grid.click_row"](
+        selector={"automation_id": "dataGrid"},
+        row={"identity": "Cue 019"},
+        identity={"column": "PhraseId"},
+        column="PhraseId",
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "grid row click unavailable"
+    assert result["requested"] == {"adapter": "ui.grid.click_row"}
 
 
 @pytest.mark.asyncio

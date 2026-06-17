@@ -26,10 +26,23 @@ class SchemaSmokeSession:
             loaded_sources={},
         )
         self.launch_calls = 0
+        self.adapter_calls: list[tuple[str, dict[str, Any]]] = []
 
     async def launch(self, **_: Any) -> dict[str, Any]:
         self.launch_calls += 1
         return {"status": "PASS", "reason": "launched"}
+
+    async def grid_get_state(self, **request: Any) -> dict[str, Any]:
+        self.adapter_calls.append(("ui.grid.get_state", request))
+        return {"status": "PASS", "visible_rows": [], "selected_rows": []}
+
+    async def grid_select_row(self, **request: Any) -> dict[str, Any]:
+        self.adapter_calls.append(("ui.grid.select_row", request))
+        return {"status": "PASS", "selected_row": dict(request.get("row") or {})}
+
+    async def grid_click_row(self, **request: Any) -> dict[str, Any]:
+        self.adapter_calls.append(("ui.grid.click_row", request))
+        return {"status": "PASS", "clicked": True, "row": dict(request.get("row") or {})}
 
 
 @pytest.mark.asyncio
@@ -201,6 +214,108 @@ def test_runtime_smoke_schema_accepts_ui_text_get_state_operation() -> None:
         )
         == []
     )
+
+
+@pytest.mark.asyncio
+async def test_legacy_runtime_smoke_grid_state_actions_reach_adapters() -> None:
+    session = SchemaSmokeSession()
+    plan = {
+        "schema": "netcoredbg.runtime_smoke.v1",
+        "steps": [
+            {
+                "op": "ui.grid.get_state",
+                "selector": {"automation_id": "CueDataGrid"},
+                "identity": {"column": "PhraseId"},
+                "rows": {"visible_only": True},
+                "columns": ["PhraseId"],
+            },
+            {
+                "op": "ui.grid.select_row",
+                "selector": {"automation_id": "CueDataGrid"},
+                "row": {"identity": "Cue 042"},
+                "identity": {"column": "PhraseId"},
+            },
+            {
+                "op": "ui.grid.click_row",
+                "selector": {"automation_id": "CueDataGrid"},
+                "row": {"index": 3},
+                "column": "Phrase",
+            },
+        ],
+    }
+
+    result = await RuntimeSmokeRunner(
+        session,
+        service_adapters={
+            "ui.grid.get_state": session.grid_get_state,
+            "ui.grid.select_row": session.grid_select_row,
+            "ui.grid.click_row": session.grid_click_row,
+        },
+    ).run(plan)
+
+    assert validate_plan(plan) == []
+    assert result["status"] == "PASS"
+    assert "validation_errors" not in result
+    assert session.adapter_calls == [
+        (
+            "ui.grid.get_state",
+            {
+                "selector": {"automation_id": "CueDataGrid"},
+                "identity": {"column": "PhraseId"},
+                "rows": {"visible_only": True},
+                "columns": ["PhraseId"],
+            },
+        ),
+        (
+            "ui.grid.select_row",
+            {
+                "selector": {"automation_id": "CueDataGrid"},
+                "row": {"identity": "Cue 042"},
+                "identity": {"column": "PhraseId"},
+            },
+        ),
+        (
+            "ui.grid.click_row",
+            {
+                "selector": {"automation_id": "CueDataGrid"},
+                "row": {"index": 3},
+                "column": "Phrase",
+            },
+        ),
+    ]
+
+
+def test_legacy_runtime_smoke_grid_state_actions_validate_arguments() -> None:
+    assert validate_plan(
+        {
+            "steps": [
+                {
+                    "op": "ui.grid.get_state",
+                    "selector": {"automation_id": "CueDataGrid"},
+                    "identity": [],
+                    "rows": [],
+                    "columns": ["PhraseId", 7],
+                },
+                {
+                    "op": "ui.grid.select_row",
+                    "selector": {"automation_id": "CueDataGrid"},
+                    "row": "Cue 042",
+                },
+                {
+                    "op": "ui.grid.click_row",
+                    "selector": {"automation_id": "CueDataGrid"},
+                    "row": {"index": 3},
+                    "column": 9,
+                },
+            ],
+        }
+    ) == [
+        "steps[0].rows must be an object for op ui.grid.get_state",
+        "steps[0].columns must be a list of strings for op ui.grid.get_state",
+        "steps[0].identity must be an object for op ui.grid.get_state",
+        "steps[1].row must be an object for op ui.grid.select_row",
+        "steps[2].column must be a string for op ui.grid.click_row",
+    ]
 
 
 def test_runtime_smoke_schema_accepts_ui_text_assert_selection_operation() -> None:

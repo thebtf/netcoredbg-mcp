@@ -117,9 +117,21 @@ OPERATION_SCHEMAS: dict[str, OperationSchema] = {
         "ui.grid.snapshot",
         ("selector",),
     ),
+    "ui.grid.get_state": OperationSchema(
+        "ui.grid.get_state",
+        ("selector",),
+    ),
     "ui.grid.select_range": OperationSchema(
         "ui.grid.select_range",
         ("selector", "start_index", "end_index"),
+    ),
+    "ui.grid.select_row": OperationSchema(
+        "ui.grid.select_row",
+        ("selector", "row"),
+    ),
+    "ui.grid.click_row": OperationSchema(
+        "ui.grid.click_row",
+        ("selector", "row"),
     ),
     "ui.grid.assert_rows": OperationSchema(
         "ui.grid.assert_rows",
@@ -882,10 +894,22 @@ def _validate_op_args(
     if "selector" in args and not isinstance(args["selector"], dict):
         errors.append(f"{prefix}.selector must be an object for op {op_name}")
 
-    if op_name == "ui.grid.snapshot":
+    if op_name in {
+        "ui.grid.snapshot",
+        "ui.grid.get_state",
+        "ui.grid.select_row",
+        "ui.grid.click_row",
+    }:
         if "rows" in args and not isinstance(args["rows"], dict):
             errors.append(f"{prefix}.rows must be an object for op {op_name}")
         _validate_optional_string_list(prefix, op_name, args, "columns", errors)
+        if "identity" in args and not isinstance(args["identity"], dict):
+            errors.append(f"{prefix}.identity must be an object for op {op_name}")
+        if op_name in {"ui.grid.select_row", "ui.grid.click_row"}:
+            if "row" in args and not isinstance(args["row"], dict):
+                errors.append(f"{prefix}.row must be an object for op {op_name}")
+            if "column" in args and not isinstance(args["column"], str):
+                errors.append(f"{prefix}.column must be a string for op {op_name}")
     elif op_name == "ui.grid.select_range":
         _validate_int_arg(prefix, op_name, args, "start_index", errors)
         _validate_int_arg(prefix, op_name, args, "end_index", errors)
