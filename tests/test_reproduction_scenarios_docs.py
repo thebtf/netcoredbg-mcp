@@ -170,7 +170,7 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
     ):
         assert f"`{issue}` | Target evidence merged" in backlog
 
-    for issue in ("#250", "#254", "#268", "#269"):
+    for issue in ("#250", "#268", "#269"):
         row = _issue_row(backlog, issue)
         assert "Target slice merged" in row
         assert "broader" in row
@@ -182,11 +182,16 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
     assert "selection confirmation" in row_250
 
     row_254 = _issue_row(backlog, "#254")
+    assert "Target evidence merged and target-side Engram issue resolved" in row_254
     assert "CR-021" in row_254
     assert "CR-027" in row_254
+    assert "PR #113" in row_254
+    assert "e497681" in row_254
     assert "selection" in row_254
     assert "selected row/index/content" in row_254
     assert "ui_query" in row_254
+    assert "XPath" in row_254
+    assert "Source-side owner may close" in row_254
 
     row = _issue_row(backlog, "#270")
     assert "Target helper slice covered" in row
@@ -215,7 +220,6 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
 
     expected_remaining_terms = {
         "#250": ["focus", "selected-item", "screenshot-orientation"],
-        "#254": ["CR-027", "ui_query", "selected row/index/content", "branch-local GREEN"],
         "#268": [
             "runtime_smoke_validate_plan",
             "runtime_smoke_run_plan",
@@ -278,11 +282,13 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "screenshot orientation",
         ],
         "#254": [
-            "commented",
-            "CR-027",
+            "resolved target-side",
+            "CR-027 / PR #113",
             "selected row/index/content",
             "ui_query",
-            "review/merge/post-merge evidence",
+            "post-merge",
+            "e497681",
+            "None in netcoredbg-mcp",
         ],
         "#268": [
             "commented",
@@ -376,7 +382,7 @@ def test_issue_272_remaining_scope_excludes_covered_launch_contract() -> None:
 def test_cr022_broad_issues_require_split_or_comment_evidence_before_closure() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
 
-    for issue in ("#250", "#254", "#268", "#269", "#270", "#271", "#272"):
+    for issue in ("#250", "#268", "#269", "#270", "#271", "#272"):
         _, status, evidence, remaining_action = _issue_cells(backlog, issue)
         lifecycle_text = " ".join((status, evidence, remaining_action)).lower()
 
