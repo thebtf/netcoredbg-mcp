@@ -269,9 +269,11 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "runtime_smoke_wait_for_result",
             "CR-024",
             "CR-026",
+            "CR-033",
             "DISAGREEING_SOURCES",
             "launch env/evidence-dir advertisement",
-            "remaining app diagnostics orchestration",
+            "launch-to-artifact default acquisition",
+            "remaining broader app diagnostics lifecycle/orchestration",
         ],
     }
 
@@ -359,6 +361,8 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "app_diagnostics.poll",
             "app_diagnostics.wait_json",
             "DISAGREEING_SOURCES",
+            "CR-033",
+            "launch-to-artifact default acquisition",
         ],
     }
 
@@ -393,7 +397,18 @@ def test_issue_272_records_cr026_launch_contract_slice() -> None:
     assert "broader FR remains open" in row
 
 
-def test_issue_272_remaining_scope_excludes_covered_launch_contract() -> None:
+def test_issue_272_records_cr033_launch_orchestration_slice() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#272")
+
+    assert "launch-orchestrated acquisition slice covered" in row
+    assert "CR-033" in row
+    assert "diagnostic_launch.evidence.path" in row
+    assert "explicit `wait_json` / `poll`" in row
+    assert "broader FR remains open" in row
+
+
+def test_issue_272_remaining_scope_excludes_covered_launch_contract_and_default() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#272")
     lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#272")
@@ -403,9 +418,13 @@ def test_issue_272_remaining_scope_excludes_covered_launch_contract() -> None:
 
     assert "diagnostic env/evidence-dir advertisement" not in remaining
     assert "launch env/evidence-dir advertisement" not in remaining
-    assert "app diagnostics orchestration beyond local-file acquisition" in remaining
+    assert "app diagnostics orchestration beyond local-file acquisition" not in remaining
+    assert "launch-to-artifact default acquisition" in remaining
+    assert "broader app diagnostics lifecycle/orchestration" in remaining
     assert "diagnostic env/evidence-dir advertisement" not in lifecycle_remaining
     assert "launch env/evidence-dir advertisement" not in lifecycle_remaining
+    assert "app diagnostics orchestration beyond local-file acquisition" not in lifecycle_remaining
+    assert "launch-to-artifact default acquisition" in lifecycle_remaining
 
 
 def test_issue_271_records_cleanup_contamination_contract_slice() -> None:
