@@ -212,5 +212,8 @@ async def test_runtime_smoke_v2_critical_direct_wpf_mcp_smoke() -> None:
     assert evidence["happy"]["status"] == "PASS", evidence
     assert evidence["happy"]["cleanup"]["process_registry_after"] == 0, evidence
     assert evidence["blocked"]["status"] == "BLOCKED", evidence
-    assert evidence["blocked"]["blocked"]["reason"] == "selector not found", evidence
+    assert (
+        evidence["blocked"]["blocked"]["reason"]
+        == "selector result did not match exact automation_id"
+    ), evidence
     assert evidence["blocked"]["cleanup"]["process_registry_after"] == 0, evidence

@@ -625,6 +625,78 @@ async def test_runtime_smoke_run_probe_starts_oracle_pack_probe_run(
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_run_probe_returns_disagreeing_oracle_pack_bundle(
+    capturing_mcp,
+    tmp_path,
+) -> None:
+    session = RunProbeFacadeSession()
+    _register(capturing_mcp, session)
+    text_source = tmp_path / "text-source.json"
+    property_source = tmp_path / "property-source.json"
+    text_source.write_text('{"status": "Ready"}', encoding="utf-8")
+    property_source.write_text('{"status": "Busy"}', encoding="utf-8")
+
+    started = await capturing_mcp.tools["runtime_smoke_run_probe"](
+        ctx=None,
+        probe={
+            "kind": "oracle_pack",
+            "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
+            "id": "status-oracle-pack",
+            "status": "PASS",
+            "checks": [
+                {
+                    "id": "status-agrees",
+                    "probe": "file.json",
+                    "expect": {"value": "Ready"},
+                    "on_blocked": {"next_step": "Inspect status evidence."},
+                }
+            ],
+            "sources": [
+                {
+                    "id": "status_text",
+                    "probe": {
+                        "kind": "file.json",
+                        "path": str(text_source),
+                        "jsonpath": "$.status",
+                    },
+                },
+                {
+                    "id": "status_property",
+                    "probe": {
+                        "kind": "file.json",
+                        "path": str(property_source),
+                        "jsonpath": "$.status",
+                    },
+                },
+            ],
+            "limits": {
+                "max_text_length": 240,
+                "max_list_items": 8,
+                "max_json_bytes": 32768,
+            },
+        },
+        name="oracle-pack-disagreeing-sources",
+    )
+    data = started["data"]
+
+    assert data["status"] == "RUNNING"
+    assert data["run_created"] is True
+    bundle = await _wait_for_bundle(capturing_mcp, data["run_id"])
+
+    assert bundle["status"] == "BLOCKED"
+    assert bundle["result"]["status"] == "BLOCKED"
+    assert bundle["result"]["reason"] == "DISAGREEING_SOURCES"
+    assert bundle["result"]["evidence_refs"] == [
+        {
+            "case_id": "run_probe",
+            "phase": "after",
+            "probe": "oracle_pack",
+            "evidence_ref": "diagnostic:oracle_pack:status-oracle-pack",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_run_probe_rejects_invalid_oracle_pack_before_run(
     capturing_mcp,
 ) -> None:

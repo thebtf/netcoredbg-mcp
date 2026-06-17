@@ -103,9 +103,11 @@ async def test_v2_unknown_probe_kind_fails_prelaunch_with_supported_kinds() -> N
     assert result["reason"] == "invalid plan schema"
     assert "ui.colorscheme" in "\n".join(result["validation_errors"])
     assert result["accepted_probe_kinds"] == [
+        "app_diagnostics",
         "debug.evaluate",
         "debug.tracepoint",
         "file.json",
+        "oracle_pack",
         "output.field",
         "output.since",
         "process.metric",

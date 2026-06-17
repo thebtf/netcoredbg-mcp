@@ -16,6 +16,12 @@ from netcoredbg_mcp.session.runtime_smoke_schema import (
 
 EXAMPLE_PATH = Path("docs/examples/runtime-smoke-v2-drag-drop-grid.json")
 SELECTOR_SAFETY_EXAMPLE_PATH = Path("docs/examples/runtime-smoke-v2-selector-safety.json")
+APP_DIAGNOSTICS_WAIT_JSON_EXAMPLE_PATH = Path(
+    "docs/examples/runtime-smoke-app-diagnostics-wait-json.json"
+)
+APP_DIAGNOSTICS_POLL_EXAMPLE_PATH = Path(
+    "docs/examples/runtime-smoke-app-diagnostics-poll.json"
+)
 README_PATH = Path("README.md")
 PLAYBOOK_PATH = Path("docs/PRODUCTION-TESTING-PLAYBOOK.md")
 
@@ -471,3 +477,24 @@ def test_diagnostic_examples_remain_schema_compatible() -> None:
         "debug.tracepoint.remove"
         in payloads["tracepoint_guardrail"]["cleanup"]["operations"]
     )
+
+
+def test_app_diagnostics_wait_json_example_remains_schema_compatible() -> None:
+    payload = json.loads(APP_DIAGNOSTICS_WAIT_JSON_EXAMPLE_PATH.read_text(encoding="utf-8"))
+
+    assert validate_diagnostic_schema_example(payload, kind="app_diagnostics") == []
+    assert payload["wait_json"]["path"] == ".agent/runtime-smoke/app-diagnostics.json"
+    assert payload["wait_json"]["timeout_ms"] == 5000
+    assert payload["wait_json"]["poll_interval_ms"] == 100
+    assert payload["observations"] == []
+
+
+def test_app_diagnostics_poll_example_remains_schema_compatible() -> None:
+    payload = json.loads(APP_DIAGNOSTICS_POLL_EXAMPLE_PATH.read_text(encoding="utf-8"))
+
+    assert validate_diagnostic_schema_example(payload, kind="app_diagnostics") == []
+    assert payload["poll"]["path"] == ".agent/runtime-smoke/app-diagnostics.json"
+    assert payload["poll"]["timeout_ms"] == 5000
+    assert payload["poll"]["poll_interval_ms"] == 100
+    assert "wait_json" not in payload
+    assert payload["observations"] == []
