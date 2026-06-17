@@ -23,6 +23,7 @@ class ActionContext:
     service_adapters: dict[str, Callable[..., Any]]
     clock: Callable[[], float]
     session: Any | None = None
+    diagnostic_launch: dict[str, Any] | None = None
 
     async def call_adapter(self, name: str, **kwargs: Any) -> dict[str, Any]:
         adapter = self.service_adapters.get(name)

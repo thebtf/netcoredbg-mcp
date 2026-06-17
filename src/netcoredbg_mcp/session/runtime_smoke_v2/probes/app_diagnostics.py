@@ -17,6 +17,9 @@ from ._diagnostic_common import (
     invalid_diagnostic_probe,
 )
 
+LAUNCH_DIAGNOSTIC_WAIT_TIMEOUT_MS = 0
+LAUNCH_DIAGNOSTIC_WAIT_POLL_INTERVAL_MS = 50
+
 
 async def handle_app_diagnostics(
     probe: dict[str, Any],
@@ -78,7 +81,7 @@ async def _probe_with_diagnostic_json(
     probe: dict[str, Any],
     context: Any,
 ) -> tuple[dict[str, Any], dict[str, Any] | None, str | None]:
-    field, source = _diagnostic_json_source(probe)
+    field, source = _diagnostic_json_source(probe, context)
     if source is None:
         return probe, None, None
 
@@ -91,14 +94,38 @@ async def _probe_with_diagnostic_json(
     return merged, metadata, field
 
 
-def _diagnostic_json_source(probe: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+def _diagnostic_json_source(
+    probe: dict[str, Any],
+    context: Any,
+) -> tuple[str, dict[str, Any] | None]:
     wait_json = probe.get("wait_json")
     if isinstance(wait_json, dict):
         return "wait_json", wait_json
     poll = probe.get("poll")
     if isinstance(poll, dict):
         return "poll", poll
+    launch_source = _launch_diagnostic_json_source(context)
+    if launch_source is not None:
+        return "wait_json", launch_source
     return "wait_json", None
+
+
+def _launch_diagnostic_json_source(context: Any) -> dict[str, Any] | None:
+    action_context = getattr(context, "action_context", None)
+    diagnostic_launch = getattr(action_context, "diagnostic_launch", None)
+    if not isinstance(diagnostic_launch, dict):
+        return None
+    evidence = diagnostic_launch.get("evidence")
+    if not isinstance(evidence, dict):
+        return None
+    path = evidence.get("path")
+    if not isinstance(path, str) or not path:
+        return None
+    return {
+        "path": path,
+        "timeout_ms": LAUNCH_DIAGNOSTIC_WAIT_TIMEOUT_MS,
+        "poll_interval_ms": LAUNCH_DIAGNOSTIC_WAIT_POLL_INTERVAL_MS,
+    }
 
 
 async def _read_wait_json(

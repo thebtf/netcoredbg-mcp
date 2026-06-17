@@ -111,7 +111,7 @@ async def _wait_for_bundle(capturing_mcp, run_id: str) -> dict[str, Any]:
         data = response["data"]
         if data.get("final"):
             return data
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.01)
     raise AssertionError("runtime smoke run did not finish")
 
 
