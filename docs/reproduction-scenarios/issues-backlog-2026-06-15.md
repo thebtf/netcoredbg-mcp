@@ -28,14 +28,14 @@ work.
 
 ## CR-022 Issue Lifecycle Refresh
 
-fresh Engram issue/comment reads on 2026-06-17 reconciled the broad rows after
+Fresh Engram issue/comment reads on 2026-06-17 reconciled the broad rows after
 CR-021. No issue was closed. The target-side comments below separate merged
 sub-slices from remaining capabilities so future closure needs named evidence
 instead of inferred completion from prior PRs.
 
 | Issue | Lifecycle decision | Fresh evidence | Remaining capability gate |
 | --- | --- | --- | --- |
-| `#226` | leave open | Existing downstream replay packet and comment remain current; latest replay is `BLOCKED`, not `PASS`. | NovaScript CR-003 replay must PASS after the drag source row visibility setup is repaired, or an explicit owner lifecycle decision must supersede the replay gate. |
+| `#226` | leave open | Existing downstream replay packet and comment remain current; latest replay is `BLOCKED`, not `PASS`; target-side evidence is not enough to close the consumer issue. | NovaScript CR-003 replay must PASS after the drag source row visibility setup is repaired, or an explicit owner lifecycle decision must supersede the replay gate. |
 | `#250` | commented; keep open or split | Engram comment #970 records PR #86/#87 pointer-routing evidence plus CR-021 focus proof and selection confirmation. | Remaining selected-item semantics, SelectionItemPattern confirmation, screenshot orientation / screenshot-orientation, and exact focus-route compatibility require split/comment evidence before closing. |
 | `#254` | commented; keep open or split | Engram comment #971 records PR #87 `ui_grid(rows)` evidence plus CR-021 selected row/index/content route evidence. | Remaining ui_query consistency for WPF DataGrid row/selection fields requires split/comment evidence before closing. |
 | `#268` | commented; keep open or split | Engram comment #972 records `runtime_smoke_validate_plan`, `runtime_smoke_run_plan`, `runtime_smoke_evidence_bundle`, `runtime_smoke_run_probe`, bounded diagnostic probes, and `runtime_smoke_wait_for_result`. | Remaining broad orchestration, NovaScript-style action/oracle DSL, and oracle-pack orchestration require split/comment evidence before closing. |

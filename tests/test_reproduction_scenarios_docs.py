@@ -20,13 +20,6 @@ def _issue_row(backlog: str, issue: str) -> str:
     raise AssertionError(f"missing backlog row for {issue}")
 
 
-def _issue_cells(backlog: str, issue: str) -> tuple[str, str, str, str]:
-    row = _issue_row(backlog, issue)
-    cells = tuple(cell.strip() for cell in row.strip().strip("|").split("|"))
-    assert len(cells) == 4
-    return cells
-
-
 def _section_issue_row(backlog: str, heading: str, issue: str) -> str:
     expected_heading = heading.strip()
     in_section = False
@@ -41,6 +34,13 @@ def _section_issue_row(backlog: str, heading: str, issue: str) -> str:
         if cells and cells[0] == f"`{issue}`":
             return line
     raise AssertionError(f"missing {heading} row for {issue}")
+
+
+def _issue_cells(backlog: str, issue: str) -> tuple[str, str, str, str]:
+    row = _section_issue_row(backlog, "## Current Issue Status", issue)
+    cells = tuple(cell.strip() for cell in row.strip().strip("|").split("|"))
+    assert len(cells) == 4, f"expected 4 cells for {issue}, got {len(cells)}: {row!r}"
+    return cells
 
 
 def test_novascript_cr003_replay_packet_is_actionable() -> None:
@@ -254,7 +254,7 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
     backlog = _read(BACKLOG_SCENARIOS)
 
     assert "## CR-022 Issue Lifecycle Refresh" in backlog
-    assert "fresh Engram issue/comment reads on 2026-06-17" in backlog
+    assert "fresh engram issue/comment reads on 2026-06-17" in backlog.lower()
 
     expected_decisions = {
         "#226": [
@@ -320,7 +320,7 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
     for issue, terms in expected_decisions.items():
         decision_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", issue)
         for term in terms:
-            assert term in decision_row
+            assert term in decision_row, f"term {term!r} missing from {issue} CR-022 row"
 
 
 def test_cr022_broad_issues_require_split_or_comment_evidence_before_closure() -> None:
