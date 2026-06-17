@@ -78,6 +78,15 @@ async def _read_status_text_or_fail(selector: dict[str, Any], **_: Any) -> dict[
     return await _read_status_text()
 
 
+async def _read_status_text_impasse(**_: Any) -> dict[str, Any]:
+    return {
+        "status": "IMPASSE",
+        "reason": "status text unavailable after retry budget",
+        "value": None,
+        "evidence_ref": "ui:text:StatusLabel",
+    }
+
+
 def test_validate_v2_plan_contract_accepts_oracle_pack_probe_kind() -> None:
     validation = validate_v2_plan_contract(one_probe_plan(_oracle_pack()))
 
@@ -341,6 +350,36 @@ async def test_oracle_pack_probe_preserves_source_failure_over_disagreement() ->
     assert "classification" not in probe
     assert "source_values" not in probe["value"]
     assert probe["value"]["sources"][2]["status"] == "FAIL"
+
+
+@pytest.mark.asyncio
+async def test_oracle_pack_probe_preserves_impasse_source_status() -> None:
+    result = await runner(
+        ProbeSmokeSession(),
+        adapters={"ui.text.read": _read_status_text_impasse},
+    ).run(
+        one_probe_plan(
+            _oracle_pack(
+                phase="after",
+                sources=[
+                    {
+                        "id": "status_text",
+                        "probe": {
+                            "kind": "ui.text",
+                            "action": "read",
+                            "selector": {"automation_id": "StatusLabel"},
+                        },
+                    }
+                ],
+            )
+        )
+    )
+
+    probe = after_probe(result)
+    assert result["status"] == "IMPASSE"
+    assert probe["status"] == "IMPASSE"
+    assert probe["reason"] == "oracle source impasse"
+    assert probe["value"]["sources"][0]["status"] == "IMPASSE"
 
 
 @pytest.mark.asyncio

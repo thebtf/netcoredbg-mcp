@@ -83,8 +83,13 @@ async def handle_oracle_pack(
                 next_step="Inspect source evidence and make every source runnable.",
             )
         )
-    elif source_status_drives_pack and source_status == "FAIL":
-        output["reason"] = "oracle source failed"
+    elif source_status_drives_pack:
+        if source_status == "FAIL":
+            output["reason"] = "oracle source failed"
+        elif source_status == "IMPASSE":
+            output["reason"] = "oracle source impasse"
+        else:
+            output["reason"] = "oracle source reported non-PASS"
     elif status == "BLOCKED":
         output["reason"] = "oracle pack reported BLOCKED"
     elif status == "FAIL":
@@ -181,6 +186,11 @@ def _source_terminal_status(sources: list[dict[str, Any]]) -> str:
         return "FAIL"
     if "BLOCKED" in statuses:
         return "BLOCKED"
+    if "IMPASSE" in statuses:
+        return "IMPASSE"
+    non_pass_statuses = sorted(status for status in statuses if status != "PASS")
+    if non_pass_statuses:
+        return non_pass_statuses[0]
     return "PASS"
 
 
