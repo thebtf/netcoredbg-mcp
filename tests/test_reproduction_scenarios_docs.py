@@ -354,6 +354,21 @@ def test_issue_272_records_cr026_launch_contract_slice() -> None:
     assert "broader FR remains open" in row
 
 
+def test_issue_272_remaining_scope_excludes_covered_launch_contract() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    _issue, _state, _evidence, remaining = _issue_cells(backlog, "#272")
+    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#272")
+    _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
+        cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
+    )
+
+    assert "diagnostic env/evidence-dir advertisement" not in remaining
+    assert "launch env/evidence-dir advertisement" not in remaining
+    assert "app diagnostics orchestration beyond local-file acquisition" in remaining
+    assert "diagnostic env/evidence-dir advertisement" not in lifecycle_remaining
+    assert "launch env/evidence-dir advertisement" not in lifecycle_remaining
+
+
 def test_cr022_broad_issues_require_split_or_comment_evidence_before_closure() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
 

@@ -103,6 +103,30 @@ async def test_runtime_smoke_validate_plan_reports_invalid_v2_without_execution(
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_validate_plan_rejects_malformed_diagnostics_contract(
+    capturing_mcp,
+) -> None:
+    session = PlanFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_validate_plan"](
+        ctx=None,
+        plan={
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "diagnostics": "app diagnostics requested but malformed",
+            "cases": [{"id": "case-1", "transitions": []}],
+        },
+    )
+    data = response["data"]
+
+    assert data["status"] == "INVALID_SETUP"
+    assert data["can_run"] is False
+    assert data["validation_errors"] == ["diagnostics must be an object"]
+    assert data["case_count"] == 1
+    assert session.launch_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_validate_plan_reports_malformed_v2_case_without_exception(
     capturing_mcp,
 ) -> None:

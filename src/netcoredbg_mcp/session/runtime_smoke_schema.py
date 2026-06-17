@@ -748,11 +748,33 @@ def _validate_object_fields(plan: dict[str, Any], errors: list[str]) -> None:
         errors.append("baseline must be an object")
     if "generate" in plan and not isinstance(plan["generate"], dict):
         errors.append("generate must be an object")
+    _validate_diagnostics_field(plan, errors)
     if "metrics_thresholds" in plan and not isinstance(plan["metrics_thresholds"], dict):
         errors.append("metrics_thresholds must be an object")
     for field_name in ("cleanup", "teardown"):
         if field_name in plan and not isinstance(plan[field_name], dict):
             errors.append(f"{field_name} must be an object")
+
+
+def _validate_diagnostics_field(plan: dict[str, Any], errors: list[str]) -> None:
+    if "diagnostics" not in plan:
+        return
+    diagnostics = plan["diagnostics"]
+    if not isinstance(diagnostics, dict):
+        errors.append("diagnostics must be an object")
+        return
+
+    app_diagnostics = diagnostics.get("app_diagnostics")
+    if app_diagnostics is None:
+        return
+    if not isinstance(app_diagnostics, dict):
+        errors.append("diagnostics.app_diagnostics must be an object")
+        return
+    if "diagnostic_launch" in app_diagnostics and not isinstance(
+        app_diagnostics["diagnostic_launch"],
+        dict,
+    ):
+        errors.append("diagnostics.app_diagnostics.diagnostic_launch must be an object")
 
 
 def _validate_budgets(plan: dict[str, Any], errors: list[str]) -> None:
