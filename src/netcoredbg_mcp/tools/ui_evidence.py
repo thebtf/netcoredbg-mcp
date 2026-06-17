@@ -215,7 +215,10 @@ def register_ui_evidence_tools(
                 backend_provider = _static_backend_provider(backend)
                 adapters = ui_operation_adapters(backend_provider)
                 result = await adapters["ui.text.set_text"](selector=selector, text=text)
-                return build_response(data=result, state=session.state.state)
+                return build_response(
+                    data=_strip_unbounded_evidence_value(result),
+                    state=session.state.state,
+                )
             if canonical_action == "get_state":
                 return build_response(
                     data=await read_textbox_state(backend, selector),

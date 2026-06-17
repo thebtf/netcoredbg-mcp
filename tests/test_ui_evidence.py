@@ -264,6 +264,20 @@ class FakeSetTextClient:
         return {"status": "FAIL", "reason": f"unexpected method {method}"}
 
 
+class RawFailingSetTextClient:
+    def __init__(self, owner: FakeSetTextBackend) -> None:
+        self._owner = owner
+
+    async def call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self._owner.calls.append({"client_call": {"method": method, "payload": dict(payload)}})
+        return {
+            "status": "BLOCKED",
+            "reason": "focus rejected",
+            "full_tree": {"must": "not leak"},
+            "result": {"raw_tree": {"must": "not leak"}},
+        }
+
+
 class FakeSetTextBackend:
     def __init__(
         self,
@@ -1269,6 +1283,37 @@ async def test_ui_text_set_text_blocks_selector_miss_before_typing(
             }
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_ui_text_set_text_strips_raw_backend_failure_evidence(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = FakeSetTextBackend()
+    backend.client = RawFailingSetTextClient(backend)
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_text"](
+        ctx=None,
+        action="set_text",
+        automation_id="CueTextBox",
+        text="Replaced text",
+    )
+
+    assert response["data"]["status"] == "BLOCKED"
+    assert response["data"]["reason"] == "focus rejected"
+    assert "full_tree" not in str(response["data"])
+    assert "raw_tree" not in str(response["data"])
 
 
 @pytest.mark.asyncio
