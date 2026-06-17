@@ -82,6 +82,56 @@ def test_diagnostic_schema_contract_exposes_orchestration_vocabulary() -> None:
     assert "diagnostic JSON not observed" in contract["app_diagnostics"]["failure_modes"]
 
 
+def test_diagnostic_schema_contract_exposes_app_diagnostics_launch_contract() -> None:
+    from netcoredbg_mcp.session.runtime_smoke_schema import diagnostic_schema_contract
+
+    contract = diagnostic_schema_contract()
+
+    assert "diagnostic_launch" in contract["app_diagnostics"]["optional_fields"]
+    assert contract["app_diagnostics"]["launch_contract"] == {
+        "env_var_names": {
+            "directory": "NETCOREDBG_MCP_APP_DIAGNOSTICS_DIR",
+            "path": "NETCOREDBG_MCP_APP_DIAGNOSTICS_PATH",
+            "schema": "NETCOREDBG_MCP_APP_DIAGNOSTICS_SCHEMA",
+        },
+        "default_evidence_directory": ".agent/runtime-smoke/app-diagnostics",
+        "default_file_name": "app-diagnostics.json",
+        "redacted_env_values": True,
+    }
+
+
+def test_app_diagnostics_launch_contract_preserves_absolute_evidence_directory() -> None:
+    from netcoredbg_mcp.session.runtime_smoke_schema import (
+        app_diagnostics_launch_contract,
+    )
+
+    contract = app_diagnostics_launch_contract(
+        evidence_dir="/tmp/runtime-smoke-diagnostics",
+        file_name="app-diagnostics.json",
+    )
+
+    assert contract["evidence"] == {
+        "directory": "/tmp/runtime-smoke-diagnostics",
+        "path": "/tmp/runtime-smoke-diagnostics/app-diagnostics.json",
+    }
+
+
+def test_app_diagnostics_launch_contract_sanitizes_traversal_and_drive_letters() -> None:
+    from netcoredbg_mcp.session.runtime_smoke_schema import (
+        app_diagnostics_launch_contract,
+    )
+
+    contract = app_diagnostics_launch_contract(
+        evidence_dir=r"C:\tmp\..\secret diagnostics",
+        file_name="../unsafe:name.json",
+    )
+
+    assert contract["evidence"] == {
+        "directory": "tmp/secret-diagnostics",
+        "path": "tmp/secret-diagnostics/unsafe-name.json",
+    }
+
+
 def test_diagnostic_schema_contract_matches_runtime_probe_registry() -> None:
     from netcoredbg_mcp.session.runtime_smoke_schema import diagnostic_schema_contract
     from netcoredbg_mcp.session.runtime_smoke_v2.probes import accepted_probe_kinds

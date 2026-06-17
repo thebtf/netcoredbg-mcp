@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner, RuntimeSmokeSession
+from netcoredbg_mcp.session.runtime_smoke_schema import app_diagnostics_launch_contract
 
 
 class BaselineSmokeSession:
@@ -86,6 +87,29 @@ def _baseline_plan() -> dict[str, Any]:
     }
 
 
+def _diagnostic_launch_baseline_plan() -> dict[str, Any]:
+    plan = _baseline_plan()
+    launch_step = plan["baseline"]["steps"][1]
+    launch_step["app_diagnostics"] = {
+        "evidence_dir": "work/runtime-smoke-diagnostics",
+        "file_name": "app-diagnostics.json",
+    }
+    return plan
+
+
+def _top_level_diagnostic_launch_baseline_plan() -> dict[str, Any]:
+    plan = _baseline_plan()
+    plan["diagnostics"] = {
+        "app_diagnostics": {
+            "diagnostic_launch": app_diagnostics_launch_contract(
+                evidence_dir="work/top-level-diagnostics",
+                file_name="app-diagnostics.json",
+            )
+        }
+    }
+    return plan
+
+
 @pytest.mark.asyncio
 async def test_v2_baseline_runs_before_first_case() -> None:
     session = BaselineSmokeSession()
@@ -100,6 +124,62 @@ async def test_v2_baseline_runs_before_first_case() -> None:
         ("ui.invoke", {"automation_id": "caseToggle"}),
     ]
     assert [call[0] for call in session.calls] == sorted(call[0] for call in session.calls)
+
+
+@pytest.mark.asyncio
+async def test_v2_baseline_launch_merges_app_diagnostics_advertisement_env() -> None:
+    session = BaselineSmokeSession()
+
+    result = await _runner(session).run(_diagnostic_launch_baseline_plan())
+
+    launch_call = [call for call in session.calls if call[1] == "launch"][0]
+    launch_env = launch_call[2]["env"]
+    assert launch_env == {
+        "NETCOREDBG_MCP_APP_DIAGNOSTICS_DIR": "work/runtime-smoke-diagnostics",
+        "NETCOREDBG_MCP_APP_DIAGNOSTICS_PATH": (
+            "work/runtime-smoke-diagnostics/app-diagnostics.json"
+        ),
+        "NETCOREDBG_MCP_APP_DIAGNOSTICS_SCHEMA": (
+            "netcoredbg.runtime_smoke.diagnostics.v1"
+        ),
+    }
+    launch_result = result["baseline"]["steps"][1]["result"]
+    assert launch_result["diagnostic_launch"]["env_var_names"] == {
+        "directory": "NETCOREDBG_MCP_APP_DIAGNOSTICS_DIR",
+        "path": "NETCOREDBG_MCP_APP_DIAGNOSTICS_PATH",
+        "schema": "NETCOREDBG_MCP_APP_DIAGNOSTICS_SCHEMA",
+    }
+    assert launch_result["diagnostic_launch"]["evidence"]["directory"] == (
+        "work/runtime-smoke-diagnostics"
+    )
+    assert launch_result["diagnostic_launch"]["evidence"]["path"] == (
+        "work/runtime-smoke-diagnostics/app-diagnostics.json"
+    )
+    assert launch_result["diagnostic_launch"]["redacted_env_values"] is True
+    assert "env" not in launch_result["diagnostic_launch"]
+    assert "env_values" not in launch_result["diagnostic_launch"]
+
+
+@pytest.mark.asyncio
+async def test_v2_baseline_launch_uses_top_level_app_diagnostics_advertisement_env() -> None:
+    session = BaselineSmokeSession()
+
+    result = await _runner(session).run(_top_level_diagnostic_launch_baseline_plan())
+
+    launch_call = [call for call in session.calls if call[1] == "launch"][0]
+    launch_env = launch_call[2]["env"]
+    assert launch_env == {
+        "NETCOREDBG_MCP_APP_DIAGNOSTICS_DIR": "work/top-level-diagnostics",
+        "NETCOREDBG_MCP_APP_DIAGNOSTICS_PATH": (
+            "work/top-level-diagnostics/app-diagnostics.json"
+        ),
+        "NETCOREDBG_MCP_APP_DIAGNOSTICS_SCHEMA": (
+            "netcoredbg.runtime_smoke.diagnostics.v1"
+        ),
+    }
+    assert result["diagnostic_launch"] == result["baseline"]["steps"][1]["result"][
+        "diagnostic_launch"
+    ]
 
 
 @pytest.mark.asyncio

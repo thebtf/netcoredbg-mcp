@@ -20,6 +20,7 @@ from ..session.runtime_smoke import RuntimeSmokeRunner
 from ..session.runtime_smoke_operations import ui_operation_adapters
 from ..session.runtime_smoke_schema import (
     SCHEMA_VERSION_V2,
+    app_diagnostics_launch_contract,
     diagnostic_schema_contract,
     schema_help_fields,
     validate_plan,
@@ -698,6 +699,11 @@ def _runtime_smoke_probe_plan(
     kind = str(probe_payload.get("kind") or "")
     probe_name = str(probe_payload.get("name") or kind or "probe")
     plan_name = str(name or f"run-probe-{probe_name}")
+    diagnostic_launch = (
+        app_diagnostics_launch_contract(name=plan_name)
+        if kind == "app_diagnostics"
+        else None
+    )
     case: dict[str, Any] = {
         "id": "run_probe",
         "transitions": [
@@ -722,6 +728,10 @@ def _runtime_smoke_probe_plan(
         "cases": [case],
         "budgets": dict(budgets or {"max_actions": 1, "max_elapsed_seconds": 5}),
     }
+    if diagnostic_launch is not None:
+        plan["diagnostics"] = {
+            "app_diagnostics": {"diagnostic_launch": diagnostic_launch}
+        }
     if debug_preflight:
         plan["baseline"] = {
             "steps": [
@@ -748,6 +758,8 @@ def _runtime_smoke_probe_plan(
     }
     if debug_preflight:
         generated["debug_preflight"] = True
+    if diagnostic_launch is not None:
+        generated["diagnostic_launch"] = diagnostic_launch
     if guard_cleanup:
         generated["tracepoint_guard"] = {
             "cleanup_operations": _runtime_smoke_tracepoint_cleanup_operations(
@@ -862,8 +874,9 @@ async def _runtime_smoke_evidence_bundle(
         "runtime_smoke_get_result",
     ]
     next_actions.append("runtime_smoke_run_plan" if final else "runtime_smoke_stop")
+    diagnostic_launch = result.get("diagnostic_launch")
 
-    return {
+    bundle = {
         "status": result.get("status", tail.get("status", "UNKNOWN")),
         "reason": result.get("reason"),
         "run_id": run_id,
@@ -884,6 +897,9 @@ async def _runtime_smoke_evidence_bundle(
         "cleanup": compact_value(result.get("cleanup")),
         "next_actions": next_actions,
     }
+    if isinstance(diagnostic_launch, dict):
+        bundle["diagnostic_launch"] = compact_value(diagnostic_launch)
+    return bundle
 
 
 async def _runtime_smoke_wait_for_result(
@@ -1407,6 +1423,8 @@ def _bounded_runtime_smoke_result(result: dict[str, Any]) -> dict[str, Any]:
         bounded["failed_assertions"] = compact_value(result["failed_assertions"])
     if "compact" in result:
         bounded["compact"] = compact_value(result["compact"])
+    if isinstance(result.get("diagnostic_launch"), dict):
+        bounded["diagnostic_launch"] = compact_value(result["diagnostic_launch"])
     debug_preflight = _bounded_debug_preflight_result(result)
     if debug_preflight is not None:
         bounded["debug_preflight"] = debug_preflight

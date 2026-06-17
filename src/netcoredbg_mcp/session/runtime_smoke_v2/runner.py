@@ -9,6 +9,7 @@ from typing import Any
 from ..runtime_smoke_schema import (
     ACCEPTED_SCHEMA_VALUES,
     ACCEPTED_TOP_LEVEL_KEYS_V2,
+    normalize_app_diagnostics_launch_contract,
     validate_diagnostic_schema_example,
 )
 from ..tracepoint_policy import tracepoint_expression_policy_error
@@ -79,9 +80,11 @@ class RuntimeStateOracleRunner:
         self._session = session
         self._service_adapters = dict(service_adapters or {})
         self._clock = clock
+        self._diagnostic_launch: dict[str, Any] | None = None
 
     async def run(self, plan: dict[str, Any]) -> dict[str, Any]:
         started = self._clock()
+        self.capture_plan_metadata(plan)
         cleanup = {"status": "PASS", "attempted": [], "failures": []}
         raw_metrics_thresholds = plan.get("metrics_thresholds")
         metrics_thresholds = (
@@ -155,6 +158,7 @@ class RuntimeStateOracleRunner:
         baseline_result = await execute_baseline(
             plan.get("baseline") if isinstance(plan.get("baseline"), dict) else None,
             context,
+            diagnostic_launch=self._diagnostic_launch,
         )
         if baseline_result is not None and baseline_result.get("status") != "PASS":
             baseline_blocked_payload = baseline_result.get("blocked")
@@ -260,6 +264,9 @@ class RuntimeStateOracleRunner:
             extra={"blocked": blocked_payload} if blocked_payload else None,
         )
 
+    def capture_plan_metadata(self, plan: dict[str, Any]) -> None:
+        self._diagnostic_launch = _diagnostic_launch_from_plan(plan)
+
     def _finalize(
         self,
         *,
@@ -284,6 +291,9 @@ class RuntimeStateOracleRunner:
             "accepted_action_kinds": accepted_action_kinds(),
             "accepted_probe_kinds": accepted_probe_kinds(),
         }
+        diagnostic_launch = self._diagnostic_launch
+        if diagnostic_launch is not None:
+            result_extra["diagnostic_launch"] = diagnostic_launch
         if extra:
             result_extra.update(extra)
         return finalize_result(
@@ -516,6 +526,17 @@ def _timeout_case_result(
         "failed_assertions": [],
         "cleanup": cleanup,
     }
+
+
+def _diagnostic_launch_from_plan(plan: dict[str, Any]) -> dict[str, Any] | None:
+    diagnostics = plan.get("diagnostics")
+    if not isinstance(diagnostics, dict):
+        return None
+    app_diagnostics = diagnostics.get("app_diagnostics")
+    if not isinstance(app_diagnostics, dict):
+        return None
+    launch = app_diagnostics.get("diagnostic_launch")
+    return normalize_app_diagnostics_launch_contract(launch)
 
 
 def _collect_v2_evidence_refs(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -15,6 +15,7 @@ from netcoredbg_mcp.session.runtime_smoke import (
     RuntimeSmokeRunRegistry,
     RuntimeSmokeSession,
 )
+from netcoredbg_mcp.session.runtime_smoke_schema import app_diagnostics_launch_contract
 from netcoredbg_mcp.session.state import DebugState, EvidenceRef, OutputEntry
 
 
@@ -53,6 +54,10 @@ class LifecycleSmokeSession:
         await self.release_event.wait()
         return {"status": "PASS", "reason": "released"}
 
+    async def invoke_until_released(self, selector: dict[str, Any]) -> dict[str, Any]:
+        await self.release_event.wait()
+        return {"status": "PASS", "reason": "released", "selector": dict(selector)}
+
     async def clear_group(self, name: str) -> dict[str, Any]:
         self.cleanup_calls += 1
         if self.block_cleanup:
@@ -70,6 +75,7 @@ def _runner(session: LifecycleSmokeSession) -> RuntimeSmokeRunner:
         service_adapters={
             "append_output": session.append_output,
             "wait_until_released": session.wait_until_released,
+            "ui.invoke": session.invoke_until_released,
             "instrumentation_group_clear": session.clear_group,
         },
     )
@@ -268,6 +274,47 @@ async def test_runtime_smoke_stop_is_idempotent_and_runs_cleanup() -> None:
     assert session.cleanup_calls == 1
     assert session.runtime_smoke.instrumentation_groups == {}
     assert session.runtime_smoke.lifecycle_runs.active_run_ids() == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_stop_preserves_v2_diagnostic_launch_contract() -> None:
+    session = LifecycleSmokeSession()
+    diagnostic_launch = app_diagnostics_launch_contract(
+        name="stopped-run",
+        evidence_dir="/tmp/runtime-smoke-diagnostics",
+    )
+
+    started = await session.runtime_smoke.lifecycle_runs.start(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "v2-diagnostics-stop",
+            "diagnostics": {
+                "app_diagnostics": {"diagnostic_launch": diagnostic_launch}
+            },
+            "cases": [
+                {
+                    "id": "case-1",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.invoke",
+                                "selector": {"automation_id": "wait"},
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        },
+        lambda: _runner(session),
+    )
+
+    stopped = await session.runtime_smoke.lifecycle_runs.stop(started["run_id"])
+
+    assert stopped["status"] == "IMPASSE"
+    assert stopped["lifecycle_status"] == "STOPPED"
+    assert stopped["diagnostic_launch"] == diagnostic_launch
+    assert stopped["diagnostic_launch"]["evidence"]["directory"].startswith("/")
 
 
 @pytest.mark.asyncio

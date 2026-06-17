@@ -115,6 +115,31 @@ async def _wait_for_bundle(capturing_mcp, run_id: str) -> dict[str, Any]:
     raise AssertionError("runtime smoke run did not finish")
 
 
+def _app_diagnostics_probe(*, status: str = "BLOCKED") -> dict[str, Any]:
+    return {
+        "kind": "app_diagnostics",
+        "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
+        "app": {"name": "WpfSmokeApp", "process_name": "dotnet"},
+        "status": status,
+        "observations": [
+            {
+                "kind": "ui.backend",
+                "status": status,
+                "reason": "GridPattern unavailable",
+                "requested": {"control_type": "DataGrid"},
+                "accepted": {"fallback": "bounded descendant text"},
+                "next_step": "Run WPF fixture replay on a GUI worker.",
+            }
+        ],
+        "redaction": {"omit_fields": ["raw_tree", "screenshot_base64", "secret"]},
+        "limits": {
+            "max_text_length": 240,
+            "max_list_items": 8,
+            "max_json_bytes": 32768,
+        },
+    }
+
+
 @pytest.mark.asyncio
 async def test_runtime_smoke_run_probe_rejects_unknown_probe_without_starting_run(
     capturing_mcp,
@@ -725,6 +750,62 @@ async def test_runtime_smoke_run_probe_rejects_invalid_oracle_pack_before_run(
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_run_probe_advertises_app_diagnostics_launch_contract(
+    capturing_mcp,
+) -> None:
+    session = RunProbeFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_run_probe"](
+        ctx=None,
+        probe=_app_diagnostics_probe(),
+        name="app-diagnostics-probe",
+    )
+    data = response["data"]
+
+    diagnostic_launch = data["generated_plan"]["diagnostic_launch"]
+    assert diagnostic_launch["kind"] == "app_diagnostics"
+    assert diagnostic_launch["schema"] == "netcoredbg.runtime_smoke.diagnostics.v1"
+    assert diagnostic_launch["env_var_names"] == {
+        "directory": "NETCOREDBG_MCP_APP_DIAGNOSTICS_DIR",
+        "path": "NETCOREDBG_MCP_APP_DIAGNOSTICS_PATH",
+        "schema": "NETCOREDBG_MCP_APP_DIAGNOSTICS_SCHEMA",
+    }
+    assert diagnostic_launch["evidence"]["directory"] == (
+        ".agent/runtime-smoke/app-diagnostics/app-diagnostics-probe"
+    )
+    assert diagnostic_launch["evidence"]["path"] == (
+        ".agent/runtime-smoke/app-diagnostics/app-diagnostics-probe/app-diagnostics.json"
+    )
+    assert diagnostic_launch["redacted_env_values"] is True
+    assert "env" not in diagnostic_launch
+    assert "env_values" not in diagnostic_launch
+    assert session.launch_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_evidence_bundle_preserves_app_diagnostics_launch_contract(
+    capturing_mcp,
+) -> None:
+    session = RunProbeFacadeSession()
+    _register(capturing_mcp, session)
+
+    started = await capturing_mcp.tools["runtime_smoke_run_probe"](
+        ctx=None,
+        probe=_app_diagnostics_probe(),
+        name="app-diagnostics-probe",
+    )
+    run_id = started["data"]["run_id"]
+    expected = started["data"]["generated_plan"]["diagnostic_launch"]
+
+    bundle = await _wait_for_bundle(capturing_mcp, run_id)
+
+    assert bundle["diagnostic_launch"] == expected
+    assert bundle["result"]["diagnostic_launch"] == expected
+    assert bundle["status"] == "BLOCKED"
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_run_probe_starts_app_diagnostics_probe_run(
     capturing_mcp,
 ) -> None:
@@ -733,28 +814,7 @@ async def test_runtime_smoke_run_probe_starts_app_diagnostics_probe_run(
 
     response = await capturing_mcp.tools["runtime_smoke_run_probe"](
         ctx=None,
-        probe={
-            "kind": "app_diagnostics",
-            "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
-            "app": {"name": "WpfSmokeApp", "process_name": "dotnet"},
-            "status": "BLOCKED",
-            "observations": [
-                {
-                    "kind": "ui.backend",
-                    "status": "BLOCKED",
-                    "reason": "GridPattern unavailable",
-                    "requested": {"control_type": "DataGrid"},
-                    "accepted": {"fallback": "bounded descendant text"},
-                    "next_step": "Run WPF fixture replay on a GUI worker.",
-                }
-            ],
-            "redaction": {"omit_fields": ["raw_tree", "screenshot_base64", "secret"]},
-            "limits": {
-                "max_text_length": 240,
-                "max_list_items": 8,
-                "max_json_bytes": 32768,
-            },
-        },
+        probe=_app_diagnostics_probe(),
         name="app-diagnostics-probe",
     )
     data = response["data"]

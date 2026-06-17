@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections import deque
 from types import SimpleNamespace
 from typing import Any
@@ -317,6 +318,78 @@ async def test_runtime_smoke_evidence_bundle_returns_bounded_final_packet(
     assert data["event_cursor"]["stale_cursor"] is False
     assert "runtime_smoke_evidence_bundle" in data["next_actions"]
     assert "runtime_smoke_run_plan" in data["next_actions"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_run_plan_sanitizes_caller_supplied_diagnostic_launch(
+    capturing_mcp,
+) -> None:
+    session = RunPlanFacadeSession()
+    _register(capturing_mcp, session)
+
+    started = await capturing_mcp.tools["runtime_smoke_run_plan"](
+        ctx=None,
+        plan={
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "caller-supplied-diagnostic-launch",
+            "diagnostics": {
+                "app_diagnostics": {
+                    "diagnostic_launch": {
+                        "kind": "app_diagnostics",
+                        "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
+                        "env_var_names": {
+                            "directory": "LEAKED_DIRECTORY_ENV",
+                            "path": "LEAKED_PATH_ENV",
+                            "schema": "LEAKED_SCHEMA_ENV",
+                            "token": "short-secret",
+                        },
+                        "evidence": {
+                            "directory": r"work\runtime-smoke-diagnostics",
+                            "path": r"work\runtime-smoke-diagnostics\app-diagnostics.json",
+                            "token": "short-secret",
+                        },
+                        "redacted_env_values": False,
+                        "env": {"TOKEN": "short-secret"},
+                        "env_values": {"TOKEN": "short-secret"},
+                        "password": "short-secret",
+                    }
+                }
+            },
+            "cases": [{"id": "case-1", "transitions": []}],
+        },
+    )
+    bundle = await _wait_for_final_bundle(capturing_mcp, started["data"]["run_id"])
+
+    diagnostic_launch = bundle["diagnostic_launch"]
+    assert set(diagnostic_launch) == {
+        "kind",
+        "schema",
+        "env_var_names",
+        "evidence",
+        "redacted_env_values",
+    }
+    assert diagnostic_launch["kind"] == "app_diagnostics"
+    assert diagnostic_launch["schema"] == "netcoredbg.runtime_smoke.diagnostics.v1"
+    assert diagnostic_launch["env_var_names"] == {
+        "directory": "NETCOREDBG_MCP_APP_DIAGNOSTICS_DIR",
+        "path": "NETCOREDBG_MCP_APP_DIAGNOSTICS_PATH",
+        "schema": "NETCOREDBG_MCP_APP_DIAGNOSTICS_SCHEMA",
+    }
+    assert diagnostic_launch["evidence"] == {
+        "directory": "work/runtime-smoke-diagnostics",
+        "path": "work/runtime-smoke-diagnostics/app-diagnostics.json",
+    }
+    assert diagnostic_launch["redacted_env_values"] is True
+    assert bundle["result"]["diagnostic_launch"] == diagnostic_launch
+    serialized_bundle = json.dumps(bundle, sort_keys=True)
+    assert "short-secret" not in serialized_bundle
+    assert "LEAKED_DIRECTORY_ENV" not in serialized_bundle
+    assert "LEAKED_PATH_ENV" not in serialized_bundle
+    assert "LEAKED_SCHEMA_ENV" not in serialized_bundle
+    assert '"env"' not in serialized_bundle
+    assert '"env_values"' not in serialized_bundle
+    assert '"password"' not in serialized_bundle
+    assert '"token"' not in serialized_bundle
 
 
 @pytest.mark.asyncio

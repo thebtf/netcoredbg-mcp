@@ -241,7 +241,9 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "oracle_pack",
             "runtime_smoke_wait_for_result",
             "CR-024",
+            "CR-026",
             "DISAGREEING_SOURCES",
+            "launch env/evidence-dir advertisement",
             "remaining app diagnostics orchestration",
         ],
     }
@@ -339,6 +341,32 @@ def test_issue_272_records_cr024_diagnostic_orchestration_slice() -> None:
     assert "poll" in row
     assert "broader FR remains open" in row
     assert "before closing the full FR" in row
+
+
+def test_issue_272_records_cr026_launch_contract_slice() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#272")
+
+    assert "launch contract slice covered" in row
+    assert "CR-026" in row
+    assert "app diagnostics launch env/evidence-dir advertisement" in row
+    assert "redacted env values" in row
+    assert "broader FR remains open" in row
+
+
+def test_issue_272_remaining_scope_excludes_covered_launch_contract() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    _issue, _state, _evidence, remaining = _issue_cells(backlog, "#272")
+    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#272")
+    _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
+        cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
+    )
+
+    assert "diagnostic env/evidence-dir advertisement" not in remaining
+    assert "launch env/evidence-dir advertisement" not in remaining
+    assert "app diagnostics orchestration beyond local-file acquisition" in remaining
+    assert "diagnostic env/evidence-dir advertisement" not in lifecycle_remaining
+    assert "launch env/evidence-dir advertisement" not in lifecycle_remaining
 
 
 def test_cr022_broad_issues_require_split_or_comment_evidence_before_closure() -> None:

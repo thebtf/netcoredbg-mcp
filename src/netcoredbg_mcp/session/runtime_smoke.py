@@ -866,6 +866,7 @@ class RuntimeSmokeRunRegistry:
                 service_adapters=runner._service_adapters,
                 clock=runner._clock,
             )
+            v2_runner.capture_plan_metadata(plan)
             try:
                 cases, generated_case_count, _generation_errors = _cases_for_execution(plan)
                 case_cleanups = []
@@ -946,11 +947,13 @@ class RuntimeSmokeRunRegistry:
         if isinstance(plan, dict) and plan.get("schema") == SCHEMA_VERSION_V2:
             from .runtime_smoke_v2.runner import RuntimeStateOracleRunner
 
-            return RuntimeStateOracleRunner(
+            v2_runner = RuntimeStateOracleRunner(
                 runner._session,
                 service_adapters=runner._service_adapters,
                 clock=runner._clock,
-            )._finalize(
+            )
+            v2_runner.capture_plan_metadata(plan)
+            return v2_runner._finalize(
                 status="FAIL",
                 reason="runtime smoke stop cleanup failed",
                 started=record.created_at,
