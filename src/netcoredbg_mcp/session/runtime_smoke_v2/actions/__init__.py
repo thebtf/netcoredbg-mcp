@@ -118,6 +118,36 @@ async def _handle_ui_grid_select(action: dict[str, Any], context: ActionContext)
             "duration_ms": context.elapsed_ms(started),
             "route": "grid_select",
         }
+    row_identities, blocked = _row_identities_from_action(action)
+    if blocked is not None:
+        return {
+            **blocked,
+            "duration_ms": context.elapsed_ms(started),
+            "route": "grid_select",
+        }
+    if row_identities:
+        identity = _mapping_from_action(action, "identity")
+        rows = _mapping_from_action(action, "rows")
+        columns = _list_from_action(action, "columns")
+        result = await context.call_adapter(
+            "ui.grid.select_identities",
+            selector=selector,
+            row_identities=row_identities,
+            identity=identity,
+            rows=rows,
+            columns=columns,
+        )
+        return _action_result(
+            status=result.get("status", "PASS"),
+            route="grid_select",
+            selector=selector,
+            row_identities=row_identities,
+            identity=identity,
+            rows=rows,
+            columns=columns,
+            duration_ms=context.elapsed_ms(started),
+            result=result,
+        )
     indices, blocked = _indices_from_action(action)
     if blocked is not None:
         return {
@@ -387,6 +417,35 @@ def _indices_from_action(action: dict[str, Any]) -> tuple[list[int], dict[str, A
             return [], {"status": "BLOCKED", **blocked}
         indices.append(index)
     return indices, None
+
+
+def _row_identities_from_action(
+    action: dict[str, Any],
+) -> tuple[list[str], dict[str, Any] | None]:
+    if "row_identities" not in action:
+        return [], None
+    raw_identities = action.get("row_identities")
+    if not isinstance(raw_identities, list) or not raw_identities:
+        blocked = build_blocked(
+            reason="invalid grid selection identities",
+            requested={"row_identities": raw_identities},
+            accepted={"row_identities": "non-empty list of row identity strings"},
+            next_step="Provide row_identities for each selected grid row.",
+        )
+        return [], {"status": "BLOCKED", **blocked}
+    identities: list[str] = []
+    for raw_identity in raw_identities:
+        identity = str(raw_identity or "").strip()
+        if not identity:
+            blocked = build_blocked(
+                reason="invalid grid selection identity",
+                requested={"row_identity": raw_identity},
+                accepted={"row_identity": "non-empty string"},
+                next_step="Use stable row identity strings.",
+            )
+            return [], {"status": "BLOCKED", **blocked}
+        identities.append(identity)
+    return identities, None
 
 
 def _row_from_action(action: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:

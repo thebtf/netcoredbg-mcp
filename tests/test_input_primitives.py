@@ -416,6 +416,13 @@ class TestDragInputValidation:
         assert "Thread.Sleep(PointerMoveSettleMs);" in drag_path_body
         assert "Thread.Sleep(Math.Max(FinalDropSettleMs, delayMs));" in drag_path_body
         assert "SendDragPathCancel(cancelKey.Value);" in drag_path_body
+        assert (
+            'output["cancel"] = new JsonObject { ["key"] = "escape", ["sent"] = true };'
+            in drag_path_body
+        )
+        assert 'output["no_op"] = new JsonObject' in drag_path_body
+        assert '["reason"] = "cancelled"' in drag_path_body
+        assert '["route_attempted"] = true' in drag_path_body
 
     def test_bridge_simple_drag_returns_route_evidence(self):
         command = (PROJECT_ROOT / "bridge" / "Commands" / "ClickCommands.cs").read_text(

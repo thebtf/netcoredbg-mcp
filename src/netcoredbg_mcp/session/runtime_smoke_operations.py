@@ -17,6 +17,7 @@ from ..ui.grid import (
     read_grid_state,
     select_grid_range,
     select_grid_row,
+    select_grid_rows_by_identities,
     snapshot_grid,
 )
 from ..ui.key_sequence import run_scoped_key_sequence
@@ -199,12 +200,6 @@ def ui_operation_adapters(
         if isinstance(backend, dict):
             return backend
         selector = _selector(args)
-        automation_id = selector.get("automation_id") or selector.get("automationId")
-        if not automation_id:
-            return _adapter_blocked(
-                "ui.grid.select_indices",
-                "grid selection requires an automation_id selector",
-            )
         indices, blocked = _grid_selection_indices(args.get("indices"))
         if blocked is not None:
             return blocked
@@ -212,6 +207,31 @@ def ui_operation_adapters(
             return _adapter_blocked(
                 "ui.grid.select_indices",
                 "indices list cannot be empty",
+            )
+        grid_select_range = getattr(backend, "grid_select_range", None)
+        contiguous_range = _contiguous_index_range(indices)
+        if contiguous_range is not None and callable(grid_select_range):
+            start_index, end_index = contiguous_range
+            try:
+                result = await grid_select_range(selector, start_index, end_index)
+            except Exception as exc:
+                return _adapter_blocked("ui.grid.select_indices", str(exc))
+            if not isinstance(result, dict):
+                return _adapter_blocked(
+                    "ui.grid.select_indices",
+                    "grid_select_range returned non-object result",
+                )
+            selected = dict(result)
+            selected.setdefault("status", "PASS")
+            selected["selector"] = selector
+            selected["selected_indices"] = indices
+            selected["selected_count"] = len(indices)
+            return selected
+        automation_id = selector.get("automation_id") or selector.get("automationId")
+        if not automation_id:
+            return _adapter_blocked(
+                "ui.grid.select_indices",
+                "grid selection requires an automation_id selector",
             )
         multi_select = getattr(backend, "multi_select", None)
         if not callable(multi_select):
@@ -238,6 +258,31 @@ def ui_operation_adapters(
             "selected_indices": indices,
             "selected_count": selected_count,
         }
+
+    async def grid_select_identities(**args: Any) -> dict[str, Any]:
+        backend = await _backend_or_blocked(ensure_ui_connected)
+        if isinstance(backend, dict):
+            return backend
+        raw_row_identities = args.get("row_identities")
+        if not isinstance(raw_row_identities, list) or not raw_row_identities:
+            return _adapter_blocked(
+                "ui.grid.select_identities",
+                "row_identities list cannot be empty",
+            )
+        row_identities = [str(item).strip() for item in raw_row_identities]
+        if any(not item for item in row_identities):
+            return _adapter_blocked(
+                "ui.grid.select_identities",
+                "row_identities list cannot contain empty values",
+            )
+        return await select_grid_rows_by_identities(
+            backend,
+            _selector(args),
+            row_identities,
+            rows=args.get("rows"),
+            columns=args.get("columns"),
+            identity=dict(args.get("identity") or {}),
+        )
 
     async def grid_assert_rows(**args: Any) -> dict[str, Any]:
         backend = await _backend_or_blocked(ensure_ui_connected)
@@ -572,7 +617,7 @@ def ui_operation_adapters(
 
         modifiers = [str(modifier) for modifier in args.get("modifiers") or []]
         speed_ms = _positive_int(args.get("duration_ms"), default=200)
-        use_path_drag = _requires_path_drag(path)
+        use_path_drag = _requires_path_drag(path) or cancel_key is not None
         resolved_path_points: list[dict[str, int]] = []
         selected_payload_before: list[dict[str, Any]] = []
         selected_payload_selector = (
@@ -724,6 +769,7 @@ def ui_operation_adapters(
         "ui.grid.viewport": grid_viewport,
         "ui.grid.ensure_visible": grid_ensure_visible,
         "ui.grid.select_indices": grid_select_indices,
+        "ui.grid.select_identities": grid_select_identities,
         "ui.grid.select_range": grid_select_range,
         "ui.grid.select_row": grid_select_row,
         "ui.grid.click_row": grid_click_row,
@@ -1160,26 +1206,53 @@ async def _drag_route(
     if blocked is not None:
         return {}, {}, blocked
 
+    route_evidence = {
+        "source": source,
+        "target": target_payload,
+        "source_bounds": source_evidence.get("bounds"),
+        "target_bounds": target_evidence.get("bounds"),
+        "source_identity": source_evidence.get("identity"),
+        "target_identity": target_evidence.get("identity"),
+        "source_point": source_point,
+        "target_point": target_point,
+    }
+    source_point = _route_point_from_relative_waypoint(
+        route_evidence,
+        prefix="source",
+        waypoint=path[0] if path else {},
+    ) or source_point
+    target_point = _route_point_from_relative_waypoint(
+        route_evidence,
+        prefix="target",
+        waypoint=path[-1] if path else {},
+    ) or target_point
+    route_evidence["source_point"] = source_point
+    route_evidence["target_point"] = target_point
+
     route = {
         "from_x": source_point["x"],
         "from_y": source_point["y"],
         "to_x": target_point["x"],
         "to_y": target_point["y"],
     }
-    return (
-        route,
-        {
-            "source": source,
-            "target": target_payload,
-            "source_bounds": source_evidence.get("bounds"),
-            "target_bounds": target_evidence.get("bounds"),
-            "source_identity": source_evidence.get("identity"),
-            "target_identity": target_evidence.get("identity"),
-            "source_point": source_point,
-            "target_point": target_point,
-        },
-        None,
-    )
+    return (route, route_evidence, None)
+
+
+def _route_point_from_relative_waypoint(
+    route_evidence: Mapping[str, Any],
+    *,
+    prefix: str,
+    waypoint: Mapping[str, Any],
+) -> dict[str, int] | None:
+    relative_to = str(waypoint.get("relative_to") or "")
+    if prefix == "source" and relative_to != "source":
+        return None
+    if prefix == "target" and relative_to not in {"drop", "target"}:
+        return None
+    point = _relative_point_from_evidence(route_evidence, prefix, waypoint)
+    if point is None:
+        return None
+    return {"x": point[0], "y": point[1]}
 
 
 def _requires_path_drag(path: list[dict[str, Any]]) -> bool:
@@ -2331,6 +2404,16 @@ def _grid_selection_indices(value: Any) -> tuple[list[int], dict[str, Any] | Non
             )
         indices.append(index)
     return indices, None
+
+
+def _contiguous_index_range(indices: list[int]) -> tuple[int, int] | None:
+    if not indices:
+        return None
+    start = min(indices)
+    end = max(indices)
+    if sorted(indices) != list(range(start, end + 1)):
+        return None
+    return start, end
 
 
 def _drag_blocked(

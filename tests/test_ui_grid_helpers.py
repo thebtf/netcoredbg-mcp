@@ -529,8 +529,13 @@ def test_bridge_grid_builds_cell_text_evidence_for_rows() -> None:
     assert "ScrollAmount.LargeDecrement" in command
     assert "ScrollAmount.LargeIncrement" in command
     assert "ScanDownward(" in ensure_visible_command
+    assert "TryScrollToVerticalStart(scrollPattern, settleMs)" in ensure_visible_command
+    assert "SetScrollPercent(ScrollPatternConstants.NoScroll, 0)" in ensure_visible_command
+    assert '"rewind_to_start"' in ensure_visible_command
+    assert "grid rewind-to-start failed before bounded scroll scan" in ensure_visible_command
+    assert "var rewindLimit = maxScrolls + currentDownwardScrolls;" in ensure_visible_command
     current_scan_index = ensure_visible_command.index('"current_downward"')
-    rewind_index = ensure_visible_command.index("ScrollAmount.LargeDecrement")
+    rewind_index = ensure_visible_command.index("TryScrollToVerticalStart(scrollPattern, settleMs)")
     rewound_scan_index = ensure_visible_command.index('"rewound_downward"')
     assert current_scan_index < rewind_index < rewound_scan_index
     assert 'var rowKey = StringValue(@params?["row_key"]);' in ensure_visible_command

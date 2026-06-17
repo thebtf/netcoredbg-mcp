@@ -360,6 +360,12 @@ public static class ClickCommands
         if (cancelSent)
         {
             output["cancel"] = new JsonObject { ["key"] = "escape", ["sent"] = true };
+            output["no_op"] = new JsonObject
+            {
+                ["expected"] = true,
+                ["reason"] = "cancelled",
+                ["route_attempted"] = true
+            };
         }
 
         return output;
