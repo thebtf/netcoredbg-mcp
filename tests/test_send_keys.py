@@ -124,6 +124,12 @@ class TestSendKeysParser:
         assert mock_user32.SendInput.call_count >= 2
 
     @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only SendInput")
+    def test_literal_escaped_sendkeys_tokens(self, send_keys, mock_user32):
+        """Escaped modifier/special tokens should type literal text."""
+        send_keys("A{+}{^}{%}{{}{}}{(}{)}{~}")
+        assert mock_user32.SendInput.call_count >= 1
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only SendInput")
     def test_ctrl_end(self, send_keys, mock_user32):
         """^{END} should press Ctrl, tap End, release Ctrl."""
         send_keys("^{END}")

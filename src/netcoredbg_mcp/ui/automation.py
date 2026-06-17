@@ -234,6 +234,16 @@ def _send_keys_via_input(keys: str) -> None:
         "%": VK_MENU,
         "+": VK_SHIFT,
     }
+    literal_special_keys = {
+        "+": "+",
+        "^": "^",
+        "%": "%",
+        "{": "{",
+        "}": "}",
+        "(": "(",
+        ")": ")",
+        "~": "~",
+    }
 
     # ── KEYBDINPUT / INPUT structs for SendInput ──
 
@@ -330,6 +340,10 @@ def _send_keys_via_input(keys: str) -> None:
         try:
             if ch == "{":
                 # Special key in braces: {ENTER}, {F4}, etc.
+                if keys.startswith("{}}", i):
+                    _type_char("}", held_modifiers)
+                    i += 3
+                    continue
                 end = keys.find("}", i)
                 if end == -1:
                     raise ValueError(
@@ -337,7 +351,10 @@ def _send_keys_via_input(keys: str) -> None:
                     )
                 key_name = keys[i + 1 : end].upper()
                 vk = vk_map.get(key_name)
-                if vk is not None:
+                literal = literal_special_keys.get(key_name)
+                if literal is not None:
+                    _type_char(literal, held_modifiers)
+                elif vk is not None:
                     _tap(vk)
                 else:
                     raise ValueError(f"Unknown special key: {{{key_name}}}")
