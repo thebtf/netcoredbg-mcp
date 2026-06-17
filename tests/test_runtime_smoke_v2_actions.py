@@ -315,6 +315,37 @@ async def test_v2_ui_text_type_replace_selection_blocks_selector_miss_before_typ
 
 
 @pytest.mark.asyncio
+async def test_v2_ui_text_type_replace_selection_blocks_missing_selector_before_lookup() -> None:
+    session = ActionSmokeSession()
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "cases": [
+                {
+                    "id": "missing_selector",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.text.type_replace_selection",
+                                "text": "Never typed",
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == "BLOCKED"
+    assert action["status"] == "BLOCKED"
+    assert action["reason"] == "missing selector payload"
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
 async def test_v2_ui_text_type_replace_selection_fails_on_post_read_mismatch() -> None:
     session = ActionSmokeSession()
     session.text_read_result = {"status": "PASS", "text": "Old text"}

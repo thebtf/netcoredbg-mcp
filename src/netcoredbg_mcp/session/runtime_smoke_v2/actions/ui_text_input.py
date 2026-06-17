@@ -139,7 +139,13 @@ def _selector_from_action(
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     raw_selector = action.get("selector")
     if raw_selector is None:
-        return {}, None
+        blocked = build_blocked(
+            reason="missing selector payload",
+            requested={"selector": None},
+            accepted={"selector_type": "object"},
+            next_step="Provide selector as an object.",
+        )
+        return {}, {"status": "BLOCKED", **blocked}
     if not isinstance(raw_selector, Mapping):
         blocked = build_blocked(
             reason="invalid selector payload",
