@@ -11,7 +11,7 @@ import pytest
 
 from netcoredbg_mcp.server import create_server
 from netcoredbg_mcp.ui import grid as grid_helpers
-from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+from netcoredbg_mcp.ui.flaui_client import BRIDGE_DEFAULT_CALL_TIMEOUT_SECONDS, FlaUIBackend
 from netcoredbg_mcp.ui.grid import (
     assert_grid_range,
     assert_grid_rows,
@@ -435,7 +435,9 @@ async def test_flaui_backend_forwards_grid_ensure_visible_to_bridge() -> None:
     )
 
     assert result["status"] == "PASS"
-    backend._client.call.assert_awaited_once_with(
+    backend._client.call.assert_awaited_once()
+    call = backend._client.call.await_args
+    assert call.args == (
         "grid_ensure_visible",
         {
             "selector": {"automationId": "CueGrid"},
@@ -447,6 +449,7 @@ async def test_flaui_backend_forwards_grid_ensure_visible_to_bridge() -> None:
             "scroll_settle_ms": 30,
         },
     )
+    assert call.kwargs["timeout"] > BRIDGE_DEFAULT_CALL_TIMEOUT_SECONDS
 
 
 @pytest.mark.asyncio
@@ -525,6 +528,24 @@ def test_bridge_grid_builds_cell_text_evidence_for_rows() -> None:
     assert "ReadBoundedInt(" in command
     assert "ScrollAmount.LargeDecrement" in command
     assert "ScrollAmount.LargeIncrement" in command
+    assert "ScanDownward(" in ensure_visible_command
+    current_scan_index = ensure_visible_command.index('"current_downward"')
+    rewind_index = ensure_visible_command.index("ScrollAmount.LargeDecrement")
+    rewound_scan_index = ensure_visible_command.index('"rewound_downward"')
+    assert current_scan_index < rewind_index < rewound_scan_index
+    assert 'var rowKey = StringValue(@params?["row_key"]);' in ensure_visible_command
+    assert "private static string? StringValue(JsonNode? node)" in ensure_visible_command
+    assert 'var value = StringValue(row[key]);' in ensure_visible_command
+    assert "var value = StringValue(cell.Value);" in ensure_visible_command
+    assert 'var text = StringValue(cell["text"]);' in ensure_visible_command
+    assert 'var value = StringValue(cell["value"]);' in ensure_visible_command
+    assert 'var value = row[key]?.GetValue<string>();' not in ensure_visible_command
+    assert "var value = cell.Value?.GetValue<string>();" not in ensure_visible_command
+    assert 'var text = cell["text"]?.GetValue<string>();' not in ensure_visible_command
+    assert 'var value = cell["value"]?.GetValue<string>();' not in ensure_visible_command
+    assert "if (before is null || after is null)\n            return false;" in (
+        ensure_visible_command.replace("\r\n", "\n")
+    )
     assert "SafeVerticallyScrollable(scrollPattern)" in command
     assert "grid vertical scrollability evidence unavailable" in command
     assert "grid row ScrollItemPattern failed" in command

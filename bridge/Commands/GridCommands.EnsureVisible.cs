@@ -19,7 +19,7 @@ public static partial class GridCommands
         if (!grid.Patterns.Grid.TryGetPattern(out _))
             return Unsupported("GridPattern");
 
-        var rowKey = @params?["row_key"]?.GetValue<string>();
+        var rowKey = StringValue(@params?["row_key"]);
         var rowIndex = ReadOptionalInt(@params, "row_index");
         if (rowIndex is null && string.IsNullOrWhiteSpace(rowKey))
         {
@@ -168,11 +168,64 @@ public static partial class GridCommands
                 attempts);
         }
 
-        var scrollsRemaining = maxScrolls;
-        while (scrollsRemaining > 0 &&
-               ScrollOneViewport(scrollPattern, ScrollAmount.LargeDecrement, settleMs))
-            scrollsRemaining--;
+        var currentScan = ScanDownward(
+            grid,
+            automation,
+            scrollPattern,
+            columns,
+            headers,
+            rowIndex,
+            rowKey,
+            attempts,
+            "current_downward",
+            maxScrolls,
+            settleMs,
+            out var currentDownwardScrolls);
+        if (currentScan.Blocked is not null || currentScan.Match is not null)
+            return currentScan;
 
+        var rewindLimit = maxScrolls + currentDownwardScrolls;
+        var rewound = false;
+        for (var rewindStep = 0; rewindStep < rewindLimit; rewindStep++)
+        {
+            if (!ScrollOneViewport(scrollPattern, ScrollAmount.LargeDecrement, settleMs))
+                break;
+            rewound = true;
+        }
+
+        if (!rewound)
+            return new RowSearchResult(null, null, attempts);
+
+        return ScanDownward(
+            grid,
+            automation,
+            scrollPattern,
+            columns,
+            headers,
+            rowIndex,
+            rowKey,
+            attempts,
+            "rewound_downward",
+            maxScrolls,
+            settleMs,
+            out _);
+    }
+
+    private static RowSearchResult ScanDownward(
+        AutomationElement grid,
+        UIA3Automation automation,
+        IScrollPattern scrollPattern,
+        List<string> columns,
+        List<string> headers,
+        int? rowIndex,
+        string? rowKey,
+        JsonArray attempts,
+        string phase,
+        int maxScrolls,
+        int settleMs,
+        out int scrollsMoved)
+    {
+        scrollsMoved = 0;
         for (var step = 0; step <= maxScrolls; step++)
         {
             var result = SearchCurrentRows(
@@ -182,18 +235,18 @@ public static partial class GridCommands
                 headers,
                 rowIndex,
                 rowKey,
-                "bounded-scroll",
+                phase,
                 step);
             AppendAttempts(attempts, result.Attempts);
             if (result.Blocked is not null)
                 return new RowSearchResult(null, result.Blocked, attempts);
             if (result.Match is not null)
                 return new RowSearchResult(result.Match, null, attempts);
-            if (scrollsRemaining <= 0)
+            if (step >= maxScrolls)
                 break;
             if (!ScrollOneViewport(scrollPattern, ScrollAmount.LargeIncrement, settleMs))
                 break;
-            scrollsRemaining--;
+            scrollsMoved++;
         }
 
         return new RowSearchResult(null, null, attempts);
@@ -217,7 +270,7 @@ public static partial class GridCommands
             Thread.Sleep(settleMs);
         var after = SafeVerticalScrollPercent(scrollPattern);
         if (before is null || after is null)
-            return true;
+            return false;
         return Math.Abs(after.Value - before.Value) > ScrollPercentEpsilon;
     }
 
@@ -394,7 +447,7 @@ public static partial class GridCommands
     {
         foreach (var key in new[] { "automation_id", "name" })
         {
-            var value = row[key]?.GetValue<string>();
+            var value = StringValue(row[key]);
             if (!string.IsNullOrWhiteSpace(value))
                 yield return value;
         }
@@ -404,7 +457,7 @@ public static partial class GridCommands
         {
             foreach (var cell in cells)
             {
-                var value = cell.Value?.GetValue<string>();
+                var value = StringValue(cell.Value);
                 if (!string.IsNullOrWhiteSpace(value))
                     yield return value;
             }
@@ -417,10 +470,10 @@ public static partial class GridCommands
             {
                 if (item is not JsonObject cell)
                     continue;
-                var text = cell["text"]?.GetValue<string>();
+                var text = StringValue(cell["text"]);
                 if (!string.IsNullOrWhiteSpace(text))
                     yield return text;
-                var value = cell["value"]?.GetValue<string>();
+                var value = StringValue(cell["value"]);
                 if (!string.IsNullOrWhiteSpace(value))
                     yield return value;
             }
@@ -472,6 +525,20 @@ public static partial class GridCommands
         try
         {
             return node.GetValue<int>();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string? StringValue(JsonNode? node)
+    {
+        if (node is null)
+            return null;
+        try
+        {
+            return node.GetValue<string>();
         }
         catch
         {
