@@ -503,6 +503,27 @@ async def test_runtime_smoke_cleanup_contract_preserves_concurrent_new_contamina
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_cleanup_contract_reports_raw_reset_failures() -> None:
+    registry = RuntimeSmokeRunRegistry()
+    registry.mark_contaminated(reason="initial contamination", run_id="run-1")
+
+    result = await registry.cleanup_contract(
+        reset=lambda: ("raw reset failure",),
+    )
+
+    assert result["status"] == "FAIL"
+    assert result["cleanup_contract"]["failures"] == [
+        {
+            "operation": "runtime_smoke_reset",
+            "reason": "raw reset failure",
+        }
+    ]
+    contamination = registry.contamination()
+    assert contamination is not None
+    assert contamination["cleanup"]["failures"][0]["reason"] == "raw reset failure"
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_stop_finalizes_when_stop_result_builder_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

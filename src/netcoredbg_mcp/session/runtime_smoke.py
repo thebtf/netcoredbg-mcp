@@ -1302,6 +1302,13 @@ def _reset_failures(reset_result: Any) -> list[dict[str, Any]]:
                     "reason": str(failure.get("error") or failure.get("reason") or failure),
                 }
             )
+        elif failure:
+            failures.append(
+                {
+                    "operation": "runtime_smoke_reset",
+                    "reason": str(failure),
+                }
+            )
     return failures
 
 
