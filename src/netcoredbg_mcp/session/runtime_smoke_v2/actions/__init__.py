@@ -217,6 +217,55 @@ async def _handle_ui_grid_select_row(
     )
 
 
+async def _handle_ui_grid_ensure_visible(
+    action: dict[str, Any],
+    context: ActionContext,
+) -> dict[str, Any]:
+    started = context.clock()
+    selector, blocked = _selector_from_action(action)
+    if blocked is not None:
+        return {
+            **blocked,
+            "duration_ms": context.elapsed_ms(started),
+            "route": "grid_ensure_visible",
+        }
+    row, blocked = _row_from_action(action)
+    if blocked is not None:
+        return {
+            **blocked,
+            "duration_ms": context.elapsed_ms(started),
+            "route": "grid_ensure_visible",
+        }
+    identity = _mapping_from_action(action, "identity")
+    rows = _mapping_from_action(action, "rows")
+    columns = _list_from_action(action, "columns")
+    max_scrolls = action.get("max_scrolls")
+    scroll_settle_ms = action.get("scroll_settle_ms")
+    result = await context.call_adapter(
+        "ui.grid.ensure_visible",
+        selector=selector,
+        row=row,
+        identity=identity,
+        rows=rows,
+        columns=columns,
+        max_scrolls=max_scrolls,
+        scroll_settle_ms=scroll_settle_ms,
+    )
+    return _action_result(
+        status=result.get("status", "PASS"),
+        route="grid_ensure_visible",
+        selector=selector,
+        row=row,
+        identity=identity,
+        rows=rows,
+        columns=columns,
+        max_scrolls=max_scrolls,
+        scroll_settle_ms=scroll_settle_ms,
+        duration_ms=context.elapsed_ms(started),
+        result=result,
+    )
+
+
 async def _handle_ui_grid_click_row(
     action: dict[str, Any],
     context: ActionContext,
@@ -454,6 +503,7 @@ register_action("ui.noop", _handle_noop)
 register_action("ui.click", _handle_ui_click)
 register_action("ui.drag", handle_ui_drag)
 register_action("ui.grid.get_state", _handle_ui_grid_get_state)
+register_action("ui.grid.ensure_visible", _handle_ui_grid_ensure_visible)
 register_action("ui.grid.select_row", _handle_ui_grid_select_row)
 register_action("ui.grid.click_row", _handle_ui_grid_click_row)
 register_action("ui.grid.select", _handle_ui_grid_select)

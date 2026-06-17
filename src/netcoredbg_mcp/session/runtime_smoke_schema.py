@@ -121,6 +121,10 @@ OPERATION_SCHEMAS: dict[str, OperationSchema] = {
         "ui.grid.get_state",
         ("selector",),
     ),
+    "ui.grid.ensure_visible": OperationSchema(
+        "ui.grid.ensure_visible",
+        ("selector", "row"),
+    ),
     "ui.grid.select_range": OperationSchema(
         "ui.grid.select_range",
         ("selector", "start_index", "end_index"),
@@ -901,6 +905,7 @@ def _validate_op_args(
     if op_name in {
         "ui.grid.snapshot",
         "ui.grid.get_state",
+        "ui.grid.ensure_visible",
         "ui.grid.select_row",
         "ui.grid.click_row",
     }:
@@ -909,9 +914,17 @@ def _validate_op_args(
         _validate_optional_string_list(prefix, op_name, args, "columns", errors)
         if "identity" in args and not isinstance(args["identity"], dict):
             errors.append(f"{prefix}.identity must be an object for op {op_name}")
-        if op_name in {"ui.grid.select_row", "ui.grid.click_row"}:
+        if op_name in {
+            "ui.grid.ensure_visible",
+            "ui.grid.select_row",
+            "ui.grid.click_row",
+        }:
             if "row" in args and not isinstance(args["row"], dict):
                 errors.append(f"{prefix}.row must be an object for op {op_name}")
+        if op_name == "ui.grid.ensure_visible":
+            _validate_int_arg(prefix, op_name, args, "max_scrolls", errors)
+            _validate_int_arg(prefix, op_name, args, "scroll_settle_ms", errors)
+        if op_name == "ui.grid.click_row":
             if "column" in args and not isinstance(args["column"], str):
                 errors.append(f"{prefix}.column must be a string for op {op_name}")
     elif op_name == "ui.grid.select_range":

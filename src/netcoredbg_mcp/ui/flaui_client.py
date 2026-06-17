@@ -28,6 +28,13 @@ DRAG_PATH_FINAL_DROP_SETTLE_MS = 180
 DRAG_PATH_TIMEOUT_MARGIN_SECONDS = 3.0
 DRAG_PATH_TIMEOUT_MULTIPLIER = 1.5
 DRAG_PATH_MAX_TIMEOUT_SECONDS = 60.0
+GRID_ENSURE_VISIBLE_DEFAULT_MAX_SCROLLS = 40
+GRID_ENSURE_VISIBLE_MAX_SCROLLS = 250
+GRID_ENSURE_VISIBLE_DEFAULT_SETTLE_MS = 80
+GRID_ENSURE_VISIBLE_MAX_SETTLE_MS = 2_000
+GRID_ENSURE_VISIBLE_SCAN_PASSES = 4
+GRID_ENSURE_VISIBLE_SCROLL_UIA_OVERHEAD_SECONDS = 0.2
+GRID_ENSURE_VISIBLE_TIMEOUT_MARGIN_SECONDS = 5.0
 
 
 def _is_window_not_ready(exc: RuntimeError) -> bool:
@@ -57,6 +64,50 @@ def _int_or_zero(value: Any) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
+def _bounded_int_or_default(
+    value: Any,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    if value is None:
+        return default
+    try:
+        candidate = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, candidate))
+
+
+def _grid_ensure_visible_timeout_seconds(
+    max_scrolls: int | None,
+    scroll_settle_ms: int | None,
+) -> float:
+    bounded_scrolls = _bounded_int_or_default(
+        max_scrolls,
+        default=GRID_ENSURE_VISIBLE_DEFAULT_MAX_SCROLLS,
+        minimum=0,
+        maximum=GRID_ENSURE_VISIBLE_MAX_SCROLLS,
+    )
+    bounded_settle_ms = _bounded_int_or_default(
+        scroll_settle_ms,
+        default=GRID_ENSURE_VISIBLE_DEFAULT_SETTLE_MS,
+        minimum=0,
+        maximum=GRID_ENSURE_VISIBLE_MAX_SETTLE_MS,
+    )
+    per_scroll_seconds = (
+        bounded_settle_ms / 1000.0 + GRID_ENSURE_VISIBLE_SCROLL_UIA_OVERHEAD_SECONDS
+    )
+    estimated_seconds = (
+        GRID_ENSURE_VISIBLE_SCAN_PASSES * bounded_scrolls * per_scroll_seconds
+    )
+    return max(
+        BRIDGE_DEFAULT_CALL_TIMEOUT_SECONDS,
+        estimated_seconds + GRID_ENSURE_VISIBLE_TIMEOUT_MARGIN_SECONDS,
+    )
 
 
 class FlaUIBridgeClient:
@@ -762,6 +813,42 @@ class FlaUIBackend:
             columns=columns or [],
         )
 
+    async def grid_ensure_visible(
+        self,
+        selector: dict[str, Any],
+        *,
+        row_key: str | None = None,
+        row_index: int | None = None,
+        identity: dict[str, Any] | None = None,
+        rows: dict[str, Any] | None = None,
+        columns: list[str] | None = None,
+        max_scrolls: int | None = None,
+        scroll_settle_ms: int | None = None,
+    ) -> dict[str, Any]:
+        """Make a DataGrid row visible via FlaUI bridge-owned support."""
+        payload: dict[str, Any] = {
+            "identity": dict(identity or {}),
+            "rows": dict(rows or {}),
+            "columns": list(columns or []),
+        }
+        if row_key is not None:
+            payload["row_key"] = row_key
+        if row_index is not None:
+            payload["row_index"] = row_index
+        if max_scrolls is not None:
+            payload["max_scrolls"] = max_scrolls
+        if scroll_settle_ms is not None:
+            payload["scroll_settle_ms"] = scroll_settle_ms
+        return await self._call_grid(
+            "grid_ensure_visible",
+            selector,
+            call_timeout=_grid_ensure_visible_timeout_seconds(
+                max_scrolls,
+                scroll_settle_ms,
+            ),
+            **payload,
+        )
+
     async def grid_assert_range(
         self,
         selector: dict[str, Any],
@@ -863,11 +950,17 @@ class FlaUIBackend:
         self,
         method: str,
         selector: dict[str, Any],
+        *,
+        call_timeout: float | None = None,
         **extra: Any,
     ) -> dict[str, Any]:
+        call_kwargs: dict[str, Any] = {}
+        if call_timeout is not None:
+            call_kwargs["timeout"] = call_timeout
         result = await self._client.call(
             method,
             {"selector": self._build_selector_params(selector), **extra},
+            **call_kwargs,
         )
         if not isinstance(result, dict):
             raise RuntimeError(

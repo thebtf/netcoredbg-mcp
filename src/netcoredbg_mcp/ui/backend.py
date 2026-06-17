@@ -201,8 +201,24 @@ class UIBackend(Protocol):
         selector: dict[str, Any],
         row_index: int,
         column: str | None = None,
+        columns: list[str] | None = None,
     ) -> dict[str, Any]:
         """Click a currently visible DataGrid row."""
+        ...
+
+    async def grid_ensure_visible(
+        self,
+        selector: dict[str, Any],
+        *,
+        row_key: str | None = None,
+        row_index: int | None = None,
+        identity: dict[str, Any] | None = None,
+        rows: dict[str, Any] | None = None,
+        columns: list[str] | None = None,
+        max_scrolls: int | None = None,
+        scroll_settle_ms: int | None = None,
+    ) -> dict[str, Any]:
+        """Make a DataGrid row visible by backend-owned realization/scroll support."""
         ...
 
     async def grid_assert_range(
