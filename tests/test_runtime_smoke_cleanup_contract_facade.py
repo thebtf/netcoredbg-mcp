@@ -218,10 +218,13 @@ async def test_runtime_smoke_stop_points_contaminated_runs_at_cleanup_contract(
     assert data["status"] == "STOPPING"
     assert data["contaminated"] is True
     assert data["cleanup_contract"]["next_action"] == "runtime_smoke_cleanup_contract"
+    assert "runtime_smoke_wait_for_result" in response["next_actions"]
+    assert "runtime_smoke_evidence_bundle" in response["next_actions"]
+    assert "runtime_smoke_tail_events" in response["next_actions"]
+    assert "runtime_smoke_get_result" in response["next_actions"]
+    assert "runtime_smoke_stop" in response["next_actions"]
     assert "runtime_smoke_cleanup_contract" in response["next_actions"]
     assert "debug_hygiene_preflight" in response["next_actions"]
-    assert "runtime_smoke_get_result" not in response["next_actions"]
-    assert "runtime_smoke_tail_events" not in response["next_actions"]
 
     session.cleanup_release_event.set()
     await _wait_for_final(session.runtime_smoke.lifecycle_runs, started["run_id"])

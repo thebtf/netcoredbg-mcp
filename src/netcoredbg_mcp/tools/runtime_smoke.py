@@ -350,12 +350,13 @@ def register_runtime_smoke_tools(
 
             data = await session.runtime_smoke.lifecycle_runs.start(plan, _runner)
             data["validation"] = _runtime_smoke_validation_summary(validation)
+            next_actions = _runtime_smoke_lifecycle_next_actions(data)
             if agent_mode:
-                _apply_runtime_smoke_agent_mode(data, "runtime_smoke_evidence_bundle")
+                _apply_runtime_smoke_agent_mode(data, next_actions[0])
             return _build_runtime_smoke_response(
                 session,
                 data,
-                _runtime_smoke_lifecycle_next_actions(data),
+                next_actions,
             )
         except Exception as exc:
             return build_error_response(str(exc), state=session.state.state)
@@ -1434,6 +1435,16 @@ def _runtime_smoke_run_missing(result: dict[str, Any]) -> bool:
 
 def _runtime_smoke_lifecycle_next_actions(data: dict[str, Any]) -> list[str]:
     if data.get("contaminated") is True:
+        if data.get("run_id") and not data.get("final") and data.get("status") == "STOPPING":
+            return [
+                "runtime_smoke_wait_for_result",
+                "runtime_smoke_evidence_bundle",
+                "runtime_smoke_tail_events",
+                "runtime_smoke_get_result",
+                "runtime_smoke_stop",
+                "runtime_smoke_cleanup_contract",
+                "debug_hygiene_preflight",
+            ]
         return ["runtime_smoke_cleanup_contract", "debug_hygiene_preflight"]
     return [
         "runtime_smoke_evidence_bundle",

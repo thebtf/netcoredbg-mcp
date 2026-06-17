@@ -282,6 +282,38 @@ async def test_runtime_smoke_run_plan_agent_mode_uses_active_run_for_blocked_sta
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_run_plan_agent_mode_points_contamination_at_cleanup_contract(
+    capturing_mcp,
+) -> None:
+    session = RunPlanFacadeSession()
+    _register(capturing_mcp, session)
+    session.runtime_smoke.lifecycle_runs.mark_contaminated(
+        reason="runtime smoke cleanup contract required",
+        run_id="previous-run",
+    )
+
+    response = await capturing_mcp.tools["runtime_smoke_run_plan"](
+        ctx=None,
+        plan={
+            "name": "blocked-by-contamination",
+            "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}],
+        },
+        agent_mode=True,
+    )
+    data = response["data"]
+
+    assert data["status"] == "BLOCKED"
+    assert data["contaminated"] is True
+    assert data["agent_mode"]["primary_next_action"] == "runtime_smoke_cleanup_contract"
+    assert data["agent_mode"]["next_request"] == {
+        "tool": "runtime_smoke_cleanup_contract",
+        "arguments": {},
+    }
+    assert "runtime_smoke_cleanup_contract" in response["next_actions"]
+    assert "runtime_smoke_run_plan" not in response["next_actions"]
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_evidence_bundle_returns_bounded_final_packet(
     capturing_mcp,
 ) -> None:
