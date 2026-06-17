@@ -838,8 +838,11 @@ def _row_index(row: dict[str, Any]) -> int | None:
         return None
     if isinstance(raw_index, int):
         return raw_index
-    if isinstance(raw_index, str) and raw_index.strip().lstrip("-").isdigit():
-        return int(raw_index)
+    if isinstance(raw_index, str):
+        try:
+            return int(raw_index.strip())
+        except ValueError:
+            return None
     return None
 
 

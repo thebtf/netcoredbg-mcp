@@ -138,6 +138,39 @@ async def test_ui_text_probe_read_mode_uses_read_adapter_without_expected() -> N
 
 
 @pytest.mark.asyncio
+async def test_ui_text_probe_read_mode_preserves_blocked_status_without_expected() -> None:
+    session = TextProbeSession()
+    session.read_results.extend(
+        [
+            {"status": "BLOCKED", "reason": "bridge not connected"},
+            {"status": "BLOCKED", "reason": "bridge not connected"},
+        ]
+    )
+
+    result = await runner(
+        session,
+        {"ui.text.read": session.text_read},
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "ui.text",
+                "name": "cue_text",
+                "action": "read",
+                "selector": {"automation_id": "CueTextBox"},
+            }
+        )
+    )
+
+    before = before_probe(result)
+    probe = after_probe(result)
+    assert result["status"] == "BLOCKED"
+    assert before["status"] == "BLOCKED"
+    assert before["reason"] == "bridge not connected"
+    assert probe["status"] == "BLOCKED"
+    assert probe["reason"] == "bridge not connected"
+
+
+@pytest.mark.asyncio
 async def test_ui_text_probe_preserves_blocked_backend_diagnostics() -> None:
     session = TextProbeSession()
     session.text_results.extend(

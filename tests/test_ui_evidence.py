@@ -1040,6 +1040,60 @@ async def test_ui_grid_select_range_confirms_by_viewport_index_when_row_index_di
 
 
 @pytest.mark.asyncio
+async def test_ui_grid_select_range_ignores_malformed_string_index(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    class MalformedIndexGridBackend(FakeEvidenceBackend):
+        async def grid_selected_rows(
+            self,
+            selector: dict[str, Any],
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            self.calls.append(
+                {
+                    "grid_selected_rows": {
+                        "selector": dict(selector),
+                        "columns": list(columns or []),
+                    }
+                }
+            )
+            return {
+                "status": "PASS",
+                "selected_rows": [{"index": "--5", "cells": {"Phrase": "Bad index"}}],
+            }
+
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = MalformedIndexGridBackend()
+    backend.process_id = 42
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_grid"](
+        ctx=None,
+        action="select_range",
+        automation_id="CueGrid",
+        start_index=1,
+        end_index=1,
+        columns=["Phrase"],
+    )
+
+    assert response["data"]["status"] == "FAIL"
+    assert response["data"]["confirmed_selection"] is False
+    assert response["data"]["observed_selected_indices"] == []
+    assert response["data"]["selected_rows"] == [
+        {"index": "--5", "cells": {"Phrase": "Bad index"}}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_ui_grid_selected_rows_forwards_columns(capturing_mcp, monkeypatch) -> None:
     session = FakeUiSession()
     session.state.state = DebugState.RUNNING
