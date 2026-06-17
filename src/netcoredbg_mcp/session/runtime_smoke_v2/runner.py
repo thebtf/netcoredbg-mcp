@@ -84,7 +84,7 @@ class RuntimeStateOracleRunner:
 
     async def run(self, plan: dict[str, Any]) -> dict[str, Any]:
         started = self._clock()
-        self._diagnostic_launch = _diagnostic_launch_from_plan(plan)
+        self.capture_plan_metadata(plan)
         cleanup = {"status": "PASS", "attempted": [], "failures": []}
         raw_metrics_thresholds = plan.get("metrics_thresholds")
         metrics_thresholds = (
@@ -262,6 +262,9 @@ class RuntimeStateOracleRunner:
             cleanup=cleanup,
             extra={"blocked": blocked_payload} if blocked_payload else None,
         )
+
+    def capture_plan_metadata(self, plan: dict[str, Any]) -> None:
+        self._diagnostic_launch = _diagnostic_launch_from_plan(plan)
 
     def _finalize(
         self,
