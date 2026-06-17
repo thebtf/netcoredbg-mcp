@@ -431,6 +431,137 @@ async def test_v2_ui_text_type_replace_selection_blocks_without_text_state() -> 
 
 
 @pytest.mark.asyncio
+async def test_v2_ui_text_type_replace_selection_accepts_float_string_selection_offsets() -> None:
+    session = ActionSmokeSession()
+    session.text_get_state_result = {
+        "status": "PASS",
+        "text": "Original text",
+        "selection": {"start": "0.0", "end": "13.0", "length": "13.0"},
+    }
+    session.text_read_result = {"status": "PASS", "text": "Replaced text"}
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "cases": [
+                {
+                    "id": "replace_text_float_offsets",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.text.type_replace_selection",
+                                "selector": {"automation_id": "CueTextBox"},
+                                "text": "Replaced text",
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == "PASS"
+    assert action["precondition"]["selected"] is True
+    assert action["precondition"]["actual"] == {
+        "selection_start": 0,
+        "selection_end": 13,
+        "selection_length": 13,
+        "text_length": 13,
+    }
+    assert ("send_keys_focused", "Replaced text") in session.calls
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_text_type_replace_selection_infers_start_from_end_and_length() -> None:
+    session = ActionSmokeSession()
+    session.text_get_state_result = {
+        "status": "PASS",
+        "text": "Original text",
+        "selection": {"end": 13, "length": 13},
+    }
+    session.text_read_result = {"status": "PASS", "text": "Replaced text"}
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "cases": [
+                {
+                    "id": "replace_text_inferred_start",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.text.type_replace_selection",
+                                "selector": {"automation_id": "CueTextBox"},
+                                "text": "Replaced text",
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == "PASS"
+    assert action["precondition"]["selected"] is True
+    assert action["precondition"]["actual"] == {
+        "selection_start": 0,
+        "selection_end": 13,
+        "selection_length": 13,
+        "text_length": 13,
+    }
+    assert ("send_keys_focused", "Replaced text") in session.calls
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_text_type_replace_selection_blocks_without_selection_state() -> None:
+    session = ActionSmokeSession()
+    session.text_get_state_result = {
+        "status": "PASS",
+        "text": "Original text",
+    }
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "cases": [
+                {
+                    "id": "replace_text_missing_selection_state",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.text.type_replace_selection",
+                                "selector": {"automation_id": "CueTextBox"},
+                                "text": "Must not type",
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == "BLOCKED"
+    assert action["precondition"]["selected"] is False
+    assert action["precondition"]["reason"] == "TextBox selection evidence unavailable"
+    assert action["precondition"]["state"] == {
+        "status": "PASS",
+        "text": "Original text",
+    }
+    assert session.calls == [
+        ("find_element", {"automation_id": "CueTextBox"}),
+        ("set_focus", {"automation_id": "CueTextBox"}),
+        ("send_keys_focused", "^a"),
+        ("text_get_state", {"automation_id": "CueTextBox"}),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_v2_ui_text_type_replace_selection_blocks_without_state_adapter() -> None:
     session = ActionSmokeSession()
 

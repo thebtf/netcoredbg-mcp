@@ -218,6 +218,7 @@ def _select_all_precondition(result: dict[str, Any]) -> dict[str, Any]:
             "reason": "TextBox selection evidence unavailable",
             "expected": expected,
             "actual": {"text_length": text_length},
+            "state": _bounded_state_evidence(result),
         }
 
     actual = _selection_evidence(selection)
@@ -255,7 +256,8 @@ def _optional_int(value: Any) -> int | None:
         return int(value)
     if isinstance(value, str):
         try:
-            return int(value.strip())
+            parsed = float(value.strip())
+            return int(parsed) if parsed.is_integer() else None
         except ValueError:
             return None
     return None
@@ -296,6 +298,8 @@ def _selection_evidence(selection: Any) -> dict[str, Any]:
         end = start + length
     if length is None and start is not None and end is not None:
         length = max(0, end - start)
+    if start is None and end is not None and length is not None:
+        start = max(0, end - length)
     return {
         "selection_start": start,
         "selection_end": end,
