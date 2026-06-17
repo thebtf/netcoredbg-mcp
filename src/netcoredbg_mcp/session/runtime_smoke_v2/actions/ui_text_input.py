@@ -70,7 +70,7 @@ async def handle_ui_text_type_replace_selection(
             default_reason="failed to focus target element",
         )
 
-    keys = f"^a{escape_sendkeys_literal(text)}"
+    keys = replacement_keys(text)
     send_result = await context.call_adapter("ui.send_keys_focused", keys=keys)
     if not _is_success(send_result):
         failed = _adapter_failure_result(
@@ -123,6 +123,12 @@ async def handle_ui_text_type_replace_selection(
 
 def escape_sendkeys_literal(text: str) -> str:
     return "".join(_SENDKEYS_LITERAL_ESCAPES.get(char, char) for char in text)
+
+
+def replacement_keys(text: str) -> str:
+    if text == "":
+        return "^a{BACKSPACE}"
+    return f"^a{escape_sendkeys_literal(text)}"
 
 
 def _text_value(result: dict[str, Any]) -> str:

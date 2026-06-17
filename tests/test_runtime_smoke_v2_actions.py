@@ -418,6 +418,39 @@ async def test_v2_ui_text_type_replace_selection_escapes_sendkeys_literals() -> 
 
 
 @pytest.mark.asyncio
+async def test_v2_ui_text_type_replace_selection_clears_text_when_replacement_is_empty() -> None:
+    session = ActionSmokeSession()
+    session.text_read_result = {"status": "PASS", "text": ""}
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "cases": [
+                {
+                    "id": "clear_textbox",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.text.type_replace_selection",
+                                "selector": {"automation_id": "CueTextBox"},
+                                "text": "",
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == "PASS"
+    assert ("send_keys_focused", "^a{BACKSPACE}") in session.calls
+    assert action["keys"] == "^a{BACKSPACE}"
+    assert action["text"] == ""
+
+
+@pytest.mark.asyncio
 async def test_v2_ui_invoke_route_does_not_focus_before_invoke() -> None:
     session = ActionSmokeSession()
 
