@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..runtime_smoke_schema import (
+    app_diagnostics_launch_contract,
+    app_diagnostics_launch_env,
+)
 from .actions import ActionContext, dispatch_action
 from .blocked import build_blocked
 from .cleanup import run_cleanup
@@ -69,7 +73,16 @@ async def _execute_step(step: dict[str, Any], context: ActionContext) -> dict[st
         )
     if kind == "isolated_profile.launch":
         launch_args = dict(step.get("launch") or {})
-        return await context.call_adapter("launch", **launch_args)
+        diagnostic_launch = _diagnostic_launch_for_step(step)
+        if diagnostic_launch:
+            launch_args["env"] = {
+                **dict(launch_args.get("env") or {}),
+                **app_diagnostics_launch_env(diagnostic_launch),
+            }
+        result = await context.call_adapter("launch", **launch_args)
+        if diagnostic_launch and isinstance(result, dict):
+            return {**result, "diagnostic_launch": diagnostic_launch}
+        return result
     if kind == "control_set":
         action = dict(step.get("action") or {})
         return await dispatch_action(action, context)
@@ -97,6 +110,16 @@ def _cleanup_step_for(step: dict[str, Any]) -> dict[str, Any] | None:
             "baseline_file": str(step.get("baseline_file") or ""),
         }
     return None
+
+
+def _diagnostic_launch_for_step(step: dict[str, Any]) -> dict[str, Any] | None:
+    app_diagnostics = step.get("app_diagnostics")
+    if not isinstance(app_diagnostics, dict):
+        return None
+    return app_diagnostics_launch_contract(
+        evidence_dir=str(app_diagnostics.get("evidence_dir") or ""),
+        file_name=str(app_diagnostics.get("file_name") or ""),
+    )
 
 
 def _accepted_step_kinds() -> list[str]:

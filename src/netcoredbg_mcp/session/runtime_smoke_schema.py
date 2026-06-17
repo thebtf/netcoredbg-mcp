@@ -10,6 +10,13 @@ SCHEMA_VERSION = "netcoredbg.runtime_smoke.v1"
 SCHEMA_VERSION_V2 = "netcoredbg.runtime_smoke.v2"
 DIAGNOSTIC_SCHEMA_VERSION = "netcoredbg.runtime_smoke.diagnostics.v1"
 MAX_DIAGNOSTIC_JSON_BYTES = 32768
+APP_DIAGNOSTICS_DEFAULT_EVIDENCE_DIRECTORY = ".agent/runtime-smoke/app-diagnostics"
+APP_DIAGNOSTICS_DEFAULT_FILE_NAME = "app-diagnostics.json"
+APP_DIAGNOSTICS_ENV_VAR_NAMES = {
+    "directory": "NETCOREDBG_MCP_APP_DIAGNOSTICS_DIR",
+    "path": "NETCOREDBG_MCP_APP_DIAGNOSTICS_PATH",
+    "schema": "NETCOREDBG_MCP_APP_DIAGNOSTICS_SCHEMA",
+}
 
 DIAGNOSTIC_STATUS_VALUES = ("PASS", "BLOCKED", "FAIL")
 DIAGNOSTIC_EVIDENCE_LIMITS = {
@@ -74,6 +81,7 @@ V2_ONLY_TOP_LEVEL_KEYS = (
     "baseline",
     "generate",
     "cases",
+    "diagnostics",
     "metrics_thresholds",
 )
 ACCEPTED_TOP_LEVEL_KEYS_V2 = ACCEPTED_TOP_LEVEL_KEYS + V2_ONLY_TOP_LEVEL_KEYS
@@ -207,7 +215,14 @@ def diagnostic_schema_contract() -> dict[str, Any]:
                 "modules",
                 "wait_json",
                 "poll",
+                "diagnostic_launch",
             ],
+            "launch_contract": {
+                "env_var_names": dict(APP_DIAGNOSTICS_ENV_VAR_NAMES),
+                "default_evidence_directory": APP_DIAGNOSTICS_DEFAULT_EVIDENCE_DIRECTORY,
+                "default_file_name": APP_DIAGNOSTICS_DEFAULT_FILE_NAME,
+                "redacted_env_values": True,
+            },
             "failure_modes": [
                 "stale_process",
                 "missing_artifact",
@@ -241,6 +256,96 @@ def diagnostic_schema_contract() -> dict[str, Any]:
             "runtime_limits": _tracepoint_runtime_limits(),
         },
     }
+
+
+def app_diagnostics_launch_contract(
+    *,
+    name: str | None = None,
+    evidence_dir: str | None = None,
+    file_name: str | None = None,
+) -> dict[str, Any]:
+    """Return public app-diagnostics launch metadata without env values."""
+
+    base_dir = _normalize_diagnostic_path(
+        evidence_dir or APP_DIAGNOSTICS_DEFAULT_EVIDENCE_DIRECTORY
+    )
+    directory = base_dir
+    if name:
+        directory = f"{base_dir}/{_diagnostic_path_segment(name)}"
+    resolved_file = _diagnostic_path_segment(file_name or APP_DIAGNOSTICS_DEFAULT_FILE_NAME)
+    return {
+        "kind": "app_diagnostics",
+        "schema": DIAGNOSTIC_SCHEMA_VERSION,
+        "env_var_names": dict(APP_DIAGNOSTICS_ENV_VAR_NAMES),
+        "evidence": {
+            "directory": directory,
+            "path": f"{directory}/{resolved_file}",
+        },
+        "redacted_env_values": True,
+    }
+
+
+def normalize_app_diagnostics_launch_contract(value: Any) -> dict[str, Any] | None:
+    """Return a safe public app-diagnostics launch contract from untrusted input."""
+
+    if not isinstance(value, dict):
+        return None
+
+    raw_evidence = value.get("evidence")
+    evidence = raw_evidence if isinstance(raw_evidence, dict) else {}
+    raw_directory = evidence.get("directory")
+    raw_path = evidence.get("path")
+
+    directory = _normalize_diagnostic_path(
+        str(raw_directory or APP_DIAGNOSTICS_DEFAULT_EVIDENCE_DIRECTORY)
+    )
+    file_name = APP_DIAGNOSTICS_DEFAULT_FILE_NAME
+    if raw_path:
+        normalized_path = _normalize_diagnostic_path(str(raw_path))
+        path_directory, separator, path_file_name = normalized_path.rpartition("/")
+        if not raw_directory and separator:
+            directory = path_directory
+        file_name = path_file_name or APP_DIAGNOSTICS_DEFAULT_FILE_NAME
+
+    return app_diagnostics_launch_contract(
+        evidence_dir=directory,
+        file_name=file_name,
+    )
+
+
+def app_diagnostics_launch_env(contract: dict[str, Any]) -> dict[str, str]:
+    """Return the private env values for a previously advertised launch contract."""
+
+    env_names = contract.get("env_var_names")
+    evidence = contract.get("evidence")
+    if not isinstance(env_names, dict) or not isinstance(evidence, dict):
+        return {}
+    directory_name = str(env_names.get("directory") or "")
+    path_name = str(env_names.get("path") or "")
+    schema_name = str(env_names.get("schema") or "")
+    env: dict[str, str] = {}
+    if directory_name:
+        env[directory_name] = str(evidence.get("directory") or "")
+    if path_name:
+        env[path_name] = str(evidence.get("path") or "")
+    if schema_name:
+        env[schema_name] = DIAGNOSTIC_SCHEMA_VERSION
+    return env
+
+
+def _normalize_diagnostic_path(value: str) -> str:
+    normalized = str(value or APP_DIAGNOSTICS_DEFAULT_EVIDENCE_DIRECTORY).replace("\\", "/")
+    normalized = "/".join(part for part in normalized.split("/") if part)
+    return normalized or APP_DIAGNOSTICS_DEFAULT_EVIDENCE_DIRECTORY
+
+
+def _diagnostic_path_segment(value: str) -> str:
+    raw = str(value or "")
+    safe = "".join(
+        char if char.isalnum() or char in {"-", "_", "."} else "-"
+        for char in raw.replace("\\", "/").rsplit("/", 1)[-1]
+    ).strip(".-")
+    return safe or "app-diagnostics"
 
 
 def _diagnostic_evidence_limits() -> dict[str, int]:

@@ -241,7 +241,9 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "oracle_pack",
             "runtime_smoke_wait_for_result",
             "CR-024",
+            "CR-026",
             "DISAGREEING_SOURCES",
+            "launch env/evidence-dir advertisement",
             "remaining app diagnostics orchestration",
         ],
     }
@@ -339,6 +341,17 @@ def test_issue_272_records_cr024_diagnostic_orchestration_slice() -> None:
     assert "poll" in row
     assert "broader FR remains open" in row
     assert "before closing the full FR" in row
+
+
+def test_issue_272_records_cr026_launch_contract_slice() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#272")
+
+    assert "launch contract slice covered" in row
+    assert "CR-026" in row
+    assert "app diagnostics launch env/evidence-dir advertisement" in row
+    assert "redacted env values" in row
+    assert "broader FR remains open" in row
 
 
 def test_cr022_broad_issues_require_split_or_comment_evidence_before_closure() -> None:

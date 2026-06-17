@@ -82,6 +82,24 @@ def test_diagnostic_schema_contract_exposes_orchestration_vocabulary() -> None:
     assert "diagnostic JSON not observed" in contract["app_diagnostics"]["failure_modes"]
 
 
+def test_diagnostic_schema_contract_exposes_app_diagnostics_launch_contract() -> None:
+    from netcoredbg_mcp.session.runtime_smoke_schema import diagnostic_schema_contract
+
+    contract = diagnostic_schema_contract()
+
+    assert "diagnostic_launch" in contract["app_diagnostics"]["optional_fields"]
+    assert contract["app_diagnostics"]["launch_contract"] == {
+        "env_var_names": {
+            "directory": "NETCOREDBG_MCP_APP_DIAGNOSTICS_DIR",
+            "path": "NETCOREDBG_MCP_APP_DIAGNOSTICS_PATH",
+            "schema": "NETCOREDBG_MCP_APP_DIAGNOSTICS_SCHEMA",
+        },
+        "default_evidence_directory": ".agent/runtime-smoke/app-diagnostics",
+        "default_file_name": "app-diagnostics.json",
+        "redacted_env_values": True,
+    }
+
+
 def test_diagnostic_schema_contract_matches_runtime_probe_registry() -> None:
     from netcoredbg_mcp.session.runtime_smoke_schema import diagnostic_schema_contract
     from netcoredbg_mcp.session.runtime_smoke_v2.probes import accepted_probe_kinds
