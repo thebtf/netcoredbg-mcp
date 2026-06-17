@@ -746,6 +746,20 @@ class FlaUIBackend:
             end_index=end_index,
         )
 
+    async def grid_click_row(
+        self,
+        selector: dict[str, Any],
+        row_index: int,
+        column: str | None = None,
+    ) -> dict[str, Any]:
+        """Click a visible DataGrid row via FlaUI bridge."""
+        return await self._call_grid(
+            "grid_click_row",
+            selector,
+            row_index=row_index,
+            column=column,
+        )
+
     async def grid_assert_range(
         self,
         selector: dict[str, Any],

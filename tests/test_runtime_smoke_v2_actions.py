@@ -25,6 +25,9 @@ class ActionSmokeSession:
         }
         self.drag_results: list[dict[str, Any]] = []
         self.grid_select_indices_results: list[dict[str, Any]] = []
+        self.grid_state_results: list[dict[str, Any]] = []
+        self.grid_select_row_results: list[dict[str, Any]] = []
+        self.grid_click_row_results: list[dict[str, Any]] = []
 
     async def find_element(self, selector: dict[str, Any]) -> dict[str, Any]:
         self.calls.append(("find_element", dict(selector)))
@@ -73,6 +76,24 @@ class ActionSmokeSession:
             "selected_count": len(request.get("indices") or []),
         }
 
+    async def grid_get_state(self, **request: Any) -> dict[str, Any]:
+        self.calls.append(("grid_get_state", request))
+        if self.grid_state_results:
+            return self.grid_state_results.pop(0)
+        return {"status": "PASS", "visible_rows": [], "selected_rows": []}
+
+    async def grid_select_row(self, **request: Any) -> dict[str, Any]:
+        self.calls.append(("grid_select_row", request))
+        if self.grid_select_row_results:
+            return self.grid_select_row_results.pop(0)
+        return {"status": "PASS", "selected_row": dict(request.get("row") or {})}
+
+    async def grid_click_row(self, **request: Any) -> dict[str, Any]:
+        self.calls.append(("grid_click_row", request))
+        if self.grid_click_row_results:
+            return self.grid_click_row_results.pop(0)
+        return {"status": "PASS", "clicked": True, "row": dict(request.get("row") or {})}
+
     async def tracepoint_status(self, tracepoint_id: str) -> dict[str, Any]:
         self.calls.append(("tracepoint_status", tracepoint_id))
         hit = self.tracepoint_hits.pop(0) if self.tracepoint_hits else False
@@ -103,6 +124,9 @@ def _runner(session: ActionSmokeSession) -> RuntimeSmokeRunner:
             "ui.text.get_state": session.text_get_state,
             "ui.invoke": session.invoke,
             "ui.drag": session.drag,
+            "ui.grid.get_state": session.grid_get_state,
+            "ui.grid.select_row": session.grid_select_row,
+            "ui.grid.click_row": session.grid_click_row,
             "ui.grid.select_indices": session.grid_select_indices,
             "debug.tracepoint_status": session.tracepoint_status,
         },
@@ -1595,6 +1619,152 @@ async def test_v2_ui_grid_select_rejects_fractional_indices() -> None:
     assert action["status"] == "BLOCKED"
     assert action["reason"] == "invalid grid selection index"
     assert action["requested"] == {"index": 1.5}
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_grid_get_state_routes_selector_identity_to_adapter() -> None:
+    session = ActionSmokeSession()
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "grid state",
+            "cases": [
+                {
+                    "id": "grid_state",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.grid.get_state",
+                                "selector": {"automation_id": "CueDataGrid"},
+                                "identity": {"column": "PhraseId"},
+                                "rows": {"visible_only": True},
+                                "columns": ["PhraseId"],
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    state_call = next(call for call in session.calls if call[0] == "grid_get_state")
+    assert result["status"] == "PASS"
+    assert "ui.grid.get_state" in result["accepted_action_kinds"]
+    assert action["route"] == "grid_get_state"
+    assert state_call[1]["selector"] == {"automation_id": "CueDataGrid"}
+    assert state_call[1]["identity"] == {"column": "PhraseId"}
+    assert state_call[1]["rows"] == {"visible_only": True}
+    assert state_call[1]["columns"] == ["PhraseId"]
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_grid_select_row_by_identity_routes_to_adapter() -> None:
+    session = ActionSmokeSession()
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "grid select row",
+            "cases": [
+                {
+                    "id": "grid_select_row",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.grid.select_row",
+                                "selector": {"automation_id": "CueDataGrid"},
+                                "row": {"identity": "Cue 042"},
+                                "identity": {"column": "PhraseId"},
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    select_call = next(call for call in session.calls if call[0] == "grid_select_row")
+    assert result["status"] == "PASS"
+    assert "ui.grid.select_row" in result["accepted_action_kinds"]
+    assert action["route"] == "grid_select_row"
+    assert select_call[1]["selector"] == {"automation_id": "CueDataGrid"}
+    assert select_call[1]["row"] == {"identity": "Cue 042"}
+    assert select_call[1]["identity"] == {"column": "PhraseId"}
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_grid_click_row_by_index_routes_to_adapter() -> None:
+    session = ActionSmokeSession()
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "grid click row",
+            "cases": [
+                {
+                    "id": "grid_click_row",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.grid.click_row",
+                                "selector": {"automation_id": "CueDataGrid"},
+                                "row": {"index": 19},
+                                "column": "Phrase",
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    click_call = next(call for call in session.calls if call[0] == "grid_click_row")
+    assert result["status"] == "PASS"
+    assert "ui.grid.click_row" in result["accepted_action_kinds"]
+    assert action["route"] == "grid_click_row"
+    assert click_call[1]["selector"] == {"automation_id": "CueDataGrid"}
+    assert click_call[1]["row"] == {"index": 19}
+    assert click_call[1]["column"] == "Phrase"
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_grid_row_action_blocks_invalid_row_payload_before_adapter() -> None:
+    session = ActionSmokeSession()
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "bad grid row",
+            "cases": [
+                {
+                    "id": "bad_grid_row",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.grid.select_row",
+                                "selector": {"automation_id": "CueDataGrid"},
+                                "row": {"index": 1.5},
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == "BLOCKED"
+    assert action["status"] == "BLOCKED"
+    assert action["reason"] == "invalid grid row index"
     assert session.calls == []
 
 

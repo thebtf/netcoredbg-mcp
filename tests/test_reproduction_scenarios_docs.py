@@ -201,10 +201,15 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
     assert "CR-021" in row
     assert "CR-025" in row
     assert "CR-029" in row
+    assert "CR-031" in row
     assert "ui.text.read" in row
     assert "ui.text.type_replace_selection" in row
     assert "ui.text.get_state" in row
     assert "ui.text.assert_selection" in row
+    assert "ui.grid.get_state" in row
+    assert "ui.grid.select_row" in row
+    assert "ui.grid.click_row" in row
+    assert 'ui_grid(action="click_row")' in row
     assert "ui_focus" in row
     assert "confirmed DataGrid selection" in row
     assert "cells" in row
@@ -248,8 +253,10 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "CR-021",
             "CR-025",
             "CR-029",
+            "CR-031",
             "ui_property",
             "public TextBox mutation/set-text helpers",
+            "DataGrid offscreen/scroll/virtualization behavior",
         ],
         "#271": ["CR-019", "debug_preflight", "tracepoint guard", "cleanup contract"],
         "#272": [
@@ -322,10 +329,14 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "ui.text.get_state",
             "ui.text.assert_selection",
             "CR-029",
+            "CR-031",
+            "visible-row-only DataGrid",
+            "bridge-owned",
             "ui_focus",
             "confirmed DataGrid selection",
             "ui_property",
             "TextBox mutation/set-text",
+            "DataGrid offscreen/scroll/virtualization behavior",
         ],
         "#271": [
             "comment already current",

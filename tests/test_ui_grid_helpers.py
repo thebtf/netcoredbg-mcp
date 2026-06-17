@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from netcoredbg_mcp.server import create_server
+from netcoredbg_mcp.ui import grid as grid_helpers
 from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
 from netcoredbg_mcp.ui.grid import (
     assert_grid_range,
@@ -119,6 +120,28 @@ class FakeGridBackend:
             ],
         }
 
+    async def grid_click_row(
+        self,
+        selector: dict[str, Any],
+        row_index: int,
+        column: str | None = None,
+    ) -> dict[str, Any]:
+        self.calls.append(
+            (
+                "click",
+                {
+                    **dict(selector),
+                    "row_index": row_index,
+                    "column": column,
+                },
+            )
+        )
+        return {
+            "status": "PASS",
+            "clicked": True,
+            "row": {"index": row_index},
+        }
+
 
 def _make_flaui() -> FlaUIBackend:
     backend = FlaUIBackend("C:/fake/FlaUIBridge.exe")
@@ -134,13 +157,29 @@ async def test_grid_helpers_preserve_selector() -> None:
 
     visible = await read_grid_visible_rows(backend, selector)
     selected = await read_grid_selected_rows(backend, selector)
+    state = await grid_helpers.read_grid_state(backend, selector, columns=["Phrase"])
     selected_range = await select_grid_range(backend, selector, 1, 2)
+    selected_row = await grid_helpers.select_grid_row(
+        backend,
+        selector,
+        1,
+        columns=["Phrase"],
+    )
+    clicked_row = await grid_helpers.click_grid_row(
+        backend,
+        selector,
+        1,
+        column="Phrase",
+    )
     asserted_range = await assert_grid_range(backend, selector, 1, 2)
 
     assert selector == {"automation_id": "CueGrid"}
     assert visible["visible_rows"][0]["automation_id"] == "Row_0"
     assert selected["selected_rows"] == [{"index": 1, "automation_id": "Row_1", "name": "B"}]
+    assert state["selected_rows"] == [{"index": 1, "automation_id": "Row_1", "name": "B"}]
     assert selected_range["selected_range"] == {"start": 1, "end": 2}
+    assert selected_row["selected_range"] == {"start": 1, "end": 1}
+    assert clicked_row["clicked"] is True
     assert asserted_range["asserted"] is True
 
 
@@ -256,6 +295,7 @@ async def test_flaui_backend_forwards_grid_helpers_to_bridge() -> None:
     result = await backend.grid_visible_rows(selector)
     await backend.grid_selected_rows(selector, columns=["Phrase"])
     await backend.grid_select_range(selector, 0, 2)
+    await backend.grid_click_row(selector, 1, column="Phrase")
     await backend.grid_assert_range(selector, 0, 2)
     await snapshot_grid(backend, selector, columns=["Start"])
     await assert_grid_rows(
@@ -274,10 +314,13 @@ async def test_flaui_backend_forwards_grid_helpers_to_bridge() -> None:
     assert calls[2].args[0] == "grid_select_range"
     assert calls[2].args[1]["start_index"] == 0
     assert calls[2].args[1]["end_index"] == 2
-    assert calls[4].args[0] == "grid_snapshot"
-    assert calls[4].args[1]["columns"] == ["Start"]
-    assert calls[5].args[0] == "grid_assert_rows"
+    assert calls[3].args[0] == "grid_click_row"
+    assert calls[3].args[1]["row_index"] == 1
+    assert calls[3].args[1]["column"] == "Phrase"
+    assert calls[5].args[0] == "grid_snapshot"
     assert calls[5].args[1]["columns"] == ["Start"]
+    assert calls[6].args[0] == "grid_assert_rows"
+    assert calls[6].args[1]["columns"] == ["Start"]
 
 
 @pytest.mark.asyncio
@@ -330,6 +373,7 @@ def test_bridge_grid_builds_cell_text_evidence_for_rows() -> None:
 
     assert '["grid_snapshot"] = GridCommands.Snapshot' in handler
     assert '["grid_assert_rows"] = GridCommands.AssertRows' in handler
+    assert '["grid_click_row"] = GridCommands.ClickRow' in handler
     assert '["cells"]' in command
     assert '["grid_bounds"] = SafeRect(grid)' in command
     assert '["bounds"] = SafeRect(row)' in command
@@ -338,6 +382,8 @@ def test_bridge_grid_builds_cell_text_evidence_for_rows() -> None:
     assert "ReadCellText" in command
     assert "new Grid(grid.FrameworkAutomationElement)" in command
     assert "gridElement.ColumnHeaders" in command
+    assert "public static JsonNode ClickRow(" in command
+    assert "row bounds are empty" in command
     assert "new GridRow(row.FrameworkAutomationElement)" in command
     assert "gridRow.Cells" in command
     assert "CellColumnIndex(cell, ordinal)" in command

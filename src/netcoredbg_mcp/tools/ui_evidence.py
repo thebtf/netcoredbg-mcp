@@ -14,9 +14,12 @@ from ..ui.events import UIEventBufferStore
 from ..ui.focus import assert_focus
 from ..ui.grid import (
     assert_grid_range,
+    click_grid_row,
     read_grid_selected_rows,
+    read_grid_state,
     read_grid_visible_rows,
     select_grid_range,
+    select_grid_row,
     snapshot_grid,
 )
 from ..ui.key_sequence import run_scoped_key_sequence
@@ -36,13 +39,17 @@ _GRID_ACTION_ALIASES = {
     "cell_values": "snapshot",
     "selected": "selected_rows",
     "selection": "selected_rows",
+    "state": "get_state",
 }
 _GRID_CANONICAL_ACTIONS = (
     "visible_rows",
     "snapshot",
     "selected_rows",
     "select_range",
+    "select_row",
+    "click_row",
     "assert_range",
+    "get_state",
 )
 _GRID_ACCEPTED_ACTIONS = (
     "visible_rows",
@@ -54,7 +61,11 @@ _GRID_ACCEPTED_ACTIONS = (
     "selected",
     "selection",
     "select_range",
+    "select_row",
+    "click_row",
     "assert_range",
+    "get_state",
+    "state",
 )
 _FOCUS_READ_ACTIONS = ("assert",)
 _TEXT_ACTION_ALIASES = {"state": "get_state"}
@@ -417,6 +428,9 @@ def register_ui_evidence_tools(
         xpath: str | None = None,
         start_index: int | None = None,
         end_index: int | None = None,
+        row_index: int | None = None,
+        row_key: str | None = None,
+        column: str | None = None,
         rows: dict[str, Any] | None = None,
         columns: list[str] | None = None,
     ) -> dict:
@@ -454,6 +468,13 @@ def register_ui_evidence_tools(
                 result = await snapshot_grid(backend, selector, rows=rows, columns=columns)
             elif canonical_action == "selected_rows":
                 result = await read_grid_selected_rows(backend, selector, columns=columns)
+            elif canonical_action == "get_state":
+                result = await read_grid_state(
+                    backend,
+                    selector,
+                    rows=rows,
+                    columns=columns,
+                )
             elif canonical_action == "select_range":
                 start, end = _require_range(start_index, end_index)
                 result = await select_grid_range(backend, selector, start, end)
@@ -466,11 +487,30 @@ def register_ui_evidence_tools(
                         columns=columns,
                         selection_result=result,
                     )
+            elif canonical_action == "select_row":
+                result = await select_grid_row(
+                    backend,
+                    selector,
+                    row_index=row_index,
+                    row_key=row_key,
+                    columns=columns,
+                    rows=rows,
+                )
+            elif canonical_action == "click_row":
+                result = await click_grid_row(
+                    backend,
+                    selector,
+                    row_index=row_index,
+                    row_key=row_key,
+                    column=column,
+                    columns=columns,
+                    rows=rows,
+                )
             elif canonical_action == "assert_range":
                 start, end = _require_range(start_index, end_index)
                 result = await assert_grid_range(backend, selector, start, end)
             if isinstance(result, dict):
-                result = dict(result)
+                result = _strip_unbounded_evidence_value(dict(result))
                 result["requested_action"] = action
                 result["canonical_action"] = canonical_action
             return build_response(data=result, state=session.state.state)

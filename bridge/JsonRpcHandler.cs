@@ -88,6 +88,7 @@ public static class JsonRpcHandler
             ["grid_selected_rows"] = GridCommands.SelectedRows,
             ["grid_snapshot"] = GridCommands.Snapshot,
             ["grid_select_range"] = GridCommands.SelectRange,
+            ["grid_click_row"] = GridCommands.ClickRow,
             ["grid_assert_range"] = GridCommands.AssertRange,
             ["grid_assert_rows"] = GridCommands.AssertRows,
             ["list_invoke_item"] = ListCommands.InvokeItem,
