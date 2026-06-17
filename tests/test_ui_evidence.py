@@ -222,6 +222,7 @@ class FakeEvidenceBackend:
         selector: dict[str, Any],
         row_index: int,
         column: str | None = None,
+        columns: list[str] | None = None,
     ) -> dict[str, Any]:
         self.calls.append(
             {
@@ -229,6 +230,7 @@ class FakeEvidenceBackend:
                     "selector": dict(selector),
                     "row_index": row_index,
                     "column": column,
+                    "columns": list(columns or []),
                 }
             }
         )
@@ -2081,6 +2083,7 @@ async def test_ui_grid_click_row_uses_backend_row_click_after_identity_resolutio
             "selector": {"automation_id": "CueGrid"},
             "row_index": 1,
             "column": "Phrase",
+            "columns": ["Phrase"],
         }
     }
 

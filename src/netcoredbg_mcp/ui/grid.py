@@ -210,6 +210,7 @@ async def click_grid_row(
     rows: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Click one currently visible DataGrid row through a backend primitive."""
+    evidence_columns = _identity_columns(identity, columns)
     resolved, blocked = await resolve_visible_grid_row(
         backend,
         selector,
@@ -217,7 +218,7 @@ async def click_grid_row(
         row_key=row_key,
         identity=identity,
         rows=rows,
-        columns=columns,
+        columns=evidence_columns,
     )
     if blocked is not None:
         return blocked
@@ -239,7 +240,12 @@ async def click_grid_row(
             "next_step": "Use a FlaUI bridge backend that can click resolved grid rows.",
             "resolved_row": _compact_row_ref(resolved, identity),
         }
-    result = await click_row(dict(selector), visible_index, column=column)
+    result = await click_row(
+        dict(selector),
+        visible_index,
+        column=column,
+        columns=evidence_columns,
+    )
     if not isinstance(result, dict):
         return {
             "status": "BLOCKED",

@@ -587,6 +587,7 @@ class PywinautoBackend:
         selector: dict[str, Any],
         row_index: int,
         column: str | None = None,
+        columns: list[str] | None = None,
     ) -> dict[str, Any]:
         """DataGrid row click evidence requires the FlaUI bridge backend."""
         return self._unsupported_grid()

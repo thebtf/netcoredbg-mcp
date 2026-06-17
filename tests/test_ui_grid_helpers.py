@@ -125,6 +125,7 @@ class FakeGridBackend:
         selector: dict[str, Any],
         row_index: int,
         column: str | None = None,
+        columns: list[str] | None = None,
     ) -> dict[str, Any]:
         self.calls.append(
             (
@@ -133,6 +134,7 @@ class FakeGridBackend:
                     **dict(selector),
                     "row_index": row_index,
                     "column": column,
+                    "columns": list(columns or []),
                 },
             )
         )
@@ -203,6 +205,31 @@ async def test_read_grid_state_requests_identity_columns() -> None:
     assert ("selected", {"automation_id": "CueGrid", "columns": ["PhraseId"]}) in (
         backend.calls
     )
+
+
+@pytest.mark.asyncio
+async def test_click_grid_row_forwards_columns_to_backend() -> None:
+    backend = FakeGridBackend()
+    selector = {"automation_id": "CueGrid"}
+
+    result = await grid_helpers.click_grid_row(
+        backend,
+        selector,
+        row_key="Fixture cue two",
+        column="Phrase",
+        columns=["Phrase"],
+    )
+
+    assert result["status"] == "PASS"
+    assert (
+        "click",
+        {
+            "automation_id": "CueGrid",
+            "row_index": 1,
+            "column": "Phrase",
+            "columns": ["Phrase"],
+        },
+    ) in backend.calls
 
 
 @pytest.mark.asyncio
@@ -317,7 +344,7 @@ async def test_flaui_backend_forwards_grid_helpers_to_bridge() -> None:
     result = await backend.grid_visible_rows(selector)
     await backend.grid_selected_rows(selector, columns=["Phrase"])
     await backend.grid_select_range(selector, 0, 2)
-    await backend.grid_click_row(selector, 1, column="Phrase")
+    await backend.grid_click_row(selector, 1, column="Phrase", columns=["Phrase"])
     await backend.grid_assert_range(selector, 0, 2)
     await snapshot_grid(backend, selector, columns=["Start"])
     await assert_grid_rows(
@@ -339,6 +366,7 @@ async def test_flaui_backend_forwards_grid_helpers_to_bridge() -> None:
     assert calls[3].args[0] == "grid_click_row"
     assert calls[3].args[1]["row_index"] == 1
     assert calls[3].args[1]["column"] == "Phrase"
+    assert calls[3].args[1]["columns"] == ["Phrase"]
     assert calls[5].args[0] == "grid_snapshot"
     assert calls[5].args[1]["columns"] == ["Start"]
     assert calls[6].args[0] == "grid_assert_rows"
