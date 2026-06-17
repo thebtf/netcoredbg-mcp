@@ -10,6 +10,7 @@ from ..blocked import build_blocked
 from ..timing import sleep_ms
 from .ui_drag import handle_ui_drag
 from .ui_key_sequence import handle_ui_key_sequence
+from .ui_text_input import handle_ui_text_type_replace_selection
 
 ActionHandler = Callable[[dict[str, Any], "ActionContext"], Awaitable[dict[str, Any]]]
 _INTEGER_TEXT = re.compile(r"-?\d+")
@@ -276,4 +277,5 @@ register_action("ui.drag", handle_ui_drag)
 register_action("ui.grid.select", _handle_ui_grid_select)
 register_action("ui.invoke", _handle_ui_invoke)
 register_action("ui.key_sequence", handle_ui_key_sequence)
+register_action("ui.text.type_replace_selection", handle_ui_text_type_replace_selection)
 register_action("wait", _handle_wait)

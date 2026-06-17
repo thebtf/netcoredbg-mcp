@@ -75,6 +75,19 @@ public static partial class InputCommands
             ["F12"] = VirtualKeyShort.F12,
         };
 
+    private static readonly IReadOnlyDictionary<string, string> LiteralSpecialKeys =
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["+"] = "+",
+            ["^"] = "^",
+            ["%"] = "%",
+            ["{"] = "{",
+            ["}"] = "}",
+            ["("] = "(",
+            [")"] = ")",
+            ["~"] = "~",
+        };
+
     public static JsonNode SendKeys(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
         if (JsonRpcHandler.Stealth)
@@ -152,6 +165,13 @@ public static partial class InputCommands
                     break;
 
                 case '{': // Special key
+                    if (i + 2 < keys.Length && keys[i + 1] == '}' && keys[i + 2] == '}')
+                    {
+                        Keyboard.Type("}");
+                        sent.Add("}");
+                        i += 3;
+                        break;
+                    }
                     var closeBrace = keys.IndexOf('}', i);
                     if (closeBrace < 0)
                         throw new ArgumentException($"Unclosed brace at position {i}");
@@ -159,7 +179,12 @@ public static partial class InputCommands
                     var keyName = keys[(i + 1)..closeBrace];
                     i = closeBrace + 1;
 
-                    if (SpecialKeys.TryGetValue(keyName, out var vk))
+                    if (LiteralSpecialKeys.TryGetValue(keyName, out var literal))
+                    {
+                        Keyboard.Type(literal);
+                        sent.Add(literal);
+                    }
+                    else if (SpecialKeys.TryGetValue(keyName, out var vk))
                     {
                         Keyboard.Press(vk);
                         Keyboard.Release(vk);
