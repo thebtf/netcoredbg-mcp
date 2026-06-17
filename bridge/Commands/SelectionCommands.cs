@@ -22,6 +22,9 @@ public static class SelectionCommands
 
         var indices = @params?["indices"]?.AsArray()
             ?? throw new ArgumentException("Missing required parameter: indices (array of int)");
+        var mode = @params?["mode"]?.GetValue<string>()?.ToLowerInvariant() ?? "replace";
+        if (mode is not ("replace" or "add"))
+            throw new ArgumentException("Unknown multi_select mode. Use 'replace' or 'add'.");
 
         var cf = new ConditionFactory(automation.PropertyLibrary);
         var container = mainWindow.FindFirstDescendant(cf.ByAutomationId(automationId))
@@ -45,7 +48,7 @@ public static class SelectionCommands
 
             if (child.Patterns.SelectionItem.TryGetPattern(out var selectionPattern))
             {
-                if (isFirst)
+                if (isFirst && mode == "replace")
                     selectionPattern.Select();
                 else
                     selectionPattern.AddToSelection();
@@ -59,7 +62,8 @@ public static class SelectionCommands
                     (int)(rect.X + rect.Width / 2),
                     (int)(rect.Y + rect.Height / 2));
 
-                if (!isFirst)
+                var useControl = mode == "add" || !isFirst;
+                if (useControl)
                     Keyboard.Press(VirtualKeyShort.CONTROL);
 
                 try
@@ -68,7 +72,7 @@ public static class SelectionCommands
                 }
                 finally
                 {
-                    if (!isFirst)
+                    if (useControl)
                         Keyboard.Release(VirtualKeyShort.CONTROL);
                 }
                 usedClickFallback = true;
@@ -84,6 +88,7 @@ public static class SelectionCommands
             ["selected_count"] = selected.Count,
             ["automationId"] = automationId,
             ["indices"] = selected,
+            ["mode"] = mode,
             ["method"] = usedClickFallback
                 ? (usedPattern ? "Mixed" : "ClickFallback")
                 : "SelectionItemPattern"
@@ -170,8 +175,10 @@ public static class SelectionCommands
         return -1;
     }
 
-    private static bool SameRuntimeId(AutomationElement left, AutomationElement right)
+    private static bool SameRuntimeId(AutomationElement? left, AutomationElement? right)
     {
+        if (left is null || right is null)
+            return false;
         var leftId = RuntimeId(left);
         var rightId = RuntimeId(right);
         return leftId is not null &&
@@ -179,8 +186,10 @@ public static class SelectionCommands
                leftId.SequenceEqual(rightId);
     }
 
-    private static int[]? RuntimeId(AutomationElement element)
+    private static int[]? RuntimeId(AutomationElement? element)
     {
+        if (element is null)
+            return null;
         try { return element.Properties.RuntimeId.ValueOrDefault; }
         catch { return null; }
     }

@@ -144,14 +144,17 @@ def register_ui_tools(
             selected_indices = payload.get("indices")
             if not isinstance(selected_indices, list):
                 selected_indices = list(indices)
-            selected_count = payload.get("selected")
-            if isinstance(selected_count, bool):
-                selected_count = payload.get(
-                    "selected_count",
-                    len(selected_indices) if selected_count else 0,
-                )
-            if not isinstance(selected_count, int):
-                selected_count = payload.get("selected_count", len(selected_indices))
+            selected_value = payload.get("selected")
+            if isinstance(selected_value, bool):
+                selected_count = payload.get("selected_count")
+                if type(selected_count) is not int:
+                    selected_count = len(selected_indices) if selected_value else 0
+            elif type(selected_value) is int:
+                selected_count = selected_value
+            else:
+                selected_count = payload.get("selected_count")
+                if type(selected_count) is not int:
+                    selected_count = len(selected_indices)
             payload["selected"] = selected_count
             payload["indices"] = selected_indices
             payload.setdefault("mode", mode)
@@ -1816,7 +1819,7 @@ def register_ui_tools(
 
             multi_select = getattr(ui, "multi_select", None)
             if _is_flaui_backend(ui) and callable(multi_select):
-                result = await multi_select(automation_id, indices)
+                result = await multi_select(automation_id, indices, mode=mode)
                 bridge_evidence = getattr(ui, "_last_multi_select_result", None)
                 payload = _selection_items_payload(
                     bridge_evidence if isinstance(bridge_evidence, dict) else result,

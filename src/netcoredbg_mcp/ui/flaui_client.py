@@ -970,13 +970,20 @@ class FlaUIBackend:
             )
         return result
 
-    async def multi_select(self, container_id: str, indices: list[int]) -> int:
+    async def multi_select(
+        self,
+        container_id: str,
+        indices: list[int],
+        *,
+        mode: str = "replace",
+    ) -> int:
         """Multi-select via FlaUI bridge."""
         result = await self._client.call(
             "multi_select",
             {
                 "automationId": container_id,
                 "indices": indices,
+                "mode": mode,
             },
         )
         if not isinstance(result, dict):
