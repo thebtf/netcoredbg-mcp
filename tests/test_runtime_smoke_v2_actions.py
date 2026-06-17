@@ -282,6 +282,57 @@ async def test_v2_ui_text_type_replace_selection_accepts_statusless_backend_succ
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("adapter_status", "expected_status"),
+    [
+        ("ERROR", "FAIL"),
+        ("UNSUPPORTED", "BLOCKED"),
+        ("INVALID_SETUP", "BLOCKED"),
+    ],
+)
+async def test_v2_ui_text_type_replace_selection_normalizes_adapter_failure_statuses(
+    adapter_status: str,
+    expected_status: str,
+) -> None:
+    session = ActionSmokeSession()
+    session.focus_result = {
+        "status": adapter_status,
+        "reason": "focus backend unavailable",
+    }
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "cases": [
+                {
+                    "id": f"replace_text_{adapter_status.lower()}",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.text.type_replace_selection",
+                                "selector": {"automation_id": "CueTextBox"},
+                                "text": "Never typed",
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == expected_status
+    assert action["status"] == expected_status
+    assert action["result"]["status"] == adapter_status
+    assert action["reason"] == "focus backend unavailable"
+    assert session.calls == [
+        ("find_element", {"automation_id": "CueTextBox"}),
+        ("set_focus", {"automation_id": "CueTextBox"}),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_v2_ui_text_type_replace_selection_blocks_selector_miss_before_typing() -> None:
     session = ActionSmokeSession()
     session.find_result = {"status": "PASS", "found": False}

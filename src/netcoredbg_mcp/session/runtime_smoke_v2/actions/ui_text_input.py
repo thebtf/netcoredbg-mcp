@@ -184,11 +184,21 @@ def _adapter_failure_result(
     route: str,
     default_reason: str,
 ) -> dict[str, Any]:
+    adapter_status = str(result.get("status") or "FAIL").upper()
     return {
-        "status": str(result.get("status") or "FAIL"),
+        "status": _terminal_failure_status(adapter_status),
         "reason": str(result.get("reason") or result.get("error") or default_reason),
         "selector": selector,
         "route": route,
         "duration_ms": duration_ms,
+        "adapter_status": adapter_status,
         "result": result,
     }
+
+
+def _terminal_failure_status(adapter_status: str) -> str:
+    if adapter_status in {"FAIL", "BLOCKED", "IMPASSE"}:
+        return adapter_status
+    if adapter_status in {"UNSUPPORTED", "INVALID_SETUP"}:
+        return "BLOCKED"
+    return "FAIL"
