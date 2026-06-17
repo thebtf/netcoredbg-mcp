@@ -912,6 +912,17 @@ async def test_ui_grid_select_range_strips_unbounded_confirmed_rows(
     monkeypatch,
 ) -> None:
     class UnboundedSuccessGridBackend(FakeEvidenceBackend):
+        async def grid_select_range(
+            self,
+            selector: dict[str, Any],
+            start_index: int,
+            end_index: int,
+        ) -> dict[str, Any]:
+            result = await super().grid_select_range(selector, start_index, end_index)
+            result["full_tree"] = {"selection": "not leak"}
+            result["raw_tree"] = {"selection": "not leak"}
+            return result
+
         async def grid_selected_rows(
             self,
             selector: dict[str, Any],
@@ -966,6 +977,66 @@ async def test_ui_grid_select_range_strips_unbounded_confirmed_rows(
     ]
     assert "full_tree" not in str(response["data"])
     assert "raw_tree" not in str(response["data"])
+
+
+@pytest.mark.asyncio
+async def test_ui_grid_select_range_confirms_by_viewport_index_when_row_index_differs(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    class VirtualizedGridBackend(FakeEvidenceBackend):
+        async def grid_selected_rows(
+            self,
+            selector: dict[str, Any],
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            self.calls.append(
+                {
+                    "grid_selected_rows": {
+                        "selector": dict(selector),
+                        "columns": list(columns or []),
+                    }
+                }
+            )
+            return {
+                "status": "PASS",
+                "selected_rows": [
+                    {
+                        "index": 1,
+                        "row_index": 19,
+                        "cells": {"Phrase": "Virtualized cue"},
+                    }
+                ],
+            }
+
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = VirtualizedGridBackend()
+    backend.process_id = 42
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_grid"](
+        ctx=None,
+        action="select_range",
+        automation_id="CueGrid",
+        start_index=1,
+        end_index=1,
+        columns=["Phrase"],
+    )
+
+    assert response["data"]["status"] == "PASS"
+    assert response["data"]["confirmed_selection"] is True
+    assert response["data"]["observed_selected_indices"] == [1]
+    assert response["data"]["selected_rows"] == [
+        {"index": 1, "row_index": 19, "cells": {"Phrase": "Virtualized cue"}}
+    ]
 
 
 @pytest.mark.asyncio

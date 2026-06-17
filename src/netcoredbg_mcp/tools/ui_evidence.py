@@ -807,7 +807,12 @@ async def _confirm_grid_selection(
             "confirmation_result": _strip_unbounded_evidence_value(confirmation),
         }
 
-    result = dict(selection_result) if isinstance(selection_result, dict) else {}
+    stripped_selection_result = _strip_unbounded_evidence_value(selection_result)
+    result = (
+        stripped_selection_result
+        if isinstance(stripped_selection_result, dict)
+        else {}
+    )
     result["status"] = "PASS"
     result["confirmed_selection"] = True
     result["selected_range"] = requested_range
@@ -828,7 +833,7 @@ def _inclusive_range_indices(start: int, end: int) -> list[int]:
 
 
 def _row_index(row: dict[str, Any]) -> int | None:
-    raw_index = row.get("row_index", row.get("index"))
+    raw_index = row.get("index", row.get("row_index"))
     if isinstance(raw_index, bool):
         return None
     if isinstance(raw_index, int):
