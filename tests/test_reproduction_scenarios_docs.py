@@ -28,14 +28,16 @@ def _issue_cells(backlog: str, issue: str) -> tuple[str, str, str, str]:
 
 
 def _section_issue_row(backlog: str, heading: str, issue: str) -> str:
+    expected_heading = heading.strip()
     in_section = False
     for line in backlog.splitlines():
-        if line.startswith("## "):
-            in_section = line == heading
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            in_section = stripped == expected_heading
             continue
         if not in_section:
             continue
-        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
         if cells and cells[0] == f"`{issue}`":
             return line
     raise AssertionError(f"missing {heading} row for {issue}")
