@@ -275,10 +275,17 @@ async def test_runtime_smoke_run_plan_agent_mode_uses_active_run_for_blocked_sta
 
     assert data["status"] == "BLOCKED"
     assert data["active_run_id"] == first["data"]["run_id"]
+    assert data["active_status"] == "RUNNING"
+    assert data["run_created"] is False
+    assert session.runtime_smoke.lifecycle_runs.active_run_ids() == [first["data"]["run_id"]]
     assert data["agent_mode"]["next_request"] == {
         "tool": "runtime_smoke_evidence_bundle",
         "arguments": {"run_id": first["data"]["run_id"], "agent_mode": True},
     }
+    assert "runtime_smoke_evidence_bundle" in blocked["next_actions"]
+    assert "runtime_smoke_wait_for_result" in blocked["next_actions"]
+    assert "runtime_smoke_stop" in blocked["next_actions"]
+    assert session.launch_calls == 0
 
 
 @pytest.mark.asyncio

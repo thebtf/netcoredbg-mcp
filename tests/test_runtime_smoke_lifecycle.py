@@ -211,6 +211,52 @@ async def test_runtime_smoke_start_returns_run_id_and_initial_event() -> None:
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_start_rejects_overlap_with_active_run_evidence() -> None:
+    session = LifecycleSmokeSession()
+    second_runner_factory_calls = 0
+
+    started = await session.runtime_smoke.lifecycle_runs.start(
+        {
+            "name": "active-single-flight",
+            "actions": [{"name": "wait_until_released"}],
+        },
+        lambda: _runner(session),
+    )
+
+    def second_runner_factory() -> RuntimeSmokeRunner:
+        nonlocal second_runner_factory_calls
+        second_runner_factory_calls += 1
+        return _runner(session)
+
+    blocked = await session.runtime_smoke.lifecycle_runs.start(
+        {
+            "name": "blocked-overlap",
+            "actions": [{"name": "append_output", "args": {"text": "second\n"}}],
+        },
+        second_runner_factory,
+    )
+
+    assert blocked["status"] == "BLOCKED"
+    assert blocked["reason"] == "runtime smoke run already active"
+    assert blocked["active_run_id"] == started["run_id"]
+    assert blocked["active_status"] == "RUNNING"
+    assert blocked["run_created"] is False
+    assert blocked["next_actions"] == [
+        "runtime_smoke_evidence_bundle",
+        "runtime_smoke_wait_for_result",
+        "runtime_smoke_tail_events",
+        "runtime_smoke_get_result",
+        "runtime_smoke_stop",
+    ]
+    assert second_runner_factory_calls == 0
+    assert session.runtime_smoke.lifecycle_runs.active_run_ids() == [started["run_id"]]
+
+    session.release_event.set()
+    final = await _wait_for_final(session.runtime_smoke.lifecycle_runs, started["run_id"])
+    assert final["status"] == "PASS"
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_tail_events_returns_incremental_events_by_cursor() -> None:
     session = LifecycleSmokeSession()
 

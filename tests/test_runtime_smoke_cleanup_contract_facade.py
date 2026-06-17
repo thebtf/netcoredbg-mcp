@@ -231,6 +231,66 @@ async def test_runtime_smoke_stop_points_contaminated_runs_at_cleanup_contract(
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_stopping_surfaces_preserve_cleanup_guidance(
+    capturing_mcp,
+) -> None:
+    session = CleanupContractFacadeSession()
+    session.block_cleanup = True
+    session.runtime_smoke.lifecycle_runs = RuntimeSmokeRunRegistry(stop_timeout_seconds=0.01)
+    session.runtime_smoke.instrumentation_groups["flow"] = {"breakpoints": [1]}
+    _register(capturing_mcp, session)
+    started = await session.runtime_smoke.lifecycle_runs.start(
+        {
+            "name": "cleanup-timeout-all-surfaces",
+            "actions": [{"name": "wait_until_released"}],
+            "teardown": {"instrumentation_groups": ["flow"]},
+        },
+        lambda: _runner(session),
+    )
+    run_id = started["run_id"]
+
+    stop = await capturing_mcp.tools["runtime_smoke_stop"](
+        ctx=None,
+        run_id=run_id,
+    )
+    get_result = await capturing_mcp.tools["runtime_smoke_get_result"](
+        ctx=None,
+        run_id=run_id,
+    )
+    tail = await capturing_mcp.tools["runtime_smoke_tail_events"](
+        ctx=None,
+        run_id=run_id,
+    )
+    bundle = await capturing_mcp.tools["runtime_smoke_evidence_bundle"](
+        ctx=None,
+        run_id=run_id,
+    )
+    wait = await capturing_mcp.tools["runtime_smoke_wait_for_result"](
+        ctx=None,
+        run_id=run_id,
+        timeout_ms=0,
+    )
+
+    for response in (stop, get_result, tail, bundle, wait):
+        data = response["data"]
+        assert data["run_id"] == run_id
+        assert data["contaminated"] is True
+        assert data["cleanup_contract"]["next_action"] == "runtime_smoke_cleanup_contract"
+        assert "runtime_smoke_cleanup_contract" in response["next_actions"]
+        assert "debug_hygiene_preflight" in response["next_actions"]
+
+    assert stop["data"]["status"] == "STOPPING"
+    assert get_result["data"]["status"] == "STOPPING"
+    assert tail["data"]["status"] == "STOPPING"
+    assert bundle["data"]["status"] == "STOPPING"
+    assert wait["data"]["status"] == "BLOCKED"
+    assert wait["data"]["reason"] == "runtime smoke wait timed out"
+
+    session.cleanup_release_event.set()
+    await _wait_for_final(session.runtime_smoke.lifecycle_runs, run_id)
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_evidence_and_wait_preserve_contamination_guidance(
     capturing_mcp,
 ) -> None:
@@ -254,6 +314,14 @@ async def test_runtime_smoke_evidence_and_wait_preserve_contamination_guidance(
         run_id=started["run_id"],
         timeout_ms=100,
     )
+    result = await capturing_mcp.tools["runtime_smoke_get_result"](
+        ctx=None,
+        run_id=started["run_id"],
+    )
+    tail = await capturing_mcp.tools["runtime_smoke_tail_events"](
+        ctx=None,
+        run_id=started["run_id"],
+    )
 
     assert bundle["data"]["contaminated"] is True
     assert bundle["data"]["cleanup_contract"]["next_action"] == "runtime_smoke_cleanup_contract"
@@ -263,3 +331,11 @@ async def test_runtime_smoke_evidence_and_wait_preserve_contamination_guidance(
     assert wait["data"]["cleanup_contract"]["next_action"] == "runtime_smoke_cleanup_contract"
     assert "runtime_smoke_cleanup_contract" in wait["next_actions"]
     assert "runtime_smoke_run_plan" not in wait["next_actions"]
+    assert result["data"]["contaminated"] is True
+    assert result["data"]["cleanup_contract"]["next_action"] == "runtime_smoke_cleanup_contract"
+    assert "runtime_smoke_cleanup_contract" in result["next_actions"]
+    assert "runtime_smoke_run_plan" not in result["next_actions"]
+    assert tail["data"]["contaminated"] is True
+    assert tail["data"]["cleanup_contract"]["next_action"] == "runtime_smoke_cleanup_contract"
+    assert "runtime_smoke_cleanup_contract" in tail["next_actions"]
+    assert "runtime_smoke_run_plan" not in tail["next_actions"]

@@ -698,12 +698,7 @@ class RuntimeSmokeRunRegistry:
 
             active = self._active_run_locked()
             if active is not None:
-                return {
-                    "status": "BLOCKED",
-                    "reason": "runtime smoke run already active",
-                    "active_run_id": active.run_id,
-                    "next_cursor": active.next_cursor - 1,
-                }
+                return self._active_blocked_payload(active)
 
             run_id = uuid.uuid4().hex
             record = RuntimeSmokeRunRecord(
@@ -737,7 +732,10 @@ class RuntimeSmokeRunRegistry:
             record = self._runs.get(run_id)
             if record is None:
                 return _run_not_found(run_id)
-            return record.tail(max(0, int(after_cursor)), max(0, int(limit)))
+            payload = record.tail(max(0, int(after_cursor)), max(0, int(limit)))
+            if self._contamination is not None:
+                payload.update(_contamination_metadata(self._contamination))
+            return payload
 
     async def get_result(self, run_id: str) -> dict[str, Any]:
         async with self._lock:
@@ -1202,7 +1200,7 @@ class RuntimeSmokeRunRegistry:
             del self._runs[run_id]
 
     def _running_payload(self, record: RuntimeSmokeRunRecord) -> dict[str, Any]:
-        return {
+        payload = {
             "status": record.status,
             "reason": "runtime smoke run is still running",
             "run_id": record.run_id,
@@ -1211,6 +1209,29 @@ class RuntimeSmokeRunRegistry:
             "oldest_cursor": record.oldest_cursor,
             "dropped_count": record.dropped_count,
             "final": False,
+        }
+        if self._contamination is not None:
+            payload.update(_contamination_metadata(self._contamination))
+        return payload
+
+    def _active_blocked_payload(self, record: RuntimeSmokeRunRecord) -> dict[str, Any]:
+        return {
+            "status": "BLOCKED",
+            "reason": "runtime smoke run already active",
+            "active_run_id": record.run_id,
+            "active_status": record.status,
+            "run_created": False,
+            "next_cursor": record.next_cursor - 1,
+            "oldest_cursor": record.oldest_cursor,
+            "dropped_count": record.dropped_count,
+            "final": False,
+            "next_actions": [
+                "runtime_smoke_evidence_bundle",
+                "runtime_smoke_wait_for_result",
+                "runtime_smoke_tail_events",
+                "runtime_smoke_get_result",
+                "runtime_smoke_stop",
+            ],
         }
 
     def _final_payload(self, record: RuntimeSmokeRunRecord) -> dict[str, Any]:
