@@ -336,6 +336,50 @@ def test_runtime_smoke_schema_accepts_ui_text_assert_selection_operation() -> No
     )
 
 
+def test_runtime_smoke_schema_accepts_ui_text_set_text_operation() -> None:
+    assert (
+        validate_plan(
+            {
+                "steps": [
+                    {
+                        "op": "ui.text.set_text",
+                        "selector": {"automation_id": "CueTextBox"},
+                        "text": "Replaced text",
+                    }
+                ]
+            }
+        )
+        == []
+    )
+
+
+def test_runtime_smoke_schema_requires_ui_text_set_text_text() -> None:
+    assert validate_plan(
+        {
+            "steps": [
+                {
+                    "op": "ui.text.set_text",
+                    "selector": {"automation_id": "CueTextBox"},
+                }
+            ]
+        }
+    ) == ["steps[0].text is required for op ui.text.set_text"]
+
+
+def test_runtime_smoke_schema_rejects_non_string_ui_text_set_text_text() -> None:
+    assert validate_plan(
+        {
+            "steps": [
+                {
+                    "op": "ui.text.set_text",
+                    "selector": {"automation_id": "CueTextBox"},
+                    "text": 42,
+                }
+            ]
+        }
+    ) == ["steps[0].text must be a string for op ui.text.set_text"]
+
+
 def test_runtime_smoke_schema_requires_ui_text_assert_selection_range() -> None:
     assert validate_plan(
         {

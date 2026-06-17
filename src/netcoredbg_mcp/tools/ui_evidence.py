@@ -9,6 +9,7 @@ from mcp.server.fastmcp import Context, FastMCP
 
 from ..response import build_error_response, build_response
 from ..session import SessionManager
+from ..session.runtime_smoke_operations import ui_operation_adapters
 from ..session.state import DebugState
 from ..ui.events import UIEventBufferStore
 from ..ui.focus import assert_focus
@@ -69,7 +70,7 @@ _GRID_ACCEPTED_ACTIONS = (
 )
 _FOCUS_READ_ACTIONS = ("assert",)
 _TEXT_ACTION_ALIASES = {"state": "get_state"}
-_TEXT_ACTIONS = ("read", "get_state", "state", "assert_selection")
+_TEXT_ACTIONS = ("read", "get_state", "state", "assert_selection", "set_text")
 _PROPERTY_READ_ACTIONS = ("read",)
 _TEXT_PROPERTY_NAMES = {"text", "value", "valuetext"}
 _PROPERTY_KEY_ALIASES = {
@@ -158,7 +159,7 @@ def register_ui_evidence_tools(
         except Exception as exc:
             return build_error_response(str(exc), state=session.state.state)
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def ui_text(
         ctx: Context,
         action: str,
@@ -169,8 +170,9 @@ def register_ui_evidence_tools(
         xpath: str | None = None,
         selection_start: int | None = None,
         selection_end: int | None = None,
+        text: str | None = None,
     ) -> dict:
-        """Read bounded TextBox/text evidence without assertion side effects."""
+        """Read or safely replace bounded TextBox/text evidence."""
         try:
             access_error = check_session_access(ctx)
             if access_error:
@@ -185,7 +187,7 @@ def register_ui_evidence_tools(
                         "action": action,
                         "accepted_actions": list(_TEXT_ACTIONS),
                         "next_step": (
-                            'Use ui_text(action="read"|"get_state"|"assert_selection") '
+                            'Use ui_text(action="read"|"get_state"|"assert_selection"|"set_text") '
                             "for bounded TextBox evidence."
                         ),
                     },
@@ -200,6 +202,23 @@ def register_ui_evidence_tools(
                 )
 
             backend = await _ensure_ui_connected()
+            if canonical_action == "set_text":
+                if text is None:
+                    return build_response(
+                        data={
+                            "status": "FAIL",
+                            "reason": "text is required",
+                            "action": action,
+                        },
+                        state=session.state.state,
+                    )
+                backend_provider = _static_backend_provider(backend)
+                adapters = ui_operation_adapters(backend_provider)
+                result = await adapters["ui.text.set_text"](selector=selector, text=text)
+                return build_response(
+                    data=_strip_unbounded_evidence_value(result),
+                    state=session.state.state,
+                )
             if canonical_action == "get_state":
                 return build_response(
                     data=await read_textbox_state(backend, selector),
@@ -1020,6 +1039,13 @@ def _strip_unbounded_evidence_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_strip_unbounded_evidence_value(item) for item in value]
     return value
+
+
+def _static_backend_provider(backend: Any) -> Callable[[], Any]:
+    async def _provider() -> Any:
+        return backend
+
+    return _provider
 
 
 async def _confirm_grid_selection(

@@ -892,6 +892,130 @@ async def test_ui_text_assert_selection_adapter_fails_with_observed_range() -> N
 
 
 @pytest.mark.asyncio
+async def test_ui_operation_adapters_text_set_text_uses_safe_type_replace() -> None:
+    class FakeClient:
+        def __init__(self, calls: list[tuple[str, Any]]) -> None:
+            self._calls = calls
+
+        async def call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
+            self._calls.append(("client_call", method, dict(payload)))
+            if method == "set_focus":
+                return {"status": "PASS", "focused": True}
+            return {"status": "FAIL", "reason": f"unexpected method {method}"}
+
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, Any]] = []
+            self.client = FakeClient(self.calls)
+
+        async def find_element(
+            self,
+            automation_id: str | None = None,
+            name: str | None = None,
+            control_type: str | None = None,
+            root_id: str | None = None,
+            xpath: str | None = None,
+        ) -> dict[str, Any]:
+            self.calls.append(
+                (
+                    "find_element",
+                    {
+                        "automation_id": automation_id,
+                        "name": name,
+                        "control_type": control_type,
+                        "root_id": root_id,
+                        "xpath": xpath,
+                    },
+                )
+            )
+            return {"status": "PASS", "found": True}
+
+        def send_keys(self, keys: str) -> dict[str, Any]:
+            self.calls.append(("send_keys", keys))
+            return {"status": "PASS", "keys": keys}
+
+        async def textbox_state(self, selector: dict[str, Any]) -> dict[str, Any]:
+            self.calls.append(("textbox_state", dict(selector)))
+            return {
+                "status": "PASS",
+                "text": "Fixture cue one",
+                "selection": {"start": 0, "end": 15, "length": 15},
+                "focus_within": True,
+                "source": "TextPattern",
+                "full_tree": {"must": "not leak"},
+            }
+
+        async def extract_text(
+            self,
+            automation_id: str | None = None,
+            name: str | None = None,
+            control_type: str | None = None,
+            root_id: str | None = None,
+            xpath: str | None = None,
+        ) -> dict[str, Any]:
+            self.calls.append(
+                (
+                    "extract_text",
+                    {
+                        "automation_id": automation_id,
+                        "name": name,
+                        "control_type": control_type,
+                        "root_id": root_id,
+                        "xpath": xpath,
+                    },
+                )
+            )
+            return {"status": "PASS", "text": "Replaced text", "full_tree": {"must": "not leak"}}
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    result = await ui_operation_adapters(backend_provider)["ui.text.set_text"](
+        selector={"automation_id": "CueTextBox"},
+        text="Replaced text",
+    )
+
+    assert result["status"] == "PASS"
+    assert result["route"] == "text_type_replace_selection"
+    assert result["verified"] is True
+    assert result["text"] == "Replaced text"
+    assert result["precondition"]["selected"] is True
+    assert "full_tree" not in str(result)
+    assert backend.calls == [
+        (
+            "find_element",
+            {
+                "automation_id": "CueTextBox",
+                "name": None,
+                "control_type": None,
+                "root_id": None,
+                "xpath": None,
+            },
+        ),
+        (
+            "client_call",
+            "set_focus",
+            {"automationId": "CueTextBox"},
+        ),
+        ("send_keys", "^a"),
+        ("textbox_state", {"automation_id": "CueTextBox"}),
+        ("send_keys", "Replaced text"),
+        (
+            "extract_text",
+            {
+                "automation_id": "CueTextBox",
+                "name": None,
+                "control_type": None,
+                "root_id": None,
+                "xpath": None,
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_ui_get_property_name_reads_element_property_not_text() -> None:
     class FakeBackend:
         def __init__(self) -> None:
