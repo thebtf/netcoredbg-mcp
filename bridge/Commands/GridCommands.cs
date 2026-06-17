@@ -218,8 +218,9 @@ public static class GridCommands
         }
 
         var row = rows[rowIndex];
+        var columns = ReadColumns(@params);
         var requestedColumn = @params?["column"]?.GetValue<string>();
-        var targetResult = ResolveClickTarget(grid, row, requestedColumn);
+        var targetResult = ResolveClickTarget(grid, row, requestedColumn, columns);
         if (targetResult.Blocked is not null)
             return targetResult.Blocked;
 
@@ -241,11 +242,11 @@ public static class GridCommands
             ["x"] = pointResult.Point.X,
             ["y"] = pointResult.Point.Y,
             ["click_result"] = clickResult.DeepClone(),
-            ["row"] = BuildRow(row, rowIndex, ReadColumns(@params), ColumnHeaders(grid))
+            ["row"] = BuildRow(row, rowIndex, columns, ColumnHeaders(grid))
         };
         if (clickResult is JsonObject clickObject &&
-            clickObject["method"] is not null)
-            output["method"] = clickObject["method"]?.DeepClone();
+            clickObject["method"] is JsonNode methodNode)
+            output["method"] = methodNode.DeepClone();
         if (!string.IsNullOrWhiteSpace(requestedColumn))
             output["column"] = requestedColumn;
         if (!string.IsNullOrWhiteSpace(targetResult.ActualColumn))
@@ -775,7 +776,8 @@ public static class GridCommands
     private static (AutomationElement? Target, string? ActualColumn, JsonObject? Blocked) ResolveClickTarget(
         AutomationElement grid,
         AutomationElement row,
-        string? requestedColumn)
+        string? requestedColumn,
+        List<string> columns)
     {
         if (string.IsNullOrWhiteSpace(requestedColumn))
             return (row, null, null);
@@ -803,7 +805,7 @@ public static class GridCommands
         {
             var cell = cells[ordinal];
             var columnIndex = CellColumnIndex(cell, ordinal);
-            var actualColumn = CellKey(cell, columnIndex, new List<string>(), headers);
+            var actualColumn = CellKey(cell, columnIndex, columns, headers);
             if (string.Equals(actualColumn, requestedColumn, StringComparison.Ordinal))
                 return (cell, actualColumn, null);
         }
