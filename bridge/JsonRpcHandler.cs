@@ -84,6 +84,7 @@ public static class JsonRpcHandler
             ["send_keys_batch"] = InputCommands.SendKeysBatch,
             ["set_value"] = InputCommands.SetValue,
             ["multi_select"] = SelectionCommands.MultiSelect,
+            ["get_selected_item"] = SelectionCommands.GetSelectedItem,
             ["grid_visible_rows"] = GridCommands.VisibleRows,
             ["grid_selected_rows"] = GridCommands.SelectedRows,
             ["grid_snapshot"] = GridCommands.Snapshot,

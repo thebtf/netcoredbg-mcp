@@ -127,6 +127,62 @@ def register_ui_tools(
             stealth_mode=getattr(session, "stealth_mode", False),
         )
 
+    def _is_flaui_backend(ui_inst: Any) -> bool:
+        from ..ui.flaui_client import FlaUIBackend
+
+        return isinstance(ui_inst, FlaUIBackend)
+
+    def _selection_items_payload(
+        result: Any,
+        *,
+        indices: list[int],
+        mode: str,
+        default_method: str,
+    ) -> dict[str, Any]:
+        if isinstance(result, dict):
+            payload = dict(result)
+            selected_indices = payload.get("indices")
+            if not isinstance(selected_indices, list):
+                selected_indices = list(indices)
+            selected_value = payload.get("selected")
+            if isinstance(selected_value, bool):
+                selected_count = payload.get("selected_count")
+                if type(selected_count) is not int:
+                    selected_count = len(selected_indices) if selected_value else 0
+            elif type(selected_value) is int:
+                selected_count = selected_value
+            else:
+                selected_count = payload.get("selected_count")
+                if type(selected_count) is not int:
+                    selected_count = len(selected_indices)
+            payload["selected"] = selected_count
+            payload["indices"] = selected_indices
+            payload.setdefault("mode", mode)
+            payload.setdefault("method", default_method)
+            return payload
+
+        selected_count = int(result)
+        return {
+            "selected": selected_count,
+            "indices": list(indices),
+            "mode": mode,
+            "method": default_method,
+        }
+
+    def _flaui_focused_element_guidance() -> dict[str, Any]:
+        return {
+            "status": "UNSUPPORTED",
+            "reason": "bounded focused-element query is not available via FlaUI legacy tool",
+            "guidance": (
+                'Use ui_focus(action="assert", automation_id=..., name=..., '
+                "control_type=...) for bounded FlaUI focus evidence."
+            ),
+            "name": None,
+            "automationId": None,
+            "controlType": None,
+            "value": None,
+        }
+
     async def _read_window_tree(ui: Any, max_depth: int, max_children: int) -> Any:
         return await asyncio.wait_for(
             ui.get_window_tree(max_depth, max_children),
@@ -1761,6 +1817,18 @@ def register_ui_tools(
 
             ui = await _ensure_ui_connected()
 
+            multi_select = getattr(ui, "multi_select", None)
+            if _is_flaui_backend(ui) and callable(multi_select):
+                result = await multi_select(automation_id, indices, mode=mode)
+                bridge_evidence = getattr(ui, "_last_multi_select_result", None)
+                payload = _selection_items_payload(
+                    bridge_evidence if isinstance(bridge_evidence, dict) else result,
+                    indices=indices,
+                    mode=mode,
+                    default_method="FlaUI.multi_select",
+                )
+                return build_response(data=payload, state=session.state.state)
+
             # Strategy 1: UIA SelectionItemPattern
             def _select_via_pattern() -> int:
                 window = ui._app.top_window()
@@ -2295,6 +2363,20 @@ def register_ui_tools(
         """
         try:
             ui = await _ensure_ui_connected()
+            get_selected_item = getattr(ui, "get_selected_item", None)
+            if callable(get_selected_item):
+                result = await get_selected_item(
+                    automation_id=automation_id,
+                    root_id=root_id,
+                    xpath=xpath,
+                )
+                if not isinstance(result, dict):
+                    return build_error_response(
+                        "get_selected_item: backend returned non-dict response "
+                        f"({type(result).__name__})",
+                        state=session.state.state,
+                    )
+                return build_response(data=result, state=session.state.state)
 
             def _get_selected() -> dict[str, Any]:
                 from ..ui.pywinauto_backend import PywinautoBackend
@@ -2425,6 +2507,21 @@ def register_ui_tools(
         """
         try:
             ui = await _ensure_ui_connected()
+            get_focused_element = getattr(ui, "get_focused_element", None)
+            if callable(get_focused_element):
+                result = await get_focused_element()
+                if not isinstance(result, dict):
+                    return build_error_response(
+                        "get_focused_element: backend returned non-dict response "
+                        f"({type(result).__name__})",
+                        state=session.state.state,
+                    )
+                return build_response(data=result, state=session.state.state)
+            if _is_flaui_backend(ui):
+                return build_response(
+                    data=_flaui_focused_element_guidance(),
+                    state=session.state.state,
+                )
 
             def _get_focused() -> dict[str, Any]:
                 from ..ui.pywinauto_backend import PywinautoBackend

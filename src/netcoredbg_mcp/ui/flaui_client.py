@@ -375,6 +375,7 @@ class FlaUIBackend:
     def __init__(self, bridge_path: str, process_registry: Any = None) -> None:
         self._element_cache: dict[str, dict] = {}
         self._process_id: int | None = None
+        self._last_multi_select_result: dict[str, Any] | None = None
         self._client = FlaUIBridgeClient(
             bridge_path,
             process_registry,
@@ -969,16 +970,51 @@ class FlaUIBackend:
             )
         return result
 
-    async def multi_select(self, container_id: str, indices: list[int]) -> int:
+    async def multi_select(
+        self,
+        container_id: str,
+        indices: list[int],
+        *,
+        mode: str = "replace",
+    ) -> int:
         """Multi-select via FlaUI bridge."""
         result = await self._client.call(
             "multi_select",
             {
                 "automationId": container_id,
                 "indices": indices,
+                "mode": mode,
             },
         )
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"multi_select: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        self._last_multi_select_result = dict(result)
         return len(result.get("indices", []))
+
+    async def get_selected_item(
+        self,
+        automation_id: str,
+        root_id: str | None = None,
+        xpath: str | None = None,
+    ) -> dict[str, Any]:
+        """Return the first selected item evidence for a list/grid container."""
+        result = await self._client.call(
+            "get_selected_item",
+            self._build_search_params(
+                automation_id=automation_id,
+                root_id=root_id,
+                xpath=xpath,
+            ),
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"get_selected_item: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result
 
     async def get_window_tree(self, max_depth: int = 3, max_children: int = 50) -> Any:
         """Get tree via FlaUI bridge and update cache.

@@ -574,6 +574,222 @@ async def test_ui_double_click_with_secondary_selector_skips_cache_before_guard(
     assert response["data"]["action"] == "ui_double_click"
 
 
+@pytest.mark.asyncio
+async def test_ui_select_items_uses_flaui_backend_multi_select_evidence(
+    capturing_mcp,
+) -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._process_id = 42
+    backend._element_cache = {}
+    backend._client = AsyncMock()
+    backend.multi_select = AsyncMock(
+        return_value={
+            "selected": 2,
+            "indices": [0, 2],
+            "mode": "replace",
+            "method": "SelectionItemPattern",
+        }
+    )
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+    )
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(
+            capturing_mcp,
+            session,
+            check_session_access=lambda ctx: None,
+        )
+        response = await capturing_mcp.tools["ui_select_items"](
+            SimpleNamespace(),
+            automation_id="fixtureList",
+            indices=[0, 2],
+            mode="replace",
+        )
+
+    backend.multi_select.assert_awaited_once_with("fixtureList", [0, 2], mode="replace")
+    assert "error" not in response
+    assert response["data"]["selected"] == 2
+    assert response["data"]["indices"] == [0, 2]
+    assert response["data"]["mode"] == "replace"
+    assert response["data"]["method"] == "SelectionItemPattern"
+
+
+@pytest.mark.asyncio
+async def test_ui_select_items_flaui_add_mode_passes_mode_to_backend(
+    capturing_mcp,
+) -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._process_id = 42
+    backend._element_cache = {}
+    backend._client = AsyncMock()
+    backend.multi_select = AsyncMock(
+        return_value={
+            "selected": 1,
+            "indices": [3],
+            "mode": "add",
+            "method": "SelectionItemPattern",
+        }
+    )
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+    )
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(
+            capturing_mcp,
+            session,
+            check_session_access=lambda ctx: None,
+        )
+        response = await capturing_mcp.tools["ui_select_items"](
+            SimpleNamespace(),
+            automation_id="fixtureList",
+            indices=[3],
+            mode="add",
+        )
+
+    backend.multi_select.assert_awaited_once_with("fixtureList", [3], mode="add")
+    assert response["data"]["mode"] == "add"
+    assert response["data"]["selected"] == 1
+
+
+@pytest.mark.asyncio
+async def test_ui_select_items_normalizes_bool_selected_count_from_flaui_evidence(
+    capturing_mcp,
+) -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._process_id = 42
+    backend._element_cache = {}
+    backend._client = AsyncMock()
+    backend._last_multi_select_result = {
+        "selected": True,
+        "selected_count": True,
+        "indices": [0],
+        "method": "SelectionItemPattern",
+    }
+    backend.multi_select = AsyncMock(return_value=1)
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+    )
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(
+            capturing_mcp,
+            session,
+            check_session_access=lambda ctx: None,
+        )
+        response = await capturing_mcp.tools["ui_select_items"](
+            SimpleNamespace(),
+            automation_id="fixtureList",
+            indices=[0],
+            mode="replace",
+        )
+
+    assert type(response["data"]["selected"]) is int
+    assert response["data"]["selected"] == 1
+
+
+@pytest.mark.asyncio
+async def test_ui_get_selected_item_uses_flaui_backend_selected_item_evidence(
+    capturing_mcp,
+) -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._process_id = 42
+    backend._element_cache = {}
+    backend._client = AsyncMock()
+    backend.get_selected_item = AsyncMock(
+        return_value={
+            "index": 1,
+            "name": "Beta",
+            "automationId": "Item_1",
+            "controlType": "ListItem",
+            "selected": True,
+        }
+    )
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+    )
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(
+            capturing_mcp,
+            session,
+            check_session_access=lambda ctx: None,
+        )
+        response = await capturing_mcp.tools["ui_get_selected_item"]("fixtureList")
+
+    backend.get_selected_item.assert_awaited_once_with(
+        automation_id="fixtureList",
+        root_id=None,
+        xpath=None,
+    )
+    assert "error" not in response
+    assert "warning" not in response["data"]
+    assert response["data"]["index"] == 1
+    assert response["data"]["name"] == "Beta"
+    assert response["data"]["automationId"] == "Item_1"
+    assert response["data"]["controlType"] == "ListItem"
+
+
+@pytest.mark.asyncio
+async def test_ui_get_focused_element_flaui_without_evidence_points_to_focus_assert(
+    capturing_mcp,
+) -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._process_id = 42
+    backend._element_cache = {}
+    backend._client = AsyncMock()
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+    )
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(
+            capturing_mcp,
+            session,
+            check_session_access=lambda ctx: None,
+        )
+        response = await capturing_mcp.tools["ui_get_focused_element"]()
+
+    assert "error" not in response
+    assert response["data"]["status"] == "UNSUPPORTED"
+    assert "ui_focus" in response["data"]["guidance"]
+    assert "assert" in response["data"]["guidance"]
+    assert response["data"]["name"] is None
+    assert response["data"]["automationId"] is None
+    assert response["data"]["controlType"] is None
+
+
 class TestFlaUIBackendToggle:
     """Tests for FlaUIBackend.toggle_element."""
 

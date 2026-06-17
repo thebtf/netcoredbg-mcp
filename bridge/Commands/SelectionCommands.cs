@@ -22,6 +22,9 @@ public static class SelectionCommands
 
         var indices = @params?["indices"]?.AsArray()
             ?? throw new ArgumentException("Missing required parameter: indices (array of int)");
+        var mode = @params?["mode"]?.GetValue<string>()?.ToLowerInvariant() ?? "replace";
+        if (mode is not ("replace" or "add"))
+            throw new ArgumentException("Unknown multi_select mode. Use 'replace' or 'add'.");
 
         var cf = new ConditionFactory(automation.PropertyLibrary);
         var container = mainWindow.FindFirstDescendant(cf.ByAutomationId(automationId))
@@ -30,6 +33,8 @@ public static class SelectionCommands
         var targets = SelectionTargets(container, automation);
         var selected = new JsonArray();
         var isFirst = true;
+        var usedPattern = false;
+        var usedClickFallback = false;
 
         foreach (var indexNode in indices)
         {
@@ -43,10 +48,11 @@ public static class SelectionCommands
 
             if (child.Patterns.SelectionItem.TryGetPattern(out var selectionPattern))
             {
-                if (isFirst)
+                if (isFirst && mode == "replace")
                     selectionPattern.Select();
                 else
                     selectionPattern.AddToSelection();
+                usedPattern = true;
             }
             else
             {
@@ -56,7 +62,8 @@ public static class SelectionCommands
                     (int)(rect.X + rect.Width / 2),
                     (int)(rect.Y + rect.Height / 2));
 
-                if (!isFirst)
+                var useControl = mode == "add" || !isFirst;
+                if (useControl)
                     Keyboard.Press(VirtualKeyShort.CONTROL);
 
                 try
@@ -65,9 +72,10 @@ public static class SelectionCommands
                 }
                 finally
                 {
-                    if (!isFirst)
+                    if (useControl)
                         Keyboard.Release(VirtualKeyShort.CONTROL);
                 }
+                usedClickFallback = true;
             }
 
             selected.Add(index);
@@ -77,9 +85,113 @@ public static class SelectionCommands
         return new JsonObject
         {
             ["selected"] = true,
+            ["selected_count"] = selected.Count,
             ["automationId"] = automationId,
-            ["indices"] = selected
+            ["indices"] = selected,
+            ["mode"] = mode,
+            ["method"] = usedClickFallback
+                ? (usedPattern ? "Mixed" : "ClickFallback")
+                : "SelectionItemPattern"
         };
+    }
+
+    public static JsonNode GetSelectedItem(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
+    {
+        if (mainWindow is null)
+            throw new InvalidOperationException("Not connected. Call 'connect' first.");
+
+        var searchRoot = ElementCommands.ResolveSearchRoot(mainWindow, @params, automation);
+        var container = ElementCommands.FindElementCascade(searchRoot, @params, automation);
+        var (selectedItems, method) = SelectedItems(container, automation);
+
+        if (selectedItems.Length == 0)
+        {
+            return new JsonObject
+            {
+                ["index"] = -1,
+                ["name"] = "",
+                ["automationId"] = "",
+                ["controlType"] = "",
+                ["selected"] = false,
+                ["selected_count"] = 0,
+                ["method"] = method
+            };
+        }
+
+        var selectedItem = selectedItems[0];
+        var result = ElementCommands.BuildElementInfo(selectedItem, includePatterns: false);
+        result["index"] = IndexOfTarget(container, automation, selectedItem);
+        result["selected"] = true;
+        result["selected_count"] = selectedItems.Length;
+        result["method"] = method;
+        return result;
+    }
+
+    private static (AutomationElement[] Items, string Method) SelectedItems(
+        AutomationElement container,
+        UIA3Automation automation)
+    {
+        try
+        {
+            if (container.Patterns.Selection.TryGetPattern(out var selectionPattern))
+            {
+                var selected = selectionPattern.Selection.ValueOrDefault ?? Array.Empty<AutomationElement>();
+                if (selected.Length > 0)
+                    return (selected, "SelectionPattern");
+            }
+        }
+        catch { /* unsupported */ }
+
+        var selectedTargets = SelectionTargets(container, automation)
+            .Where(IsSelected)
+            .ToArray();
+        return (selectedTargets, "SelectionItemPatternScan");
+    }
+
+    private static bool IsSelected(AutomationElement element)
+    {
+        try
+        {
+            return element.Patterns.SelectionItem.TryGetPattern(out var pattern) &&
+                   pattern.IsSelected.Value;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static int IndexOfTarget(
+        AutomationElement container,
+        UIA3Automation automation,
+        AutomationElement target)
+    {
+        var targets = SelectionTargets(container, automation);
+        for (var index = 0; index < targets.Length; index++)
+        {
+            if (SameRuntimeId(targets[index], target))
+                return index;
+        }
+        return -1;
+    }
+
+    private static bool SameRuntimeId(AutomationElement? left, AutomationElement? right)
+    {
+        if (left is null || right is null)
+            return false;
+        var leftId = RuntimeId(left);
+        var rightId = RuntimeId(right);
+        return leftId is not null &&
+               rightId is not null &&
+               leftId.SequenceEqual(rightId);
+    }
+
+    private static int[]? RuntimeId(AutomationElement? element)
+    {
+        if (element is null)
+            return null;
+        try { return element.Properties.RuntimeId.ValueOrDefault; }
+        catch { return null; }
     }
 
     private static AutomationElement[] SelectionTargets(AutomationElement container, UIA3Automation automation)
