@@ -672,6 +672,79 @@ async def test_ui_property_tool_reads_text_value_via_extract_text(
 
 
 @pytest.mark.asyncio
+async def test_ui_property_tool_keeps_missing_text_value_as_none(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = SimpleNamespace(
+        process_id=42,
+        extract_text=AsyncMock(
+            return_value={
+                "status": "PASS",
+                "text": None,
+                "source": "ValuePattern",
+            }
+        ),
+    )
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_property"](
+        ctx=None,
+        action="read",
+        property="Value",
+        automation_id="CueTextBox",
+    )
+
+    assert response["data"]["status"] == "PASS"
+    assert response["data"]["value"] is None
+
+
+@pytest.mark.asyncio
+async def test_ui_property_tool_uses_case_insensitive_property_fallback(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = SimpleNamespace(
+        process_id=42,
+        find_element=AsyncMock(
+            return_value={
+                "status": "PASS",
+                "localizedControlType": "edit",
+            }
+        ),
+    )
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_property"](
+        ctx=None,
+        action="read",
+        property="LocalizedControlType",
+        automation_id="CueTextBox",
+    )
+
+    assert response["data"]["status"] == "PASS"
+    assert response["data"]["value"] == "edit"
+
+
+@pytest.mark.asyncio
 async def test_ui_property_unknown_action_reports_accepted_actions_without_backend(
     capturing_mcp,
     monkeypatch,

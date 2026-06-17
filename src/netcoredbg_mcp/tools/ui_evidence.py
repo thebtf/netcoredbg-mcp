@@ -282,7 +282,7 @@ def register_ui_evidence_tools(
                         selector,
                         requested_property,
                         result,
-                        value=str(result.get("text", "")) if isinstance(result, dict) else None,
+                        value=_text_property_value(result),
                         source=result.get("source") if isinstance(result, dict) else None,
                     ),
                     state=session.state.state,
@@ -303,7 +303,7 @@ def register_ui_evidence_tools(
                     selector,
                     requested_property,
                     result,
-                    value=result.get(key) if isinstance(result, dict) else None,
+                    value=_property_value(result, key),
                 ),
                 state=session.state.state,
             )
@@ -825,6 +825,25 @@ def _accepted_property_names() -> list[str]:
         "Value",
         "ValueText",
     ]
+
+
+def _text_property_value(result: Any) -> str | None:
+    if not isinstance(result, dict):
+        return None
+    value = result.get("text")
+    return str(value) if value is not None else None
+
+
+def _property_value(result: Any, key: str) -> Any:
+    if not isinstance(result, dict):
+        return None
+    if key in result:
+        return result[key]
+    key_lower = key.lower()
+    for candidate_key, candidate_value in result.items():
+        if candidate_key.lower() == key_lower:
+            return candidate_value
+    return None
 
 
 def _bounded_property_backend_result(result: Any) -> dict[str, Any]:

@@ -671,10 +671,10 @@ def _validate_op_args(
         if "keys" in args and not isinstance(args["keys"], list):
             errors.append(f"{prefix}.keys must be a list for op {op_name}")
     elif op_name == "ui.get_property":
-        if args.get("property") is None and args.get("property_name") is None:
-            errors.append(
-                f"{prefix}.property or property_name is required for op {op_name}"
-            )
+        has_property_argument = args.get("property") is not None
+        has_property_name_argument = args.get("property_name") is not None
+        if not has_property_argument and not has_property_name_argument:
+            errors.append(f"{prefix}.property or property_name is required for op {op_name}")
         for field_name in ("property", "property_name"):
             if (
                 field_name in args
@@ -682,6 +682,10 @@ def _validate_op_args(
                 and not isinstance(args[field_name], str)
             ):
                 errors.append(f"{prefix}.{field_name} must be a string for op {op_name}")
+            elif isinstance(args.get(field_name), str) and not args[field_name].strip():
+                errors.append(
+                    f"{prefix}.{field_name} must be a non-empty string for op {op_name}"
+                )
 
 
 def _validate_int_arg(
