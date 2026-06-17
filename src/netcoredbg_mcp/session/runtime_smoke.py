@@ -680,6 +680,7 @@ class RuntimeSmokeRunRegistry:
         self._clock = clock
         self._runs: dict[str, RuntimeSmokeRunRecord] = {}
         self._lock = asyncio.Lock()
+        self._contamination: dict[str, Any] | None = None
 
     async def start(
         self,
@@ -687,6 +688,10 @@ class RuntimeSmokeRunRegistry:
         runner_factory: Callable[[], RuntimeSmokeRunner],
     ) -> dict[str, Any]:
         async with self._lock:
+            contamination = self._contamination
+            if contamination is not None:
+                return _contamination_blocked_payload(contamination)
+
             active = self._active_run_locked()
             if active is not None:
                 return {
@@ -773,12 +778,18 @@ class RuntimeSmokeRunRegistry:
                     if record is None:
                         return _run_not_found(run_id)
                     record.status = "STOPPING"
+                    contamination = self._mark_contaminated_locked(
+                        reason="runtime smoke stop timed out during cleanup",
+                        run_id=record.run_id,
+                    )
                     record.append_event(
                         "stop_timeout",
                         self._clock,
                         reason="runtime smoke stop is still cleaning up",
                     )
-                    return self._running_payload(record)
+                    payload = self._running_payload(record)
+                    payload.update(_contamination_metadata(contamination))
+                    return payload
 
         return await self.get_result(run_id)
 
@@ -806,6 +817,139 @@ class RuntimeSmokeRunRegistry:
     def retained_run_ids(self) -> list[str]:
         return list(self._runs)
 
+    def contamination(self) -> dict[str, Any] | None:
+        return dict(self._contamination) if self._contamination is not None else None
+
+    def mark_contaminated(
+        self,
+        *,
+        reason: str,
+        run_id: str | None = None,
+        cleanup: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self._contamination = _contamination_payload(
+            reason=reason,
+            run_id=run_id,
+            cleanup=cleanup,
+            observed_at_ms=int(self._clock() * 1000),
+        )
+        return dict(self._contamination)
+
+    async def cleanup_contract(
+        self,
+        *,
+        reset: Callable[[], Any] | None = None,
+    ) -> dict[str, Any]:
+        async with self._lock:
+            active = self._active_run_locked()
+            contamination = self.contamination()
+            if active is not None:
+                if contamination is not None:
+                    return {
+                        "status": "BLOCKED",
+                        "reason": "runtime smoke run is still active",
+                        **_contamination_metadata(contamination),
+                        "cleanup_contract": {
+                            **_cleanup_contract_required(contamination),
+                            "status": "BLOCKED",
+                        },
+                    }
+                return {
+                    "status": "BLOCKED",
+                    "reason": "runtime smoke run is still active",
+                    "run_id": active.run_id,
+                    "contaminated": False,
+                    "cleanup_contract": {
+                        "status": "BLOCKED",
+                        "required_before": False,
+                        "attempted": [],
+                        "failures": [],
+                    },
+                }
+            required_before = contamination is not None
+
+        if not required_before:
+            return {
+                "status": "PASS",
+                "reason": "runtime smoke cleanup contract already clean",
+                "contaminated": False,
+                "cleanup_contract": {
+                    "status": "PASS",
+                    "required_before": False,
+                    "attempted": [],
+                    "failures": [],
+                },
+            }
+
+        attempted: list[str] = []
+        failures: list[dict[str, Any]] = []
+        if reset is not None:
+            attempted.append("runtime_smoke_reset")
+            try:
+                reset_result = reset()
+                if inspect.isawaitable(reset_result):
+                    reset_result = await reset_result
+                failures.extend(_reset_failures(reset_result))
+            except Exception as exc:
+                failures.append(
+                    {
+                        "operation": "runtime_smoke_reset",
+                        "reason": str(exc),
+                        "exception": {
+                            "type": type(exc).__name__,
+                            "message": str(exc),
+                        },
+                    }
+                )
+
+        if failures:
+            async with self._lock:
+                contamination = self._mark_contaminated_locked(
+                    reason="runtime smoke cleanup contract failed",
+                    cleanup={"status": "FAIL", "failures": failures},
+                )
+            return {
+                "status": "FAIL",
+                "reason": "runtime smoke cleanup contract failed",
+                **_contamination_metadata(contamination),
+                "cleanup_contract": {
+                    "status": "FAIL",
+                    "required_before": True,
+                    "attempted": attempted,
+                    "failures": failures,
+                    "next_action": "runtime_smoke_cleanup_contract",
+                },
+            }
+
+        async with self._lock:
+            if self._contamination == contamination:
+                self._contamination = None
+            elif self._contamination is not None:
+                latest = dict(self._contamination)
+                return {
+                    "status": "BLOCKED",
+                    "reason": "runtime smoke cleanup contract changed during cleanup",
+                    **_contamination_metadata(latest),
+                    "cleanup_contract": {
+                        **_cleanup_contract_required(latest),
+                        "status": "REQUIRED",
+                        "required_before": True,
+                        "attempted": attempted,
+                        "failures": [],
+                    },
+                }
+        return {
+            "status": "PASS",
+            "reason": "runtime smoke cleanup contract satisfied",
+            "contaminated": False,
+            "cleanup_contract": {
+                "status": "PASS",
+                "required_before": True,
+                "attempted": attempted,
+                "failures": [],
+            },
+        }
+
     async def _execute(
         self,
         record: RuntimeSmokeRunRecord,
@@ -830,6 +974,14 @@ class RuntimeSmokeRunRegistry:
             event_kind = "failed"
 
         async with self._lock:
+            if _result_requires_cleanup_contract(result):
+                cleanup = result.get("cleanup")
+                contamination = self._mark_contaminated_locked(
+                    reason=str(result.get("reason") or "runtime smoke cleanup failed"),
+                    run_id=record.run_id,
+                    cleanup=cleanup if isinstance(cleanup, dict) else None,
+                )
+                result.update(_contamination_metadata(contamination))
             record.result = result
             record.status = status
             record.append_event(
@@ -1022,6 +1174,21 @@ class RuntimeSmokeRunRegistry:
                 return record
         return None
 
+    def _mark_contaminated_locked(
+        self,
+        *,
+        reason: str,
+        run_id: str | None = None,
+        cleanup: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self._contamination = _contamination_payload(
+            reason=reason,
+            run_id=run_id,
+            cleanup=cleanup,
+            observed_at_ms=int(self._clock() * 1000),
+        )
+        return dict(self._contamination)
+
     def _prune_locked(self) -> None:
         for run_id, record in list(self._runs.items()):
             if len(self._runs) <= self._max_runs:
@@ -1055,6 +1222,8 @@ class RuntimeSmokeRunRegistry:
                 "final": True,
             }
         )
+        if self._contamination is not None:
+            payload.update(_contamination_metadata(self._contamination))
         return payload
 
 
@@ -1070,6 +1239,70 @@ def _run_not_found(run_id: str) -> dict[str, Any]:
         "reason": "runtime smoke run not found",
         "run_id": run_id,
     }
+
+
+def _contamination_payload(
+    *,
+    reason: str,
+    run_id: str | None,
+    cleanup: dict[str, Any] | None,
+    observed_at_ms: int,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "reason": reason,
+        "observed_at_ms": observed_at_ms,
+    }
+    if run_id:
+        payload["run_id"] = run_id
+    if cleanup is not None:
+        payload["cleanup"] = dict(cleanup)
+    return payload
+
+
+def _cleanup_contract_required(contamination: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "required": True,
+        "status": "REQUIRED",
+        "reason": contamination.get("reason"),
+        "run_id": contamination.get("run_id"),
+        "next_action": "runtime_smoke_cleanup_contract",
+    }
+
+
+def _contamination_metadata(contamination: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "contaminated": True,
+        "cleanup_contract": _cleanup_contract_required(contamination),
+    }
+
+
+def _contamination_blocked_payload(contamination: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": "BLOCKED",
+        "reason": "runtime smoke cleanup contract required",
+        **_contamination_metadata(contamination),
+    }
+
+
+def _result_requires_cleanup_contract(result: dict[str, Any]) -> bool:
+    cleanup = result.get("cleanup")
+    return isinstance(cleanup, dict) and cleanup.get("status") == "FAIL"
+
+
+def _reset_failures(reset_result: Any) -> list[dict[str, Any]]:
+    if not isinstance(reset_result, (list, tuple)):
+        return []
+    failures: list[dict[str, Any]] = []
+    for failure in reset_result:
+        if isinstance(failure, dict):
+            operation = failure.get("name") or failure.get("operation")
+            failures.append(
+                {
+                    "operation": str(operation or "runtime_smoke_reset"),
+                    "reason": str(failure.get("error") or failure.get("reason") or failure),
+                }
+            )
+    return failures
 
 
 def _cleanup_exception_payload(operation: str, exc: Exception) -> dict[str, Any]:

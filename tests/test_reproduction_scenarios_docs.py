@@ -379,6 +379,23 @@ def test_issue_272_remaining_scope_excludes_covered_launch_contract() -> None:
     assert "launch env/evidence-dir advertisement" not in lifecycle_remaining
 
 
+def test_issue_271_records_cleanup_contamination_contract_slice() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#271")
+    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#271")
+
+    assert "CR-028" in row
+    assert "cleanup contamination contract" in row
+    assert "runtime_smoke_cleanup_contract" in row
+    assert "contaminated-state surfacing" in row
+    assert "trace cursor/delta APIs" in row
+    assert "broader" in row
+    assert "CR-028" in lifecycle_row
+    assert "cleanup_contract" in lifecycle_row
+    assert "runtime_smoke_cleanup_contract" in lifecycle_row
+    assert "trace cursor/delta" in lifecycle_row
+
+
 def test_cr022_broad_issues_require_split_or_comment_evidence_before_closure() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
 

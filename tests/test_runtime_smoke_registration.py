@@ -44,6 +44,7 @@ async def test_runtime_smoke_agent_lifecycle_tools_are_registered(mock_netcoredb
         "runtime_smoke_tail_events",
         "runtime_smoke_get_result",
         "runtime_smoke_stop",
+        "runtime_smoke_cleanup_contract",
         "run_runtime_smoke",
     }.issubset(tool_names)
 

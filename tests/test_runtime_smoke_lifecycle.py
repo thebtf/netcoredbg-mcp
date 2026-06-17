@@ -380,6 +380,9 @@ async def test_runtime_smoke_stop_finalizes_when_cleanup_raises() -> None:
     assert stopped["reason"] == "runtime smoke stop cleanup failed"
     assert stopped["cleanup"]["status"] == "FAIL"
     assert stopped["cleanup"]["failures"][0]["reason"] == "cleanup exploded"
+    assert stopped["contaminated"] is True
+    assert stopped["cleanup_contract"]["required"] is True
+    assert stopped["cleanup_contract"]["next_action"] == "runtime_smoke_cleanup_contract"
     assert session.runtime_smoke.lifecycle_runs.active_run_ids() == []
 
     next_run = await session.runtime_smoke.lifecycle_runs.start(
@@ -389,7 +392,114 @@ async def test_runtime_smoke_stop_finalizes_when_cleanup_raises() -> None:
         },
         lambda: _runner(session),
     )
+    assert next_run["status"] == "BLOCKED"
+    assert next_run["reason"] == "runtime smoke cleanup contract required"
+    assert next_run["contaminated"] is True
+    assert next_run["cleanup_contract"]["next_action"] == "runtime_smoke_cleanup_contract"
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_stop_timeout_sets_contaminated_pending_cleanup_contract() -> None:
+    session = LifecycleSmokeSession()
+    session.block_cleanup = True
+    session.runtime_smoke.lifecycle_runs = RuntimeSmokeRunRegistry(stop_timeout_seconds=0.01)
+    session.runtime_smoke.instrumentation_groups["flow"] = {"breakpoints": [1]}
+
+    started = await session.runtime_smoke.lifecycle_runs.start(
+        {
+            "name": "lifecycle-stop-timeout",
+            "actions": [{"name": "wait_until_released"}],
+            "teardown": {"instrumentation_groups": ["flow"]},
+        },
+        lambda: _runner(session),
+    )
+
+    stopped = await session.runtime_smoke.lifecycle_runs.stop(started["run_id"])
+
+    assert stopped["status"] == "STOPPING"
+    assert stopped["contaminated"] is True
+    assert stopped["cleanup_contract"]["required"] is True
+    assert stopped["cleanup_contract"]["next_action"] == "runtime_smoke_cleanup_contract"
+
+    next_run = await session.runtime_smoke.lifecycle_runs.start(
+        {
+            "name": "after-stop-timeout",
+            "actions": [{"name": "append_output", "args": {"text": "ready\n"}}],
+        },
+        lambda: _runner(session),
+    )
+    assert next_run["status"] == "BLOCKED"
+    assert next_run["reason"] == "runtime smoke cleanup contract required"
+
+    session.cleanup_release_event.set()
+    await _wait_for_final(session.runtime_smoke.lifecycle_runs, started["run_id"])
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_cleanup_contract_does_not_contaminate_clean_active_run() -> None:
+    session = LifecycleSmokeSession()
+    started = await session.runtime_smoke.lifecycle_runs.start(
+        {
+            "name": "active-clean-run",
+            "actions": [{"name": "wait_until_released"}],
+        },
+        lambda: _runner(session),
+    )
+
+    cleanup = await session.runtime_smoke.lifecycle_runs.cleanup_contract(
+        reset=session.runtime_smoke.reset,
+    )
+
+    assert cleanup["status"] == "BLOCKED"
+    assert cleanup["reason"] == "runtime smoke run is still active"
+    assert cleanup["contaminated"] is False
+    assert cleanup["cleanup_contract"]["required_before"] is False
+    assert session.runtime_smoke.lifecycle_runs.contamination() is None
+
+    session.release_event.set()
+    final = await _wait_for_final(session.runtime_smoke.lifecycle_runs, started["run_id"])
+    assert final["status"] == "PASS"
+
+    next_run = await session.runtime_smoke.lifecycle_runs.start(
+        {
+            "name": "after-clean-active-cleanup-check",
+            "actions": [{"name": "append_output", "args": {"text": "ready\n"}}],
+        },
+        lambda: _runner(session),
+    )
     assert next_run["status"] == "RUNNING"
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_cleanup_contract_preserves_concurrent_new_contamination() -> None:
+    registry = RuntimeSmokeRunRegistry()
+    registry.mark_contaminated(reason="initial contamination", run_id="run-1")
+    success_started = asyncio.Event()
+    success_can_finish = asyncio.Event()
+
+    async def slow_success_reset() -> tuple[Any, ...]:
+        success_started.set()
+        await success_can_finish.wait()
+        return ()
+
+    async def failing_reset() -> tuple[dict[str, str], ...]:
+        await success_started.wait()
+        return ({"name": "runtime_smoke_reset", "error": "cleanup still locked"},)
+
+    success_task = asyncio.create_task(
+        registry.cleanup_contract(reset=slow_success_reset),
+    )
+    failed = await registry.cleanup_contract(reset=failing_reset)
+    success_can_finish.set()
+    succeeded = await success_task
+
+    assert failed["status"] == "FAIL"
+    assert succeeded["status"] == "BLOCKED"
+    assert succeeded["reason"] == "runtime smoke cleanup contract changed during cleanup"
+    contamination = registry.contamination()
+    assert contamination is not None
+    assert contamination["reason"] == "runtime smoke cleanup contract failed"
+    assert contamination["cleanup"]["failures"][0]["reason"] == "cleanup still locked"
 
 
 @pytest.mark.asyncio
