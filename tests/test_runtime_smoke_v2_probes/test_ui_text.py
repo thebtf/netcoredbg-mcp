@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from .helpers import ProbeSmokeSession, after_probe, one_probe_plan, runner
+from .helpers import ProbeSmokeSession, after_probe, before_probe, one_probe_plan, runner
 
 
 class TextProbeSession(ProbeSmokeSession):
@@ -89,13 +89,21 @@ async def test_ui_text_probe_blocks_when_execution_is_unavailable() -> None:
 @pytest.mark.asyncio
 async def test_ui_text_probe_read_mode_uses_read_adapter_without_expected() -> None:
     session = TextProbeSession()
-    session.read_results.append(
-        {
-            "status": "PASS",
-            "text": "Fixture cue one",
-            "source": "ValuePattern",
-            "full_tree": {"must": "not leak"},
-        }
+    session.read_results.extend(
+        [
+            {
+                "status": "PASS",
+                "text": "Fixture cue zero",
+                "source": "ValuePattern",
+                "full_tree": {"must": "not leak"},
+            },
+            {
+                "status": "PASS",
+                "text": "Fixture cue one",
+                "source": "ValuePattern",
+                "full_tree": {"must": "not leak"},
+            },
+        ]
     )
 
     result = await runner(
@@ -112,15 +120,20 @@ async def test_ui_text_probe_read_mode_uses_read_adapter_without_expected() -> N
         )
     )
 
+    before = before_probe(result)
     probe = after_probe(result)
     assert result["status"] == "PASS"
+    assert before["status"] == "PASS"
+    assert before["value"] == "Fixture cue zero"
     assert probe["status"] == "PASS"
     assert probe["value"] == "Fixture cue one"
     assert probe["source"] == "ValuePattern"
     assert session.calls == [
+        ("ui.text.read", {"automation_id": "CueTextBox"}),
         ("ui.invoke", {"automation_id": "ToggleSetting"}),
         ("ui.text.read", {"automation_id": "CueTextBox"}),
     ]
+    assert "full_tree" not in str(before)
     assert "full_tree" not in str(probe)
 
 

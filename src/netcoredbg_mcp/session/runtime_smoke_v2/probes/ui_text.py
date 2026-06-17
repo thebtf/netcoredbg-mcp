@@ -21,13 +21,6 @@ async def handle_ui_text(
     kind = "ui.text"
     action = str(probe.get("action") or "assert")
     if action == "read":
-        if phase != "after":
-            return {
-                "name": probe_name(probe, kind),
-                "kind": kind,
-                "status": "PASS",
-                "value": None,
-            }
         if not service_available(context, "ui.text.read"):
             return blocked_probe(
                 probe,
