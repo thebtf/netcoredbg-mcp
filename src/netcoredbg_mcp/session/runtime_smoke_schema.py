@@ -161,6 +161,10 @@ OPERATION_SCHEMAS: dict[str, OperationSchema] = {
         "ui.text.get_state",
         ("selector",),
     ),
+    "ui.text.set_text": OperationSchema(
+        "ui.text.set_text",
+        ("selector", "text"),
+    ),
     "ui.text.assert_selection": OperationSchema(
         "ui.text.assert_selection",
         ("selector",),
@@ -938,6 +942,9 @@ def _validate_op_args(
             )
         _validate_int_arg(prefix, op_name, args, "selection_start", errors)
         _validate_int_arg(prefix, op_name, args, "selection_end", errors)
+    elif op_name == "ui.text.set_text":
+        if "text" in args and not isinstance(args["text"], str):
+            errors.append(f"{prefix}.text must be a string for op {op_name}")
     elif op_name == "ui.get_property":
         has_property_argument = args.get("property") is not None
         has_property_name_argument = args.get("property_name") is not None

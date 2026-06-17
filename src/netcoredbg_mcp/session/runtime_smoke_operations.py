@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
@@ -20,6 +21,8 @@ from ..ui.grid import (
 from ..ui.key_sequence import run_scoped_key_sequence
 from ..ui.list_items import invoke_list_item, toggle_list_item_child
 from ..ui.text import assert_text_selection, read_textbox_state
+from .runtime_smoke_v2.actions import ActionContext
+from .runtime_smoke_v2.actions.ui_text_input import handle_ui_text_type_replace_selection
 
 BackendProvider = Callable[[], Awaitable[Any]]
 OperationAdapterMap = dict[str, Callable[..., Awaitable[dict[str, Any]]]]
@@ -478,6 +481,13 @@ def ui_operation_adapters(
             selection_end=selection_end,
         )
 
+    async def text_set_text(**args: Any) -> dict[str, Any]:
+        selector = _selector(args)
+        text = args.get("text")
+        action = {"selector": selector, "text": text}
+        context = ActionContext(service_adapters=adapters, clock=time.monotonic)
+        return await handle_ui_text_type_replace_selection(action, context)
+
     async def invoke(**args: Any) -> dict[str, Any]:
         backend = await _backend_or_blocked(ensure_ui_connected)
         if isinstance(backend, dict):
@@ -701,6 +711,7 @@ def ui_operation_adapters(
         "ui.text.read": text_read,
         "ui.text.get_state": text_get_state,
         "ui.text.assert_selection": text_assert_selection,
+        "ui.text.set_text": text_set_text,
         "ui.get_property": get_property,
         "ui.find_element": find_element,
         "ui.set_focus": set_focus,
