@@ -119,6 +119,16 @@ async def test_ui_monitor_tools_are_registered(mock_netcoredbg_path) -> None:
     }.issubset(tool_names)
 
 
+@pytest.mark.asyncio
+async def test_ui_property_tool_is_registered(mock_netcoredbg_path) -> None:
+    server = create_server(str(os.getcwd()))
+
+    tools = await server.list_tools()
+    tool_names = {tool.name for tool in tools}
+
+    assert "ui_property" in tool_names
+
+
 def test_success_response_keeps_existing_envelope_meaning() -> None:
     response = build_response(
         data={"value": 42},

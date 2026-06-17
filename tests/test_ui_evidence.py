@@ -99,6 +99,35 @@ class FakeEvidenceBackend:
             "full_tree": {"must": "not leak"},
         }
 
+    async def find_element(
+        self,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {
+                "find_element": {
+                    "automation_id": automation_id,
+                    "name": name,
+                    "control_type": control_type,
+                    "root_id": root_id,
+                    "xpath": xpath,
+                }
+            }
+        )
+        return {
+            "status": "PASS",
+            "automationId": automation_id or "CueTextBox",
+            "name": "Cue text",
+            "controlType": control_type or "TextBox",
+            "className": "TextBox",
+            "full_tree": {"must": "not leak"},
+            "raw_tree": {"must": "not leak"},
+        }
+
     async def grid_snapshot(
         self,
         selector: dict[str, Any],
@@ -556,6 +585,248 @@ async def test_ui_text_tool_maps_selector_miss_to_blocked(capturing_mcp, monkeyp
     ]
     assert response["data"]["next_step"]
     assert "full_tree" not in str(response["data"])
+
+
+@pytest.mark.asyncio
+async def test_ui_property_tool_reads_element_property_without_unbounded_payload(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = FakeEvidenceBackend()
+    backend.process_id = 42
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_property"](
+        ctx=None,
+        action="read",
+        property="Name",
+        automation_id="CueTextBox",
+        control_type="TextBox",
+    )
+
+    assert response["data"]["status"] == "PASS"
+    assert response["data"]["property"] == "Name"
+    assert response["data"]["value"] == "Cue text"
+    assert response["data"]["selector"] == {
+        "automation_id": "CueTextBox",
+        "control_type": "TextBox",
+    }
+    assert "full_tree" not in str(response["data"])
+    assert "raw_tree" not in str(response["data"])
+    assert backend.calls[-1]["find_element"] == {
+        "automation_id": "CueTextBox",
+        "name": None,
+        "control_type": "TextBox",
+        "root_id": None,
+        "xpath": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_ui_property_tool_reads_text_value_via_extract_text(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = FakeEvidenceBackend()
+    backend.process_id = 42
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_property"](
+        ctx=None,
+        action="read",
+        property="Value",
+        automation_id="CueTextBox",
+    )
+
+    assert response["data"]["status"] == "PASS"
+    assert response["data"]["property"] == "Value"
+    assert response["data"]["value"] == "Fixture cue one"
+    assert response["data"]["source"] == "ValuePattern"
+    assert response["data"]["selector"] == {"automation_id": "CueTextBox"}
+    assert "full_tree" not in str(response["data"])
+    assert backend.calls[-1]["extract_text"] == {
+        "automation_id": "CueTextBox",
+        "name": None,
+        "control_type": None,
+        "root_id": None,
+        "xpath": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_ui_property_tool_keeps_missing_text_value_as_none(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = SimpleNamespace(
+        process_id=42,
+        extract_text=AsyncMock(
+            return_value={
+                "status": "PASS",
+                "text": None,
+                "source": "ValuePattern",
+            }
+        ),
+    )
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_property"](
+        ctx=None,
+        action="read",
+        property="Value",
+        automation_id="CueTextBox",
+    )
+
+    assert response["data"]["status"] == "PASS"
+    assert response["data"]["value"] is None
+
+
+@pytest.mark.asyncio
+async def test_ui_property_tool_uses_case_insensitive_property_fallback(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = SimpleNamespace(
+        process_id=42,
+        find_element=AsyncMock(
+            return_value={
+                "status": "PASS",
+                "localizedControlType": "edit",
+            }
+        ),
+    )
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_property"](
+        ctx=None,
+        action="read",
+        property="LocalizedControlType",
+        automation_id="CueTextBox",
+    )
+
+    assert response["data"]["status"] == "PASS"
+    assert response["data"]["value"] == "edit"
+
+
+@pytest.mark.asyncio
+async def test_ui_property_unknown_action_reports_accepted_actions_without_backend(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    create_backend = AsyncMock()
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", create_backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_property"](
+        ctx=None,
+        action="set",
+        property="Name",
+        automation_id="CueTextBox",
+    )
+
+    assert response["data"] == {
+        "status": "FAIL",
+        "reason": "unknown property action",
+        "action": "set",
+        "accepted_actions": ["read"],
+        "next_step": "Use ui_property(action=\"read\") for read-only property evidence.",
+    }
+    create_backend.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_ui_property_tool_maps_selector_miss_to_blocked(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = SimpleNamespace(
+        process_id=42,
+        find_element=AsyncMock(
+            return_value={
+                "status": "FAIL",
+                "reason": "Element not found",
+                "full_tree": {"must": "not leak"},
+                "raw_tree": {"must": "not leak"},
+            }
+        ),
+    )
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_property"](
+        ctx=None,
+        action="read",
+        property="Name",
+        automation_id="MissingCueTextBox",
+    )
+
+    assert response["data"]["status"] == "BLOCKED"
+    assert response["data"]["reason"] == "selector not found"
+    assert response["data"]["requested"] == {
+        "selector": {"automation_id": "MissingCueTextBox"}
+    }
+    assert response["data"]["accepted"]["selector_keys"] == [
+        "automation_id",
+        "name",
+        "control_type",
+        "root_id",
+        "xpath",
+    ]
+    assert response["data"]["next_step"]
+    assert "full_tree" not in str(response["data"])
+    assert "raw_tree" not in str(response["data"])
 
 
 @pytest.mark.asyncio
