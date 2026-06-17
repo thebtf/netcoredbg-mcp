@@ -5,13 +5,14 @@ from typing import Any
 
 import pytest
 
-from .helpers import ProbeSmokeSession, after_probe, one_probe_plan, runner
+from .helpers import ProbeSmokeSession, after_probe, before_probe, one_probe_plan, runner
 
 
 class TextProbeSession(ProbeSmokeSession):
     def __init__(self) -> None:
         super().__init__()
         self.text_results: deque[dict[str, Any]] = deque()
+        self.read_results: deque[dict[str, Any]] = deque()
 
     async def text_assert(
         self,
@@ -23,6 +24,14 @@ class TextProbeSession(ProbeSmokeSession):
     ) -> dict[str, Any]:
         self.calls.append(("ui.text.assert", dict(selector), contains, equals, must_exist))
         return self.text_results.popleft()
+
+    async def text_read(
+        self,
+        *,
+        selector: dict[str, Any],
+    ) -> dict[str, Any]:
+        self.calls.append(("ui.text.read", dict(selector)))
+        return self.read_results.popleft()
 
 
 @pytest.mark.asyncio
@@ -75,6 +84,90 @@ async def test_ui_text_probe_blocks_when_execution_is_unavailable() -> None:
     assert result["status"] == "BLOCKED"
     assert probe["status"] == "BLOCKED"
     assert probe["reason"] == "probe execution not available"
+
+
+@pytest.mark.asyncio
+async def test_ui_text_probe_read_mode_uses_read_adapter_without_expected() -> None:
+    session = TextProbeSession()
+    session.read_results.extend(
+        [
+            {
+                "status": "PASS",
+                "text": "Fixture cue zero",
+                "source": "ValuePattern",
+                "full_tree": {"must": "not leak"},
+            },
+            {
+                "status": "PASS",
+                "text": "Fixture cue one",
+                "source": "ValuePattern",
+                "full_tree": {"must": "not leak"},
+            },
+        ]
+    )
+
+    result = await runner(
+        session,
+        {"ui.text.read": session.text_read},
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "ui.text",
+                "name": "cue_text",
+                "action": "read",
+                "selector": {"automation_id": "CueTextBox"},
+            }
+        )
+    )
+
+    before = before_probe(result)
+    probe = after_probe(result)
+    assert result["status"] == "PASS"
+    assert before["status"] == "PASS"
+    assert before["value"] == "Fixture cue zero"
+    assert probe["status"] == "PASS"
+    assert probe["value"] == "Fixture cue one"
+    assert probe["source"] == "ValuePattern"
+    assert session.calls == [
+        ("ui.text.read", {"automation_id": "CueTextBox"}),
+        ("ui.invoke", {"automation_id": "ToggleSetting"}),
+        ("ui.text.read", {"automation_id": "CueTextBox"}),
+    ]
+    assert "full_tree" not in str(before)
+    assert "full_tree" not in str(probe)
+
+
+@pytest.mark.asyncio
+async def test_ui_text_probe_read_mode_preserves_blocked_status_without_expected() -> None:
+    session = TextProbeSession()
+    session.read_results.extend(
+        [
+            {"status": "BLOCKED", "reason": "bridge not connected"},
+            {"status": "BLOCKED", "reason": "bridge not connected"},
+        ]
+    )
+
+    result = await runner(
+        session,
+        {"ui.text.read": session.text_read},
+    ).run(
+        one_probe_plan(
+            {
+                "kind": "ui.text",
+                "name": "cue_text",
+                "action": "read",
+                "selector": {"automation_id": "CueTextBox"},
+            }
+        )
+    )
+
+    before = before_probe(result)
+    probe = after_probe(result)
+    assert result["status"] == "BLOCKED"
+    assert before["status"] == "BLOCKED"
+    assert before["reason"] == "bridge not connected"
+    assert probe["status"] == "BLOCKED"
+    assert probe["reason"] == "bridge not connected"
 
 
 @pytest.mark.asyncio

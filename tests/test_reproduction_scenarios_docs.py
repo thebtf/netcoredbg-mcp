@@ -153,11 +153,25 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
         assert "broader" in row
         assert "None in netcoredbg-mcp." not in row
 
+    row_250 = _issue_row(backlog, "#250")
+    assert "CR-021" in row_250
+    assert "focus proof" in row_250
+    assert "selection confirmation" in row_250
+
+    row_254 = _issue_row(backlog, "#254")
+    assert "CR-021" in row_254
+    assert "selection" in row_254
+    assert "selected row/index/content" in row_254
+
     row = _issue_row(backlog, "#270")
     assert "Target helper slice covered" in row
     assert "broader FR remains open" in row
     assert 'ui_text(action="read")' in row
     assert 'ui_grid(action="snapshot")' in row
+    assert "CR-021" in row
+    assert "ui.text.read" in row
+    assert "ui_focus" in row
+    assert "confirmed DataGrid selection" in row
     assert "cells" in row
     assert "cell_values" in row
     assert "None in netcoredbg-mcp." not in row
@@ -195,7 +209,7 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "agent_mode",
             "broad lifecycle/orchestration closure",
         ],
-        "#270": ["CR-017", "ui_property", "TextBox mutation/set-text"],
+        "#270": ["CR-017", "CR-021", "ui_property", "TextBox mutation/set-text"],
         "#271": ["CR-019", "debug_preflight", "tracepoint guard", "cleanup contract"],
         "#272": [
             "app diagnostics",

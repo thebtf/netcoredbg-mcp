@@ -133,6 +133,10 @@ OPERATION_SCHEMAS: dict[str, OperationSchema] = {
         "ui.text.assert",
         ("selector",),
     ),
+    "ui.text.read": OperationSchema(
+        "ui.text.read",
+        ("selector",),
+    ),
     "ui.invoke": OperationSchema(
         "ui.invoke",
         ("selector",),

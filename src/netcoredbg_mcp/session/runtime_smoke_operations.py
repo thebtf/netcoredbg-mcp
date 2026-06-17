@@ -349,6 +349,46 @@ def ui_operation_adapters(
             }
         return {"status": "PASS", "matched": True, "text": text, "result": text_result}
 
+    async def text_read(**args: Any) -> dict[str, Any]:
+        backend = await _backend_or_blocked(ensure_ui_connected)
+        if isinstance(backend, dict):
+            return backend
+        selector = _selector(args)
+        try:
+            text_result = await backend.extract_text(**_selector_kwargs(selector))
+        except Exception as exc:
+            result = {"status": "BLOCKED", "reason": str(exc)}
+            if _is_selector_miss(result):
+                return _selector_blocked(selector, result=result)
+            return {
+                "status": "BLOCKED",
+                "reason": str(exc),
+                "requested": {"selector": selector},
+                "accepted": {"backend": "connected UI backend supporting ui.text.read"},
+                "next_step": "Inspect UI backend or bridge transport diagnostics.",
+                "result": result,
+            }
+        if not isinstance(text_result, dict):
+            return {
+                "status": "FAIL",
+                "reason": "text backend returned non-object result",
+                "selector": selector,
+                "result": text_result,
+            }
+        if _is_selector_miss(text_result):
+            return _selector_blocked(selector, result=_bounded_text_result(text_result))
+        if not _is_backend_success(text_result):
+            result = _bounded_text_result(text_result)
+            result["status"] = str(text_result.get("status") or "FAIL")
+            result["reason"] = str(text_result.get("reason") or "text read failed")
+            result["selector"] = selector
+            return result
+        result = _bounded_text_result(text_result)
+        result["status"] = "PASS"
+        result["text"] = str(text_result.get("text", ""))
+        result["selector"] = selector
+        return result
+
     async def invoke(**args: Any) -> dict[str, Any]:
         backend = await _backend_or_blocked(ensure_ui_connected)
         if isinstance(backend, dict):
@@ -566,6 +606,7 @@ def ui_operation_adapters(
         "ui.list.toggle_item_child": list_toggle_child,
         "ui.focus.assert": focus_assert,
         "ui.text.assert": text_assert,
+        "ui.text.read": text_read,
         "ui.get_property": get_property,
         "ui.find_element": find_element,
         "ui.set_focus": set_focus,
@@ -2282,6 +2323,22 @@ def _selector_blocked(
         "next_step": "Inspect the fixture UI tree and update the selector.",
         "result": result,
     }
+
+
+def _bounded_text_result(result: dict[str, Any]) -> dict[str, Any]:
+    allowed_keys = (
+        "status",
+        "text",
+        "source",
+        "found",
+        "reason",
+        "error",
+        "matched",
+        "automation_id",
+        "name",
+        "control_type",
+    )
+    return {key: result[key] for key in allowed_keys if key in result}
 
 
 def _selector(args: dict[str, Any]) -> dict[str, Any]:
