@@ -133,6 +133,7 @@ class RuntimeStateOracleRunner:
             service_adapters=self._service_adapters,
             clock=self._clock,
             session=self._session,
+            diagnostic_launch=self._diagnostic_launch,
         )
         try:
             budgets = _budgets_from_plan(plan)
@@ -175,6 +176,18 @@ class RuntimeStateOracleRunner:
                 baseline=baseline_result,
                 cleanup=cleanup,
                 extra=({"blocked": baseline_blocked_payload} if baseline_blocked_payload else None),
+            )
+        effective_diagnostic_launch = (
+            _diagnostic_launch_from_baseline_result(baseline_result)
+            or self._diagnostic_launch
+        )
+        if effective_diagnostic_launch != self._diagnostic_launch:
+            self._diagnostic_launch = effective_diagnostic_launch
+            context = ActionContext(
+                service_adapters=self._service_adapters,
+                clock=self._clock,
+                session=self._session,
+                diagnostic_launch=self._diagnostic_launch,
             )
 
         case_results: list[dict[str, Any]] = []
@@ -537,6 +550,27 @@ def _diagnostic_launch_from_plan(plan: dict[str, Any]) -> dict[str, Any] | None:
         return None
     launch = app_diagnostics.get("diagnostic_launch")
     return normalize_app_diagnostics_launch_contract(launch)
+
+
+def _diagnostic_launch_from_baseline_result(
+    baseline_result: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(baseline_result, dict):
+        return None
+    steps = baseline_result.get("steps")
+    if not isinstance(steps, list):
+        return None
+    for step in reversed(steps):
+        if not isinstance(step, dict):
+            continue
+        result = step.get("result")
+        if not isinstance(result, dict):
+            continue
+        diagnostic_launch = result.get("diagnostic_launch")
+        normalized = normalize_app_diagnostics_launch_contract(diagnostic_launch)
+        if normalized is not None:
+            return normalized
+    return None
 
 
 def _collect_v2_evidence_refs(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:

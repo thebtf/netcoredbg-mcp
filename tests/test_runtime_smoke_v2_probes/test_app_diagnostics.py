@@ -10,6 +10,7 @@ from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner
 from netcoredbg_mcp.session.runtime_smoke_schema import (
     DIAGNOSTIC_EVIDENCE_LIMITS,
     DIAGNOSTIC_SCHEMA_VERSION,
+    app_diagnostics_launch_contract,
 )
 from netcoredbg_mcp.session.runtime_smoke_v2.runner import validate_v2_plan_contract
 
@@ -77,11 +78,215 @@ class _RecordingAdvancingClock:
         self._now += max(1, idle_ms) / 1000
 
 
+class LaunchDiagnosticSmokeSession(ProbeSmokeSession):
+    def __init__(self) -> None:
+        super().__init__()
+        self.launches: list[dict[str, Any]] = []
+
+    async def launch(self, **kwargs: Any) -> dict[str, Any]:
+        self.launches.append(dict(kwargs))
+        return {"status": "PASS", "profile": kwargs.get("profile", "isolated")}
+
+
+def _launch_diagnostics_plan(
+    diagnostic_path: Path,
+    probe: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema": "netcoredbg.runtime_smoke.v2",
+        "diagnostics": {
+            "app_diagnostics": {
+                "diagnostic_launch": app_diagnostics_launch_contract(
+                    evidence_dir=str(diagnostic_path.parent),
+                    file_name=diagnostic_path.name,
+                )
+            }
+        },
+        "baseline": {
+            "steps": [
+                {
+                    "id": "launch-with-diagnostics",
+                    "kind": "isolated_profile.launch",
+                    "launch": {
+                        "program": "SmokeTestApp.dll",
+                        "profile": "isolated",
+                    },
+                }
+            ]
+        },
+        "cases": [
+            {
+                "id": "diagnostic_case",
+                "transitions": [
+                    {
+                        "id": "read_app_diagnostics",
+                        "action": {
+                            "kind": "ui.invoke",
+                            "selector": {"automation_id": "RefreshDiagnostics"},
+                        },
+                        "probes": [probe],
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def _launch_diagnostics_runner(
+    session: LaunchDiagnosticSmokeSession,
+) -> RuntimeSmokeRunner:
+    return RuntimeSmokeRunner(
+        session,
+        service_adapters={
+            "launch": session.launch,
+            "ui.invoke": session.invoke,
+        },
+    )
+
+
 def test_validate_v2_plan_contract_accepts_app_diagnostics_probe_kind() -> None:
     validation = validate_v2_plan_contract(one_probe_plan(_app_diagnostics()))
 
     assert validation["validation_errors"] == []
     assert "app_diagnostics" in validation["accepted_probe_kinds"]
+
+
+@pytest.mark.asyncio
+async def test_app_diagnostics_defaults_to_launch_advertised_json_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    diagnostic_path = Path("runtime-smoke-diagnostics") / "launch-advertised-app-diagnostics.json"
+    diagnostic_path.parent.mkdir(parents=True)
+    diagnostic_path.write_text(
+        json.dumps(
+            _app_diagnostics(
+                app={"name": "LaunchAdvertisedApp", "process_name": "dotnet"},
+                status="PASS",
+                observations=[
+                    {
+                        "kind": "app.snapshot",
+                        "status": "PASS",
+                        "reason": "launch advertised diagnostic observed",
+                        "next_step": "No action required.",
+                    }
+                ],
+            )
+        ),
+        encoding="utf-8",
+    )
+    session = LaunchDiagnosticSmokeSession()
+
+    result = await _launch_diagnostics_runner(session).run(
+        _launch_diagnostics_plan(
+            diagnostic_path,
+            _app_diagnostics(
+                phase="after",
+                app={"name": "PlaceholderApp"},
+                status="PASS",
+                observations=[],
+            ),
+        )
+    )
+
+    probe = after_probe(result)
+    assert result["status"] == "PASS"
+    assert probe["status"] == "PASS"
+    assert probe["value"]["app"]["name"] == "LaunchAdvertisedApp"
+    assert probe["value"]["wait_json"]["path"] == diagnostic_path.as_posix()
+    assert probe["value"]["wait_json"]["observed"] is True
+    assert result["diagnostic_launch"]["evidence"]["path"] == diagnostic_path.as_posix()
+    assert session.launches[0]["env"]["NETCOREDBG_MCP_APP_DIAGNOSTICS_PATH"] == (
+        diagnostic_path.as_posix()
+    )
+
+
+@pytest.mark.asyncio
+async def test_app_diagnostics_launch_advertised_default_blocks_with_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    diagnostic_path = Path("runtime-smoke-diagnostics") / (
+        "missing-launch-advertised-app-diagnostics.json"
+    )
+    session = LaunchDiagnosticSmokeSession()
+
+    result = await _launch_diagnostics_runner(session).run(
+        _launch_diagnostics_plan(
+            diagnostic_path,
+            _app_diagnostics(
+                phase="after",
+                app={"name": "LaunchAdvertisedApp"},
+                status="PASS",
+                observations=[],
+            ),
+        )
+    )
+
+    probe = after_probe(result)
+    assert result["status"] == "BLOCKED"
+    assert probe["status"] == "BLOCKED"
+    assert probe["reason"] == "diagnostic JSON not observed"
+    assert probe["value"]["wait_json"]["path"] == diagnostic_path.as_posix()
+    assert probe["value"]["wait_json"]["observed"] is False
+    assert probe["requested"]["wait_json"]["path"] == diagnostic_path.as_posix()
+
+
+@pytest.mark.asyncio
+async def test_app_diagnostics_explicit_wait_json_overrides_launch_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    launch_path = Path("runtime-smoke-diagnostics") / "launch-advertised-app-diagnostics.json"
+    explicit_path = tmp_path / "explicit-app-diagnostics.json"
+    launch_path.parent.mkdir(parents=True)
+    launch_path.write_text(
+        json.dumps(
+            _app_diagnostics(
+                app={"name": "LaunchAdvertisedApp"},
+                status="PASS",
+                observations=[],
+            )
+        ),
+        encoding="utf-8",
+    )
+    explicit_path.write_text(
+        json.dumps(
+            _app_diagnostics(
+                app={"name": "ExplicitDiagnosticApp"},
+                status="PASS",
+                observations=[],
+            )
+        ),
+        encoding="utf-8",
+    )
+    session = LaunchDiagnosticSmokeSession()
+
+    result = await _launch_diagnostics_runner(session).run(
+        _launch_diagnostics_plan(
+            launch_path,
+            _app_diagnostics(
+                phase="after",
+                app={"name": "PlaceholderApp"},
+                status="PASS",
+                observations=[],
+                wait_json={
+                    "path": str(explicit_path),
+                    "timeout_ms": 0,
+                    "poll_interval_ms": 0,
+                },
+            ),
+        )
+    )
+
+    probe = after_probe(result)
+    assert result["status"] == "PASS"
+    assert probe["value"]["app"]["name"] == "ExplicitDiagnosticApp"
+    assert probe["value"]["wait_json"]["path"] == str(explicit_path)
+    assert result["diagnostic_launch"]["evidence"]["path"] == launch_path.as_posix()
 
 
 @pytest.mark.asyncio
