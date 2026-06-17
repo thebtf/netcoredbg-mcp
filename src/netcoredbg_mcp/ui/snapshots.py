@@ -56,8 +56,21 @@ async def query_ui_fields(
             "allowed_fields": list(ALLOWED_UI_FIELDS),
         }
 
+    tried_grid_selection = _is_datagrid_selection_query(selector, fields)
+    if tried_grid_selection:
+        grid_selection = await _query_datagrid_selection(backend, selector)
+        if grid_selection is not None:
+            return grid_selection
+
     result = await backend.query_ui(dict(selector), list(fields), max_results=max_results)
     if result.get("unsupported") is True or result.get("status") in {"BLOCKED", "UNSUPPORTED"}:
+        if (
+            not tried_grid_selection
+            and _can_try_datagrid_selection_fallback(selector, fields)
+        ):
+            grid_selection = await _query_datagrid_selection(backend, selector)
+            if grid_selection is not None and grid_selection.get("status") != "BLOCKED":
+                return grid_selection
         return {
             **result,
             "status": "BLOCKED",
@@ -190,6 +203,94 @@ def diff_ui_snapshots(
 def invalid_ui_fields(fields: list[str]) -> list[str]:
     allowed = set(ALLOWED_UI_FIELDS)
     return sorted(field for field in fields if field not in allowed)
+
+
+def _is_datagrid_selection_query(selector: dict[str, Any], fields: list[str]) -> bool:
+    if list(fields) != ["selection"]:
+        return False
+    if selector.get("xpath"):
+        return False
+    control_type = str(
+        selector.get("control_type")
+        or selector.get("controlType")
+        or ""
+    ).lower()
+    return control_type in {"datagrid", "data_grid", "grid"}
+
+
+def _can_try_datagrid_selection_fallback(selector: dict[str, Any], fields: list[str]) -> bool:
+    if list(fields) != ["selection"]:
+        return False
+    if selector.get("xpath"):
+        return False
+    return bool(
+        selector.get("automation_id")
+        or selector.get("automationId")
+        or selector.get("name")
+    )
+
+
+async def _query_datagrid_selection(
+    backend: Any,
+    selector: dict[str, Any],
+) -> dict[str, Any] | None:
+    grid_selected_rows = getattr(backend, "grid_selected_rows", None)
+    if not callable(grid_selected_rows):
+        return None
+    result = await grid_selected_rows(dict(selector), columns=[])
+    if not isinstance(result, dict):
+        return None
+    if result.get("unsupported") is True or result.get("status") in {"BLOCKED", "UNSUPPORTED"}:
+        return {
+            **result,
+            "status": "BLOCKED",
+            "elements": [],
+        }
+    selected_rows = result.get("selected_rows")
+    if not isinstance(selected_rows, list):
+        selected_rows = []
+    selected_rows = [
+        _strip_unbounded_evidence(row)
+        for row in selected_rows
+        if isinstance(row, dict)
+    ]
+    element = {
+        "element_id": selector_ref(selector),
+        "selection": {
+            "source": "grid_selected_rows",
+            "selected_count": len(selected_rows),
+            "selected_rows": selected_rows,
+        },
+    }
+    evidence_ref = {
+        "kind": "ui_query",
+        "ref": f"ui_query:{selector_ref(selector)}",
+        "summary": (
+            f"returned=1 omitted=0 fields=selection "
+            f"selected_rows={len(selected_rows)}"
+        ),
+    }
+    return {
+        "status": result.get("status", "PASS"),
+        "fields": ["selection"],
+        "elements": [element],
+        "element_count": 1,
+        "returned_count": 1,
+        "omitted_count": 0,
+        "evidence_refs": [evidence_ref],
+    }
+
+
+def _strip_unbounded_evidence(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _strip_unbounded_evidence(item)
+            for key, item in value.items()
+            if key not in {"full_tree", "raw_tree", "ui_tree", "window_tree"}
+        }
+    if isinstance(value, list):
+        return [_strip_unbounded_evidence(item) for item in value]
+    return value
 
 
 def _merge_reported_counts(

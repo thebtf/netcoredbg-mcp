@@ -183,8 +183,10 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
 
     row_254 = _issue_row(backlog, "#254")
     assert "CR-021" in row_254
+    assert "CR-027" in row_254
     assert "selection" in row_254
     assert "selected row/index/content" in row_254
+    assert "ui_query" in row_254
 
     row = _issue_row(backlog, "#270")
     assert "Target helper slice covered" in row
@@ -213,7 +215,7 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
 
     expected_remaining_terms = {
         "#250": ["focus", "selected-item", "screenshot-orientation"],
-        "#254": ["ui_query", "selected row/index/content"],
+        "#254": ["CR-027", "ui_query", "selected row/index/content", "branch-local GREEN"],
         "#268": [
             "runtime_smoke_validate_plan",
             "runtime_smoke_run_plan",
@@ -277,8 +279,10 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
         ],
         "#254": [
             "commented",
+            "CR-027",
             "selected row/index/content",
-            "ui_query consistency",
+            "ui_query",
+            "review/merge/post-merge evidence",
         ],
         "#268": [
             "commented",

@@ -222,6 +222,28 @@ class UnsupportedEvidenceBackend:
         }
 
 
+class UnsupportedGridFallbackBackend(FakeEvidenceBackend):
+    async def grid_selected_rows(
+        self,
+        selector: dict[str, Any],
+        columns: list[str] | None = None,
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {
+                "grid_selected_rows": {
+                    "selector": dict(selector),
+                    "columns": list(columns or []),
+                }
+            }
+        )
+        return {
+            "status": "UNSUPPORTED",
+            "unsupported": True,
+            "backend": "pywinauto",
+            "reason": "DataGrid selection evidence requires the FlaUI bridge backend.",
+        }
+
+
 class FakeUiSession:
     def __init__(self) -> None:
         self.runtime_smoke = RuntimeSmokeSession()
@@ -266,6 +288,218 @@ async def test_query_ui_returns_only_requested_fields_and_bounded_counts() -> No
     ]
     assert "full_tree" not in str(result)
     assert backend.calls[0]["fields"] == ["focus", "selection", "text"]
+
+
+@pytest.mark.asyncio
+async def test_query_ui_datagrid_selection_uses_grid_selected_rows() -> None:
+    backend = FakeEvidenceBackend()
+    backend.responses = [
+        {
+            "status": "BLOCKED",
+            "reason": "FlaUI bridge error: Internal error: Element not found",
+            "elements": [],
+        }
+    ]
+
+    result = await query_ui_fields(
+        backend,
+        {"automation_id": "dataGrid2", "control_type": "DataGrid"},
+        fields=["selection"],
+        max_results=1,
+    )
+
+    assert result["status"] == "PASS"
+    assert result["fields"] == ["selection"]
+    assert result["element_count"] == 1
+    assert result["returned_count"] == 1
+    assert result["elements"] == [
+        {
+            "element_id": "dataGrid2",
+            "selection": {
+                "source": "grid_selected_rows",
+                "selected_count": 1,
+                "selected_rows": [
+                    {
+                        "index": 1,
+                        "automation_id": "Row_1",
+                        "cells": {"Phrase": "Fixture cue two"},
+                    }
+                ],
+            },
+        }
+    ]
+    assert backend.calls == [
+        {
+            "grid_selected_rows": {
+                "selector": {"automation_id": "dataGrid2", "control_type": "DataGrid"},
+                "columns": [],
+            }
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_query_ui_datagrid_selection_honors_xpath_with_generic_resolver() -> None:
+    backend = FakeEvidenceBackend()
+    backend.responses = [
+        {
+            "status": "PASS",
+            "elements": [
+                {
+                    "element_id": "xpath-grid",
+                    "selection": {"selected": True},
+                }
+            ],
+            "element_count": 1,
+        }
+    ]
+
+    result = await query_ui_fields(
+        backend,
+        {"xpath": "//DataGrid[2]", "control_type": "DataGrid"},
+        fields=["selection"],
+        max_results=1,
+    )
+
+    assert result["status"] == "PASS"
+    assert result["elements"] == [
+        {
+            "element_id": "xpath-grid",
+            "selection": {"selected": True},
+        }
+    ]
+    assert backend.calls == [
+        {
+            "selector": {"xpath": "//DataGrid[2]", "control_type": "DataGrid"},
+            "fields": ["selection"],
+            "max_results": 1,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_query_ui_datagrid_selection_falls_back_after_automation_id_only_miss() -> None:
+    backend = FakeEvidenceBackend()
+    backend.responses = [
+        {
+            "status": "BLOCKED",
+            "reason": "FlaUI bridge error: Internal error: Element not found",
+            "elements": [],
+        }
+    ]
+
+    result = await query_ui_fields(
+        backend,
+        {"automation_id": "dataGrid2"},
+        fields=["selection"],
+        max_results=1,
+    )
+
+    assert result["status"] == "PASS"
+    assert result["elements"][0]["selection"]["source"] == "grid_selected_rows"
+    assert result["elements"][0]["selection"]["selected_rows"] == [
+        {
+            "index": 1,
+            "automation_id": "Row_1",
+            "cells": {"Phrase": "Fixture cue two"},
+        }
+    ]
+    assert backend.calls == [
+        {
+            "selector": {"automation_id": "dataGrid2"},
+            "fields": ["selection"],
+            "max_results": 1,
+        },
+        {
+            "grid_selected_rows": {
+                "selector": {"automation_id": "dataGrid2"},
+                "columns": [],
+            }
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_query_ui_datagrid_selection_keeps_xpath_miss_blocked() -> None:
+    backend = FakeEvidenceBackend()
+    backend.responses = [
+        {
+            "status": "BLOCKED",
+            "reason": "FlaUI bridge error: Internal error: Element not found",
+            "elements": [],
+        }
+    ]
+
+    result = await query_ui_fields(
+        backend,
+        {"xpath": "//DataGrid[2]"},
+        fields=["selection"],
+        max_results=1,
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "FlaUI bridge error: Internal error: Element not found"
+    assert result["elements"] == []
+    assert backend.calls == [
+        {
+            "selector": {"xpath": "//DataGrid[2]"},
+            "fields": ["selection"],
+            "max_results": 1,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_query_ui_datagrid_selection_keeps_generic_block_when_fallback_blocks() -> None:
+    backend = UnsupportedGridFallbackBackend()
+    backend.responses = [
+        {
+            "status": "BLOCKED",
+            "reason": "FlaUI bridge error: Internal error: Element not found",
+            "elements": [],
+        }
+    ]
+
+    result = await query_ui_fields(
+        backend,
+        {"automation_id": "notAGrid"},
+        fields=["selection"],
+        max_results=1,
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "FlaUI bridge error: Internal error: Element not found"
+    assert result["elements"] == []
+
+
+@pytest.mark.asyncio
+async def test_query_ui_explicit_datagrid_does_not_repeat_missing_grid_fallback() -> None:
+    backend = FakeEvidenceBackend()
+    backend.grid_selected_rows = None  # type: ignore[method-assign]
+    backend.responses = [
+        {
+            "status": "BLOCKED",
+            "reason": "focused UI evidence requires FlaUI bridge",
+            "elements": [],
+        }
+    ]
+
+    result = await query_ui_fields(
+        backend,
+        {"automation_id": "dataGrid2", "control_type": "DataGrid"},
+        fields=["selection"],
+        max_results=1,
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "focused UI evidence requires FlaUI bridge"
+    assert backend.calls == [
+        {
+            "selector": {"automation_id": "dataGrid2", "control_type": "DataGrid"},
+            "fields": ["selection"],
+            "max_results": 1,
+        }
+    ]
 
 
 @pytest.mark.asyncio
