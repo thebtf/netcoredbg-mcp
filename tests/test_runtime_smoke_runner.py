@@ -3389,6 +3389,158 @@ async def test_ui_operation_adapters_grid_select_identities_resolves_visible_ind
 
 
 @pytest.mark.asyncio
+async def test_grid_select_identities_rejects_empty_identity_values() -> None:
+    class FakeBackend:
+        pass
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.grid.select_identities"](
+        selector={"automation_id": "dataGrid"},
+        row_identities=["Cue 016", ""],
+        identity={"column": "PhraseId"},
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "row_identities list cannot contain empty values"
+
+
+@pytest.mark.asyncio
+async def test_grid_select_identities_matches_only_stable_identity_column() -> None:
+    class FakeBackend:
+        async def grid_snapshot(
+            self,
+            selector: dict[str, Any],
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "visible_rows": [
+                    {
+                        "index": 1,
+                        "row_index": 1,
+                        "cells": {"PhraseId": "Cue 001", "Text": "Cue 016"},
+                    },
+                    {
+                        "index": 2,
+                        "row_index": 2,
+                        "cells": {"PhraseId": "Cue 016", "Text": "Actual"},
+                    },
+                ],
+            }
+
+        async def grid_select_range(
+            self,
+            selector: dict[str, Any],
+            start_index: int,
+            end_index: int,
+        ) -> dict[str, Any]:
+            self.start_index = start_index
+            self.end_index = end_index
+            return {"status": "PASS"}
+
+        async def grid_selected_rows(
+            self,
+            selector: dict[str, Any],
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "selected_rows": [
+                    {
+                        "index": 2,
+                        "row_index": 2,
+                        "cells": {"PhraseId": "Cue 016", "Text": "Actual"},
+                    }
+                ],
+            }
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    result = await ui_operation_adapters(backend_provider)["ui.grid.select_identities"](
+        selector={"automation_id": "dataGrid"},
+        row_identities=["Cue 016"],
+        identity={"column": "PhraseId"},
+        columns=["PhraseId", "Text"],
+    )
+
+    assert result["status"] == "PASS"
+    assert backend.start_index == 2
+    assert backend.end_index == 2
+    assert result["resolved_rows"] == [
+        {"index": 2, "identity": "Cue 016", "row_index": 2}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_grid_select_identities_confirms_selection_in_ui_order() -> None:
+    class FakeBackend:
+        async def grid_snapshot(
+            self,
+            selector: dict[str, Any],
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "visible_rows": [
+                    {"index": 5, "row_index": 16, "cells": {"PhraseId": "Cue 016"}},
+                    {"index": 6, "row_index": 17, "cells": {"PhraseId": "Cue 017"}},
+                    {"index": 7, "row_index": 18, "cells": {"PhraseId": "Cue 018"}},
+                ],
+            }
+
+        async def grid_select_range(
+            self,
+            selector: dict[str, Any],
+            start_index: int,
+            end_index: int,
+        ) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "selected_range": {"start": start_index, "end": end_index},
+            }
+
+        async def grid_selected_rows(
+            self,
+            selector: dict[str, Any],
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "selected_rows": [
+                    {"index": 5, "row_index": 16, "cells": {"PhraseId": "Cue 016"}},
+                    {"index": 6, "row_index": 17, "cells": {"PhraseId": "Cue 017"}},
+                    {"index": 7, "row_index": 18, "cells": {"PhraseId": "Cue 018"}},
+                ],
+            }
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.grid.select_identities"](
+        selector={"automation_id": "dataGrid"},
+        row_identities=["Cue 018", "Cue 016", "Cue 017"],
+        identity={"column": "PhraseId"},
+        columns=["PhraseId"],
+    )
+
+    assert result["status"] == "PASS"
+    assert result["confirmed_selection"] is True
+    assert result["selected_identities"] == ["Cue 018", "Cue 016", "Cue 017"]
+    assert result["observed_selected_identities"] == [
+        "Cue 016",
+        "Cue 017",
+        "Cue 018",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_ui_operation_adapters_grid_click_row_requires_backend_click_primitive() -> None:
     class FakeBackend:
         async def grid_snapshot(

@@ -263,11 +263,17 @@ def ui_operation_adapters(
         backend = await _backend_or_blocked(ensure_ui_connected)
         if isinstance(backend, dict):
             return backend
-        row_identities = _string_list(args.get("row_identities"))
-        if not row_identities:
+        raw_row_identities = args.get("row_identities")
+        if not isinstance(raw_row_identities, list) or not raw_row_identities:
             return _adapter_blocked(
                 "ui.grid.select_identities",
                 "row_identities list cannot be empty",
+            )
+        row_identities = [str(item).strip() for item in raw_row_identities]
+        if any(not item for item in row_identities):
+            return _adapter_blocked(
+                "ui.grid.select_identities",
+                "row_identities list cannot contain empty values",
             )
         return await select_grid_rows_by_identities(
             backend,
@@ -2267,12 +2273,6 @@ def _mapping_list(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     return [dict(item) for item in value if isinstance(item, Mapping)]
-
-
-def _string_list(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item) for item in value if str(item)]
 
 
 def _screen_point(value: Any) -> tuple[int, int] | None:

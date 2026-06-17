@@ -310,13 +310,20 @@ async def select_grid_rows_by_identities(
     rows: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Select visible DataGrid rows by stable identity and confirm the selection."""
-    requested_identities = [str(item) for item in row_identities if str(item)]
+    requested_identities = [str(item).strip() for item in row_identities]
     identity_payload = _identity_payload(identity, columns)
     evidence_columns = _identity_columns(identity_payload, columns)
     if not requested_identities:
         return {
             "status": "BLOCKED",
             "reason": "grid identity selection requires row identities",
+            "requested": {"row_identities": row_identities},
+            "accepted": {"row_identities": "non-empty list of unique row identities"},
+        }
+    if any(not item for item in requested_identities):
+        return {
+            "status": "BLOCKED",
+            "reason": "grid identity selection contains empty identities",
             "requested": {"row_identities": row_identities},
             "accepted": {"row_identities": "non-empty list of unique row identities"},
         }
@@ -359,12 +366,12 @@ async def select_grid_rows_by_identities(
 
     resolved_rows: list[dict[str, Any]] = []
     for row_identity in requested_identities:
-        matches = _matching_visible_rows(
-            visible_rows,
-            row_index=None,
-            row_key=row_identity,
-            identity=identity_payload,
-        )
+        matches = [
+            dict(row)
+            for row in visible_rows
+            if isinstance(row, Mapping)
+            and _row_identity(row, identity_payload) == row_identity
+        ]
         if not matches:
             return {
                 "status": "BLOCKED",
@@ -447,7 +454,10 @@ async def select_grid_rows_by_identities(
         for row in selected_rows
         if isinstance(row, Mapping)
     ]
-    if observed_identities != requested_identities:
+    if (
+        len(observed_identities) != len(requested_identities)
+        or set(observed_identities) != set(requested_identities)
+    ):
         return {
             "status": "FAIL",
             "reason": "selected identity confirmation failed",
@@ -464,6 +474,7 @@ async def select_grid_rows_by_identities(
     result["confirmed_selection"] = True
     result["selected_indices"] = indices
     result["selected_identities"] = requested_identities
+    result["observed_selected_identities"] = observed_identities
     result["resolved_rows"] = [_compact_row_ref(row, identity_payload) for row in resolved_rows]
     result["selected_rows"] = selected_rows
     return result
