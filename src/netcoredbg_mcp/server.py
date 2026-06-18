@@ -67,6 +67,11 @@ async def resolve_project_root(ctx: Context, session: SessionManager) -> Path | 
     return project_root
 
 
+async def resolve_project_root_readonly(ctx: Context, _session: SessionManager) -> Path | None:
+    """Resolve the current project root without mutating shared session scope."""
+    return await get_project_root(ctx)
+
+
 def create_server(project_path: str | None = None) -> FastMCP:
     """Create and configure the MCP server.
 
@@ -300,6 +305,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         session=session,
         check_session_access=_check_session_access,
         resolve_project_root=resolve_project_root,
+        resolve_project_root_readonly=resolve_project_root_readonly,
     )
 
     register_ui_tools(

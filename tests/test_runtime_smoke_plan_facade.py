@@ -27,6 +27,7 @@ class PlanFacadeSession:
         self.project_path: str | None = None
         self.resolved_project_root = False
         self.validated_paths: list[str] = []
+        self.validated_project_paths: list[str | None] = []
         self.path_error: Exception | None = None
 
     async def launch(self, **_: Any) -> dict[str, Any]:
@@ -39,6 +40,10 @@ class PlanFacadeSession:
             raise self.path_error
         return path
 
+    def validate_path_for_project(self, path: str, project_path: str | None) -> str:
+        self.validated_project_paths.append(project_path)
+        return self.validate_path(path)
+
 
 async def _resolve_project_root(_ctx: Any, _session: Any) -> None:
     raise AssertionError("validate-only facade must not resolve project paths")
@@ -49,18 +54,36 @@ async def _resolve_project_root_ok(_ctx: Any, session: PlanFacadeSession) -> Non
     session.resolved_project_root = True
 
 
+async def _resolve_project_root_readonly_ok(
+    _ctx: Any,
+    session: PlanFacadeSession,
+) -> str:
+    session.resolved_project_root = True
+    return "D:\\project"
+
+
 def _register(
     capturing_mcp,
     session: PlanFacadeSession,
     *,
     check_session_access: Any | None = None,
     resolve_project_root: Any | None = None,
+    resolve_project_root_readonly: Any | None = None,
 ) -> None:
+    root_resolver = resolve_project_root or _resolve_project_root
+    readonly_resolver = resolve_project_root_readonly
+    if readonly_resolver is None:
+        readonly_resolver = (
+            _resolve_project_root_readonly_ok
+            if root_resolver is _resolve_project_root_ok
+            else root_resolver
+        )
     register_runtime_smoke_tools(
         mcp=capturing_mcp,
         session=session,
         check_session_access=check_session_access or (lambda ctx: None),
-        resolve_project_root=resolve_project_root or _resolve_project_root,
+        resolve_project_root=root_resolver,
+        resolve_project_root_readonly=readonly_resolver,
     )
 
 
@@ -301,6 +324,39 @@ async def test_runtime_smoke_validate_plan_path_does_not_claim_session_ownership
     assert data["can_run"] is True
     assert session.resolved_project_root is True
     assert session.validated_paths == [str(plan_path)]
+    assert session.launch_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_validate_plan_path_does_not_mutate_project_scope(
+    capturing_mcp,
+    tmp_path,
+) -> None:
+    session = PlanFacadeSession()
+    session.project_path = "D:\\owner-project"
+
+    _register(capturing_mcp, session, resolve_project_root=_resolve_project_root_ok)
+    plan_path = tmp_path / "runtime-smoke-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema": "netcoredbg.runtime_smoke.v2",
+                "name": "validate-from-file",
+                "cases": [{"id": "case-1", "transitions": []}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    response = await capturing_mcp.tools["runtime_smoke_validate_plan"](
+        ctx=None,
+        plan_path=str(plan_path),
+    )
+    data = response["data"]
+
+    assert data["status"] == "PASS"
+    assert session.project_path == "D:\\owner-project"
+    assert session.validated_project_paths == ["D:\\project"]
     assert session.launch_calls == 0
 
 
