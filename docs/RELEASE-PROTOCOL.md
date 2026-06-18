@@ -35,9 +35,9 @@ It is mandatory when a change affects any of these surfaces:
 | Version parity | Check `pyproject.toml`, `src/netcoredbg_mcp/__init__.py`, `uv.lock`, README release copy, changelog, and release notes | Any public version surface disagrees with `X.Y.Z` / `vX.Y.Z` |
 | Changelog and release notes | `CHANGELOG.md` has a dated `X.Y.Z` section; `RELEASE_NOTES.md` has user-facing notes | Either file missing or contains only generic placeholder text |
 | Documentation refresh | README and README.ru reflect the current tool/test counts and release highlights; docs examples touched since last tag have matching tests | Public docs still describe an older released surface |
-| Critical suite | `uv run --locked pytest tests/critical -m critical` | Any `@critical` test fails or the suite cannot run |
-| Runtime-smoke docs/examples | `uv run --locked pytest tests/test_runtime_smoke_v2_docs.py tests/test_runtime_smoke_diagnostics_schema.py tests/critical/test_runtime_smoke_v2_critical.py` or a narrower documented equivalent | Docs examples, diagnostic schemas, or v2 critical guards fail |
-| Package build | `uv run --locked python -m build` | Wheel or sdist build fails |
+| Critical suite | `uv run --locked --extra dev pytest tests/critical -m critical` | Any `@critical` test fails or the suite cannot run |
+| Runtime-smoke docs/examples | `uv run --locked --extra dev pytest tests/test_runtime_smoke_v2_docs.py tests/test_runtime_smoke_diagnostics_schema.py tests/critical/test_runtime_smoke_v2_critical.py` or a narrower documented equivalent | Docs examples, diagnostic schemas, or v2 critical guards fail |
+| Package build | `uv build` | Wheel or sdist build fails |
 | Wheel install smoke | Install the built wheel into a disposable environment and run `netcoredbg-mcp --version` plus an import smoke | Install, import, or CLI version smoke fails |
 | Production playbook | Execute `docs/PRODUCTION-TESTING-PLAYBOOK.md` in customer mode and record a run report | Overall verdict is `BROKEN` or `PARTIALLY_WORKS` for a release that claims those product flows as shipped |
 | MCP PR review | Release-prep PR summary reports zero unresolved blocking findings, and reviewer status is clean enough for merge | Any `fix_now` or unresolved mandatory review thread remains |
