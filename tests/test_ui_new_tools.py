@@ -159,14 +159,14 @@ async def test_ui_click_annotated_uses_cached_screen_bounds_after_annotated_scre
     capturing_mcp,
     monkeypatch,
 ) -> None:
-    from PIL import Image
+    pil_image = pytest.importorskip("PIL.Image")
 
     from netcoredbg_mcp.session.manager import DebugState
     from netcoredbg_mcp.tools.ui import register_ui_tools
     from netcoredbg_mcp.ui.pywinauto_backend import PywinautoBackend
 
     png = io.BytesIO()
-    Image.new("RGB", (120, 80), (255, 255, 255)).save(png, format="PNG")
+    pil_image.new("RGB", (120, 80), (255, 255, 255)).save(png, format="PNG")
 
     backend = PywinautoBackend.__new__(PywinautoBackend)
     backend._ui = SimpleNamespace(process_id=42, _app=object())

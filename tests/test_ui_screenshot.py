@@ -6,7 +6,9 @@ import ctypes
 import io
 from types import SimpleNamespace
 
-from PIL import Image
+import pytest
+
+Image = pytest.importorskip("PIL.Image")
 
 
 def _bgra(r: int, g: int, b: int, a: int = 255) -> bytes:
