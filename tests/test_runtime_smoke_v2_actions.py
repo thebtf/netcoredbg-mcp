@@ -23,6 +23,12 @@ class ActionSmokeSession:
             "selectionStart": 0,
             "selectionLength": 13,
         }
+        self.click_result: dict[str, Any] = {"status": "PASS", "clicked": True}
+        self.property_result: dict[str, Any] = {
+            "status": "PASS",
+            "property": "IsSelected",
+            "value": True,
+        }
         self.drag_results: list[dict[str, Any]] = []
         self.grid_select_indices_results: list[dict[str, Any]] = []
         self.grid_select_identities_results: list[dict[str, Any]] = []
@@ -54,6 +60,18 @@ class ActionSmokeSession:
     async def invoke(self, selector: dict[str, Any]) -> dict[str, Any]:
         self.calls.append(("invoke", dict(selector)))
         return {"status": "PASS", "method": "InvokePattern"}
+
+    async def click(self, selector: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append(("click", dict(selector)))
+        return dict(self.click_result)
+
+    async def get_property(
+        self,
+        selector: dict[str, Any],
+        property_name: str,
+    ) -> dict[str, Any]:
+        self.calls.append(("get_property", {"selector": dict(selector), "property": property_name}))
+        return dict(self.property_result)
 
     async def drag(self, **request: Any) -> dict[str, Any]:
         self.calls.append(("drag", request))
@@ -144,6 +162,8 @@ def _runner(session: ActionSmokeSession) -> RuntimeSmokeRunner:
             "ui.send_keys_focused": session.send_keys_focused,
             "ui.text.read": session.text_read,
             "ui.text.get_state": session.text_get_state,
+            "ui.click": session.click,
+            "ui.get_property": session.get_property,
             "ui.invoke": session.invoke,
             "ui.drag": session.drag,
             "ui.grid.get_state": session.grid_get_state,
@@ -207,6 +227,364 @@ def _runner_with_clock(
         },
         clock=clock,
     )
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_input_ensure_target_focuses_and_records_target_evidence() -> None:
+    session = ActionSmokeSession()
+    session.find_result = {
+        "status": "PASS",
+        "found": True,
+        "visible": True,
+        "enabled": True,
+        "controlType": "Edit",
+        "automationId": "CueTextBox",
+    }
+    session.focus_result = {
+        "status": "PASS",
+        "focused": True,
+        "focus_within": True,
+        "method": "UIA.Focus",
+    }
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "verified input target",
+            "cases": [
+                {
+                    "id": "ensure_textbox_target",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.input.ensure_target",
+                                "selector": {"automation_id": "CueTextBox"},
+                                "require": {
+                                    "visible": True,
+                                    "enabled": True,
+                                    "focus": True,
+                                },
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert result["status"] == "PASS"
+    action = result["cases"][0]["actions"][0]
+    assert "ui.input.ensure_target" in result["accepted_action_kinds"]
+    assert session.calls == [
+        ("find_element", {"automation_id": "CueTextBox"}),
+        ("set_focus", {"automation_id": "CueTextBox"}),
+    ]
+    assert action["route"] == "input_ensure_target"
+    assert action["verified"] is True
+    assert action["target"]["selector"] == {"automation_id": "CueTextBox"}
+    assert action["target"]["visible"] is True
+    assert action["target"]["enabled"] is True
+    assert action["target"]["focus"]["focus_within"] is True
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_input_ensure_target_accepts_backend_camel_case_state() -> None:
+    session = ActionSmokeSession()
+    session.find_result = {
+        "status": "PASS",
+        "found": True,
+        "isVisible": True,
+        "isEnabled": True,
+        "controlType": "Edit",
+        "automationId": "CueTextBox",
+    }
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "verified input target",
+            "cases": [
+                {
+                    "id": "ensure_textbox_target",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.input.ensure_target",
+                                "selector": {"automation_id": "CueTextBox"},
+                                "require": {
+                                    "visible": True,
+                                    "enabled": True,
+                                },
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert result["status"] == "PASS"
+    action = result["cases"][0]["actions"][0]
+    assert action["target"]["visible"] is True
+    assert action["target"]["enabled"] is True
+    assert session.calls == [("find_element", {"automation_id": "CueTextBox"})]
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_click_verified_clicks_after_target_proof_and_checks_postcondition() -> None:
+    session = ActionSmokeSession()
+    session.find_result = {
+        "status": "PASS",
+        "found": True,
+        "visible": True,
+        "enabled": True,
+        "controlType": "Button",
+        "automationId": "ApplyButton",
+    }
+    session.focus_result = {"status": "PASS", "focused": True, "focus_within": True}
+    session.click_result = {"status": "PASS", "clicked": True, "method": "InvokePattern"}
+    session.property_result = {
+        "status": "PASS",
+        "property": "IsSelected",
+        "value": True,
+        "source": "TogglePattern",
+    }
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "verified click",
+            "cases": [
+                {
+                    "id": "verified_apply_click",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.click_verified",
+                                "selector": {"automation_id": "ApplyButton"},
+                                "postcondition": {
+                                    "op": "ui.get_property",
+                                    "selector": {"automation_id": "ApplyButton"},
+                                    "property": "IsSelected",
+                                    "equals": True,
+                                },
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert result["status"] == "PASS"
+    action = result["cases"][0]["actions"][0]
+    assert "ui.click_verified" in result["accepted_action_kinds"]
+    assert session.calls == [
+        ("find_element", {"automation_id": "ApplyButton"}),
+        ("set_focus", {"automation_id": "ApplyButton"}),
+        ("click", {"automation_id": "ApplyButton"}),
+        (
+            "get_property",
+            {
+                "selector": {"automation_id": "ApplyButton"},
+                "property": "IsSelected",
+            },
+        ),
+    ]
+    assert action["route"] == "click_verified"
+    assert action["target"]["verified"] is True
+    assert action["click"]["status"] == "PASS"
+    assert action["postcondition"]["verified"] is True
+    assert action["postcondition"]["actual"] is True
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_click_verified_blocks_missing_postcondition_before_side_effects() -> None:
+    session = ActionSmokeSession()
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "verified click requires postcondition",
+            "cases": [
+                {
+                    "id": "missing_postcondition",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.click_verified",
+                                "selector": {"automation_id": "ApplyButton"},
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert result["status"] == "BLOCKED"
+    action = result["cases"][0]["actions"][0]
+    assert action["status"] == "BLOCKED"
+    assert action["reason"] == "click postcondition required"
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_click_verified_blocks_unsupported_postcondition_before_side_effects() -> None:
+    session = ActionSmokeSession()
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "verified click rejects unsupported postcondition op",
+            "cases": [
+                {
+                    "id": "unsupported_postcondition_op",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.click_verified",
+                                "selector": {"automation_id": "ApplyButton"},
+                                "postcondition": {
+                                    "op": "ui.find_element",
+                                    "selector": {"automation_id": "ApplyButton"},
+                                    "property": "IsSelected",
+                                    "equals": True,
+                                },
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert result["status"] == "BLOCKED"
+    action = result["cases"][0]["actions"][0]
+    assert action["status"] == "BLOCKED"
+    assert action["reason"] == "unsupported click postcondition"
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_input_ensure_target_requires_positive_focus_evidence() -> None:
+    session = ActionSmokeSession()
+    session.find_result = {
+        "status": "PASS",
+        "found": True,
+        "visible": True,
+        "enabled": True,
+        "controlType": "Edit",
+        "automationId": "CueTextBox",
+    }
+    session.focus_result = {
+        "status": "PASS",
+        "method": "UIA.Focus",
+    }
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "focus evidence is mandatory",
+            "cases": [
+                {
+                    "id": "focus_without_positive_evidence",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.input.ensure_target",
+                                "selector": {"automation_id": "CueTextBox"},
+                                "require": {
+                                    "visible": True,
+                                    "enabled": True,
+                                    "focus": True,
+                                },
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert result["status"] == "BLOCKED"
+    action = result["cases"][0]["actions"][0]
+    assert action["status"] == "BLOCKED"
+    assert action["reason"] == "target focus evidence missing"
+    assert session.calls == [
+        ("find_element", {"automation_id": "CueTextBox"}),
+        ("set_focus", {"automation_id": "CueTextBox"}),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("adapter_status", "expected_status"),
+    [
+        ("ERROR", "FAIL"),
+        ("UNSUPPORTED", "BLOCKED"),
+        ("INVALID_SETUP", "BLOCKED"),
+    ],
+)
+async def test_v2_ui_input_ensure_target_normalizes_adapter_failure_statuses(
+    adapter_status: str,
+    expected_status: str,
+) -> None:
+    session = ActionSmokeSession()
+    session.find_result = {
+        "status": "PASS",
+        "found": True,
+        "visible": True,
+        "enabled": True,
+        "controlType": "Edit",
+        "automationId": "CueTextBox",
+    }
+    session.focus_result = {
+        "status": adapter_status,
+        "reason": "focus backend unavailable",
+    }
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "focus adapter status normalization",
+            "cases": [
+                {
+                    "id": f"ensure_target_{adapter_status.lower()}",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.input.ensure_target",
+                                "selector": {"automation_id": "CueTextBox"},
+                                "require": {
+                                    "visible": True,
+                                    "enabled": True,
+                                    "focus": True,
+                                },
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == expected_status
+    assert action["status"] == expected_status
+    assert action["result"]["status"] == adapter_status
+    assert action["reason"] == "focus backend unavailable"
+    assert session.calls == [
+        ("find_element", {"automation_id": "CueTextBox"}),
+        ("set_focus", {"automation_id": "CueTextBox"}),
+    ]
 
 
 @pytest.mark.asyncio
