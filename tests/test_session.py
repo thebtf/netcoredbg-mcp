@@ -129,6 +129,40 @@ class TestPathValidation:
             with pytest.raises(ValueError, match="does not exist"):
                 manager.validate_path(str(tmp_path / "nonexistent.cs"), must_exist=True)
 
+    def test_validate_path_for_project_uses_supplied_worktree_scope(self, tmp_path):
+        """validate_path_for_project uses supplied project worktrees, not session scope."""
+        owner_project = tmp_path / "owner"
+        observer_project = tmp_path / "observer"
+        observer_worktree = tmp_path / "observer-wt"
+        owner_project.mkdir()
+        observer_project.mkdir()
+        observer_worktree.mkdir()
+        (observer_worktree / ".git").mkdir()
+        plan_file = observer_worktree / "runtime-smoke-plan.json"
+        plan_file.write_text("{}", encoding="utf-8")
+
+        worktrees_dir = observer_project / ".git" / "worktrees" / "observer-wt"
+        worktrees_dir.mkdir(parents=True)
+        (worktrees_dir / "gitdir").write_text(
+            str(observer_worktree / ".git"),
+            encoding="utf-8",
+        )
+
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager(project_path=str(owner_project))
+
+            with pytest.raises(ValueError, match="outside project scope"):
+                manager.validate_path(str(plan_file))
+
+            assert (
+                manager.validate_path_for_project(
+                    str(plan_file),
+                    str(observer_project),
+                )
+                == str(plan_file.resolve())
+            )
+            assert manager.project_path == str(owner_project.resolve())
+
     def test_validate_program_valid(self, tmp_path):
         """Test validate_program accepts .dll and .exe files."""
         with patch("netcoredbg_mcp.session.manager.DAPClient"):
