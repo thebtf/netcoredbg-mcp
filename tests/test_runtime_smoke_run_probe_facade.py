@@ -323,7 +323,10 @@ async def test_runtime_smoke_run_probe_agent_mode_exposes_metrics_contract(
     ]
     assert agent["metrics"]["time_to_verdict_ms"]["status"] == "NO DATA"
     assert agent["metrics"]["time_to_verdict_ms"]["reason"] == "run is not final"
-    assert agent["metrics"]["retry_count"] == {"status": "MEASURED", "value": 0}
+    assert agent["metrics"]["retry_count"] == {
+        "status": "NO DATA",
+        "reason": "retry count evidence is not present",
+    }
     assert agent["metrics"]["wrong_target_prevention"]["status"] == "NO DATA"
     assert agent["metrics"]["wrong_target_prevention"]["reason"] == "run is not final"
     assert agent["metrics"]["focus_foreground_checks"]["status"] == "NO DATA"
@@ -365,7 +368,10 @@ async def test_runtime_smoke_evidence_bundle_agent_mode_reports_final_metrics(
     assert metrics["time_to_verdict_ms"]["status"] == "MEASURED"
     assert isinstance(metrics["time_to_verdict_ms"]["value"], int)
     assert metrics["time_to_verdict_ms"]["value"] >= 0
-    assert metrics["retry_count"] == {"status": "MEASURED", "value": 0}
+    assert metrics["retry_count"] == {
+        "status": "NO DATA",
+        "reason": "retry count evidence is not present",
+    }
     assert metrics["evidence_completeness"]["status"] in {"COMPLETE", "PARTIAL"}
     assert metrics["evidence_completeness"]["signals"]["result"] is True
     assert metrics["evidence_completeness"]["signals"]["events"] is True

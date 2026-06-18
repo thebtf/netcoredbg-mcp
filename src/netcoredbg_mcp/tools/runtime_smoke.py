@@ -1419,7 +1419,7 @@ def _runtime_smoke_agent_metrics(data: dict[str, Any]) -> dict[str, Any]:
             data,
             missing_reason,
         ),
-        "retry_count": {"status": "MEASURED", "value": 0},
+        "retry_count": _runtime_smoke_agent_retry_count_metric(data),
         "evidence_completeness": _runtime_smoke_agent_evidence_completeness(data),
         "wrong_target_prevention": _runtime_smoke_agent_no_data(
             _runtime_smoke_agent_source_evidence_reason(
@@ -1475,6 +1475,14 @@ def _runtime_smoke_agent_evidence_completeness(data: dict[str, Any]) -> dict[str
         "status": "COMPLETE" if all(signals.values()) else "PARTIAL",
         "signals": signals,
     }
+
+
+def _runtime_smoke_agent_retry_count_metric(data: dict[str, Any]) -> dict[str, Any]:
+    result = data.get("result") if isinstance(data.get("result"), dict) else data
+    retry_count = result.get("retry_count") if isinstance(result, dict) else None
+    if isinstance(retry_count, int) and not isinstance(retry_count, bool):
+        return {"status": "MEASURED", "value": max(0, retry_count)}
+    return _runtime_smoke_agent_no_data("retry count evidence is not present")
 
 
 def _runtime_smoke_agent_no_data(reason: str) -> dict[str, Any]:
