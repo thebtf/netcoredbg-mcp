@@ -283,7 +283,27 @@ class SessionManager:
             return None
 
     def validate_path(self, path: str, must_exist: bool = False) -> str:
-        """Validate path is within project scope.
+        """Validate path is within the current project scope."""
+        return self._validate_path(path, self._project_path, must_exist=must_exist)
+
+    def validate_path_for_project(
+        self,
+        path: str,
+        project_path: str | None,
+        must_exist: bool = False,
+    ) -> str:
+        """Validate path against a supplied project scope without mutating session state."""
+        project_scope = os.path.abspath(project_path) if project_path else None
+        return self._validate_path(path, project_scope, must_exist=must_exist)
+
+    def _validate_path(
+        self,
+        path: str,
+        project_path: str | None,
+        *,
+        must_exist: bool = False,
+    ) -> str:
+        """Validate path is within the supplied project scope.
 
         Accepts paths within:
         1. The project root directory
@@ -306,8 +326,8 @@ class SessionManager:
         logger.debug(f"[validate_path] resolved to: {abs_path}")
 
         # Check within project scope
-        if self._project_path:
-            project_real = os.path.realpath(self._project_path)
+        if project_path:
+            project_real = os.path.realpath(project_path)
 
             # Check 1: within project root
             if self._is_path_within(abs_path, project_real):

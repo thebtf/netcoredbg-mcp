@@ -48,6 +48,7 @@ def register_runtime_smoke_tools(
     session: SessionManager,
     check_session_access: Callable[[Any], str | None],
     resolve_project_root: Callable[..., Awaitable[Any]],
+    resolve_project_root_readonly: Callable[..., Awaitable[Any]] | None = None,
 ) -> None:
     """Register runtime smoke composite tools on the MCP server."""
     from mcp.types import ToolAnnotations
@@ -337,6 +338,7 @@ def register_runtime_smoke_tools(
                 ctx,
                 session,
                 resolve_project_root,
+                resolve_project_root_readonly=resolve_project_root_readonly,
                 plan=plan,
                 plan_path=plan_path,
             )
@@ -744,6 +746,7 @@ async def _runtime_smoke_resolve_plan_input(
     session: SessionManager,
     resolve_project_root: Callable[..., Awaitable[Any]],
     *,
+    resolve_project_root_readonly: Callable[..., Awaitable[Any]] | None = None,
     plan: Any,
     plan_path: str | None,
 ) -> tuple[Any, dict[str, str] | None, dict[str, Any] | None]:
@@ -761,8 +764,14 @@ async def _runtime_smoke_resolve_plan_input(
         return plan, None, None
 
     assert plan_path is not None
-    await resolve_project_root(ctx, session)
-    if not session.project_path:
+    if resolve_project_root_readonly is None:
+        await resolve_project_root(ctx, session)
+        project_path = session.project_path
+    else:
+        project_root = await resolve_project_root_readonly(ctx, session)
+        project_path = str(project_root) if project_root is not None else session.project_path
+
+    if not project_path:
         return (
             None,
             None,
@@ -772,7 +781,10 @@ async def _runtime_smoke_resolve_plan_input(
             ),
         )
     try:
-        validated_path = session.validate_path(plan_path)
+        if resolve_project_root_readonly is None:
+            validated_path = session.validate_path(plan_path)
+        else:
+            validated_path = session.validate_path_for_project(plan_path, project_path)
     except ValueError as exc:
         return (
             None,
