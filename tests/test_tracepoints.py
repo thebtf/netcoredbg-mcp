@@ -140,7 +140,7 @@ class TestTracepointLog:
 
         assert [entry.value for entry in delta["entries"]] == ["retained-1", "retained-2"]
         assert delta["stale"] is True
-        assert "dropped_count" in delta
+        assert delta["dropped_count"] is None
         assert delta["next_cursor"]["after_timestamp"] == 4.0
 
     def test_trace_delta_marks_cursor_stale_when_log_was_cleared(self):
