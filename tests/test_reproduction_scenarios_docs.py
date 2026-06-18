@@ -177,10 +177,13 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
         assert "None in netcoredbg-mcp." not in row
 
     row_269 = _issue_row(backlog, "#269")
-    assert "Target metrics slice covered" in row_269
+    assert "Target metrics/profile-defaults slices covered" in row_269
     assert "broader FR remains open" in row_269
     assert "CR-039" in row_269
+    assert "CR-041" in row_269
     assert "metrics_contract" in row_269
+    assert "agent_mode.defaults" in row_269
+    assert "event_limit=20" in row_269
     assert "NO DATA" in row_269
     assert "None in netcoredbg-mcp." not in row_269
 
@@ -270,7 +273,10 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "runtime_smoke_get_event_delta",
             "CR-016",
             "CR-039",
+            "CR-041",
             "metrics_contract",
+            "agent_mode.defaults",
+            "event_limit=20",
             "NO DATA",
             "agent_mode",
             "broad lifecycle/orchestration closure",
@@ -311,6 +317,12 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
     assert "screenshot orientation" not in remaining_250
     assert "fresh Engram `#250`" in remaining_250
     assert "do not close the full Engram" in backlog
+
+    _, _status, _evidence, remaining_269 = _issue_cells(backlog, "#269")
+    assert "profile defaults" not in remaining_269
+    assert "full `agent_mode=true` profile defaults" not in remaining_269
+    assert "generic probe UX" in remaining_269
+    assert "multi-source event deltas" in remaining_269
 
 
 def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> None:
@@ -356,7 +368,9 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "runtime_smoke_get_event_delta",
             "agent_mode",
             "CR-039",
+            "CR-041",
             "metrics_contract",
+            "agent_mode.defaults",
             "success-metrics evidence",
             "broad lifecycle/orchestration",
         ],

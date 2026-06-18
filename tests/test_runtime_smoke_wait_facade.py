@@ -285,6 +285,7 @@ async def test_runtime_smoke_wait_for_result_agent_mode_retry_advances_cursor(
             "run_id": "slow-run",
             "after_cursor": 1,
             "agent_mode": True,
+            "event_limit": 20,
         },
     }
 

@@ -29,6 +29,16 @@ from ..session.runtime_smoke_v2.result_envelope import compact_value
 from ..session.state import DebugState
 
 _NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+_RUNTIME_SMOKE_AGENT_DEFAULT_TIMEOUT_MS = 5000
+_RUNTIME_SMOKE_AGENT_DEFAULT_POLL_INTERVAL_MS = 500
+_RUNTIME_SMOKE_AGENT_DEFAULT_EVENT_LIMIT = 20
+_RUNTIME_SMOKE_AGENT_EVENT_LIMIT_TOOLS = frozenset(
+    {
+        "runtime_smoke_evidence_bundle",
+        "runtime_smoke_get_event_delta",
+        "runtime_smoke_wait_for_result",
+    }
+)
 
 
 def register_runtime_smoke_tools(
@@ -1323,7 +1333,10 @@ def _apply_runtime_smoke_agent_mode(
         if cursor:
             next_request = {
                 "tool": primary_next_action,
-                "arguments": {"cursor": cursor, "agent_mode": True},
+                "arguments": _runtime_smoke_agent_next_arguments(
+                    primary_next_action,
+                    {"cursor": cursor, "agent_mode": True},
+                ),
             }
         else:
             primary_next_action = "runtime_smoke_run_plan"
@@ -1337,7 +1350,10 @@ def _apply_runtime_smoke_agent_mode(
                 )
             next_request = {
                 "tool": primary_next_action,
-                "arguments": arguments,
+                "arguments": _runtime_smoke_agent_next_arguments(
+                    primary_next_action,
+                    arguments,
+                ),
             }
         else:
             primary_next_action = "runtime_smoke_run_plan"
@@ -1349,7 +1365,10 @@ def _apply_runtime_smoke_agent_mode(
     elif run_id:
         next_request = {
             "tool": primary_next_action,
-            "arguments": {"run_id": run_id, "agent_mode": True},
+            "arguments": _runtime_smoke_agent_next_arguments(
+                primary_next_action,
+                {"run_id": run_id, "agent_mode": True},
+            ),
         }
     else:
         primary_next_action = "runtime_smoke_run_plan"
@@ -1372,6 +1391,7 @@ def _runtime_smoke_agent_mode_payload(
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "profile": "compact",
+        "defaults": _runtime_smoke_agent_defaults(),
         "primary_next_action": primary_next_action,
         "metrics_contract": _runtime_smoke_agent_metrics_contract(),
         "metrics": metrics or _runtime_smoke_agent_metrics({}),
@@ -1385,6 +1405,42 @@ def _runtime_smoke_agent_mode_payload(
     if cursor:
         payload["cursor"] = cursor
     return payload
+
+
+def _runtime_smoke_agent_defaults() -> dict[str, Any]:
+    return {
+        "profile": "agent",
+        "timeout_ms": _RUNTIME_SMOKE_AGENT_DEFAULT_TIMEOUT_MS,
+        "poll_interval_ms": _RUNTIME_SMOKE_AGENT_DEFAULT_POLL_INTERVAL_MS,
+        "event_limit": _RUNTIME_SMOKE_AGENT_DEFAULT_EVENT_LIMIT,
+        "raw_evidence": {
+            "include_raw_dumps": False,
+            "tree_dump_policy": "omit",
+            "screenshot_policy": "artifact-reference",
+        },
+        "verdicts": ["PASS", "FAIL", "BLOCKED", "INVALID_SETUP", "ERROR"],
+        "single_flight": {
+            "overlap": "reject",
+            "returns_active_run": True,
+        },
+        "cleanup": {
+            "require_cleanup_contract": True,
+            "surface_contamination": True,
+        },
+    }
+
+
+def _runtime_smoke_agent_next_arguments(
+    tool: str,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    compact_arguments = dict(arguments)
+    if tool in _RUNTIME_SMOKE_AGENT_EVENT_LIMIT_TOOLS:
+        compact_arguments.setdefault(
+            "event_limit",
+            _RUNTIME_SMOKE_AGENT_DEFAULT_EVENT_LIMIT,
+        )
+    return compact_arguments
 
 
 def _runtime_smoke_agent_metrics_contract() -> dict[str, Any]:
