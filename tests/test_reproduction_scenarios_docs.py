@@ -170,11 +170,19 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
     ):
         assert f"`{issue}` | Target evidence merged" in backlog
 
-    for issue in ("#250", "#268", "#269"):
+    for issue in ("#250", "#268"):
         row = _issue_row(backlog, issue)
         assert "Target slice merged" in row
         assert "broader" in row
         assert "None in netcoredbg-mcp." not in row
+
+    row_269 = _issue_row(backlog, "#269")
+    assert "Target metrics slice covered" in row_269
+    assert "broader FR remains open" in row_269
+    assert "CR-039" in row_269
+    assert "metrics_contract" in row_269
+    assert "NO DATA" in row_269
+    assert "None in netcoredbg-mcp." not in row_269
 
     row_250 = _issue_row(backlog, "#250")
     assert "CR-021" in row_250
@@ -248,6 +256,9 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "runtime_smoke_mark_event_cursor",
             "runtime_smoke_get_event_delta",
             "CR-016",
+            "CR-039",
+            "metrics_contract",
+            "NO DATA",
             "agent_mode",
             "broad lifecycle/orchestration closure",
         ],
@@ -327,6 +338,9 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "runtime_smoke_mark_event_cursor",
             "runtime_smoke_get_event_delta",
             "agent_mode",
+            "CR-039",
+            "metrics_contract",
+            "success-metrics evidence",
             "broad lifecycle/orchestration",
         ],
         "#270": [
