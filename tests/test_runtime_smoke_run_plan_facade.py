@@ -30,10 +30,19 @@ class RunPlanFacadeSession:
             loaded_sources={},
         )
         self.process_registry = None
+        self.resolved_project_root = False
+        self.validated_paths: list[str] = []
+        self.path_error: Exception | None = None
 
     async def launch(self, **_: Any) -> dict[str, Any]:
         self.launch_calls += 1
         raise AssertionError("run-plan facade must not launch directly")
+
+    def validate_path(self, path: str) -> str:
+        self.validated_paths.append(path)
+        if self.path_error is not None:
+            raise self.path_error
+        return path
 
 
 class LargeFinalResultRegistry:
@@ -109,7 +118,16 @@ async def _resolve_project_root(_ctx: Any, _session: Any) -> None:
     raise AssertionError("run-plan facade test plan must not resolve project paths")
 
 
-def _register(capturing_mcp, session: RunPlanFacadeSession) -> list[Any]:
+async def _resolve_project_root_ok(_ctx: Any, session: RunPlanFacadeSession) -> None:
+    session.resolved_project_root = True
+
+
+def _register(
+    capturing_mcp,
+    session: RunPlanFacadeSession,
+    *,
+    resolve_project_root: Any | None = None,
+) -> list[Any]:
     access_calls: list[Any] = []
 
     def check_access(ctx: Any) -> None:
@@ -120,7 +138,7 @@ def _register(capturing_mcp, session: RunPlanFacadeSession) -> list[Any]:
         mcp=capturing_mcp,
         session=session,
         check_session_access=check_access,
-        resolve_project_root=_resolve_project_root,
+        resolve_project_root=resolve_project_root or _resolve_project_root,
     )
     return access_calls
 
@@ -207,6 +225,107 @@ async def test_runtime_smoke_run_plan_starts_durable_run_after_validation(
     assert data["validation"]["can_run"] is True
     assert data["validation"]["validation_errors"] == []
     assert session.runtime_smoke.lifecycle_runs.active_run_ids() == [data["run_id"]]
+    assert session.launch_calls == 0
+    assert len(access_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_run_plan_accepts_json_plan_path(
+    capturing_mcp,
+    tmp_path,
+) -> None:
+    session = RunPlanFacadeSession()
+    access_calls = _register(
+        capturing_mcp,
+        session,
+        resolve_project_root=_resolve_project_root_ok,
+    )
+    plan_path = tmp_path / "runtime-smoke-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "name": "facade-run-from-file",
+                "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    response = await capturing_mcp.tools["runtime_smoke_run_plan"](
+        ctx=None,
+        plan_path=str(plan_path),
+    )
+    data = response["data"]
+
+    assert data["status"] == "RUNNING"
+    assert data["run_id"]
+    assert data["plan_name"] == "facade-run-from-file"
+    assert data["validation"]["can_run"] is True
+    assert data["validation"]["plan_source"] == {
+        "kind": "file",
+        "path": str(plan_path),
+        "format": "json",
+    }
+    assert session.resolved_project_root is True
+    assert session.validated_paths == [str(plan_path)]
+    assert session.runtime_smoke.lifecycle_runs.active_run_ids() == [data["run_id"]]
+    assert len(access_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_run_plan_rejects_missing_plan_input(
+    capturing_mcp,
+) -> None:
+    session = RunPlanFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_run_plan"](ctx=None)
+    data = response["data"]
+
+    assert data["status"] == "INVALID_SETUP"
+    assert data["can_run"] is False
+    assert data["validation_errors"] == [
+        "provide exactly one runtime smoke plan input: plan or plan_path"
+    ]
+    assert session.runtime_smoke.lifecycle_runs.retained_run_ids() == []
+    assert session.validated_paths == []
+    assert session.launch_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_run_plan_rejects_unvalidated_plan_path(
+    capturing_mcp,
+    tmp_path,
+) -> None:
+    session = RunPlanFacadeSession()
+    session.path_error = ValueError("outside project root")
+    access_calls = _register(
+        capturing_mcp,
+        session,
+        resolve_project_root=_resolve_project_root_ok,
+    )
+    plan_path = tmp_path / "runtime-smoke-plan.json"
+    plan_path.write_text('{"name": "blocked-path"}', encoding="utf-8")
+
+    response = await capturing_mcp.tools["runtime_smoke_run_plan"](
+        ctx=None,
+        plan_path=str(plan_path),
+    )
+    data = response["data"]
+
+    assert data["status"] == "INVALID_SETUP"
+    assert data["can_run"] is False
+    assert data["validation_errors"] == [
+        "plan_path validation failed: outside project root"
+    ]
+    assert data["plan_source"] == {
+        "kind": "file",
+        "path": str(plan_path),
+        "format": "json",
+    }
+    assert session.runtime_smoke.lifecycle_runs.retained_run_ids() == []
+    assert session.resolved_project_root is True
+    assert session.validated_paths == [str(plan_path)]
     assert session.launch_calls == 0
     assert len(access_calls) == 1
 

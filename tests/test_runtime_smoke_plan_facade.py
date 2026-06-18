@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections import deque
 from types import SimpleNamespace
 from typing import Any
@@ -23,14 +24,27 @@ class PlanFacadeSession:
             output_buffer=deque(),
         )
         self.process_registry = None
+        self.resolved_project_root = False
+        self.validated_paths: list[str] = []
+        self.path_error: Exception | None = None
 
     async def launch(self, **_: Any) -> dict[str, Any]:
         self.launch_calls += 1
         raise AssertionError("validate-only facade must not launch")
 
+    def validate_path(self, path: str) -> str:
+        self.validated_paths.append(path)
+        if self.path_error is not None:
+            raise self.path_error
+        return path
+
 
 async def _resolve_project_root(_ctx: Any, _session: Any) -> None:
     raise AssertionError("validate-only facade must not resolve project paths")
+
+
+async def _resolve_project_root_ok(_ctx: Any, session: PlanFacadeSession) -> None:
+    session.resolved_project_root = True
 
 
 def _register(
@@ -38,12 +52,13 @@ def _register(
     session: PlanFacadeSession,
     *,
     check_session_access: Any | None = None,
+    resolve_project_root: Any | None = None,
 ) -> None:
     register_runtime_smoke_tools(
         mcp=capturing_mcp,
         session=session,
         check_session_access=check_session_access or (lambda ctx: None),
-        resolve_project_root=_resolve_project_root,
+        resolve_project_root=resolve_project_root or _resolve_project_root,
     )
 
 
@@ -206,3 +221,152 @@ async def test_runtime_smoke_validate_plan_reports_runnable_v2_contract(
     assert session.launch_calls == 0
     assert "cleanup" not in data
     assert "completed_steps" not in data
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_validate_plan_accepts_json_plan_path(
+    capturing_mcp,
+    tmp_path,
+) -> None:
+    session = PlanFacadeSession()
+    _register(capturing_mcp, session, resolve_project_root=_resolve_project_root_ok)
+    plan_path = tmp_path / "runtime-smoke-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema": "netcoredbg.runtime_smoke.v2",
+                "name": "validate-from-file",
+                "cases": [{"id": "case-1", "transitions": []}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    response = await capturing_mcp.tools["runtime_smoke_validate_plan"](
+        ctx=None,
+        plan_path=str(plan_path),
+    )
+    data = response["data"]
+
+    assert data["status"] == "PASS"
+    assert data["can_run"] is True
+    assert data["plan_source"] == {
+        "kind": "file",
+        "path": str(plan_path),
+        "format": "json",
+    }
+    assert session.resolved_project_root is True
+    assert session.validated_paths == [str(plan_path)]
+    assert session.launch_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_validate_plan_rejects_mixed_plan_inputs(
+    capturing_mcp,
+    tmp_path,
+) -> None:
+    session = PlanFacadeSession()
+    _register(capturing_mcp, session, resolve_project_root=_resolve_project_root_ok)
+    plan_path = tmp_path / "runtime-smoke-plan.json"
+    plan_path.write_text('{"name": "from-file"}', encoding="utf-8")
+
+    response = await capturing_mcp.tools["runtime_smoke_validate_plan"](
+        ctx=None,
+        plan={"name": "inline"},
+        plan_path=str(plan_path),
+    )
+    data = response["data"]
+
+    assert data["status"] == "INVALID_SETUP"
+    assert data["can_run"] is False
+    assert data["validation_errors"] == [
+        "provide exactly one runtime smoke plan input: plan or plan_path"
+    ]
+    assert data["accepted_input"] == {
+        "plan": "inline JSON object",
+        "plan_path": "path to a UTF-8 JSON object plan file",
+    }
+    assert session.validated_paths == []
+    assert session.launch_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_validate_plan_rejects_malformed_json_plan_path(
+    capturing_mcp,
+    tmp_path,
+) -> None:
+    session = PlanFacadeSession()
+    _register(capturing_mcp, session, resolve_project_root=_resolve_project_root_ok)
+    plan_path = tmp_path / "runtime-smoke-plan.json"
+    plan_path.write_text("{not-json", encoding="utf-8")
+
+    response = await capturing_mcp.tools["runtime_smoke_validate_plan"](
+        ctx=None,
+        plan_path=str(plan_path),
+    )
+    data = response["data"]
+
+    assert data["status"] == "INVALID_SETUP"
+    assert data["can_run"] is False
+    assert data["validation_errors"][0].startswith("plan_path JSON parse failed:")
+    assert data["plan_source"] == {
+        "kind": "file",
+        "path": str(plan_path),
+        "format": "json",
+    }
+    assert session.validated_paths == [str(plan_path)]
+    assert session.launch_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_validate_plan_rejects_non_object_json_plan_path(
+    capturing_mcp,
+    tmp_path,
+) -> None:
+    session = PlanFacadeSession()
+    _register(capturing_mcp, session, resolve_project_root=_resolve_project_root_ok)
+    plan_path = tmp_path / "runtime-smoke-plan.json"
+    plan_path.write_text("[1, 2, 3]", encoding="utf-8")
+
+    response = await capturing_mcp.tools["runtime_smoke_validate_plan"](
+        ctx=None,
+        plan_path=str(plan_path),
+    )
+    data = response["data"]
+
+    assert data["status"] == "INVALID_SETUP"
+    assert data["can_run"] is False
+    assert data["validation_errors"] == ["plan_path JSON root must be an object"]
+    assert session.launch_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_validate_plan_rejects_unvalidated_plan_path(
+    capturing_mcp,
+    tmp_path,
+) -> None:
+    session = PlanFacadeSession()
+    session.path_error = ValueError("outside project root")
+    _register(capturing_mcp, session, resolve_project_root=_resolve_project_root_ok)
+    plan_path = tmp_path / "runtime-smoke-plan.json"
+    plan_path.write_text('{"name": "blocked-path"}', encoding="utf-8")
+
+    response = await capturing_mcp.tools["runtime_smoke_validate_plan"](
+        ctx=None,
+        plan_path=str(plan_path),
+    )
+    data = response["data"]
+
+    assert data["status"] == "INVALID_SETUP"
+    assert data["can_run"] is False
+    assert data["validation_errors"] == [
+        "plan_path validation failed: outside project root"
+    ]
+    assert data["plan_source"] == {
+        "kind": "file",
+        "path": str(plan_path),
+        "format": "json",
+    }
+    assert session.resolved_project_root is True
+    assert session.validated_paths == [str(plan_path)]
+    assert session.launch_calls == 0

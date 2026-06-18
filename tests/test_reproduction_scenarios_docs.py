@@ -502,6 +502,30 @@ def test_issue_272_remaining_scope_excludes_covered_launch_contract_and_default(
     assert "launch-to-artifact default acquisition" in lifecycle_remaining
 
 
+def test_issue_268_records_cr044_plan_path_slice() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#268")
+    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#268")
+    _issue, _state, _evidence, remaining = _issue_cells(backlog, "#268")
+    _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
+        cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
+    )
+
+    assert "CR-044" in row
+    assert "plan_path" in row
+    assert "plan_source" in row
+    assert "runtime_smoke_validate_plan" in row
+    assert "runtime_smoke_run_plan" in row
+    assert "missing, mixed, malformed, non-object, or path-validation failures" in row
+    assert "CR-044" in lifecycle_row
+    assert "plan_path" in lifecycle_row
+    assert "plan_source" in lifecycle_row
+    assert "plan_path input" not in remaining
+    assert "plan_path input" not in lifecycle_remaining
+    assert "YAML/v3 authoring" in remaining
+    assert "YAML/v3 authoring" in lifecycle_remaining
+
+
 def test_issue_271_records_cleanup_and_trace_delta_slices() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#271")
