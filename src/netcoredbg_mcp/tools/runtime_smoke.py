@@ -1422,10 +1422,16 @@ def _runtime_smoke_agent_metrics(data: dict[str, Any]) -> dict[str, Any]:
         "retry_count": {"status": "MEASURED", "value": 0},
         "evidence_completeness": _runtime_smoke_agent_evidence_completeness(data),
         "wrong_target_prevention": _runtime_smoke_agent_no_data(
-            "wrong-target prevention evidence is not present",
+            _runtime_smoke_agent_source_evidence_reason(
+                missing_reason,
+                "wrong-target prevention evidence is not present",
+            ),
         ),
         "focus_foreground_checks": _runtime_smoke_agent_no_data(
-            "focus/foreground evidence is not present",
+            _runtime_smoke_agent_source_evidence_reason(
+                missing_reason,
+                "focus/foreground evidence is not present",
+            ),
         ),
     }
 
@@ -1473,6 +1479,15 @@ def _runtime_smoke_agent_evidence_completeness(data: dict[str, Any]) -> dict[str
 
 def _runtime_smoke_agent_no_data(reason: str) -> dict[str, Any]:
     return {"status": "NO DATA", "reason": reason}
+
+
+def _runtime_smoke_agent_source_evidence_reason(
+    missing_reason: str,
+    source_absent_reason: str,
+) -> str:
+    if missing_reason == "source evidence is absent":
+        return source_absent_reason
+    return missing_reason
 
 
 def _runtime_smoke_agent_fail_closed(data: dict[str, Any]) -> bool:

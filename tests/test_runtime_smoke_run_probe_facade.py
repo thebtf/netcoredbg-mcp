@@ -325,7 +325,9 @@ async def test_runtime_smoke_run_probe_agent_mode_exposes_metrics_contract(
     assert agent["metrics"]["time_to_verdict_ms"]["reason"] == "run is not final"
     assert agent["metrics"]["retry_count"] == {"status": "MEASURED", "value": 0}
     assert agent["metrics"]["wrong_target_prevention"]["status"] == "NO DATA"
+    assert agent["metrics"]["wrong_target_prevention"]["reason"] == "run is not final"
     assert agent["metrics"]["focus_foreground_checks"]["status"] == "NO DATA"
+    assert agent["metrics"]["focus_foreground_checks"]["reason"] == "run is not final"
 
 
 @pytest.mark.asyncio
