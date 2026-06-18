@@ -88,6 +88,8 @@ def test_bridge_focused_element_query_handles_transient_focused_element_errors()
     assert "focused = automation.FocusedElement();" in command
     assert "catch (COMException)" in command
     assert "catch (InvalidOperationException)" in command
+    assert "catch (ElementNotAvailableException)" in command
+    assert "catch (TimeoutException)" in command
     assert "if (focused is null)" in command
     assert "return EmptyFocusedElementInfo();" in command
 
@@ -101,4 +103,10 @@ def test_bridge_focused_element_query_rejects_focus_outside_connected_process() 
     assert "JsonRpcHandler.ProcessId" in command
     assert "mainWindow.Properties.ProcessId.ValueOrDefault" in command
     assert "focused.Properties.ProcessId.ValueOrDefault" in command
+    process_guard = command.split(
+        "private static bool FocusedElementBelongsToConnectedProcess",
+        1,
+    )[1]
+    assert "catch (ElementNotAvailableException)" in process_guard
+    assert "catch (TimeoutException)" in process_guard
     assert "return EmptyFocusedElementInfo();" in command

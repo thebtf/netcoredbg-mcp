@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 using FlaUI.Core;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Conditions;
+using FlaUI.Core.Exceptions;
 using FlaUI.UIA3;
 
 namespace FlaUIBridge.Commands;
@@ -132,6 +133,14 @@ public static class FocusCommands
         {
             return EmptyFocusedElementInfo();
         }
+        catch (ElementNotAvailableException)
+        {
+            return EmptyFocusedElementInfo();
+        }
+        catch (TimeoutException)
+        {
+            return EmptyFocusedElementInfo();
+        }
 
         if (focused is null)
             return EmptyFocusedElementInfo();
@@ -184,6 +193,14 @@ public static class FocusCommands
             {
                 return false;
             }
+            catch (ElementNotAvailableException)
+            {
+                return false;
+            }
+            catch (TimeoutException)
+            {
+                return false;
+            }
         }
 
         if (expectedProcessId == 0)
@@ -198,6 +215,14 @@ public static class FocusCommands
             return false;
         }
         catch (InvalidOperationException)
+        {
+            return false;
+        }
+        catch (ElementNotAvailableException)
+        {
+            return false;
+        }
+        catch (TimeoutException)
         {
             return false;
         }
