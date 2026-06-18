@@ -14,7 +14,7 @@
 вычислять выражения, читать вывод отладки и управлять поверхностями Windows UI
 Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 
-**103 MCP-инструмента · 8 промптов · 4 ресурса · 968 собранных тестов · релиз v0.14.0**
+**130 MCP-инструментов · 8 промптов · 4 ресурса · 1586 собранных тестов · релиз v0.18.0**
 
 ## Быстрые ссылки
 
@@ -23,19 +23,21 @@ Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 - **Справочник:** [Доступные инструменты](#доступные-инструменты) · [Ресурсы](#mcp-ресурсы) · [Промпты](#mcp-промпты) · [Архитектура](#обзор-архитектуры)
 - **Проект:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## What's New in v0.14.0
+## Что нового в v0.18.0
 
-- **Runtime smoke v2 state oracle** - `run_runtime_smoke` now accepts
-  `netcoredbg.runtime_smoke.v2` plans with baseline setup, case transitions,
-  before/after probes, diffs, cleanup aggregation, and compact evidence.
-- **Probe and template expansion** - v2 adds UI property/text/grid probes,
-  debug evaluation, tracepoints, output checks, JSONPath file assertions,
-  process metrics, key-sequence actions, and generated A/B cases.
-- **Release-gated fixture coverage** - critical tests and manual smoke entries
-  now cover WPF and Avalonia state-oracle scenarios with runnable JSON examples.
-- **Adapter failure hardening** - bridge and process-registry failures now
-  return structured `BLOCKED` evidence instead of crashing the smoke runner or
-  producing false PASS results.
+- **Semantic UI evidence** — агенты могут читать focus, text, property,
+  DataGrid, monitor, screenshot, click, selection и ensure-visible состояние
+  через bounded helper-инструменты для повторяемой UI-отладки.
+- **Runtime-smoke orchestration** — v2-планы получили validation, one-call
+  execution, diagnostic probes, wait/event cursors, tracepoint policy
+  guardrails, app diagnostics, trace cursor deltas и plan-file inputs.
+- **FlaUI bridge hardening** — stale sessions, transient focus exceptions,
+  screenshot orientation, focused-element process boundaries и DataGrid
+  selection compatibility теперь возвращают bounded evidence вместо
+  неоднозначных failures.
+- **Release protocol** — проект теперь фиксирует PyPI/GitHub release path,
+  version parity surfaces, critical-suite и production-playbook gates, local
+  deploy smoke и post-tag verification для milestone tags.
 
 ## Основные возможности
 

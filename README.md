@@ -14,7 +14,7 @@ set breakpoints, step through code, inspect variables, evaluate expressions, rea
 debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
 and Avalonia windows without opening an IDE.
 
-**103 MCP tools · 8 prompts · 4 resources · 968 collected tests · release v0.14.0**
+**130 MCP tools · 8 prompts · 4 resources · 1586 collected tests · release v0.18.0**
 
 ## Quick Links
 
@@ -23,19 +23,21 @@ and Avalonia windows without opening an IDE.
 - **Reference:** [Available Tools](#available-tools) · [Resources](#mcp-resources) · [Prompts](#mcp-prompts) · [Architecture](#architecture-overview)
 - **Project:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## What's New in v0.14.0
+## What's New in v0.18.0
 
-- **Runtime smoke v2 state oracle** — `run_runtime_smoke` now accepts
-  `netcoredbg.runtime_smoke.v2` plans with baseline setup, case transitions,
-  before/after probes, diffs, cleanup aggregation, and compact evidence.
-- **Probe and template expansion** — v2 adds UI property/text/grid probes,
-  debug evaluation, tracepoints, output checks, JSONPath file assertions,
-  process metrics, key-sequence actions, and generated A/B cases.
-- **Release-gated fixture coverage** — critical tests and manual smoke entries
-  now cover WPF and Avalonia state-oracle scenarios with runnable JSON examples.
-- **Adapter failure hardening** — bridge and process-registry failures now
-  return structured `BLOCKED` evidence instead of crashing the smoke runner or
-  producing false PASS results.
+- **Semantic UI evidence** — agents can query focus, text, property, DataGrid,
+  monitor, screenshot, click, selection, and ensure-visible state through
+  bounded helper tools built for repeatable UI debugging.
+- **Runtime-smoke orchestration** — v2 plans now have validation, one-call
+  execution, diagnostic probes, wait/event cursors, tracepoint policy
+  guardrails, app diagnostics, trace cursor deltas, and plan-file inputs.
+- **FlaUI bridge hardening** — stale sessions, transient focus exceptions,
+  screenshot orientation, focused-element process boundaries, and DataGrid
+  selection compatibility now return bounded evidence instead of ambiguous
+  failures.
+- **Release protocol** — the project now documents the PyPI/GitHub release
+  path, version parity surfaces, critical-suite and production-playbook gates,
+  local deploy smoke, and post-tag verification required for milestone tags.
 
 ## Highlights
 
