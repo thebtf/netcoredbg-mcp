@@ -143,6 +143,48 @@ class TestTracepointLog:
         assert "dropped_count" in delta
         assert delta["next_cursor"]["after_timestamp"] == 4.0
 
+    def test_trace_delta_marks_cursor_stale_when_log_was_cleared(self):
+        mgr = TracepointManager()
+        mgr._trace_buffer.append(TraceEntry(1.0, "a.cs", 1, "a", "boundary", 1, "tp-1"))
+        cursor = mgr.mark_trace_cursor()
+
+        mgr.clear_log()
+        delta = mgr.get_trace_delta(cursor)
+
+        assert delta["entries"] == []
+        assert delta["stale"] is True
+        assert delta["dropped_count"] is None
+        assert delta["next_cursor"]["buffer_size"] == 0
+
+    def test_trace_delta_marks_empty_cursor_stale_after_fifo_overflow(self):
+        mgr = TracepointManager()
+        mgr._trace_buffer = deque(maxlen=2)
+        cursor = mgr.mark_trace_cursor()
+
+        mgr._trace_buffer.append(TraceEntry(1.0, "a.cs", 1, "a", "dropped", 1, "tp-1"))
+        mgr._trace_buffer.append(TraceEntry(2.0, "a.cs", 1, "a", "retained-1", 1, "tp-1"))
+        mgr._trace_buffer.append(TraceEntry(3.0, "a.cs", 1, "a", "retained-2", 1, "tp-1"))
+
+        delta = mgr.get_trace_delta(cursor)
+
+        assert [entry.value for entry in delta["entries"]] == ["retained-1", "retained-2"]
+        assert delta["stale"] is True
+        assert delta["dropped_count"] is None
+
+    def test_trace_delta_next_cursor_preserves_retained_buffer_metadata(self):
+        mgr = TracepointManager()
+        mgr._trace_buffer.append(TraceEntry(1.0, "a.cs", 1, "a", "old", 1, "tp-1"))
+        mgr._trace_buffer.append(TraceEntry(2.0, "a.cs", 1, "a", "boundary", 1, "tp-1"))
+        cursor = mgr.mark_trace_cursor()
+        mgr._trace_buffer.append(TraceEntry(3.0, "a.cs", 1, "a", "new-1", 1, "tp-1"))
+        mgr._trace_buffer.append(TraceEntry(4.0, "a.cs", 1, "a", "new-2", 1, "tp-1"))
+
+        delta = mgr.get_trace_delta(cursor, limit=1)
+
+        assert delta["next_cursor"]["after_timestamp"] == 3.0
+        assert delta["next_cursor"]["buffer_start_timestamp"] == 1.0
+        assert delta["next_cursor"]["buffer_size"] == 4
+
 
 class TestTracepointBufferFIFO:
     def test_buffer_evicts_oldest_at_limit(self):

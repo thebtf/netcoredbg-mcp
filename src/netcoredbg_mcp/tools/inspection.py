@@ -729,7 +729,7 @@ def register_inspection_tools(
         State: Works in any state.
 
         Args:
-            cursor: Cursor returned by mark_trace_cursor or a timestamp boundary
+            cursor: Cursor returned by mark_trace_cursor or a raw monotonic timestamp
             limit: Maximum number of entries to return
             tracepoint_id: Optional tracepoint filter overriding the cursor filter
         """
@@ -738,6 +738,8 @@ def register_inspection_tools(
             if mgr is None:
                 if isinstance(cursor, dict):
                     next_cursor = dict(cursor)
+                    if tracepoint_id is not None:
+                        next_cursor["tracepoint_id"] = tracepoint_id
                 else:
                     next_cursor = {
                         "after_timestamp": cursor,

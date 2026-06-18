@@ -281,6 +281,22 @@ async def test_mark_trace_cursor_and_delta_tools_handle_missing_manager():
 
 
 @pytest.mark.asyncio
+async def test_trace_delta_tool_missing_manager_honors_tracepoint_override():
+    manager = make_manager()
+    tools = register_tools(manager)
+    cursor = {
+        "after_timestamp": 2.0,
+        "tracepoint_id": "tp-1",
+        "buffer_start_timestamp": 1.0,
+        "buffer_size": 2,
+    }
+
+    response = await tools["get_trace_delta"](cursor, tracepoint_id="tp-2")
+
+    assert response["data"]["next_cursor"]["tracepoint_id"] == "tp-2"
+
+
+@pytest.mark.asyncio
 async def test_trace_delta_tool_returns_bounded_entries_and_continuation_cursor():
     manager = make_manager()
     tracepoints = TracepointManager()

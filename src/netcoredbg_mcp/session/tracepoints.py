@@ -100,10 +100,11 @@ class TracepointManager:
 
         retained_entries = self.get_log(tracepoint_id=effective_tracepoint_id)
         oldest_retained = retained_entries[0].timestamp if retained_entries else None
-        stale = (
-            after_timestamp is not None
-            and oldest_retained is not None
-            and oldest_retained > after_timestamp
+        stale = self._is_stale_cursor(
+            cursor,
+            after_timestamp=after_timestamp,
+            oldest_retained=oldest_retained,
+            retained_count=len(retained_entries),
         )
 
         entries = retained_entries
@@ -117,10 +118,12 @@ class TracepointManager:
 
         next_cursor: dict[str, Any]
         if bounded_entries:
-            next_cursor = self._build_trace_cursor(
-                [bounded_entries[-1]],
-                tracepoint_id=effective_tracepoint_id,
-            )
+            next_cursor = {
+                "after_timestamp": bounded_entries[-1].timestamp,
+                "tracepoint_id": effective_tracepoint_id,
+                "buffer_start_timestamp": oldest_retained,
+                "buffer_size": len(retained_entries),
+            }
         elif after_timestamp is not None:
             next_cursor = {
                 "after_timestamp": after_timestamp,
@@ -181,6 +184,25 @@ class TracepointManager:
             "buffer_start_timestamp": entries[0].timestamp if entries else None,
             "buffer_size": len(entries),
         }
+
+    def _is_stale_cursor(
+        self,
+        cursor: dict[str, Any] | float | None,
+        *,
+        after_timestamp: float | None,
+        oldest_retained: float | None,
+        retained_count: int,
+    ) -> bool:
+        if after_timestamp is not None:
+            return oldest_retained is None or oldest_retained > after_timestamp
+        if not isinstance(cursor, dict):
+            return False
+        marked_empty_log = (
+            cursor.get("after_timestamp") is None
+            and cursor.get("buffer_start_timestamp") is None
+            and cursor.get("buffer_size") == 0
+        )
+        return marked_empty_log and retained_count > 0 and self.is_log_full
 
     @staticmethod
     def _normalize_path(path: str) -> str:
