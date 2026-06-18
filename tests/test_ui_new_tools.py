@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -151,6 +152,82 @@ class TestFlaUIBackendInvoke:
         assert response["data"]["reason"] == "selector result did not match exact automation_id"
         assert response["data"]["requested"]["automationId"] == "playButton"
         assert response["data"]["requested"]["rootAutomationId"] == "selectorSafetyPanel"
+
+
+@pytest.mark.asyncio
+async def test_ui_click_annotated_uses_cached_screen_bounds_after_annotated_screenshot(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    pil_image = pytest.importorskip("PIL.Image")
+
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.pywinauto_backend import PywinautoBackend
+
+    png = io.BytesIO()
+    pil_image.new("RGB", (120, 80), (255, 255, 255)).save(png, format="PNG")
+
+    backend = PywinautoBackend.__new__(PywinautoBackend)
+    backend._ui = SimpleNamespace(process_id=42, _app=object())
+    backend.click_at = AsyncMock()
+
+    def fake_get_window_rect(_hwnd, rect_ptr):
+        rect = rect_ptr._obj
+        rect.left = 100
+        rect.top = 200
+        rect.right = 220
+        rect.bottom = 280
+        return True
+
+    monkeypatch.setattr(
+        "netcoredbg_mcp.ui.screenshot.get_hwnd_for_pid",
+        lambda _pid: 555,
+    )
+    monkeypatch.setattr(
+        "netcoredbg_mcp.ui.screenshot.capture_window",
+        lambda _hwnd: (png.getvalue(), 120, 80),
+    )
+    monkeypatch.setattr(
+        "netcoredbg_mcp.ui.screenshot.collect_visible_elements",
+        lambda _app, _max_depth, _interactive_only: [
+            {
+                "id": 7,
+                "name": "Save",
+                "type": "Button",
+                "automationId": "saveButton",
+                "bounds": {"x": 110, "y": 220, "width": 40, "height": 20},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "ctypes.windll",
+        SimpleNamespace(user32=SimpleNamespace(GetWindowRect=fake_get_window_rect)),
+        raising=False,
+    )
+
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+        session_id=None,
+    )
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(
+            capturing_mcp,
+            session,
+            check_session_access=lambda ctx: None,
+        )
+        await capturing_mcp.tools["ui_take_annotated_screenshot"](SimpleNamespace())
+        response = await capturing_mcp.tools["ui_click_annotated"](
+            SimpleNamespace(),
+            element_id=7,
+        )
+
+    backend.click_at.assert_awaited_once_with(130, 230)
+    assert response["data"]["clicked"] is True
+    assert response["data"]["position"] == {"x": 130, "y": 230}
 
 
 def _pywinauto_backend_with_element(element: MagicMock) -> tuple[object, SimpleNamespace]:

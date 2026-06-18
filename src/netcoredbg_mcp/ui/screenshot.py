@@ -178,7 +178,7 @@ def capture_window(hwnd: int) -> tuple[bytes, int, int]:
                         "raw",
                         "BGRA",
                         0,
-                        -1,
+                        1,
                     )
 
                     # Encode to PNG
