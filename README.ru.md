@@ -26,7 +26,7 @@ Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 ## Что нового в v0.18.0
 
 - **Semantic UI evidence** — агенты могут читать focus, text, property,
-  DataGrid, monitor, screenshot, click, selection и ensure-visible состояние
+  DataGrid, monitor, screenshot, click, selection и ensure-visible состояния
   через bounded helper-инструменты для повторяемой UI-отладки.
 - **Runtime-smoke orchestration** — v2-планы получили validation, one-call
   execution, diagnostic probes, wait/event cursors, tracepoint policy

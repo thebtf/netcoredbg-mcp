@@ -51,7 +51,7 @@ It is mandatory when a change affects any of these surfaces:
 | --- | --- | --- | --- |
 | Local release-prep branch and commit | Automatic | Sensitive content, incoherent diff, or unrelated dirty state | Git status, diff, and gate output |
 | Release-prep PR creation | Automatic | Unreviewed broad product change outside release-owned files | PR URL and changed-file list |
-| PR merge | Automatic after MCP PR review and required checks are clean when the user has authorized auto-merge for this session | `fix_now`, unresolved mandatory review threads, failed checks, or high-risk scope expansion | `mcp__pr.pr_summary`, GitHub merge state, status checks |
+| PR merge | Automatic after MCP PR review and required checks are clean when the user has authorized auto-merge for this session | `fix_now`, unresolved mandatory review threads, failed checks, or high-risk scope expansion | MCP PR summary, GitHub merge state, status checks |
 | PATCH or MINOR tag and remote publication | Automatic when the current user directive explicitly authorizes release/tag/deploy and all gates above pass | MAJOR/breaking change, tag collision, failed release gate, or missing publication evidence | Remote tag, workflow status, release URL, package smoke |
 | MAJOR or breaking release | Approval required | Always | Explicit user approval naming the version |
 | Production/customer deployment outside this workstation | Approval required | Always | Named target, deploy plan, health checks |
