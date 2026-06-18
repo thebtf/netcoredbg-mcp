@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-06-19
+
+### Added
+- Semantic UI automation helpers for monitor events, text and grid evidence,
+  focus assertions, read-only property checks, annotated screenshots, verified
+  click evidence, DataGrid ensure-visible actions, selected-row evidence, and
+  FlaUI focused-element queries.
+- Runtime-smoke facades for v2 plan validation, one-call plan execution,
+  diagnostic probes, event cursors, wait results, debug preflight, tracepoint
+  policy guardrails, diagnostic orchestration, app diagnostics, agent-mode
+  defaults, trace cursor deltas, and plan-file inputs.
+- Reproduction and lifecycle ledgers for the issue-backlog hardening roadmap,
+  including portable NovaScript replay packets and release-readiness evidence.
+
+### Fixed
+- Runtime-smoke cleanup, selector safety, text replacement, textbox state
+  oracles, single-flight cleanup, and plan-file validation now fail closed with
+  bounded evidence instead of leaking stale or ambiguous state.
+- FlaUI bridge and UI helpers now handle stale bridge sessions, pointer routing,
+  selection compatibility, screenshot orientation, transient focus exceptions,
+  and target-process focus boundaries.
+- Tracepoint cursor and policy handling now preserves cursor boundaries,
+  disambiguates same-timestamp events, reports stale dropped counts, and avoids
+  unsafe tracepoint reuse.
+
+### Changed
+- Release preparation now has a project-specific release protocol covering
+  PyPI/TestPyPI, GitHub Release, version parity, release notes, critical-suite,
+  production playbook, local deploy smoke, and post-tag publication evidence.
+
 ## [0.17.2] - 2026-05-17
 
 ### Fixed
