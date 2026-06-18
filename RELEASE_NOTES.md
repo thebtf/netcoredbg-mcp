@@ -1,46 +1,40 @@
-# netcoredbg-mcp v0.18.0
+# netcoredbg-mcp v0.18.1
 
 Released: 2026-06-19
 
 ## Summary
 
-`v0.18.0` is the UI emulation and runtime-smoke hardening milestone. It turns a
-large backlog of consumer-facing debugging failures into bounded, reproducible
-evidence surfaces for agents: semantic UI helpers, stronger FlaUI bridge
-behavior, richer runtime-smoke probes, tracepoint guardrails, and release
-playbooks that future agents can execute instead of guessing.
+`v0.18.1` is a patch release for the UI emulation and runtime-smoke hardening
+milestone. It ships the CR-044 review follow-ups merged after `v0.18.0`, so the
+published package and this workstation receive the same read-only validation and
+worktree-scope fixes already present on `main`.
 
 ## Highlights
 
-- Added semantic UI evidence helpers for text, focus, properties, DataGrid
-  state, monitor events, screenshots, clicks, selected rows, and ensure-visible
-  workflows.
-- Added runtime-smoke v2 facades for plan validation, plan execution, diagnostic
-  probes, wait/event cursors, debug preflight, tracepoint policies, app
-  diagnostics, trace cursor deltas, agent-mode defaults, and plan-file inputs.
-- Hardened FlaUI bridge behavior around stale bridge sessions, pointer routing,
-  selection compatibility, screenshot orientation, transient focus exceptions,
-  and target-process focus boundaries.
-- Added issue-reproduction ledgers and NovaScript replay packets so broad UI
-  issues are tracked as bounded slices rather than closed from partial evidence.
-- Added this release protocol so PyPI/GitHub publication, local deploy smoke,
-  critical-suite, production playbook, and version-parity gates are explicit.
+- Runtime-smoke `plan_path` validation no longer acquires mux ownership for
+  read-only validation calls.
+- Read-only validation no longer mutates `session.project_path`, preserving the
+  active debug session target while observers inspect plans.
+- Worktree lookup caching in project path validation is scoped by the supplied
+  project root, avoiding stale decisions across worktrees or plan-file scopes.
+- Broad issue-backlog work remains open; this patch only publishes the bounded
+  CR-044 follow-up fixes already merged through PR #134, PR #135, and PR #136.
 
 ## Upgrade Notes
 
-- This is a MINOR release because it adds public MCP/runtime-smoke/UI automation
-  capabilities while preserving existing package and CLI entry points.
+- This is a PATCH release. It preserves the `v0.18.0` public API surface and
+  fixes validation/session-scope behavior around runtime-smoke plan files.
 - Upgrade an existing pip or pipx install with one of:
 
   ```powershell
-  python -m pip install --upgrade netcoredbg-mcp==0.18.0
+  python -m pip install --upgrade netcoredbg-mcp==0.18.1
   pipx upgrade netcoredbg-mcp
   ```
 
 - For a new workstation install:
 
   ```powershell
-  pipx install netcoredbg-mcp==0.18.0
+  pipx install netcoredbg-mcp==0.18.1
   netcoredbg-mcp --setup
   ```
 
