@@ -698,6 +698,299 @@ async def test_ui_invoke_preserves_non_selector_backend_exception() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ui_operation_adapters_click_uses_invoke_element_with_bounded_evidence() -> None:
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.invoke_calls: list[dict[str, Any]] = []
+            self.click_at_calls: list[tuple[int, int]] = []
+
+        async def invoke_element(self, **kwargs: Any) -> dict[str, Any]:
+            self.invoke_calls.append(dict(kwargs))
+            return {
+                "status": "PASS",
+                "invoked": True,
+                "method": "InvokePattern",
+                "automationId": "ApplyButton",
+                "name": "Apply",
+                "controlType": "Button",
+                "full_tree": {"must": "not leak"},
+            }
+
+        async def click_at(self, x: int, y: int) -> None:
+            self.click_at_calls.append((x, y))
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    result = await ui_operation_adapters(backend_provider)["ui.click"](
+        selector={"automation_id": "ApplyButton"},
+    )
+
+    assert result == {
+        "status": "PASS",
+        "clicked": True,
+        "method": "InvokePattern",
+        "selector": {"automation_id": "ApplyButton"},
+        "automationId": "ApplyButton",
+        "name": "Apply",
+        "controlType": "Button",
+        "result": {
+            "status": "PASS",
+            "invoked": True,
+            "method": "InvokePattern",
+            "automationId": "ApplyButton",
+            "name": "Apply",
+            "controlType": "Button",
+        },
+        "settled_ms": 500,
+    }
+    assert backend.invoke_calls == [
+        {
+            "automation_id": "ApplyButton",
+            "name": None,
+            "control_type": None,
+            "root_id": None,
+            "xpath": None,
+        }
+    ]
+    assert backend.click_at_calls == []
+
+
+@pytest.mark.asyncio
+async def test_ui_operation_adapters_click_blocks_without_activation_evidence() -> None:
+    class FakeBackend:
+        async def invoke_element(self, **kwargs: Any) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "invoked": False,
+                "method": "InvokePattern",
+                "automationId": "ApplyButton",
+                "full_tree": {"must": "not leak"},
+            }
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    result = await ui_operation_adapters(backend_provider)["ui.click"](
+        selector={"automation_id": "ApplyButton"},
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "click activation evidence failed"
+    assert result["requested"] == {"clicked": False}
+    assert result["accepted"] == {"clicked": True, "invoked": True}
+    assert result["selector"] == {"automation_id": "ApplyButton"}
+    assert "full_tree" not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_ui_operation_adapters_click_verified_uses_production_click_adapter() -> None:
+    class FakeClient:
+        def __init__(self, calls: list[tuple[str, Any]]) -> None:
+            self.calls = calls
+
+        async def call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
+            self.calls.append(("client_call", method, dict(payload)))
+            if method == "set_focus":
+                return {
+                    "status": "PASS",
+                    "focused": True,
+                    "focus_within": True,
+                    "method": "UIA.Focus",
+                }
+            return {"status": "FAIL", "reason": f"unexpected method {method}"}
+
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, Any]] = []
+            self.client = FakeClient(self.calls)
+
+        async def find_element(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls.append(("find_element", dict(kwargs)))
+            return {
+                "status": "PASS",
+                "found": True,
+                "visible": True,
+                "enabled": True,
+                "automationId": "ApplyButton",
+                "controlType": "Button",
+                "IsSelected": True,
+                "full_tree": {"must": "not leak"},
+            }
+
+        async def invoke_element(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls.append(("invoke_element", dict(kwargs)))
+            return {
+                "status": "PASS",
+                "invoked": True,
+                "method": "InvokePattern",
+                "automationId": "ApplyButton",
+                "name": "Apply",
+                "controlType": "Button",
+                "full_tree": {"must": "not leak"},
+            }
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    result = await RuntimeSmokeRunner(
+        FakeRuntimeSmokeSession(),
+        service_adapters=ui_operation_adapters(backend_provider),
+    ).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "verified production click",
+            "cases": [
+                {
+                    "id": "click_apply_button",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.click_verified",
+                                "selector": {"automation_id": "ApplyButton"},
+                                "postcondition": {
+                                    "op": "ui.get_property",
+                                    "selector": {"automation_id": "ApplyButton"},
+                                    "property": "IsSelected",
+                                    "equals": True,
+                                },
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert result["status"] == "PASS"
+    action = result["cases"][0]["actions"][0]
+    assert action["route"] == "click_verified"
+    assert action["target"]["verified"] is True
+    assert action["click"]["clicked"] is True
+    assert action["postcondition"]["verified"] is True
+    assert action["postcondition"]["actual"] is True
+    assert "full_tree" not in repr(action)
+    selector_kwargs = {
+        "automation_id": "ApplyButton",
+        "name": None,
+        "control_type": None,
+        "root_id": None,
+        "xpath": None,
+    }
+    assert backend.calls == [
+        ("find_element", selector_kwargs),
+        ("client_call", "set_focus", {"automationId": "ApplyButton"}),
+        ("invoke_element", selector_kwargs),
+        ("find_element", selector_kwargs),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ui_operation_adapters_click_verified_blocks_false_activation() -> None:
+    class FakeClient:
+        def __init__(self, calls: list[tuple[str, Any]]) -> None:
+            self.calls = calls
+
+        async def call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
+            self.calls.append(("client_call", method, dict(payload)))
+            if method == "set_focus":
+                return {
+                    "status": "PASS",
+                    "focused": True,
+                    "focus_within": True,
+                    "method": "UIA.Focus",
+                }
+            return {"status": "FAIL", "reason": f"unexpected method {method}"}
+
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, Any]] = []
+            self.client = FakeClient(self.calls)
+
+        async def find_element(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls.append(("find_element", dict(kwargs)))
+            return {
+                "status": "PASS",
+                "found": True,
+                "visible": True,
+                "enabled": True,
+                "automationId": "ApplyButton",
+                "controlType": "Button",
+                "IsSelected": True,
+            }
+
+        async def invoke_element(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls.append(("invoke_element", dict(kwargs)))
+            return {
+                "status": "PASS",
+                "invoked": False,
+                "method": "InvokePattern",
+                "automationId": "ApplyButton",
+                "name": "Apply",
+                "controlType": "Button",
+            }
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    result = await RuntimeSmokeRunner(
+        FakeRuntimeSmokeSession(),
+        service_adapters=ui_operation_adapters(backend_provider),
+    ).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "verified production click",
+            "cases": [
+                {
+                    "id": "click_apply_button",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.click_verified",
+                                "selector": {"automation_id": "ApplyButton"},
+                                "postcondition": {
+                                    "op": "ui.get_property",
+                                    "selector": {"automation_id": "ApplyButton"},
+                                    "property": "IsSelected",
+                                    "equals": True,
+                                },
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert result["status"] == "BLOCKED"
+    action = result["cases"][0]["actions"][0]
+    assert action["status"] == "BLOCKED"
+    assert action["reason"] == "click activation evidence failed"
+    selector_kwargs = {
+        "automation_id": "ApplyButton",
+        "name": None,
+        "control_type": None,
+        "root_id": None,
+        "xpath": None,
+    }
+    assert backend.calls == [
+        ("find_element", selector_kwargs),
+        ("client_call", "set_focus", {"automationId": "ApplyButton"}),
+        ("invoke_element", selector_kwargs),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_ui_get_property_propagates_backend_failure_status() -> None:
     class FakeBackend:
         async def extract_text(self, **_: Any) -> dict[str, Any]:

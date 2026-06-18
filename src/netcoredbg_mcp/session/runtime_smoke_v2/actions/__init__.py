@@ -109,6 +109,114 @@ async def _handle_ui_click(action: dict[str, Any], context: ActionContext) -> di
     )
 
 
+async def _handle_ui_input_ensure_target(
+    action: dict[str, Any],
+    context: ActionContext,
+) -> dict[str, Any]:
+    started = context.clock()
+    selector, blocked = _selector_from_action(action)
+    if blocked is not None:
+        return {
+            **blocked,
+            "duration_ms": context.elapsed_ms(started),
+            "route": "input_ensure_target",
+        }
+    require, blocked = _target_requirements_from_action(action)
+    if blocked is not None:
+        return {
+            **blocked,
+            "duration_ms": context.elapsed_ms(started),
+            "route": "input_ensure_target",
+        }
+    target = await _ensure_input_target(
+        selector,
+        require=require,
+        context=context,
+        started=started,
+        route="input_ensure_target",
+    )
+    return target
+
+
+async def _handle_ui_click_verified(
+    action: dict[str, Any],
+    context: ActionContext,
+) -> dict[str, Any]:
+    started = context.clock()
+    selector, blocked = _selector_from_action(action)
+    if blocked is not None:
+        return {
+            **blocked,
+            "duration_ms": context.elapsed_ms(started),
+            "route": "click_verified",
+        }
+    postcondition, blocked = _postcondition_from_action(action, default_selector=selector)
+    if blocked is not None:
+        return {
+            "status": "BLOCKED",
+            **blocked,
+            "route": "click_verified",
+            "selector": selector,
+            "duration_ms": context.elapsed_ms(started),
+        }
+    target_result = await _ensure_input_target(
+        selector,
+        require={"visible": True, "enabled": True, "focus": True},
+        context=context,
+        started=started,
+        route="click_verified",
+    )
+    if target_result.get("status") != "PASS":
+        target_result["route"] = "click_verified"
+        return target_result
+
+    click_result = await context.call_adapter("ui.click", selector=selector)
+    if not _is_adapter_success(click_result):
+        failed = _adapter_failure_result(
+            click_result,
+            route="click_verified",
+            duration_ms=context.elapsed_ms(started),
+            default_reason="failed to click verified target",
+        )
+        failed["selector"] = selector
+        failed["target"] = target_result["target"]
+        failed["click"] = _bounded_result(click_result)
+        return failed
+
+    click_blocked = _click_evidence_failure(click_result)
+    if click_blocked is not None:
+        return {
+            "status": "BLOCKED",
+            **click_blocked,
+            "route": "click_verified",
+            "selector": selector,
+            "target": target_result["target"],
+            "click": _bounded_result(click_result),
+            "duration_ms": context.elapsed_ms(started),
+        }
+    post_result = await _verify_postcondition(
+        postcondition,
+        context=context,
+        started=started,
+        route="click_verified",
+    )
+    if post_result.get("status") != "PASS":
+        post_result["selector"] = selector
+        post_result["target"] = target_result["target"]
+        post_result["click"] = _bounded_result(click_result)
+        return post_result
+
+    return {
+        "status": "PASS",
+        "route": "click_verified",
+        "selector": selector,
+        "target": target_result["target"],
+        "click": _bounded_result(click_result),
+        "postcondition": post_result["postcondition"],
+        "duration_ms": context.elapsed_ms(started),
+    }
+
+
 async def _handle_ui_grid_select(action: dict[str, Any], context: ActionContext) -> dict[str, Any]:
     started = context.clock()
     selector, blocked = _selector_from_action(action)
@@ -365,6 +473,189 @@ async def _handle_noop(action: dict[str, Any], context: ActionContext) -> dict[s
     }
 
 
+async def _ensure_input_target(
+    selector: dict[str, Any],
+    *,
+    require: dict[str, Any],
+    context: ActionContext,
+    started: float,
+    route: str,
+) -> dict[str, Any]:
+    find_result = await context.call_adapter("ui.find_element", selector=selector)
+    if find_result.get("found") is False:
+        blocked = build_blocked(
+            reason="selector not found",
+            requested={"selector": selector},
+            accepted={"selector": "visible enabled UI target"},
+            next_step="Refresh the UI tree and provide a selector that resolves uniquely.",
+        )
+        return {
+            "status": "BLOCKED",
+            **blocked,
+            "route": route,
+            "selector": selector,
+            "duration_ms": context.elapsed_ms(started),
+        }
+    if not _is_adapter_success(find_result):
+        failed = _adapter_failure_result(
+            find_result,
+            route=route,
+            duration_ms=context.elapsed_ms(started),
+            default_reason="failed to find target element",
+        )
+        failed["selector"] = selector
+        return failed
+
+    target = _target_evidence(selector, find_result)
+    blocked = _target_requirement_failure(target, require)
+    if blocked is not None:
+        return {
+            "status": "BLOCKED",
+            **blocked,
+            "route": route,
+            "selector": selector,
+            "target": target,
+            "duration_ms": context.elapsed_ms(started),
+        }
+
+    if require.get("focus") is True:
+        focus_result = await context.call_adapter("ui.set_focus", selector=selector)
+        if not _is_adapter_success(focus_result):
+            failed = _adapter_failure_result(
+                focus_result,
+                route=route,
+                duration_ms=context.elapsed_ms(started),
+                default_reason="failed to focus target element",
+            )
+            failed["selector"] = selector
+            failed["target"] = target
+            return failed
+        focus = _bounded_result(focus_result)
+        focus_within = focus.get("focus_within")
+        focused = focus.get("focused")
+        if focus_within is False or focused is False:
+            blocked = build_blocked(
+                reason="target focus evidence failed",
+                requested={"focus_within": focus_within, "focused": focused},
+                accepted={"focus_within": True, "focused": True},
+                next_step="Ensure focus remains inside the requested input target.",
+            )
+            return {
+                "status": "BLOCKED",
+                **blocked,
+                "route": route,
+                "selector": selector,
+                "target": {**target, "focus": focus},
+                "duration_ms": context.elapsed_ms(started),
+            }
+        if focus_within is not True and focused is not True:
+            blocked = build_blocked(
+                reason="target focus evidence missing",
+                requested={"focus_within": focus_within, "focused": focused},
+                accepted={"focus_within": True, "focused": True},
+                next_step="Return positive focus evidence after focusing the input target.",
+            )
+            return {
+                "status": "BLOCKED",
+                **blocked,
+                "route": route,
+                "selector": selector,
+                "target": {**target, "focus": focus},
+                "duration_ms": context.elapsed_ms(started),
+            }
+        target["focus"] = focus
+
+    target["verified"] = True
+    return {
+        "status": "PASS",
+        "route": route,
+        "selector": selector,
+        "verified": True,
+        "target": target,
+        "duration_ms": context.elapsed_ms(started),
+    }
+
+
+async def _verify_postcondition(
+    postcondition: dict[str, Any],
+    *,
+    context: ActionContext,
+    started: float,
+    route: str,
+) -> dict[str, Any]:
+    op_name = str(postcondition.get("op") or "")
+    if op_name != "ui.get_property":
+        blocked = build_blocked(
+            reason="unsupported click postcondition",
+            requested={"op": op_name},
+            accepted={"op": "ui.get_property"},
+            next_step="Use a bounded property postcondition for ui.click_verified.",
+        )
+        return {
+            "status": "BLOCKED",
+            **blocked,
+            "route": route,
+            "duration_ms": context.elapsed_ms(started),
+        }
+    selector = dict(postcondition["selector"])
+    property_name = str(postcondition["property"])
+    expected = postcondition["equals"]
+    result = await context.call_adapter(
+        "ui.get_property",
+        selector=selector,
+        property_name=property_name,
+    )
+    if not _is_adapter_success(result):
+        failed = _adapter_failure_result(
+            result,
+            route=route,
+            duration_ms=context.elapsed_ms(started),
+            default_reason="failed to verify click postcondition",
+        )
+        failed["postcondition"] = {
+            "op": op_name,
+            "selector": selector,
+            "property": property_name,
+            "expected": expected,
+            "result": _bounded_result(result),
+            "verified": False,
+        }
+        return failed
+
+    actual = result.get("value", result.get("actual"))
+    if actual != expected:
+        return {
+            "status": "FAIL",
+            "reason": "click postcondition mismatch",
+            "route": route,
+            "postcondition": {
+                "op": op_name,
+                "selector": selector,
+                "property": property_name,
+                "expected": expected,
+                "actual": actual,
+                "result": _bounded_result(result),
+                "verified": False,
+            },
+            "duration_ms": context.elapsed_ms(started),
+        }
+
+    return {
+        "status": "PASS",
+        "route": route,
+        "postcondition": {
+            "op": op_name,
+            "selector": selector,
+            "property": property_name,
+            "expected": expected,
+            "actual": actual,
+            "result": _bounded_result(result),
+            "verified": True,
+        },
+        "duration_ms": context.elapsed_ms(started),
+    }
+
+
 def _action_result(**payload: Any) -> dict[str, Any]:
     result = dict(payload.get("result") or {})
     action = dict(payload)
@@ -373,6 +664,185 @@ def _action_result(**payload: Any) -> dict[str, Any]:
             if key in result:
                 action[key] = result[key]
     return action
+
+
+def _target_requirements_from_action(
+    action: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    raw_require = action.get("require", {})
+    if not isinstance(raw_require, Mapping):
+        blocked = build_blocked(
+            reason="invalid target requirements",
+            requested={"require": raw_require},
+            accepted={"require": "object with visible/enabled/focus booleans"},
+            next_step="Provide require as an object.",
+        )
+        return {}, {"status": "BLOCKED", **blocked}
+    require = dict(raw_require)
+    for key in ("visible", "enabled", "focus"):
+        if key in require and not isinstance(require[key], bool):
+            blocked = build_blocked(
+                reason="invalid target requirement",
+                requested={key: require[key]},
+                accepted={key: "boolean"},
+                next_step=f"Provide require.{key} as true or false.",
+            )
+            return {}, {"status": "BLOCKED", **blocked}
+    return require, None
+
+
+def _postcondition_from_action(
+    action: dict[str, Any],
+    *,
+    default_selector: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    raw_postcondition = action.get("postcondition")
+    if not isinstance(raw_postcondition, Mapping):
+        blocked = build_blocked(
+            reason="click postcondition required",
+            requested={"postcondition": raw_postcondition},
+            accepted={"postcondition": "object with op=ui.get_property and equals"},
+            next_step="Provide a bounded postcondition for ui.click_verified.",
+        )
+        return {}, {"status": "BLOCKED", **blocked}
+    postcondition = dict(raw_postcondition)
+    op_name = str(postcondition.get("op") or "")
+    if op_name != "ui.get_property":
+        blocked = build_blocked(
+            reason="unsupported click postcondition",
+            requested={"op": op_name},
+            accepted={"op": "ui.get_property"},
+            next_step="Use a bounded property postcondition for ui.click_verified.",
+        )
+        return {}, {"status": "BLOCKED", **blocked}
+    selector = postcondition.get("selector", default_selector)
+    if not isinstance(selector, Mapping):
+        blocked = build_blocked(
+            reason="invalid click postcondition selector",
+            requested={"selector": selector},
+            accepted={"selector": "object"},
+            next_step="Provide postcondition.selector as an object.",
+        )
+        return {}, {"status": "BLOCKED", **blocked}
+    property_name = postcondition.get("property", postcondition.get("property_name"))
+    if not isinstance(property_name, str) or not property_name.strip():
+        blocked = build_blocked(
+            reason="click postcondition property required",
+            requested={"property": property_name},
+            accepted={"property": "non-empty string"},
+            next_step="Provide the UI property that must be verified after the click.",
+        )
+        return {}, {"status": "BLOCKED", **blocked}
+    if "equals" not in postcondition:
+        blocked = build_blocked(
+            reason="click postcondition expected value required",
+            requested={"equals": None},
+            accepted={"equals": "bounded expected value"},
+            next_step="Provide postcondition.equals so the click result can be verified.",
+        )
+        return {}, {"status": "BLOCKED", **blocked}
+    return {
+        "op": op_name,
+        "selector": dict(selector),
+        "property": property_name.strip(),
+        "equals": postcondition["equals"],
+    }, None
+
+
+def _target_requirement_failure(
+    target: dict[str, Any],
+    require: dict[str, Any],
+) -> dict[str, Any] | None:
+    for key in ("visible", "enabled"):
+        if require.get(key) is True and target.get(key) is not True:
+            return build_blocked(
+                reason="target precondition failed",
+                requested={key: target.get(key)},
+                accepted={key: True},
+                next_step="Choose a target that is visible and enabled before input/click.",
+            )
+    return None
+
+
+def _target_evidence(
+    selector: dict[str, Any],
+    find_result: dict[str, Any],
+) -> dict[str, Any]:
+    target: dict[str, Any] = {
+        "selector": selector,
+        "found": find_result.get("found", True),
+    }
+    _copy_first_present(target, find_result, "visible", ("visible", "isVisible"))
+    _copy_first_present(target, find_result, "enabled", ("enabled", "isEnabled"))
+    for key in (
+        "focusable",
+        "isVisible",
+        "isEnabled",
+        "controlType",
+        "control_type",
+        "automationId",
+        "automation_id",
+        "name",
+    ):
+        if key in find_result:
+            target[key] = find_result[key]
+    return target
+
+
+def _copy_first_present(
+    target: dict[str, Any],
+    source: Mapping[str, Any],
+    output_key: str,
+    input_keys: tuple[str, ...],
+) -> None:
+    for key in input_keys:
+        if key in source:
+            target[output_key] = source[key]
+            return
+
+
+def _is_adapter_success(result: dict[str, Any]) -> bool:
+    return str(result.get("status", "PASS")).upper() in {"PASS", "OK", "SUCCESS"}
+
+
+def _adapter_failure_result(
+    result: dict[str, Any],
+    *,
+    route: str,
+    duration_ms: int,
+    default_reason: str,
+) -> dict[str, Any]:
+    status = str(result.get("status") or "BLOCKED").upper()
+    failed: dict[str, Any] = {
+        "status": status,
+        "reason": str(result.get("reason") or default_reason),
+        "route": route,
+        "duration_ms": duration_ms,
+        "result": _bounded_result(result),
+    }
+    for key in ("requested", "accepted", "next_step"):
+        if key in result:
+            failed[key] = result[key]
+    return failed
+
+
+def _click_evidence_failure(result: dict[str, Any]) -> dict[str, Any] | None:
+    if result.get("clicked") is True or result.get("invoked") is True:
+        return None
+    return build_blocked(
+        reason="click activation evidence failed",
+        requested={"clicked": result.get("clicked"), "invoked": result.get("invoked")},
+        accepted={"clicked": True, "invoked": True},
+        next_step="Return positive click activation evidence before verifying postconditions.",
+    )
+
+
+def _bounded_result(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in result.items()
+        if key not in {"full_tree", "raw_tree", "ui_tree", "window_tree"}
+    }
 
 
 def _indices_from_action(action: dict[str, Any]) -> tuple[list[int], dict[str, Any] | None]:
@@ -560,12 +1030,14 @@ def _selector_from_action(
 register_action("noop", _handle_noop)
 register_action("ui.noop", _handle_noop)
 register_action("ui.click", _handle_ui_click)
+register_action("ui.click_verified", _handle_ui_click_verified)
 register_action("ui.drag", handle_ui_drag)
 register_action("ui.grid.get_state", _handle_ui_grid_get_state)
 register_action("ui.grid.ensure_visible", _handle_ui_grid_ensure_visible)
 register_action("ui.grid.select_row", _handle_ui_grid_select_row)
 register_action("ui.grid.click_row", _handle_ui_grid_click_row)
 register_action("ui.grid.select", _handle_ui_grid_select)
+register_action("ui.input.ensure_target", _handle_ui_input_ensure_target)
 register_action("ui.invoke", _handle_ui_invoke)
 register_action("ui.key_sequence", handle_ui_key_sequence)
 register_action("ui.text.type_replace_selection", handle_ui_text_type_replace_selection)

@@ -346,7 +346,7 @@ def ui_operation_adapters(
                 "status": "PASS",
                 "property": property_name,
                 "value": str(result.get("text", "")),
-                "result": result,
+                "result": _bounded_ui_result(result),
             }
 
         try:
@@ -371,8 +371,69 @@ def ui_operation_adapters(
             "status": "PASS",
             "property": property_name,
             "value": result.get(key),
-            "result": result,
+            "result": _bounded_ui_result(result),
         }
+
+    async def click(**args: Any) -> dict[str, Any]:
+        backend = await _backend_or_blocked(ensure_ui_connected)
+        if isinstance(backend, dict):
+            return backend
+        selector = _selector(args)
+        try:
+            result = await backend.invoke_element(**_selector_kwargs(selector))
+        except Exception as exc:
+            blocked = {"status": "BLOCKED", "reason": str(exc)}
+            if _is_selector_miss(blocked):
+                return _selector_blocked(selector, result=blocked)
+            return {
+                "status": "BLOCKED",
+                "reason": str(exc),
+                "requested": {"selector": selector},
+                "accepted": {
+                    "backend": "connected UI backend supporting ui.click via invoke_element"
+                },
+                "next_step": "Inspect UI backend or bridge transport diagnostics.",
+                "result": blocked,
+            }
+        if _is_selector_miss(result):
+            return _selector_blocked(selector, result=_bounded_ui_result(result))
+        if not _is_backend_success(result):
+            failed = _backend_failure_result(_bounded_ui_result(result), operation="ui.click")
+            failed["selector"] = selector
+            return failed
+
+        bounded = _bounded_ui_result(result)
+        if result.get("invoked") is not True:
+            return {
+                "status": "BLOCKED",
+                "reason": "click activation evidence failed",
+                "requested": {"clicked": bool(result.get("invoked", False))},
+                "accepted": {"clicked": True, "invoked": True},
+                "next_step": (
+                    "Return positive invoke/click evidence before treating ui.click as successful."
+                ),
+                "selector": selector,
+                "result": bounded,
+            }
+        output: dict[str, Any] = {
+            "status": "PASS",
+            "clicked": True,
+            "method": str(result.get("method") or "invoke_element"),
+            "selector": selector,
+            "result": bounded,
+        }
+        for key in (
+            "automationId",
+            "automation_id",
+            "name",
+            "controlType",
+            "control_type",
+            "className",
+            "class_name",
+        ):
+            if key in result:
+                output[key] = result[key]
+        return await _settle_after_state_change(output)
 
     async def find_element(**args: Any) -> dict[str, Any]:
         backend = await _backend_or_blocked(ensure_ui_connected)
@@ -783,6 +844,7 @@ def ui_operation_adapters(
         "ui.text.assert_selection": text_assert_selection,
         "ui.text.set_text": text_set_text,
         "ui.get_property": get_property,
+        "ui.click": click,
         "ui.find_element": find_element,
         "ui.set_focus": set_focus,
         "ui.send_keys_focused": send_keys_focused,
@@ -2611,6 +2673,11 @@ def _bounded_text_result(result: dict[str, Any]) -> dict[str, Any]:
         "control_type",
     )
     return {key: result[key] for key in allowed_keys if key in result}
+
+
+def _bounded_ui_result(result: dict[str, Any]) -> dict[str, Any]:
+    unbounded_keys = {"full_tree", "raw_tree", "ui_tree", "window_tree"}
+    return {key: value for key, value in result.items() if key not in unbounded_keys}
 
 
 def _selector(args: dict[str, Any]) -> dict[str, Any]:
