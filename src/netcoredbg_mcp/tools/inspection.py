@@ -18,6 +18,18 @@ logger = logging.getLogger(__name__)
 _NULL_SENTINELS = frozenset(("null", "Nothing", "None", ""))
 
 
+def _trace_entry_to_dict(entry: Any) -> dict[str, Any]:
+    return {
+        "timestamp": entry.timestamp,
+        "file": entry.file,
+        "line": entry.line,
+        "expression": entry.expression,
+        "value": entry.value,
+        "thread_id": entry.thread_id,
+        "tracepoint_id": entry.tracepoint_id,
+    }
+
+
 def compute_collection_stats(items: list, sample_size: int) -> dict[str, Any]:
     """Compute collection statistics from a list of Variable objects.
 
@@ -661,20 +673,101 @@ def register_inspection_tools(
             entries = mgr.get_log(since=since, tracepoint_id=tracepoint_id)
             return build_response(
                 data={
-                    "entries": [
-                        {
-                            "timestamp": e.timestamp,
-                            "file": e.file,
-                            "line": e.line,
-                            "expression": e.expression,
-                            "value": e.value,
-                            "thread_id": e.thread_id,
-                            "tracepoint_id": e.tracepoint_id,
-                        }
-                        for e in entries
-                    ],
+                    "entries": [_trace_entry_to_dict(e) for e in entries],
                     "total": len(entries),
                     "truncated": mgr.is_log_full,
+                },
+                state=session.state.state,
+            )
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
+    async def mark_trace_cursor(tracepoint_id: str | None = None) -> dict:
+        """Mark the current tracepoint log boundary for later delta reads.
+
+        State: Works in any state.
+
+        Args:
+            tracepoint_id: Optional tracepoint filter to bind into the cursor
+        """
+        try:
+            mgr = getattr(session, "_tracepoint_manager", None)
+            if mgr is None:
+                cursor = {
+                    "after_timestamp": None,
+                    "tracepoint_id": tracepoint_id,
+                    "buffer_start_timestamp": None,
+                    "buffer_size": 0,
+                }
+            else:
+                cursor = mgr.mark_trace_cursor(tracepoint_id=tracepoint_id)
+
+            return build_response(
+                data={
+                    "cursor": cursor,
+                    "buffer_size": cursor["buffer_size"],
+                    "tracepoint_id": tracepoint_id,
+                },
+                state=session.state.state,
+            )
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+    )
+    async def get_trace_delta(
+        cursor: dict[str, Any] | float | None,
+        limit: int | None = None,
+        tracepoint_id: str | None = None,
+    ) -> dict:
+        """Get tracepoint log entries appended after a cursor.
+
+        State: Works in any state.
+
+        Args:
+            cursor: Cursor returned by mark_trace_cursor or a raw monotonic timestamp
+            limit: Maximum number of entries to return
+            tracepoint_id: Optional tracepoint filter overriding the cursor filter
+        """
+        try:
+            mgr = getattr(session, "_tracepoint_manager", None)
+            if mgr is None:
+                if isinstance(cursor, dict):
+                    next_cursor = dict(cursor)
+                    if tracepoint_id is not None:
+                        next_cursor["tracepoint_id"] = tracepoint_id
+                else:
+                    next_cursor = {
+                        "after_timestamp": cursor,
+                        "tracepoint_id": tracepoint_id,
+                        "buffer_start_timestamp": None,
+                        "buffer_size": 0,
+                    }
+                return build_response(
+                    data={
+                        "entries": [],
+                        "available": 0,
+                        "total": 0,
+                        "limit": limit,
+                        "limited": False,
+                        "truncated": False,
+                        "stale": False,
+                        "dropped_count": 0,
+                        "cursor": cursor,
+                        "next_cursor": next_cursor,
+                    },
+                    state=session.state.state,
+                )
+
+            delta = mgr.get_trace_delta(cursor, limit=limit, tracepoint_id=tracepoint_id)
+            return build_response(
+                data={
+                    **delta,
+                    "entries": [_trace_entry_to_dict(e) for e in delta["entries"]],
                 },
                 state=session.state.state,
             )
