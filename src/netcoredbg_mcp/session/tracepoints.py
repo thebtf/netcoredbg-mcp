@@ -28,15 +28,55 @@ RATE_LIMIT_INTERVAL_SECONDS = float(
 )  # Max 10 hits/sec
 
 
+class _TraceBuffer(deque[TraceEntry]):
+    def __init__(
+        self,
+        owner: TracepointManager,
+        entries: list[TraceEntry] | deque[TraceEntry] | None = None,
+        *,
+        maxlen: int | None,
+    ) -> None:
+        super().__init__(entries or (), maxlen=maxlen)
+        self._owner = owner
+
+    def append(self, entry: TraceEntry) -> None:  # type: ignore[override]
+        if self.maxlen is not None and len(self) >= self.maxlen:
+            self._owner._trace_drop_generation += 1
+        self._owner._trace_append_generation += 1
+        super().append(entry)
+
+    def clear(self) -> None:  # type: ignore[override]
+        if self:
+            self._owner._trace_drop_generation += len(self)
+        super().clear()
+
+
 class TracepointManager:
     """Manages client-side tracepoints with rate limiting and trace buffer."""
 
     def __init__(self) -> None:
         self._tracepoints: dict[str, Tracepoint] = {}
-        self._trace_buffer: deque[TraceEntry] = deque(maxlen=MAX_TRACE_ENTRIES)
+        self._trace_append_generation = 0
+        self._trace_drop_generation = 0
+        self._trace_buffer_storage: deque[TraceEntry] = _TraceBuffer(
+            self,
+            maxlen=MAX_TRACE_ENTRIES,
+        )
         self._counter = 0
         self._last_hit_times: dict[str, float] = {}  # tp_id → last hit monotonic time
         self._lock = asyncio.Lock()
+
+    @property
+    def _trace_buffer(self) -> deque[TraceEntry]:
+        return self._trace_buffer_storage
+
+    @_trace_buffer.setter
+    def _trace_buffer(self, value: deque[TraceEntry]) -> None:
+        self._trace_buffer_storage = _TraceBuffer(
+            self,
+            list(value),
+            maxlen=value.maxlen,
+        )
 
     @property
     def tracepoints(self) -> dict[str, Tracepoint]:
@@ -82,8 +122,13 @@ class TracepointManager:
 
     def mark_trace_cursor(self, tracepoint_id: str | None = None) -> dict[str, Any]:
         """Return a cursor for the current trace log boundary."""
+        all_entries = self.get_log()
         entries = self.get_log(tracepoint_id=tracepoint_id)
-        return self._build_trace_cursor(entries, tracepoint_id=tracepoint_id)
+        return self._build_trace_cursor(
+            entries,
+            tracepoint_id=tracepoint_id,
+            global_entries=all_entries,
+        )
 
     def get_trace_delta(
         self,
@@ -93,7 +138,10 @@ class TracepointManager:
         tracepoint_id: str | None = None,
     ) -> dict[str, Any]:
         """Return trace entries after a cursor plus continuation metadata."""
-        after_timestamp, after_ordinal, cursor_tracepoint_id = self._parse_trace_cursor(cursor)
+        after_timestamp, after_ordinal, cursor_tracepoint_id = self._parse_trace_cursor(
+            cursor,
+            tracepoint_id=tracepoint_id,
+        )
         effective_tracepoint_id = (
             tracepoint_id if tracepoint_id is not None else cursor_tracepoint_id
         )
@@ -106,7 +154,6 @@ class TracepointManager:
             after_ordinal=after_ordinal,
             oldest_retained=oldest_retained,
             retained_entries=retained_entries,
-            retained_count=len(retained_entries),
         )
 
         entries = retained_entries
@@ -141,6 +188,8 @@ class TracepointManager:
                 "tracepoint_id": effective_tracepoint_id,
                 "buffer_start_timestamp": oldest_retained,
                 "buffer_size": len(retained_entries),
+                "append_generation": self._trace_append_generation,
+                "drop_generation": self._trace_drop_generation,
             }
         else:
             next_cursor = self._build_trace_cursor(
@@ -167,29 +216,44 @@ class TracepointManager:
         self._trace_buffer.clear()
         return count
 
-    @staticmethod
     def _parse_trace_cursor(
+        self,
         cursor: dict[str, Any] | float | None,
+        *,
+        tracepoint_id: str | None,
     ) -> tuple[float | None, int, str | None]:
         if isinstance(cursor, dict):
-            after_timestamp = cursor.get("after_timestamp")
+            cursor_tracepoint_id = cursor.get("tracepoint_id")
+            use_global_boundary = (
+                tracepoint_id is not None
+                and cursor_tracepoint_id is not None
+                and str(cursor_tracepoint_id) != tracepoint_id
+            )
+            after_timestamp = cursor.get(
+                "global_after_timestamp" if use_global_boundary else "after_timestamp"
+            )
             if after_timestamp is not None:
                 after_timestamp = float(after_timestamp)
-            after_ordinal = int(cursor.get("after_ordinal") or 0)
-            tracepoint_id = cursor.get("tracepoint_id")
-            if tracepoint_id is not None:
-                tracepoint_id = str(tracepoint_id)
-            return after_timestamp, after_ordinal, tracepoint_id
+            after_ordinal = int(
+                cursor.get("global_after_ordinal" if use_global_boundary else "after_ordinal")
+                or 0
+            )
+            parsed_tracepoint_id = cursor.get("tracepoint_id")
+            if parsed_tracepoint_id is not None:
+                parsed_tracepoint_id = str(parsed_tracepoint_id)
+            return after_timestamp, after_ordinal, parsed_tracepoint_id
         if cursor is None:
             return None, 0, None
         return float(cursor), 0, None
 
-    @staticmethod
     def _build_trace_cursor(
+        self,
         entries: list[TraceEntry],
         *,
         tracepoint_id: str | None,
+        global_entries: list[TraceEntry] | None = None,
     ) -> dict[str, Any]:
+        global_entries = entries if global_entries is None else global_entries
         return {
             "after_timestamp": entries[-1].timestamp if entries else None,
             "after_ordinal": (
@@ -197,13 +261,25 @@ class TracepointManager:
                 if entries
                 else 0
             ),
+            "global_after_timestamp": global_entries[-1].timestamp if global_entries else None,
+            "global_after_ordinal": (
+                sum(
+                    1
+                    for entry in global_entries
+                    if entry.timestamp == global_entries[-1].timestamp
+                )
+                if global_entries
+                else 0
+            ),
             "tracepoint_id": tracepoint_id,
             "buffer_start_timestamp": entries[0].timestamp if entries else None,
             "buffer_size": len(entries),
+            "append_generation": self._trace_append_generation,
+            "drop_generation": self._trace_drop_generation,
         }
 
-    @staticmethod
     def _build_unadvanced_trace_cursor(
+        self,
         cursor: dict[str, Any] | float | None,
         *,
         after_timestamp: float | None,
@@ -219,13 +295,15 @@ class TracepointManager:
                 "tracepoint_id": tracepoint_id,
                 "buffer_start_timestamp": oldest_retained,
                 "buffer_size": retained_count,
+                "append_generation": self._trace_append_generation,
+                "drop_generation": self._trace_drop_generation,
             }
         if isinstance(cursor, dict):
             next_cursor = dict(cursor)
             next_cursor["after_ordinal"] = int(next_cursor.get("after_ordinal") or 0)
             next_cursor["tracepoint_id"] = tracepoint_id
             return next_cursor
-        return TracepointManager._build_trace_cursor([], tracepoint_id=tracepoint_id)
+        return self._build_trace_cursor([], tracepoint_id=tracepoint_id)
 
     @staticmethod
     def _entries_after_cursor(
@@ -245,8 +323,8 @@ class TracepointManager:
                     result.append(entry)
         return result
 
-    @staticmethod
     def _build_trace_cursor_for_boundary(
+        self,
         entries: list[TraceEntry],
         boundary: TraceEntry,
         *,
@@ -264,6 +342,8 @@ class TracepointManager:
             "tracepoint_id": tracepoint_id,
             "buffer_start_timestamp": entries[0].timestamp if entries else None,
             "buffer_size": len(entries),
+            "append_generation": self._trace_append_generation,
+            "drop_generation": self._trace_drop_generation,
         }
 
     def _is_stale_cursor(
@@ -274,7 +354,6 @@ class TracepointManager:
         after_ordinal: int,
         oldest_retained: float | None,
         retained_entries: list[TraceEntry],
-        retained_count: int,
     ) -> bool:
         if after_timestamp is not None:
             if oldest_retained is None or oldest_retained > after_timestamp:
@@ -290,7 +369,8 @@ class TracepointManager:
             and cursor.get("buffer_start_timestamp") is None
             and cursor.get("buffer_size") == 0
         )
-        return marked_empty_log and self.is_log_full
+        cursor_drop_generation = int(cursor.get("drop_generation") or 0)
+        return marked_empty_log and self._trace_drop_generation > cursor_drop_generation
 
     @staticmethod
     def _normalize_path(path: str) -> str:

@@ -126,6 +126,18 @@ class TestTracepointLog:
         assert second_delta["available"] == 1
         assert second_delta["limited"] is False
 
+    def test_trace_delta_override_uses_global_mark_boundary_for_filtered_cursor(self):
+        mgr = TracepointManager()
+        mgr._trace_buffer.append(TraceEntry(1.0, "a.cs", 1, "a", "tp1-boundary", 1, "tp-1"))
+        mgr._trace_buffer.append(TraceEntry(2.0, "b.cs", 2, "b", "tp2-before-mark", 1, "tp-2"))
+        cursor = mgr.mark_trace_cursor(tracepoint_id="tp-1")
+        mgr._trace_buffer.append(TraceEntry(3.0, "b.cs", 2, "b", "tp2-after-mark", 1, "tp-2"))
+
+        delta = mgr.get_trace_delta(cursor, tracepoint_id="tp-2")
+
+        assert [entry.value for entry in delta["entries"]] == ["tp2-after-mark"]
+        assert delta["next_cursor"]["tracepoint_id"] == "tp-2"
+
     def test_trace_delta_marks_cursor_stale_when_boundary_was_evicted(self):
         mgr = TracepointManager()
         mgr._trace_buffer = deque(maxlen=2)
@@ -156,6 +168,18 @@ class TestTracepointLog:
         assert delta["dropped_count"] is None
         assert delta["next_cursor"]["buffer_size"] == 0
 
+    def test_trace_delta_marks_empty_cursor_stale_when_new_entries_were_cleared(self):
+        mgr = TracepointManager()
+        cursor = mgr.mark_trace_cursor()
+        mgr._trace_buffer.append(TraceEntry(1.0, "a.cs", 1, "a", "dropped", 1, "tp-1"))
+
+        mgr.clear_log()
+        delta = mgr.get_trace_delta(cursor)
+
+        assert delta["entries"] == []
+        assert delta["stale"] is True
+        assert delta["dropped_count"] is None
+
     def test_trace_delta_marks_empty_cursor_stale_after_fifo_overflow(self):
         mgr = TracepointManager()
         mgr._trace_buffer = deque(maxlen=2)
@@ -170,6 +194,21 @@ class TestTracepointLog:
         assert [entry.value for entry in delta["entries"]] == ["retained-1", "retained-2"]
         assert delta["stale"] is True
         assert delta["dropped_count"] is None
+
+    def test_trace_delta_does_not_mark_exactly_full_buffer_stale(self):
+        mgr = TracepointManager()
+        mgr._trace_buffer = deque(maxlen=2)
+        cursor = mgr.mark_trace_cursor()
+
+        mgr._trace_buffer.append(TraceEntry(1.0, "a.cs", 1, "a", "first", 1, "tp-1"))
+        mgr._trace_buffer.append(TraceEntry(2.0, "a.cs", 1, "a", "second", 1, "tp-1"))
+
+        delta = mgr.get_trace_delta(cursor)
+
+        assert [entry.value for entry in delta["entries"]] == ["first", "second"]
+        assert delta["truncated"] is True
+        assert delta["stale"] is False
+        assert delta["dropped_count"] == 0
 
     def test_trace_delta_marks_filtered_empty_cursor_stale_after_fifo_overflow(self):
         mgr = TracepointManager()
