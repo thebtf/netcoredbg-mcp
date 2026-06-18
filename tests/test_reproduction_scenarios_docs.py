@@ -172,7 +172,7 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
 
     for issue in ("#250", "#268"):
         row = _issue_row(backlog, issue)
-        assert "Target slice merged" in row
+        assert "Target slice merged" in row or "Target screenshot-orientation slice covered" in row
         assert "broader" in row
         assert "None in netcoredbg-mcp." not in row
 
@@ -186,8 +186,13 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
 
     row_250 = _issue_row(backlog, "#250")
     assert "CR-021" in row_250
+    assert "CR-037" in row_250
+    assert "CR-040" in row_250
     assert "focus proof" in row_250
     assert "selection confirmation" in row_250
+    assert "ui_take_annotated_screenshot" in row_250
+    assert "ui_click_annotated" in row_250
+    assert "screen-space click centers unchanged" in row_250
 
     row_254 = _issue_row(backlog, "#254")
     assert "Target evidence merged and target-side Engram issue resolved" in row_254
@@ -238,7 +243,15 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
     backlog = _read(BACKLOG_SCENARIOS)
 
     expected_remaining_terms = {
-        "#250": ["focus", "selected-item", "screenshot-orientation"],
+        "#250": [
+            "CR-037",
+            "CR-040",
+            "selected-item semantics",
+            "SelectionItemPattern",
+            "ui_take_annotated_screenshot",
+            "ui_click_annotated",
+            "fresh Engram",
+        ],
         "#268": [
             "runtime_smoke_validate_plan",
             "runtime_smoke_run_plan",
@@ -293,6 +306,10 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
         for term in terms:
             assert term in row
 
+    _, _status, _evidence, remaining_250 = _issue_cells(backlog, "#250")
+    assert "screenshot-orientation" not in remaining_250
+    assert "screenshot orientation" not in remaining_250
+    assert "fresh Engram `#250`" in remaining_250
     assert "do not close the full Engram" in backlog
 
 
