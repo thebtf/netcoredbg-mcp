@@ -30,6 +30,7 @@ class RunPlanFacadeSession:
             loaded_sources={},
         )
         self.process_registry = None
+        self.project_path: str | None = None
         self.resolved_project_root = False
         self.validated_paths: list[str] = []
         self.path_error: Exception | None = None
@@ -119,6 +120,7 @@ async def _resolve_project_root(_ctx: Any, _session: Any) -> None:
 
 
 async def _resolve_project_root_ok(_ctx: Any, session: RunPlanFacadeSession) -> None:
+    session.project_path = "D:\\project"
     session.resolved_project_root = True
 
 

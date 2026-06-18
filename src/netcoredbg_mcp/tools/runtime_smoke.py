@@ -333,6 +333,11 @@ def register_runtime_smoke_tools(
     ) -> dict:
         """Validate a runtime-smoke plan without launching or touching a target app."""
         try:
+            if plan_path:
+                access_error = check_session_access(ctx)
+                if access_error:
+                    return build_error_response(access_error, state=session.state.state)
+
             loaded_plan, plan_source, input_error = await _runtime_smoke_resolve_plan_input(
                 ctx,
                 session,
@@ -762,9 +767,18 @@ async def _runtime_smoke_resolve_plan_input(
 
     assert plan_path is not None
     await resolve_project_root(ctx, session)
+    if not session.project_path:
+        return (
+            None,
+            None,
+            _runtime_smoke_plan_input_error(
+                "plan_path validation failed: project root is not resolved",
+                plan_source=_runtime_smoke_plan_source(plan_path),
+            ),
+        )
     try:
         validated_path = session.validate_path(plan_path)
-    except Exception as exc:
+    except ValueError as exc:
         return (
             None,
             None,

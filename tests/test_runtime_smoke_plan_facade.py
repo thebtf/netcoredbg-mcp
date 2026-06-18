@@ -24,6 +24,7 @@ class PlanFacadeSession:
             output_buffer=deque(),
         )
         self.process_registry = None
+        self.project_path: str | None = None
         self.resolved_project_root = False
         self.validated_paths: list[str] = []
         self.path_error: Exception | None = None
@@ -44,6 +45,7 @@ async def _resolve_project_root(_ctx: Any, _session: Any) -> None:
 
 
 async def _resolve_project_root_ok(_ctx: Any, session: PlanFacadeSession) -> None:
+    session.project_path = "D:\\project"
     session.resolved_project_root = True
 
 
@@ -261,6 +263,39 @@ async def test_runtime_smoke_validate_plan_accepts_json_plan_path(
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_validate_plan_checks_session_access_before_plan_path_io(
+    capturing_mcp,
+    tmp_path,
+) -> None:
+    session = PlanFacadeSession()
+    access_calls: list[Any] = []
+
+    def deny_access(ctx: Any) -> str:
+        access_calls.append(ctx)
+        return "session access denied"
+
+    _register(
+        capturing_mcp,
+        session,
+        check_session_access=deny_access,
+        resolve_project_root=_resolve_project_root_ok,
+    )
+    plan_path = tmp_path / "runtime-smoke-plan.json"
+    plan_path.write_text('{"name": "blocked-before-io"}', encoding="utf-8")
+
+    response = await capturing_mcp.tools["runtime_smoke_validate_plan"](
+        ctx="ctx-token",
+        plan_path=str(plan_path),
+    )
+
+    assert response["error"] == "session access denied"
+    assert access_calls == ["ctx-token"]
+    assert session.resolved_project_root is False
+    assert session.validated_paths == []
+    assert session.launch_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_validate_plan_rejects_mixed_plan_inputs(
     capturing_mcp,
     tmp_path,
@@ -365,6 +400,46 @@ async def test_runtime_smoke_validate_plan_rejects_non_object_json_plan_path(
     assert data["status"] == "INVALID_SETUP"
     assert data["can_run"] is False
     assert data["validation_errors"] == ["plan_path JSON root must be an object"]
+    assert data["plan_source"] == {
+        "kind": "file",
+        "path": str(plan_path),
+        "format": "json",
+    }
+    assert session.validated_paths == [str(plan_path)]
+    assert session.launch_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_validate_plan_rejects_plan_path_without_project_root(
+    capturing_mcp,
+    tmp_path,
+) -> None:
+    session = PlanFacadeSession()
+
+    async def leave_project_root_unresolved(_ctx: Any, _session: PlanFacadeSession) -> None:
+        session.resolved_project_root = True
+
+    _register(capturing_mcp, session, resolve_project_root=leave_project_root_unresolved)
+    plan_path = tmp_path / "runtime-smoke-plan.json"
+    plan_path.write_text('{"name": "unscoped-file"}', encoding="utf-8")
+
+    response = await capturing_mcp.tools["runtime_smoke_validate_plan"](
+        ctx=None,
+        plan_path=str(plan_path),
+    )
+    data = response["data"]
+
+    assert data["status"] == "INVALID_SETUP"
+    assert data["can_run"] is False
+    assert data["validation_errors"] == [
+        "plan_path validation failed: project root is not resolved"
+    ]
+    assert data["plan_source"] == {
+        "kind": "file",
+        "path": str(plan_path),
+        "format": "json",
+    }
+    assert session.validated_paths == []
     assert session.launch_calls == 0
 
 
