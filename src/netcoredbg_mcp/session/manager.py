@@ -95,6 +95,7 @@ class SessionManager:
         self._stealth_mode = False
         self._quick_eval_lock = asyncio.Lock()
         self._runtime_smoke = RuntimeSmokeSession()
+        self._worktree_cache_map: dict[str, list[str]] = {}
         self._hygiene = RuntimeHygieneService(self)
         self._instrumentation = InstrumentationGroupService(self)
         self._output_assertions = OutputAssertionService(self)
@@ -375,59 +376,55 @@ class SessionManager:
         if not target_path:
             return []
 
-        if not hasattr(self, "_worktree_cache_map"):
-            self._worktree_cache_map: dict[str, list[str]] = {}
-
         if target_path not in self._worktree_cache_map:
             worktree_cache: list[str] = []
             self._worktree_cache_map[target_path] = worktree_cache
-            if target_path:
-                try:
-                    # Find the .git directory (could be file pointing to gitdir for worktrees)
-                    git_dir = os.path.join(target_path, ".git")
-                    if os.path.isfile(git_dir):
-                        # This is a worktree itself — read the gitdir pointer
-                        with open(git_dir) as f:
-                            content = f.read().strip()
-                        if content.startswith("gitdir: "):
-                            real_git_dir = os.path.abspath(
-                                os.path.join(target_path, content[len("gitdir: ") :])
-                            )
-                            # Navigate up to the main .git directory
-                            # e.g., /main/.git/worktrees/wt-name → /main/.git
-                            git_dir = os.path.dirname(os.path.dirname(real_git_dir))
+            try:
+                # Find the .git directory (could be file pointing to gitdir for worktrees)
+                git_dir = os.path.join(target_path, ".git")
+                if os.path.isfile(git_dir):
+                    # This is a worktree itself — read the gitdir pointer
+                    with open(git_dir) as f:
+                        content = f.read().strip()
+                    if content.startswith("gitdir: "):
+                        real_git_dir = os.path.abspath(
+                            os.path.join(target_path, content[len("gitdir: ") :])
+                        )
+                        # Navigate up to the main .git directory
+                        # e.g., /main/.git/worktrees/wt-name → /main/.git
+                        git_dir = os.path.dirname(os.path.dirname(real_git_dir))
 
-                    worktrees_dir = os.path.join(git_dir, "worktrees")
-                    if os.path.isdir(worktrees_dir):
-                        entries = os.listdir(worktrees_dir)
-                        logger.debug(f"[worktree] entries in {worktrees_dir}: {entries}")
-                        for entry in entries:
-                            gitdir_file = os.path.join(worktrees_dir, entry, "gitdir")
-                            if os.path.isfile(gitdir_file):
-                                try:
-                                    with open(gitdir_file) as f:
-                                        wt_gitdir = f.read().strip()
-                                    # gitdir contains path to <worktree>/.git
-                                    wt_path = os.path.dirname(os.path.abspath(wt_gitdir))
-                                    logger.debug(
-                                        f"[worktree] {entry}: gitdir={wt_gitdir!r}, "
-                                        f"path={wt_path}, exists={os.path.isdir(wt_path)}"
-                                    )
-                                    if os.path.isdir(wt_path):
-                                        worktree_cache.append(wt_path)
-                                except (OSError, ValueError) as e:
-                                    logger.debug(f"[worktree] {entry}: error reading gitdir: {e}")
-                                    continue
-                            else:
-                                logger.debug(f"[worktree] {entry}: no gitdir file")
-                    else:
-                        logger.debug(f"[worktree] no worktrees dir at {worktrees_dir}")
-                    logger.debug(
-                        f"[worktree] found {len(worktree_cache)} worktrees "
-                        f"from {worktrees_dir}"
-                    )
-                except OSError as e:
-                    logger.debug(f"[worktree] cannot read worktrees: {e}")
+                worktrees_dir = os.path.join(git_dir, "worktrees")
+                if os.path.isdir(worktrees_dir):
+                    entries = os.listdir(worktrees_dir)
+                    logger.debug(f"[worktree] entries in {worktrees_dir}: {entries}")
+                    for entry in entries:
+                        gitdir_file = os.path.join(worktrees_dir, entry, "gitdir")
+                        if os.path.isfile(gitdir_file):
+                            try:
+                                with open(gitdir_file) as f:
+                                    wt_gitdir = f.read().strip()
+                                # gitdir contains path to <worktree>/.git
+                                wt_path = os.path.dirname(os.path.abspath(wt_gitdir))
+                                logger.debug(
+                                    f"[worktree] {entry}: gitdir={wt_gitdir!r}, "
+                                    f"path={wt_path}, exists={os.path.isdir(wt_path)}"
+                                )
+                                if os.path.isdir(wt_path):
+                                    worktree_cache.append(wt_path)
+                            except (OSError, ValueError) as e:
+                                logger.debug(f"[worktree] {entry}: error reading gitdir: {e}")
+                                continue
+                        else:
+                            logger.debug(f"[worktree] {entry}: no gitdir file")
+                else:
+                    logger.debug(f"[worktree] no worktrees dir at {worktrees_dir}")
+                logger.debug(
+                    f"[worktree] found {len(worktree_cache)} worktrees "
+                    f"from {worktrees_dir}"
+                )
+            except OSError as e:
+                logger.debug(f"[worktree] cannot read worktrees: {e}")
         return self._worktree_cache_map[target_path]
 
     @staticmethod
