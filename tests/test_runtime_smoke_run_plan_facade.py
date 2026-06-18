@@ -245,7 +245,11 @@ async def test_runtime_smoke_run_plan_agent_mode_adds_cursor_guidance(
     ]
     assert data["agent_mode"]["next_request"] == {
         "tool": "runtime_smoke_evidence_bundle",
-        "arguments": {"run_id": data["run_id"], "agent_mode": True},
+        "arguments": {
+            "run_id": data["run_id"],
+            "agent_mode": True,
+            "event_limit": 20,
+        },
     }
 
 
@@ -280,7 +284,11 @@ async def test_runtime_smoke_run_plan_agent_mode_uses_active_run_for_blocked_sta
     assert session.runtime_smoke.lifecycle_runs.active_run_ids() == [first["data"]["run_id"]]
     assert data["agent_mode"]["next_request"] == {
         "tool": "runtime_smoke_evidence_bundle",
-        "arguments": {"run_id": first["data"]["run_id"], "agent_mode": True},
+        "arguments": {
+            "run_id": first["data"]["run_id"],
+            "agent_mode": True,
+            "event_limit": 20,
+        },
     }
     assert "runtime_smoke_evidence_bundle" in blocked["next_actions"]
     assert "runtime_smoke_wait_for_result" in blocked["next_actions"]
@@ -460,7 +468,11 @@ async def test_runtime_smoke_evidence_bundle_agent_mode_adds_delta_guidance(
     assert agent["cursor"]["after_cursor"] == response["data"]["event_cursor"]["next_cursor"]
     assert agent["next_request"] == {
         "tool": "runtime_smoke_get_event_delta",
-        "arguments": {"cursor": agent["cursor"], "agent_mode": True},
+        "arguments": {
+            "cursor": agent["cursor"],
+            "agent_mode": True,
+            "event_limit": 20,
+        },
     }
 
 

@@ -286,7 +286,11 @@ async def test_runtime_smoke_run_probe_agent_mode_adds_evidence_guidance(
     assert data["agent_mode"]["primary_next_action"] == "runtime_smoke_evidence_bundle"
     assert data["agent_mode"]["next_request"] == {
         "tool": "runtime_smoke_evidence_bundle",
-        "arguments": {"run_id": data["run_id"], "agent_mode": True},
+        "arguments": {
+            "run_id": data["run_id"],
+            "agent_mode": True,
+            "event_limit": 20,
+        },
     }
     assert data["agent_mode"]["event_cursor_tools"] == [
         "runtime_smoke_mark_event_cursor",
@@ -331,6 +335,48 @@ async def test_runtime_smoke_run_probe_agent_mode_exposes_metrics_contract(
     assert agent["metrics"]["wrong_target_prevention"]["reason"] == "run is not final"
     assert agent["metrics"]["focus_foreground_checks"]["status"] == "NO DATA"
     assert agent["metrics"]["focus_foreground_checks"]["reason"] == "run is not final"
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_run_probe_agent_mode_exposes_profile_defaults(
+    capturing_mcp,
+) -> None:
+    session = RunProbeFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_run_probe"](
+        ctx=None,
+        probe={
+            "kind": "process.metric",
+            "name": "process_memory",
+            "pid": os.getpid(),
+        },
+        name="agent-defaults-probe",
+        agent_mode=True,
+    )
+    agent = response["data"]["agent_mode"]
+
+    assert agent["defaults"] == {
+        "profile": "agent",
+        "timeout_ms": 5000,
+        "poll_interval_ms": 500,
+        "event_limit": 20,
+        "raw_evidence": {
+            "include_raw_dumps": False,
+            "tree_dump_policy": "omit",
+            "screenshot_policy": "artifact-reference",
+        },
+        "verdicts": ["PASS", "FAIL", "BLOCKED", "INVALID_SETUP", "ERROR"],
+        "single_flight": {
+            "overlap": "reject",
+            "returns_active_run": True,
+        },
+        "cleanup": {
+            "require_cleanup_contract": True,
+            "surface_contamination": True,
+        },
+    }
+    assert agent["next_request"]["arguments"]["event_limit"] == 20
 
 
 @pytest.mark.asyncio

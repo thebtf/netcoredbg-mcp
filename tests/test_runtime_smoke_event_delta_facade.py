@@ -251,7 +251,11 @@ async def test_runtime_smoke_mark_event_cursor_agent_mode_adds_delta_request(
     assert agent["cursor"] == data["cursor"]
     assert agent["next_request"] == {
         "tool": "runtime_smoke_get_event_delta",
-        "arguments": {"cursor": data["cursor"], "agent_mode": True},
+        "arguments": {
+            "cursor": data["cursor"],
+            "agent_mode": True,
+            "event_limit": 20,
+        },
     }
 
 
