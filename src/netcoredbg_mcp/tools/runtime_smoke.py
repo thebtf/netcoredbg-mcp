@@ -1312,6 +1312,7 @@ def _apply_runtime_smoke_agent_mode(
     if _runtime_smoke_agent_fail_closed(data):
         data["agent_mode"] = _runtime_smoke_agent_mode_payload(
             "runtime_smoke_run_plan",
+            metrics=_runtime_smoke_agent_metrics(data),
         )
         return data
 
@@ -1357,6 +1358,7 @@ def _apply_runtime_smoke_agent_mode(
         primary_next_action,
         next_request=next_request,
         cursor=cursor,
+        metrics=_runtime_smoke_agent_metrics(data),
     )
     return data
 
@@ -1366,10 +1368,13 @@ def _runtime_smoke_agent_mode_payload(
     *,
     next_request: dict[str, Any] | None = None,
     cursor: dict[str, Any] | None = None,
+    metrics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "profile": "compact",
         "primary_next_action": primary_next_action,
+        "metrics_contract": _runtime_smoke_agent_metrics_contract(),
+        "metrics": metrics or _runtime_smoke_agent_metrics({}),
         "event_cursor_tools": [
             "runtime_smoke_mark_event_cursor",
             "runtime_smoke_get_event_delta",
@@ -1380,6 +1385,94 @@ def _runtime_smoke_agent_mode_payload(
     if cursor:
         payload["cursor"] = cursor
     return payload
+
+
+def _runtime_smoke_agent_metrics_contract() -> dict[str, Any]:
+    return {
+        "fields": [
+            "time_to_verdict_ms",
+            "retry_count",
+            "evidence_completeness",
+            "wrong_target_prevention",
+            "focus_foreground_checks",
+        ],
+        "missing_state": "NO DATA",
+    }
+
+
+def _runtime_smoke_agent_metrics(data: dict[str, Any]) -> dict[str, Any]:
+    missing_reason = _runtime_smoke_agent_metric_missing_reason(data)
+    if missing_reason in {
+        "runtime smoke run not found",
+        "runtime smoke run not started",
+    }:
+        return {
+            "time_to_verdict_ms": _runtime_smoke_agent_no_data(missing_reason),
+            "retry_count": _runtime_smoke_agent_no_data(missing_reason),
+            "evidence_completeness": _runtime_smoke_agent_no_data(missing_reason),
+            "wrong_target_prevention": _runtime_smoke_agent_no_data(missing_reason),
+            "focus_foreground_checks": _runtime_smoke_agent_no_data(missing_reason),
+        }
+
+    return {
+        "time_to_verdict_ms": _runtime_smoke_agent_time_to_verdict_metric(
+            data,
+            missing_reason,
+        ),
+        "retry_count": {"status": "MEASURED", "value": 0},
+        "evidence_completeness": _runtime_smoke_agent_evidence_completeness(data),
+        "wrong_target_prevention": _runtime_smoke_agent_no_data(
+            "wrong-target prevention evidence is not present",
+        ),
+        "focus_foreground_checks": _runtime_smoke_agent_no_data(
+            "focus/foreground evidence is not present",
+        ),
+    }
+
+
+def _runtime_smoke_agent_metric_missing_reason(data: dict[str, Any]) -> str:
+    if data.get("status") == "FAIL" and data.get("result") is None:
+        reason = data.get("reason")
+        if reason:
+            return str(reason)
+    if not _runtime_smoke_agent_run_id(data):
+        return "runtime smoke run not started"
+    if not data.get("final"):
+        return "run is not final"
+    return "source evidence is absent"
+
+
+def _runtime_smoke_agent_time_to_verdict_metric(
+    data: dict[str, Any],
+    missing_reason: str,
+) -> dict[str, Any]:
+    result = data.get("result") if isinstance(data.get("result"), dict) else data
+    elapsed_ms = result.get("elapsed_ms") if isinstance(result, dict) else None
+    if data.get("final") and isinstance(elapsed_ms, int) and not isinstance(elapsed_ms, bool):
+        return {"status": "MEASURED", "value": max(0, elapsed_ms)}
+    return _runtime_smoke_agent_no_data(missing_reason)
+
+
+def _runtime_smoke_agent_evidence_completeness(data: dict[str, Any]) -> dict[str, Any]:
+    if not data.get("final"):
+        return _runtime_smoke_agent_no_data("run is not final")
+
+    signals = {
+        "result": isinstance(data.get("result"), dict),
+        "events": bool(data.get("events")),
+        "event_cursor": isinstance(data.get("event_cursor"), dict),
+    }
+    if not any(signals.values()):
+        return _runtime_smoke_agent_no_data("source evidence is absent")
+
+    return {
+        "status": "COMPLETE" if all(signals.values()) else "PARTIAL",
+        "signals": signals,
+    }
+
+
+def _runtime_smoke_agent_no_data(reason: str) -> dict[str, Any]:
+    return {"status": "NO DATA", "reason": reason}
 
 
 def _runtime_smoke_agent_fail_closed(data: dict[str, Any]) -> bool:

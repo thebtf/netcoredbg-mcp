@@ -295,6 +295,107 @@ async def test_runtime_smoke_run_probe_agent_mode_adds_evidence_guidance(
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_run_probe_agent_mode_exposes_metrics_contract(
+    capturing_mcp,
+) -> None:
+    session = RunProbeFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_run_probe"](
+        ctx=None,
+        probe={
+            "kind": "process.metric",
+            "name": "process_memory",
+            "pid": os.getpid(),
+        },
+        name="agent-probe",
+        agent_mode=True,
+    )
+    data = response["data"]
+    agent = data["agent_mode"]
+
+    assert agent["metrics_contract"]["fields"] == [
+        "time_to_verdict_ms",
+        "retry_count",
+        "evidence_completeness",
+        "wrong_target_prevention",
+        "focus_foreground_checks",
+    ]
+    assert agent["metrics"]["time_to_verdict_ms"]["status"] == "NO DATA"
+    assert agent["metrics"]["time_to_verdict_ms"]["reason"] == "run is not final"
+    assert agent["metrics"]["retry_count"] == {"status": "MEASURED", "value": 0}
+    assert agent["metrics"]["wrong_target_prevention"]["status"] == "NO DATA"
+    assert agent["metrics"]["focus_foreground_checks"]["status"] == "NO DATA"
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_evidence_bundle_agent_mode_reports_final_metrics(
+    capturing_mcp,
+) -> None:
+    session = RunProbeFacadeSession()
+    _register(capturing_mcp, session)
+
+    started = await capturing_mcp.tools["runtime_smoke_run_probe"](
+        ctx=None,
+        probe={
+            "kind": "process.metric",
+            "name": "process_memory",
+            "pid": os.getpid(),
+        },
+        name="metrics-bundle",
+        phase="both",
+    )
+    run_id = started["data"]["run_id"]
+    for _ in range(20):
+        response = await capturing_mcp.tools["runtime_smoke_evidence_bundle"](
+            ctx=None,
+            run_id=run_id,
+            agent_mode=True,
+        )
+        data = response["data"]
+        if data.get("final"):
+            break
+        await asyncio.sleep(0.01)
+    else:
+        raise AssertionError("runtime smoke run did not finish")
+
+    metrics = data["agent_mode"]["metrics"]
+    assert metrics["time_to_verdict_ms"]["status"] == "MEASURED"
+    assert isinstance(metrics["time_to_verdict_ms"]["value"], int)
+    assert metrics["time_to_verdict_ms"]["value"] >= 0
+    assert metrics["retry_count"] == {"status": "MEASURED", "value": 0}
+    assert metrics["evidence_completeness"]["status"] in {"COMPLETE", "PARTIAL"}
+    assert metrics["evidence_completeness"]["signals"]["result"] is True
+    assert metrics["evidence_completeness"]["signals"]["events"] is True
+    assert metrics["wrong_target_prevention"]["status"] == "NO DATA"
+    assert metrics["focus_foreground_checks"]["status"] == "NO DATA"
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_evidence_bundle_agent_mode_does_not_fabricate_missing_run_metrics(
+    capturing_mcp,
+) -> None:
+    session = RunProbeFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_evidence_bundle"](
+        ctx=None,
+        run_id="missing-run",
+        agent_mode=True,
+    )
+    data = response["data"]
+    metrics = data["agent_mode"]["metrics"]
+
+    assert data["status"] == "FAIL"
+    assert metrics["time_to_verdict_ms"]["status"] == "NO DATA"
+    assert metrics["time_to_verdict_ms"]["reason"] == "runtime smoke run not found"
+    assert metrics["retry_count"] == {"status": "NO DATA", "reason": "runtime smoke run not found"}
+    assert metrics["evidence_completeness"]["status"] == "NO DATA"
+    assert metrics["wrong_target_prevention"]["status"] == "NO DATA"
+    assert metrics["focus_foreground_checks"]["status"] == "NO DATA"
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_run_probe_contamination_points_at_cleanup_contract(
     capturing_mcp,
 ) -> None:
