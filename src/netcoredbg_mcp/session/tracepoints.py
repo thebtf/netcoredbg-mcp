@@ -93,7 +93,7 @@ class TracepointManager:
         tracepoint_id: str | None = None,
     ) -> dict[str, Any]:
         """Return trace entries after a cursor plus continuation metadata."""
-        after_timestamp, cursor_tracepoint_id = self._parse_trace_cursor(cursor)
+        after_timestamp, after_ordinal, cursor_tracepoint_id = self._parse_trace_cursor(cursor)
         effective_tracepoint_id = (
             tracepoint_id if tracepoint_id is not None else cursor_tracepoint_id
         )
@@ -103,13 +103,15 @@ class TracepointManager:
         stale = self._is_stale_cursor(
             cursor,
             after_timestamp=after_timestamp,
+            after_ordinal=after_ordinal,
             oldest_retained=oldest_retained,
+            retained_entries=retained_entries,
             retained_count=len(retained_entries),
         )
 
         entries = retained_entries
         if after_timestamp is not None:
-            entries = [e for e in entries if e.timestamp > after_timestamp]
+            entries = self._entries_after_cursor(entries, after_timestamp, after_ordinal)
 
         available = len(entries)
         bounded_entries = entries
@@ -118,15 +120,15 @@ class TracepointManager:
 
         next_cursor: dict[str, Any]
         if bounded_entries:
-            next_cursor = {
-                "after_timestamp": bounded_entries[-1].timestamp,
-                "tracepoint_id": effective_tracepoint_id,
-                "buffer_start_timestamp": oldest_retained,
-                "buffer_size": len(retained_entries),
-            }
+            next_cursor = self._build_trace_cursor_for_boundary(
+                retained_entries,
+                bounded_entries[-1],
+                tracepoint_id=effective_tracepoint_id,
+            )
         elif after_timestamp is not None:
             next_cursor = {
                 "after_timestamp": after_timestamp,
+                "after_ordinal": after_ordinal,
                 "tracepoint_id": effective_tracepoint_id,
                 "buffer_start_timestamp": oldest_retained,
                 "buffer_size": len(retained_entries),
@@ -159,18 +161,19 @@ class TracepointManager:
     @staticmethod
     def _parse_trace_cursor(
         cursor: dict[str, Any] | float | None,
-    ) -> tuple[float | None, str | None]:
+    ) -> tuple[float | None, int, str | None]:
         if isinstance(cursor, dict):
             after_timestamp = cursor.get("after_timestamp")
             if after_timestamp is not None:
                 after_timestamp = float(after_timestamp)
+            after_ordinal = int(cursor.get("after_ordinal") or 0)
             tracepoint_id = cursor.get("tracepoint_id")
             if tracepoint_id is not None:
                 tracepoint_id = str(tracepoint_id)
-            return after_timestamp, tracepoint_id
+            return after_timestamp, after_ordinal, tracepoint_id
         if cursor is None:
-            return None, None
-        return float(cursor), None
+            return None, 0, None
+        return float(cursor), 0, None
 
     @staticmethod
     def _build_trace_cursor(
@@ -180,6 +183,50 @@ class TracepointManager:
     ) -> dict[str, Any]:
         return {
             "after_timestamp": entries[-1].timestamp if entries else None,
+            "after_ordinal": (
+                sum(1 for entry in entries if entry.timestamp == entries[-1].timestamp)
+                if entries
+                else 0
+            ),
+            "tracepoint_id": tracepoint_id,
+            "buffer_start_timestamp": entries[0].timestamp if entries else None,
+            "buffer_size": len(entries),
+        }
+
+    @staticmethod
+    def _entries_after_cursor(
+        entries: list[TraceEntry],
+        after_timestamp: float,
+        after_ordinal: int,
+    ) -> list[TraceEntry]:
+        same_timestamp_seen = 0
+        result: list[TraceEntry] = []
+        for entry in entries:
+            if entry.timestamp > after_timestamp:
+                result.append(entry)
+                continue
+            if entry.timestamp == after_timestamp:
+                same_timestamp_seen += 1
+                if same_timestamp_seen > after_ordinal:
+                    result.append(entry)
+        return result
+
+    @staticmethod
+    def _build_trace_cursor_for_boundary(
+        entries: list[TraceEntry],
+        boundary: TraceEntry,
+        *,
+        tracepoint_id: str | None,
+    ) -> dict[str, Any]:
+        after_ordinal = 0
+        for entry in entries:
+            if entry.timestamp == boundary.timestamp:
+                after_ordinal += 1
+            if entry is boundary:
+                break
+        return {
+            "after_timestamp": boundary.timestamp,
+            "after_ordinal": after_ordinal,
             "tracepoint_id": tracepoint_id,
             "buffer_start_timestamp": entries[0].timestamp if entries else None,
             "buffer_size": len(entries),
@@ -190,11 +237,18 @@ class TracepointManager:
         cursor: dict[str, Any] | float | None,
         *,
         after_timestamp: float | None,
+        after_ordinal: int,
         oldest_retained: float | None,
+        retained_entries: list[TraceEntry],
         retained_count: int,
     ) -> bool:
         if after_timestamp is not None:
-            return oldest_retained is None or oldest_retained > after_timestamp
+            if oldest_retained is None or oldest_retained > after_timestamp:
+                return True
+            retained_boundary_count = sum(
+                1 for entry in retained_entries if entry.timestamp == after_timestamp
+            )
+            return oldest_retained == after_timestamp and retained_boundary_count < after_ordinal
         if not isinstance(cursor, dict):
             return False
         marked_empty_log = (

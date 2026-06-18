@@ -185,6 +185,23 @@ class TestTracepointLog:
         assert delta["next_cursor"]["buffer_start_timestamp"] == 1.0
         assert delta["next_cursor"]["buffer_size"] == 4
 
+    def test_trace_delta_paginates_entries_with_same_timestamp(self):
+        mgr = TracepointManager()
+        mgr._trace_buffer.append(TraceEntry(1.0, "a.cs", 1, "a", "boundary", 1, "tp-1"))
+        cursor = mgr.mark_trace_cursor()
+        mgr._trace_buffer.append(TraceEntry(2.0, "a.cs", 1, "a", "new-1", 1, "tp-1"))
+        mgr._trace_buffer.append(TraceEntry(2.0, "a.cs", 1, "a", "new-2", 1, "tp-1"))
+
+        first_delta = mgr.get_trace_delta(cursor, limit=1)
+        second_delta = mgr.get_trace_delta(first_delta["next_cursor"], limit=1)
+
+        assert [entry.value for entry in first_delta["entries"]] == ["new-1"]
+        assert first_delta["next_cursor"]["after_timestamp"] == 2.0
+        assert first_delta["next_cursor"]["after_ordinal"] == 1
+        assert [entry.value for entry in second_delta["entries"]] == ["new-2"]
+        assert second_delta["next_cursor"]["after_timestamp"] == 2.0
+        assert second_delta["next_cursor"]["after_ordinal"] == 2
+
 
 class TestTracepointBufferFIFO:
     def test_buffer_evicts_oldest_at_limit(self):
