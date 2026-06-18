@@ -333,7 +333,10 @@ class SessionManager:
             if self._is_path_within(abs_path, project_real):
                 logger.debug("[validate_path] within project root")
             # Check 2: within git worktrees
-            elif any(self._is_path_within(abs_path, wt) for wt in self._get_worktree_paths()):
+            elif any(
+                self._is_path_within(abs_path, wt)
+                for wt in self._get_worktree_paths(project_path)
+            ):
                 logger.debug("[validate_path] within git worktree")
             # Check 3: within NETCOREDBG_ALLOWED_PATHS
             elif any(self._is_path_within(abs_path, ap) for ap in self._get_env_allowed_paths()):
@@ -360,26 +363,35 @@ class SessionManager:
         except ValueError:
             return False
 
-    def _get_worktree_paths(self) -> list[str]:
+    def _get_worktree_paths(self, project_path: str | None = None) -> list[str]:
         """Auto-detect git worktree paths from filesystem (no subprocess).
 
         Reads .git/worktrees/<name>/gitdir files directly instead of spawning
         git subprocess. This avoids hangs when running inside daemon processes
         where inherited stdin/env causes git to block on prompts.
         """
-        if not hasattr(self, "_worktree_cache"):
-            self._worktree_cache: list[str] = []
-            if self._project_path:
+        target_scope = project_path or self._project_path
+        target_path = os.path.realpath(target_scope) if target_scope else None
+        if not target_path:
+            return []
+
+        if not hasattr(self, "_worktree_cache_map"):
+            self._worktree_cache_map: dict[str, list[str]] = {}
+
+        if target_path not in self._worktree_cache_map:
+            worktree_cache: list[str] = []
+            self._worktree_cache_map[target_path] = worktree_cache
+            if target_path:
                 try:
                     # Find the .git directory (could be file pointing to gitdir for worktrees)
-                    git_dir = os.path.join(self._project_path, ".git")
+                    git_dir = os.path.join(target_path, ".git")
                     if os.path.isfile(git_dir):
                         # This is a worktree itself — read the gitdir pointer
                         with open(git_dir) as f:
                             content = f.read().strip()
                         if content.startswith("gitdir: "):
                             real_git_dir = os.path.abspath(
-                                os.path.join(self._project_path, content[len("gitdir: ") :])
+                                os.path.join(target_path, content[len("gitdir: ") :])
                             )
                             # Navigate up to the main .git directory
                             # e.g., /main/.git/worktrees/wt-name → /main/.git
@@ -402,7 +414,7 @@ class SessionManager:
                                         f"path={wt_path}, exists={os.path.isdir(wt_path)}"
                                     )
                                     if os.path.isdir(wt_path):
-                                        self._worktree_cache.append(wt_path)
+                                        worktree_cache.append(wt_path)
                                 except (OSError, ValueError) as e:
                                     logger.debug(f"[worktree] {entry}: error reading gitdir: {e}")
                                     continue
@@ -411,12 +423,12 @@ class SessionManager:
                     else:
                         logger.debug(f"[worktree] no worktrees dir at {worktrees_dir}")
                     logger.debug(
-                        f"[worktree] found {len(self._worktree_cache)} worktrees "
+                        f"[worktree] found {len(worktree_cache)} worktrees "
                         f"from {worktrees_dir}"
                     )
                 except OSError as e:
                     logger.debug(f"[worktree] cannot read worktrees: {e}")
-        return self._worktree_cache
+        return self._worktree_cache_map[target_path]
 
     @staticmethod
     def _get_env_allowed_paths() -> list[str]:
