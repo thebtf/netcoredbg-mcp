@@ -14,7 +14,7 @@
 вычислять выражения, читать вывод отладки и управлять поверхностями Windows UI
 Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 
-**130 MCP-инструментов · 8 промптов · 4 ресурса · 1586 собранных тестов · релиз v0.18.0**
+**130 MCP-инструментов · 8 промптов · 4 ресурса · 1588 собранных тестов · релиз v0.18.1**
 
 ## Быстрые ссылки
 
@@ -23,21 +23,19 @@ Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 - **Справочник:** [Доступные инструменты](#доступные-инструменты) · [Ресурсы](#mcp-ресурсы) · [Промпты](#mcp-промпты) · [Архитектура](#обзор-архитектуры)
 - **Проект:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## Что нового в v0.18.0
+## Что нового в v0.18.1
 
-- **Semantic UI evidence** — агенты могут читать focus, text, property,
-  DataGrid, monitor, screenshot, click, selection и ensure-visible состояния
-  через bounded helper-инструменты для повторяемой UI-отладки.
-- **Runtime-smoke orchestration** — v2-планы получили validation, one-call
-  execution, diagnostic probes, wait/event cursors, tracepoint policy
-  guardrails, app diagnostics, trace cursor deltas и plan-file inputs.
-- **FlaUI bridge hardening** — stale sessions, transient focus exceptions,
-  screenshot orientation, focused-element process boundaries и DataGrid
-  selection compatibility теперь возвращают bounded evidence вместо
-  неоднозначных failures.
-- **Release protocol** — проект теперь фиксирует PyPI/GitHub release path,
-  version parity surfaces, critical-suite и production-playbook gates, local
-  deploy smoke и post-tag verification для milestone tags.
+- **Read-only plan validation** — runtime-smoke `plan_path` validation больше
+  не захватывает mux ownership, когда вызывающему нужна только validation
+  evidence.
+- **Session scope safety** — validation-only проверки планов сохраняют
+  `session.project_path`, так что наблюдатели не могут незаметно сменить target
+  активной debug session.
+- **Worktree-aware path checks** — project path validation кеширует worktree
+  lookup по переданному project root, избегая stale decisions между worktree и
+  plan-file scopes.
+- **Patch delivery** — релиз публикует follow-up fixes из PR #134/#135/#136,
+  которые попали в `main` после UI emulation milestone `v0.18.0`.
 
 ## Основные возможности
 

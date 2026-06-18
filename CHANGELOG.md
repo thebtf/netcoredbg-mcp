@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-06-19
+
+### Fixed
+- Runtime-smoke `plan_path` validation no longer auto-claims mux ownership
+  when the caller only wants a read-only validation result.
+- Read-only runtime-smoke plan validation keeps `session.project_path`
+  unchanged, so observer-style checks cannot silently retarget the shared
+  debug session.
+- Project path validation now scopes worktree lookup caching by the supplied
+  project root, preventing cross-project stale-cache decisions during release
+  and multi-worktree validation.
+
 ## [0.18.0] - 2026-06-19
 
 ### Added
