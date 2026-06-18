@@ -138,6 +138,29 @@ class TestTracepointLog:
         assert [entry.value for entry in delta["entries"]] == ["tp2-after-mark"]
         assert delta["next_cursor"]["tracepoint_id"] == "tp-2"
 
+    def test_trace_delta_override_converts_global_boundary_ordinal_to_filter(self):
+        mgr = TracepointManager()
+        mgr._trace_buffer.append(TraceEntry(10.0, "a.cs", 1, "a", "tp1-boundary", 1, "tp-1"))
+        mgr._trace_buffer.append(TraceEntry(10.0, "b.cs", 2, "b", "tp2-before-mark", 1, "tp-2"))
+        cursor = mgr.mark_trace_cursor(tracepoint_id="tp-1")
+        mgr._trace_buffer.append(TraceEntry(10.0, "b.cs", 2, "b", "tp2-after-mark", 1, "tp-2"))
+
+        delta = mgr.get_trace_delta(cursor, tracepoint_id="tp-2")
+
+        assert [entry.value for entry in delta["entries"]] == ["tp2-after-mark"]
+        assert delta["stale"] is False
+
+    def test_trace_delta_quiet_filtered_override_is_not_stale_without_drops(self):
+        mgr = TracepointManager()
+        mgr._trace_buffer.append(TraceEntry(1.0, "a.cs", 1, "a", "tp1-boundary", 1, "tp-1"))
+        cursor = mgr.mark_trace_cursor()
+
+        delta = mgr.get_trace_delta(cursor, tracepoint_id="tp-2")
+
+        assert delta["entries"] == []
+        assert delta["stale"] is False
+        assert delta["dropped_count"] == 0
+
     def test_trace_delta_marks_cursor_stale_when_boundary_was_evicted(self):
         mgr = TracepointManager()
         mgr._trace_buffer = deque(maxlen=2)

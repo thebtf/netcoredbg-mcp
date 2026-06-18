@@ -145,6 +145,12 @@ class TracepointManager:
         effective_tracepoint_id = (
             tracepoint_id if tracepoint_id is not None else cursor_tracepoint_id
         )
+        if self._uses_global_cursor_boundary(cursor, tracepoint_id=tracepoint_id):
+            after_ordinal = self._filter_ordinal_at_global_boundary(
+                after_timestamp=after_timestamp,
+                global_after_ordinal=after_ordinal,
+                tracepoint_id=tracepoint_id,
+            )
 
         retained_entries = self.get_log(tracepoint_id=effective_tracepoint_id)
         oldest_retained = retained_entries[0].timestamp if retained_entries else None
@@ -223,21 +229,24 @@ class TracepointManager:
         tracepoint_id: str | None,
     ) -> tuple[float | None, int, str | None]:
         if isinstance(cursor, dict):
-            cursor_tracepoint_id = cursor.get("tracepoint_id")
-            use_global_boundary = (
-                tracepoint_id is not None
-                and cursor_tracepoint_id is not None
-                and str(cursor_tracepoint_id) != tracepoint_id
+            use_global_boundary = self._uses_global_cursor_boundary(
+                cursor,
+                tracepoint_id=tracepoint_id,
             )
-            after_timestamp = cursor.get(
-                "global_after_timestamp" if use_global_boundary else "after_timestamp"
+            timestamp_key = (
+                "global_after_timestamp"
+                if use_global_boundary and "global_after_timestamp" in cursor
+                else "after_timestamp"
             )
+            ordinal_key = (
+                "global_after_ordinal"
+                if use_global_boundary and "global_after_ordinal" in cursor
+                else "after_ordinal"
+            )
+            after_timestamp = cursor.get(timestamp_key)
             if after_timestamp is not None:
                 after_timestamp = float(after_timestamp)
-            after_ordinal = int(
-                cursor.get("global_after_ordinal" if use_global_boundary else "after_ordinal")
-                or 0
-            )
+            after_ordinal = int(cursor.get(ordinal_key) or 0)
             parsed_tracepoint_id = cursor.get("tracepoint_id")
             if parsed_tracepoint_id is not None:
                 parsed_tracepoint_id = str(parsed_tracepoint_id)
@@ -245,6 +254,39 @@ class TracepointManager:
         if cursor is None:
             return None, 0, None
         return float(cursor), 0, None
+
+    @staticmethod
+    def _uses_global_cursor_boundary(
+        cursor: dict[str, Any] | float | None,
+        *,
+        tracepoint_id: str | None,
+    ) -> bool:
+        if not isinstance(cursor, dict) or tracepoint_id is None:
+            return False
+        cursor_tracepoint_id = cursor.get("tracepoint_id")
+        return cursor_tracepoint_id is None or str(cursor_tracepoint_id) != tracepoint_id
+
+    def _filter_ordinal_at_global_boundary(
+        self,
+        *,
+        after_timestamp: float | None,
+        global_after_ordinal: int,
+        tracepoint_id: str | None,
+    ) -> int:
+        if after_timestamp is None or tracepoint_id is None or global_after_ordinal <= 0:
+            return 0
+
+        global_seen = 0
+        filtered_seen = 0
+        for entry in self.get_log():
+            if entry.timestamp != after_timestamp:
+                continue
+            global_seen += 1
+            if entry.tracepoint_id == tracepoint_id:
+                filtered_seen += 1
+            if global_seen >= global_after_ordinal:
+                return filtered_seen
+        return filtered_seen
 
     def _build_trace_cursor(
         self,
@@ -357,6 +399,9 @@ class TracepointManager:
     ) -> bool:
         if after_timestamp is not None:
             if oldest_retained is None or oldest_retained > after_timestamp:
+                if isinstance(cursor, dict):
+                    cursor_drop_generation = int(cursor.get("drop_generation") or 0)
+                    return self._trace_drop_generation > cursor_drop_generation
                 return True
             retained_boundary_count = sum(
                 1 for entry in retained_entries if entry.timestamp == after_timestamp
