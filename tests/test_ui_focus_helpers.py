@@ -77,3 +77,15 @@ def test_bridge_focused_element_query_returns_bounded_element_info() -> None:
     assert 'result["focused"] = true' in command
     assert '["focused"] = false' in command
     assert 'result["value"] = FocusedValue(focused)' in command
+
+
+def test_bridge_focused_element_query_handles_transient_focused_element_errors() -> None:
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "FocusCommands.cs").read_text(
+        encoding="utf-8"
+    )
+
+    assert "AutomationElement? focused = null;" in command
+    assert "focused = automation.FocusedElement();" in command
+    assert "catch (COMException)" in command
+    assert "catch (InvalidOperationException)" in command
+    assert "return EmptyFocusedElementInfo();" in command

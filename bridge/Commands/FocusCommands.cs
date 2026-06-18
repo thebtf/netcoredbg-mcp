@@ -119,7 +119,20 @@ public static class FocusCommands
         if (mainWindow is null)
             throw new InvalidOperationException("Not connected. Call 'connect' first.");
 
-        var focused = automation.FocusedElement();
+        AutomationElement? focused = null;
+        try
+        {
+            focused = automation.FocusedElement();
+        }
+        catch (COMException)
+        {
+            return EmptyFocusedElementInfo();
+        }
+        catch (InvalidOperationException)
+        {
+            return EmptyFocusedElementInfo();
+        }
+
         if (focused is null)
             return EmptyFocusedElementInfo();
 
