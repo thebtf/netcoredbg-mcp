@@ -119,7 +119,16 @@ class TracepointManager:
             bounded_entries = entries[: max(limit, 0)]
 
         next_cursor: dict[str, Any]
-        if bounded_entries:
+        if limit is not None and max(limit, 0) == 0 and available > 0:
+            next_cursor = self._build_unadvanced_trace_cursor(
+                cursor,
+                after_timestamp=after_timestamp,
+                after_ordinal=after_ordinal,
+                tracepoint_id=effective_tracepoint_id,
+                oldest_retained=oldest_retained,
+                retained_count=len(retained_entries),
+            )
+        elif bounded_entries:
             next_cursor = self._build_trace_cursor_for_boundary(
                 retained_entries,
                 bounded_entries[-1],
@@ -192,6 +201,31 @@ class TracepointManager:
             "buffer_start_timestamp": entries[0].timestamp if entries else None,
             "buffer_size": len(entries),
         }
+
+    @staticmethod
+    def _build_unadvanced_trace_cursor(
+        cursor: dict[str, Any] | float | None,
+        *,
+        after_timestamp: float | None,
+        after_ordinal: int,
+        tracepoint_id: str | None,
+        oldest_retained: float | None,
+        retained_count: int,
+    ) -> dict[str, Any]:
+        if after_timestamp is not None:
+            return {
+                "after_timestamp": after_timestamp,
+                "after_ordinal": after_ordinal,
+                "tracepoint_id": tracepoint_id,
+                "buffer_start_timestamp": oldest_retained,
+                "buffer_size": retained_count,
+            }
+        if isinstance(cursor, dict):
+            next_cursor = dict(cursor)
+            next_cursor["after_ordinal"] = int(next_cursor.get("after_ordinal") or 0)
+            next_cursor["tracepoint_id"] = tracepoint_id
+            return next_cursor
+        return TracepointManager._build_trace_cursor([], tracepoint_id=tracepoint_id)
 
     @staticmethod
     def _entries_after_cursor(

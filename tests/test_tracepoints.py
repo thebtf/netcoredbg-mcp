@@ -218,6 +218,35 @@ class TestTracepointLog:
         assert second_delta["next_cursor"]["after_timestamp"] == 2.0
         assert second_delta["next_cursor"]["after_ordinal"] == 2
 
+    def test_trace_delta_zero_limit_preserves_empty_cursor_boundary(self):
+        mgr = TracepointManager()
+        cursor = mgr.mark_trace_cursor()
+        mgr._trace_buffer.append(TraceEntry(1.0, "a.cs", 1, "a", "new-1", 1, "tp-1"))
+        mgr._trace_buffer.append(TraceEntry(2.0, "a.cs", 1, "a", "new-2", 1, "tp-1"))
+
+        metadata = mgr.get_trace_delta(cursor, limit=0)
+        delta = mgr.get_trace_delta(metadata["next_cursor"])
+
+        assert metadata["entries"] == []
+        assert metadata["available"] == 2
+        assert metadata["limited"] is True
+        assert metadata["next_cursor"]["after_timestamp"] is None
+        assert [entry.value for entry in delta["entries"]] == ["new-1", "new-2"]
+
+    def test_trace_delta_zero_limit_preserves_none_cursor_boundary(self):
+        mgr = TracepointManager()
+        mgr._trace_buffer.append(TraceEntry(1.0, "a.cs", 1, "a", "new-1", 1, "tp-1"))
+        mgr._trace_buffer.append(TraceEntry(2.0, "a.cs", 1, "a", "new-2", 1, "tp-1"))
+
+        metadata = mgr.get_trace_delta(None, limit=0)
+        delta = mgr.get_trace_delta(metadata["next_cursor"])
+
+        assert metadata["entries"] == []
+        assert metadata["available"] == 2
+        assert metadata["limited"] is True
+        assert metadata["next_cursor"]["after_timestamp"] is None
+        assert [entry.value for entry in delta["entries"]] == ["new-1", "new-2"]
+
 
 class TestTracepointBufferFIFO:
     def test_buffer_evicts_oldest_at_limit(self):
