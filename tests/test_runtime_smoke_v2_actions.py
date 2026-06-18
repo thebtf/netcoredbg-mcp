@@ -524,6 +524,70 @@ async def test_v2_ui_input_ensure_target_requires_positive_focus_evidence() -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("adapter_status", "expected_status"),
+    [
+        ("ERROR", "FAIL"),
+        ("UNSUPPORTED", "BLOCKED"),
+        ("INVALID_SETUP", "BLOCKED"),
+    ],
+)
+async def test_v2_ui_input_ensure_target_normalizes_adapter_failure_statuses(
+    adapter_status: str,
+    expected_status: str,
+) -> None:
+    session = ActionSmokeSession()
+    session.find_result = {
+        "status": "PASS",
+        "found": True,
+        "visible": True,
+        "enabled": True,
+        "controlType": "Edit",
+        "automationId": "CueTextBox",
+    }
+    session.focus_result = {
+        "status": adapter_status,
+        "reason": "focus backend unavailable",
+    }
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "focus adapter status normalization",
+            "cases": [
+                {
+                    "id": f"ensure_target_{adapter_status.lower()}",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.input.ensure_target",
+                                "selector": {"automation_id": "CueTextBox"},
+                                "require": {
+                                    "visible": True,
+                                    "enabled": True,
+                                    "focus": True,
+                                },
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == expected_status
+    assert action["status"] == expected_status
+    assert action["result"]["status"] == adapter_status
+    assert action["reason"] == "focus backend unavailable"
+    assert session.calls == [
+        ("find_element", {"automation_id": "CueTextBox"}),
+        ("set_focus", {"automation_id": "CueTextBox"}),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_v2_ui_key_sequence_focuses_before_sending_keys() -> None:
     session = ActionSmokeSession()
 

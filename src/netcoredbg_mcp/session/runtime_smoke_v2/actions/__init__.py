@@ -805,6 +805,14 @@ def _is_adapter_success(result: dict[str, Any]) -> bool:
     return str(result.get("status", "PASS")).upper() in {"PASS", "OK", "SUCCESS"}
 
 
+def _terminal_failure_status(adapter_status: str) -> str:
+    if adapter_status in {"FAIL", "BLOCKED", "IMPASSE"}:
+        return adapter_status
+    if adapter_status in {"UNSUPPORTED", "INVALID_SETUP"}:
+        return "BLOCKED"
+    return "FAIL"
+
+
 def _adapter_failure_result(
     result: dict[str, Any],
     *,
@@ -812,12 +820,13 @@ def _adapter_failure_result(
     duration_ms: int,
     default_reason: str,
 ) -> dict[str, Any]:
-    status = str(result.get("status") or "BLOCKED").upper()
+    adapter_status = str(result.get("status") or "BLOCKED").upper()
     failed: dict[str, Any] = {
-        "status": status,
+        "status": _terminal_failure_status(adapter_status),
         "reason": str(result.get("reason") or default_reason),
         "route": route,
         "duration_ms": duration_ms,
+        "adapter_status": adapter_status,
         "result": _bounded_result(result),
     }
     for key in ("requested", "accepted", "next_step"):
