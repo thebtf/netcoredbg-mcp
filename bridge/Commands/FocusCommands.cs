@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 using FlaUI.Core;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Conditions;
+using FlaUI.Core.Exceptions;
 using FlaUI.UIA3;
 
 namespace FlaUIBridge.Commands;
@@ -112,6 +113,134 @@ public static class FocusCommands
                 ? null
                 : ElementCommands.BuildElementInfo(focused, includePatterns: false)
         };
+    }
+
+    public static JsonNode GetFocusedElement(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
+    {
+        if (mainWindow is null)
+            throw new InvalidOperationException("Not connected. Call 'connect' first.");
+
+        AutomationElement? focused = null;
+        try
+        {
+            focused = automation.FocusedElement();
+        }
+        catch (COMException)
+        {
+            return EmptyFocusedElementInfo();
+        }
+        catch (InvalidOperationException)
+        {
+            return EmptyFocusedElementInfo();
+        }
+        catch (ElementNotAvailableException)
+        {
+            return EmptyFocusedElementInfo();
+        }
+        catch (TimeoutException)
+        {
+            return EmptyFocusedElementInfo();
+        }
+
+        if (focused is null)
+            return EmptyFocusedElementInfo();
+        if (!FocusedElementBelongsToConnectedProcess(focused, mainWindow))
+            return EmptyFocusedElementInfo();
+
+        var result = ElementCommands.BuildElementInfo(focused, includePatterns: false);
+        result["focused"] = true;
+        result["value"] = FocusedValue(focused);
+        return result;
+    }
+
+    private static JsonObject EmptyFocusedElementInfo()
+    {
+        return new JsonObject
+        {
+            ["found"] = false,
+            ["focused"] = false,
+            ["automationId"] = "",
+            ["name"] = "",
+            ["controlType"] = "",
+            ["className"] = "",
+            ["value"] = "",
+            ["rect"] = new JsonObject
+            {
+                ["x"] = 0,
+                ["y"] = 0,
+                ["width"] = 0,
+                ["height"] = 0
+            }
+        };
+    }
+
+    private static bool FocusedElementBelongsToConnectedProcess(
+        AutomationElement focused,
+        AutomationElement mainWindow)
+    {
+        var expectedProcessId = JsonRpcHandler.ProcessId;
+        if (expectedProcessId == 0)
+        {
+            try
+            {
+                expectedProcessId = mainWindow.Properties.ProcessId.ValueOrDefault;
+            }
+            catch (COMException)
+            {
+                return false;
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+            catch (ElementNotAvailableException)
+            {
+                return false;
+            }
+            catch (TimeoutException)
+            {
+                return false;
+            }
+        }
+
+        if (expectedProcessId == 0)
+            return false;
+
+        try
+        {
+            return focused.Properties.ProcessId.ValueOrDefault == expectedProcessId;
+        }
+        catch (COMException)
+        {
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+        catch (ElementNotAvailableException)
+        {
+            return false;
+        }
+        catch (TimeoutException)
+        {
+            return false;
+        }
+    }
+
+    private static string FocusedValue(AutomationElement focused)
+    {
+        try
+        {
+            if (focused.Patterns.Value.TryGetPattern(out var valuePattern))
+                return valuePattern.Value.ValueOrDefault ?? "";
+        }
+        catch
+        {
+            // Unsupported or stale UIA providers should not make the identity query fail.
+        }
+
+        return "";
     }
 
     private static bool SameRuntimeId(AutomationElement left, AutomationElement right)

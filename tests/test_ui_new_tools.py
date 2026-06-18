@@ -833,7 +833,7 @@ async def test_ui_get_selected_item_uses_flaui_backend_selected_item_evidence(
 
 
 @pytest.mark.asyncio
-async def test_ui_get_focused_element_flaui_without_evidence_points_to_focus_assert(
+async def test_ui_get_focused_element_flaui_returns_bridge_evidence(
     capturing_mcp,
 ) -> None:
     from netcoredbg_mcp.session.manager import DebugState
@@ -844,6 +844,16 @@ async def test_ui_get_focused_element_flaui_without_evidence_points_to_focus_ass
     backend._process_id = 42
     backend._element_cache = {}
     backend._client = AsyncMock()
+    backend._client.call = AsyncMock(
+        return_value={
+            "name": "Phrase editor",
+            "automationId": "CueTextBox",
+            "controlType": "Edit",
+            "className": "TextBox",
+            "value": "Current cue text",
+            "rect": {"x": 10, "y": 20, "width": 300, "height": 24},
+        }
+    )
     session = SimpleNamespace(
         process_registry=None,
         state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
@@ -859,12 +869,37 @@ async def test_ui_get_focused_element_flaui_without_evidence_points_to_focus_ass
         response = await capturing_mcp.tools["ui_get_focused_element"]()
 
     assert "error" not in response
-    assert response["data"]["status"] == "UNSUPPORTED"
-    assert "ui_focus" in response["data"]["guidance"]
-    assert "assert" in response["data"]["guidance"]
-    assert response["data"]["name"] is None
-    assert response["data"]["automationId"] is None
-    assert response["data"]["controlType"] is None
+    assert response["data"]["name"] == "Phrase editor"
+    assert response["data"]["automationId"] == "CueTextBox"
+    assert response["data"]["controlType"] == "Edit"
+    assert response["data"]["className"] == "TextBox"
+    assert response["data"]["value"] == "Current cue text"
+    assert response["data"]["rect"] == {"x": 10, "y": 20, "width": 300, "height": 24}
+    backend._client.call.assert_awaited_once_with("get_focused_element", {})
+
+
+@pytest.mark.asyncio
+async def test_flaui_backend_get_focused_element_forwards_to_bridge() -> None:
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._client = AsyncMock()
+    backend._client.call = AsyncMock(
+        return_value={
+            "name": "Phrase editor",
+            "automationId": "CueTextBox",
+            "controlType": "Edit",
+            "value": "Current cue text",
+        }
+    )
+    backend._element_cache = {}
+    backend._process_id = 42
+
+    result = await backend.get_focused_element()
+
+    assert result["automationId"] == "CueTextBox"
+    assert result["value"] == "Current cue text"
+    backend._client.call.assert_awaited_once_with("get_focused_element", {})
 
 
 class TestFlaUIBackendToggle:
