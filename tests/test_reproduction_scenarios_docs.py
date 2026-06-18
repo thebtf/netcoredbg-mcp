@@ -172,7 +172,11 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
 
     for issue in ("#250", "#268"):
         row = _issue_row(backlog, issue)
-        assert "Target slice merged" in row or "Target screenshot-orientation slice covered" in row
+        assert (
+            "Target slice merged" in row
+            or "Target screenshot-orientation slice covered" in row
+            or "Target focused-element query and screenshot-orientation slices covered" in row
+        )
         assert "broader" in row
         assert "None in netcoredbg-mcp." not in row
 
@@ -191,7 +195,10 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
     assert "CR-021" in row_250
     assert "CR-037" in row_250
     assert "CR-040" in row_250
+    assert "CR-043" in row_250
     assert "focus proof" in row_250
+    assert "get_focused_element" in row_250
+    assert "ui_get_focused_element" in row_250
     assert "selection confirmation" in row_250
     assert "ui_take_annotated_screenshot" in row_250
     assert "ui_click_annotated" in row_250
@@ -249,10 +256,13 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
         "#250": [
             "CR-037",
             "CR-040",
+            "CR-043",
             "selected-item semantics",
             "SelectionItemPattern",
             "ui_take_annotated_screenshot",
             "ui_click_annotated",
+            "get_focused_element",
+            "ui_get_focused_element",
             "fresh Engram",
         ],
         "#268": [
@@ -324,6 +334,8 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
     _, _status, _evidence, remaining_250 = _issue_cells(backlog, "#250")
     assert "screenshot-orientation" not in remaining_250
     assert "screenshot orientation" not in remaining_250
+    assert "exact focus-route compatibility" not in remaining_250
+    assert "focused-element query" not in remaining_250
     assert "fresh Engram `#250`" in remaining_250
     assert "do not close the full Engram" in backlog
 
@@ -350,8 +362,14 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "commented",
             "CR-021 focus proof",
             "selection confirmation",
+            "CR-037",
             "selected-item semantics",
+            "SelectionItemPattern",
+            "CR-040",
             "screenshot orientation",
+            "CR-043",
+            "focused-element query",
+            "get_focused_element",
         ],
         "#254": [
             "resolved target-side",

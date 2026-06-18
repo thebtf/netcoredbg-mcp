@@ -58,3 +58,22 @@ def test_bridge_focus_assertion_accepts_descendant_focus() -> None:
     assert "IsSameOrDescendant(expected, focused)" in command
     assert "SameRuntimeId(expected, current)" in command
     assert "current = current.Parent" in command
+
+
+def test_bridge_registers_focused_element_query() -> None:
+    router = (PROJECT_ROOT / "bridge" / "JsonRpcHandler.cs").read_text(encoding="utf-8")
+
+    assert '["get_focused_element"] = FocusCommands.GetFocusedElement' in router
+
+
+def test_bridge_focused_element_query_returns_bounded_element_info() -> None:
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "FocusCommands.cs").read_text(
+        encoding="utf-8"
+    )
+
+    assert "public static JsonNode GetFocusedElement" in command
+    assert "automation.FocusedElement()" in command
+    assert "ElementCommands.BuildElementInfo(focused, includePatterns: false)" in command
+    assert 'result["focused"] = true' in command
+    assert '["focused"] = false' in command
+    assert 'result["value"] = FocusedValue(focused)' in command

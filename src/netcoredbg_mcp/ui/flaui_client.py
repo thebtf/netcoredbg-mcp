@@ -609,6 +609,16 @@ class FlaUIBackend:
         params = self._build_search_params(automation_id, name, control_type, root_id, xpath)
         return await self._client.call("extract_text", params)
 
+    async def get_focused_element(self) -> dict[str, Any]:
+        """Read bounded identity evidence for the currently focused element."""
+        result = await self._client.call("get_focused_element", {})
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"get_focused_element: bridge returned a non-dict response "
+                f"({type(result).__name__}): {result!r}"
+            )
+        return result
+
     async def click_at(self, x: int, y: int) -> None:
         """Click at coordinates via FlaUI bridge."""
         await self._client.call("click", {"x": x, "y": y})

@@ -114,6 +114,57 @@ public static class FocusCommands
         };
     }
 
+    public static JsonNode GetFocusedElement(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
+    {
+        if (mainWindow is null)
+            throw new InvalidOperationException("Not connected. Call 'connect' first.");
+
+        var focused = automation.FocusedElement();
+        if (focused is null)
+            return EmptyFocusedElementInfo();
+
+        var result = ElementCommands.BuildElementInfo(focused, includePatterns: false);
+        result["focused"] = true;
+        result["value"] = FocusedValue(focused);
+        return result;
+    }
+
+    private static JsonObject EmptyFocusedElementInfo()
+    {
+        return new JsonObject
+        {
+            ["found"] = false,
+            ["focused"] = false,
+            ["automationId"] = "",
+            ["name"] = "",
+            ["controlType"] = "",
+            ["className"] = "",
+            ["value"] = "",
+            ["rect"] = new JsonObject
+            {
+                ["x"] = 0,
+                ["y"] = 0,
+                ["width"] = 0,
+                ["height"] = 0
+            }
+        };
+    }
+
+    private static string FocusedValue(AutomationElement focused)
+    {
+        try
+        {
+            if (focused.Patterns.Value.TryGetPattern(out var valuePattern))
+                return valuePattern.Value.ValueOrDefault ?? "";
+        }
+        catch
+        {
+            // Unsupported or stale UIA providers should not make the identity query fail.
+        }
+
+        return "";
+    }
+
     private static bool SameRuntimeId(AutomationElement left, AutomationElement right)
     {
         try

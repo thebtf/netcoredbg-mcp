@@ -105,6 +105,7 @@ public static class JsonRpcHandler
             ["extract_text"] = ElementCommands.ExtractText,
             ["set_focus"] = FocusCommands.SetFocus,
             ["assert_focus"] = FocusCommands.AssertFocus,
+            ["get_focused_element"] = FocusCommands.GetFocusedElement,
             // v0.11.1 — pattern expansion
             ["close_window"]             = WindowCommands.CloseWindow,
             ["maximize_window"]          = WindowCommands.MaximizeWindow,
