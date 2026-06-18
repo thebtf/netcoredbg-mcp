@@ -788,6 +788,27 @@ async def test_ui_operation_adapters_click_blocks_without_activation_evidence() 
 
 
 @pytest.mark.asyncio
+async def test_ui_operation_adapters_click_blocks_raw_backend_failure() -> None:
+    class FakeBackend:
+        async def invoke_element(self, **kwargs: Any) -> str:
+            return "bridge transport unavailable"
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.click"](
+        selector={"automation_id": "ApplyButton"},
+    )
+
+    assert result == {
+        "status": "FAIL",
+        "reason": "ui.click returned non-object result",
+        "result": "bridge transport unavailable",
+        "selector": {"automation_id": "ApplyButton"},
+    }
+
+
+@pytest.mark.asyncio
 async def test_ui_operation_adapters_click_verified_uses_production_click_adapter() -> None:
     class FakeClient:
         def __init__(self, calls: list[tuple[str, Any]]) -> None:

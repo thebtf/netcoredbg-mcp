@@ -398,7 +398,8 @@ def ui_operation_adapters(
         if _is_selector_miss(result):
             return _selector_blocked(selector, result=_bounded_ui_result(result))
         if not _is_backend_success(result):
-            failed = _backend_failure_result(_bounded_ui_result(result), operation="ui.click")
+            bounded = _bounded_ui_result(result) if isinstance(result, dict) else result
+            failed = _backend_failure_result(bounded, operation="ui.click")
             failed["selector"] = selector
             return failed
 
