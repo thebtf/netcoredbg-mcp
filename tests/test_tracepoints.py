@@ -171,6 +171,22 @@ class TestTracepointLog:
         assert delta["stale"] is True
         assert delta["dropped_count"] is None
 
+    def test_trace_delta_marks_filtered_empty_cursor_stale_after_fifo_overflow(self):
+        mgr = TracepointManager()
+        mgr._trace_buffer = deque(maxlen=2)
+        cursor = mgr.mark_trace_cursor(tracepoint_id="tp-1")
+
+        mgr._trace_buffer.append(TraceEntry(1.0, "a.cs", 1, "a", "dropped", 1, "tp-1"))
+        mgr._trace_buffer.append(TraceEntry(2.0, "b.cs", 2, "b", "noise-1", 1, "tp-2"))
+        mgr._trace_buffer.append(TraceEntry(3.0, "b.cs", 2, "b", "noise-2", 1, "tp-2"))
+
+        delta = mgr.get_trace_delta(cursor)
+
+        assert delta["entries"] == []
+        assert delta["stale"] is True
+        assert delta["dropped_count"] is None
+        assert delta["next_cursor"]["tracepoint_id"] == "tp-1"
+
     def test_trace_delta_next_cursor_preserves_retained_buffer_metadata(self):
         mgr = TracepointManager()
         mgr._trace_buffer.append(TraceEntry(1.0, "a.cs", 1, "a", "old", 1, "tp-1"))

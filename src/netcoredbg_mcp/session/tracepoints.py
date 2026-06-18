@@ -256,7 +256,7 @@ class TracepointManager:
             and cursor.get("buffer_start_timestamp") is None
             and cursor.get("buffer_size") == 0
         )
-        return marked_empty_log and retained_count > 0 and self.is_log_full
+        return marked_empty_log and self.is_log_full
 
     @staticmethod
     def _normalize_path(path: str) -> str:
