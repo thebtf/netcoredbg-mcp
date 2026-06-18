@@ -88,6 +88,7 @@ def test_bridge_focused_element_query_handles_transient_focused_element_errors()
     assert "focused = automation.FocusedElement();" in command
     assert "catch (COMException)" in command
     assert "catch (InvalidOperationException)" in command
+    assert "if (focused is null)" in command
     assert "return EmptyFocusedElementInfo();" in command
 
 
