@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -324,10 +326,34 @@ def register_runtime_smoke_tools(
             return build_error_response(str(exc), state=session.state.state)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
-    async def runtime_smoke_validate_plan(ctx: Context, plan: dict[str, Any]) -> dict:
+    async def runtime_smoke_validate_plan(
+        ctx: Context,
+        plan: dict[str, Any] | None = None,
+        plan_path: str | None = None,
+    ) -> dict:
         """Validate a runtime-smoke plan without launching or touching a target app."""
         try:
-            data = validate_runtime_smoke_plan_contract(plan)
+            if plan_path:
+                access_error = check_session_access(ctx)
+                if access_error:
+                    return build_error_response(access_error, state=session.state.state)
+
+            loaded_plan, plan_source, input_error = await _runtime_smoke_resolve_plan_input(
+                ctx,
+                session,
+                resolve_project_root,
+                plan=plan,
+                plan_path=plan_path,
+            )
+            if input_error is not None:
+                return _build_runtime_smoke_response(
+                    session,
+                    input_error,
+                    ["runtime_smoke_validate_plan", "runtime_smoke_run_plan"],
+                )
+            data = validate_runtime_smoke_plan_contract(loaded_plan)
+            if plan_source is not None:
+                data["plan_source"] = plan_source
             return _build_runtime_smoke_response(
                 session,
                 data,
@@ -339,7 +365,8 @@ def register_runtime_smoke_tools(
     @mcp.tool(annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
     async def runtime_smoke_run_plan(
         ctx: Context,
-        plan: dict[str, Any],
+        plan: dict[str, Any] | None = None,
+        plan_path: str | None = None,
         agent_mode: bool = False,
     ) -> dict:
         """Validate then start a durable runtime smoke run."""
@@ -348,7 +375,25 @@ def register_runtime_smoke_tools(
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
 
-            validation = validate_runtime_smoke_plan_contract(plan)
+            loaded_plan, plan_source, input_error = await _runtime_smoke_resolve_plan_input(
+                ctx,
+                session,
+                resolve_project_root,
+                plan=plan,
+                plan_path=plan_path,
+            )
+            if input_error is not None:
+                if agent_mode:
+                    _apply_runtime_smoke_agent_mode(input_error, "runtime_smoke_run_plan")
+                return _build_runtime_smoke_response(
+                    session,
+                    input_error,
+                    ["runtime_smoke_validate_plan", "runtime_smoke_run_plan"],
+                )
+
+            validation = validate_runtime_smoke_plan_contract(loaded_plan)
+            if plan_source is not None:
+                validation["plan_source"] = plan_source
             if not validation["can_run"]:
                 if agent_mode:
                     _apply_runtime_smoke_agent_mode(validation, "runtime_smoke_run_plan")
@@ -358,7 +403,7 @@ def register_runtime_smoke_tools(
                     ["runtime_smoke_validate_plan", "runtime_smoke_run_plan"],
                 )
 
-            data = await session.runtime_smoke.lifecycle_runs.start(plan, _runner)
+            data = await session.runtime_smoke.lifecycle_runs.start(loaded_plan, _runner)
             data["validation"] = _runtime_smoke_validation_summary(validation)
             next_actions = _runtime_smoke_lifecycle_next_actions(data)
             if agent_mode:
@@ -699,6 +744,117 @@ def validate_runtime_smoke_plan_contract(plan: dict[str, Any]) -> dict[str, Any]
     return result
 
 
+async def _runtime_smoke_resolve_plan_input(
+    ctx: Context,
+    session: SessionManager,
+    resolve_project_root: Callable[..., Awaitable[Any]],
+    *,
+    plan: Any,
+    plan_path: str | None,
+) -> tuple[Any, dict[str, str] | None, dict[str, Any] | None]:
+    has_inline_plan = plan is not None
+    has_plan_path = bool(plan_path)
+    if has_inline_plan == has_plan_path:
+        return (
+            None,
+            None,
+            _runtime_smoke_plan_input_error(
+                "provide exactly one runtime smoke plan input: plan or plan_path"
+            ),
+        )
+    if has_inline_plan:
+        return plan, None, None
+
+    assert plan_path is not None
+    await resolve_project_root(ctx, session)
+    if not session.project_path:
+        return (
+            None,
+            None,
+            _runtime_smoke_plan_input_error(
+                "plan_path validation failed: project root is not resolved",
+                plan_source=_runtime_smoke_plan_source(plan_path),
+            ),
+        )
+    try:
+        validated_path = session.validate_path(plan_path)
+    except ValueError as exc:
+        return (
+            None,
+            None,
+            _runtime_smoke_plan_input_error(
+                f"plan_path validation failed: {exc}",
+                plan_source=_runtime_smoke_plan_source(plan_path),
+            ),
+        )
+
+    plan_source = _runtime_smoke_plan_source(validated_path)
+    try:
+        loaded = json.loads(Path(validated_path).read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return (
+            None,
+            None,
+            _runtime_smoke_plan_input_error(
+                f"plan_path JSON parse failed: {exc.msg}",
+                plan_source=plan_source,
+            ),
+        )
+    except UnicodeDecodeError as exc:
+        return (
+            None,
+            None,
+            _runtime_smoke_plan_input_error(
+                f"plan_path UTF-8 decode failed: {exc}",
+                plan_source=plan_source,
+            ),
+        )
+    except OSError as exc:
+        return (
+            None,
+            None,
+            _runtime_smoke_plan_input_error(
+                f"plan_path read failed: {exc}",
+                plan_source=plan_source,
+            ),
+        )
+    if not isinstance(loaded, dict):
+        return (
+            None,
+            None,
+            _runtime_smoke_plan_input_error(
+                "plan_path JSON root must be an object",
+                plan_source=plan_source,
+            ),
+        )
+    return loaded, plan_source, None
+
+
+def _runtime_smoke_plan_source(plan_path: str) -> dict[str, str]:
+    return {"kind": "file", "path": str(plan_path), "format": "json"}
+
+
+def _runtime_smoke_plan_input_error(
+    reason: str,
+    *,
+    plan_source: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "status": "INVALID_SETUP",
+        "can_run": False,
+        "validation_errors": [reason],
+        "accepted_input": {
+            "plan": "inline JSON object",
+            "plan_path": "path to a UTF-8 JSON object plan file",
+        },
+        **schema_help_fields(None),
+        "evidence_contract": _runtime_smoke_evidence_contract(),
+    }
+    if plan_source is not None:
+        result["plan_source"] = plan_source
+    return result
+
+
 def _runtime_smoke_validation_summary(validation: dict[str, Any]) -> dict[str, Any]:
     keys = (
         "status",
@@ -707,6 +863,7 @@ def _runtime_smoke_validation_summary(validation: dict[str, Any]) -> dict[str, A
         "case_count",
         "generated_case_count",
         "evidence_contract",
+        "plan_source",
     )
     return {key: validation[key] for key in keys if key in validation}
 
