@@ -319,6 +319,34 @@ async def test_runtime_smoke_validate_plan_rejects_malformed_json_plan_path(
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_validate_plan_rejects_non_utf8_plan_path(
+    capturing_mcp,
+    tmp_path,
+) -> None:
+    session = PlanFacadeSession()
+    _register(capturing_mcp, session, resolve_project_root=_resolve_project_root_ok)
+    plan_path = tmp_path / "runtime-smoke-plan.json"
+    plan_path.write_bytes(b'{"name": "\xff"}')
+
+    response = await capturing_mcp.tools["runtime_smoke_validate_plan"](
+        ctx=None,
+        plan_path=str(plan_path),
+    )
+    data = response["data"]
+
+    assert data["status"] == "INVALID_SETUP"
+    assert data["can_run"] is False
+    assert data["validation_errors"][0].startswith("plan_path UTF-8 decode failed:")
+    assert data["plan_source"] == {
+        "kind": "file",
+        "path": str(plan_path),
+        "format": "json",
+    }
+    assert session.validated_paths == [str(plan_path)]
+    assert session.launch_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_validate_plan_rejects_non_object_json_plan_path(
     capturing_mcp,
     tmp_path,

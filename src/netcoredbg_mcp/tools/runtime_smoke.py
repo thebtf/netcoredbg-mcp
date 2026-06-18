@@ -786,6 +786,15 @@ async def _runtime_smoke_resolve_plan_input(
                 plan_source=plan_source,
             ),
         )
+    except UnicodeDecodeError as exc:
+        return (
+            None,
+            None,
+            _runtime_smoke_plan_input_error(
+                f"plan_path UTF-8 decode failed: {exc}",
+                plan_source=plan_source,
+            ),
+        )
     except OSError as exc:
         return (
             None,
