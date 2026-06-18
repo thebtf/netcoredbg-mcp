@@ -292,7 +292,16 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "ui_property",
             "DataGrid offscreen/scroll/virtualization behavior",
         ],
-        "#271": ["CR-019", "debug_preflight", "tracepoint guard", "cleanup contract"],
+        "#271": [
+            "CR-019",
+            "CR-042",
+            "debug_preflight",
+            "tracepoint guard",
+            "cleanup contract",
+            "mark_trace_cursor",
+            "get_trace_delta",
+            "live-target cleanup/PDB/process proof",
+        ],
         "#272": [
             "app diagnostics",
             "oracle_pack",
@@ -391,12 +400,15 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "DataGrid offscreen/scroll/virtualization behavior",
         ],
         "#271": [
-            "comment already current",
+            "commented",
             "CR-020",
-            "trace-specific cursor/delta",
+            "CR-042",
+            "mark_trace_cursor",
+            "get_trace_delta",
             "cleanup_contract",
             "contaminated",
             "single-flight",
+            "live-target cleanup/PDB/process proof",
         ],
         "#272": [
             "commented",
@@ -472,16 +484,24 @@ def test_issue_272_remaining_scope_excludes_covered_launch_contract_and_default(
     assert "launch-to-artifact default acquisition" in lifecycle_remaining
 
 
-def test_issue_271_records_cleanup_contamination_contract_slice() -> None:
+def test_issue_271_records_cleanup_and_trace_delta_slices() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#271")
     lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#271")
+    _issue, _state, _evidence, remaining = _issue_cells(backlog, "#271")
+    _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
+        cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
+    )
 
     assert "CR-028" in row
     assert "cleanup contamination contract" in row
     assert "runtime_smoke_cleanup_contract" in row
     assert "contaminated-state surfacing" in row
-    assert "trace-specific cursor/delta APIs" in row
+    assert "CR-042" in row
+    assert "TracepointManager.mark_trace_cursor" in row
+    assert "TracepointManager.get_trace_delta" in row
+    assert "public read-only `mark_trace_cursor`" in row
+    assert "public read-only `get_trace_delta`" in row
     assert "broader" in row
     assert "CR-028" in lifecycle_row
     assert "cleanup_contract" in lifecycle_row
@@ -493,7 +513,13 @@ def test_issue_271_records_cleanup_contamination_contract_slice() -> None:
     assert "run_created=false" in row
     assert "STOPPING" in lifecycle_row
     assert "evidence_bundle" in lifecycle_row
-    assert "trace-specific cursor/delta" in lifecycle_row
+    assert "CR-042" in lifecycle_row
+    assert "TracepointManager.mark_trace_cursor" in lifecycle_row
+    assert "TracepointManager.get_trace_delta" in lifecycle_row
+    assert "trace-specific cursor/delta APIs" not in remaining
+    assert "trace-specific cursor/delta APIs" not in lifecycle_remaining
+    assert "broader diagnostics orchestration" in remaining
+    assert "live-target cleanup/PDB/process proof" in remaining
 
 
 def test_cr022_broad_issues_require_split_or_comment_evidence_before_closure() -> None:

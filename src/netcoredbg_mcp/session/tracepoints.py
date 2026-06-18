@@ -80,11 +80,107 @@ class TracepointManager:
             entries = [e for e in entries if e.tracepoint_id == tracepoint_id]
         return entries
 
+    def mark_trace_cursor(self, tracepoint_id: str | None = None) -> dict[str, Any]:
+        """Return a cursor for the current trace log boundary."""
+        entries = self.get_log(tracepoint_id=tracepoint_id)
+        return self._build_trace_cursor(entries, tracepoint_id=tracepoint_id)
+
+    def get_trace_delta(
+        self,
+        cursor: dict[str, Any] | float | None,
+        *,
+        limit: int | None = None,
+        tracepoint_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Return trace entries after a cursor plus continuation metadata."""
+        after_timestamp, cursor_tracepoint_id = self._parse_trace_cursor(cursor)
+        effective_tracepoint_id = (
+            tracepoint_id if tracepoint_id is not None else cursor_tracepoint_id
+        )
+
+        retained_entries = self.get_log(tracepoint_id=effective_tracepoint_id)
+        oldest_retained = retained_entries[0].timestamp if retained_entries else None
+        stale = (
+            after_timestamp is not None
+            and oldest_retained is not None
+            and oldest_retained > after_timestamp
+        )
+
+        entries = retained_entries
+        if after_timestamp is not None:
+            entries = [e for e in entries if e.timestamp > after_timestamp]
+
+        available = len(entries)
+        bounded_entries = entries
+        if limit is not None:
+            bounded_entries = entries[: max(limit, 0)]
+
+        next_cursor: dict[str, Any]
+        if bounded_entries:
+            next_cursor = self._build_trace_cursor(
+                [bounded_entries[-1]],
+                tracepoint_id=effective_tracepoint_id,
+            )
+        elif after_timestamp is not None:
+            next_cursor = {
+                "after_timestamp": after_timestamp,
+                "tracepoint_id": effective_tracepoint_id,
+                "buffer_start_timestamp": oldest_retained,
+                "buffer_size": len(retained_entries),
+            }
+        else:
+            next_cursor = self._build_trace_cursor(
+                retained_entries,
+                tracepoint_id=effective_tracepoint_id,
+            )
+
+        return {
+            "entries": bounded_entries,
+            "available": available,
+            "total": len(bounded_entries),
+            "limit": limit,
+            "limited": limit is not None and available > max(limit, 0),
+            "truncated": self.is_log_full,
+            "stale": stale,
+            "dropped_count": None if stale else 0,
+            "cursor": cursor,
+            "next_cursor": next_cursor,
+        }
+
     def clear_log(self) -> int:
         """Clear trace buffer. Returns count of cleared entries."""
         count = len(self._trace_buffer)
         self._trace_buffer.clear()
         return count
+
+    @staticmethod
+    def _parse_trace_cursor(
+        cursor: dict[str, Any] | float | None,
+    ) -> tuple[float | None, str | None]:
+        if isinstance(cursor, dict):
+            after_timestamp = cursor.get("after_timestamp")
+            if after_timestamp is not None:
+                after_timestamp = float(after_timestamp)
+            tracepoint_id = cursor.get("tracepoint_id")
+            if tracepoint_id is not None:
+                tracepoint_id = str(tracepoint_id)
+            return after_timestamp, tracepoint_id
+        if cursor is None:
+            return None, None
+        return float(cursor), None
+
+    @staticmethod
+    def _build_trace_cursor(
+        entries: list[TraceEntry],
+        *,
+        tracepoint_id: str | None,
+    ) -> dict[str, Any]:
+        return {
+            "after_timestamp": entries[-1].timestamp if entries else None,
+            "tracepoint_id": tracepoint_id,
+            "buffer_start_timestamp": entries[0].timestamp if entries else None,
+            "buffer_size": len(entries),
+        }
 
     @staticmethod
     def _normalize_path(path: str) -> str:

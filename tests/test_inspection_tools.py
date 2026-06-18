@@ -8,7 +8,8 @@ import pytest
 
 from netcoredbg_mcp.dap.protocol import DAPResponse
 from netcoredbg_mcp.session import SessionManager
-from netcoredbg_mcp.session.state import LoadedSource
+from netcoredbg_mcp.session.state import LoadedSource, TraceEntry
+from netcoredbg_mcp.session.tracepoints import TracepointManager
 
 
 class ToolRegistry:
@@ -260,3 +261,49 @@ async def test_manager_disassemble_and_locations_map_dap_fields():
     assert instructions[0]["address"] == "0x1234"
     assert location["line"] == 20
     assert location["end_line"] == 20
+
+
+@pytest.mark.asyncio
+async def test_mark_trace_cursor_and_delta_tools_handle_missing_manager():
+    manager = make_manager()
+    tools = register_tools(manager)
+
+    cursor_response = await tools["mark_trace_cursor"]()
+    delta_response = await tools["get_trace_delta"](cursor_response["data"]["cursor"], limit=5)
+
+    assert cursor_response["data"]["cursor"]["after_timestamp"] is None
+    assert cursor_response["data"]["cursor"]["tracepoint_id"] is None
+    assert cursor_response["data"]["buffer_size"] == 0
+    assert delta_response["data"]["entries"] == []
+    assert delta_response["data"]["available"] == 0
+    assert delta_response["data"]["limited"] is False
+    assert delta_response["data"]["stale"] is False
+
+
+@pytest.mark.asyncio
+async def test_trace_delta_tool_returns_bounded_entries_and_continuation_cursor():
+    manager = make_manager()
+    tracepoints = TracepointManager()
+    tracepoints._trace_buffer.append(TraceEntry(1.0, "a.cs", 1, "a", "old", 1, "tp-1"))
+    tracepoints._trace_buffer.append(TraceEntry(2.0, "a.cs", 1, "a", "boundary", 1, "tp-1"))
+    tracepoints._trace_buffer.append(TraceEntry(2.5, "b.cs", 2, "b", "other", 1, "tp-2"))
+    manager._tracepoint_manager = tracepoints
+    tools = register_tools(manager)
+
+    cursor_response = await tools["mark_trace_cursor"](tracepoint_id="tp-1")
+    tracepoints._trace_buffer.append(TraceEntry(3.0, "a.cs", 1, "a", "new-1", 1, "tp-1"))
+    tracepoints._trace_buffer.append(TraceEntry(4.0, "a.cs", 1, "a", "new-2", 1, "tp-1"))
+    tracepoints._trace_buffer.append(TraceEntry(5.0, "b.cs", 2, "b", "other-new", 1, "tp-2"))
+
+    delta_response = await tools["get_trace_delta"](cursor_response["data"]["cursor"], limit=1)
+
+    data = delta_response["data"]
+    assert [entry["value"] for entry in data["entries"]] == ["new-1"]
+    assert data["entries"][0]["tracepoint_id"] == "tp-1"
+    assert data["available"] == 2
+    assert data["limit"] == 1
+    assert data["limited"] is True
+    assert data["stale"] is False
+    assert data["dropped_count"] == 0
+    assert data["next_cursor"]["after_timestamp"] == 3.0
+    assert data["next_cursor"]["tracepoint_id"] == "tp-1"
