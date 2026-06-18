@@ -30,6 +30,20 @@ playbooks that future agents can execute instead of guessing.
 
 - This is a MINOR release because it adds public MCP/runtime-smoke/UI automation
   capabilities while preserving existing package and CLI entry points.
+- Upgrade an existing pip or pipx install with one of:
+
+  ```powershell
+  python -m pip install --upgrade netcoredbg-mcp==0.18.0
+  pipx upgrade netcoredbg-mcp
+  ```
+
+- For a new workstation install:
+
+  ```powershell
+  pipx install netcoredbg-mcp==0.18.0
+  netcoredbg-mcp --setup
+  ```
+
 - Runtime-smoke and UI helper failures intentionally prefer bounded `BLOCKED`,
   `INVALID_SETUP`, or `FAIL` evidence over false `PASS` results.
 - Some broad issue-backlog rows remain open by design; this release ships the
