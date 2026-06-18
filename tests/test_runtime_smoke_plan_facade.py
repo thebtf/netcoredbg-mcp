@@ -263,35 +263,44 @@ async def test_runtime_smoke_validate_plan_accepts_json_plan_path(
 
 
 @pytest.mark.asyncio
-async def test_runtime_smoke_validate_plan_checks_session_access_before_plan_path_io(
+async def test_runtime_smoke_validate_plan_path_does_not_claim_session_ownership(
     capturing_mcp,
     tmp_path,
 ) -> None:
     session = PlanFacadeSession()
-    access_calls: list[Any] = []
 
-    def deny_access(ctx: Any) -> str:
-        access_calls.append(ctx)
-        return "session access denied"
+    def fail_access_check(_ctx: Any) -> str | None:
+        raise AssertionError("validate-only facade must not claim session ownership")
 
     _register(
         capturing_mcp,
         session,
-        check_session_access=deny_access,
+        check_session_access=fail_access_check,
         resolve_project_root=_resolve_project_root_ok,
     )
     plan_path = tmp_path / "runtime-smoke-plan.json"
-    plan_path.write_text('{"name": "blocked-before-io"}', encoding="utf-8")
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema": "netcoredbg.runtime_smoke.v2",
+                "name": "validate-from-file",
+                "cases": [{"id": "case-1", "transitions": []}],
+            }
+        ),
+        encoding="utf-8",
+    )
 
     response = await capturing_mcp.tools["runtime_smoke_validate_plan"](
         ctx="ctx-token",
         plan_path=str(plan_path),
     )
+    data = response["data"]
 
-    assert response["error"] == "session access denied"
-    assert access_calls == ["ctx-token"]
-    assert session.resolved_project_root is False
-    assert session.validated_paths == []
+    assert "error" not in response
+    assert data["status"] == "PASS"
+    assert data["can_run"] is True
+    assert session.resolved_project_root is True
+    assert session.validated_paths == [str(plan_path)]
     assert session.launch_calls == 0
 
 
@@ -301,7 +310,16 @@ async def test_runtime_smoke_validate_plan_rejects_mixed_plan_inputs(
     tmp_path,
 ) -> None:
     session = PlanFacadeSession()
-    _register(capturing_mcp, session, resolve_project_root=_resolve_project_root_ok)
+
+    def fail_access_check(_ctx: Any) -> str | None:
+        raise AssertionError("mixed validate inputs must not claim session ownership")
+
+    _register(
+        capturing_mcp,
+        session,
+        check_session_access=fail_access_check,
+        resolve_project_root=_resolve_project_root_ok,
+    )
     plan_path = tmp_path / "runtime-smoke-plan.json"
     plan_path.write_text('{"name": "from-file"}', encoding="utf-8")
 
