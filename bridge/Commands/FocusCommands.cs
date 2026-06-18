@@ -135,6 +135,8 @@ public static class FocusCommands
 
         if (focused is null)
             return EmptyFocusedElementInfo();
+        if (!FocusedElementBelongsToConnectedProcess(focused, mainWindow))
+            return EmptyFocusedElementInfo();
 
         var result = ElementCommands.BuildElementInfo(focused, includePatterns: false);
         result["focused"] = true;
@@ -161,6 +163,44 @@ public static class FocusCommands
                 ["height"] = 0
             }
         };
+    }
+
+    private static bool FocusedElementBelongsToConnectedProcess(
+        AutomationElement focused,
+        AutomationElement mainWindow)
+    {
+        var expectedProcessId = JsonRpcHandler.ProcessId;
+        if (expectedProcessId == 0)
+        {
+            try
+            {
+                expectedProcessId = mainWindow.Properties.ProcessId.ValueOrDefault;
+            }
+            catch (COMException)
+            {
+                return false;
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+        }
+
+        if (expectedProcessId == 0)
+            return false;
+
+        try
+        {
+            return focused.Properties.ProcessId.ValueOrDefault == expectedProcessId;
+        }
+        catch (COMException)
+        {
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
     }
 
     private static string FocusedValue(AutomationElement focused)

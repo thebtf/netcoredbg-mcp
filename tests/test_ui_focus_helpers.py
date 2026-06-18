@@ -89,3 +89,15 @@ def test_bridge_focused_element_query_handles_transient_focused_element_errors()
     assert "catch (COMException)" in command
     assert "catch (InvalidOperationException)" in command
     assert "return EmptyFocusedElementInfo();" in command
+
+
+def test_bridge_focused_element_query_rejects_focus_outside_connected_process() -> None:
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "FocusCommands.cs").read_text(
+        encoding="utf-8"
+    )
+
+    assert "FocusedElementBelongsToConnectedProcess(focused, mainWindow)" in command
+    assert "JsonRpcHandler.ProcessId" in command
+    assert "mainWindow.Properties.ProcessId.ValueOrDefault" in command
+    assert "focused.Properties.ProcessId.ValueOrDefault" in command
+    assert "return EmptyFocusedElementInfo();" in command
