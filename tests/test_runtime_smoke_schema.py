@@ -52,6 +52,15 @@ class SchemaSmokeSession:
         self.adapter_calls.append(("ui.grid.click_row", request))
         return {"status": "PASS", "clicked": True, "row": dict(request.get("row") or {})}
 
+    async def grid_right_click_row(self, **request: Any) -> dict[str, Any]:
+        self.adapter_calls.append(("ui.grid.right_click_row", request))
+        return {
+            "status": "PASS",
+            "clicked": True,
+            "right_clicked": True,
+            "row": dict(request.get("row") or {}),
+        }
+
 
 @pytest.mark.asyncio
 async def test_invalid_plan_returns_self_describing_schema_help_before_launch() -> None:
@@ -292,6 +301,12 @@ async def test_legacy_runtime_smoke_grid_state_actions_reach_adapters() -> None:
                 "row": {"index": 3},
                 "column": "Phrase",
             },
+            {
+                "op": "ui.grid.right_click_row",
+                "selector": {"automation_id": "CueDataGrid"},
+                "row": {"index": 4},
+                "column": "Phrase",
+            },
         ],
     }
 
@@ -301,6 +316,7 @@ async def test_legacy_runtime_smoke_grid_state_actions_reach_adapters() -> None:
             "ui.grid.get_state": session.grid_get_state,
             "ui.grid.select_row": session.grid_select_row,
             "ui.grid.click_row": session.grid_click_row,
+            "ui.grid.right_click_row": session.grid_right_click_row,
         },
     ).run(plan)
 
@@ -333,6 +349,14 @@ async def test_legacy_runtime_smoke_grid_state_actions_reach_adapters() -> None:
                 "column": "Phrase",
             },
         ),
+        (
+            "ui.grid.right_click_row",
+            {
+                "selector": {"automation_id": "CueDataGrid"},
+                "row": {"index": 4},
+                "column": "Phrase",
+            },
+        ),
     ]
 
 
@@ -358,6 +382,13 @@ def test_legacy_runtime_smoke_grid_state_actions_validate_arguments() -> None:
                     "row": {"index": 3},
                     "column": 9,
                 },
+                {
+                    "op": "ui.grid.right_click_row",
+                    "selector": {"automation_id": "CueDataGrid"},
+                    "row": {"index": 4},
+                    "identity": [],
+                    "column": 10,
+                },
             ],
         }
     ) == [
@@ -366,6 +397,8 @@ def test_legacy_runtime_smoke_grid_state_actions_validate_arguments() -> None:
         "steps[0].identity must be an object for op ui.grid.get_state",
         "steps[1].row must be an object for op ui.grid.select_row",
         "steps[2].column must be a string for op ui.grid.click_row",
+        "steps[3].identity must be an object for op ui.grid.right_click_row",
+        "steps[3].column must be a string for op ui.grid.right_click_row",
     ]
 
 
@@ -389,6 +422,14 @@ def test_legacy_runtime_smoke_grid_row_actions_validate_ensure_visible_arguments
                     "max_scrolls": [],
                     "scroll_settle_ms": "slow",
                 },
+                {
+                    "op": "ui.grid.right_click_row",
+                    "selector": {"automation_id": "CueDataGrid"},
+                    "row": {"index": 4},
+                    "ensure_visible": 1,
+                    "max_scrolls": [],
+                    "scroll_settle_ms": "slow",
+                },
             ],
         }
     ) == [
@@ -398,6 +439,9 @@ def test_legacy_runtime_smoke_grid_row_actions_validate_ensure_visible_arguments
         "steps[1].ensure_visible must be a boolean for op ui.grid.click_row",
         "steps[1].max_scrolls must be an integer for op ui.grid.click_row",
         "steps[1].scroll_settle_ms must be an integer for op ui.grid.click_row",
+        "steps[2].ensure_visible must be a boolean for op ui.grid.right_click_row",
+        "steps[2].max_scrolls must be an integer for op ui.grid.right_click_row",
+        "steps[2].scroll_settle_ms must be an integer for op ui.grid.right_click_row",
     ]
 
 

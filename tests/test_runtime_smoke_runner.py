@@ -4310,6 +4310,39 @@ async def test_ui_operation_adapters_grid_click_row_requires_backend_click_primi
 
 
 @pytest.mark.asyncio
+async def test_ui_operation_adapters_grid_right_click_row_requires_backend_click_primitive(
+) -> None:
+    class FakeBackend:
+        async def grid_snapshot(
+            self,
+            selector: dict[str, Any],
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "visible_rows": [
+                    {"index": 0, "row_index": 18, "cells": {"PhraseId": "Cue 018"}},
+                    {"index": 1, "row_index": 19, "cells": {"PhraseId": "Cue 019"}},
+                ],
+            }
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.grid.right_click_row"](
+        selector={"automation_id": "dataGrid"},
+        row={"identity": "Cue 019"},
+        identity={"column": "PhraseId"},
+        column="PhraseId",
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "grid row right click unavailable"
+    assert result["requested"] == {"adapter": "ui.grid.right_click_row"}
+
+
+@pytest.mark.asyncio
 async def test_ui_operation_adapters_grid_ensure_visible_confirms_after_backend_setup() -> None:
     class FakeBackend:
         def __init__(self) -> None:

@@ -254,6 +254,72 @@ public static partial class GridCommands
         return output;
     }
 
+    public static JsonNode RightClickRow(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
+    {
+        if (JsonRpcHandler.Stealth)
+        {
+            return Blocked(
+                "grid row right click requires foreground mouse input",
+                new JsonObject { ["mode"] = "stealth" },
+                new JsonObject { ["mode"] = "non-stealth FlaUI bridge" },
+                "Disable stealth mode or use a non-coordinate UIA action.");
+        }
+
+        var grid = ResolveGrid(@params, automation, mainWindow);
+        if (!grid.Patterns.Grid.TryGetPattern(out _))
+            return Unsupported("GridPattern");
+
+        var rowIndex = @params?["row_index"]?.GetValue<int>()
+            ?? throw new ArgumentException("Missing required parameter: row_index");
+        var rows = GridRows(grid, automation);
+        if (rowIndex < 0 || rowIndex >= rows.Length)
+        {
+            return Blocked(
+                "grid row is outside visible rows",
+                new JsonObject { ["row_index"] = rowIndex, ["visible_count"] = rows.Length },
+                new JsonObject { ["row_index"] = "currently visible row index" },
+                "Scroll the grid or choose a currently visible row before clicking.");
+        }
+
+        var row = rows[rowIndex];
+        var columns = ReadColumns(@params);
+        var requestedColumn = @params?["column"]?.GetValue<string>();
+        var targetResult = ResolveClickTarget(grid, row, requestedColumn, columns);
+        if (targetResult.Blocked is not null)
+            return targetResult.Blocked;
+
+        var target = targetResult.Target ?? row;
+        var pointResult = ClickPoint(target);
+        if (pointResult.Blocked is not null)
+            return pointResult.Blocked;
+
+        var clickResult = ClickCommands.RightClick(
+            new JsonObject { ["x"] = pointResult.Point.X, ["y"] = pointResult.Point.Y },
+            automation,
+            mainWindow);
+
+        var output = new JsonObject
+        {
+            ["status"] = "PASS",
+            ["clicked"] = true,
+            ["right_clicked"] = true,
+            ["click_kind"] = "right",
+            ["row_index"] = rowIndex,
+            ["x"] = pointResult.Point.X,
+            ["y"] = pointResult.Point.Y,
+            ["click_result"] = clickResult?.DeepClone(),
+            ["row"] = BuildRow(row, rowIndex, columns, ColumnHeaders(grid))
+        };
+        if (clickResult is JsonObject clickObject &&
+            clickObject["method"] is JsonNode methodNode)
+            output["method"] = methodNode.DeepClone();
+        if (!string.IsNullOrWhiteSpace(requestedColumn))
+            output["column"] = requestedColumn;
+        if (!string.IsNullOrWhiteSpace(targetResult.ActualColumn))
+            output["actual_column"] = targetResult.ActualColumn;
+        return output;
+    }
+
     public static JsonNode AssertRange(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
         var grid = ResolveGrid(@params, automation, mainWindow);
