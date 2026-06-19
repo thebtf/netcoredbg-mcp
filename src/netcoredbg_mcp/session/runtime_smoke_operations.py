@@ -458,6 +458,7 @@ def ui_operation_adapters(
             result = await backend.find_element(**_selector_kwargs(selector))
         except Exception as exc:
             blocked = {"status": "BLOCKED", "reason": str(exc)}
+            # Some backend wrappers surface selector misses as exceptions.
             if _is_selector_miss(blocked):
                 return _selector_blocked(selector, result=blocked)
             return {

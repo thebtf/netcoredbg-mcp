@@ -932,6 +932,23 @@ async def test_ui_operation_adapters_double_click_uses_bounded_target_rect() -> 
     assert "raw_tree" not in repr(result)
 
 
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        ({"rect": {"x": 10, "y": 20, "width": 100, "height": 60}}, (60, 50)),
+        ({"rect": {"left": 20, "top": 30, "right": 80, "bottom": 90}}, (50, 60)),
+        ({"rect": {"x": 10, "y": 20, "width": 100}}, None),
+        ({"rect": {"x": "bad", "y": 20, "width": 100, "height": 60}}, None),
+        ({}, None),
+    ],
+)
+def test_element_center_handles_supported_rect_shapes(
+    result: dict[str, Any],
+    expected: tuple[int, int] | None,
+) -> None:
+    assert smoke_ops._element_center(result) == expected
+
+
 @pytest.mark.asyncio
 async def test_ui_operation_adapters_right_click_blocks_raw_backend_failure() -> None:
     class FakeBackend:
@@ -953,6 +970,55 @@ async def test_ui_operation_adapters_right_click_blocks_raw_backend_failure() ->
         "reason": "ui.right_click returned non-object result",
         "result": "bridge transport unavailable",
         "selector": {"automation_id": "CueGrid"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_ui_operation_adapters_double_click_blocks_raw_backend_failure() -> None:
+    class FakeBackend:
+        async def find_element(self, **kwargs: Any) -> str:
+            return "bridge transport unavailable"
+
+        async def double_click_at(self, x: int, y: int) -> None:
+            raise AssertionError("double_click_at should not run without target evidence")
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.double_click"](
+        selector={"automation_id": "OpenRecentItem"},
+    )
+
+    assert result == {
+        "status": "FAIL",
+        "reason": "ui.double_click returned non-object result",
+        "result": "bridge transport unavailable",
+        "selector": {"automation_id": "OpenRecentItem"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_ui_operation_adapters_right_click_maps_not_found_exception() -> None:
+    class FakeBackend:
+        async def find_element(self, **kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError("element not found: CueGrid")
+
+        async def right_click_at(self, x: int, y: int) -> None:
+            raise AssertionError("right_click_at should not run after selector miss")
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.right_click"](
+        selector={"automation_id": "CueGrid"},
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "selector not found"
+    assert result["requested"] == {"selector": {"automation_id": "CueGrid"}}
+    assert result["result"] == {
+        "status": "BLOCKED",
+        "reason": "element not found: CueGrid",
     }
 
 
