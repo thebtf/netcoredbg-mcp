@@ -274,11 +274,17 @@ def diagnostic_schema_contract() -> dict[str, Any]:
                     "PASS": "preserve diagnostic status with freshness proof",
                 },
             },
+            "wait_json_condition_contract": {
+                "fields": ["jsonpath", "expected"],
+                "matching": "wait until the JSONPath value equals expected",
+                "failure_mode": "diagnostic JSON condition not satisfied",
+            },
             "failure_modes": [
                 "stale_process",
                 "missing_artifact",
                 "redacted_evidence",
                 "diagnostic JSON not observed",
+                "diagnostic JSON condition not satisfied",
             ],
         },
         "semantic_probe": {
@@ -692,6 +698,7 @@ def _validate_wait_json_schema(
             errors.append(
                 f"app_diagnostics.{field_name}.pattern must be a file-name pattern"
             )
+    _validate_wait_json_condition_schema(wait_json, errors, field_name=field_name)
     for numeric_field in ("timeout_ms", "poll_interval_ms"):
         if numeric_field not in wait_json:
             continue
@@ -702,6 +709,28 @@ def _validate_wait_json_schema(
             )
         elif value < 0:
             errors.append(f"app_diagnostics.{field_name}.{numeric_field} must be >= 0")
+
+
+def _validate_wait_json_condition_schema(
+    wait_json: dict[str, Any],
+    errors: list[str],
+    *,
+    field_name: str,
+) -> None:
+    condition = wait_json.get("condition")
+    if condition is None:
+        return
+    if field_name != "wait_json":
+        errors.append("app_diagnostics.poll.condition is not accepted")
+        return
+    if not isinstance(condition, dict):
+        errors.append("app_diagnostics.wait_json.condition must be an object")
+        return
+    jsonpath = condition.get("jsonpath")
+    if not isinstance(jsonpath, str) or not jsonpath:
+        errors.append("app_diagnostics.wait_json.condition.jsonpath is required")
+    if "expected" not in condition:
+        errors.append("app_diagnostics.wait_json.condition.expected is required")
 
 
 def _validate_semantic_probe_schema(payload: dict[str, Any], errors: list[str]) -> None:
