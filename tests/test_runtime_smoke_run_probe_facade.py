@@ -371,7 +371,8 @@ async def test_runtime_smoke_run_probe_rejects_unknown_probe_without_starting_ru
     assert data["run_created"] is False
     assert "ui.colorscheme" in "\n".join(data["validation_errors"])
     assert "ui.text" in data["accepted_probe_kinds"]
-    assert "runtime_smoke_validate_plan" in response["next_actions"]
+    assert "runtime_smoke_validate_probe" in response["next_actions"]
+    assert "runtime_smoke_run_probe" not in response["next_actions"]
     assert session.runtime_smoke.lifecycle_runs.active_run_ids() == []
     assert session.runtime_smoke.lifecycle_runs.retained_run_ids() == []
     assert session.launch_calls == 0
@@ -396,8 +397,59 @@ async def test_runtime_smoke_run_probe_agent_mode_invalid_probe_fails_closed(
     assert data["status"] == "INVALID_SETUP"
     assert data["can_run"] is False
     assert data["run_created"] is False
-    assert agent["primary_next_action"] == "runtime_smoke_run_plan"
-    assert "next_request" not in agent
+    assert agent["primary_next_action"] == "runtime_smoke_validate_probe"
+    assert agent["next_request"] == {
+        "tool": "runtime_smoke_validate_probe",
+        "arguments": {
+            "probe": {"kind": "ui.colorscheme", "name": "theme"},
+            "agent_mode": True,
+        },
+    }
+    assert "cursor" not in agent
+    assert session.runtime_smoke.lifecycle_runs.retained_run_ids() == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_run_probe_agent_mode_invalid_known_probe_preserves_context(
+    capturing_mcp,
+) -> None:
+    session = RunProbeFacadeSession()
+    _register(capturing_mcp, session)
+    probe = {
+        "kind": "oracle_pack",
+        "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
+        "id": "broken-oracle-pack",
+        "status": "PASS",
+        "checks": [],
+    }
+
+    response = await capturing_mcp.tools["runtime_smoke_run_probe"](
+        ctx=None,
+        probe=probe,
+        name="repair-oracle-pack",
+        phase="both",
+        budgets={"max_actions": 2, "max_elapsed_seconds": 7},
+        debug_preflight=True,
+        agent_mode=True,
+    )
+    data = response["data"]
+    agent = data["agent_mode"]
+
+    assert data["status"] == "INVALID_SETUP"
+    assert data["can_run"] is False
+    assert data["run_created"] is False
+    assert agent["primary_next_action"] == "runtime_smoke_validate_probe"
+    assert agent["next_request"] == {
+        "tool": "runtime_smoke_validate_probe",
+        "arguments": {
+            "probe": probe,
+            "name": "repair-oracle-pack",
+            "phase": "both",
+            "budgets": {"max_actions": 2, "max_elapsed_seconds": 7},
+            "debug_preflight": True,
+            "agent_mode": True,
+        },
+    }
     assert "cursor" not in agent
     assert session.runtime_smoke.lifecycle_runs.retained_run_ids() == []
 
