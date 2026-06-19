@@ -14,7 +14,7 @@ set breakpoints, step through code, inspect variables, evaluate expressions, rea
 debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
 and Avalonia windows without opening an IDE.
 
-**130 MCP tools · 8 prompts · 4 resources · 1588 collected tests · release v0.18.1**
+**130 MCP tools · 8 prompts · 4 resources · 1610 collected tests · release v0.18.2**
 
 ## Quick Links
 
@@ -23,18 +23,20 @@ and Avalonia windows without opening an IDE.
 - **Reference:** [Available Tools](#available-tools) · [Resources](#mcp-resources) · [Prompts](#mcp-prompts) · [Architecture](#architecture-overview)
 - **Project:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## What's New in v0.18.1
+## What's New in v0.18.2
 
-- **Read-only plan validation** — runtime-smoke `plan_path` validation no
-  longer acquires mux ownership when callers only need validation evidence.
-- **Session scope safety** — validation-only plan checks preserve
-  `session.project_path`, so observers cannot silently retarget the active
-  debug session.
-- **Worktree-aware path checks** — project path validation caches worktree
-  lookups per supplied project root, avoiding stale decisions across worktrees
-  and plan-file scopes.
-- **Patch delivery** — this release publishes the PR #134/#135/#136 follow-up
-  fixes that landed after the `v0.18.0` UI emulation milestone.
+- **YAML runtime-smoke plans** — `plan_path` now accepts `.yaml` and `.yml`
+  files in the existing validation and run-plan facades while JSON remains the
+  default.
+- **Runner exception cleanup proof** — durable v2 runner exceptions now return
+  v2-shaped exception evidence and execute declared cleanup/contamination
+  handling instead of falling back to opaque legacy teardown.
+- **Read-only probe validation** — `runtime_smoke_validate_probe` validates a
+  single v2 probe without creating a durable run, launching a target, claiming
+  session ownership, or writing an evidence directory.
+- **App diagnostic freshness** — app-written diagnostic `PASS` results are
+  checked against live debug freshness expectations for process, module,
+  source, workspace, and artifact evidence before they are accepted.
 
 ## Highlights
 
