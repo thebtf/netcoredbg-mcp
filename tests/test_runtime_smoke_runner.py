@@ -937,6 +937,7 @@ async def test_ui_operation_adapters_double_click_uses_bounded_target_rect() -> 
     [
         ({"rect": {"x": 10, "y": 20, "width": 100, "height": 60}}, (60, 50)),
         ({"rect": {"left": 20, "top": 30, "right": 80, "bottom": 90}}, (50, 60)),
+        ({"rectangle": {"left": 40, "top": 50, "right": 120, "bottom": 150}}, (80, 100)),
         ({"rect": {"x": 10, "y": 20, "width": 100}}, None),
         ({"rect": {"x": "bad", "y": 20, "width": 100, "height": 60}}, None),
         ({}, None),

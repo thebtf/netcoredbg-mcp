@@ -2808,7 +2808,7 @@ def _bounded_ui_result(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def _element_center(result: Mapping[str, Any]) -> tuple[int, int] | None:
-    rect = result.get("rect")
+    rect = result.get("rect", result.get("rectangle"))
     if not isinstance(rect, Mapping):
         return None
     if all(key in rect for key in ("x", "y", "width", "height")):
