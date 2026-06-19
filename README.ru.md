@@ -14,7 +14,7 @@
 вычислять выражения, читать вывод отладки и управлять поверхностями Windows UI
 Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 
-**131 MCP-инструмент · 8 промптов · 4 ресурса · 1642 собранных теста · релиз v0.18.7**
+**131 MCP-инструмент · 8 промптов · 4 ресурса · 1649 собранных тестов · релиз v0.18.8**
 
 ## Быстрые ссылки
 
@@ -23,17 +23,16 @@ Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 - **Справочник:** [Доступные инструменты](#доступные-инструменты) · [Ресурсы](#mcp-ресурсы) · [Промпты](#mcp-промпты) · [Архитектура](#обзор-архитектуры)
 - **Проект:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## Что нового в v0.18.7
+## Что нового в v0.18.8
 
-- **Проверенные варианты клика** — runtime-smoke v2 теперь поддерживает
-  `ui.right_click_verified` и `ui.double_click_verified`, а также адаптеры
-  операций `ui.right_click` и `ui.double_click`.
-- **Единое доказательство цели** — right-click и double-click используют
-  существующую проверку целевого элемента и postcondition-проверку
-  verified-click, поэтому несовпадение цели блокируется до побочного действия.
-- **Геометрия pywinauto fallback** — вычисление центра verified click теперь
-  принимает pywinauto-поле `rectangle` наряду с `rect`, сохраняя координатные
-  клики на fallback-бэкенде.
+- **Инкрементальная app diagnostics** — `app_diagnostics.poll.since` принимает
+  cursor `{mtime_ns, name}` для опроса директории.
+- **Защита от stale snapshots** — directory poll игнорирует старые или равные
+  diagnostic JSON snapshots вместо повторного чтения прежнего app-written
+  `PASS` artifact.
+- **Доказательство следующего cursor** — успешный directory poll возвращает
+  `cursor` с `mtime_ns` и `name` найденного файла, чтобы потребители могли
+  продолжить с уже наблюденного snapshot.
 
 ## Основные возможности
 
