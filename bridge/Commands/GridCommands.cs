@@ -307,7 +307,7 @@ public static partial class GridCommands
             ["row_index"] = rowIndex,
             ["x"] = pointResult.Point.X,
             ["y"] = pointResult.Point.Y,
-            ["click_result"] = clickResult.DeepClone(),
+            ["click_result"] = clickResult?.DeepClone(),
             ["row"] = BuildRow(row, rowIndex, columns, ColumnHeaders(grid))
         };
         if (clickResult is JsonObject clickObject &&

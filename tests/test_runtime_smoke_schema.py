@@ -386,6 +386,7 @@ def test_legacy_runtime_smoke_grid_state_actions_validate_arguments() -> None:
                     "op": "ui.grid.right_click_row",
                     "selector": {"automation_id": "CueDataGrid"},
                     "row": {"index": 4},
+                    "identity": [],
                     "column": 10,
                 },
             ],
@@ -396,6 +397,7 @@ def test_legacy_runtime_smoke_grid_state_actions_validate_arguments() -> None:
         "steps[0].identity must be an object for op ui.grid.get_state",
         "steps[1].row must be an object for op ui.grid.select_row",
         "steps[2].column must be a string for op ui.grid.click_row",
+        "steps[3].identity must be an object for op ui.grid.right_click_row",
         "steps[3].column must be a string for op ui.grid.right_click_row",
     ]
 
