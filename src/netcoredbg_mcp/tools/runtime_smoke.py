@@ -1443,6 +1443,9 @@ def _runtime_smoke_invalid_event_delta(
     run_id: str = "",
 ) -> dict[str, Any]:
     parsed_limit = _runtime_smoke_parse_nonnegative_int(limit)
+    next_actions = ["runtime_smoke_run_plan"]
+    if run_id:
+        next_actions.insert(0, "runtime_smoke_mark_event_cursor")
     return {
         "status": "INVALID_SETUP",
         "reason": reason,
@@ -1454,7 +1457,7 @@ def _runtime_smoke_invalid_event_delta(
             limit=parsed_limit if parsed_limit is not None else 0,
         ),
         "final": True,
-        "next_actions": ["runtime_smoke_mark_event_cursor", "runtime_smoke_run_plan"],
+        "next_actions": next_actions,
     }
 
 

@@ -311,6 +311,7 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "CR-059",
             "CR-060",
             "CR-061",
+            "CR-062",
             "metrics_contract",
             "agent_mode.defaults",
             "runtime_smoke_validate_probe",
@@ -318,6 +319,7 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "invalid-probe repair guidance",
             "invalid-run-probe repair guidance",
             "event-delta cursor repair guidance",
+            "contextless event-delta guidance",
             "exception verdict",
             "cleanup-contract guidance",
             "event_limit=20",
@@ -764,12 +766,16 @@ def test_issue_268_269_record_validate_probe_slice_without_broad_closure() -> No
     assert "CR-060" in lifecycle_row_269
     assert "CR-061" in row_269
     assert "CR-061" in lifecycle_row_269
+    assert "CR-062" in row_269
+    assert "CR-062" in lifecycle_row_269
     assert "invalid-probe repair guidance" in row_269
     assert "invalid-probe repair guidance" in lifecycle_row_269
     assert "invalid-run-probe repair guidance" in row_269
     assert "invalid-run-probe repair guidance" in lifecycle_row_269
     assert "event-delta cursor repair guidance" in row_269
     assert "event-delta cursor repair guidance" in lifecycle_row_269
+    assert "contextless event-delta guidance" in row_269
+    assert "contextless event-delta guidance" in lifecycle_row_269
 
 
 def test_issue_271_records_cleanup_and_trace_delta_slices() -> None:
