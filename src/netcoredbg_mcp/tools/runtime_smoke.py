@@ -1564,6 +1564,24 @@ def _apply_runtime_smoke_agent_mode(
     data: dict[str, Any],
     primary_next_action: str,
 ) -> dict[str, Any]:
+    if (
+        primary_next_action == "runtime_smoke_get_event_delta"
+        and data.get("status") == "INVALID_SETUP"
+        and isinstance(data.get("run_id"), str)
+        and data.get("run_id")
+    ):
+        data["agent_mode"] = _runtime_smoke_agent_mode_payload(
+            "runtime_smoke_mark_event_cursor",
+            next_request={
+                "tool": "runtime_smoke_mark_event_cursor",
+                "arguments": {
+                    "run_id": data["run_id"],
+                    "agent_mode": True,
+                },
+            },
+            metrics=_runtime_smoke_agent_metrics(data),
+        )
+        return data
     if _runtime_smoke_agent_fail_closed(data):
         data["agent_mode"] = _runtime_smoke_agent_mode_payload(
             "runtime_smoke_run_plan",
