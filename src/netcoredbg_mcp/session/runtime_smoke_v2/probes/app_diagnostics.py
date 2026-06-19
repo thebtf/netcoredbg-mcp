@@ -132,6 +132,7 @@ def _freshness_expectations(probe: dict[str, Any]) -> dict[str, Any] | None:
         "expected_workspace": _path_or_none(probe.get("workspace")),
         "expected_sources": _string_list(
             app.get("expected_sources")
+            or probe.get("loaded_sources")
             or probe.get("sources")
             or _object_or_empty(probe.get("workspace")).get("sources")
         ),

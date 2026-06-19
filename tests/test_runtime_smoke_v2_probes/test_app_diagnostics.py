@@ -570,6 +570,66 @@ async def test_app_diagnostics_wait_json_keeps_pass_with_incomplete_freshness_wa
 
 
 @pytest.mark.asyncio
+async def test_app_diagnostics_wait_json_honors_loaded_sources_freshness(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    expected_source = workspace / "Program.cs"
+    other_source = tmp_path / "other" / "Program.cs"
+    expected_source.parent.mkdir(parents=True)
+    other_source.parent.mkdir(parents=True)
+    expected_source.write_text("class Expected {}", encoding="utf-8")
+    other_source.write_text("class Other {}", encoding="utf-8")
+    diagnostic_path = tmp_path / "app-diagnostics-loaded-sources.json"
+    diagnostic_path.write_text(
+        json.dumps(
+            _app_diagnostics(
+                app={"name": "LiveWpfSmokeApp"},
+                status="PASS",
+                observations=[],
+                workspace=str(workspace),
+                loaded_sources=[str(expected_source)],
+            )
+        ),
+        encoding="utf-8",
+    )
+    session = _session_with_debug_freshness(
+        sources={
+            str(other_source): {
+                "name": "Program.cs",
+                "path": str(other_source),
+            }
+        }
+    )
+
+    result = await runner(session).run(
+        one_probe_plan(
+            _app_diagnostics(
+                phase="after",
+                app={"name": "PlaceholderApp"},
+                status="PASS",
+                observations=[],
+                wait_json={
+                    "path": str(diagnostic_path),
+                    "timeout_ms": 0,
+                    "poll_interval_ms": 0,
+                },
+            )
+        )
+    )
+
+    probe = after_probe(result)
+    assert result["status"] == "FAIL"
+    freshness = probe["value"]["freshness"]
+    assert freshness["status"] == "FAIL"
+    mismatch_kinds = {mismatch["kind"] for mismatch in freshness["mismatches"]}
+    assert {
+        "expected_source_missing",
+        "source_workspace_mismatch",
+    }.issubset(mismatch_kinds)
+
+
+@pytest.mark.asyncio
 async def test_app_diagnostics_declared_freshness_warns_when_session_unavailable() -> None:
     result = await handle_app_diagnostics(
         _app_diagnostics(

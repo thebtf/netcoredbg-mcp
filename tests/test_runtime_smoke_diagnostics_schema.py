@@ -113,7 +113,13 @@ def test_diagnostic_schema_contract_exposes_app_diagnostics_freshness_contract()
             "expected_modules",
             "require_active_process",
         ],
-        "top_level_fields": ["workspace", "artifacts", "process", "modules"],
+        "top_level_fields": [
+            "workspace",
+            "artifacts",
+            "process",
+            "modules",
+            "loaded_sources",
+        ],
         "aliases": {
             "process": ["id", "name", "expected_id", "expected_name", "require_active"],
         },
@@ -145,6 +151,7 @@ def test_app_diagnostics_schema_rejects_invalid_freshness_contract_shapes() -> N
         "workspace": 1234,
         "process": "dotnet",
         "modules": "WpfSmokeApp.dll",
+        "loaded_sources": "Program.cs",
         "artifacts": {"expected": "not-a-list"},
         "limits": {
             "max_text_length": 240,
@@ -161,6 +168,7 @@ def test_app_diagnostics_schema_rejects_invalid_freshness_contract_shapes() -> N
     assert "app_diagnostics.workspace must be a string or object" in errors
     assert "app_diagnostics.process must be an object" in errors
     assert "app_diagnostics.modules must be a list or object" in errors
+    assert "app_diagnostics.loaded_sources must be a list of strings" in errors
     assert "app_diagnostics.artifacts.expected must be a list of strings" in errors
 
 

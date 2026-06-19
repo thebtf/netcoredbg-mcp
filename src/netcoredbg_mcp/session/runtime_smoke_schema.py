@@ -258,7 +258,13 @@ def diagnostic_schema_contract() -> dict[str, Any]:
                     "expected_modules",
                     "require_active_process",
                 ],
-                "top_level_fields": ["workspace", "artifacts", "process", "modules"],
+                "top_level_fields": [
+                    "workspace",
+                    "artifacts",
+                    "process",
+                    "modules",
+                    "loaded_sources",
+                ],
                 "aliases": {
                     "process": ["id", "name", "expected_id", "expected_name", "require_active"],
                 },
@@ -644,6 +650,9 @@ def _validate_app_diagnostics_freshness_shapes(
     modules = payload.get("modules")
     if modules is not None and not isinstance(modules, (list, dict)):
         errors.append("app_diagnostics.modules must be a list or object")
+    loaded_sources = payload.get("loaded_sources")
+    if loaded_sources is not None and not _is_string_list(loaded_sources):
+        errors.append("app_diagnostics.loaded_sources must be a list of strings")
     artifacts = payload.get("artifacts")
     if artifacts is not None and not isinstance(artifacts, (list, dict)):
         errors.append("app_diagnostics.artifacts must be a list or object")
