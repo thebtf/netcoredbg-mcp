@@ -14,7 +14,7 @@ set breakpoints, step through code, inspect variables, evaluate expressions, rea
 debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
 and Avalonia windows without opening an IDE.
 
-**131 MCP tools · 8 prompts · 4 resources · 1629 collected tests · release v0.18.6**
+**131 MCP tools · 8 prompts · 4 resources · 1642 collected tests · release v0.18.7**
 
 ## Quick Links
 
@@ -23,17 +23,17 @@ and Avalonia windows without opening an IDE.
 - **Reference:** [Available Tools](#available-tools) · [Resources](#mcp-resources) · [Prompts](#mcp-prompts) · [Architecture](#architecture-overview)
 - **Project:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## What's New in v0.18.6
+## What's New in v0.18.7
 
-- **Opt-in DataGrid row visibility** — DataGrid row select and click actions now
-  accept explicit `ensure_visible=True` handling across the public `ui_grid`
-  helper, legacy runtime-smoke route, and runtime-smoke v2 action runner.
-- **Visible-row default preserved** — row actions still require already-visible
-  rows unless the caller opts into ensure-visible behavior, keeping existing
-  scripts deterministic by default.
-- **Fail-closed v2 preflight** — unsupported or invalid ensure-visible
-  preflight outcomes are normalized to terminal failure statuses, so skipped
-  row actions cannot silently report `PASS`.
+- **Verified click variants** — runtime-smoke v2 now supports
+  `ui.right_click_verified` and `ui.double_click_verified`, with matching
+  `ui.right_click` and `ui.double_click` operation adapters.
+- **Shared target proof** — right-click and double-click variants reuse the
+  existing verified-click selector proof and postcondition pipeline, so target
+  mismatches fail before side effects.
+- **Pywinauto fallback geometry** — verified click center resolution now accepts
+  pywinauto `rectangle` payloads as well as `rect`, preserving coordinate
+  clicks on fallback backends.
 
 ## Highlights
 

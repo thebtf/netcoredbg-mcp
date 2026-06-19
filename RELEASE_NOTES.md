@@ -1,43 +1,45 @@
-# netcoredbg-mcp v0.18.6
+# netcoredbg-mcp v0.18.7
 
 Released: 2026-06-19
 
 ## Summary
 
-`v0.18.6` is a patch release for the runtime-smoke and UI-emulation hardening
-roadmap. It publishes CR-053 after `v0.18.5`, so package consumers can opt into
-ensure-visible handling for DataGrid row select and click actions without
-changing the default visible-row-only behavior.
+`v0.18.7` is a patch release for the runtime-smoke and UI-emulation hardening
+roadmap. It publishes CR-054 after `v0.18.6`, giving package consumers verified
+right-click and double-click flows without changing the existing
+`ui.click_verified` contract.
 
 ## Highlights
 
-- DataGrid row select and click actions now accept explicit
-  `ensure_visible=True` behavior through the public `ui_grid` helper, legacy
-  runtime-smoke execution, and runtime-smoke v2 actions.
-- Existing row actions remain visible-row-only by default, preserving
-  deterministic behavior for current consumers.
-- Runtime-smoke v2 now normalizes unsupported or invalid ensure-visible
-  preflight results to terminal failure statuses instead of allowing a skipped
-  row action to report `PASS`.
-- Broad issue `#270` remains open for broader DataGrid offscreen/scroll action
-  semantics, arbitrary click variants, downstream replay tails, and broader
-  helper ergonomics.
+- Runtime-smoke v2 now supports `ui.right_click_verified` and
+  `ui.double_click_verified`.
+- Runtime-smoke operation adapters now expose `ui.right_click` and
+  `ui.double_click` through the same target-proof and postcondition behavior as
+  verified primary clicks.
+- Verified click variants fail closed before side effects when selector proof
+  does not match the intended target.
+- Pywinauto fallback click-center resolution now accepts `rectangle` geometry
+  payloads as well as `rect`, preserving coordinate-click behavior on fallback
+  backends.
+- Broad issue `#270` remains open for DataGrid-specific and arbitrary click
+  variants, broader offscreen/scroll semantics, drag/drop tails, downstream
+  replay coverage, and broader helper ergonomics.
 
 ## Upgrade Notes
 
 - This is a PATCH release. It preserves the `v0.18.x` public API shape and
-  tightens runtime-smoke validation/freshness behavior.
+  expands runtime-smoke click coverage with verified secondary click variants.
 - Upgrade an existing pip or pipx install with one of:
 
   ```powershell
-  python -m pip install --upgrade netcoredbg-mcp==0.18.6
+  python -m pip install --upgrade netcoredbg-mcp==0.18.7
   pipx upgrade netcoredbg-mcp
   ```
 
 - For a new workstation install:
 
   ```powershell
-  pipx install netcoredbg-mcp==0.18.6
+  pipx install netcoredbg-mcp==0.18.7
   netcoredbg-mcp --setup
   ```
 
