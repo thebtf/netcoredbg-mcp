@@ -500,6 +500,50 @@ async def test_runtime_smoke_v2_runner_exception_runs_v2_cleanup_with_diagnostic
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_v2_exception_case_cleanup_error_keeps_plan_cleanup() -> None:
+    class TraceLogCleanupFailsSession(LifecycleSmokeSession):
+        async def clear_trace_log(self) -> dict[str, Any]:
+            self.trace_log_clear_calls += 1
+            raise RuntimeError("trace log cleanup exploded")
+
+    session = TraceLogCleanupFailsSession()
+
+    started = await session.runtime_smoke.lifecycle_runs.start(
+        _v2_exception_cleanup_plan(),
+        lambda: _exploding_runner(session),
+    )
+    final = await _wait_for_final(session.runtime_smoke.lifecycle_runs, started["run_id"])
+
+    assert final["status"] == "FAIL"
+    assert final["reason"] == "runtime smoke runner raised exception"
+    assert final["cleanup"]["status"] == "FAIL"
+    assert "case:case-1:debug.trace_log.clear" in final["cleanup"]["attempted"]
+    assert "debug.stop:graceful" in final["cleanup"]["attempted"]
+    assert "process.registry.assert_empty" in final["cleanup"]["attempted"]
+    assert final["cleanup"]["debug_stop"]["status"] == "PASS"
+    assert final["cleanup"]["process_registry_after"] == 0
+    assert len(final["cleanup"]["failed_case_cleanups"]) == 1
+    failed_case_cleanup = final["cleanup"]["failed_case_cleanups"][0]
+    assert failed_case_cleanup["case_id"] == "case-1"
+    assert len(failed_case_cleanup["failures"]) == 1
+    failure = failed_case_cleanup["failures"][0]
+    assert failure["kind"] == "debug.trace_log.clear"
+    assert failure["reason"] == "trace log cleanup exploded"
+    assert failure["result"]["status"] == "FAIL"
+    assert failure["result"]["reason"] == "trace log cleanup exploded"
+    assert failure["result"]["exception"]["type"] == "RuntimeError"
+    assert failure["result"]["exception"]["message"] == "trace log cleanup exploded"
+    assert "clear_trace_log" in failure["result"]["exception"]["traceback"]
+    assert "RuntimeError: trace log cleanup exploded" in failure["result"]["exception"][
+        "traceback"
+    ]
+    assert final["contaminated"] is True
+    assert final["cleanup_contract"]["next_action"] == "runtime_smoke_cleanup_contract"
+    assert session.stop_calls == 1
+    assert session.trace_log_clear_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_v2_runner_exception_cleanup_failure_requires_contract() -> None:
     session = LifecycleSmokeSession()
     session.fail_debug_stop = True
