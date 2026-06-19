@@ -679,6 +679,99 @@ async def _handle_ui_grid_right_click_row(
     return _action_result(**action_payload)
 
 
+async def _handle_ui_grid_double_click_row(
+    action: dict[str, Any],
+    context: ActionContext,
+) -> dict[str, Any]:
+    started = context.clock()
+    selector, blocked = _selector_from_action(action)
+    if blocked is not None:
+        return {
+            **blocked,
+            "duration_ms": context.elapsed_ms(started),
+            "route": "grid_double_click_row",
+        }
+    row, blocked = _row_from_action(action)
+    if blocked is not None:
+        return {
+            **blocked,
+            "duration_ms": context.elapsed_ms(started),
+            "route": "grid_double_click_row",
+        }
+    identity = _mapping_from_action(action, "identity")
+    rows = _mapping_from_action(action, "rows")
+    columns = _list_from_action(action, "columns")
+    column = action.get("column")
+    ensure_visible = action.get("ensure_visible") is True
+    max_scrolls = action.get("max_scrolls")
+    scroll_settle_ms = action.get("scroll_settle_ms")
+    ensure_visible_result: dict[str, Any] | None = None
+    if ensure_visible:
+        ensure_visible_result = await context.call_adapter(
+            "ui.grid.ensure_visible",
+            selector=selector,
+            row=row,
+            identity=identity,
+            rows=rows,
+            columns=columns,
+            max_scrolls=max_scrolls,
+            scroll_settle_ms=scroll_settle_ms,
+        )
+        if not _is_adapter_success(ensure_visible_result):
+            result = dict(ensure_visible_result)
+            status = _terminal_failure_status(str(result.get("status", "BLOCKED")).upper())
+            result["status"] = status
+            result["ensure_visible_result"] = ensure_visible_result
+            result["action_skipped"] = True
+            return _action_result(
+                status=status,
+                route="grid_double_click_row",
+                selector=selector,
+                row=row,
+                identity=identity,
+                rows=rows,
+                columns=columns,
+                column=str(column) if column is not None else None,
+                ensure_visible=True,
+                max_scrolls=max_scrolls,
+                scroll_settle_ms=scroll_settle_ms,
+                action_skipped=True,
+                duration_ms=context.elapsed_ms(started),
+                result=result,
+            )
+    result = await context.call_adapter(
+        "ui.grid.double_click_row",
+        selector=selector,
+        row=row,
+        identity=identity,
+        rows=rows,
+        columns=columns,
+        column=str(column) if column is not None else None,
+    )
+    if ensure_visible_result is not None:
+        result = dict(result)
+        result["ensure_visible_result"] = ensure_visible_result
+    action_payload = {
+        "status": result.get("status", "PASS"),
+        "route": "grid_double_click_row",
+        "selector": selector,
+        "row": row,
+        "identity": identity,
+        "rows": rows,
+        "columns": columns,
+        "column": str(column) if column is not None else None,
+        "duration_ms": context.elapsed_ms(started),
+        "result": result,
+    }
+    if ensure_visible:
+        action_payload["ensure_visible"] = True
+        if max_scrolls is not None:
+            action_payload["max_scrolls"] = max_scrolls
+        if scroll_settle_ms is not None:
+            action_payload["scroll_settle_ms"] = scroll_settle_ms
+    return _action_result(**action_payload)
+
+
 async def _handle_wait(action: dict[str, Any], context: ActionContext) -> dict[str, Any]:
     started = context.clock()
     idle_ms, blocked = _idle_ms_from_action(action)
@@ -1277,6 +1370,7 @@ register_action("ui.grid.ensure_visible", _handle_ui_grid_ensure_visible)
 register_action("ui.grid.select_row", _handle_ui_grid_select_row)
 register_action("ui.grid.click_row", _handle_ui_grid_click_row)
 register_action("ui.grid.right_click_row", _handle_ui_grid_right_click_row)
+register_action("ui.grid.double_click_row", _handle_ui_grid_double_click_row)
 register_action("ui.grid.select", _handle_ui_grid_select)
 register_action("ui.input.ensure_target", _handle_ui_input_ensure_target)
 register_action("ui.invoke", _handle_ui_invoke)

@@ -170,6 +170,32 @@ class FakeGridBackend:
             "row": {"index": row_index},
         }
 
+    async def grid_double_click_row(
+        self,
+        selector: dict[str, Any],
+        row_index: int,
+        column: str | None = None,
+        columns: list[str] | None = None,
+    ) -> dict[str, Any]:
+        self.calls.append(
+            (
+                "double_click",
+                {
+                    **dict(selector),
+                    "row_index": row_index,
+                    "column": column,
+                    "columns": list(columns or []),
+                },
+            )
+        )
+        return {
+            "status": "PASS",
+            "clicked": True,
+            "double_clicked": True,
+            "click_kind": "double",
+            "row": {"index": row_index},
+        }
+
 
 def _make_flaui() -> FlaUIBackend:
     backend = FlaUIBackend("C:/fake/FlaUIBridge.exe")
@@ -199,6 +225,12 @@ async def test_grid_helpers_preserve_selector() -> None:
         1,
         column="Phrase",
     )
+    double_clicked_row = await grid_helpers.double_click_grid_row(
+        backend,
+        selector,
+        1,
+        column="Phrase",
+    )
     asserted_range = await assert_grid_range(backend, selector, 1, 2)
 
     assert selector == {"automation_id": "CueGrid"}
@@ -208,6 +240,7 @@ async def test_grid_helpers_preserve_selector() -> None:
     assert selected_range["selected_range"] == {"start": 1, "end": 2}
     assert selected_row["selected_range"] == {"start": 1, "end": 1}
     assert clicked_row["clicked"] is True
+    assert double_clicked_row["double_clicked"] is True
     assert asserted_range["asserted"] is True
 
 
@@ -274,6 +307,31 @@ async def test_right_click_grid_row_forwards_columns_to_backend() -> None:
     assert result["status"] == "PASS"
     assert (
         "right_click",
+        {
+            "automation_id": "CueGrid",
+            "row_index": 1,
+            "column": "Phrase",
+            "columns": ["Phrase"],
+        },
+    ) in backend.calls
+
+
+@pytest.mark.asyncio
+async def test_double_click_grid_row_forwards_columns_to_backend() -> None:
+    backend = FakeGridBackend()
+    selector = {"automation_id": "CueGrid"}
+
+    result = await grid_helpers.double_click_grid_row(
+        backend,
+        selector,
+        row_key="Fixture cue two",
+        column="Phrase",
+        columns=["Phrase"],
+    )
+
+    assert result["status"] == "PASS"
+    assert (
+        "double_click",
         {
             "automation_id": "CueGrid",
             "row_index": 1,
@@ -415,6 +473,12 @@ async def test_pywinauto_backend_returns_unsupported_for_grid_helpers() -> None:
         column="Phrase",
         columns=["Phrase"],
     )
+    double_click_result = await backend.grid_double_click_row(
+        {"automation_id": "CueGrid"},
+        1,
+        column="Phrase",
+        columns=["Phrase"],
+    )
 
     assert visible["status"] == "UNSUPPORTED"
     assert visible["unsupported"] is True
@@ -425,6 +489,9 @@ async def test_pywinauto_backend_returns_unsupported_for_grid_helpers() -> None:
     assert right_click_result["status"] == "UNSUPPORTED"
     assert right_click_result["unsupported"] is True
     assert right_click_result["backend"] == "pywinauto"
+    assert double_click_result["status"] == "UNSUPPORTED"
+    assert double_click_result["unsupported"] is True
+    assert double_click_result["backend"] == "pywinauto"
 
 
 @pytest.mark.asyncio
@@ -457,6 +524,7 @@ async def test_flaui_backend_forwards_grid_helpers_to_bridge() -> None:
     await backend.grid_select_range(selector, 0, 2)
     await backend.grid_click_row(selector, 1, column="Phrase", columns=["Phrase"])
     await backend.grid_right_click_row(selector, 1, column="Phrase", columns=["Phrase"])
+    await backend.grid_double_click_row(selector, 1, column="Phrase", columns=["Phrase"])
     await backend.grid_assert_range(selector, 0, 2)
     await snapshot_grid(backend, selector, columns=["Start"])
     await assert_grid_rows(
@@ -483,10 +551,14 @@ async def test_flaui_backend_forwards_grid_helpers_to_bridge() -> None:
     assert calls[4].args[1]["row_index"] == 1
     assert calls[4].args[1]["column"] == "Phrase"
     assert calls[4].args[1]["columns"] == ["Phrase"]
-    assert calls[6].args[0] == "grid_snapshot"
-    assert calls[6].args[1]["columns"] == ["Start"]
-    assert calls[7].args[0] == "grid_assert_rows"
+    assert calls[5].args[0] == "grid_double_click_row"
+    assert calls[5].args[1]["row_index"] == 1
+    assert calls[5].args[1]["column"] == "Phrase"
+    assert calls[5].args[1]["columns"] == ["Phrase"]
+    assert calls[7].args[0] == "grid_snapshot"
     assert calls[7].args[1]["columns"] == ["Start"]
+    assert calls[8].args[0] == "grid_assert_rows"
+    assert calls[8].args[1]["columns"] == ["Start"]
 
 
 @pytest.mark.asyncio
@@ -586,6 +658,7 @@ def test_bridge_grid_builds_cell_text_evidence_for_rows() -> None:
     assert '["grid_assert_rows"] = GridCommands.AssertRows' in handler
     assert '["grid_click_row"] = GridCommands.ClickRow' in handler
     assert '["grid_right_click_row"] = GridCommands.RightClickRow' in handler
+    assert '["grid_double_click_row"] = GridCommands.DoubleClickRow' in handler
     assert '["grid_ensure_visible"] = GridCommands.EnsureVisible' in handler
     assert '["cells"]' in command
     assert '["grid_bounds"] = SafeRect(grid)' in command
@@ -597,6 +670,7 @@ def test_bridge_grid_builds_cell_text_evidence_for_rows() -> None:
     assert "gridElement.ColumnHeaders" in command
     assert "public static JsonNode ClickRow(" in command
     assert "public static JsonNode RightClickRow(" in command
+    assert "public static JsonNode DoubleClickRow(" in command
     assert "public static JsonNode EnsureVisible(" in command
     assert "ScrollIntoView()" in command
     assert "ScanForRowWithBoundedScroll" in command

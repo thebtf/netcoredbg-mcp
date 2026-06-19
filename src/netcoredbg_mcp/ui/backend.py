@@ -216,6 +216,16 @@ class UIBackend(Protocol):
         """Right-click a currently visible DataGrid row."""
         ...
 
+    async def grid_double_click_row(
+        self,
+        selector: dict[str, Any],
+        row_index: int,
+        column: str | None = None,
+        columns: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Double-click a currently visible DataGrid row."""
+        ...
+
     async def grid_ensure_visible(
         self,
         selector: dict[str, Any],

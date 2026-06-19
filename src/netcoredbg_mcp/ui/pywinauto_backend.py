@@ -602,6 +602,16 @@ class PywinautoBackend:
         """DataGrid row right-click evidence requires the FlaUI bridge backend."""
         return self._unsupported_grid()
 
+    async def grid_double_click_row(
+        self,
+        selector: dict[str, Any],
+        row_index: int,
+        column: str | None = None,
+        columns: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """DataGrid row double-click evidence requires the FlaUI bridge backend."""
+        return self._unsupported_grid()
+
     async def grid_ensure_visible(
         self,
         selector: dict[str, Any],

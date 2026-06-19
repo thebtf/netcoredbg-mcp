@@ -141,6 +141,10 @@ OPERATION_SCHEMAS: dict[str, OperationSchema] = {
         "ui.grid.right_click_row",
         ("selector", "row"),
     ),
+    "ui.grid.double_click_row": OperationSchema(
+        "ui.grid.double_click_row",
+        ("selector", "row"),
+    ),
     "ui.grid.assert_rows": OperationSchema(
         "ui.grid.assert_rows",
         ("selector", "rows"),
@@ -1045,6 +1049,7 @@ def _validate_op_args(
         "ui.grid.select_row",
         "ui.grid.click_row",
         "ui.grid.right_click_row",
+        "ui.grid.double_click_row",
     }:
         if "rows" in args and not isinstance(args["rows"], dict):
             errors.append(f"{prefix}.rows must be an object for op {op_name}")
@@ -1056,18 +1061,24 @@ def _validate_op_args(
             "ui.grid.select_row",
             "ui.grid.click_row",
             "ui.grid.right_click_row",
+            "ui.grid.double_click_row",
         }:
             if "row" in args and not isinstance(args["row"], dict):
                 errors.append(f"{prefix}.row must be an object for op {op_name}")
         if op_name == "ui.grid.ensure_visible":
             _validate_int_arg(prefix, op_name, args, "max_scrolls", errors)
             _validate_int_arg(prefix, op_name, args, "scroll_settle_ms", errors)
-        if op_name in {"ui.grid.select_row", "ui.grid.click_row", "ui.grid.right_click_row"}:
+        if op_name in {
+            "ui.grid.select_row",
+            "ui.grid.click_row",
+            "ui.grid.right_click_row",
+            "ui.grid.double_click_row",
+        }:
             if "ensure_visible" in args and not isinstance(args["ensure_visible"], bool):
                 errors.append(f"{prefix}.ensure_visible must be a boolean for op {op_name}")
             _validate_int_arg(prefix, op_name, args, "max_scrolls", errors)
             _validate_int_arg(prefix, op_name, args, "scroll_settle_ms", errors)
-        if op_name in {"ui.grid.click_row", "ui.grid.right_click_row"}:
+        if op_name in {"ui.grid.click_row", "ui.grid.right_click_row", "ui.grid.double_click_row"}:
             if "column" in args and not isinstance(args["column"], str):
                 errors.append(f"{prefix}.column must be a string for op {op_name}")
     elif op_name == "ui.grid.select_range":
