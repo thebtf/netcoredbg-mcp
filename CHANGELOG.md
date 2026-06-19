@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.7] - 2026-06-19
+
+### Added
+- Runtime-smoke v2 now supports verified right-click and double-click actions
+  through `ui.right_click_verified` and `ui.double_click_verified`.
+- Runtime-smoke operation adapters now expose `ui.right_click` and
+  `ui.double_click` through the same verified-click target proof and
+  postcondition behavior as `ui.click_verified`.
+
+### Fixed
+- Pywinauto fallback click-center resolution now accepts `rectangle` element
+  geometry payloads as an alias for `rect`, preserving coordinate-click
+  behavior on fallback backends.
+
 ## [0.18.6] - 2026-06-19
 
 ### Added
