@@ -2347,6 +2347,67 @@ async def test_v2_ui_grid_click_row_with_ensure_visible_calls_ensure_before_clic
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "route", "row_call"),
+    [
+        ("ui.grid.select_row", "grid_select_row", "grid_select_row"),
+        ("ui.grid.click_row", "grid_click_row", "grid_click_row"),
+    ],
+)
+async def test_v2_ui_grid_row_ensure_visible_blocks_unsupported_preflight(
+    kind: str,
+    route: str,
+    row_call: str,
+) -> None:
+    session = ActionSmokeSession()
+    session.grid_ensure_visible_results = [
+        {
+            "status": "UNSUPPORTED",
+            "reason": "pywinauto grid backend cannot realize rows",
+        }
+    ]
+
+    action: dict[str, Any] = {
+        "kind": kind,
+        "selector": {"automation_id": "CueDataGrid"},
+        "row": {"identity": "Cue 042"},
+        "identity": {"column": "PhraseId"},
+        "ensure_visible": True,
+    }
+    if kind == "ui.grid.click_row":
+        action["column"] = "PhraseId"
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "grid row ensure visible unsupported preflight",
+            "cases": [
+                {
+                    "id": "grid_row_ensure_visible_unsupported",
+                    "transitions": [{"action": action, "probes": []}],
+                }
+            ],
+        }
+    )
+
+    action_result = result["cases"][0]["actions"][0]
+    transition = result["cases"][0]["transitions"][0]
+
+    assert result["status"] == "BLOCKED"
+    assert transition["status"] == "BLOCKED"
+    assert action_result["status"] == "BLOCKED"
+    assert action_result["route"] == route
+    assert action_result["action_skipped"] is True
+    assert action_result["reason"] == "pywinauto grid backend cannot realize rows"
+    assert action_result["result"]["ensure_visible_result"] == {
+        "status": "UNSUPPORTED",
+        "reason": "pywinauto grid backend cannot realize rows",
+    }
+    assert any(call[0] == "grid_ensure_visible" for call in session.calls)
+    assert not any(call[0] == row_call for call in session.calls)
+
+
+@pytest.mark.asyncio
 async def test_v2_ui_grid_row_action_blocks_invalid_row_payload_before_adapter() -> None:
     session = ActionSmokeSession()
 

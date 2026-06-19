@@ -351,10 +351,12 @@ async def _handle_ui_grid_select_row(
         )
         if not _is_adapter_success(ensure_visible_result):
             result = dict(ensure_visible_result)
+            status = _terminal_failure_status(str(result.get("status", "BLOCKED")).upper())
+            result["status"] = status
             result["ensure_visible_result"] = ensure_visible_result
             result["action_skipped"] = True
             return _action_result(
-                status=result.get("status", "BLOCKED"),
+                status=status,
                 route="grid_select_row",
                 selector=selector,
                 row=row,
@@ -364,6 +366,7 @@ async def _handle_ui_grid_select_row(
                 ensure_visible=True,
                 max_scrolls=max_scrolls,
                 scroll_settle_ms=scroll_settle_ms,
+                action_skipped=True,
                 duration_ms=context.elapsed_ms(started),
                 result=result,
             )
@@ -487,10 +490,12 @@ async def _handle_ui_grid_click_row(
         )
         if not _is_adapter_success(ensure_visible_result):
             result = dict(ensure_visible_result)
+            status = _terminal_failure_status(str(result.get("status", "BLOCKED")).upper())
+            result["status"] = status
             result["ensure_visible_result"] = ensure_visible_result
             result["action_skipped"] = True
             return _action_result(
-                status=result.get("status", "BLOCKED"),
+                status=status,
                 route="grid_click_row",
                 selector=selector,
                 row=row,
@@ -501,6 +506,7 @@ async def _handle_ui_grid_click_row(
                 ensure_visible=True,
                 max_scrolls=max_scrolls,
                 scroll_settle_ms=scroll_settle_ms,
+                action_skipped=True,
                 duration_ms=context.elapsed_ms(started),
                 result=result,
             )
