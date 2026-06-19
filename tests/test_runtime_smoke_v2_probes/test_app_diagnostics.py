@@ -581,6 +581,62 @@ async def test_app_diagnostics_wait_json_blocks_when_condition_times_out(
 
 
 @pytest.mark.asyncio
+async def test_app_diagnostics_wait_json_condition_does_not_match_bool_to_int(
+    tmp_path: Path,
+) -> None:
+    diagnostic_path = tmp_path / "app-diagnostics-condition-type.json"
+    diagnostic_path.write_text(
+        json.dumps(
+            _app_diagnostics(
+                app={"name": "LiveWpfSmokeApp", "process_name": "dotnet"},
+                status="PASS",
+                observations=[
+                    {
+                        "kind": "app.snapshot",
+                        "status": "PASS",
+                        "reason": "boolean readiness should not satisfy numeric condition",
+                        "value": {"ready": True},
+                        "next_step": "Wait for numeric readiness evidence.",
+                    }
+                ],
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    result = await runner(ProbeSmokeSession()).run(
+        one_probe_plan(
+            _app_diagnostics(
+                phase="after",
+                app={"name": "PlaceholderApp"},
+                status="PASS",
+                observations=[],
+                wait_json={
+                    "path": str(diagnostic_path),
+                    "condition": {
+                        "jsonpath": "$.observations[0].value.ready",
+                        "expected": 1,
+                    },
+                    "timeout_ms": 0,
+                    "poll_interval_ms": 0,
+                },
+            )
+        )
+    )
+
+    probe = after_probe(result)
+    wait_json = probe["value"]["wait_json"]
+    assert result["status"] == "BLOCKED"
+    assert probe["reason"] == "diagnostic JSON condition not satisfied"
+    assert wait_json["condition"] == {
+        "jsonpath": "$.observations[0].value.ready",
+        "expected": 1,
+        "value": True,
+        "matched": False,
+    }
+
+
+@pytest.mark.asyncio
 async def test_app_diagnostics_wait_json_fails_pass_artifact_on_freshness_mismatch(
     tmp_path: Path,
 ) -> None:

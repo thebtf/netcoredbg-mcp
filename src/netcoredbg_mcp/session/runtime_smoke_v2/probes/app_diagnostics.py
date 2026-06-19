@@ -460,8 +460,28 @@ def _evaluate_diagnostic_condition(
         )
         return result
     result["value"] = value
-    result["matched"] = value == expected
+    result["matched"] = _diagnostic_condition_values_equal(value, expected)
     return result
+
+
+def _diagnostic_condition_values_equal(value: Any, expected: Any) -> bool:
+    if isinstance(value, bool) or isinstance(expected, bool):
+        return type(value) is type(expected) and value == expected
+    if isinstance(value, (int, float)) and isinstance(expected, (int, float)):
+        return value == expected
+    if isinstance(value, list) and isinstance(expected, list):
+        return len(value) == len(expected) and all(
+            _diagnostic_condition_values_equal(item, expected_item)
+            for item, expected_item in zip(value, expected, strict=True)
+        )
+    if isinstance(value, dict) and isinstance(expected, dict):
+        return value.keys() == expected.keys() and all(
+            _diagnostic_condition_values_equal(value[key], expected[key])
+            for key in value
+        )
+    if type(value) is not type(expected):
+        return False
+    return value == expected
 
 
 def _diagnostic_jsonpath_value(payload: dict[str, Any], jsonpath: str) -> Any:
