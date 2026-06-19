@@ -14,7 +14,7 @@ set breakpoints, step through code, inspect variables, evaluate expressions, rea
 debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
 and Avalonia windows without opening an IDE.
 
-**131 MCP tools · 8 prompts · 4 resources · 1610 collected tests · release v0.18.2**
+**131 MCP tools · 8 prompts · 4 resources · 1611 collected tests · release v0.18.3**
 
 ## Quick Links
 
@@ -23,20 +23,20 @@ and Avalonia windows without opening an IDE.
 - **Reference:** [Available Tools](#available-tools) · [Resources](#mcp-resources) · [Prompts](#mcp-prompts) · [Architecture](#architecture-overview)
 - **Project:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## What's New in v0.18.2
+## What's New in v0.18.3
 
-- **YAML runtime-smoke plans** — `plan_path` now accepts `.yaml` and `.yml`
-  files in the existing validation and run-plan facades while JSON remains the
-  default.
-- **Runner exception cleanup proof** — durable v2 runner exceptions now return
-  v2-shaped exception evidence and execute declared cleanup/contamination
-  handling instead of falling back to opaque legacy teardown.
-- **Read-only probe validation** — `runtime_smoke_validate_probe` validates a
-  single v2 probe without creating a durable run, launching a target, claiming
-  session ownership, or writing an evidence directory.
-- **App diagnostic freshness** — app-written diagnostic `PASS` results are
-  checked against live debug freshness expectations for process, module,
-  source, workspace, and artifact evidence before they are accepted.
+- **Resilient failure cleanup** — runtime-smoke v2 runner-exception
+  finalization records raised case cleanup adapters as cleanup failures and
+  still continues to plan-level cleanup.
+- **Plan-level cleanup proof** — declared `debug.stop` and
+  `process.registry.assert_empty` cleanup steps remain attempted after case
+  cleanup failures, so failure evidence shows whether debuggee/process hygiene
+  actually ran.
+- **Cleanup exception diagnostics** — cleanup adapter failures now include
+  exception type, message, and traceback diagnostics in the evidence payload.
+- **Review-debt closure** — this release ships the PR #139 MCP review follow-up
+  while broad issue rows `#268`, `#269`, and `#271` remain open for later
+  roadmap slices.
 
 ## Highlights
 

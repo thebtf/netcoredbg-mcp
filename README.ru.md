@@ -14,7 +14,7 @@
 вычислять выражения, читать вывод отладки и управлять поверхностями Windows UI
 Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 
-**131 MCP-инструмент · 8 промптов · 4 ресурса · 1610 собранных тестов · релиз v0.18.2**
+**131 MCP-инструмент · 8 промптов · 4 ресурса · 1611 собранных тестов · релиз v0.18.3**
 
 ## Быстрые ссылки
 
@@ -23,20 +23,20 @@ Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 - **Справочник:** [Доступные инструменты](#доступные-инструменты) · [Ресурсы](#mcp-ресурсы) · [Промпты](#mcp-промпты) · [Архитектура](#обзор-архитектуры)
 - **Проект:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## Что нового в v0.18.2
+## Что нового в v0.18.3
 
-- **YAML runtime-smoke plans** — `plan_path` теперь принимает `.yaml` и `.yml`
-  в существующих validation и run-plan facades, при этом JSON остается
-  стандартным форматом.
-- **Runner exception cleanup proof** — durable v2 runner exceptions теперь
-  возвращают v2-shaped exception evidence и выполняют declared
-  cleanup/contamination handling вместо непрозрачного legacy teardown.
-- **Read-only probe validation** — `runtime_smoke_validate_probe` валидирует
-  один v2 probe без durable run, target launch, session ownership claim или
-  записи evidence directory.
-- **App diagnostic freshness** — app-written diagnostic `PASS` сверяется с live
-  debug freshness expectations для process, module, source, workspace и
-  artifact evidence до того, как результат считается валидным.
+- **Устойчивая cleanup-финализация** — runtime-smoke v2 runner-exception
+  finalization записывает raised case cleanup adapters как cleanup failures и
+  продолжает plan-level cleanup.
+- **Проверяемый plan-level cleanup** — объявленные шаги `debug.stop` и
+  `process.registry.assert_empty` остаются attempted даже после case cleanup
+  failures, поэтому failure evidence показывает, запускалась ли очистка
+  debuggee/process registry.
+- **Диагностика cleanup exceptions** — cleanup adapter failures теперь несут
+  exception type, message и traceback diagnostics в evidence payload.
+- **Закрытие review debt** — релиз публикует follow-up к MCP review PR #139;
+  широкие issue rows `#268`, `#269` и `#271` остаются открытыми для следующих
+  roadmap slices.
 
 ## Основные возможности
 
