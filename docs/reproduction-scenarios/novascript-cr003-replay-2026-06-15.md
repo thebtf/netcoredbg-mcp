@@ -19,26 +19,33 @@ Machine-readable sidecar:
   - PR #89 / CR-005: blocked semantic probe diagnostics.
   - PR #90 / CR-006: runtime-smoke lifecycle tools.
   - PR #91 / CR-007: diagnostic schema contract.
-- Target-side evidence is not consumer closure evidence. It only proves the
-  provider is ready for a downstream replay.
+- Target-side v0.17.2 evidence alone was not enough to close the consumer
+  issue. It only proved the provider was ready for a downstream replay.
 
 ## Current CR-008 Replay Result
 
 The 2026-06-15 clean downstream replay reached NovaScript and returned
-`BLOCKED`, not `PASS`.
+`BLOCKED`, not `PASS`. A later merged-provider replay after CR-035 returned
+`PASS`, so target-side issue `#226` is now resolved again.
 
-- Contract test: `PASS` (`2 passed`) in a clean detached NovaScript worktree.
-- Runtime-smoke baseline launch: `PASS`.
-- Runtime-smoke case: `BLOCKED` before the first drag.
-- Blocker: the plan requested source identity `ROW-008-UNIQUE-PHRASE`, but
-  NovaScript selected `ROW-031-UNIQUE-PHRASE` on load and the visible DataGrid
-  viewport was `ROW-027-UNIQUE-PHRASE` through `ROW-044-UNIQUE-PHRASE`.
-- Cleanup: `PASS`; debug stop succeeded and the process registry was empty.
+- CR-035 provider PR: #123, merged as
+  `75b0fd130ca563316e7b1e87cbc16df1d9cc5b59`.
+- Runtime-smoke final status: `PASS`.
+- Covered cases: `visible-row-drag-reorder`, `edge-scroll-drag-reorder`,
+  `multi-row-drag-reorder`, and `invalid-drop-noop`.
+- Cleanup: `PASS`; debug stop succeeded and `process_registry_after=0`.
+- Target-side lifecycle decision: `resolved`; source-side owner should close or
+  reopen after verifying consumer evidence.
 
-Issue `#226` remains open. The downstream next step is to amend
-`fixed-bug-regression.runtime-smoke-v2.json` so the first drag has an explicit
-visible-row setup: scroll/select to `ROW-008-UNIQUE-PHRASE` before dragging, or
-derive source/drop identities from the current visible viewport.
+Issue `#226` is no longer blocked on netcoredbg-mcp. The source-side owner may
+close it after accepting the replay evidence, or reopen with contradictory
+fresh consumer evidence.
+
+Historical blocked shape retained for audit: the earlier 2026-06-15 replay
+requested source identity `ROW-008-UNIQUE-PHRASE`, while NovaScript selected
+`ROW-031-UNIQUE-PHRASE` on load and the visible viewport was
+`ROW-027-UNIQUE-PHRASE` through `ROW-044-UNIQUE-PHRASE`. That historical shape
+was `BLOCKED`, not closure evidence.
 
 ## Downstream Inputs
 
@@ -56,10 +63,14 @@ Use the NovaScript repository, not a local WPF substitute:
 - Stable row identity column: `Реплика`.
 - Required variants:
   - `visible_row_drag`
-  - `downward_edge_scroll`
-  - `upward_edge_scroll`
+  - `edge_scroll_drag`
   - `multi_row_drag`
   - `invalid_drop_noop_or_cancel`
+
+The earlier 2026-06-15 packet split edge-scroll by direction. The later CR-035
+merged-provider replay contract records one bounded `edge_scroll_drag` case, so
+the machine-readable sidecar keeps the directional split only as historical
+audit context.
 
 ## Preflight
 

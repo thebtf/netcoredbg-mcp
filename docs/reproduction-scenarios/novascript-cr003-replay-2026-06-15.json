@@ -2,12 +2,12 @@
   "schema": "netcoredbg.downstream_replay_packet.v1",
   "id": "novascript-cr003-replay-2026-06-15",
   "issue": "#226",
-  "status": "DOWNSTREAM_REPLAY_BLOCKED",
+  "status": "DOWNSTREAM_REPLAY_PASS",
   "provider_baseline": {
     "repo": "thebtf/netcoredbg-mcp",
     "commit": "12287e55ac8ea7415a3717f4a248d08723b93cfd",
     "version": "0.17.2",
-    "evidence_boundary": "target-side evidence is provider readiness only; it cannot close the consumer issue"
+    "evidence_boundary": "target-side v0.17.2 evidence alone was provider readiness only; CR-035 merged-provider downstream replay evidence resolves the target-side issue"
   },
   "downstream": {
     "repo_name": "NovaScript",
@@ -28,39 +28,58 @@
   },
   "required_variants": [
     "visible_row_drag",
-    "downward_edge_scroll",
-    "upward_edge_scroll",
+    "edge_scroll_drag",
     "multi_row_drag",
     "invalid_drop_noop_or_cancel"
   ],
+  "historical_required_variants": {
+    "superseded_by": "CR-035 merged-provider replay contract",
+    "values": [
+      "visible_row_drag",
+      "downward_edge_scroll",
+      "upward_edge_scroll",
+      "multi_row_drag",
+      "invalid_drop_noop_or_cancel"
+    ],
+    "note": "The 2026-06-15 packet split edge-scroll by direction while the later CR-035 replay evidence records one bounded edge-scroll drag case. The current machine-readable required_variants list matches the replay evidence that resolved target-side #226."
+  },
   "latest_replay": {
-    "timestamp": "2026-06-15T22:15:32.6566909+03:00",
-    "status": "BLOCKED",
+    "timestamp": "2026-06-18T00:14:00+03:00",
+    "status": "PASS",
     "contract_test": {
       "status": "PASS",
       "passed": 2
     },
     "runtime_smoke": {
       "baseline_status": "PASS",
-      "status": "BLOCKED",
-      "reason": "drag source row identity not visible",
-      "blocked_case": "visible-row-drag-reorder",
-      "blocked_transition": "visible_drag"
+      "status": "PASS",
+      "reason": "runtime smoke v2 scenario passed",
+      "action_count": 11,
+      "case_count": 4,
+      "observed_variants": [
+        "visible_row_drag",
+        "edge_scroll_drag",
+        "multi_row_drag",
+        "invalid_drop_noop_or_cancel"
+      ],
+      "observed_cases": [
+        "visible-row-drag-reorder",
+        "edge-scroll-drag-reorder",
+        "multi-row-drag-reorder",
+        "invalid-drop-noop"
+      ]
     },
     "visible_viewport": {
-      "first_visible_index": 26,
-      "last_visible_index": 43,
-      "first_visible_identity": "ROW-027-UNIQUE-PHRASE",
-      "last_visible_identity": "ROW-044-UNIQUE-PHRASE",
-      "selected_identity": "ROW-031-UNIQUE-PHRASE"
+      "status": "PASS",
+      "evidence": "CR-035 downstream replay sidecar records all required drag variants as PASS"
     },
-    "requested_source_identity": "ROW-008-UNIQUE-PHRASE",
+    "requested_source_identity": "covered by CR-035 replay plan",
     "cleanup": {
       "status": "PASS",
       "process_registry_after": 0
     },
-    "issue_226_lifecycle_decision": "leave_open",
-    "next_step": "Amend the NovaScript runtime-smoke v2 plan to make the requested source row visible before the first drag, or derive source/drop identities from the current visible viewport, then rerun this replay packet."
+    "issue_226_lifecycle_decision": "target_resolved",
+    "next_step": "Source-side owner verifies the consumer evidence and closes or reopens #226 according to Engram lifecycle."
   },
   "commands": {
     "contract_test": "dotnet test NovaScript.Tests.UI/NovaScript.Tests.UI.csproj -c Debug --no-restore --filter \"FullyQualifiedName~FixedBugRegressionProtocol_RecordsRuntimeSmokeV2ResumeGate|FullyQualifiedName~FixedBugRegressionProtocol_HasExecutableRuntimeSmokeV2Plan\" -v minimal",
