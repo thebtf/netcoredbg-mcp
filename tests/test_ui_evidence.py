@@ -2648,6 +2648,160 @@ async def test_ui_grid_ensure_visible_realizes_identity_and_confirms_visible(
 
 
 @pytest.mark.asyncio
+async def test_ui_grid_viewport_returns_bounded_viewport_snapshot(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    class ViewportGridBackend:
+        def __init__(self) -> None:
+            self.process_id = 42
+            self.snapshot_calls: list[dict[str, Any]] = []
+
+        async def grid_snapshot(
+            self,
+            selector: dict[str, Any],
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            self.snapshot_calls.append(
+                {
+                    "selector": dict(selector),
+                    "rows": dict(rows or {}),
+                    "columns": list(columns or []),
+                }
+            )
+            return {
+                "status": "PASS",
+                "row_count": 24,
+                "visible_rows": [
+                    {
+                        "index": 0,
+                        "row_index": 18,
+                        "selected": False,
+                        "cells": {"PhraseId": "Cue 018"},
+                        "full_tree": {"must": "not leak"},
+                    },
+                    {
+                        "index": 1,
+                        "row_index": 19,
+                        "selected": True,
+                        "cells": {"PhraseId": "Cue 019"},
+                        "raw_tree": {"must": "not leak"},
+                    },
+                ],
+                "full_tree": {"must": "not leak"},
+            }
+
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = ViewportGridBackend()
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_grid"](
+        ctx=None,
+        action="viewport",
+        automation_id="CueGrid",
+        rows={"visible_only": True},
+        identity={"column": "PhraseId"},
+        expect={"selected_payload_preserved": False},
+        phase="before",
+        probe_name="cue_viewport",
+    )
+
+    assert response["data"]["status"] == "PASS"
+    assert response["data"]["requested_action"] == "viewport"
+    assert response["data"]["canonical_action"] == "viewport"
+    assert response["data"]["phase"] == "before"
+    assert response["data"]["probe_name"] == "cue_viewport"
+    assert response["data"]["snapshot"] == {
+        "first_visible_index": 18,
+        "last_visible_index": 19,
+        "visible_rows": [
+            {"index": 18, "identity": "Cue 018", "derived": False},
+            {"index": 19, "identity": "Cue 019", "derived": False},
+        ],
+        "selected_rows": [
+            {"index": 19, "identity": "Cue 019", "derived": False},
+        ],
+        "row_count": 24,
+        "identity_strategy": {"kind": "configured_column", "column": "PhraseId"},
+    }
+    assert backend.snapshot_calls == [
+        {
+            "selector": {"automation_id": "CueGrid"},
+            "rows": {"visible_only": True},
+            "columns": ["PhraseId"],
+        }
+    ]
+    assert "full_tree" not in str(response["data"])
+    assert "raw_tree" not in str(response["data"])
+
+
+@pytest.mark.asyncio
+async def test_ui_grid_viewport_forwards_expect_to_selected_payload_evidence(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    class ViewportGridBackend:
+        def __init__(self) -> None:
+            self.process_id = 42
+
+        async def grid_snapshot(
+            self,
+            selector: dict[str, Any],
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "row_count": 2,
+                "visible_rows": [
+                    {"index": 0, "selected": False, "cells": {"PhraseId": "Cue 001"}},
+                    {"index": 1, "selected": False, "cells": {"PhraseId": "Cue 002"}},
+                ],
+            }
+
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = ViewportGridBackend()
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_grid"](
+        ctx=None,
+        action="viewport",
+        automation_id="CueGrid",
+        identity={"column": "PhraseId"},
+        expect={"selected_payload_preserved": True},
+        phase="after",
+        probe_name="selected_payload_viewport",
+    )
+
+    assert response["data"]["status"] == "BLOCKED"
+    assert response["data"]["reason"] == "selected row evidence unavailable"
+    assert response["data"]["requested"] == {
+        "selector": {"automation_id": "CueGrid"},
+        "probe": "ui.grid.viewport",
+    }
+    assert response["data"]["accepted"]["selected_rows"]
+    assert response["data"]["requested_action"] == "viewport"
+    assert response["data"]["canonical_action"] == "viewport"
+
+
+@pytest.mark.asyncio
 async def test_ui_grid_identity_is_forwarded_to_state_select_and_click(
     capturing_mcp,
     monkeypatch,
@@ -2821,6 +2975,7 @@ async def test_ui_grid_unknown_action_reports_accepted_actions_without_backend(
             "selected",
             "selection",
             "ensure_visible",
+            "viewport",
             "select_range",
             "select_row",
             "click_row",
