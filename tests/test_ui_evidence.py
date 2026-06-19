@@ -241,6 +241,32 @@ class FakeEvidenceBackend:
             "hit_target": {"x": 42, "y": 84, "column": column},
         }
 
+    async def grid_right_click_row(
+        self,
+        selector: dict[str, Any],
+        row_index: int,
+        column: str | None = None,
+        columns: list[str] | None = None,
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {
+                "grid_right_click_row": {
+                    "selector": dict(selector),
+                    "row_index": row_index,
+                    "column": column,
+                    "columns": list(columns or []),
+                }
+            }
+        )
+        return {
+            "status": "PASS",
+            "clicked": True,
+            "right_clicked": True,
+            "click_kind": "right",
+            "row": {"index": row_index, "cells": {"Phrase": "Fixture cue two"}},
+            "hit_target": {"x": 42, "y": 84, "column": column},
+        }
+
     async def assert_focus(self, selector: dict[str, Any]) -> dict[str, Any]:
         self.calls.append({"assert_focus": {"selector": dict(selector)}})
         return {
@@ -2438,6 +2464,76 @@ async def test_ui_grid_click_row_uses_backend_row_click_after_identity_resolutio
 
 
 @pytest.mark.asyncio
+async def test_ui_grid_right_click_row_uses_backend_row_click_after_identity_resolution(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    class KeyedGridBackend(FakeEvidenceBackend):
+        async def grid_snapshot(
+            self,
+            selector: dict[str, Any],
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            self.calls.append(
+                {
+                    "grid_snapshot": {
+                        "selector": dict(selector),
+                        "rows": dict(rows or {}),
+                        "columns": list(columns or []),
+                    }
+                }
+            )
+            return {
+                "status": "PASS",
+                "visible_rows": [
+                    {"index": 0, "row_index": 18, "cells": {"Phrase": "Cue 018"}},
+                    {"index": 1, "row_index": 19, "cells": {"Phrase": "Cue 019"}},
+                ],
+            }
+
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = KeyedGridBackend()
+    backend.process_id = 42
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_grid"](
+        ctx=None,
+        action="right_click_row",
+        automation_id="CueGrid",
+        row_key="Cue 019",
+        column="Phrase",
+        columns=["Phrase"],
+    )
+
+    assert response["data"]["status"] == "PASS"
+    assert response["data"]["canonical_action"] == "right_click_row"
+    assert response["data"]["clicked"] is True
+    assert response["data"]["right_clicked"] is True
+    assert response["data"]["resolved_row"] == {
+        "index": 1,
+        "row_index": 19,
+        "identity": "Cue 019",
+    }
+    assert backend.calls[1] == {
+        "grid_right_click_row": {
+            "selector": {"automation_id": "CueGrid"},
+            "row_index": 1,
+            "column": "Phrase",
+            "columns": ["Phrase"],
+        }
+    }
+
+
+@pytest.mark.asyncio
 async def test_ui_grid_select_range_ignores_malformed_string_index(
     capturing_mcp,
     monkeypatch,
@@ -3148,6 +3244,7 @@ async def test_ui_grid_unknown_action_reports_accepted_actions_without_backend(
             "select_range",
             "select_row",
             "click_row",
+            "right_click_row",
             "assert_range",
             "get_state",
             "state",

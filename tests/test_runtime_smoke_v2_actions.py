@@ -48,6 +48,7 @@ class ActionSmokeSession:
         self.grid_ensure_visible_results: list[dict[str, Any]] = []
         self.grid_select_row_results: list[dict[str, Any]] = []
         self.grid_click_row_results: list[dict[str, Any]] = []
+        self.grid_right_click_row_results: list[dict[str, Any]] = []
 
     async def find_element(self, selector: dict[str, Any]) -> dict[str, Any]:
         self.calls.append(("find_element", dict(selector)))
@@ -154,6 +155,18 @@ class ActionSmokeSession:
             return self.grid_click_row_results.pop(0)
         return {"status": "PASS", "clicked": True, "row": dict(request.get("row") or {})}
 
+    async def grid_right_click_row(self, **request: Any) -> dict[str, Any]:
+        self.calls.append(("grid_right_click_row", request))
+        if self.grid_right_click_row_results:
+            return self.grid_right_click_row_results.pop(0)
+        return {
+            "status": "PASS",
+            "clicked": True,
+            "right_clicked": True,
+            "click_kind": "right",
+            "row": dict(request.get("row") or {}),
+        }
+
     async def tracepoint_status(self, tracepoint_id: str) -> dict[str, Any]:
         self.calls.append(("tracepoint_status", tracepoint_id))
         hit = self.tracepoint_hits.pop(0) if self.tracepoint_hits else False
@@ -192,6 +205,7 @@ def _runner(session: ActionSmokeSession) -> RuntimeSmokeRunner:
             "ui.grid.ensure_visible": session.grid_ensure_visible,
             "ui.grid.select_row": session.grid_select_row,
             "ui.grid.click_row": session.grid_click_row,
+            "ui.grid.right_click_row": session.grid_right_click_row,
             "ui.grid.select_indices": session.grid_select_indices,
             "ui.grid.select_identities": session.grid_select_identities,
             "debug.tracepoint_status": session.tracepoint_status,
@@ -2444,6 +2458,46 @@ async def test_v2_ui_grid_click_row_by_index_routes_to_adapter() -> None:
 
 
 @pytest.mark.asyncio
+async def test_v2_ui_grid_right_click_row_by_index_routes_to_adapter() -> None:
+    session = ActionSmokeSession()
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "grid right click row",
+            "cases": [
+                {
+                    "id": "grid_right_click_row",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.grid.right_click_row",
+                                "selector": {"automation_id": "CueDataGrid"},
+                                "row": {"index": 19},
+                                "column": "Phrase",
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    click_call = next(call for call in session.calls if call[0] == "grid_right_click_row")
+    assert result["status"] == "PASS"
+    assert "ui.grid.right_click_row" in result["accepted_action_kinds"]
+    assert action["route"] == "grid_right_click_row"
+    assert "ensure_visible" not in action
+    assert "max_scrolls" not in action
+    assert "scroll_settle_ms" not in action
+    assert click_call[1]["selector"] == {"automation_id": "CueDataGrid"}
+    assert click_call[1]["row"] == {"index": 19}
+    assert click_call[1]["column"] == "Phrase"
+
+
+@pytest.mark.asyncio
 async def test_v2_ui_grid_click_row_with_ensure_visible_calls_ensure_before_click() -> None:
     session = ActionSmokeSession()
 
@@ -2510,6 +2564,7 @@ async def test_v2_ui_grid_click_row_with_ensure_visible_calls_ensure_before_clic
     [
         ("ui.grid.select_row", "grid_select_row", "grid_select_row"),
         ("ui.grid.click_row", "grid_click_row", "grid_click_row"),
+        ("ui.grid.right_click_row", "grid_right_click_row", "grid_right_click_row"),
     ],
 )
 async def test_v2_ui_grid_row_ensure_visible_blocks_unsupported_preflight(
@@ -2532,7 +2587,7 @@ async def test_v2_ui_grid_row_ensure_visible_blocks_unsupported_preflight(
         "identity": {"column": "PhraseId"},
         "ensure_visible": True,
     }
-    if kind == "ui.grid.click_row":
+    if kind in {"ui.grid.click_row", "ui.grid.right_click_row"}:
         action["column"] = "PhraseId"
 
     result = await _runner(session).run(

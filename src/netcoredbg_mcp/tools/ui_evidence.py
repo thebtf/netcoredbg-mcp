@@ -20,6 +20,7 @@ from ..ui.grid import (
     read_grid_selected_rows,
     read_grid_state,
     read_grid_visible_rows,
+    right_click_grid_row,
     select_grid_range,
     select_grid_row,
     snapshot_grid,
@@ -52,6 +53,7 @@ _GRID_CANONICAL_ACTIONS = (
     "select_range",
     "select_row",
     "click_row",
+    "right_click_row",
     "assert_range",
     "get_state",
 )
@@ -69,6 +71,7 @@ _GRID_ACCEPTED_ACTIONS = (
     "select_range",
     "select_row",
     "click_row",
+    "right_click_row",
     "assert_range",
     "get_state",
     "state",
@@ -587,6 +590,20 @@ def register_ui_evidence_tools(
                     )
                 elif canonical_action == "click_row":
                     result = await click_grid_row(
+                        backend,
+                        selector,
+                        row_index=row_index,
+                        row_key=row_key,
+                        column=column,
+                        columns=columns,
+                        rows=rows,
+                        identity=identity,
+                        ensure_visible=ensure_visible,
+                        max_scrolls=max_scrolls,
+                        scroll_settle_ms=scroll_settle_ms,
+                    )
+                elif canonical_action == "right_click_row":
+                    result = await right_click_grid_row(
                         backend,
                         selector,
                         row_index=row_index,
