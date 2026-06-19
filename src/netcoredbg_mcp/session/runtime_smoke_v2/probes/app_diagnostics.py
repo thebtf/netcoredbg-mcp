@@ -92,7 +92,20 @@ def _verify_declared_freshness(probe: dict[str, Any], context: Any) -> dict[str,
         return None
     session = getattr(getattr(context, "action_context", None), "session", None)
     if session is None:
-        return None
+        return {
+            "status": "WARN",
+            "reason": "debug freshness evidence incomplete",
+            "warnings": [
+                {
+                    "kind": "session_unavailable",
+                    "reason": (
+                        "app diagnostics freshness expectations declared but no session "
+                        "is available"
+                    ),
+                }
+            ],
+            "mismatches": [],
+        }
     return DebugFreshnessVerifier(session).verify(**expectations).to_dict()
 
 

@@ -13,6 +13,9 @@ from netcoredbg_mcp.session.runtime_smoke_schema import (
     DIAGNOSTIC_SCHEMA_VERSION,
     app_diagnostics_launch_contract,
 )
+from netcoredbg_mcp.session.runtime_smoke_v2.probes.app_diagnostics import (
+    handle_app_diagnostics,
+)
 from netcoredbg_mcp.session.runtime_smoke_v2.runner import validate_v2_plan_contract
 from netcoredbg_mcp.session.state import DebugState
 
@@ -564,6 +567,35 @@ async def test_app_diagnostics_wait_json_keeps_pass_with_incomplete_freshness_wa
         "workspace_unavailable",
         "modules_unavailable",
     }.issubset(warning_kinds)
+
+
+@pytest.mark.asyncio
+async def test_app_diagnostics_declared_freshness_warns_when_session_unavailable() -> None:
+    result = await handle_app_diagnostics(
+        _app_diagnostics(
+            status="PASS",
+            observations=[],
+            app={
+                "name": "LiveWpfSmokeApp",
+                "process_id": 1234,
+                "process_name": "LiveWpfSmokeApp",
+                "expected_modules": ["LiveWpfSmokeApp.dll"],
+            },
+        ),
+        SimpleNamespace(action_context=SimpleNamespace(session=None)),
+        phase="after",
+    )
+
+    assert result["status"] == "PASS"
+    freshness = result["value"]["freshness"]
+    assert freshness["status"] == "WARN"
+    assert freshness["warnings"] == [
+        {
+            "kind": "session_unavailable",
+            "reason": "app diagnostics freshness expectations declared but no session is available",
+        }
+    ]
+    assert freshness["mismatches"] == []
 
 
 @pytest.mark.asyncio

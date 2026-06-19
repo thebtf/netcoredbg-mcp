@@ -107,8 +107,16 @@ def test_diagnostic_schema_contract_exposes_app_diagnostics_freshness_contract()
     app_diagnostics = contract["app_diagnostics"]
 
     assert app_diagnostics["freshness_contract"] == {
-        "app_fields": ["process_id", "process_name", "expected_modules"],
+        "app_fields": [
+            "process_id",
+            "process_name",
+            "expected_modules",
+            "require_active_process",
+        ],
         "top_level_fields": ["workspace", "artifacts", "process", "modules"],
+        "aliases": {
+            "process": ["id", "name", "expected_id", "expected_name", "require_active"],
+        },
         "status_policy": {
             "FAIL": "force diagnostic FAIL when live target contradicts declared app",
             "WARN": "preserve diagnostic status and include incomplete evidence warning",
@@ -126,7 +134,12 @@ def test_app_diagnostics_schema_rejects_invalid_freshness_contract_shapes() -> N
 
     payload = {
         "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
-        "app": {"name": "WpfSmokeApp"},
+        "app": {
+            "name": "WpfSmokeApp",
+            "process_id": "abc",
+            "expected_modules": "WpfSmokeApp.dll",
+            "require_active_process": "yes",
+        },
         "status": "PASS",
         "observations": [],
         "workspace": 1234,
@@ -142,6 +155,9 @@ def test_app_diagnostics_schema_rejects_invalid_freshness_contract_shapes() -> N
 
     errors = validate_diagnostic_schema_example(payload, kind="app_diagnostics")
 
+    assert "app_diagnostics.app.process_id must be an integer" in errors
+    assert "app_diagnostics.app.expected_modules must be a list of strings" in errors
+    assert "app_diagnostics.app.require_active_process must be a boolean" in errors
     assert "app_diagnostics.workspace must be a string or object" in errors
     assert "app_diagnostics.process must be an object" in errors
     assert "app_diagnostics.modules must be a list or object" in errors

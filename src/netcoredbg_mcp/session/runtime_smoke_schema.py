@@ -252,8 +252,16 @@ def diagnostic_schema_contract() -> dict[str, Any]:
                 "redacted_env_values": True,
             },
             "freshness_contract": {
-                "app_fields": ["process_id", "process_name", "expected_modules"],
+                "app_fields": [
+                    "process_id",
+                    "process_name",
+                    "expected_modules",
+                    "require_active_process",
+                ],
                 "top_level_fields": ["workspace", "artifacts", "process", "modules"],
+                "aliases": {
+                    "process": ["id", "name", "expected_id", "expected_name", "require_active"],
+                },
                 "status_policy": {
                     "FAIL": "force diagnostic FAIL when live target contradicts declared app",
                     "WARN": "preserve diagnostic status and include incomplete evidence warning",
@@ -614,6 +622,19 @@ def _validate_app_diagnostics_freshness_shapes(
     payload: dict[str, Any],
     errors: list[str],
 ) -> None:
+    app = payload.get("app")
+    if isinstance(app, dict):
+        process_id = app.get("process_id") or app.get("expected_process_id")
+        if process_id is not None and (
+            isinstance(process_id, bool) or not isinstance(process_id, int)
+        ):
+            errors.append("app_diagnostics.app.process_id must be an integer")
+        expected_modules = app.get("expected_modules")
+        if expected_modules is not None and not _is_string_list(expected_modules):
+            errors.append("app_diagnostics.app.expected_modules must be a list of strings")
+        require_active_process = app.get("require_active_process")
+        if require_active_process is not None and not isinstance(require_active_process, bool):
+            errors.append("app_diagnostics.app.require_active_process must be a boolean")
     workspace = payload.get("workspace")
     if workspace is not None and not isinstance(workspace, (str, dict)):
         errors.append("app_diagnostics.workspace must be a string or object")
