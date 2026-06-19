@@ -235,8 +235,9 @@ def _record_from_any(item: Any) -> dict[str, Any]:
         "origin",
         "presentationHint",
     ):
-        if data.get(key) is not None:
-            record[key] = data[key]
+        value = data.get(key) if key in data else getattr(item, key, None)
+        if value is not None:
+            record[key] = value
     return record
 
 

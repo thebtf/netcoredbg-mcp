@@ -160,11 +160,11 @@ def test_freshness_preserves_module_symbol_status_records_for_pdb_proof(
     session.state.process_id = 1234
     session.state.process_name = "App"
     session.state.modules = [
-        {
-            "name": "App.dll",
-            "path": str(artifact),
-            "symbolStatus": "Symbols loaded.",
-        }
+        SimpleNamespace(
+            name="App.dll",
+            path=str(artifact),
+            symbolStatus="Symbols loaded.",
+        )
     ]
 
     result = (

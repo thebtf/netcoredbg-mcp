@@ -97,7 +97,7 @@ def _verify_declared_freshness(probe: dict[str, Any], context: Any) -> dict[str,
 
 
 def _freshness_expectations(probe: dict[str, Any]) -> dict[str, Any] | None:
-    app = dict(probe.get("app") or {})
+    app = _object_or_empty(probe.get("app"))
     process = _object_or_empty(probe.get("process"))
     expectations = {
         "expected_process_id": _int_or_none(
@@ -369,7 +369,7 @@ def _blocked_diagnostic_json_probe(
     *,
     field: str,
 ) -> dict[str, Any]:
-    app = dict(probe.get("app") or {})
+    app = _object_or_empty(probe.get("app"))
     limits = diagnostic_limits(probe)
     value = {
         "schema": DIAGNOSTIC_SCHEMA_VERSION,
