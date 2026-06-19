@@ -12,6 +12,7 @@ from ..ui.focus import assert_focus
 from ..ui.grid import (
     assert_grid_rows,
     click_grid_row,
+    double_click_grid_row,
     ensure_grid_row_visible,
     read_grid_selected_rows,
     read_grid_state,
@@ -213,6 +214,30 @@ def ui_operation_adapters(
         if blocked is not None:
             return blocked
         return await right_click_grid_row(
+            backend,
+            _selector(args),
+            row_index=row_index,
+            row_key=row_key,
+            column=args.get("column"),
+            rows=args.get("rows"),
+            columns=args.get("columns"),
+            identity=dict(args.get("identity") or {}),
+            ensure_visible=args.get("ensure_visible") is True,
+            max_scrolls=args.get("max_scrolls"),
+            scroll_settle_ms=args.get("scroll_settle_ms"),
+        )
+
+    async def grid_double_click_row(**args: Any) -> dict[str, Any]:
+        backend = await _backend_or_blocked(ensure_ui_connected)
+        if isinstance(backend, dict):
+            return backend
+        row_index, row_key, blocked = _grid_row_request(
+            args.get("row"),
+            adapter="ui.grid.double_click_row",
+        )
+        if blocked is not None:
+            return blocked
+        return await double_click_grid_row(
             backend,
             _selector(args),
             row_index=row_index,
@@ -985,6 +1010,7 @@ def ui_operation_adapters(
         "ui.grid.select_row": grid_select_row,
         "ui.grid.click_row": grid_click_row,
         "ui.grid.right_click_row": grid_right_click_row,
+        "ui.grid.double_click_row": grid_double_click_row,
         "ui.grid.assert_rows": grid_assert_rows,
         "ui.list.invoke_item": list_invoke,
         "ui.list.toggle_item_child": list_toggle_child,

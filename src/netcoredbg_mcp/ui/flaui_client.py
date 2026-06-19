@@ -840,6 +840,22 @@ class FlaUIBackend:
             columns=columns or [],
         )
 
+    async def grid_double_click_row(
+        self,
+        selector: dict[str, Any],
+        row_index: int,
+        column: str | None = None,
+        columns: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Double-click a visible DataGrid row via FlaUI bridge."""
+        return await self._call_grid(
+            "grid_double_click_row",
+            selector,
+            row_index=row_index,
+            column=column,
+            columns=columns or [],
+        )
+
     async def grid_ensure_visible(
         self,
         selector: dict[str, Any],

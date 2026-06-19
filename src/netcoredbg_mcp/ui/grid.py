@@ -731,6 +731,94 @@ async def right_click_grid_row(
     return output
 
 
+async def double_click_grid_row(
+    backend: Any,
+    selector: dict[str, Any],
+    row_index: int | None = None,
+    *,
+    row_key: str | None = None,
+    column: str | None = None,
+    columns: list[str] | None = None,
+    identity: Mapping[str, Any] | None = None,
+    rows: dict[str, Any] | None = None,
+    ensure_visible: bool = False,
+    max_scrolls: int | None = None,
+    scroll_settle_ms: int | None = None,
+) -> dict[str, Any]:
+    """Double-click one currently visible DataGrid row through a backend primitive."""
+    identity_payload = _identity_payload(identity, columns)
+    evidence_columns = _identity_columns(identity_payload, columns)
+    ensure_visible_result: dict[str, Any] | None = None
+    if ensure_visible:
+        ensure_visible_result = await ensure_grid_row_visible(
+            backend,
+            selector,
+            row_index=row_index,
+            row_key=row_key,
+            identity=identity_payload,
+            rows=rows,
+            columns=evidence_columns,
+            max_scrolls=max_scrolls,
+            scroll_settle_ms=scroll_settle_ms,
+        )
+        if not _passes(ensure_visible_result):
+            result = dict(ensure_visible_result) if isinstance(ensure_visible_result, dict) else {}
+            result["status"] = _blocked_status(result)
+            result.setdefault("reason", "grid ensure-visible failed before row double click")
+            result["ensure_visible_result"] = ensure_visible_result
+            result["action_skipped"] = True
+            return result
+
+    resolved, blocked = await resolve_visible_grid_row(
+        backend,
+        selector,
+        row_index=row_index,
+        row_key=row_key,
+        identity=identity_payload,
+        rows=rows,
+        columns=evidence_columns,
+    )
+    if blocked is not None:
+        return blocked
+    visible_index = _visible_index(resolved)
+    if visible_index is None:
+        return {
+            "status": "BLOCKED",
+            "reason": "resolved row has no visible index",
+            "resolved_row": _compact_row_ref(resolved, identity_payload),
+        }
+
+    double_click_row = getattr(backend, "grid_double_click_row", None)
+    if not callable(double_click_row):
+        return {
+            "status": "BLOCKED",
+            "reason": "grid row double click unavailable",
+            "requested": {"adapter": "ui.grid.double_click_row"},
+            "accepted": {"backend": "DataGrid backend with grid_double_click_row"},
+            "next_step": "Use a FlaUI bridge backend that can double-click resolved grid rows.",
+            "resolved_row": _compact_row_ref(resolved, identity_payload),
+        }
+    result = await double_click_row(
+        dict(selector),
+        visible_index,
+        column=column,
+        columns=evidence_columns,
+    )
+    if not isinstance(result, dict):
+        return {
+            "status": "BLOCKED",
+            "reason": "grid row double click returned non-object result",
+            "resolved_row": _compact_row_ref(resolved, identity_payload),
+            "click_result": result,
+        }
+    output = dict(result)
+    output.setdefault("status", "PASS")
+    output["resolved_row"] = _compact_row_ref(resolved, identity_payload)
+    if ensure_visible_result is not None:
+        output["ensure_visible_result"] = ensure_visible_result
+    return output
+
+
 async def assert_grid_range(
     backend: Any,
     selector: dict[str, Any],

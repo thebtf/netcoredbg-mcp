@@ -49,6 +49,7 @@ class ActionSmokeSession:
         self.grid_select_row_results: list[dict[str, Any]] = []
         self.grid_click_row_results: list[dict[str, Any]] = []
         self.grid_right_click_row_results: list[dict[str, Any]] = []
+        self.grid_double_click_row_results: list[dict[str, Any]] = []
 
     async def find_element(self, selector: dict[str, Any]) -> dict[str, Any]:
         self.calls.append(("find_element", dict(selector)))
@@ -167,6 +168,18 @@ class ActionSmokeSession:
             "row": dict(request.get("row") or {}),
         }
 
+    async def grid_double_click_row(self, **request: Any) -> dict[str, Any]:
+        self.calls.append(("grid_double_click_row", request))
+        if self.grid_double_click_row_results:
+            return self.grid_double_click_row_results.pop(0)
+        return {
+            "status": "PASS",
+            "clicked": True,
+            "double_clicked": True,
+            "click_kind": "double",
+            "row": dict(request.get("row") or {}),
+        }
+
     async def tracepoint_status(self, tracepoint_id: str) -> dict[str, Any]:
         self.calls.append(("tracepoint_status", tracepoint_id))
         hit = self.tracepoint_hits.pop(0) if self.tracepoint_hits else False
@@ -206,6 +219,7 @@ def _runner(session: ActionSmokeSession) -> RuntimeSmokeRunner:
             "ui.grid.select_row": session.grid_select_row,
             "ui.grid.click_row": session.grid_click_row,
             "ui.grid.right_click_row": session.grid_right_click_row,
+            "ui.grid.double_click_row": session.grid_double_click_row,
             "ui.grid.select_indices": session.grid_select_indices,
             "ui.grid.select_identities": session.grid_select_identities,
             "debug.tracepoint_status": session.tracepoint_status,
@@ -2498,6 +2512,46 @@ async def test_v2_ui_grid_right_click_row_by_index_routes_to_adapter() -> None:
 
 
 @pytest.mark.asyncio
+async def test_v2_ui_grid_double_click_row_by_index_routes_to_adapter() -> None:
+    session = ActionSmokeSession()
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "grid double click row",
+            "cases": [
+                {
+                    "id": "grid_double_click_row",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.grid.double_click_row",
+                                "selector": {"automation_id": "CueDataGrid"},
+                                "row": {"index": 19},
+                                "column": "Phrase",
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    click_call = next(call for call in session.calls if call[0] == "grid_double_click_row")
+    assert result["status"] == "PASS"
+    assert "ui.grid.double_click_row" in result["accepted_action_kinds"]
+    assert action["route"] == "grid_double_click_row"
+    assert "ensure_visible" not in action
+    assert "max_scrolls" not in action
+    assert "scroll_settle_ms" not in action
+    assert click_call[1]["selector"] == {"automation_id": "CueDataGrid"}
+    assert click_call[1]["row"] == {"index": 19}
+    assert click_call[1]["column"] == "Phrase"
+
+
+@pytest.mark.asyncio
 async def test_v2_ui_grid_click_row_with_ensure_visible_calls_ensure_before_click() -> None:
     session = ActionSmokeSession()
 
@@ -2565,6 +2619,7 @@ async def test_v2_ui_grid_click_row_with_ensure_visible_calls_ensure_before_clic
         ("ui.grid.select_row", "grid_select_row", "grid_select_row"),
         ("ui.grid.click_row", "grid_click_row", "grid_click_row"),
         ("ui.grid.right_click_row", "grid_right_click_row", "grid_right_click_row"),
+        ("ui.grid.double_click_row", "grid_double_click_row", "grid_double_click_row"),
     ],
 )
 async def test_v2_ui_grid_row_ensure_visible_blocks_unsupported_preflight(
@@ -2587,7 +2642,7 @@ async def test_v2_ui_grid_row_ensure_visible_blocks_unsupported_preflight(
         "identity": {"column": "PhraseId"},
         "ensure_visible": True,
     }
-    if kind in {"ui.grid.click_row", "ui.grid.right_click_row"}:
+    if kind in {"ui.grid.click_row", "ui.grid.right_click_row", "ui.grid.double_click_row"}:
         action["column"] = "PhraseId"
 
     result = await _runner(session).run(
@@ -2618,6 +2673,125 @@ async def test_v2_ui_grid_row_ensure_visible_blocks_unsupported_preflight(
     }
     assert any(call[0] == "grid_ensure_visible" for call in session.calls)
     assert not any(call[0] == row_call for call in session.calls)
+
+
+@pytest.mark.parametrize(
+    ("kind", "route", "row_call"),
+    [
+        ("ui.grid.select_row", "grid_select_row", "grid_select_row"),
+        ("ui.grid.click_row", "grid_click_row", "grid_click_row"),
+        ("ui.grid.right_click_row", "grid_right_click_row", "grid_right_click_row"),
+        ("ui.grid.double_click_row", "grid_double_click_row", "grid_double_click_row"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_v2_ui_grid_row_action_blocks_non_dict_ensure_visible_result(
+    kind: str,
+    route: str,
+    row_call: str,
+) -> None:
+    session = ActionSmokeSession()
+    session.grid_ensure_visible_results = ["not-a-dict"]  # type: ignore[list-item]
+
+    action: dict[str, Any] = {
+        "kind": kind,
+        "selector": {"automation_id": "CueDataGrid"},
+        "row": {"identity": "Cue 042"},
+        "identity": {"column": "PhraseId"},
+        "ensure_visible": True,
+    }
+    if kind in {"ui.grid.click_row", "ui.grid.right_click_row", "ui.grid.double_click_row"}:
+        action["column"] = "PhraseId"
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "grid row bad ensure visible result",
+            "cases": [
+                {
+                    "id": "grid_row_action",
+                    "transitions": [{"action": action, "probes": []}],
+                }
+            ],
+        }
+    )
+
+    action_result = result["cases"][0]["actions"][0]
+    assert result["status"] == "BLOCKED"
+    assert action_result["status"] == "BLOCKED"
+    assert action_result["route"] == route
+    assert action_result["result"]["reason"] == "grid ensure-visible returned non-object result"
+    assert action_result["result"]["ensure_visible_result"] == "not-a-dict"
+    assert action_result["action_skipped"] is True
+    assert not any(call[0] == row_call for call in session.calls)
+
+
+@pytest.mark.parametrize(
+    ("kind", "route", "result_attr", "reason"),
+    [
+        (
+            "ui.grid.select_row",
+            "grid_select_row",
+            "grid_select_row_results",
+            "grid row selection returned non-object result",
+        ),
+        (
+            "ui.grid.click_row",
+            "grid_click_row",
+            "grid_click_row_results",
+            "grid row click returned non-object result",
+        ),
+        (
+            "ui.grid.right_click_row",
+            "grid_right_click_row",
+            "grid_right_click_row_results",
+            "grid row right click returned non-object result",
+        ),
+        (
+            "ui.grid.double_click_row",
+            "grid_double_click_row",
+            "grid_double_click_row_results",
+            "grid row double click returned non-object result",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_v2_ui_grid_row_action_blocks_non_dict_adapter_result(
+    kind: str,
+    route: str,
+    result_attr: str,
+    reason: str,
+) -> None:
+    session = ActionSmokeSession()
+    setattr(session, result_attr, ["not-a-dict"])  # type: ignore[arg-type]
+
+    action: dict[str, Any] = {
+        "kind": kind,
+        "selector": {"automation_id": "CueDataGrid"},
+        "row": {"index": 19},
+    }
+    if kind != "ui.grid.select_row":
+        action["column"] = "Phrase"
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "grid row bad adapter result",
+            "cases": [
+                {
+                    "id": "grid_row_action",
+                    "transitions": [{"action": action, "probes": []}],
+                }
+            ],
+        }
+    )
+
+    action_result = result["cases"][0]["actions"][0]
+    assert result["status"] == "BLOCKED"
+    assert action_result["status"] == "BLOCKED"
+    assert action_result["route"] == route
+    assert action_result["result"]["reason"] == reason
+    assert action_result["result"]["adapter_result"] == "not-a-dict"
 
 
 @pytest.mark.asyncio

@@ -16,6 +16,7 @@ from ..ui.focus import assert_focus
 from ..ui.grid import (
     assert_grid_range,
     click_grid_row,
+    double_click_grid_row,
     ensure_grid_row_visible,
     read_grid_selected_rows,
     read_grid_state,
@@ -54,6 +55,7 @@ _GRID_CANONICAL_ACTIONS = (
     "select_row",
     "click_row",
     "right_click_row",
+    "double_click_row",
     "assert_range",
     "get_state",
 )
@@ -72,6 +74,7 @@ _GRID_ACCEPTED_ACTIONS = (
     "select_row",
     "click_row",
     "right_click_row",
+    "double_click_row",
     "assert_range",
     "get_state",
     "state",
@@ -604,6 +607,20 @@ def register_ui_evidence_tools(
                     )
                 elif canonical_action == "right_click_row":
                     result = await right_click_grid_row(
+                        backend,
+                        selector,
+                        row_index=row_index,
+                        row_key=row_key,
+                        column=column,
+                        columns=columns,
+                        rows=rows,
+                        identity=identity,
+                        ensure_visible=ensure_visible,
+                        max_scrolls=max_scrolls,
+                        scroll_settle_ms=scroll_settle_ms,
+                    )
+                elif canonical_action == "double_click_row":
+                    result = await double_click_grid_row(
                         backend,
                         selector,
                         row_index=row_index,
