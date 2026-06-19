@@ -146,3 +146,44 @@ def test_freshness_fails_for_concrete_process_path_and_artifact_mismatches(
         "artifact_missing",
     }.issubset(mismatch_kinds)
     assert result["artifacts"]["missing"] == [str(missing_artifact)]
+
+
+def test_freshness_preserves_module_symbol_status_records_for_pdb_proof(
+    tmp_path,
+) -> None:
+    workspace = tmp_path / "repo"
+    artifact = workspace / "bin" / "Debug" / "App.dll"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("binary", encoding="utf-8")
+    session = FakeFreshnessSession()
+    session.project_path = str(workspace)
+    session.state.process_id = 1234
+    session.state.process_name = "App"
+    session.state.modules = [
+        SimpleNamespace(
+            name="App.dll",
+            path=str(artifact),
+            symbolStatus="Symbols loaded.",
+        )
+    ]
+
+    result = (
+        DebugFreshnessVerifier(session)
+        .verify(
+            expected_process_id=1234,
+            expected_process_name="App",
+            expected_workspace=str(workspace),
+            expected_modules=[str(artifact)],
+            expected_artifacts=[str(artifact)],
+        )
+        .to_dict()
+    )
+
+    assert result["status"] == "PASS"
+    assert result["modules"]["records"] == [
+        {
+            "name": "App.dll",
+            "path": str(artifact),
+            "symbolStatus": "Symbols loaded.",
+        }
+    ]

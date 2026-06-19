@@ -251,6 +251,29 @@ def diagnostic_schema_contract() -> dict[str, Any]:
                 "default_file_name": APP_DIAGNOSTICS_DEFAULT_FILE_NAME,
                 "redacted_env_values": True,
             },
+            "freshness_contract": {
+                "app_fields": [
+                    "process_id",
+                    "process_name",
+                    "expected_modules",
+                    "require_active_process",
+                ],
+                "top_level_fields": [
+                    "workspace",
+                    "artifacts",
+                    "process",
+                    "modules",
+                    "loaded_sources",
+                ],
+                "aliases": {
+                    "process": ["id", "name", "expected_id", "expected_name", "require_active"],
+                },
+                "status_policy": {
+                    "FAIL": "force diagnostic FAIL when live target contradicts declared app",
+                    "WARN": "preserve diagnostic status and include incomplete evidence warning",
+                    "PASS": "preserve diagnostic status with freshness proof",
+                },
+            },
             "failure_modes": [
                 "stale_process",
                 "missing_artifact",
@@ -594,10 +617,56 @@ def _validate_app_diagnostics_schema(payload: dict[str, Any], errors: list[str])
         _validate_optional_status(prefix, observation.get("status"), errors)
         if observation.get("status") == "BLOCKED":
             _require_blocked_diagnostics(prefix, observation, errors)
+    _validate_app_diagnostics_freshness_shapes(payload, errors)
     if payload.get("wait_json") is not None and payload.get("poll") is not None:
         errors.append("app_diagnostics.wait_json and app_diagnostics.poll are mutually exclusive")
     _validate_wait_json_schema(payload, errors, field_name="wait_json")
     _validate_wait_json_schema(payload, errors, field_name="poll")
+
+
+def _validate_app_diagnostics_freshness_shapes(
+    payload: dict[str, Any],
+    errors: list[str],
+) -> None:
+    app = payload.get("app")
+    if isinstance(app, dict):
+        process_id = app.get("process_id") or app.get("expected_process_id")
+        if process_id is not None and (
+            isinstance(process_id, bool) or not isinstance(process_id, int)
+        ):
+            errors.append("app_diagnostics.app.process_id must be an integer")
+        expected_modules = app.get("expected_modules")
+        if expected_modules is not None and not _is_string_list(expected_modules):
+            errors.append("app_diagnostics.app.expected_modules must be a list of strings")
+        require_active_process = app.get("require_active_process")
+        if require_active_process is not None and not isinstance(require_active_process, bool):
+            errors.append("app_diagnostics.app.require_active_process must be a boolean")
+    workspace = payload.get("workspace")
+    if workspace is not None and not isinstance(workspace, (str, dict)):
+        errors.append("app_diagnostics.workspace must be a string or object")
+    process = payload.get("process")
+    if process is not None and not isinstance(process, dict):
+        errors.append("app_diagnostics.process must be an object")
+    modules = payload.get("modules")
+    if modules is not None and not isinstance(modules, (list, dict)):
+        errors.append("app_diagnostics.modules must be a list or object")
+    loaded_sources = payload.get("loaded_sources")
+    if loaded_sources is not None and not _is_string_list(loaded_sources):
+        errors.append("app_diagnostics.loaded_sources must be a list of strings")
+    artifacts = payload.get("artifacts")
+    if artifacts is not None and not isinstance(artifacts, (list, dict)):
+        errors.append("app_diagnostics.artifacts must be a list or object")
+    for field_name in ("modules", "artifacts"):
+        field = payload.get(field_name)
+        if not isinstance(field, dict):
+            continue
+        expected = field.get("expected")
+        if expected is not None and not _is_string_list(expected):
+            errors.append(f"app_diagnostics.{field_name}.expected must be a list of strings")
+
+
+def _is_string_list(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
 
 def _validate_wait_json_schema(

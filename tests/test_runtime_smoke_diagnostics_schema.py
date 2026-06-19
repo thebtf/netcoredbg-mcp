@@ -100,6 +100,78 @@ def test_diagnostic_schema_contract_exposes_app_diagnostics_launch_contract() ->
     }
 
 
+def test_diagnostic_schema_contract_exposes_app_diagnostics_freshness_contract() -> None:
+    from netcoredbg_mcp.session.runtime_smoke_schema import diagnostic_schema_contract
+
+    contract = diagnostic_schema_contract()
+    app_diagnostics = contract["app_diagnostics"]
+
+    assert app_diagnostics["freshness_contract"] == {
+        "app_fields": [
+            "process_id",
+            "process_name",
+            "expected_modules",
+            "require_active_process",
+        ],
+        "top_level_fields": [
+            "workspace",
+            "artifacts",
+            "process",
+            "modules",
+            "loaded_sources",
+        ],
+        "aliases": {
+            "process": ["id", "name", "expected_id", "expected_name", "require_active"],
+        },
+        "status_policy": {
+            "FAIL": "force diagnostic FAIL when live target contradicts declared app",
+            "WARN": "preserve diagnostic status and include incomplete evidence warning",
+            "PASS": "preserve diagnostic status with freshness proof",
+        },
+    }
+    assert "stale_process" in app_diagnostics["failure_modes"]
+    assert "missing_artifact" in app_diagnostics["failure_modes"]
+
+
+def test_app_diagnostics_schema_rejects_invalid_freshness_contract_shapes() -> None:
+    from netcoredbg_mcp.session.runtime_smoke_schema import (
+        validate_diagnostic_schema_example,
+    )
+
+    payload = {
+        "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
+        "app": {
+            "name": "WpfSmokeApp",
+            "process_id": "abc",
+            "expected_modules": "WpfSmokeApp.dll",
+            "require_active_process": "yes",
+        },
+        "status": "PASS",
+        "observations": [],
+        "workspace": 1234,
+        "process": "dotnet",
+        "modules": "WpfSmokeApp.dll",
+        "loaded_sources": "Program.cs",
+        "artifacts": {"expected": "not-a-list"},
+        "limits": {
+            "max_text_length": 240,
+            "max_list_items": 8,
+            "max_json_bytes": 32768,
+        },
+    }
+
+    errors = validate_diagnostic_schema_example(payload, kind="app_diagnostics")
+
+    assert "app_diagnostics.app.process_id must be an integer" in errors
+    assert "app_diagnostics.app.expected_modules must be a list of strings" in errors
+    assert "app_diagnostics.app.require_active_process must be a boolean" in errors
+    assert "app_diagnostics.workspace must be a string or object" in errors
+    assert "app_diagnostics.process must be an object" in errors
+    assert "app_diagnostics.modules must be a list or object" in errors
+    assert "app_diagnostics.loaded_sources must be a list of strings" in errors
+    assert "app_diagnostics.artifacts.expected must be a list of strings" in errors
+
+
 def test_app_diagnostics_launch_contract_preserves_absolute_evidence_directory() -> None:
     from netcoredbg_mcp.session.runtime_smoke_schema import (
         app_diagnostics_launch_contract,

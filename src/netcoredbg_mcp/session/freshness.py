@@ -173,6 +173,7 @@ class DebugFreshnessVerifier:
                 "paths": module_paths,
                 "names": sorted(module_names),
                 "expected": expected_module_paths,
+                "records": modules,
             },
             "artifacts": {
                 "existing": existing_artifacts,
@@ -221,10 +222,23 @@ def _record_from_any(item: Any) -> dict[str, Any]:
             "path": getattr(item, "path", None),
         }
     path = data.get("path")
-    return {
+    record = {
         "name": data.get("name") or (os.path.basename(path) if path else None),
         "path": _display_path(path) if path else None,
     }
+    for key in (
+        "id",
+        "version",
+        "isOptimized",
+        "symbolStatus",
+        "sourceReference",
+        "origin",
+        "presentationHint",
+    ):
+        value = data.get(key) if key in data else getattr(item, key, None)
+        if value is not None:
+            record[key] = value
+    return record
 
 
 def _display_path(path: Any) -> str:

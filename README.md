@@ -388,6 +388,10 @@ by `max_text_length`, `max_list_items`, and `max_json_bytes`; `raw_tree`,
 `window_tree`, `ui_tree`, `screenshot_base64`, `access_token`, `api_key`,
 `password`, and `secret` must be omitted before evidence is returned;
 `backend_result`, `exception`, `raw_output`, and `stack` must be summarized.
+App diagnostics can declare freshness expectations such as
+`expected_process_name`, `expected_modules`, workspace artifacts, and
+`loaded_sources`; returned freshness evidence preserves module `symbolStatus`
+so live-target PDB/process proof can fail a stale `PASS` diagnostic artifact.
 Tracepoint guardrails must name `allowed_when`, `blocked_when`, `unsafe_when`,
 and cleanup ownership with `debug.tracepoint.remove`.
 

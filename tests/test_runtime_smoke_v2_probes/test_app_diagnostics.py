@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -12,7 +13,11 @@ from netcoredbg_mcp.session.runtime_smoke_schema import (
     DIAGNOSTIC_SCHEMA_VERSION,
     app_diagnostics_launch_contract,
 )
+from netcoredbg_mcp.session.runtime_smoke_v2.probes.app_diagnostics import (
+    handle_app_diagnostics,
+)
 from netcoredbg_mcp.session.runtime_smoke_v2.runner import validate_v2_plan_contract
+from netcoredbg_mcp.session.state import DebugState
 
 from .helpers import ProbeSmokeSession, after_probe, before_probe, one_probe_plan, runner
 
@@ -86,6 +91,27 @@ class LaunchDiagnosticSmokeSession(ProbeSmokeSession):
     async def launch(self, **kwargs: Any) -> dict[str, Any]:
         self.launches.append(dict(kwargs))
         return {"status": "PASS", "profile": kwargs.get("profile", "isolated")}
+
+
+def _session_with_debug_freshness(
+    *,
+    process_id: int | None = 1234,
+    process_name: str | None = "LiveWpfSmokeApp",
+    project_path: str | None = None,
+    modules: list[dict[str, Any]] | None = None,
+    sources: dict[str, dict[str, Any]] | None = None,
+) -> ProbeSmokeSession:
+    session = ProbeSmokeSession()
+    session.project_path = project_path
+    session.state = SimpleNamespace(
+        state=DebugState.RUNNING,
+        output_buffer=[],
+        process_id=process_id,
+        process_name=process_name,
+        modules=list(modules or []),
+        loaded_sources=dict(sources or {}),
+    )
+    return session
 
 
 def _launch_diagnostics_plan(
@@ -398,6 +424,281 @@ async def test_app_diagnostics_wait_json_reads_live_diagnostic_artifact(
     assert probe["value"]["wait_json"]["observed"] is True
     assert probe["value"]["wait_json"]["polls"] >= 1
     assert probe["evidence_ref"] == "diagnostic:app_diagnostics:LiveWpfSmokeApp"
+
+
+@pytest.mark.asyncio
+async def test_app_diagnostics_wait_json_fails_pass_artifact_on_freshness_mismatch(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    expected_module = workspace / "bin" / "Debug" / "LiveWpfSmokeApp.dll"
+    other_module = tmp_path / "other" / "OtherApp.dll"
+    expected_module.parent.mkdir(parents=True)
+    other_module.parent.mkdir(parents=True)
+    expected_module.write_text("expected module", encoding="utf-8")
+    other_module.write_text("other module", encoding="utf-8")
+    diagnostic_path = tmp_path / "app-diagnostics-freshness.json"
+    diagnostic_path.write_text(
+        json.dumps(
+            _app_diagnostics(
+                app={
+                    "name": "LiveWpfSmokeApp",
+                    "process_id": 1234,
+                    "process_name": "LiveWpfSmokeApp",
+                    "expected_modules": [str(expected_module)],
+                },
+                status="PASS",
+                observations=[
+                    {
+                        "kind": "artifact",
+                        "status": "PASS",
+                        "reason": "diagnostic artifact claims the app is healthy",
+                        "next_step": "No action required.",
+                    }
+                ],
+                workspace=str(workspace),
+            )
+        ),
+        encoding="utf-8",
+    )
+    session = _session_with_debug_freshness(
+        process_id=9999,
+        process_name="OtherApp",
+        project_path=str(workspace),
+        modules=[{"name": "OtherApp.dll", "path": str(other_module)}],
+    )
+
+    result = await runner(session).run(
+        one_probe_plan(
+            _app_diagnostics(
+                phase="after",
+                app={"name": "PlaceholderApp"},
+                status="PASS",
+                observations=[],
+                wait_json={
+                    "path": str(diagnostic_path),
+                    "timeout_ms": 0,
+                    "poll_interval_ms": 0,
+                },
+            )
+        )
+    )
+
+    probe = after_probe(result)
+    assert result["status"] == "FAIL"
+    assert result["reason"] == "app diagnostics freshness mismatch"
+    assert probe["status"] == "FAIL"
+    assert probe["reason"] == "app diagnostics freshness mismatch"
+    assert probe["value"]["status"] == "FAIL"
+    freshness = probe["value"]["freshness"]
+    assert freshness["status"] == "FAIL"
+    mismatch_kinds = {mismatch["kind"] for mismatch in freshness["mismatches"]}
+    assert {
+        "process_id_mismatch",
+        "process_name_mismatch",
+        "expected_module_missing",
+    }.issubset(mismatch_kinds)
+    assert session.runtime_smoke.freshness_evidence["latest"]["status"] == "FAIL"
+
+
+@pytest.mark.asyncio
+async def test_app_diagnostics_wait_json_preserves_declared_app_freshness(
+    tmp_path: Path,
+) -> None:
+    diagnostic_path = tmp_path / "app-diagnostics-artifact-app.json"
+    diagnostic_path.write_text(
+        json.dumps(
+            _app_diagnostics(
+                app={"name": "ArtifactReportedApp"},
+                status="PASS",
+                observations=[],
+            )
+        ),
+        encoding="utf-8",
+    )
+    session = _session_with_debug_freshness(process_id=9999)
+
+    result = await runner(session).run(
+        one_probe_plan(
+            _app_diagnostics(
+                phase="after",
+                app={"name": "DeclaredApp", "process_id": 1234},
+                status="PASS",
+                observations=[],
+                wait_json={
+                    "path": str(diagnostic_path),
+                    "timeout_ms": 0,
+                    "poll_interval_ms": 0,
+                },
+            )
+        )
+    )
+
+    probe = after_probe(result)
+    assert result["status"] == "FAIL"
+    assert probe["value"]["app"]["name"] == "ArtifactReportedApp"
+    assert probe["value"]["app"]["process_id"] == 1234
+    freshness = probe["value"]["freshness"]
+    assert freshness["status"] == "FAIL"
+    mismatch_kinds = {mismatch["kind"] for mismatch in freshness["mismatches"]}
+    assert "process_id_mismatch" in mismatch_kinds
+
+
+@pytest.mark.asyncio
+async def test_app_diagnostics_wait_json_keeps_pass_with_incomplete_freshness_warning(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    expected_module = workspace / "bin" / "Debug" / "LiveWpfSmokeApp.dll"
+    expected_module.parent.mkdir(parents=True)
+    expected_module.write_text("expected module", encoding="utf-8")
+    diagnostic_path = tmp_path / "app-diagnostics-freshness-warn.json"
+    diagnostic_path.write_text(
+        json.dumps(
+            _app_diagnostics(
+                app={
+                    "name": "LiveWpfSmokeApp",
+                    "process_id": 1234,
+                    "expected_modules": [str(expected_module)],
+                },
+                status="PASS",
+                observations=[
+                    {
+                        "kind": "artifact",
+                        "status": "PASS",
+                        "reason": "diagnostic artifact observed",
+                        "next_step": "No action required.",
+                    }
+                ],
+                workspace=str(workspace),
+            )
+        ),
+        encoding="utf-8",
+    )
+    session = _session_with_debug_freshness(
+        process_id=None,
+        process_name=None,
+        project_path=None,
+        modules=[],
+    )
+
+    result = await runner(session).run(
+        one_probe_plan(
+            _app_diagnostics(
+                phase="after",
+                app={"name": "PlaceholderApp"},
+                status="PASS",
+                observations=[],
+                wait_json={
+                    "path": str(diagnostic_path),
+                    "timeout_ms": 0,
+                    "poll_interval_ms": 0,
+                },
+            )
+        )
+    )
+
+    probe = after_probe(result)
+    assert result["status"] == "PASS"
+    assert probe["status"] == "PASS"
+    freshness = probe["value"]["freshness"]
+    assert freshness["status"] == "WARN"
+    assert freshness["mismatches"] == []
+    warning_kinds = {warning["kind"] for warning in freshness["warnings"]}
+    assert {
+        "process_id_unavailable",
+        "workspace_unavailable",
+        "modules_unavailable",
+    }.issubset(warning_kinds)
+
+
+@pytest.mark.asyncio
+async def test_app_diagnostics_wait_json_honors_loaded_sources_freshness(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    expected_source = workspace / "Program.cs"
+    other_source = tmp_path / "other" / "Program.cs"
+    expected_source.parent.mkdir(parents=True)
+    other_source.parent.mkdir(parents=True)
+    expected_source.write_text("class Expected {}", encoding="utf-8")
+    other_source.write_text("class Other {}", encoding="utf-8")
+    diagnostic_path = tmp_path / "app-diagnostics-loaded-sources.json"
+    diagnostic_path.write_text(
+        json.dumps(
+            _app_diagnostics(
+                app={"name": "LiveWpfSmokeApp"},
+                status="PASS",
+                observations=[],
+                workspace=str(workspace),
+                loaded_sources=[str(expected_source)],
+            )
+        ),
+        encoding="utf-8",
+    )
+    session = _session_with_debug_freshness(
+        sources={
+            str(other_source): {
+                "name": "Program.cs",
+                "path": str(other_source),
+            }
+        }
+    )
+
+    result = await runner(session).run(
+        one_probe_plan(
+            _app_diagnostics(
+                phase="after",
+                app={"name": "PlaceholderApp"},
+                status="PASS",
+                observations=[],
+                wait_json={
+                    "path": str(diagnostic_path),
+                    "timeout_ms": 0,
+                    "poll_interval_ms": 0,
+                },
+            )
+        )
+    )
+
+    probe = after_probe(result)
+    assert result["status"] == "FAIL"
+    freshness = probe["value"]["freshness"]
+    assert freshness["status"] == "FAIL"
+    mismatch_kinds = {mismatch["kind"] for mismatch in freshness["mismatches"]}
+    assert {
+        "expected_source_missing",
+        "source_workspace_mismatch",
+    }.issubset(mismatch_kinds)
+
+
+@pytest.mark.asyncio
+async def test_app_diagnostics_declared_freshness_warns_when_session_unavailable() -> None:
+    result = await handle_app_diagnostics(
+        _app_diagnostics(
+            status="PASS",
+            observations=[],
+            app={
+                "name": "LiveWpfSmokeApp",
+                "process_id": 1234,
+                "process_name": "LiveWpfSmokeApp",
+                "expected_modules": ["LiveWpfSmokeApp.dll"],
+            },
+        ),
+        SimpleNamespace(action_context=SimpleNamespace(session=None)),
+        phase="after",
+    )
+
+    assert result["status"] == "PASS"
+    freshness = result["value"]["freshness"]
+    assert freshness["status"] == "WARN"
+    assert freshness["warnings"] == [
+        {
+            "kind": "session_unavailable",
+            "reason": "app diagnostics freshness expectations declared but no session is available",
+        }
+    ]
+    assert freshness["mismatches"] == []
 
 
 @pytest.mark.asyncio
