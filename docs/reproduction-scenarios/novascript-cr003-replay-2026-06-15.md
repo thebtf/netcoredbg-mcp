@@ -63,10 +63,14 @@ Use the NovaScript repository, not a local WPF substitute:
 - Stable row identity column: `Реплика`.
 - Required variants:
   - `visible_row_drag`
-  - `downward_edge_scroll`
-  - `upward_edge_scroll`
+  - `edge_scroll_drag`
   - `multi_row_drag`
   - `invalid_drop_noop_or_cancel`
+
+The earlier 2026-06-15 packet split edge-scroll by direction. The later CR-035
+merged-provider replay contract records one bounded `edge_scroll_drag` case, so
+the machine-readable sidecar keeps the directional split only as historical
+audit context.
 
 ## Preflight
 

@@ -57,8 +57,7 @@ def test_novascript_cr003_replay_packet_is_actionable() -> None:
         "DataGrid",
         "Реплика",
         "visible_row_drag",
-        "downward_edge_scroll",
-        "upward_edge_scroll",
+        "edge_scroll_drag",
         "multi_row_drag",
         "invalid_drop_noop_or_cancel",
         "PASS",
@@ -104,6 +103,12 @@ def test_novascript_cr003_replay_packet_json_is_machine_readable() -> None:
     assert payload["downstream"]["identity"] == {"column": "Реплика"}
     assert set(payload["required_variants"]) == {
         "visible_row_drag",
+        "edge_scroll_drag",
+        "multi_row_drag",
+        "invalid_drop_noop_or_cancel",
+    }
+    assert set(payload["historical_required_variants"]["values"]) == {
+        "visible_row_drag",
         "downward_edge_scroll",
         "upward_edge_scroll",
         "multi_row_drag",
@@ -116,6 +121,9 @@ def test_novascript_cr003_replay_packet_json_is_machine_readable() -> None:
     assert (
         payload["latest_replay"]["runtime_smoke"]["reason"]
         == "runtime smoke v2 scenario passed"
+    )
+    assert set(payload["latest_replay"]["runtime_smoke"]["observed_variants"]) == set(
+        payload["required_variants"]
     )
     assert set(payload["latest_replay"]["runtime_smoke"]["observed_cases"]) == {
         "visible-row-drag-reorder",

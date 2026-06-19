@@ -28,11 +28,21 @@
   },
   "required_variants": [
     "visible_row_drag",
-    "downward_edge_scroll",
-    "upward_edge_scroll",
+    "edge_scroll_drag",
     "multi_row_drag",
     "invalid_drop_noop_or_cancel"
   ],
+  "historical_required_variants": {
+    "superseded_by": "CR-035 merged-provider replay contract",
+    "values": [
+      "visible_row_drag",
+      "downward_edge_scroll",
+      "upward_edge_scroll",
+      "multi_row_drag",
+      "invalid_drop_noop_or_cancel"
+    ],
+    "note": "The 2026-06-15 packet split edge-scroll by direction while the later CR-035 replay evidence records one bounded edge-scroll drag case. The current machine-readable required_variants list matches the replay evidence that resolved target-side #226."
+  },
   "latest_replay": {
     "timestamp": "2026-06-18T00:14:00+03:00",
     "status": "PASS",
@@ -46,6 +56,12 @@
       "reason": "runtime smoke v2 scenario passed",
       "action_count": 11,
       "case_count": 4,
+      "observed_variants": [
+        "visible_row_drag",
+        "edge_scroll_drag",
+        "multi_row_drag",
+        "invalid_drop_noop_or_cancel"
+      ],
       "observed_cases": [
         "visible-row-drag-reorder",
         "edge-scroll-drag-reorder",
