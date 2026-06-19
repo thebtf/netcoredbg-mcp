@@ -93,6 +93,23 @@ class LaunchDiagnosticSmokeSession(ProbeSmokeSession):
         return {"status": "PASS", "profile": kwargs.get("profile", "isolated")}
 
 
+class CandidateValidationProbeSmokeSession(ProbeSmokeSession):
+    def __init__(self, project_root: Path, rejected_path: Path) -> None:
+        super().__init__()
+        self.project_root = project_root.resolve()
+        self.rejected_path = rejected_path.resolve()
+        self.validated_paths: list[tuple[Path, bool]] = []
+
+    def validate_path(self, path: str, must_exist: bool = False) -> str:
+        resolved = Path(path).resolve()
+        self.validated_paths.append((resolved, must_exist))
+        if must_exist and resolved == self.rejected_path:
+            raise ValueError("Path outside project scope")
+        if self.project_root not in (resolved, *resolved.parents):
+            raise ValueError("Path outside project scope")
+        return str(resolved)
+
+
 def _session_with_debug_freshness(
     *,
     process_id: int | None = 1234,
@@ -905,6 +922,56 @@ async def test_app_diagnostics_poll_reads_matching_json_from_directory(
     assert probe["value"]["poll"]["pattern"] == "diagnostic-*.json"
     assert probe["value"]["poll"]["matched_path"] == str(diagnostic_path)
     assert probe["value"]["poll"]["observed"] is True
+
+
+@pytest.mark.asyncio
+async def test_app_diagnostics_poll_revalidates_matched_directory_candidate(
+    tmp_path: Path,
+) -> None:
+    diagnostic_dir = tmp_path / "novascript-evidence"
+    diagnostic_dir.mkdir()
+    diagnostic_path = diagnostic_dir / "diagnostic-cue-change.json"
+    diagnostic_path.write_text(
+        json.dumps(
+            _app_diagnostics(
+                app={"name": "NovaScript"},
+                status="PASS",
+                observations=[],
+            )
+        ),
+        encoding="utf-8",
+    )
+    session = CandidateValidationProbeSmokeSession(
+        project_root=tmp_path,
+        rejected_path=diagnostic_path,
+    )
+
+    result = await runner(session).run(
+        one_probe_plan(
+            _app_diagnostics(
+                phase="after",
+                app={"name": "PlaceholderApp"},
+                status="PASS",
+                observations=[],
+                poll={
+                    "path": str(diagnostic_dir),
+                    "pattern": "diagnostic-*.json",
+                    "timeout_ms": 0,
+                    "poll_interval_ms": 0,
+                },
+            )
+        )
+    )
+
+    probe = after_probe(result)
+    assert result["status"] == "BLOCKED"
+    assert probe["status"] == "BLOCKED"
+    assert probe["reason"] == "matched diagnostic JSON is outside allowed scope"
+    assert probe["value"]["poll"]["matched_path"] == str(diagnostic_path.resolve())
+    assert probe["value"]["poll"]["observed"] is False
+    assert probe["value"]["poll"]["validation_error"] == "Path outside project scope"
+    assert (diagnostic_dir.resolve(), False) in session.validated_paths
+    assert (diagnostic_path.resolve(), True) in session.validated_paths
 
 
 @pytest.mark.asyncio

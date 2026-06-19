@@ -333,7 +333,13 @@ async def _read_wait_json(
             file_text = None
             if candidate is not None:
                 metadata["matched_path"] = str(candidate)
+                candidate = _resolve_matched_candidate_path(candidate, context)
+                metadata["matched_path"] = str(candidate)
                 file_text = await asyncio.to_thread(_read_file_if_present, candidate)
+        except ValueError as exc:
+            metadata["reason"] = "matched diagnostic JSON is outside allowed scope"
+            metadata["validation_error"] = str(exc)
+            file_text = None
         except OSError as exc:
             metadata["reason"] = "diagnostic JSON is not readable"
             metadata["error"] = str(exc)
@@ -379,6 +385,14 @@ def _read_file_if_present(path: Path) -> str | None:
     if not path.is_file():
         return None
     return path.read_text(encoding="utf-8")
+
+
+def _resolve_matched_candidate_path(path: Path, context: Any) -> Path:
+    session = getattr(context, "session", None)
+    validate_path = getattr(session, "validate_path", None)
+    if callable(validate_path):
+        return Path(validate_path(str(path), must_exist=True))
+    return path
 
 
 def _diagnostic_pattern(source: dict[str, Any]) -> str | None:
