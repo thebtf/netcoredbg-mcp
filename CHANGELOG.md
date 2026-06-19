@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.5] - 2026-06-19
+
+### Added
+- Public `ui_grid(action="viewport")` now exposes bounded visible-row DataGrid
+  viewport identity snapshots through the existing runtime-smoke
+  `ui.grid.viewport` adapter.
+
+### Fixed
+- Direct viewport helper calls now reject comparison-only expectations such as
+  `viewport_moved` or `direction`, preventing a single-snapshot helper call from
+  silently reporting `PASS` for checks that require runtime-smoke v2 before/after
+  probe state.
+
 ## [0.18.4] - 2026-06-19
 
 ### Added
