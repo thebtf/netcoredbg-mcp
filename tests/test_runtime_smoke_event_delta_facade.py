@@ -477,6 +477,26 @@ async def test_runtime_smoke_get_event_delta_missing_run_fails_closed(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cursor", ["not-a-cursor", {}])
+async def test_runtime_smoke_get_event_delta_contextless_invalid_cursor_omits_mark_action(
+    capturing_mcp,
+    cursor,
+) -> None:
+    session = CursorFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor=cursor,
+    )
+    data = response["data"]
+
+    assert data["status"] == "INVALID_SETUP"
+    assert "runtime_smoke_run_plan" in response["next_actions"]
+    assert "runtime_smoke_mark_event_cursor" not in response["next_actions"]
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_get_event_delta_missing_run_without_literal_reason_fails_closed(
     capturing_mcp,
 ) -> None:
