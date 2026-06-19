@@ -226,12 +226,15 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
     assert "CR-029" in row
     assert "CR-031" in row
     assert "CR-032" in row
+    assert "CR-052" in row
     assert 'ui_text(action="set_text")' in row
+    assert 'ui_grid(action="viewport")' in row
     assert "ui.text.read" in row
     assert "ui.text.type_replace_selection" in row
     assert "ui.text.get_state" in row
     assert "ui.text.assert_selection" in row
     assert "ui.text.set_text" in row
+    assert "ui.grid.viewport" in row
     assert "ui.grid.get_state" in row
     assert "ui.grid.select_row" in row
     assert "ui.grid.click_row" in row
@@ -313,9 +316,11 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "CR-029",
             "CR-031",
             "CR-032",
+            "CR-052",
             "ui.text.set_text",
-            "ui_property",
-            "DataGrid offscreen/scroll/virtualization behavior",
+            'ui_grid(action="viewport")',
+            "ui.grid.viewport",
+            "DataGrid offscreen/scroll action semantics",
         ],
         "#271": [
             "CR-019",
@@ -445,13 +450,16 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "CR-029",
             "CR-031",
             "CR-032",
+            "CR-052",
             "ui.text.set_text",
+            'ui_grid(action="viewport")',
+            "ui.grid.viewport",
             "visible-row-only DataGrid",
             "bridge-owned",
             "ui_focus",
             "confirmed DataGrid selection",
-            "ui_property",
-            "DataGrid offscreen/scroll/virtualization behavior",
+            "bounded visible-row identity snapshots",
+            "DataGrid offscreen/scroll action semantics",
         ],
         "#271": [
             "commented",

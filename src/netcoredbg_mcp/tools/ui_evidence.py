@@ -48,6 +48,7 @@ _GRID_CANONICAL_ACTIONS = (
     "snapshot",
     "selected_rows",
     "ensure_visible",
+    "viewport",
     "select_range",
     "select_row",
     "click_row",
@@ -64,6 +65,7 @@ _GRID_ACCEPTED_ACTIONS = (
     "selected",
     "selection",
     "ensure_visible",
+    "viewport",
     "select_range",
     "select_row",
     "click_row",
@@ -71,6 +73,7 @@ _GRID_ACCEPTED_ACTIONS = (
     "get_state",
     "state",
 )
+_GRID_VIEWPORT_DIRECT_EXPECTATIONS = ("selected_payload_preserved",)
 _FOCUS_READ_ACTIONS = ("assert",)
 _TEXT_ACTION_ALIASES = {"state": "get_state"}
 _TEXT_ACTIONS = ("read", "get_state", "state", "assert_selection", "set_text")
@@ -85,6 +88,13 @@ _PROPERTY_KEY_ALIASES = {
     "classname": "className",
     "class_name": "className",
 }
+
+
+def _unsupported_direct_viewport_expectations(expect: dict[str, Any] | None) -> list[str]:
+    if not expect:
+        return []
+    accepted = set(_GRID_VIEWPORT_DIRECT_EXPECTATIONS)
+    return sorted(str(key) for key in expect if key not in accepted)
 
 
 def register_ui_evidence_tools(
@@ -456,6 +466,9 @@ def register_ui_evidence_tools(
         rows: dict[str, Any] | None = None,
         columns: list[str] | None = None,
         identity: dict[str, Any] | None = None,
+        expect: dict[str, Any] | None = None,
+        phase: str | None = None,
+        probe_name: str | None = None,
         max_scrolls: int | None = None,
         scroll_settle_ms: int | None = None,
     ) -> dict:
@@ -486,69 +499,102 @@ def register_ui_evidence_tools(
                     state=session.state.state,
                 )
 
-            backend = await _ensure_ui_connected()
-            if canonical_action == "visible_rows":
-                result = await read_grid_visible_rows(backend, selector)
-            elif canonical_action == "snapshot":
-                result = await snapshot_grid(backend, selector, rows=rows, columns=columns)
-            elif canonical_action == "selected_rows":
-                result = await read_grid_selected_rows(backend, selector, columns=columns)
-            elif canonical_action == "get_state":
-                result = await read_grid_state(
-                    backend,
-                    selector,
+            if canonical_action == "viewport":
+                unsupported_expectations = _unsupported_direct_viewport_expectations(expect)
+                if unsupported_expectations:
+                    return build_response(
+                        data={
+                            "status": "FAIL",
+                            "reason": "unsupported viewport expectations for direct ui_grid helper",
+                            "requested_action": action,
+                            "canonical_action": canonical_action,
+                            "requested": {
+                                "expect": dict(expect or {}),
+                                "unsupported_expectations": unsupported_expectations,
+                            },
+                            "accepted": {
+                                "direct_expectations": list(_GRID_VIEWPORT_DIRECT_EXPECTATIONS),
+                                "comparison_route": "runtime_smoke_run_probe ui.grid.viewport",
+                            },
+                            "next_step": (
+                                "Use runtime_smoke_run_probe or runtime_smoke_run_plan with "
+                                "kind='ui.grid.viewport' for before/after comparison expectations."
+                            ),
+                        },
+                        state=session.state.state,
+                    )
+                result = await ui_operation_adapters(_ensure_ui_connected)["ui.grid.viewport"](
+                    selector=selector,
                     rows=rows,
-                    columns=columns,
                     identity=identity,
+                    expect=expect,
+                    phase=phase,
+                    probe_name=probe_name,
                 )
-            elif canonical_action == "ensure_visible":
-                result = await ensure_grid_row_visible(
-                    backend,
-                    selector,
-                    row_index=row_index,
-                    row_key=row_key,
-                    rows=rows,
-                    columns=columns,
-                    identity=identity,
-                    max_scrolls=max_scrolls,
-                    scroll_settle_ms=scroll_settle_ms,
-                )
-            elif canonical_action == "select_range":
-                start, end = _require_range(start_index, end_index)
-                result = await select_grid_range(backend, selector, start, end)
-                if _passes(result):
-                    result = await _confirm_grid_selection(
+            else:
+                backend = await _ensure_ui_connected()
+                if canonical_action == "visible_rows":
+                    result = await read_grid_visible_rows(backend, selector)
+                elif canonical_action == "snapshot":
+                    result = await snapshot_grid(backend, selector, rows=rows, columns=columns)
+                elif canonical_action == "selected_rows":
+                    result = await read_grid_selected_rows(backend, selector, columns=columns)
+                elif canonical_action == "get_state":
+                    result = await read_grid_state(
                         backend,
                         selector,
-                        start=start,
-                        end=end,
+                        rows=rows,
                         columns=columns,
-                        selection_result=result,
+                        identity=identity,
                     )
-            elif canonical_action == "select_row":
-                result = await select_grid_row(
-                    backend,
-                    selector,
-                    row_index=row_index,
-                    row_key=row_key,
-                    columns=columns,
-                    rows=rows,
-                    identity=identity,
-                )
-            elif canonical_action == "click_row":
-                result = await click_grid_row(
-                    backend,
-                    selector,
-                    row_index=row_index,
-                    row_key=row_key,
-                    column=column,
-                    columns=columns,
-                    rows=rows,
-                    identity=identity,
-                )
-            elif canonical_action == "assert_range":
-                start, end = _require_range(start_index, end_index)
-                result = await assert_grid_range(backend, selector, start, end)
+                elif canonical_action == "ensure_visible":
+                    result = await ensure_grid_row_visible(
+                        backend,
+                        selector,
+                        row_index=row_index,
+                        row_key=row_key,
+                        rows=rows,
+                        columns=columns,
+                        identity=identity,
+                        max_scrolls=max_scrolls,
+                        scroll_settle_ms=scroll_settle_ms,
+                    )
+                elif canonical_action == "select_range":
+                    start, end = _require_range(start_index, end_index)
+                    result = await select_grid_range(backend, selector, start, end)
+                    if _passes(result):
+                        result = await _confirm_grid_selection(
+                            backend,
+                            selector,
+                            start=start,
+                            end=end,
+                            columns=columns,
+                            selection_result=result,
+                        )
+                elif canonical_action == "select_row":
+                    result = await select_grid_row(
+                        backend,
+                        selector,
+                        row_index=row_index,
+                        row_key=row_key,
+                        columns=columns,
+                        rows=rows,
+                        identity=identity,
+                    )
+                elif canonical_action == "click_row":
+                    result = await click_grid_row(
+                        backend,
+                        selector,
+                        row_index=row_index,
+                        row_key=row_key,
+                        column=column,
+                        columns=columns,
+                        rows=rows,
+                        identity=identity,
+                    )
+                elif canonical_action == "assert_range":
+                    start, end = _require_range(start_index, end_index)
+                    result = await assert_grid_range(backend, selector, start, end)
             if isinstance(result, dict):
                 result = _strip_unbounded_evidence_value(dict(result))
                 result["requested_action"] = action
