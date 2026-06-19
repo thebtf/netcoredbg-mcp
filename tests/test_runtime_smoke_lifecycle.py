@@ -38,6 +38,10 @@ class LifecycleSmokeSession:
         self.block_cleanup = False
         self.fail_cleanup = False
         self.cleanup_calls = 0
+        self.stop_calls = 0
+        self.trace_log_clear_calls = 0
+        self.process_registry_count = 0
+        self.fail_debug_stop = False
 
     async def append_output(self, text: str = "ready\n") -> dict[str, Any]:
         self.state.output_sequence += 1
@@ -68,6 +72,20 @@ class LifecycleSmokeSession:
         self.runtime_smoke.instrumentation_groups.pop(name, None)
         return {"status": "PASS", "reason": "instrumentation group cleared"}
 
+    async def clear_trace_log(self) -> dict[str, Any]:
+        self.trace_log_clear_calls += 1
+        return {"status": "PASS", "reason": "trace log cleared"}
+
+    async def debug_stop(self, mode: str = "graceful") -> dict[str, Any]:
+        self.stop_calls += 1
+        if self.fail_debug_stop:
+            raise RuntimeError("debug stop exploded")
+        self.state.state = DebugState.STOPPED
+        return {"status": "PASS", "mode": mode, "stopped": True}
+
+    async def count_process_registry(self) -> dict[str, Any]:
+        return {"status": "PASS", "count": self.process_registry_count}
+
 
 def _runner(session: LifecycleSmokeSession) -> RuntimeSmokeRunner:
     return RuntimeSmokeRunner(
@@ -77,6 +95,29 @@ def _runner(session: LifecycleSmokeSession) -> RuntimeSmokeRunner:
             "wait_until_released": session.wait_until_released,
             "ui.invoke": session.invoke_until_released,
             "instrumentation_group_clear": session.clear_group,
+            "debug.trace_log.clear": session.clear_trace_log,
+            "debug.stop": session.debug_stop,
+            "process.registry.count": session.count_process_registry,
+        },
+    )
+
+
+class ExplodingRuntimeSmokeRunner(RuntimeSmokeRunner):
+    async def run(self, plan: Any) -> dict[str, Any]:
+        raise RuntimeError("NovaScript plan adapter exploded")
+
+
+def _exploding_runner(session: LifecycleSmokeSession) -> RuntimeSmokeRunner:
+    return ExplodingRuntimeSmokeRunner(
+        session,
+        service_adapters={
+            "append_output": session.append_output,
+            "wait_until_released": session.wait_until_released,
+            "ui.invoke": session.invoke_until_released,
+            "instrumentation_group_clear": session.clear_group,
+            "debug.trace_log.clear": session.clear_trace_log,
+            "debug.stop": session.debug_stop,
+            "process.registry.count": session.count_process_registry,
         },
     )
 
@@ -88,6 +129,42 @@ async def _wait_for_final(registry: RuntimeSmokeRunRegistry, run_id: str) -> dic
             return result
         await asyncio.sleep(0)
     raise AssertionError("runtime smoke lifecycle run did not finish")
+
+
+def _v2_exception_cleanup_plan() -> dict[str, Any]:
+    return {
+        "schema": "netcoredbg.runtime_smoke.v2",
+        "name": "v2-exception-cleanup",
+        "diagnostics": {
+            "app_diagnostics": {
+                "diagnostic_launch": app_diagnostics_launch_contract(
+                    name="v2-exception-cleanup",
+                    evidence_dir="/tmp/runtime-smoke-diagnostics",
+                )
+            }
+        },
+        "cases": [
+            {
+                "id": "case-1",
+                "transitions": [
+                    {
+                        "action": {
+                            "kind": "ui.invoke",
+                            "selector": {"automation_id": "run"},
+                        },
+                        "probes": [],
+                    }
+                ],
+                "cleanup": [{"kind": "debug.trace_log.clear"}],
+            }
+        ],
+        "cleanup": {
+            "steps": [
+                {"kind": "debug.stop", "mode": "graceful"},
+                {"kind": "process.registry.assert_empty"},
+            ]
+        },
+    }
 
 
 def test_runtime_smoke_session_reset_clears_owned_state() -> None:
@@ -383,6 +460,74 @@ async def test_runtime_smoke_stop_preserves_v2_diagnostic_launch_contract() -> N
     assert stopped["lifecycle_status"] == "STOPPED"
     assert stopped["diagnostic_launch"] == diagnostic_launch
     assert stopped["diagnostic_launch"]["evidence"]["directory"].startswith("/")
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_v2_runner_exception_runs_v2_cleanup_with_diagnostics() -> None:
+    session = LifecycleSmokeSession()
+
+    started = await session.runtime_smoke.lifecycle_runs.start(
+        _v2_exception_cleanup_plan(),
+        lambda: _exploding_runner(session),
+    )
+    final = await _wait_for_final(session.runtime_smoke.lifecycle_runs, started["run_id"])
+
+    assert final["status"] == "FAIL"
+    assert final["reason"] == "runtime smoke runner raised exception"
+    assert final["exception"] == {
+        "type": "RuntimeError",
+        "message": "NovaScript plan adapter exploded",
+    }
+    assert final["compact"]["exception"] == {
+        "type": "RuntimeError",
+        "message": "NovaScript plan adapter exploded",
+    }
+    assert final["generated_case_count"] == 0
+    assert final["cases"] == []
+    assert final["diagnostic_launch"]["kind"] == "app_diagnostics"
+    assert final["diagnostic_launch"]["evidence"]["directory"].endswith(
+        "/v2-exception-cleanup"
+    )
+    assert "debug.stop:graceful" in final["cleanup"]["attempted"]
+    assert "case:case-1:debug.trace_log.clear" in final["cleanup"]["attempted"]
+    assert "process.registry.assert_empty" in final["cleanup"]["attempted"]
+    assert final["cleanup"]["status"] == "PASS"
+    assert final["cleanup"]["debug_stop"]["status"] == "PASS"
+    assert final["cleanup"]["process_registry_after"] == 0
+    assert final.get("contaminated") is not True
+    assert session.stop_calls == 1
+    assert session.trace_log_clear_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_v2_runner_exception_cleanup_failure_requires_contract() -> None:
+    session = LifecycleSmokeSession()
+    session.fail_debug_stop = True
+
+    started = await session.runtime_smoke.lifecycle_runs.start(
+        _v2_exception_cleanup_plan(),
+        lambda: _exploding_runner(session),
+    )
+    final = await _wait_for_final(session.runtime_smoke.lifecycle_runs, started["run_id"])
+
+    assert final["status"] == "FAIL"
+    assert final["reason"] == "runtime smoke runner raised exception"
+    assert final["cleanup"]["status"] == "FAIL"
+    assert final["cleanup"]["failures"][0]["reason"] == "debug stop exploded"
+    assert final["contaminated"] is True
+    assert final["cleanup_contract"]["next_action"] == "runtime_smoke_cleanup_contract"
+
+    blocked = await session.runtime_smoke.lifecycle_runs.start(
+        {
+            "name": "after-v2-exception-cleanup-failure",
+            "actions": [{"name": "append_output", "args": {"text": "ready\n"}}],
+        },
+        lambda: _runner(session),
+    )
+
+    assert blocked["status"] == "BLOCKED"
+    assert blocked["reason"] == "runtime smoke cleanup contract required"
+    assert blocked["cleanup_contract"]["next_action"] == "runtime_smoke_cleanup_contract"
 
 
 @pytest.mark.asyncio

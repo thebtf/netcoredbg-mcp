@@ -29,7 +29,7 @@ from .result_envelope import compact_value, finalize_result
 
 
 def compact_v2_result(result: dict[str, Any]) -> dict[str, Any]:
-    return {
+    compact = {
         "status": result.get("status"),
         "reason": result.get("reason"),
         "elapsed_ms": result.get("elapsed_ms", 0),
@@ -39,6 +39,9 @@ def compact_v2_result(result: dict[str, Any]) -> dict[str, Any]:
         "cleanup": compact_value(result.get("cleanup", {})),
         "evidence_refs": compact_value(result.get("evidence_refs", [])),
     }
+    if isinstance(result.get("exception"), dict):
+        compact["exception"] = compact_value(result["exception"])
+    return compact
 
 
 def validate_v2_plan_contract(plan: dict[str, Any]) -> dict[str, Any]:

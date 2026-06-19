@@ -272,8 +272,11 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "runtime_smoke_run_probe",
             "runtime_smoke_wait_for_result",
             "CR-045",
+            "CR-046",
             "YAML",
             'plan_source.format="yaml"',
+            "runner-exception diagnostics",
+            "debug.stop",
             "oracle-pack",
             "remaining lifecycle/orchestration closure",
         ],
@@ -287,8 +290,11 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "CR-016",
             "CR-039",
             "CR-041",
+            "CR-046",
             "metrics_contract",
             "agent_mode.defaults",
+            "exception verdict",
+            "cleanup-contract guidance",
             "event_limit=20",
             "NO DATA",
             "agent_mode",
@@ -313,7 +319,10 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "cleanup contract",
             "mark_trace_cursor",
             "get_trace_delta",
-            "live-target cleanup/PDB/process proof",
+            "CR-046",
+            "debug.stop",
+            "process-registry assertion",
+            "live-target PDB/process proof",
         ],
         "#272": [
             "app diagnostics",
@@ -391,8 +400,10 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "runtime_smoke_run_probe",
             "runtime_smoke_wait_for_result",
             "CR-045",
+            "CR-046",
             "YAML",
             'plan_source.format="yaml"',
+            "runner-exception diagnostics",
             "broad orchestration",
         ],
         "#269": [
@@ -402,9 +413,11 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "agent_mode",
             "CR-039",
             "CR-041",
+            "CR-046",
             "metrics_contract",
             "agent_mode.defaults",
             "success-metrics evidence",
+            "exception verdict",
             "broad lifecycle/orchestration",
         ],
         "#270": [
@@ -427,12 +440,15 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "commented",
             "CR-020",
             "CR-042",
+            "CR-046",
             "mark_trace_cursor",
             "get_trace_delta",
             "cleanup_contract",
+            "debug.stop",
+            "process-registry assertion",
             "contaminated",
             "single-flight",
-            "live-target cleanup/PDB/process proof",
+            "live-target PDB/process proof",
         ],
         "#272": [
             "commented",
@@ -521,8 +537,12 @@ def test_issue_268_records_plan_path_slices() -> None:
     assert "plan_path" in row
     assert "plan_source" in row
     assert "CR-045" in row
+    assert "CR-046" in row
     assert "YAML" in row
     assert 'plan_source.format="yaml"' in row
+    assert "runner-exception diagnostics" in row
+    assert "debug.stop" in row
+    assert "contamination guidance" in row
     assert "runtime_smoke_validate_plan" in row
     assert "runtime_smoke_run_plan" in row
     assert "missing, mixed, malformed, non-object, or path-validation failures" in row
@@ -530,8 +550,10 @@ def test_issue_268_records_plan_path_slices() -> None:
     assert "plan_path" in lifecycle_row
     assert "plan_source" in lifecycle_row
     assert "CR-045" in lifecycle_row
+    assert "CR-046" in lifecycle_row
     assert "YAML" in lifecycle_row
     assert 'plan_source.format="yaml"' in lifecycle_row
+    assert "runner-exception diagnostics" in lifecycle_row
     assert "plan_path input" not in remaining
     assert "plan_path input" not in lifecycle_remaining
     assert "YAML/v3 authoring" not in remaining
@@ -554,10 +576,13 @@ def test_issue_271_records_cleanup_and_trace_delta_slices() -> None:
     assert "runtime_smoke_cleanup_contract" in row
     assert "contaminated-state surfacing" in row
     assert "CR-042" in row
+    assert "CR-046" in row
     assert "TracepointManager.mark_trace_cursor" in row
     assert "TracepointManager.get_trace_delta" in row
     assert "public read-only `mark_trace_cursor`" in row
     assert "public read-only `get_trace_delta`" in row
+    assert "debug.stop" in row
+    assert "process-registry assertion" in row
     assert "broader" in row
     assert "CR-028" in lifecycle_row
     assert "cleanup_contract" in lifecycle_row
@@ -570,12 +595,15 @@ def test_issue_271_records_cleanup_and_trace_delta_slices() -> None:
     assert "STOPPING" in lifecycle_row
     assert "evidence_bundle" in lifecycle_row
     assert "CR-042" in lifecycle_row
+    assert "CR-046" in lifecycle_row
     assert "TracepointManager.mark_trace_cursor" in lifecycle_row
     assert "TracepointManager.get_trace_delta" in lifecycle_row
+    assert "debug.stop" in lifecycle_row
+    assert "process-registry assertion" in lifecycle_row
     assert "trace-specific cursor/delta APIs" not in remaining
     assert "trace-specific cursor/delta APIs" not in lifecycle_remaining
     assert "broader diagnostics orchestration" in remaining
-    assert "live-target cleanup/PDB/process proof" in remaining
+    assert "live-target PDB/process proof" in remaining
 
 
 def test_cr022_broad_issues_require_split_or_comment_evidence_before_closure() -> None:

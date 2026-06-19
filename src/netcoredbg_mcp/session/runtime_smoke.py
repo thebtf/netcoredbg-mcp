@@ -1137,6 +1137,9 @@ class RuntimeSmokeRunRegistry:
         runner: RuntimeSmokeRunner,
         exc: Exception,
     ) -> dict[str, Any]:
+        if isinstance(plan, dict) and plan.get("schema") == SCHEMA_VERSION_V2:
+            return await self._v2_failure_result(record, plan, runner, exc)
+
         try:
             cleanup = await runner._teardown(
                 plan if isinstance(plan, dict) else {},
@@ -1161,6 +1164,76 @@ class RuntimeSmokeRunRegistry:
             action_count=0,
             completed_steps=[],
             failed_assertions=[],
+            cleanup=cleanup,
+            extra={
+                "exception": {
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                }
+            },
+        )
+
+    async def _v2_failure_result(
+        self,
+        record: RuntimeSmokeRunRecord,
+        plan: dict[str, Any],
+        runner: RuntimeSmokeRunner,
+        exc: Exception,
+    ) -> dict[str, Any]:
+        from .runtime_smoke_v2.actions import ActionContext
+        from .runtime_smoke_v2.cleanup import (
+            cleanup_steps_from_case,
+            cleanup_steps_from_plan,
+            merge_cleanup_results,
+            run_cleanup,
+        )
+        from .runtime_smoke_v2.runner import RuntimeStateOracleRunner, _cases_for_execution
+
+        v2_runner = RuntimeStateOracleRunner(
+            runner._session,
+            service_adapters=runner._service_adapters,
+            clock=runner._clock,
+        )
+        v2_runner.capture_plan_metadata(plan)
+        raw_metrics_thresholds = plan.get("metrics_thresholds")
+        metrics_thresholds = (
+            dict(raw_metrics_thresholds) if isinstance(raw_metrics_thresholds, dict) else None
+        )
+        generated_case_count = 0
+        try:
+            cases, generated_case_count, _generation_errors = _cases_for_execution(plan)
+            context = ActionContext(
+                service_adapters=runner._service_adapters,
+                clock=runner._clock,
+                session=runner._session,
+                diagnostic_launch=getattr(v2_runner, "_diagnostic_launch", None),
+            )
+            case_cleanups = []
+            for case in cases:
+                case_cleanup_steps = cleanup_steps_from_case(case)
+                if not case_cleanup_steps:
+                    continue
+                case_cleanups.append(
+                    await run_cleanup(
+                        case_cleanup_steps,
+                        context,
+                        case_id=str(case.get("id") or ""),
+                    )
+                )
+            plan_cleanup = await run_cleanup(cleanup_steps_from_plan(plan), context)
+            cleanup = merge_cleanup_results(plan_cleanup, case_cleanups)
+        except Exception as cleanup_exc:
+            cleanup = _cleanup_exception_payload("runtime_smoke_failure_cleanup", cleanup_exc)
+
+        return v2_runner._finalize(
+            status="FAIL",
+            reason="runtime smoke runner raised exception",
+            started=record.created_at,
+            action_count=0,
+            cases=[],
+            generated_case_count=generated_case_count,
+            metrics_thresholds=metrics_thresholds,
+            baseline=None,
             cleanup=cleanup,
             extra={
                 "exception": {
