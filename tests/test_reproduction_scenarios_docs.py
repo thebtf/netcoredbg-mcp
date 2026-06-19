@@ -89,7 +89,7 @@ def test_novascript_cr003_replay_packet_json_is_machine_readable() -> None:
 
     assert payload["schema"] == "netcoredbg.downstream_replay_packet.v1"
     assert payload["issue"] == "#226"
-    assert payload["status"] == "DOWNSTREAM_REPLAY_BLOCKED"
+    assert payload["status"] == "DOWNSTREAM_REPLAY_PASS"
     assert payload["provider_baseline"]["commit"] == "12287e55ac8ea7415a3717f4a248d08723b93cfd"
     assert payload["provider_baseline"]["version"] == "0.17.2"
     assert payload["downstream"]["expected_local_path"] == "<NOVASCRIPT_REPO>"
@@ -110,21 +110,22 @@ def test_novascript_cr003_replay_packet_json_is_machine_readable() -> None:
         "invalid_drop_noop_or_cancel",
     }
     assert "PARTIAL_PASS_INVALID_FOR_GATE" in " ".join(payload["known_invalid_evidence"])
-    assert payload["latest_replay"]["status"] == "BLOCKED"
+    assert payload["latest_replay"]["status"] == "PASS"
     assert payload["latest_replay"]["runtime_smoke"]["baseline_status"] == "PASS"
+    assert payload["latest_replay"]["runtime_smoke"]["status"] == "PASS"
     assert (
         payload["latest_replay"]["runtime_smoke"]["reason"]
-        == "drag source row identity not visible"
+        == "runtime smoke v2 scenario passed"
     )
-    assert payload["latest_replay"]["requested_source_identity"] == "ROW-008-UNIQUE-PHRASE"
-    assert payload["latest_replay"]["visible_viewport"] == {
-        "first_visible_index": 26,
-        "last_visible_index": 43,
-        "first_visible_identity": "ROW-027-UNIQUE-PHRASE",
-        "last_visible_identity": "ROW-044-UNIQUE-PHRASE",
-        "selected_identity": "ROW-031-UNIQUE-PHRASE",
+    assert set(payload["latest_replay"]["runtime_smoke"]["observed_cases"]) == {
+        "visible-row-drag-reorder",
+        "edge-scroll-drag-reorder",
+        "multi-row-drag-reorder",
+        "invalid-drop-noop",
     }
-    assert payload["latest_replay"]["issue_226_lifecycle_decision"] == "leave_open"
+    assert payload["latest_replay"]["cleanup"]["status"] == "PASS"
+    assert payload["latest_replay"]["cleanup"]["process_registry_after"] == 0
+    assert payload["latest_replay"]["issue_226_lifecycle_decision"] == "target_resolved"
     assert payload["evidence_output"]["status_values"] == ["PASS", "BLOCKED", "FAIL"]
     assert set(payload["evidence_output"]["required_fields"]) >= {
         "status",
@@ -147,8 +148,8 @@ def test_issues_backlog_links_novascript_replay_packet() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
 
     assert "docs/reproduction-scenarios/novascript-cr003-replay-2026-06-15.md" in backlog
-    assert "target-side v0.17.2 evidence is not enough" in backlog.lower()
-    assert "DOWNSTREAM_REPLAY_BLOCKED" in backlog
+    assert "target-side v0.17.2 evidence alone was not enough" in backlog.lower()
+    assert "DOWNSTREAM_REPLAY_PASS" in backlog
 
 
 def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
@@ -159,18 +160,29 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
     assert "## Executable RED Scenarios" not in backlog
     assert "## Blocked Or Spec-Needed Scenarios" not in backlog
     assert "SpecKit needed" not in backlog
-    assert "`#226` | Downstream replay `BLOCKED`" in backlog
+    assert "`#226` | Target-side resolved after downstream replay `PASS`" in backlog
 
     for issue in (
         "#251",
         "#264",
         "#265",
         "#266",
-        "#267",
     ):
         assert f"`{issue}` | Target evidence merged" in backlog
 
-    for issue in ("#250", "#268"):
+    row_267 = _issue_row(backlog, "#267")
+    assert "Target evidence merged and target-side Engram issue resolved" in row_267
+    assert "CR-011" in row_267
+    assert "ui_monitor_start" in row_267
+    assert "ui_monitor_events" in row_267
+    assert "Source-side owner may close" in row_267
+
+    row_250 = _issue_row(backlog, "#250")
+    assert "Target-side Engram issue resolved" in row_250
+    assert "broader issue accepted as covered by accumulated evidence" in row_250
+    assert "Source-side owner may close" in row_250
+
+    for issue in ("#268",):
         row = _issue_row(backlog, issue)
         assert (
             "Target slice merged" in row
@@ -191,7 +203,6 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
     assert "NO DATA" in row_269
     assert "None in netcoredbg-mcp." not in row_269
 
-    row_250 = _issue_row(backlog, "#250")
     assert "CR-021" in row_250
     assert "CR-037" in row_250
     assert "CR-040" in row_250
@@ -259,18 +270,6 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
     backlog = _read(BACKLOG_SCENARIOS)
 
     expected_remaining_terms = {
-        "#250": [
-            "CR-037",
-            "CR-040",
-            "CR-043",
-            "selected-item semantics",
-            "SelectionItemPattern",
-            "ui_take_annotated_screenshot",
-            "ui_click_annotated",
-            "get_focused_element",
-            "ui_get_focused_element",
-            "fresh Engram",
-        ],
         "#268": [
             "runtime_smoke_validate_plan",
             "runtime_smoke_run_plan",
@@ -371,12 +370,9 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             assert term in row
 
     _, _status, _evidence, remaining_250 = _issue_cells(backlog, "#250")
-    assert "screenshot-orientation" not in remaining_250
-    assert "screenshot orientation" not in remaining_250
-    assert "exact focus-route compatibility" not in remaining_250
-    assert "focused-element query" not in remaining_250
-    assert "fresh Engram `#250`" in remaining_250
-    assert "do not close the full Engram" in backlog
+    assert "None in netcoredbg-mcp." in remaining_250
+    assert "source-side" in remaining_250.lower()
+    assert "fresh Engram `#250`" not in remaining_250
 
     _, _status, _evidence, remaining_269 = _issue_cells(backlog, "#269")
     assert "profile defaults" not in remaining_269
@@ -393,12 +389,17 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
 
     expected_decisions = {
         "#226": [
-            "leave open",
-            "NovaScript CR-003 replay",
-            "drag source row visibility",
+            "resolved target-side",
+            "CR-035",
+            "downstream replay",
+            "visible-row-drag-reorder",
+            "edge-scroll-drag-reorder",
+            "multi-row-drag-reorder",
+            "invalid-drop-noop",
+            "process_registry_after=0",
         ],
         "#250": [
-            "commented",
+            "resolved target-side",
             "CR-021 focus proof",
             "selection confirmation",
             "CR-037",
@@ -409,6 +410,7 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "CR-043",
             "focused-element query",
             "get_focused_element",
+            "source-side NovaScript verification",
         ],
         "#254": [
             "resolved target-side",
@@ -511,6 +513,29 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
         decision_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", issue)
         for term in terms:
             assert term in decision_row, f"term {term!r} missing from {issue} CR-022 row"
+
+
+def test_cr055_lifecycle_reconciliation_records_resolved_target_issues() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    replay = json.loads(REPLAY_PACKET_JSON.read_text(encoding="utf-8"))
+
+    assert replay["status"] == "DOWNSTREAM_REPLAY_PASS"
+    assert replay["latest_replay"]["status"] == "PASS"
+    assert replay["latest_replay"]["cleanup"]["status"] == "PASS"
+    assert replay["latest_replay"]["cleanup"]["process_registry_after"] == 0
+    assert replay["latest_replay"]["issue_226_lifecycle_decision"] == "target_resolved"
+
+    for issue in ("#226", "#250", "#267"):
+        row = _issue_row(backlog, issue)
+        lifecycle_row = _section_issue_row(
+            backlog,
+            "## CR-022 Issue Lifecycle Refresh",
+            issue,
+        )
+
+        assert "resolved" in row
+        assert "resolved target-side" in lifecycle_row
+        assert "Source-side owner may close" in row
 
 
 def test_issue_272_records_cr024_diagnostic_orchestration_slice() -> None:
@@ -724,7 +749,7 @@ def test_issue_271_records_cleanup_and_trace_delta_slices() -> None:
 def test_cr022_broad_issues_require_split_or_comment_evidence_before_closure() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
 
-    for issue in ("#250", "#268", "#269", "#270", "#271", "#272"):
+    for issue in ("#268", "#269", "#270", "#271", "#272"):
         _, status, evidence, remaining_action = _issue_cells(backlog, issue)
         lifecycle_text = " ".join((status, evidence, remaining_action)).lower()
 
@@ -752,8 +777,9 @@ def test_cr022_issue_226_requires_downstream_pass_before_closure() -> None:
 
     if "closed" in status.lower() or "resolved" in status.lower():
         assert packet["latest_replay"]["status"] == "PASS"
-        assert packet["latest_replay"]["issue_226_lifecycle_decision"] == "close"
-        assert "downstream replay pass" in lifecycle_text
+        assert packet["latest_replay"]["issue_226_lifecycle_decision"] == "target_resolved"
+        assert "downstream replay `pass`" in lifecycle_text
+        assert "source-side owner may close" in lifecycle_text
     else:
         assert status == "Downstream replay `BLOCKED`"
         assert packet["latest_replay"]["status"] == "BLOCKED"
