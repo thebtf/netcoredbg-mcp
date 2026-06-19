@@ -358,6 +358,7 @@ public static partial class GridCommands
         var pointResult = ClickPoint(target);
         if (pointResult.Blocked is not null)
             return pointResult.Blocked;
+        var rowEvidence = BuildRow(row, rowIndex, columns, ColumnHeaders(grid));
 
         var clickResult = ClickCommands.DoubleClick(
             new JsonObject { ["x"] = pointResult.Point.X, ["y"] = pointResult.Point.Y },
@@ -374,7 +375,7 @@ public static partial class GridCommands
             ["x"] = pointResult.Point.X,
             ["y"] = pointResult.Point.Y,
             ["click_result"] = clickResult?.DeepClone(),
-            ["row"] = BuildRow(row, rowIndex, columns, ColumnHeaders(grid))
+            ["row"] = rowEvidence
         };
         if (clickResult is JsonObject clickObject &&
             clickObject["method"] is JsonNode methodNode)

@@ -392,6 +392,28 @@ async def _handle_ui_grid_select_row(
             max_scrolls=max_scrolls,
             scroll_settle_ms=scroll_settle_ms,
         )
+        non_object_failure = _object_only_adapter_failure(
+            ensure_visible_result,
+            reason="grid ensure-visible returned non-object result",
+            raw_key="ensure_visible_result",
+        )
+        if non_object_failure is not None:
+            non_object_failure["action_skipped"] = True
+            return _action_result(
+                status="BLOCKED",
+                route="grid_select_row",
+                selector=selector,
+                row=row,
+                identity=identity,
+                rows=rows,
+                columns=columns,
+                ensure_visible=True,
+                max_scrolls=max_scrolls,
+                scroll_settle_ms=scroll_settle_ms,
+                action_skipped=True,
+                duration_ms=context.elapsed_ms(started),
+                result=non_object_failure,
+            )
         if not _is_adapter_success(ensure_visible_result):
             result = dict(ensure_visible_result)
             status = _terminal_failure_status(str(result.get("status", "BLOCKED")).upper())
@@ -421,6 +443,23 @@ async def _handle_ui_grid_select_row(
         rows=rows,
         columns=columns,
     )
+    non_object_failure = _object_only_adapter_failure(
+        result,
+        reason="grid row selection returned non-object result",
+        raw_key="adapter_result",
+    )
+    if non_object_failure is not None:
+        return _action_result(
+            status="BLOCKED",
+            route="grid_select_row",
+            selector=selector,
+            row=row,
+            identity=identity,
+            rows=rows,
+            columns=columns,
+            duration_ms=context.elapsed_ms(started),
+            result=non_object_failure,
+        )
     if ensure_visible_result is not None:
         result = dict(result)
         result["ensure_visible_result"] = ensure_visible_result
@@ -531,6 +570,29 @@ async def _handle_ui_grid_click_row(
             max_scrolls=max_scrolls,
             scroll_settle_ms=scroll_settle_ms,
         )
+        non_object_failure = _object_only_adapter_failure(
+            ensure_visible_result,
+            reason="grid ensure-visible returned non-object result",
+            raw_key="ensure_visible_result",
+        )
+        if non_object_failure is not None:
+            non_object_failure["action_skipped"] = True
+            return _action_result(
+                status="BLOCKED",
+                route="grid_click_row",
+                selector=selector,
+                row=row,
+                identity=identity,
+                rows=rows,
+                columns=columns,
+                column=str(column) if column is not None else None,
+                ensure_visible=True,
+                max_scrolls=max_scrolls,
+                scroll_settle_ms=scroll_settle_ms,
+                action_skipped=True,
+                duration_ms=context.elapsed_ms(started),
+                result=non_object_failure,
+            )
         if not _is_adapter_success(ensure_visible_result):
             result = dict(ensure_visible_result)
             status = _terminal_failure_status(str(result.get("status", "BLOCKED")).upper())
@@ -562,6 +624,24 @@ async def _handle_ui_grid_click_row(
         columns=columns,
         column=str(column) if column is not None else None,
     )
+    non_object_failure = _object_only_adapter_failure(
+        result,
+        reason="grid row click returned non-object result",
+        raw_key="adapter_result",
+    )
+    if non_object_failure is not None:
+        return _action_result(
+            status="BLOCKED",
+            route="grid_click_row",
+            selector=selector,
+            row=row,
+            identity=identity,
+            rows=rows,
+            columns=columns,
+            column=str(column) if column is not None else None,
+            duration_ms=context.elapsed_ms(started),
+            result=non_object_failure,
+        )
     if ensure_visible_result is not None:
         result = dict(result)
         result["ensure_visible_result"] = ensure_visible_result
@@ -624,6 +704,29 @@ async def _handle_ui_grid_right_click_row(
             max_scrolls=max_scrolls,
             scroll_settle_ms=scroll_settle_ms,
         )
+        non_object_failure = _object_only_adapter_failure(
+            ensure_visible_result,
+            reason="grid ensure-visible returned non-object result",
+            raw_key="ensure_visible_result",
+        )
+        if non_object_failure is not None:
+            non_object_failure["action_skipped"] = True
+            return _action_result(
+                status="BLOCKED",
+                route="grid_right_click_row",
+                selector=selector,
+                row=row,
+                identity=identity,
+                rows=rows,
+                columns=columns,
+                column=str(column) if column is not None else None,
+                ensure_visible=True,
+                max_scrolls=max_scrolls,
+                scroll_settle_ms=scroll_settle_ms,
+                action_skipped=True,
+                duration_ms=context.elapsed_ms(started),
+                result=non_object_failure,
+            )
         if not _is_adapter_success(ensure_visible_result):
             result = dict(ensure_visible_result)
             status = _terminal_failure_status(str(result.get("status", "BLOCKED")).upper())
@@ -655,6 +758,24 @@ async def _handle_ui_grid_right_click_row(
         columns=columns,
         column=str(column) if column is not None else None,
     )
+    non_object_failure = _object_only_adapter_failure(
+        result,
+        reason="grid row right click returned non-object result",
+        raw_key="adapter_result",
+    )
+    if non_object_failure is not None:
+        return _action_result(
+            status="BLOCKED",
+            route="grid_right_click_row",
+            selector=selector,
+            row=row,
+            identity=identity,
+            rows=rows,
+            columns=columns,
+            column=str(column) if column is not None else None,
+            duration_ms=context.elapsed_ms(started),
+            result=non_object_failure,
+        )
     if ensure_visible_result is not None:
         result = dict(result)
         result["ensure_visible_result"] = ensure_visible_result
@@ -717,6 +838,29 @@ async def _handle_ui_grid_double_click_row(
             max_scrolls=max_scrolls,
             scroll_settle_ms=scroll_settle_ms,
         )
+        non_object_failure = _object_only_adapter_failure(
+            ensure_visible_result,
+            reason="grid ensure-visible returned non-object result",
+            raw_key="ensure_visible_result",
+        )
+        if non_object_failure is not None:
+            non_object_failure["action_skipped"] = True
+            return _action_result(
+                status="BLOCKED",
+                route="grid_double_click_row",
+                selector=selector,
+                row=row,
+                identity=identity,
+                rows=rows,
+                columns=columns,
+                column=str(column) if column is not None else None,
+                ensure_visible=True,
+                max_scrolls=max_scrolls,
+                scroll_settle_ms=scroll_settle_ms,
+                action_skipped=True,
+                duration_ms=context.elapsed_ms(started),
+                result=non_object_failure,
+            )
         if not _is_adapter_success(ensure_visible_result):
             result = dict(ensure_visible_result)
             status = _terminal_failure_status(str(result.get("status", "BLOCKED")).upper())
@@ -748,6 +892,24 @@ async def _handle_ui_grid_double_click_row(
         columns=columns,
         column=str(column) if column is not None else None,
     )
+    non_object_failure = _object_only_adapter_failure(
+        result,
+        reason="grid row double click returned non-object result",
+        raw_key="adapter_result",
+    )
+    if non_object_failure is not None:
+        return _action_result(
+            status="BLOCKED",
+            route="grid_double_click_row",
+            selector=selector,
+            row=row,
+            identity=identity,
+            rows=rows,
+            columns=columns,
+            column=str(column) if column is not None else None,
+            duration_ms=context.elapsed_ms(started),
+            result=non_object_failure,
+        )
     if ensure_visible_result is not None:
         result = dict(result)
         result["ensure_visible_result"] = ensure_visible_result
@@ -1133,6 +1295,25 @@ def _terminal_failure_status(adapter_status: str) -> str:
     if adapter_status in {"UNSUPPORTED", "INVALID_SETUP"}:
         return "BLOCKED"
     return "FAIL"
+
+
+def _object_only_adapter_failure(
+    result: dict[str, Any],
+    *,
+    reason: str,
+    raw_key: str,
+) -> dict[str, Any] | None:
+    if (
+        str(result.get("status", "PASS")).upper() == "PASS"
+        and "value" in result
+        and len(result) == 2
+    ):
+        return {
+            "status": "BLOCKED",
+            "reason": reason,
+            raw_key: result.get("value"),
+        }
+    return None
 
 
 def _adapter_failure_result(

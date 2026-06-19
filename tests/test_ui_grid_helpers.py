@@ -627,6 +627,19 @@ def test_bridge_grid_rejects_invalid_control_type_and_prevalidates_selection_ran
     assert validation_index < mutation_index
 
 
+def test_bridge_double_click_row_captures_row_evidence_before_click_side_effects() -> None:
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "GridCommands.cs").read_text(
+        encoding="utf-8",
+    )
+
+    start = command.index("public static JsonNode DoubleClickRow(")
+    evidence_index = command.index("var rowEvidence = BuildRow(", start)
+    click_index = command.index("ClickCommands.DoubleClick(", start)
+    output_index = command.index('["row"] = rowEvidence', start)
+
+    assert evidence_index < click_index < output_index
+
+
 def test_bridge_find_element_rejects_invalid_control_type() -> None:
     command = (PROJECT_ROOT / "bridge" / "Commands" / "ElementCommands.cs").read_text(
         encoding="utf-8",
