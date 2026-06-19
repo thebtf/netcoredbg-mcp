@@ -1640,7 +1640,7 @@ def _apply_runtime_smoke_validate_probe_agent_mode(
     if phase != "after":
         arguments["phase"] = phase
     if budgets is not None:
-        arguments["budgets"] = dict(budgets)
+        arguments["budgets"] = dict(budgets) if isinstance(budgets, dict) else budgets
     if debug_preflight:
         arguments["debug_preflight"] = True
     if tracepoint_guard is not None:
