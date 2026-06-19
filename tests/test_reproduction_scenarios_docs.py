@@ -181,7 +181,7 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
         assert "None in netcoredbg-mcp." not in row
 
     row_269 = _issue_row(backlog, "#269")
-    assert "Target metrics/profile-defaults slices covered" in row_269
+    assert "Target metrics/profile-defaults/probe-validation slices covered" in row_269
     assert "broader FR remains open" in row_269
     assert "CR-039" in row_269
     assert "CR-041" in row_269
@@ -273,8 +273,11 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "runtime_smoke_wait_for_result",
             "CR-045",
             "CR-046",
+            "CR-047",
             "YAML",
             'plan_source.format="yaml"',
+            "runtime_smoke_validate_probe",
+            "read-only probe validation",
             "runner-exception diagnostics",
             "debug.stop",
             "oracle-pack",
@@ -291,8 +294,11 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "CR-039",
             "CR-041",
             "CR-046",
+            "CR-047",
             "metrics_contract",
             "agent_mode.defaults",
+            "runtime_smoke_validate_probe",
+            "read-only probe validation",
             "exception verdict",
             "cleanup-contract guidance",
             "event_limit=20",
@@ -401,8 +407,10 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "runtime_smoke_wait_for_result",
             "CR-045",
             "CR-046",
+            "CR-047",
             "YAML",
             'plan_source.format="yaml"',
+            "runtime_smoke_validate_probe",
             "runner-exception diagnostics",
             "broad orchestration",
         ],
@@ -414,8 +422,10 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "CR-039",
             "CR-041",
             "CR-046",
+            "CR-047",
             "metrics_contract",
             "agent_mode.defaults",
+            "runtime_smoke_validate_probe",
             "success-metrics evidence",
             "exception verdict",
             "broad lifecycle/orchestration",
@@ -560,6 +570,31 @@ def test_issue_268_records_plan_path_slices() -> None:
     assert "YAML/v3 authoring" not in lifecycle_remaining
     assert "v3 authoring" in remaining
     assert "v3 authoring" in lifecycle_remaining
+
+
+def test_issue_268_269_record_validate_probe_slice_without_broad_closure() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+
+    for issue in ("#268", "#269"):
+        row = _issue_row(backlog, issue)
+        lifecycle_row = _section_issue_row(
+            backlog,
+            "## CR-022 Issue Lifecycle Refresh",
+            issue,
+        )
+        _issue, _state, _evidence, remaining = _issue_cells(backlog, issue)
+        _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
+            cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
+        )
+
+        assert "CR-047" in row
+        assert "CR-047" in lifecycle_row
+        assert "runtime_smoke_validate_probe" in row
+        assert "runtime_smoke_validate_probe" in lifecycle_row
+        assert "read-only probe validation" in row
+        assert "read-only probe validation" in lifecycle_row
+        assert "generic probe UX" in remaining
+        assert "generic probe UX" in lifecycle_remaining
 
 
 def test_issue_271_records_cleanup_and_trace_delta_slices() -> None:
