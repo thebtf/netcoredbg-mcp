@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import traceback
 from typing import Any
 
 from .actions import ActionContext
@@ -20,79 +21,88 @@ async def run_cleanup(
 
     for step in _cleanup_execution_order(cleanup_steps):
         kind = str(step.get("kind") or "")
-        if kind == "fixture.restore":
-            path = str(step.get("path") or "")
-            attempted.append(f"fixture.restore:{path}")
-            result = await context.call_adapter(
-                "fixture.restore",
-                path=path,
-                baseline_file=str(step.get("baseline_file") or ""),
-            )
-        elif kind == "debug.tracepoint.remove":
-            tracepoint_id = str(step.get("id") or step.get("tracepoint_id") or "")
-            attempted.append(f"debug.tracepoint.remove:{tracepoint_id}")
-            remove_args: dict[str, Any] = {"tracepoint_id": tracepoint_id}
-            if step.get("file"):
-                remove_args["file"] = str(step.get("file") or "")
-            if step.get("line") is not None:
-                remove_args["line"] = step.get("line")
-            result = await context.call_adapter(
-                "debug.tracepoint.remove",
-                **remove_args,
-            )
-            if (
-                str(result.get("status", "PASS")) == "PASS"
-                and result.get("removed") is True
-            ):
-                tracepoints_removed += 1
-        elif kind == "debug.trace_log.clear":
-            attempted.append("debug.trace_log.clear")
-            result = await context.call_adapter("debug.trace_log.clear")
-        elif kind == "isolated_profile.teardown":
-            profile = str(step.get("profile") or "auto")
-            attempted.append(f"isolated_profile.teardown:{profile}")
-            result = await context.call_adapter(
-                "isolated_profile.teardown",
-                profile=profile,
-            )
-            if str(result.get("status", "PASS")) == "PASS":
-                isolated_profiles_torn_down += 1
-        elif kind == "debug.stop":
-            mode = str(step.get("mode") or "graceful")
-            attempted.append(f"debug.stop:{mode}")
-            result = await context.call_adapter("debug.stop", mode=mode)
-            debug_stop = {
-                "status": str(result.get("status", "PASS")),
-                "mode": mode,
-                "result": result,
-            }
-        elif kind == "process.registry.assert_empty":
-            attempted.append("process.registry.assert_empty")
-            result = await context.call_adapter("process.registry.count")
-            if str(result.get("status", "PASS")) == "PASS":
-                raw_count = result.get("count", 0)
-                try:
-                    process_registry_after = int(raw_count)
-                except (TypeError, ValueError):
-                    result = {
-                        "status": "FAIL",
-                        "reason": "invalid process registry count",
-                        "count": raw_count,
-                    }
-                else:
-                    if process_registry_after != 0:
+        try:
+            if kind == "fixture.restore":
+                path = str(step.get("path") or "")
+                attempted.append(f"fixture.restore:{path}")
+                result = await context.call_adapter(
+                    "fixture.restore",
+                    path=path,
+                    baseline_file=str(step.get("baseline_file") or ""),
+                )
+            elif kind == "debug.tracepoint.remove":
+                tracepoint_id = str(step.get("id") or step.get("tracepoint_id") or "")
+                attempted.append(f"debug.tracepoint.remove:{tracepoint_id}")
+                remove_args: dict[str, Any] = {"tracepoint_id": tracepoint_id}
+                if step.get("file"):
+                    remove_args["file"] = str(step.get("file") or "")
+                if step.get("line") is not None:
+                    remove_args["line"] = step.get("line")
+                result = await context.call_adapter(
+                    "debug.tracepoint.remove",
+                    **remove_args,
+                )
+                if (
+                    str(result.get("status", "PASS")) == "PASS"
+                    and result.get("removed") is True
+                ):
+                    tracepoints_removed += 1
+            elif kind == "debug.trace_log.clear":
+                attempted.append("debug.trace_log.clear")
+                result = await context.call_adapter("debug.trace_log.clear")
+            elif kind == "isolated_profile.teardown":
+                profile = str(step.get("profile") or "auto")
+                attempted.append(f"isolated_profile.teardown:{profile}")
+                result = await context.call_adapter(
+                    "isolated_profile.teardown",
+                    profile=profile,
+                )
+                if str(result.get("status", "PASS")) == "PASS":
+                    isolated_profiles_torn_down += 1
+            elif kind == "debug.stop":
+                mode = str(step.get("mode") or "graceful")
+                attempted.append(f"debug.stop:{mode}")
+                result = await context.call_adapter("debug.stop", mode=mode)
+                debug_stop = {
+                    "status": str(result.get("status", "PASS")),
+                    "mode": mode,
+                    "result": result,
+                }
+            elif kind == "process.registry.assert_empty":
+                attempted.append("process.registry.assert_empty")
+                result = await context.call_adapter("process.registry.count")
+                if str(result.get("status", "PASS")) == "PASS":
+                    raw_count = result.get("count", 0)
+                    try:
+                        process_registry_after = int(raw_count)
+                    except (TypeError, ValueError):
                         result = {
                             "status": "FAIL",
-                            "reason": "process registry not empty",
-                            "count": process_registry_after,
+                            "reason": "invalid process registry count",
+                            "count": raw_count,
                         }
-        else:
-            attempted.append(kind or "unknown")
-            result = {
-                "status": "BLOCKED",
-                "reason": "cleanup step kind not supported",
-                "step": step,
-            }
+                    else:
+                        if process_registry_after != 0:
+                            result = {
+                                "status": "FAIL",
+                                "reason": "process registry not empty",
+                                "count": process_registry_after,
+                            }
+            else:
+                attempted.append(kind or "unknown")
+                result = {
+                    "status": "BLOCKED",
+                    "reason": "cleanup step kind not supported",
+                    "step": step,
+                }
+        except Exception as exc:
+            result = _cleanup_adapter_exception_result(exc)
+            if kind == "debug.stop":
+                debug_stop = {
+                    "status": "FAIL",
+                    "mode": str(step.get("mode") or "graceful"),
+                    "result": result,
+                }
         if str(result.get("status", "PASS")) != "PASS":
             failures.append(
                 {
@@ -114,6 +124,20 @@ async def run_cleanup(
     if case_id is not None:
         cleanup["case_id"] = case_id
     return cleanup
+
+
+def _cleanup_adapter_exception_result(exc: Exception) -> dict[str, Any]:
+    return {
+        "status": "FAIL",
+        "reason": str(exc),
+        "exception": {
+            "type": type(exc).__name__,
+            "message": str(exc),
+            "traceback": "".join(
+                traceback.format_exception(type(exc), exc, exc.__traceback__)
+            ),
+        },
+    }
 
 
 def _cleanup_execution_order(cleanup_steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
