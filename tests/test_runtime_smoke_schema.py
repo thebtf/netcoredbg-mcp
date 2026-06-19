@@ -369,6 +369,38 @@ def test_legacy_runtime_smoke_grid_state_actions_validate_arguments() -> None:
     ]
 
 
+def test_legacy_runtime_smoke_grid_row_actions_validate_ensure_visible_arguments() -> None:
+    assert validate_plan(
+        {
+            "steps": [
+                {
+                    "op": "ui.grid.select_row",
+                    "selector": {"automation_id": "CueDataGrid"},
+                    "row": {"identity": "Cue 042"},
+                    "ensure_visible": "yes",
+                    "max_scrolls": "far",
+                    "scroll_settle_ms": False,
+                },
+                {
+                    "op": "ui.grid.click_row",
+                    "selector": {"automation_id": "CueDataGrid"},
+                    "row": {"index": 3},
+                    "ensure_visible": 1,
+                    "max_scrolls": [],
+                    "scroll_settle_ms": "slow",
+                },
+            ],
+        }
+    ) == [
+        "steps[0].ensure_visible must be a boolean for op ui.grid.select_row",
+        "steps[0].max_scrolls must be an integer for op ui.grid.select_row",
+        "steps[0].scroll_settle_ms must be an integer for op ui.grid.select_row",
+        "steps[1].ensure_visible must be a boolean for op ui.grid.click_row",
+        "steps[1].max_scrolls must be an integer for op ui.grid.click_row",
+        "steps[1].scroll_settle_ms must be an integer for op ui.grid.click_row",
+    ]
+
+
 def test_legacy_runtime_smoke_grid_ensure_visible_validates_arguments() -> None:
     assert validate_plan(
         {

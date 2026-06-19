@@ -2178,9 +2178,71 @@ async def test_v2_ui_grid_select_row_by_identity_routes_to_adapter() -> None:
     assert result["status"] == "PASS"
     assert "ui.grid.select_row" in result["accepted_action_kinds"]
     assert action["route"] == "grid_select_row"
+    assert "ensure_visible" not in action
+    assert "max_scrolls" not in action
+    assert "scroll_settle_ms" not in action
     assert select_call[1]["selector"] == {"automation_id": "CueDataGrid"}
     assert select_call[1]["row"] == {"identity": "Cue 042"}
     assert select_call[1]["identity"] == {"column": "PhraseId"}
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_grid_select_row_with_ensure_visible_calls_ensure_before_select() -> None:
+    session = ActionSmokeSession()
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "grid select row with ensure visible",
+            "cases": [
+                {
+                    "id": "grid_select_row",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.grid.select_row",
+                                "selector": {"automation_id": "CueDataGrid"},
+                                "row": {"identity": "Cue 042"},
+                                "identity": {"column": "PhraseId"},
+                                "rows": {"visible_only": True},
+                                "columns": ["PhraseId"],
+                                "ensure_visible": True,
+                                "max_scrolls": 12,
+                                "scroll_settle_ms": 25,
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    ensure_call_index = next(
+        index for index, call in enumerate(session.calls) if call[0] == "grid_ensure_visible"
+    )
+    select_call_index = next(
+        index for index, call in enumerate(session.calls) if call[0] == "grid_select_row"
+    )
+    ensure_call = session.calls[ensure_call_index]
+    select_call = session.calls[select_call_index]
+
+    assert result["status"] == "PASS"
+    assert action["route"] == "grid_select_row"
+    assert action["ensure_visible"] is True
+    assert ensure_call_index < select_call_index
+    assert ensure_call[1]["selector"] == {"automation_id": "CueDataGrid"}
+    assert ensure_call[1]["row"] == {"identity": "Cue 042"}
+    assert ensure_call[1]["identity"] == {"column": "PhraseId"}
+    assert ensure_call[1]["rows"] == {"visible_only": True}
+    assert ensure_call[1]["columns"] == ["PhraseId"]
+    assert ensure_call[1]["max_scrolls"] == 12
+    assert ensure_call[1]["scroll_settle_ms"] == 25
+    assert select_call[1]["selector"] == {"automation_id": "CueDataGrid"}
+    assert select_call[1]["row"] == {"identity": "Cue 042"}
+    assert select_call[1]["identity"] == {"column": "PhraseId"}
+    assert action["result"]["ensure_visible_result"]["status"] == "PASS"
 
 
 @pytest.mark.asyncio
@@ -2215,9 +2277,73 @@ async def test_v2_ui_grid_click_row_by_index_routes_to_adapter() -> None:
     assert result["status"] == "PASS"
     assert "ui.grid.click_row" in result["accepted_action_kinds"]
     assert action["route"] == "grid_click_row"
+    assert "ensure_visible" not in action
+    assert "max_scrolls" not in action
+    assert "scroll_settle_ms" not in action
     assert click_call[1]["selector"] == {"automation_id": "CueDataGrid"}
     assert click_call[1]["row"] == {"index": 19}
     assert click_call[1]["column"] == "Phrase"
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_grid_click_row_with_ensure_visible_calls_ensure_before_click() -> None:
+    session = ActionSmokeSession()
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "grid click row with ensure visible",
+            "cases": [
+                {
+                    "id": "grid_click_row",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.grid.click_row",
+                                "selector": {"automation_id": "CueDataGrid"},
+                                "row": {"identity": "Cue 042"},
+                                "identity": {"column": "PhraseId"},
+                                "rows": {"visible_only": True},
+                                "columns": ["PhraseId"],
+                                "column": "PhraseId",
+                                "ensure_visible": True,
+                                "max_scrolls": 12,
+                                "scroll_settle_ms": 25,
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    ensure_call_index = next(
+        index for index, call in enumerate(session.calls) if call[0] == "grid_ensure_visible"
+    )
+    click_call_index = next(
+        index for index, call in enumerate(session.calls) if call[0] == "grid_click_row"
+    )
+    ensure_call = session.calls[ensure_call_index]
+    click_call = session.calls[click_call_index]
+
+    assert result["status"] == "PASS"
+    assert action["route"] == "grid_click_row"
+    assert action["ensure_visible"] is True
+    assert ensure_call_index < click_call_index
+    assert ensure_call[1]["selector"] == {"automation_id": "CueDataGrid"}
+    assert ensure_call[1]["row"] == {"identity": "Cue 042"}
+    assert ensure_call[1]["identity"] == {"column": "PhraseId"}
+    assert ensure_call[1]["rows"] == {"visible_only": True}
+    assert ensure_call[1]["columns"] == ["PhraseId"]
+    assert ensure_call[1]["max_scrolls"] == 12
+    assert ensure_call[1]["scroll_settle_ms"] == 25
+    assert click_call[1]["selector"] == {"automation_id": "CueDataGrid"}
+    assert click_call[1]["row"] == {"identity": "Cue 042"}
+    assert click_call[1]["identity"] == {"column": "PhraseId"}
+    assert click_call[1]["column"] == "PhraseId"
+    assert action["result"]["ensure_visible_result"]["status"] == "PASS"
 
 
 @pytest.mark.asyncio
