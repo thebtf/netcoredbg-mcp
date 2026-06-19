@@ -286,6 +286,45 @@ async def test_runtime_smoke_validate_plan_accepts_json_plan_path(
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_validate_plan_accepts_yaml_plan_path(
+    capturing_mcp,
+    tmp_path,
+) -> None:
+    session = PlanFacadeSession()
+    _register(capturing_mcp, session, resolve_project_root=_resolve_project_root_ok)
+    plan_path = tmp_path / "runtime-smoke-plan.yaml"
+    plan_path.write_text(
+        "\n".join(
+            [
+                "schema: netcoredbg.runtime_smoke.v2",
+                "name: validate-from-yaml",
+                "cases:",
+                "  - id: case-1",
+                "    transitions: []",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    response = await capturing_mcp.tools["runtime_smoke_validate_plan"](
+        ctx=None,
+        plan_path=str(plan_path),
+    )
+    data = response["data"]
+
+    assert data["status"] == "PASS"
+    assert data["can_run"] is True
+    assert data["plan_source"] == {
+        "kind": "file",
+        "path": str(plan_path),
+        "format": "yaml",
+    }
+    assert session.resolved_project_root is True
+    assert session.validated_paths == [str(plan_path)]
+    assert session.launch_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_validate_plan_path_does_not_claim_session_ownership(
     capturing_mcp,
     tmp_path,
@@ -393,7 +432,7 @@ async def test_runtime_smoke_validate_plan_rejects_mixed_plan_inputs(
     ]
     assert data["accepted_input"] == {
         "plan": "inline JSON object",
-        "plan_path": "path to a UTF-8 JSON object plan file",
+        "plan_path": "path to a UTF-8 JSON or YAML object plan file",
     }
     assert session.validated_paths == []
     assert session.launch_calls == 0
@@ -422,6 +461,34 @@ async def test_runtime_smoke_validate_plan_rejects_malformed_json_plan_path(
         "kind": "file",
         "path": str(plan_path),
         "format": "json",
+    }
+    assert session.validated_paths == [str(plan_path)]
+    assert session.launch_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_validate_plan_rejects_malformed_yaml_plan_path(
+    capturing_mcp,
+    tmp_path,
+) -> None:
+    session = PlanFacadeSession()
+    _register(capturing_mcp, session, resolve_project_root=_resolve_project_root_ok)
+    plan_path = tmp_path / "runtime-smoke-plan.yaml"
+    plan_path.write_text("name: [unterminated", encoding="utf-8")
+
+    response = await capturing_mcp.tools["runtime_smoke_validate_plan"](
+        ctx=None,
+        plan_path=str(plan_path),
+    )
+    data = response["data"]
+
+    assert data["status"] == "INVALID_SETUP"
+    assert data["can_run"] is False
+    assert data["validation_errors"][0].startswith("plan_path YAML parse failed:")
+    assert data["plan_source"] == {
+        "kind": "file",
+        "path": str(plan_path),
+        "format": "yaml",
     }
     assert session.validated_paths == [str(plan_path)]
     assert session.launch_calls == 0
@@ -478,6 +545,34 @@ async def test_runtime_smoke_validate_plan_rejects_non_object_json_plan_path(
         "kind": "file",
         "path": str(plan_path),
         "format": "json",
+    }
+    assert session.validated_paths == [str(plan_path)]
+    assert session.launch_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_validate_plan_rejects_non_object_yaml_plan_path(
+    capturing_mcp,
+    tmp_path,
+) -> None:
+    session = PlanFacadeSession()
+    _register(capturing_mcp, session, resolve_project_root=_resolve_project_root_ok)
+    plan_path = tmp_path / "runtime-smoke-plan.yaml"
+    plan_path.write_text("- one\n- two\n", encoding="utf-8")
+
+    response = await capturing_mcp.tools["runtime_smoke_validate_plan"](
+        ctx=None,
+        plan_path=str(plan_path),
+    )
+    data = response["data"]
+
+    assert data["status"] == "INVALID_SETUP"
+    assert data["can_run"] is False
+    assert data["validation_errors"] == ["plan_path YAML root must be an object"]
+    assert data["plan_source"] == {
+        "kind": "file",
+        "path": str(plan_path),
+        "format": "yaml",
     }
     assert session.validated_paths == [str(plan_path)]
     assert session.launch_calls == 0

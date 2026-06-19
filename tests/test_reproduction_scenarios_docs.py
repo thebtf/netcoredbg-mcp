@@ -271,6 +271,9 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "runtime_smoke_evidence_bundle",
             "runtime_smoke_run_probe",
             "runtime_smoke_wait_for_result",
+            "CR-045",
+            "YAML",
+            'plan_source.format="yaml"',
             "oracle-pack",
             "remaining lifecycle/orchestration closure",
         ],
@@ -387,6 +390,9 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "runtime_smoke_evidence_bundle",
             "runtime_smoke_run_probe",
             "runtime_smoke_wait_for_result",
+            "CR-045",
+            "YAML",
+            'plan_source.format="yaml"',
             "broad orchestration",
         ],
         "#269": [
@@ -502,7 +508,7 @@ def test_issue_272_remaining_scope_excludes_covered_launch_contract_and_default(
     assert "launch-to-artifact default acquisition" in lifecycle_remaining
 
 
-def test_issue_268_records_cr044_plan_path_slice() -> None:
+def test_issue_268_records_plan_path_slices() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#268")
     lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#268")
@@ -514,16 +520,24 @@ def test_issue_268_records_cr044_plan_path_slice() -> None:
     assert "CR-044" in row
     assert "plan_path" in row
     assert "plan_source" in row
+    assert "CR-045" in row
+    assert "YAML" in row
+    assert 'plan_source.format="yaml"' in row
     assert "runtime_smoke_validate_plan" in row
     assert "runtime_smoke_run_plan" in row
     assert "missing, mixed, malformed, non-object, or path-validation failures" in row
     assert "CR-044" in lifecycle_row
     assert "plan_path" in lifecycle_row
     assert "plan_source" in lifecycle_row
+    assert "CR-045" in lifecycle_row
+    assert "YAML" in lifecycle_row
+    assert 'plan_source.format="yaml"' in lifecycle_row
     assert "plan_path input" not in remaining
     assert "plan_path input" not in lifecycle_remaining
-    assert "YAML/v3 authoring" in remaining
-    assert "YAML/v3 authoring" in lifecycle_remaining
+    assert "YAML/v3 authoring" not in remaining
+    assert "YAML/v3 authoring" not in lifecycle_remaining
+    assert "v3 authoring" in remaining
+    assert "v3 authoring" in lifecycle_remaining
 
 
 def test_issue_271_records_cleanup_and_trace_delta_slices() -> None:

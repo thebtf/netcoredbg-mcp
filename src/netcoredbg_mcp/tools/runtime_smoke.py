@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+import yaml
 from mcp.server.fastmcp import Context, FastMCP
 
 from ..response import build_error_response, build_response, extend_next_actions
@@ -796,14 +797,25 @@ async def _runtime_smoke_resolve_plan_input(
         )
 
     plan_source = _runtime_smoke_plan_source(validated_path)
+    plan_format = plan_source["format"]
     try:
-        loaded = json.loads(Path(validated_path).read_text(encoding="utf-8"))
+        plan_text = Path(validated_path).read_text(encoding="utf-8")
+        loaded = _runtime_smoke_parse_plan_text(plan_text, plan_format)
     except json.JSONDecodeError as exc:
         return (
             None,
             None,
             _runtime_smoke_plan_input_error(
                 f"plan_path JSON parse failed: {exc.msg}",
+                plan_source=plan_source,
+            ),
+        )
+    except yaml.YAMLError as exc:
+        return (
+            None,
+            None,
+            _runtime_smoke_plan_input_error(
+                f"plan_path YAML parse failed: {exc}",
                 plan_source=plan_source,
             ),
         )
@@ -830,15 +842,26 @@ async def _runtime_smoke_resolve_plan_input(
             None,
             None,
             _runtime_smoke_plan_input_error(
-                "plan_path JSON root must be an object",
+                f"plan_path {plan_format.upper()} root must be an object",
                 plan_source=plan_source,
             ),
         )
     return loaded, plan_source, None
 
 
+def _runtime_smoke_parse_plan_text(plan_text: str, plan_format: str) -> Any:
+    if plan_format == "yaml":
+        return yaml.safe_load(plan_text)
+    return json.loads(plan_text)
+
+
+def _runtime_smoke_plan_format(plan_path: str) -> str:
+    suffix = Path(plan_path).suffix.lower()
+    return "yaml" if suffix in {".yaml", ".yml"} else "json"
+
+
 def _runtime_smoke_plan_source(plan_path: str) -> dict[str, str]:
-    return {"kind": "file", "path": str(plan_path), "format": "json"}
+    return {"kind": "file", "path": str(plan_path), "format": _runtime_smoke_plan_format(plan_path)}
 
 
 def _runtime_smoke_plan_input_error(
@@ -852,7 +875,7 @@ def _runtime_smoke_plan_input_error(
         "validation_errors": [reason],
         "accepted_input": {
             "plan": "inline JSON object",
-            "plan_path": "path to a UTF-8 JSON object plan file",
+            "plan_path": "path to a UTF-8 JSON or YAML object plan file",
         },
         **schema_help_fields(None),
         "evidence_contract": _runtime_smoke_evidence_contract(),
