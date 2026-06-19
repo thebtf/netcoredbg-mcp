@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.4] - 2026-06-19
+
+### Added
+- `app_diagnostics.poll` now consumes an explicit evidence directory with a
+  file-name glob pattern such as `diagnostic-*.json`, preserving matched path,
+  observation, poll count, and timeout metadata.
+- `app_diagnostics.wait_json` now supports a bounded
+  `{jsonpath, expected}` condition contract and keeps polling until the
+  app-written diagnostic JSON reaches the requested oracle state.
+
+### Fixed
+- Directory poll candidates are revalidated through the session path policy
+  before read, preventing out-of-scope or symlinked matches from being consumed.
+- `wait_json.condition` compares JSON values type-safely, so booleans no
+  longer match numeric `0` / `1` expectations through Python equality.
+
 ## [0.18.3] - 2026-06-19
 
 ### Fixed

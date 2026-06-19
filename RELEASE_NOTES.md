@@ -1,24 +1,31 @@
-# netcoredbg-mcp v0.18.3
+# netcoredbg-mcp v0.18.4
 
 Released: 2026-06-19
 
 ## Summary
 
-`v0.18.3` is a patch release for the runtime-smoke and UI-emulation hardening
-roadmap. It publishes CR-049 after `v0.18.2`, so consumers can test resilient
-v2 runner-exception cleanup when a case cleanup adapter itself raises during
-failure finalization.
+`v0.18.4` is a patch release for the runtime-smoke and UI-emulation hardening
+roadmap. It publishes CR-050 and CR-051 after `v0.18.3`, so package consumers
+can test external app-diagnostics directory polling and wait-for-condition JSON
+oracle semantics.
 
 ## Highlights
 
-- Runtime-smoke v2 runner-exception finalization now records raised case
-  cleanup adapter exceptions as cleanup failure evidence.
-- Plan-level cleanup still runs after a raised case cleanup adapter, including
-  declared `debug.stop` and `process.registry.assert_empty` steps.
-- Cleanup adapter failures now carry exception type, message, and traceback
-  diagnostics in the evidence payload.
-- This release resolves the PR #139 MCP review follow-up without closing broad
-  issue rows `#268`, `#269`, or `#271`.
+- `app_diagnostics.poll` can now consume an explicit evidence directory with a
+  file-name glob pattern such as `diagnostic-*.json`.
+- Directory poll result metadata includes the matched path, observation state,
+  poll count, timeout, and pattern details.
+- Matched directory-poll files are revalidated through the session path policy
+  before read, preventing out-of-scope or symlinked matches from being consumed.
+- `app_diagnostics.wait_json.condition` now waits for a JSONPath value to equal
+  the requested `expected` value before returning `PASS`.
+- Unsatisfied wait-json conditions return actionable `BLOCKED` metadata with
+  the candidate observation state and condition details.
+- JSON condition matching is type-aware, so booleans no longer match numeric
+  `0` / `1` expectations through Python equality.
+- Broad issue `#272` remains open for `since` cursors, diagnostics event
+  streams, product-specific defaults, generic probe UX/v3 DSL, and full
+  app-diagnostics/oracle lifecycle closure.
 
 ## Upgrade Notes
 
@@ -27,14 +34,14 @@ failure finalization.
 - Upgrade an existing pip or pipx install with one of:
 
   ```powershell
-  python -m pip install --upgrade netcoredbg-mcp==0.18.3
+  python -m pip install --upgrade netcoredbg-mcp==0.18.4
   pipx upgrade netcoredbg-mcp
   ```
 
 - For a new workstation install:
 
   ```powershell
-  pipx install netcoredbg-mcp==0.18.3
+  pipx install netcoredbg-mcp==0.18.4
   netcoredbg-mcp --setup
   ```
 
