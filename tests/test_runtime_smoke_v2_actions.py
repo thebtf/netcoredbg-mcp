@@ -24,6 +24,18 @@ class ActionSmokeSession:
             "selectionLength": 13,
         }
         self.click_result: dict[str, Any] = {"status": "PASS", "clicked": True}
+        self.right_click_result: dict[str, Any] = {
+            "status": "PASS",
+            "clicked": True,
+            "right_clicked": True,
+            "click_kind": "right",
+        }
+        self.double_click_result: dict[str, Any] = {
+            "status": "PASS",
+            "clicked": True,
+            "double_clicked": True,
+            "click_kind": "double",
+        }
         self.property_result: dict[str, Any] = {
             "status": "PASS",
             "property": "IsSelected",
@@ -64,6 +76,14 @@ class ActionSmokeSession:
     async def click(self, selector: dict[str, Any]) -> dict[str, Any]:
         self.calls.append(("click", dict(selector)))
         return dict(self.click_result)
+
+    async def right_click(self, selector: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append(("right_click", dict(selector)))
+        return dict(self.right_click_result)
+
+    async def double_click(self, selector: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append(("double_click", dict(selector)))
+        return dict(self.double_click_result)
 
     async def get_property(
         self,
@@ -163,6 +183,8 @@ def _runner(session: ActionSmokeSession) -> RuntimeSmokeRunner:
             "ui.text.read": session.text_read,
             "ui.text.get_state": session.text_get_state,
             "ui.click": session.click,
+            "ui.right_click": session.right_click,
+            "ui.double_click": session.double_click,
             "ui.get_property": session.get_property,
             "ui.invoke": session.invoke,
             "ui.drag": session.drag,
@@ -399,6 +421,142 @@ async def test_v2_ui_click_verified_clicks_after_target_proof_and_checks_postcon
     assert action["click"]["status"] == "PASS"
     assert action["postcondition"]["verified"] is True
     assert action["postcondition"]["actual"] is True
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_right_click_verified_uses_target_proof_and_postcondition() -> None:
+    session = ActionSmokeSession()
+    session.find_result = {
+        "status": "PASS",
+        "found": True,
+        "visible": True,
+        "enabled": True,
+        "controlType": "DataGrid",
+        "automationId": "CueGrid",
+    }
+    session.focus_result = {"status": "PASS", "focused": True, "focus_within": True}
+    session.property_result = {
+        "status": "PASS",
+        "property": "IsVisible",
+        "value": True,
+        "source": "MenuPattern",
+    }
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "verified context click",
+            "cases": [
+                {
+                    "id": "open_grid_context_menu",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.right_click_verified",
+                                "selector": {"automation_id": "CueGrid"},
+                                "postcondition": {
+                                    "op": "ui.get_property",
+                                    "selector": {"automation_id": "ContextMenu"},
+                                    "property": "IsVisible",
+                                    "equals": True,
+                                },
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert result["status"] == "PASS"
+    action = result["cases"][0]["actions"][0]
+    assert "ui.right_click_verified" in result["accepted_action_kinds"]
+    assert session.calls == [
+        ("find_element", {"automation_id": "CueGrid"}),
+        ("set_focus", {"automation_id": "CueGrid"}),
+        ("right_click", {"automation_id": "CueGrid"}),
+        (
+            "get_property",
+            {
+                "selector": {"automation_id": "ContextMenu"},
+                "property": "IsVisible",
+            },
+        ),
+    ]
+    assert action["route"] == "right_click_verified"
+    assert action["target"]["verified"] is True
+    assert action["click"]["click_kind"] == "right"
+    assert action["click"]["clicked"] is True
+    assert action["postcondition"]["verified"] is True
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_double_click_verified_uses_target_proof_and_postcondition() -> None:
+    session = ActionSmokeSession()
+    session.find_result = {
+        "status": "PASS",
+        "found": True,
+        "visible": True,
+        "enabled": True,
+        "controlType": "ListItem",
+        "automationId": "OpenRecentItem",
+    }
+    session.focus_result = {"status": "PASS", "focused": True, "focus_within": True}
+    session.property_result = {
+        "status": "PASS",
+        "property": "IsSelected",
+        "value": True,
+        "source": "SelectionItemPattern",
+    }
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "verified double click",
+            "cases": [
+                {
+                    "id": "open_recent_item",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.double_click_verified",
+                                "selector": {"automation_id": "OpenRecentItem"},
+                                "postcondition": {
+                                    "op": "ui.get_property",
+                                    "selector": {"automation_id": "OpenRecentItem"},
+                                    "property": "IsSelected",
+                                    "equals": True,
+                                },
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert result["status"] == "PASS"
+    action = result["cases"][0]["actions"][0]
+    assert "ui.double_click_verified" in result["accepted_action_kinds"]
+    assert session.calls == [
+        ("find_element", {"automation_id": "OpenRecentItem"}),
+        ("set_focus", {"automation_id": "OpenRecentItem"}),
+        ("double_click", {"automation_id": "OpenRecentItem"}),
+        (
+            "get_property",
+            {
+                "selector": {"automation_id": "OpenRecentItem"},
+                "property": "IsSelected",
+            },
+        ),
+    ]
+    assert action["route"] == "double_click_verified"
+    assert action["target"]["verified"] is True
+    assert action["click"]["click_kind"] == "double"
+    assert action["click"]["clicked"] is True
+    assert action["postcondition"]["verified"] is True
 
 
 @pytest.mark.asyncio

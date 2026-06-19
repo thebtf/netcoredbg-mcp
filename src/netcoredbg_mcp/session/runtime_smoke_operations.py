@@ -442,6 +442,123 @@ def ui_operation_adapters(
                 output[key] = result[key]
         return await _settle_after_state_change(output)
 
+    async def coordinate_click_variant(
+        *,
+        args: dict[str, Any],
+        adapter_name: str,
+        backend_method_name: str,
+        click_kind: str,
+        clicked_key: str,
+    ) -> dict[str, Any]:
+        backend = await _backend_or_blocked(ensure_ui_connected)
+        if isinstance(backend, dict):
+            return backend
+        selector = _selector(args)
+        try:
+            result = await backend.find_element(**_selector_kwargs(selector))
+        except Exception as exc:
+            blocked = {"status": "BLOCKED", "reason": str(exc)}
+            if _is_selector_miss(blocked):
+                return _selector_blocked(selector, result=blocked)
+            return {
+                "status": "BLOCKED",
+                "reason": str(exc),
+                "requested": {"selector": selector},
+                "accepted": {
+                    "backend": f"connected UI backend supporting {adapter_name}",
+                },
+                "next_step": "Inspect UI backend or bridge transport diagnostics.",
+                "result": blocked,
+            }
+        if not isinstance(result, dict):
+            failed = _backend_failure_result(result, operation=adapter_name)
+            failed["selector"] = selector
+            return failed
+        if _is_selector_miss(result):
+            return _selector_blocked(selector, result=_bounded_ui_result(result))
+        if not _is_backend_success(result):
+            failed = _backend_failure_result(_bounded_ui_result(result), operation=adapter_name)
+            failed["selector"] = selector
+            return failed
+        center = _element_center(result)
+        if center is None:
+            return {
+                "status": "BLOCKED",
+                "reason": "click target rectangle unavailable",
+                "requested": {"selector": selector},
+                "accepted": {
+                    "rect": "object with x/y/width/height or left/top/right/bottom",
+                },
+                "next_step": "Return target rectangle evidence before coordinate click.",
+                "selector": selector,
+                "result": _bounded_ui_result(result),
+            }
+        click_at = getattr(backend, backend_method_name, None)
+        if not callable(click_at):
+            blocked = _adapter_blocked(
+                adapter_name,
+                f"{backend_method_name} backend capability unavailable",
+            )
+            blocked["selector"] = selector
+            return blocked
+        x, y = center
+        try:
+            click_result = click_at(x, y)
+            if asyncio.iscoroutine(click_result) or isinstance(click_result, Awaitable):
+                await click_result
+        except Exception as exc:
+            return {
+                "status": "BLOCKED",
+                "reason": str(exc),
+                "requested": {"selector": selector, "position": {"x": x, "y": y}},
+                "accepted": {
+                    "backend": f"connected UI backend supporting {backend_method_name}",
+                },
+                "next_step": "Inspect UI backend or bridge transport diagnostics.",
+                "selector": selector,
+                "result": _bounded_ui_result(result),
+            }
+        output: dict[str, Any] = {
+            "status": "PASS",
+            "clicked": True,
+            clicked_key: True,
+            "click_kind": click_kind,
+            "method": backend_method_name,
+            "selector": selector,
+            "position": {"x": x, "y": y},
+            "result": _bounded_ui_result(result),
+        }
+        for key in (
+            "automationId",
+            "automation_id",
+            "name",
+            "controlType",
+            "control_type",
+            "className",
+            "class_name",
+        ):
+            if key in result:
+                output[key] = result[key]
+        return await _settle_after_state_change(output)
+
+    async def right_click(**args: Any) -> dict[str, Any]:
+        return await coordinate_click_variant(
+            args=args,
+            adapter_name="ui.right_click",
+            backend_method_name="right_click_at",
+            click_kind="right",
+            clicked_key="right_clicked",
+        )
+
+    async def double_click(**args: Any) -> dict[str, Any]:
+        return await coordinate_click_variant(
+            args=args,
+            adapter_name="ui.double_click",
+            backend_method_name="double_click_at",
+            click_kind="double",
+            clicked_key="double_clicked",
+        )
+
     async def find_element(**args: Any) -> dict[str, Any]:
         backend = await _backend_or_blocked(ensure_ui_connected)
         if isinstance(backend, dict):
@@ -852,6 +969,8 @@ def ui_operation_adapters(
         "ui.text.set_text": text_set_text,
         "ui.get_property": get_property,
         "ui.click": click,
+        "ui.right_click": right_click,
+        "ui.double_click": double_click,
         "ui.find_element": find_element,
         "ui.set_focus": set_focus,
         "ui.send_keys_focused": send_keys_focused,
@@ -2685,6 +2804,29 @@ def _bounded_text_result(result: dict[str, Any]) -> dict[str, Any]:
 def _bounded_ui_result(result: dict[str, Any]) -> dict[str, Any]:
     unbounded_keys = {"full_tree", "raw_tree", "ui_tree", "window_tree"}
     return {key: value for key, value in result.items() if key not in unbounded_keys}
+
+
+def _element_center(result: Mapping[str, Any]) -> tuple[int, int] | None:
+    rect = result.get("rect")
+    if not isinstance(rect, Mapping):
+        return None
+    if all(key in rect for key in ("x", "y", "width", "height")):
+        try:
+            return (
+                int(float(rect["x"]) + float(rect["width"]) / 2),
+                int(float(rect["y"]) + float(rect["height"]) / 2),
+            )
+        except (TypeError, ValueError):
+            return None
+    if all(key in rect for key in ("left", "top", "right", "bottom")):
+        try:
+            return (
+                int((float(rect["left"]) + float(rect["right"])) / 2),
+                int((float(rect["top"]) + float(rect["bottom"])) / 2),
+            )
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 def _selector(args: dict[str, Any]) -> dict[str, Any]:
