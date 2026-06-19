@@ -333,20 +333,19 @@ async def _read_wait_json(
     while True:
         metadata["polls"] += 1
         try:
-            candidate = await asyncio.to_thread(
+            candidate_entry = await asyncio.to_thread(
                 _first_diagnostic_candidate,
                 path,
                 pattern,
                 since_cursor,
             )
             file_text = None
-            if candidate is not None:
+            if candidate_entry is not None:
+                candidate, cursor = candidate_entry
                 metadata["matched_path"] = str(candidate)
                 candidate = _resolve_matched_candidate_path(candidate, context)
                 metadata["matched_path"] = str(candidate)
-                metadata["cursor"] = _diagnostic_cursor_payload(
-                    _diagnostic_candidate_sort_key(candidate)
-                )
+                metadata["cursor"] = _diagnostic_cursor_payload(cursor)
                 file_text = await asyncio.to_thread(_read_file_if_present, candidate)
         except ValueError as exc:
             metadata["reason"] = "matched diagnostic JSON is outside allowed scope"
@@ -537,19 +536,23 @@ def _first_diagnostic_candidate(
     path: Path,
     pattern: str | None,
     since: tuple[int, str] | None = None,
-) -> Path | None:
+) -> tuple[Path, tuple[int, str]] | None:
     if path.is_file():
-        return path if _diagnostic_candidate_is_after(path, since) else None
+        key = _diagnostic_candidate_sort_key(path)
+        return (path, key) if _diagnostic_candidate_is_after(key, since) else None
     if not path.is_dir():
         return None
-    matches = [
-        candidate
-        for candidate in path.glob(pattern or "*.json")
-        if candidate.is_file() and _diagnostic_candidate_is_after(candidate, since)
-    ]
+    matches: list[tuple[tuple[int, str], Path]] = []
+    for candidate in path.glob(pattern or "*.json"):
+        if not candidate.is_file():
+            continue
+        key = _diagnostic_candidate_sort_key(candidate)
+        if _diagnostic_candidate_is_after(key, since):
+            matches.append((key, candidate))
     if not matches:
         return None
-    return max(matches, key=_diagnostic_candidate_sort_key)
+    key, candidate = max(matches, key=lambda item: item[0])
+    return candidate, key
 
 
 def _diagnostic_candidate_sort_key(path: Path) -> tuple[int, str]:
@@ -558,12 +561,12 @@ def _diagnostic_candidate_sort_key(path: Path) -> tuple[int, str]:
 
 
 def _diagnostic_candidate_is_after(
-    path: Path,
+    key: tuple[int, str],
     since: tuple[int, str] | None,
 ) -> bool:
     if since is None:
         return True
-    return _diagnostic_candidate_sort_key(path) > since
+    return key > since
 
 
 def _diagnostic_cursor_payload(cursor: tuple[int, str]) -> dict[str, Any]:

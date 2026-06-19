@@ -1200,6 +1200,53 @@ async def test_app_diagnostics_poll_since_blocks_when_only_old_matching_json_exi
 
 
 @pytest.mark.asyncio
+async def test_app_diagnostics_poll_since_uses_name_tiebreaker_for_equal_mtime(
+    tmp_path: Path,
+) -> None:
+    diagnostic_dir = tmp_path / "novascript-evidence"
+    diagnostic_dir.mkdir()
+    diagnostic_path = diagnostic_dir / "diagnostic-a.json"
+    diagnostic_path.write_text(
+        json.dumps(
+            _app_diagnostics(
+                app={"name": "NovaScript", "process_name": "NovaScript.Wpf"},
+                status="PASS",
+                observations=[],
+            )
+        ),
+        encoding="utf-8",
+    )
+    os.utime(diagnostic_path, ns=(1_000_000_000, 1_000_000_000))
+
+    result = await runner(ProbeSmokeSession()).run(
+        one_probe_plan(
+            _app_diagnostics(
+                phase="after",
+                app={"name": "PlaceholderApp"},
+                status="PASS",
+                observations=[],
+                poll={
+                    "path": str(diagnostic_dir),
+                    "pattern": "diagnostic-*.json",
+                    "since": {
+                        "mtime_ns": diagnostic_path.stat().st_mtime_ns,
+                        "name": "diagnostic-b.json",
+                    },
+                    "timeout_ms": 0,
+                    "poll_interval_ms": 0,
+                },
+            )
+        )
+    )
+
+    probe = after_probe(result)
+    assert result["status"] == "BLOCKED"
+    assert probe["reason"] == "diagnostic JSON not observed after since cursor"
+    assert probe["value"]["poll"]["observed"] is False
+    assert "matched_path" not in probe["value"]["poll"]
+
+
+@pytest.mark.asyncio
 async def test_app_diagnostics_poll_since_waits_for_new_matching_json_before_merging(
     tmp_path: Path,
 ) -> None:
