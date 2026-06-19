@@ -1,45 +1,44 @@
-# netcoredbg-mcp v0.18.7
+# netcoredbg-mcp v0.18.8
 
 Released: 2026-06-19
 
 ## Summary
 
-`v0.18.7` is a patch release for the runtime-smoke and UI-emulation hardening
-roadmap. It publishes CR-054 after `v0.18.6`, giving package consumers verified
-right-click and double-click flows without changing the existing
-`ui.click_verified` contract.
+`v0.18.8` is a patch release for the runtime-smoke and UI-emulation hardening
+roadmap. It publishes CR-056 after `v0.18.7`, giving package consumers
+incremental `app_diagnostics.poll` acquisition through a durable `since` cursor
+without changing existing poll calls that do not provide a cursor.
 
 ## Highlights
 
-- Runtime-smoke v2 now supports `ui.right_click_verified` and
-  `ui.double_click_verified`.
-- Runtime-smoke operation adapters now expose `ui.right_click` and
-  `ui.double_click` through the same target-proof and postcondition behavior as
-  verified primary clicks.
-- Verified click variants fail closed before side effects when selector proof
-  does not match the intended target.
-- Pywinauto fallback click-center resolution now accepts `rectangle` geometry
-  payloads as well as `rect`, preserving coordinate-click behavior on fallback
-  backends.
-- Broad issue `#270` remains open for DataGrid-specific and arbitrary click
-  variants, broader offscreen/scroll semantics, drag/drop tails, downstream
-  replay coverage, and broader helper ergonomics.
+- `app_diagnostics.poll.since` accepts `{mtime_ns, name}` cursor values that use
+  the same ordering as directory candidate selection.
+- Directory polling ignores stale or equal diagnostic JSON snapshots instead of
+  re-consuming a previous app-written `PASS` artifact.
+- Successful directory polls return a `cursor` with the matched file's
+  `mtime_ns` and `name`, so the next consumer poll can continue from that point.
+- Public `runtime_smoke_run_probe` app-diagnostics runs inherit the same
+  fail-closed stale-snapshot behavior.
+- Broad issue `#272` remains open for the remaining app-diagnostics lifecycle,
+  orchestration, and generic probe-authoring scope beyond this bounded cursor
+  slice.
 
 ## Upgrade Notes
 
 - This is a PATCH release. It preserves the `v0.18.x` public API shape and
-  expands runtime-smoke click coverage with verified secondary click variants.
+  adds optional incremental app-diagnostics polling. Existing `poll` payloads
+  without `since` keep their previous latest-matching-file behavior.
 - Upgrade an existing pip or pipx install with one of:
 
   ```powershell
-  python -m pip install --upgrade netcoredbg-mcp==0.18.7
+  python -m pip install --upgrade netcoredbg-mcp==0.18.8
   pipx upgrade netcoredbg-mcp
   ```
 
 - For a new workstation install:
 
   ```powershell
-  pipx install netcoredbg-mcp==0.18.7
+  pipx install netcoredbg-mcp==0.18.8
   netcoredbg-mcp --setup
   ```
 

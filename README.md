@@ -14,7 +14,7 @@ set breakpoints, step through code, inspect variables, evaluate expressions, rea
 debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
 and Avalonia windows without opening an IDE.
 
-**131 MCP tools · 8 prompts · 4 resources · 1642 collected tests · release v0.18.7**
+**131 MCP tools · 8 prompts · 4 resources · 1649 collected tests · release v0.18.8**
 
 ## Quick Links
 
@@ -23,17 +23,16 @@ and Avalonia windows without opening an IDE.
 - **Reference:** [Available Tools](#available-tools) · [Resources](#mcp-resources) · [Prompts](#mcp-prompts) · [Architecture](#architecture-overview)
 - **Project:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## What's New in v0.18.7
+## What's New in v0.18.8
 
-- **Verified click variants** — runtime-smoke v2 now supports
-  `ui.right_click_verified` and `ui.double_click_verified`, with matching
-  `ui.right_click` and `ui.double_click` operation adapters.
-- **Shared target proof** — right-click and double-click variants reuse the
-  existing verified-click selector proof and postcondition pipeline, so target
-  mismatches fail before side effects.
-- **Pywinauto fallback geometry** — verified click center resolution now accepts
-  pywinauto `rectangle` payloads as well as `rect`, preserving coordinate
-  clicks on fallback backends.
+- **Incremental app diagnostics** — `app_diagnostics.poll.since` accepts
+  `{mtime_ns, name}` cursors for directory polling.
+- **Stale snapshot prevention** — directory polling ignores stale or equal
+  diagnostic JSON snapshots instead of re-consuming an earlier app-written
+  `PASS` artifact.
+- **Next cursor evidence** — successful directory polls return a `cursor` with
+  the matched file's `mtime_ns` and `name` so consumers can continue from the
+  observed snapshot.
 
 ## Highlights
 
