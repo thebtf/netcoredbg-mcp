@@ -392,6 +392,47 @@ async def test_runtime_smoke_get_event_delta_returns_debug_output_source_delta(
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_get_event_delta_compacts_large_debug_output_entries(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    session.state.output_buffer = deque(
+        [
+            OutputEntry(text="x" * 500, category="stdout", sequence=2),
+        ]
+    )
+    session.state.output_sequence = 2
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor={
+            "run_id": "run-1",
+            "after_cursor": 4,
+            "sources": {
+                "debug_output": {
+                    "after_sequence": 1,
+                    "trimmed_before": 0,
+                }
+            },
+        },
+        event_limit=5,
+    )
+    data = response["data"]
+
+    assert data["status"] == "PASS"
+    assert data["source_deltas"]["debug_output"]["entries"] == [
+        {
+            "text_length": 500,
+            "category": "stdout",
+            "variables_reference": 0,
+            "sequence": 2,
+            "omitted_fields": ["text"],
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_get_event_delta_marks_debug_output_cursor_stale(
     capturing_mcp,
 ) -> None:
@@ -440,6 +481,47 @@ async def test_runtime_smoke_get_event_delta_marks_debug_output_cursor_stale(
     assert data["cursor"]["sources"]["debug_output"] == {
         "after_sequence": 4,
         "trimmed_before": 3,
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_get_event_delta_marks_cleared_debug_output_gap_stale(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    session.state.output_buffer = deque()
+    session.state.output_sequence = 3
+    session.state.output_trimmed_before = 0
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor={
+            "run_id": "run-1",
+            "after_cursor": 4,
+            "sources": {
+                "debug_output": {
+                    "after_sequence": 1,
+                    "trimmed_before": 0,
+                }
+            },
+        },
+        event_limit=5,
+    )
+    data = response["data"]
+
+    assert data["status"] == "PASS"
+    assert data["source_deltas"]["debug_output"] == {
+        "entries": [],
+        "available": 0,
+        "limit": 5,
+        "limited": False,
+        "stale_cursor": True,
+        "dropped_count": 2,
+    }
+    assert data["cursor"]["sources"]["debug_output"] == {
+        "after_sequence": 1,
+        "trimmed_before": 0,
     }
 
 

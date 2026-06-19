@@ -1678,13 +1678,18 @@ def _runtime_smoke_debug_output_delta(
     ]
     available = len(filtered_entries)
     bounded_entries = filtered_entries[:bounded_limit]
-    stale_cursor = current_trimmed_before > max(after_sequence, trimmed_before)
+    cleared_gap = available == 0 and current_sequence > after_sequence
+    stale_cursor = (
+        current_trimmed_before > max(after_sequence, trimmed_before) or cleared_gap
+    )
     dropped_count = max(0, current_trimmed_before - max(after_sequence, trimmed_before))
+    if cleared_gap:
+        dropped_count = max(dropped_count, current_sequence - after_sequence)
     if bounded_entries:
         next_after_sequence = max(
             int(getattr(entry, "sequence", 0) or 0) for entry in bounded_entries
         )
-    elif available == 0:
+    elif available == 0 and not stale_cursor:
         next_after_sequence = current_sequence
     else:
         next_after_sequence = after_sequence
@@ -1707,14 +1712,16 @@ def _runtime_smoke_debug_output_delta(
 
 
 def _runtime_smoke_output_entry_to_dict(entry: Any) -> dict[str, Any]:
-    return {
+    return compact_value(
+        {
         "text": str(getattr(entry, "text", "")),
         "category": str(getattr(entry, "category", "console") or "console"),
         "variables_reference": max(
             0, int(getattr(entry, "variables_reference", 0) or 0)
         ),
         "sequence": max(0, int(getattr(entry, "sequence", 0) or 0)),
-    }
+        }
+    )
 
 
 def _apply_runtime_smoke_agent_mode(
