@@ -14,7 +14,7 @@
 вычислять выражения, читать вывод отладки и управлять поверхностями Windows UI
 Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 
-**131 MCP-инструмент · 8 промптов · 4 ресурса · 1621 собранных тестов · релиз v0.18.5**
+**131 MCP-инструмент · 8 промптов · 4 ресурса · 1629 собранных тестов · релиз v0.18.6**
 
 ## Быстрые ссылки
 
@@ -23,17 +23,17 @@ Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 - **Справочник:** [Доступные инструменты](#доступные-инструменты) · [Ресурсы](#mcp-ресурсы) · [Промпты](#mcp-промпты) · [Архитектура](#обзор-архитектуры)
 - **Проект:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## Что нового в v0.18.5
+## Что нового в v0.18.6
 
-- **Публичный DataGrid viewport helper** — `ui_grid(action="viewport")` возвращает
-  bounded visible-row identity snapshots через существующий runtime-smoke
-  adapter `ui.grid.viewport`.
-- **Безопасная граница ожиданий** — direct viewport helper отклоняет
-  comparison-only expectations вроде `viewport_moved` или `direction`, а не
-  возвращает single-snapshot false `PASS`.
-- **Runtime-smoke маршрут сравнения сохранен** — before/after viewport checks
-  остаются в `runtime_smoke_run_probe` / `runtime_smoke_run_plan` с
-  `kind="ui.grid.viewport"`.
+- **Opt-in DataGrid row visibility** — DataGrid row select и click actions
+  теперь принимают явный `ensure_visible=True` через public `ui_grid`, legacy
+  runtime-smoke route и runtime-smoke v2 action runner.
+- **Visible-row default сохранен** — row actions по умолчанию по-прежнему
+  требуют уже видимые строки; ensure-visible включается только явно, чтобы
+  существующие сценарии оставались детерминированными.
+- **Fail-closed v2 preflight** — unsupported или invalid ensure-visible
+  preflight outcomes нормализуются в terminal failure statuses, поэтому
+  skipped row actions не могут тихо вернуться как `PASS`.
 
 ## Основные возможности
 

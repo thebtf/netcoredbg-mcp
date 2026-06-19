@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.6] - 2026-06-19
+
+### Added
+- DataGrid row select and click actions now support explicit
+  `ensure_visible=True` composition across the public `ui_grid` helper, legacy
+  runtime-smoke route, and runtime-smoke v2 action runner.
+
+### Fixed
+- Runtime-smoke v2 row actions now normalize unsupported or invalid
+  ensure-visible preflight results to terminal failure statuses, preventing
+  skipped row actions from silently reporting `PASS`.
+
 ## [0.18.5] - 2026-06-19
 
 ### Added
