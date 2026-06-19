@@ -809,6 +809,221 @@ async def test_ui_operation_adapters_click_blocks_raw_backend_failure() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ui_operation_adapters_right_click_uses_bounded_target_rect() -> None:
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.find_calls: list[dict[str, Any]] = []
+            self.right_click_at_calls: list[tuple[int, int]] = []
+
+        async def find_element(self, **kwargs: Any) -> dict[str, Any]:
+            self.find_calls.append(dict(kwargs))
+            return {
+                "status": "PASS",
+                "found": True,
+                "automationId": "CueGrid",
+                "controlType": "DataGrid",
+                "rect": {"x": 10, "y": 20, "width": 100, "height": 60},
+                "full_tree": {"must": "not leak"},
+            }
+
+        async def right_click_at(self, x: int, y: int) -> None:
+            self.right_click_at_calls.append((x, y))
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    result = await ui_operation_adapters(backend_provider)["ui.right_click"](
+        selector={"automation_id": "CueGrid"},
+    )
+
+    assert result == {
+        "status": "PASS",
+        "clicked": True,
+        "right_clicked": True,
+        "click_kind": "right",
+        "method": "right_click_at",
+        "selector": {"automation_id": "CueGrid"},
+        "position": {"x": 60, "y": 50},
+        "automationId": "CueGrid",
+        "controlType": "DataGrid",
+        "result": {
+            "status": "PASS",
+            "found": True,
+            "automationId": "CueGrid",
+            "controlType": "DataGrid",
+            "rect": {"x": 10, "y": 20, "width": 100, "height": 60},
+        },
+        "settled_ms": 500,
+    }
+    assert backend.find_calls == [
+        {
+            "automation_id": "CueGrid",
+            "name": None,
+            "control_type": None,
+            "root_id": None,
+            "xpath": None,
+        }
+    ]
+    assert backend.right_click_at_calls == [(60, 50)]
+    assert "full_tree" not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_ui_operation_adapters_double_click_uses_bounded_target_rect() -> None:
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.find_calls: list[dict[str, Any]] = []
+            self.double_click_at_calls: list[tuple[int, int]] = []
+
+        async def find_element(self, **kwargs: Any) -> dict[str, Any]:
+            self.find_calls.append(dict(kwargs))
+            return {
+                "status": "PASS",
+                "found": True,
+                "automationId": "OpenRecentItem",
+                "controlType": "ListItem",
+                "rect": {"left": 20, "top": 30, "right": 80, "bottom": 90},
+                "raw_tree": {"must": "not leak"},
+            }
+
+        async def double_click_at(self, x: int, y: int) -> None:
+            self.double_click_at_calls.append((x, y))
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    result = await ui_operation_adapters(backend_provider)["ui.double_click"](
+        selector={"automation_id": "OpenRecentItem"},
+    )
+
+    assert result == {
+        "status": "PASS",
+        "clicked": True,
+        "double_clicked": True,
+        "click_kind": "double",
+        "method": "double_click_at",
+        "selector": {"automation_id": "OpenRecentItem"},
+        "position": {"x": 50, "y": 60},
+        "automationId": "OpenRecentItem",
+        "controlType": "ListItem",
+        "result": {
+            "status": "PASS",
+            "found": True,
+            "automationId": "OpenRecentItem",
+            "controlType": "ListItem",
+            "rect": {"left": 20, "top": 30, "right": 80, "bottom": 90},
+        },
+        "settled_ms": 500,
+    }
+    assert backend.find_calls == [
+        {
+            "automation_id": "OpenRecentItem",
+            "name": None,
+            "control_type": None,
+            "root_id": None,
+            "xpath": None,
+        }
+    ]
+    assert backend.double_click_at_calls == [(50, 60)]
+    assert "raw_tree" not in repr(result)
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        ({"rect": {"x": 10, "y": 20, "width": 100, "height": 60}}, (60, 50)),
+        ({"rect": {"left": 20, "top": 30, "right": 80, "bottom": 90}}, (50, 60)),
+        ({"rectangle": {"left": 40, "top": 50, "right": 120, "bottom": 150}}, (80, 100)),
+        ({"rect": {"x": 10, "y": 20, "width": 100}}, None),
+        ({"rect": {"x": "bad", "y": 20, "width": 100, "height": 60}}, None),
+        ({}, None),
+    ],
+)
+def test_element_center_handles_supported_rect_shapes(
+    result: dict[str, Any],
+    expected: tuple[int, int] | None,
+) -> None:
+    assert smoke_ops._element_center(result) == expected
+
+
+@pytest.mark.asyncio
+async def test_ui_operation_adapters_right_click_blocks_raw_backend_failure() -> None:
+    class FakeBackend:
+        async def find_element(self, **kwargs: Any) -> str:
+            return "bridge transport unavailable"
+
+        async def right_click_at(self, x: int, y: int) -> None:
+            raise AssertionError("right_click_at should not run without target evidence")
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.right_click"](
+        selector={"automation_id": "CueGrid"},
+    )
+
+    assert result == {
+        "status": "FAIL",
+        "reason": "ui.right_click returned non-object result",
+        "result": "bridge transport unavailable",
+        "selector": {"automation_id": "CueGrid"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_ui_operation_adapters_double_click_blocks_raw_backend_failure() -> None:
+    class FakeBackend:
+        async def find_element(self, **kwargs: Any) -> str:
+            return "bridge transport unavailable"
+
+        async def double_click_at(self, x: int, y: int) -> None:
+            raise AssertionError("double_click_at should not run without target evidence")
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.double_click"](
+        selector={"automation_id": "OpenRecentItem"},
+    )
+
+    assert result == {
+        "status": "FAIL",
+        "reason": "ui.double_click returned non-object result",
+        "result": "bridge transport unavailable",
+        "selector": {"automation_id": "OpenRecentItem"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_ui_operation_adapters_right_click_maps_not_found_exception() -> None:
+    class FakeBackend:
+        async def find_element(self, **kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError("element not found: CueGrid")
+
+        async def right_click_at(self, x: int, y: int) -> None:
+            raise AssertionError("right_click_at should not run after selector miss")
+
+    async def backend_provider() -> FakeBackend:
+        return FakeBackend()
+
+    result = await ui_operation_adapters(backend_provider)["ui.right_click"](
+        selector={"automation_id": "CueGrid"},
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "selector not found"
+    assert result["requested"] == {"selector": {"automation_id": "CueGrid"}}
+    assert result["result"] == {
+        "status": "BLOCKED",
+        "reason": "element not found: CueGrid",
+    }
+
+
+@pytest.mark.asyncio
 async def test_ui_operation_adapters_click_verified_uses_production_click_adapter() -> None:
     class FakeClient:
         def __init__(self, calls: list[tuple[str, Any]]) -> None:

@@ -138,9 +138,13 @@ async def _handle_ui_input_ensure_target(
     return target
 
 
-async def _handle_ui_click_verified(
+async def _handle_verified_click_variant(
     action: dict[str, Any],
     context: ActionContext,
+    *,
+    route: str,
+    adapter: str,
+    default_reason: str,
 ) -> dict[str, Any]:
     started = context.clock()
     selector, blocked = _selector_from_action(action)
@@ -148,14 +152,14 @@ async def _handle_ui_click_verified(
         return {
             **blocked,
             "duration_ms": context.elapsed_ms(started),
-            "route": "click_verified",
+            "route": route,
         }
     postcondition, blocked = _postcondition_from_action(action, default_selector=selector)
     if blocked is not None:
         return {
             "status": "BLOCKED",
             **blocked,
-            "route": "click_verified",
+            "route": route,
             "selector": selector,
             "duration_ms": context.elapsed_ms(started),
         }
@@ -164,19 +168,19 @@ async def _handle_ui_click_verified(
         require={"visible": True, "enabled": True, "focus": True},
         context=context,
         started=started,
-        route="click_verified",
+        route=route,
     )
     if target_result.get("status") != "PASS":
-        target_result["route"] = "click_verified"
+        target_result["route"] = route
         return target_result
 
-    click_result = await context.call_adapter("ui.click", selector=selector)
+    click_result = await context.call_adapter(adapter, selector=selector)
     if not _is_adapter_success(click_result):
         failed = _adapter_failure_result(
             click_result,
-            route="click_verified",
+            route=route,
             duration_ms=context.elapsed_ms(started),
-            default_reason="failed to click verified target",
+            default_reason=default_reason,
         )
         failed["selector"] = selector
         failed["target"] = target_result["target"]
@@ -188,7 +192,7 @@ async def _handle_ui_click_verified(
         return {
             "status": "BLOCKED",
             **click_blocked,
-            "route": "click_verified",
+            "route": route,
             "selector": selector,
             "target": target_result["target"],
             "click": _bounded_result(click_result),
@@ -198,7 +202,7 @@ async def _handle_ui_click_verified(
         postcondition,
         context=context,
         started=started,
-        route="click_verified",
+        route=route,
     )
     if post_result.get("status") != "PASS":
         post_result["selector"] = selector
@@ -208,13 +212,52 @@ async def _handle_ui_click_verified(
 
     return {
         "status": "PASS",
-        "route": "click_verified",
+        "route": route,
         "selector": selector,
         "target": target_result["target"],
         "click": _bounded_result(click_result),
         "postcondition": post_result["postcondition"],
         "duration_ms": context.elapsed_ms(started),
     }
+
+
+async def _handle_ui_click_verified(
+    action: dict[str, Any],
+    context: ActionContext,
+) -> dict[str, Any]:
+    return await _handle_verified_click_variant(
+        action,
+        context,
+        route="click_verified",
+        adapter="ui.click",
+        default_reason="failed to click verified target",
+    )
+
+
+async def _handle_ui_right_click_verified(
+    action: dict[str, Any],
+    context: ActionContext,
+) -> dict[str, Any]:
+    return await _handle_verified_click_variant(
+        action,
+        context,
+        route="right_click_verified",
+        adapter="ui.right_click",
+        default_reason="failed to right-click verified target",
+    )
+
+
+async def _handle_ui_double_click_verified(
+    action: dict[str, Any],
+    context: ActionContext,
+) -> dict[str, Any]:
+    return await _handle_verified_click_variant(
+        action,
+        context,
+        route="double_click_verified",
+        adapter="ui.double_click",
+        default_reason="failed to double-click verified target",
+    )
 
 
 async def _handle_ui_grid_select(action: dict[str, Any], context: ActionContext) -> dict[str, Any]:
@@ -1133,6 +1176,8 @@ register_action("noop", _handle_noop)
 register_action("ui.noop", _handle_noop)
 register_action("ui.click", _handle_ui_click)
 register_action("ui.click_verified", _handle_ui_click_verified)
+register_action("ui.right_click_verified", _handle_ui_right_click_verified)
+register_action("ui.double_click_verified", _handle_ui_double_click_verified)
 register_action("ui.drag", handle_ui_drag)
 register_action("ui.grid.get_state", _handle_ui_grid_get_state)
 register_action("ui.grid.ensure_visible", _handle_ui_grid_ensure_visible)
