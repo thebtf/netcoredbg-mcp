@@ -425,7 +425,7 @@ def register_runtime_smoke_tools(
         tracepoint_guard: dict[str, Any] | None = None,
         agent_mode: bool = False,
     ) -> dict:
-        """Validate the v2 plan generated for a single probe without starting a run."""
+        """Validate one generated probe plan and return agent-mode run guidance."""
         try:
             plan, generated = _runtime_smoke_probe_plan(
                 probe,
@@ -1623,13 +1623,13 @@ def _apply_runtime_smoke_validate_probe_agent_mode(
     budgets: dict[str, Any] | None,
     debug_preflight: bool,
     tracepoint_guard: dict[str, Any] | None,
-) -> dict[str, Any]:
+) -> None:
     if data.get("can_run") is not True:
         data["agent_mode"] = _runtime_smoke_agent_mode_payload(
             "runtime_smoke_validate_probe",
             metrics=_runtime_smoke_agent_metrics(data),
         )
-        return data
+        return
 
     arguments: dict[str, Any] = {
         "probe": dict(probe) if isinstance(probe, dict) else probe,
@@ -1658,7 +1658,6 @@ def _apply_runtime_smoke_validate_probe_agent_mode(
         },
         metrics=_runtime_smoke_agent_metrics(data),
     )
-    return data
 
 
 def _runtime_smoke_agent_mode_payload(

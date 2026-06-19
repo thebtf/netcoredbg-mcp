@@ -248,6 +248,30 @@ async def test_runtime_smoke_validate_probe_agent_mode_returns_run_probe_request
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_validate_probe_agent_mode_invalid_probe_points_to_validation(
+    capturing_mcp,
+) -> None:
+    session = RunProbeFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_validate_probe"](
+        ctx=None,
+        probe={"kind": "ui.colorscheme", "name": "theme"},
+        agent_mode=True,
+    )
+    data = response["data"]
+    agent = data["agent_mode"]
+
+    assert data["status"] == "INVALID_SETUP"
+    assert data["can_run"] is False
+    assert data["run_created"] is False
+    assert agent["primary_next_action"] == "runtime_smoke_validate_probe"
+    assert "next_request" not in agent
+    assert "cursor" not in agent
+    assert session.runtime_smoke.lifecycle_runs.retained_run_ids() == []
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_validate_probe_advertises_app_diagnostics_launch_contract(
     capturing_mcp,
 ) -> None:
