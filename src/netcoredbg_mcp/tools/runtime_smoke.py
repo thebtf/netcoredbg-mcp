@@ -414,6 +414,51 @@ def register_runtime_smoke_tools(
         except Exception as exc:
             return build_error_response(str(exc), state=session.state.state)
 
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+    async def runtime_smoke_validate_probe(
+        ctx: Context,
+        probe: dict[str, Any],
+        name: str | None = None,
+        phase: str = "after",
+        budgets: dict[str, Any] | None = None,
+        debug_preflight: bool = False,
+        tracepoint_guard: dict[str, Any] | None = None,
+        agent_mode: bool = False,
+    ) -> dict:
+        """Validate one generated probe plan and return agent-mode run guidance."""
+        try:
+            plan, generated = _runtime_smoke_probe_plan(
+                probe,
+                name=name,
+                phase=phase,
+                budgets=budgets,
+                debug_preflight=debug_preflight,
+                tracepoint_guard=tracepoint_guard,
+            )
+            data = {
+                **validate_runtime_smoke_plan_contract(plan),
+                "run_created": False,
+                "probe": _runtime_smoke_probe_summary(probe),
+                "generated_plan": generated,
+            }
+            if agent_mode:
+                _apply_runtime_smoke_validate_probe_agent_mode(
+                    data,
+                    probe=probe,
+                    name=name,
+                    phase=phase,
+                    budgets=budgets,
+                    debug_preflight=debug_preflight,
+                    tracepoint_guard=tracepoint_guard,
+                )
+            return _build_runtime_smoke_response(
+                session,
+                data,
+                ["runtime_smoke_run_probe", "runtime_smoke_validate_plan"],
+            )
+        except Exception as exc:
+            return build_error_response(str(exc), state=session.state.state)
+
     @mcp.tool(annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
     async def runtime_smoke_run_probe(
         ctx: Context,
@@ -1567,6 +1612,52 @@ def _apply_runtime_smoke_agent_mode(
         metrics=_runtime_smoke_agent_metrics(data),
     )
     return data
+
+
+def _apply_runtime_smoke_validate_probe_agent_mode(
+    data: dict[str, Any],
+    *,
+    probe: dict[str, Any],
+    name: str | None,
+    phase: str,
+    budgets: dict[str, Any] | None,
+    debug_preflight: bool,
+    tracepoint_guard: dict[str, Any] | None,
+) -> None:
+    if data.get("can_run") is not True:
+        data["agent_mode"] = _runtime_smoke_agent_mode_payload(
+            "runtime_smoke_validate_probe",
+            metrics=_runtime_smoke_agent_metrics(data),
+        )
+        return
+
+    arguments: dict[str, Any] = {
+        "probe": dict(probe) if isinstance(probe, dict) else probe,
+        "agent_mode": True,
+    }
+    if name is not None:
+        arguments["name"] = name
+    if phase != "after":
+        arguments["phase"] = phase
+    if budgets is not None:
+        arguments["budgets"] = dict(budgets) if isinstance(budgets, dict) else budgets
+    if debug_preflight:
+        arguments["debug_preflight"] = True
+    if tracepoint_guard is not None:
+        arguments["tracepoint_guard"] = (
+            dict(tracepoint_guard)
+            if isinstance(tracepoint_guard, dict)
+            else tracepoint_guard
+        )
+
+    data["agent_mode"] = _runtime_smoke_agent_mode_payload(
+        "runtime_smoke_run_probe",
+        next_request={
+            "tool": "runtime_smoke_run_probe",
+            "arguments": arguments,
+        },
+        metrics=_runtime_smoke_agent_metrics(data),
+    )
 
 
 def _runtime_smoke_agent_mode_payload(

@@ -141,6 +141,165 @@ def _app_diagnostics_probe(*, status: str = "BLOCKED") -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_validate_probe_accepts_runnable_probe_without_starting_run(
+    capturing_mcp,
+) -> None:
+    session = RunProbeFacadeSession()
+    access_calls = _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_validate_probe"](
+        ctx=None,
+        probe={
+            "kind": "process.metric",
+            "name": "process_memory",
+            "pid": os.getpid(),
+        },
+        name="ready-probe",
+        phase="both",
+    )
+    data = response["data"]
+
+    assert data["status"] == "PASS"
+    assert data["can_run"] is True
+    assert data["run_created"] is False
+    assert data["probe"] == {
+        "kind": "process.metric",
+        "name": "process_memory",
+    }
+    assert data["generated_plan"]["schema"] == "netcoredbg.runtime_smoke.v2"
+    assert data["generated_plan"]["plan_name"] == "ready-probe"
+    assert data["generated_plan"]["case_count"] == 1
+    assert data["generated_plan"]["transition_count"] == 1
+    assert data["generated_plan"]["action_kind"] == "ui.noop"
+    assert data["generated_plan"]["probe_kind"] == "process.metric"
+    assert data["generated_plan"]["probe_phase"] == "both"
+    assert "runtime_smoke_run_probe" in response["next_actions"]
+    assert session.runtime_smoke.lifecycle_runs.active_run_ids() == []
+    assert session.runtime_smoke.lifecycle_runs.retained_run_ids() == []
+    assert session.launch_calls == 0
+    assert access_calls == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_validate_probe_rejects_unknown_probe_without_starting_run(
+    capturing_mcp,
+) -> None:
+    session = RunProbeFacadeSession()
+    access_calls = _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_validate_probe"](
+        ctx=None,
+        probe={"kind": "ui.colorscheme", "name": "theme"},
+    )
+    data = response["data"]
+
+    assert data["status"] == "INVALID_SETUP"
+    assert data["can_run"] is False
+    assert data["run_created"] is False
+    assert "ui.colorscheme" in "\n".join(data["validation_errors"])
+    assert "ui.text" in data["accepted_probe_kinds"]
+    assert "runtime_smoke_run_probe" in response["next_actions"]
+    assert session.runtime_smoke.lifecycle_runs.active_run_ids() == []
+    assert session.runtime_smoke.lifecycle_runs.retained_run_ids() == []
+    assert session.launch_calls == 0
+    assert access_calls == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_validate_probe_agent_mode_returns_run_probe_request(
+    capturing_mcp,
+) -> None:
+    session = RunProbeFacadeSession()
+    _register(capturing_mcp, session)
+    probe = {
+        "kind": "process.metric",
+        "name": "process_memory",
+        "pid": os.getpid(),
+    }
+
+    response = await capturing_mcp.tools["runtime_smoke_validate_probe"](
+        ctx=None,
+        probe=probe,
+        name="ready-probe",
+        phase="both",
+        budgets={"max_actions": 2, "max_elapsed_seconds": 7},
+        debug_preflight=True,
+        agent_mode=True,
+    )
+    data = response["data"]
+    agent = data["agent_mode"]
+
+    assert data["status"] == "PASS"
+    assert data["run_created"] is False
+    assert agent["primary_next_action"] == "runtime_smoke_run_probe"
+    assert agent["next_request"] == {
+        "tool": "runtime_smoke_run_probe",
+        "arguments": {
+            "probe": probe,
+            "name": "ready-probe",
+            "phase": "both",
+            "budgets": {"max_actions": 2, "max_elapsed_seconds": 7},
+            "debug_preflight": True,
+            "agent_mode": True,
+        },
+    }
+    assert "cursor" not in agent
+    assert session.runtime_smoke.lifecycle_runs.retained_run_ids() == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_validate_probe_agent_mode_invalid_probe_points_to_validation(
+    capturing_mcp,
+) -> None:
+    session = RunProbeFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_validate_probe"](
+        ctx=None,
+        probe={"kind": "ui.colorscheme", "name": "theme"},
+        agent_mode=True,
+    )
+    data = response["data"]
+    agent = data["agent_mode"]
+
+    assert data["status"] == "INVALID_SETUP"
+    assert data["can_run"] is False
+    assert data["run_created"] is False
+    assert agent["primary_next_action"] == "runtime_smoke_validate_probe"
+    assert "next_request" not in agent
+    assert "cursor" not in agent
+    assert session.runtime_smoke.lifecycle_runs.retained_run_ids() == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_validate_probe_advertises_app_diagnostics_launch_contract(
+    capturing_mcp,
+) -> None:
+    session = RunProbeFacadeSession()
+    access_calls = _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_validate_probe"](
+        ctx=None,
+        probe=_app_diagnostics_probe(),
+        name="app-diagnostics-probe",
+    )
+    data = response["data"]
+
+    assert data["status"] == "PASS"
+    assert data["can_run"] is True
+    assert data["run_created"] is False
+    assert data["probe"]["kind"] == "app_diagnostics"
+    assert data["generated_plan"]["probe_kind"] == "app_diagnostics"
+    assert data["generated_plan"]["diagnostic_launch"]["kind"] == "app_diagnostics"
+    assert data["generated_plan"]["diagnostic_launch"]["evidence"]["path"].endswith(
+        "app-diagnostics.json"
+    )
+    assert session.runtime_smoke.lifecycle_runs.active_run_ids() == []
+    assert session.launch_calls == 0
+    assert access_calls == []
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_run_probe_rejects_unknown_probe_without_starting_run(
     capturing_mcp,
 ) -> None:
