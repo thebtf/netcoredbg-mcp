@@ -275,6 +275,52 @@ async def test_runtime_smoke_run_plan_accepts_json_plan_path(
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_run_plan_accepts_yaml_plan_path(
+    capturing_mcp,
+    tmp_path,
+) -> None:
+    session = RunPlanFacadeSession()
+    access_calls = _register(
+        capturing_mcp,
+        session,
+        resolve_project_root=_resolve_project_root_ok,
+    )
+    plan_path = tmp_path / "runtime-smoke-plan.yml"
+    plan_path.write_text(
+        "\n".join(
+            [
+                "name: facade-run-from-yaml",
+                "actions:",
+                "  - name: output_checkpoint",
+                "    args:",
+                "      name: start",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    response = await capturing_mcp.tools["runtime_smoke_run_plan"](
+        ctx=None,
+        plan_path=str(plan_path),
+    )
+    data = response["data"]
+
+    assert data["status"] == "RUNNING"
+    assert data["run_id"]
+    assert data["plan_name"] == "facade-run-from-yaml"
+    assert data["validation"]["can_run"] is True
+    assert data["validation"]["plan_source"] == {
+        "kind": "file",
+        "path": str(plan_path),
+        "format": "yaml",
+    }
+    assert session.resolved_project_root is True
+    assert session.validated_paths == [str(plan_path)]
+    assert session.runtime_smoke.lifecycle_runs.active_run_ids() == [data["run_id"]]
+    assert len(access_calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_run_plan_rejects_missing_plan_input(
     capturing_mcp,
 ) -> None:

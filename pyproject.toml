@@ -29,6 +29,7 @@ dependencies = [
     "Pillow>=10.0; sys_platform == 'win32'",
     "jsonpath-ng>=1.8.0,<2.0.0",
     "psutil>=7.2.2,<8.0.0",
+    "pyyaml>=6.0,<7.0",
 ]
 
 [project.optional-dependencies]
