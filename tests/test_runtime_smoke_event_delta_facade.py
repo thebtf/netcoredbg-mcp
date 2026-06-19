@@ -557,23 +557,42 @@ async def test_runtime_smoke_get_event_delta_agent_mode_malformed_cursor_has_no_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "cursor",
-    [
-        "not-a-cursor",
-        {"run_id": "run-1", "after_cursor": "bad"},
-    ],
-)
-async def test_runtime_smoke_get_event_delta_agent_mode_invalid_cursor_values_fail_closed(
+async def test_runtime_smoke_get_event_delta_agent_mode_invalid_cursor_with_run_id_repairs_via_mark(
     capturing_mcp,
-    cursor,
 ) -> None:
     session = CursorFacadeSession()
     _register(capturing_mcp, session)
 
     response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
         ctx=None,
-        cursor=cursor,
+        cursor={"run_id": "run-1", "after_cursor": "bad"},
+        agent_mode=True,
+    )
+    data = response["data"]
+    agent = data["agent_mode"]
+
+    assert data["status"] == "INVALID_SETUP"
+    assert agent["primary_next_action"] == "runtime_smoke_mark_event_cursor"
+    assert agent["next_request"] == {
+        "tool": "runtime_smoke_mark_event_cursor",
+        "arguments": {
+            "run_id": "run-1",
+            "agent_mode": True,
+        },
+    }
+    assert "cursor" not in agent
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_get_event_delta_agent_mode_non_object_cursor_stays_fail_closed(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor="not-a-cursor",
         agent_mode=True,
     )
     data = response["data"]
