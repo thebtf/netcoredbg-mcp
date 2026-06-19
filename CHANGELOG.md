@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.3] - 2026-06-19
+
+### Fixed
+- Runtime-smoke v2 runner-exception finalization now records raised case
+  cleanup adapter exceptions as cleanup failure evidence and continues to
+  plan-level cleanup.
+- Plan-level cleanup declared in v2 failure plans, including `debug.stop` and
+  `process.registry.assert_empty`, remains attempted after case cleanup
+  failures so failure evidence cannot silently skip process hygiene.
+- Cleanup adapter exception evidence now includes traceback diagnostics
+  alongside exception type and message.
+
 ## [0.18.2] - 2026-06-19
 
 ### Added

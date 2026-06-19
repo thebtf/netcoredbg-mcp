@@ -1,27 +1,24 @@
-# netcoredbg-mcp v0.18.2
+# netcoredbg-mcp v0.18.3
 
 Released: 2026-06-19
 
 ## Summary
 
-`v0.18.2` is a patch release for the runtime-smoke and UI-emulation hardening
-roadmap. It publishes the CR-045 through CR-048 slices that landed after
-`v0.18.1`, so consumers can test YAML plan files, read-only probe validation,
-runner-exception cleanup evidence, and app-diagnostic freshness guardrails from
-the package instead of source `main`.
+`v0.18.3` is a patch release for the runtime-smoke and UI-emulation hardening
+roadmap. It publishes CR-049 after `v0.18.2`, so consumers can test resilient
+v2 runner-exception cleanup when a case cleanup adapter itself raises during
+failure finalization.
 
 ## Highlights
 
-- `plan_path` now accepts `.yaml` and `.yml` runtime-smoke plans in the existing
-  validation and run-plan facades.
-- Durable v2 runner exceptions now keep v2-shaped exception evidence and execute
-  declared cleanup/contamination handling.
-- `runtime_smoke_validate_probe` validates a single v2 probe without starting a
-  durable run, launching a target, claiming session ownership, or creating an
-  evidence directory.
-- App diagnostics now fail closed when an app-written `PASS` contradicts live
-  debug freshness evidence for process, module, source, workspace, or artifact
-  expectations.
+- Runtime-smoke v2 runner-exception finalization now records raised case
+  cleanup adapter exceptions as cleanup failure evidence.
+- Plan-level cleanup still runs after a raised case cleanup adapter, including
+  declared `debug.stop` and `process.registry.assert_empty` steps.
+- Cleanup adapter failures now carry exception type, message, and traceback
+  diagnostics in the evidence payload.
+- This release resolves the PR #139 MCP review follow-up without closing broad
+  issue rows `#268`, `#269`, or `#271`.
 
 ## Upgrade Notes
 
@@ -30,14 +27,14 @@ the package instead of source `main`.
 - Upgrade an existing pip or pipx install with one of:
 
   ```powershell
-  python -m pip install --upgrade netcoredbg-mcp==0.18.2
+  python -m pip install --upgrade netcoredbg-mcp==0.18.3
   pipx upgrade netcoredbg-mcp
   ```
 
 - For a new workstation install:
 
   ```powershell
-  pipx install netcoredbg-mcp==0.18.2
+  pipx install netcoredbg-mcp==0.18.3
   netcoredbg-mcp --setup
   ```
 
