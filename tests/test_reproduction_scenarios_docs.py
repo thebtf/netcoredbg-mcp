@@ -326,9 +326,11 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "mark_trace_cursor",
             "get_trace_delta",
             "CR-046",
+            "CR-048",
             "debug.stop",
             "process-registry assertion",
-            "live-target PDB/process proof",
+            "app diagnostics live-target freshness",
+            "broader diagnostics orchestration",
         ],
         "#272": [
             "app diagnostics",
@@ -337,6 +339,7 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "CR-024",
             "CR-026",
             "CR-033",
+            "CR-048",
             "DISAGREEING_SOURCES",
             "launch env/evidence-dir advertisement",
             "launch-to-artifact default acquisition",
@@ -451,6 +454,7 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "CR-020",
             "CR-042",
             "CR-046",
+            "CR-048",
             "mark_trace_cursor",
             "get_trace_delta",
             "cleanup_contract",
@@ -458,7 +462,8 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "process-registry assertion",
             "contaminated",
             "single-flight",
-            "live-target PDB/process proof",
+            "app diagnostics live-target freshness",
+            "PDB/process proof",
         ],
         "#272": [
             "commented",
@@ -469,7 +474,9 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "app_diagnostics.wait_json",
             "DISAGREEING_SOURCES",
             "CR-033",
+            "CR-048",
             "launch-to-artifact default acquisition",
+            "PDB/process proof",
         ],
     }
 
@@ -513,6 +520,26 @@ def test_issue_272_records_cr033_launch_orchestration_slice() -> None:
     assert "diagnostic_launch.evidence.path" in row
     assert "explicit `wait_json` / `poll`" in row
     assert "broader FR remains open" in row
+
+
+def test_issue_271_272_record_cr048_app_diagnostics_freshness_slice() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row_271 = _issue_row(backlog, "#271")
+    row_272 = _issue_row(backlog, "#272")
+
+    for row in (row_271, row_272):
+        assert "CR-048" in row
+        assert "app diagnostics live-target freshness" in row
+        assert "PDB/process proof" in row
+        assert "broader FR remains open" in row
+
+    _issue, _state, _evidence, remaining_271 = _issue_cells(backlog, "#271")
+    _issue, _state, _evidence, remaining_272 = _issue_cells(backlog, "#272")
+
+    assert "live-target PDB/process proof" not in remaining_271
+    assert "PDB/process proof" not in remaining_272
+    assert "broader diagnostics orchestration" in remaining_271
+    assert "broader app diagnostics lifecycle/orchestration" in remaining_272
 
 
 def test_issue_272_remaining_scope_excludes_covered_launch_contract_and_default() -> None:
@@ -638,7 +665,8 @@ def test_issue_271_records_cleanup_and_trace_delta_slices() -> None:
     assert "trace-specific cursor/delta APIs" not in remaining
     assert "trace-specific cursor/delta APIs" not in lifecycle_remaining
     assert "broader diagnostics orchestration" in remaining
-    assert "live-target PDB/process proof" in remaining
+    assert "live-target PDB/process proof" not in remaining
+    assert "freshness paths" in remaining
 
 
 def test_cr022_broad_issues_require_split_or_comment_evidence_before_closure() -> None:

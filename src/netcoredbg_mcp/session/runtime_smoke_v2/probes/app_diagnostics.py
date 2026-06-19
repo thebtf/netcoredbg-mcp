@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from ...freshness import DebugFreshnessVerifier
 from ...runtime_smoke_schema import DIAGNOSTIC_SCHEMA_VERSION
 from ..blocked import build_blocked
 from ..timing import sleep_ms
@@ -61,6 +62,12 @@ async def handle_app_diagnostics(
     }
     if acquisition is not None and acquisition_field is not None:
         value[acquisition_field] = acquisition
+    freshness = _verify_declared_freshness(probe, context)
+    if freshness is not None:
+        value["freshness"] = freshness
+        if status == "PASS" and freshness.get("status") == "FAIL":
+            status = "FAIL"
+            value["status"] = status
     limits = diagnostic_limits(probe)
     output = {
         "name": probe_name(probe, kind),
@@ -72,9 +79,142 @@ async def handle_app_diagnostics(
     if status == "BLOCKED":
         output["reason"] = "app diagnostics reported BLOCKED"
         output.update(blocked_details_from_first_observation(observations))
+    elif status == "FAIL" and freshness is not None and freshness.get("status") == "FAIL":
+        output["reason"] = "app diagnostics freshness mismatch"
     elif status == "FAIL":
         output["reason"] = "app diagnostics reported FAIL"
     return output
+
+
+def _verify_declared_freshness(probe: dict[str, Any], context: Any) -> dict[str, Any] | None:
+    expectations = _freshness_expectations(probe)
+    if expectations is None:
+        return None
+    session = getattr(getattr(context, "action_context", None), "session", None)
+    if session is None:
+        return None
+    return DebugFreshnessVerifier(session).verify(**expectations).to_dict()
+
+
+def _freshness_expectations(probe: dict[str, Any]) -> dict[str, Any] | None:
+    app = dict(probe.get("app") or {})
+    process = _object_or_empty(probe.get("process"))
+    expectations = {
+        "expected_process_id": _int_or_none(
+            app.get("process_id")
+            or app.get("expected_process_id")
+            or process.get("process_id")
+            or process.get("id")
+            or process.get("expected_process_id")
+            or process.get("expected_id")
+        ),
+        "expected_process_name": _str_or_none(
+            app.get("process_name")
+            or app.get("expected_process_name")
+            or process.get("process_name")
+            or process.get("name")
+            or process.get("expected_process_name")
+            or process.get("expected_name")
+        ),
+        "expected_workspace": _path_or_none(probe.get("workspace")),
+        "expected_sources": _string_list(
+            app.get("expected_sources")
+            or probe.get("sources")
+            or _object_or_empty(probe.get("workspace")).get("sources")
+        ),
+        "expected_modules": _string_list(
+            app.get("expected_modules") or _expected_collection(probe.get("modules"))
+        ),
+        "expected_artifacts": _string_list(_expected_collection(probe.get("artifacts"))),
+        "require_active_process": bool(
+            app.get("require_active_process")
+            or process.get("require_active_process")
+            or process.get("require_active")
+        ),
+    }
+    has_expectations = any(
+        expectations[key]
+        for key in (
+            "expected_process_id",
+            "expected_process_name",
+            "expected_workspace",
+            "expected_sources",
+            "expected_modules",
+            "expected_artifacts",
+            "require_active_process",
+        )
+    )
+    return expectations if has_expectations else None
+
+
+def _object_or_empty(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _str_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text if text else None
+
+
+def _path_or_none(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value or None
+    if isinstance(value, dict):
+        return _str_or_none(
+            value.get("path")
+            or value.get("expected")
+            or value.get("expected_path")
+            or value.get("root")
+        )
+    return None
+
+
+def _expected_collection(value: Any) -> Any:
+    if isinstance(value, dict):
+        return (
+            value.get("expected")
+            or value.get("paths")
+            or value.get("names")
+            or value.get("modules")
+            or value.get("artifacts")
+        )
+    return value
+
+
+def _string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, dict):
+        path = value.get("path") or value.get("name")
+        return [str(path)] if path else []
+    if isinstance(value, (list, tuple, set)):
+        items: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                item_value = item.get("path") or item.get("name")
+                if item_value:
+                    items.append(str(item_value))
+            elif item:
+                items.append(str(item))
+        return items
+    return []
 
 
 async def _probe_with_diagnostic_json(

@@ -251,6 +251,15 @@ def diagnostic_schema_contract() -> dict[str, Any]:
                 "default_file_name": APP_DIAGNOSTICS_DEFAULT_FILE_NAME,
                 "redacted_env_values": True,
             },
+            "freshness_contract": {
+                "app_fields": ["process_id", "process_name", "expected_modules"],
+                "top_level_fields": ["workspace", "artifacts", "process", "modules"],
+                "status_policy": {
+                    "FAIL": "force diagnostic FAIL when live target contradicts declared app",
+                    "WARN": "preserve diagnostic status and include incomplete evidence warning",
+                    "PASS": "preserve diagnostic status with freshness proof",
+                },
+            },
             "failure_modes": [
                 "stale_process",
                 "missing_artifact",
@@ -594,10 +603,40 @@ def _validate_app_diagnostics_schema(payload: dict[str, Any], errors: list[str])
         _validate_optional_status(prefix, observation.get("status"), errors)
         if observation.get("status") == "BLOCKED":
             _require_blocked_diagnostics(prefix, observation, errors)
+    _validate_app_diagnostics_freshness_shapes(payload, errors)
     if payload.get("wait_json") is not None and payload.get("poll") is not None:
         errors.append("app_diagnostics.wait_json and app_diagnostics.poll are mutually exclusive")
     _validate_wait_json_schema(payload, errors, field_name="wait_json")
     _validate_wait_json_schema(payload, errors, field_name="poll")
+
+
+def _validate_app_diagnostics_freshness_shapes(
+    payload: dict[str, Any],
+    errors: list[str],
+) -> None:
+    workspace = payload.get("workspace")
+    if workspace is not None and not isinstance(workspace, (str, dict)):
+        errors.append("app_diagnostics.workspace must be a string or object")
+    process = payload.get("process")
+    if process is not None and not isinstance(process, dict):
+        errors.append("app_diagnostics.process must be an object")
+    modules = payload.get("modules")
+    if modules is not None and not isinstance(modules, (list, dict)):
+        errors.append("app_diagnostics.modules must be a list or object")
+    artifacts = payload.get("artifacts")
+    if artifacts is not None and not isinstance(artifacts, (list, dict)):
+        errors.append("app_diagnostics.artifacts must be a list or object")
+    for field_name in ("modules", "artifacts"):
+        field = payload.get(field_name)
+        if not isinstance(field, dict):
+            continue
+        expected = field.get("expected")
+        if expected is not None and not _is_string_list(expected):
+            errors.append(f"app_diagnostics.{field_name}.expected must be a list of strings")
+
+
+def _is_string_list(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
 
 def _validate_wait_json_schema(

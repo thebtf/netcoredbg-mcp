@@ -194,6 +194,10 @@ Expected result:
   `api_key`, `password`, and `secret` are omitted before results leave the
   runtime-smoke boundary; `backend_result`, `exception`, `raw_output`, and
   `stack` are summarized.
+- App diagnostics that declare freshness expectations such as
+  `expected_process_name`, `expected_modules`, workspace artifacts, or
+  `loaded_sources` preserve module `symbolStatus` evidence so live-target PDB/process proof
+  can fail a stale `PASS` diagnostic artifact.
 - Tracepoint guardrails name `allowed_when`, `blocked_when`, `unsafe_when`, and
   cleanup ownership with `debug.tracepoint.remove` before
   instrumentation-dependent runtime behavior is added.
