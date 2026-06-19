@@ -79,7 +79,16 @@ def test_diagnostic_schema_contract_exposes_orchestration_vocabulary() -> None:
     assert "DISAGREEING_SOURCES" in contract["oracle_pack"]["failure_modes"]
     assert "wait_json" in contract["app_diagnostics"]["optional_fields"]
     assert "poll" in contract["app_diagnostics"]["optional_fields"]
+    assert contract["app_diagnostics"]["wait_json_condition_contract"] == {
+        "fields": ["jsonpath", "expected"],
+        "matching": "wait until the JSONPath value equals expected",
+        "failure_mode": "diagnostic JSON condition not satisfied",
+    }
     assert "diagnostic JSON not observed" in contract["app_diagnostics"]["failure_modes"]
+    assert (
+        "diagnostic JSON condition not satisfied"
+        in contract["app_diagnostics"]["failure_modes"]
+    )
 
 
 def test_diagnostic_schema_contract_exposes_app_diagnostics_launch_contract() -> None:
@@ -449,6 +458,9 @@ def test_app_diagnostics_schema_rejects_invalid_wait_json() -> None:
         "observations": [],
         "wait_json": {
             "path": "",
+            "condition": {
+                "jsonpath": "",
+            },
             "timeout_ms": -1,
             "poll_interval_ms": "soon",
         },
@@ -463,6 +475,8 @@ def test_app_diagnostics_schema_rejects_invalid_wait_json() -> None:
     errors = validate_diagnostic_schema_example(payload, kind="app_diagnostics")
 
     assert "app_diagnostics.wait_json.path is required" in errors
+    assert "app_diagnostics.wait_json.condition.jsonpath is required" in errors
+    assert "app_diagnostics.wait_json.condition.expected is required" in errors
     assert "app_diagnostics.wait_json.timeout_ms must be >= 0" in errors
     assert "app_diagnostics.wait_json.poll_interval_ms must be an integer" in errors
 
@@ -480,6 +494,7 @@ def test_app_diagnostics_schema_rejects_invalid_poll() -> None:
         "poll": {
             "path": "",
             "pattern": "nested/diagnostic-*.json",
+            "condition": {"jsonpath": "$.status", "expected": "PASS"},
             "timeout_ms": -1,
             "poll_interval_ms": "soon",
         },
@@ -495,6 +510,7 @@ def test_app_diagnostics_schema_rejects_invalid_poll() -> None:
 
     assert "app_diagnostics.poll.path is required" in errors
     assert "app_diagnostics.poll.pattern must be a file-name pattern" in errors
+    assert "app_diagnostics.poll.condition is not accepted" in errors
     assert "app_diagnostics.poll.timeout_ms must be >= 0" in errors
     assert "app_diagnostics.poll.poll_interval_ms must be an integer" in errors
 

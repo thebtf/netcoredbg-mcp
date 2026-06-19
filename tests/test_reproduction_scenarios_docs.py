@@ -340,9 +340,13 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "CR-026",
             "CR-033",
             "CR-048",
+            "CR-050",
+            "CR-051",
             "DISAGREEING_SOURCES",
             "launch env/evidence-dir advertisement",
             "launch-to-artifact default acquisition",
+            "evidence-directory poll",
+            "wait-json condition semantics",
             "remaining broader app diagnostics lifecycle/orchestration",
         ],
     }
@@ -475,8 +479,11 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "DISAGREEING_SOURCES",
             "CR-033",
             "CR-048",
+            "CR-050",
+            "CR-051",
             "launch-to-artifact default acquisition",
             "PDB/process proof",
+            "wait_json.condition",
         ],
     }
 
@@ -522,6 +529,27 @@ def test_issue_272_records_cr033_launch_orchestration_slice() -> None:
     assert "broader FR remains open" in row
 
 
+def test_issue_272_records_cr050_cr051_app_diagnostics_source_slices() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#272")
+    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#272")
+    _issue, _state, _evidence, remaining = _issue_cells(backlog, "#272")
+
+    for text in (row, lifecycle_row):
+        assert "CR-050" in text
+        assert "CR-051" in text
+        assert "evidence-directory" in text
+        assert "file-name pattern" in text or "poll pattern" in text
+        assert "matched-candidate revalidation" in text or "matched-file revalidation" in text
+        assert "wait_json.condition" in text
+        assert "JSONPath equality" in text or "JSONPath equality waiting" in text
+
+    assert "beyond launch-to-artifact default acquisition" in remaining
+    assert "directory poll" in remaining
+    assert "wait-json condition semantics" in remaining
+    assert "broader app diagnostics lifecycle/orchestration" in remaining
+
+
 def test_issue_271_272_record_cr048_app_diagnostics_freshness_slice() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
     row_271 = _issue_row(backlog, "#271")
@@ -554,11 +582,15 @@ def test_issue_272_remaining_scope_excludes_covered_launch_contract_and_default(
     assert "launch env/evidence-dir advertisement" not in remaining
     assert "app diagnostics orchestration beyond local-file acquisition" not in remaining
     assert "launch-to-artifact default acquisition" in remaining
+    assert "directory poll" in remaining
     assert "broader app diagnostics lifecycle/orchestration" in remaining
+    assert "wait-json condition semantics" in remaining
     assert "diagnostic env/evidence-dir advertisement" not in lifecycle_remaining
     assert "launch env/evidence-dir advertisement" not in lifecycle_remaining
     assert "app diagnostics orchestration beyond local-file acquisition" not in lifecycle_remaining
     assert "launch-to-artifact default acquisition" in lifecycle_remaining
+    assert "directory poll" in lifecycle_remaining
+    assert "wait-json condition semantics" in lifecycle_remaining
 
 
 def test_issue_268_records_plan_path_slices() -> None:

@@ -304,6 +304,7 @@ async def _read_wait_json(
     raw_path = str(wait_json.get("path") or "")
     timeout_ms = _bounded_int(wait_json.get("timeout_ms"), default=0)
     poll_interval_ms = _bounded_int(wait_json.get("poll_interval_ms"), default=50)
+    condition = _diagnostic_condition(wait_json)
     metadata: dict[str, Any] = {
         "path": raw_path,
         "observed": False,
@@ -352,6 +353,33 @@ async def _read_wait_json(
                 metadata["error"] = str(exc)
             else:
                 if isinstance(payload, dict):
+                    condition_result = _evaluate_diagnostic_condition(payload, condition)
+                    if condition_result is not None:
+                        metadata["candidate_observed"] = True
+                        metadata["condition"] = condition_result
+                        if not condition_result["matched"]:
+                            metadata["reason"] = (
+                                "diagnostic JSON condition not satisfied"
+                            )
+                            metadata.pop("error", None)
+                            if condition_result.get("error"):
+                                metadata["error"] = condition_result["error"]
+                            if condition_result.get("terminal"):
+                                break
+                            if clock() < deadline:
+                                await sleep_ms(
+                                    clock,
+                                    _poll_sleep_ms(
+                                        timeout_ms=timeout_ms,
+                                        poll_interval_ms=poll_interval_ms,
+                                        remaining_ms=max(
+                                            1,
+                                            int((deadline - clock()) * 1000),
+                                        ),
+                                    ),
+                                )
+                                continue
+                            break
                     metadata["observed"] = True
                     metadata.pop("reason", None)
                     metadata.pop("error", None)
@@ -400,6 +428,62 @@ def _diagnostic_pattern(source: dict[str, Any]) -> str | None:
     if isinstance(pattern, str) and pattern:
         return pattern
     return None
+
+
+def _diagnostic_condition(source: dict[str, Any]) -> dict[str, Any] | None:
+    condition = source.get("condition")
+    return condition if isinstance(condition, dict) else None
+
+
+def _evaluate_diagnostic_condition(
+    payload: dict[str, Any],
+    condition: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if condition is None:
+        return None
+    jsonpath = str(condition.get("jsonpath") or "")
+    expected = condition.get("expected")
+    result: dict[str, Any] = {
+        "jsonpath": jsonpath,
+        "expected": expected,
+    }
+    try:
+        value = _diagnostic_jsonpath_value(payload, jsonpath)
+    except (ImportError, ValueError) as exc:
+        result.update(
+            {
+                "value": None,
+                "matched": False,
+                "error": str(exc),
+                "terminal": True,
+            }
+        )
+        return result
+    result["value"] = value
+    result["matched"] = value == expected
+    return result
+
+
+def _diagnostic_jsonpath_value(payload: dict[str, Any], jsonpath: str) -> Any:
+    if not jsonpath:
+        raise ValueError("condition jsonpath is required")
+    try:
+        from jsonpath_ng import parse  # type: ignore[import-untyped]
+        from jsonpath_ng.exceptions import (  # type: ignore[import-untyped]
+            JsonPathLexerError,
+            JsonPathParserError,
+        )
+    except ImportError as exc:
+        raise ImportError("jsonpath-ng is not installed") from exc
+    try:
+        matches = [match.value for match in parse(jsonpath).find(payload)]
+    except (JsonPathLexerError, JsonPathParserError) as exc:
+        raise ValueError(f"condition jsonpath evaluation failed: {exc}") from exc
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+    return matches
 
 
 def _first_diagnostic_candidate(path: Path, pattern: str | None) -> Path | None:

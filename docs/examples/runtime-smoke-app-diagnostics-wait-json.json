@@ -11,6 +11,10 @@
   "observations": [],
   "wait_json": {
     "path": ".agent/runtime-smoke/app-diagnostics.json",
+    "condition": {
+      "jsonpath": "$.status",
+      "expected": "PASS"
+    },
     "timeout_ms": 5000,
     "poll_interval_ms": 100
   },

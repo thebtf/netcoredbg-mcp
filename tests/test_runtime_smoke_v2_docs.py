@@ -550,6 +550,10 @@ def test_app_diagnostics_wait_json_example_remains_schema_compatible() -> None:
 
     assert validate_diagnostic_schema_example(payload, kind="app_diagnostics") == []
     assert payload["wait_json"]["path"] == ".agent/runtime-smoke/app-diagnostics.json"
+    assert payload["wait_json"]["condition"] == {
+        "jsonpath": "$.status",
+        "expected": "PASS",
+    }
     assert payload["wait_json"]["timeout_ms"] == 5000
     assert payload["wait_json"]["poll_interval_ms"] == 100
     assert payload["observations"] == []
