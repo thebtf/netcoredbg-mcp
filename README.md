@@ -14,7 +14,7 @@ set breakpoints, step through code, inspect variables, evaluate expressions, rea
 debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
 and Avalonia windows without opening an IDE.
 
-**131 MCP tools · 8 prompts · 4 resources · 1611 collected tests · release v0.18.3**
+**131 MCP tools · 8 prompts · 4 resources · 1618 collected tests · release v0.18.4**
 
 ## Quick Links
 
@@ -23,20 +23,18 @@ and Avalonia windows without opening an IDE.
 - **Reference:** [Available Tools](#available-tools) · [Resources](#mcp-resources) · [Prompts](#mcp-prompts) · [Architecture](#architecture-overview)
 - **Project:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## What's New in v0.18.3
+## What's New in v0.18.4
 
-- **Resilient failure cleanup** — runtime-smoke v2 runner-exception
-  finalization records raised case cleanup adapters as cleanup failures and
-  still continues to plan-level cleanup.
-- **Plan-level cleanup proof** — declared `debug.stop` and
-  `process.registry.assert_empty` cleanup steps remain attempted after case
-  cleanup failures, so failure evidence shows whether debuggee/process hygiene
-  actually ran.
-- **Cleanup exception diagnostics** — cleanup adapter failures now include
-  exception type, message, and traceback diagnostics in the evidence payload.
-- **Review-debt closure** — this release ships the PR #139 MCP review follow-up
-  while broad issue rows `#268`, `#269`, and `#271` remain open for later
-  roadmap slices.
+- **External app diagnostics directories** — `app_diagnostics.poll` can consume
+  an explicit evidence directory with a file-name glob such as
+  `diagnostic-*.json`.
+- **Wait-for-oracle conditions** — `app_diagnostics.wait_json.condition` waits
+  for a JSONPath value to equal the requested `expected` value before returning
+  `PASS`.
+- **Safer diagnostic reads** — matched directory-poll candidates are
+  revalidated through the session path policy before being read.
+- **Type-aware JSON comparison** — condition matching no longer treats
+  booleans as numeric `0` / `1` values.
 
 ## Highlights
 

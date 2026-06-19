@@ -14,7 +14,7 @@
 вычислять выражения, читать вывод отладки и управлять поверхностями Windows UI
 Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 
-**131 MCP-инструмент · 8 промптов · 4 ресурса · 1611 собранных тестов · релиз v0.18.3**
+**131 MCP-инструмент · 8 промптов · 4 ресурса · 1618 собранных тестов · релиз v0.18.4**
 
 ## Быстрые ссылки
 
@@ -23,20 +23,18 @@ Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 - **Справочник:** [Доступные инструменты](#доступные-инструменты) · [Ресурсы](#mcp-ресурсы) · [Промпты](#mcp-промпты) · [Архитектура](#обзор-архитектуры)
 - **Проект:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## Что нового в v0.18.3
+## Что нового в v0.18.4
 
-- **Устойчивая cleanup-финализация** — runtime-smoke v2 runner-exception
-  finalization записывает raised case cleanup adapters как cleanup failures и
-  продолжает plan-level cleanup.
-- **Проверяемый plan-level cleanup** — объявленные шаги `debug.stop` и
-  `process.registry.assert_empty` остаются attempted даже после case cleanup
-  failures, поэтому failure evidence показывает, запускалась ли очистка
-  debuggee/process registry.
-- **Диагностика cleanup exceptions** — cleanup adapter failures теперь несут
-  exception type, message и traceback diagnostics в evidence payload.
-- **Закрытие review debt** — релиз публикует follow-up к MCP review PR #139;
-  широкие issue rows `#268`, `#269` и `#271` остаются открытыми для следующих
-  roadmap slices.
+- **Внешние директории app diagnostics** — `app_diagnostics.poll` теперь может
+  читать явную evidence-директорию с file-name glob вроде
+  `diagnostic-*.json`.
+- **Ожидание oracle-условия** — `app_diagnostics.wait_json.condition` ждет,
+  пока значение по JSONPath станет равно ожидаемому `expected`, и только после
+  этого возвращает `PASS`.
+- **Безопасное чтение diagnostics** — найденные directory-poll кандидаты перед
+  чтением повторно проверяются через session path policy.
+- **Type-aware JSON comparison** — condition matching больше не считает
+  booleans числовыми значениями `0` / `1`.
 
 ## Основные возможности
 
