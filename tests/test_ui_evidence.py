@@ -2802,6 +2802,58 @@ async def test_ui_grid_viewport_forwards_expect_to_selected_payload_evidence(
 
 
 @pytest.mark.asyncio
+async def test_ui_grid_viewport_rejects_direct_comparison_expectations(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+
+    def fail_if_backend_created(**_kwargs: Any) -> Any:
+        raise AssertionError("backend should not be created for unsupported viewport expectations")
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", fail_if_backend_created)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_grid"](
+        ctx=None,
+        action="viewport",
+        automation_id="CueGrid",
+        identity={"column": "PhraseId"},
+        expect={
+            "selected_payload_preserved": True,
+            "viewport_moved": True,
+            "direction": "down",
+        },
+        phase="after",
+        probe_name="cue_viewport",
+    )
+
+    assert response["data"]["status"] == "FAIL"
+    assert response["data"]["reason"] == (
+        "unsupported viewport expectations for direct ui_grid helper"
+    )
+    assert response["data"]["requested_action"] == "viewport"
+    assert response["data"]["canonical_action"] == "viewport"
+    assert response["data"]["requested"]["unsupported_expectations"] == [
+        "direction",
+        "viewport_moved",
+    ]
+    assert response["data"]["accepted"]["direct_expectations"] == [
+        "selected_payload_preserved",
+    ]
+    assert response["data"]["accepted"]["comparison_route"] == (
+        "runtime_smoke_run_probe ui.grid.viewport"
+    )
+    assert "before/after comparison expectations" in response["data"]["next_step"]
+
+
+@pytest.mark.asyncio
 async def test_ui_grid_identity_is_forwarded_to_state_select_and_click(
     capturing_mcp,
     monkeypatch,

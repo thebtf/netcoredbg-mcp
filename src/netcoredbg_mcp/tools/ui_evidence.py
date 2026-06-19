@@ -73,6 +73,7 @@ _GRID_ACCEPTED_ACTIONS = (
     "get_state",
     "state",
 )
+_GRID_VIEWPORT_DIRECT_EXPECTATIONS = ("selected_payload_preserved",)
 _FOCUS_READ_ACTIONS = ("assert",)
 _TEXT_ACTION_ALIASES = {"state": "get_state"}
 _TEXT_ACTIONS = ("read", "get_state", "state", "assert_selection", "set_text")
@@ -87,6 +88,13 @@ _PROPERTY_KEY_ALIASES = {
     "classname": "className",
     "class_name": "className",
 }
+
+
+def _unsupported_direct_viewport_expectations(expect: dict[str, Any] | None) -> list[str]:
+    if not expect:
+        return []
+    accepted = set(_GRID_VIEWPORT_DIRECT_EXPECTATIONS)
+    return sorted(str(key) for key in expect if key not in accepted)
 
 
 def register_ui_evidence_tools(
@@ -492,6 +500,29 @@ def register_ui_evidence_tools(
                 )
 
             if canonical_action == "viewport":
+                unsupported_expectations = _unsupported_direct_viewport_expectations(expect)
+                if unsupported_expectations:
+                    return build_response(
+                        data={
+                            "status": "FAIL",
+                            "reason": "unsupported viewport expectations for direct ui_grid helper",
+                            "requested_action": action,
+                            "canonical_action": canonical_action,
+                            "requested": {
+                                "expect": dict(expect or {}),
+                                "unsupported_expectations": unsupported_expectations,
+                            },
+                            "accepted": {
+                                "direct_expectations": list(_GRID_VIEWPORT_DIRECT_EXPECTATIONS),
+                                "comparison_route": "runtime_smoke_run_probe ui.grid.viewport",
+                            },
+                            "next_step": (
+                                "Use runtime_smoke_run_probe or runtime_smoke_run_plan with "
+                                "kind='ui.grid.viewport' for before/after comparison expectations."
+                            ),
+                        },
+                        state=session.state.state,
+                    )
                 result = await ui_operation_adapters(_ensure_ui_connected)["ui.grid.viewport"](
                     selector=selector,
                     rows=rows,
