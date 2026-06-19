@@ -498,11 +498,19 @@ def register_runtime_smoke_tools(
                     "generated_plan": generated,
                 }
                 if agent_mode:
-                    _apply_runtime_smoke_agent_mode(data, "runtime_smoke_run_plan")
+                    _apply_runtime_smoke_validate_probe_agent_mode(
+                        data,
+                        probe=probe,
+                        name=name,
+                        phase=phase,
+                        budgets=budgets,
+                        debug_preflight=debug_preflight,
+                        tracepoint_guard=tracepoint_guard,
+                    )
                 return _build_runtime_smoke_response(
                     session,
                     data,
-                    ["runtime_smoke_validate_plan", "runtime_smoke_run_probe"],
+                    ["runtime_smoke_validate_probe", "runtime_smoke_validate_plan"],
                 )
 
             data = await session.runtime_smoke.lifecycle_runs.start(plan, _runner)
