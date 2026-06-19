@@ -601,6 +601,7 @@ def register_runtime_smoke_tools(
         ctx: Context,
         run_id: str,
         agent_mode: bool = False,
+        include_debug_output: bool = False,
     ) -> dict:
         """Return a compact cursor token for the current durable run event position."""
         try:
@@ -610,6 +611,8 @@ def register_runtime_smoke_tools(
             data = await _runtime_smoke_mark_event_cursor(
                 session.runtime_smoke.lifecycle_runs,
                 run_id,
+                session_state=session.state,
+                include_debug_output=include_debug_output,
             )
             if agent_mode:
                 _apply_runtime_smoke_agent_mode(data, "runtime_smoke_get_event_delta")
@@ -637,6 +640,7 @@ def register_runtime_smoke_tools(
                 session.runtime_smoke.lifecycle_runs,
                 cursor,
                 event_limit=event_limit,
+                session_state=session.state,
             )
             if agent_mode:
                 _apply_runtime_smoke_agent_mode(data, "runtime_smoke_get_event_delta")
@@ -1333,7 +1337,13 @@ def _runtime_smoke_wait_with_next_actions(
     return {**data, "next_actions": actions}
 
 
-async def _runtime_smoke_mark_event_cursor(registry: Any, run_id: str) -> dict[str, Any]:
+async def _runtime_smoke_mark_event_cursor(
+    registry: Any,
+    run_id: str,
+    *,
+    session_state: Any | None = None,
+    include_debug_output: bool = False,
+) -> dict[str, Any]:
     tail = await registry.tail_events(run_id, after_cursor=0, limit=0)
     if _runtime_smoke_tail_missing(tail):
         return _runtime_smoke_missing_event_delta(run_id, 0, tail, limit=0)
@@ -1344,6 +1354,8 @@ async def _runtime_smoke_mark_event_cursor(registry: Any, run_id: str) -> dict[s
         after_cursor=next_cursor,
         tail=tail,
     )
+    if include_debug_output:
+        _runtime_smoke_attach_debug_output_cursor(cursor, session_state)
     return {
         "status": "PASS",
         "reason": "runtime smoke event cursor marked",
@@ -1363,12 +1375,21 @@ async def _runtime_smoke_get_event_delta(
     cursor: dict[str, Any],
     *,
     event_limit: int = 50,
+    session_state: Any | None = None,
 ) -> dict[str, Any]:
     if not isinstance(cursor, dict):
         return _runtime_smoke_invalid_event_delta(
             "cursor token must be an object",
             after_cursor=0,
             limit=event_limit,
+        )
+    parsed_debug_output_cursor = _runtime_smoke_parse_debug_output_source_cursor(cursor)
+    if parsed_debug_output_cursor is False:
+        return _runtime_smoke_invalid_event_delta(
+            "cursor token debug_output cursor is invalid",
+            after_cursor=0,
+            limit=event_limit,
+            run_id=str(cursor.get("run_id") or ""),
         )
 
     parsed_after_cursor = _runtime_smoke_parse_nonnegative_int(
@@ -1410,6 +1431,21 @@ async def _runtime_smoke_get_event_delta(
         return _runtime_smoke_missing_event_delta(run_id, after_cursor, tail, limit=limit)
 
     continuation_cursor = _runtime_smoke_tail_continuation_cursor(tail, after_cursor)
+    next_cursor = _runtime_smoke_cursor_token(
+        run_id,
+        after_cursor=continuation_cursor,
+        tail=tail,
+    )
+    source_deltas: dict[str, Any] = {}
+    if parsed_debug_output_cursor is not None:
+        debug_output_delta, debug_output_cursor = _runtime_smoke_debug_output_delta(
+            session_state,
+            after_sequence=parsed_debug_output_cursor["after_sequence"],
+            trimmed_before=parsed_debug_output_cursor["trimmed_before"],
+            limit=limit,
+        )
+        source_deltas["debug_output"] = debug_output_delta
+        next_cursor["sources"] = {"debug_output": debug_output_cursor}
     return {
         "status": "PASS",
         "reason": "runtime smoke event delta read",
@@ -1420,11 +1456,7 @@ async def _runtime_smoke_get_event_delta(
             tail=tail,
             limit=limit,
         ),
-        "cursor": _runtime_smoke_cursor_token(
-            run_id,
-            after_cursor=continuation_cursor,
-            tail=tail,
-        ),
+        "cursor": next_cursor,
         "final": bool(tail.get("final")),
         "next_actions": [
             "runtime_smoke_get_event_delta",
@@ -1432,6 +1464,7 @@ async def _runtime_smoke_get_event_delta(
             "runtime_smoke_evidence_bundle",
             "runtime_smoke_tail_events",
         ],
+        **({"source_deltas": source_deltas} if source_deltas else {}),
     }
 
 
@@ -1560,6 +1593,127 @@ def _runtime_smoke_cursor_token(
         "oldest_cursor": tail.get("oldest_cursor"),
         "dropped_count": tail.get("dropped_count", 0),
         "stale_cursor": tail.get("stale_cursor", False),
+    }
+
+
+def _runtime_smoke_attach_debug_output_cursor(
+    cursor: dict[str, Any],
+    session_state: Any | None,
+) -> None:
+    debug_output_cursor = _runtime_smoke_current_debug_output_cursor(session_state)
+    if debug_output_cursor is None:
+        return
+    sources = dict(cursor.get("sources") or {})
+    sources["debug_output"] = debug_output_cursor
+    cursor["sources"] = sources
+
+
+def _runtime_smoke_current_debug_output_cursor(
+    session_state: Any | None,
+) -> dict[str, int] | None:
+    if session_state is None:
+        return None
+    return {
+        "after_sequence": max(0, int(getattr(session_state, "output_sequence", 0) or 0)),
+        "trimmed_before": max(
+            0, int(getattr(session_state, "output_trimmed_before", 0) or 0)
+        ),
+    }
+
+
+def _runtime_smoke_parse_debug_output_source_cursor(
+    cursor: dict[str, Any],
+) -> dict[str, int] | None | bool:
+    sources = cursor.get("sources")
+    if sources is None:
+        return None
+    if not isinstance(sources, dict):
+        return False
+    debug_output = sources.get("debug_output")
+    if debug_output is None:
+        return None
+    if not isinstance(debug_output, dict):
+        return False
+    after_sequence = _runtime_smoke_parse_nonnegative_int(
+        debug_output.get("after_sequence")
+    )
+    trimmed_before = _runtime_smoke_parse_nonnegative_int(
+        debug_output.get("trimmed_before")
+    )
+    if after_sequence is None or trimmed_before is None:
+        return False
+    return {
+        "after_sequence": after_sequence,
+        "trimmed_before": trimmed_before,
+    }
+
+
+def _runtime_smoke_debug_output_delta(
+    session_state: Any | None,
+    *,
+    after_sequence: int,
+    trimmed_before: int,
+    limit: int,
+) -> tuple[dict[str, Any], dict[str, int]]:
+    entries = (
+        list(getattr(session_state, "output_buffer", []))
+        if session_state is not None
+        else []
+    )
+    current_sequence = (
+        max(0, int(getattr(session_state, "output_sequence", 0) or 0))
+        if session_state is not None
+        else 0
+    )
+    current_trimmed_before = (
+        max(0, int(getattr(session_state, "output_trimmed_before", 0) or 0))
+        if session_state is not None
+        else 0
+    )
+    bounded_limit = max(0, int(limit))
+    filtered_entries = [
+        entry
+        for entry in entries
+        if int(getattr(entry, "sequence", 0) or 0) > after_sequence
+    ]
+    available = len(filtered_entries)
+    bounded_entries = filtered_entries[:bounded_limit]
+    stale_cursor = current_trimmed_before > max(after_sequence, trimmed_before)
+    dropped_count = max(0, current_trimmed_before - max(after_sequence, trimmed_before))
+    if bounded_entries:
+        next_after_sequence = max(
+            int(getattr(entry, "sequence", 0) or 0) for entry in bounded_entries
+        )
+    elif available == 0:
+        next_after_sequence = current_sequence
+    else:
+        next_after_sequence = after_sequence
+    return (
+        {
+            "entries": [
+                _runtime_smoke_output_entry_to_dict(entry) for entry in bounded_entries
+            ],
+            "available": available,
+            "limit": bounded_limit,
+            "limited": available > bounded_limit,
+            "stale_cursor": stale_cursor,
+            "dropped_count": dropped_count,
+        },
+        {
+            "after_sequence": max(0, int(next_after_sequence)),
+            "trimmed_before": current_trimmed_before,
+        },
+    )
+
+
+def _runtime_smoke_output_entry_to_dict(entry: Any) -> dict[str, Any]:
+    return {
+        "text": str(getattr(entry, "text", "")),
+        "category": str(getattr(entry, "category", "console") or "console"),
+        "variables_reference": max(
+            0, int(getattr(entry, "variables_reference", 0) or 0)
+        ),
+        "sequence": max(0, int(getattr(entry, "sequence", 0) or 0)),
     }
 
 
