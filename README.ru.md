@@ -14,7 +14,7 @@
 вычислять выражения, читать вывод отладки и управлять поверхностями Windows UI
 Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 
-**130 MCP-инструментов · 8 промптов · 4 ресурса · 1588 собранных тестов · релиз v0.18.1**
+**131 MCP-инструмент · 8 промптов · 4 ресурса · 1610 собранных тестов · релиз v0.18.2**
 
 ## Быстрые ссылки
 
@@ -23,19 +23,20 @@ Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 - **Справочник:** [Доступные инструменты](#доступные-инструменты) · [Ресурсы](#mcp-ресурсы) · [Промпты](#mcp-промпты) · [Архитектура](#обзор-архитектуры)
 - **Проект:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## Что нового в v0.18.1
+## Что нового в v0.18.2
 
-- **Read-only plan validation** — runtime-smoke `plan_path` validation больше
-  не захватывает mux ownership, когда вызывающему нужна только validation
-  evidence.
-- **Session scope safety** — validation-only проверки планов сохраняют
-  `session.project_path`, так что наблюдатели не могут незаметно сменить target
-  активной debug session.
-- **Worktree-aware path checks** — project path validation кеширует worktree
-  lookup по переданному project root, избегая stale decisions между worktree и
-  plan-file scopes.
-- **Patch delivery** — релиз публикует follow-up fixes из PR #134/#135/#136,
-  которые попали в `main` после UI emulation milestone `v0.18.0`.
+- **YAML runtime-smoke plans** — `plan_path` теперь принимает `.yaml` и `.yml`
+  в существующих validation и run-plan facades, при этом JSON остается
+  стандартным форматом.
+- **Runner exception cleanup proof** — durable v2 runner exceptions теперь
+  возвращают v2-shaped exception evidence и выполняют declared
+  cleanup/contamination handling вместо непрозрачного legacy teardown.
+- **Read-only probe validation** — `runtime_smoke_validate_probe` валидирует
+  один v2 probe без durable run, target launch, session ownership claim или
+  записи evidence directory.
+- **App diagnostic freshness** — app-written diagnostic `PASS` сверяется с live
+  debug freshness expectations для process, module, source, workspace и
+  artifact evidence до того, как результат считается валидным.
 
 ## Основные возможности
 

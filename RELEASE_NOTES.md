@@ -1,52 +1,55 @@
-# netcoredbg-mcp v0.18.1
+# netcoredbg-mcp v0.18.2
 
 Released: 2026-06-19
 
 ## Summary
 
-`v0.18.1` is a patch release for the UI emulation and runtime-smoke hardening
-milestone. It ships the CR-044 review follow-ups merged after `v0.18.0`, so the
-published package and this workstation receive the same read-only validation and
-worktree-scope fixes already present on `main`.
+`v0.18.2` is a patch release for the runtime-smoke and UI-emulation hardening
+roadmap. It publishes the CR-045 through CR-048 slices that landed after
+`v0.18.1`, so consumers can test YAML plan files, read-only probe validation,
+runner-exception cleanup evidence, and app-diagnostic freshness guardrails from
+the package instead of source `main`.
 
 ## Highlights
 
-- Runtime-smoke `plan_path` validation no longer acquires mux ownership for
-  read-only validation calls.
-- Read-only validation no longer mutates `session.project_path`, preserving the
-  active debug session target while observers inspect plans.
-- Worktree lookup caching in project path validation is scoped by the supplied
-  project root, avoiding stale decisions across worktrees or plan-file scopes.
-- Broad issue-backlog work remains open; this patch only publishes the bounded
-  CR-044 follow-up fixes already merged through PR #134, PR #135, and PR #136.
+- `plan_path` now accepts `.yaml` and `.yml` runtime-smoke plans in the existing
+  validation and run-plan facades.
+- Durable v2 runner exceptions now keep v2-shaped exception evidence and execute
+  declared cleanup/contamination handling.
+- `runtime_smoke_validate_probe` validates a single v2 probe without starting a
+  durable run, launching a target, claiming session ownership, or creating an
+  evidence directory.
+- App diagnostics now fail closed when an app-written `PASS` contradicts live
+  debug freshness evidence for process, module, source, workspace, or artifact
+  expectations.
 
 ## Upgrade Notes
 
-- This is a PATCH release. It preserves the `v0.18.0` public API surface and
-  fixes validation/session-scope behavior around runtime-smoke plan files.
+- This is a PATCH release. It preserves the `v0.18.x` public API shape and
+  tightens runtime-smoke validation/freshness behavior.
 - Upgrade an existing pip or pipx install with one of:
 
   ```powershell
-  python -m pip install --upgrade netcoredbg-mcp==0.18.1
+  python -m pip install --upgrade netcoredbg-mcp==0.18.2
   pipx upgrade netcoredbg-mcp
   ```
 
 - For a new workstation install:
 
   ```powershell
-  pipx install netcoredbg-mcp==0.18.1
+  pipx install netcoredbg-mcp==0.18.2
   netcoredbg-mcp --setup
   ```
 
-- Runtime-smoke and UI helper failures intentionally prefer bounded `BLOCKED`,
-  `INVALID_SETUP`, or `FAIL` evidence over false `PASS` results.
-- Some broad issue-backlog rows remain open by design; this release ships the
-  bounded slices already merged to `main`, not every downstream consumer replay.
+- Runtime-smoke and UI helper failures continue to prefer bounded `BLOCKED`,
+  `INVALID_SETUP`, `WARN`, or `FAIL` evidence over false `PASS` results.
+- Broad issue-backlog rows remain open by design; this release ships bounded
+  provider-side slices, not every downstream consumer replay.
 
 ## Release Gates
 
 - Release-prep PR must pass MCP PR review before merge.
-- Critical suite must pass with `uv run --locked pytest tests/critical -m critical`.
+- Critical suite must pass with `uv run --locked --extra dev pytest tests/critical -m critical`.
 - Runtime-smoke docs/schema gates must pass for the shipped examples.
 - Package build and disposable wheel install smoke must pass.
 - Production playbook must be executed and recorded before tagging.

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.2] - 2026-06-19
+
+### Added
+- Runtime-smoke `plan_path` inputs now accept YAML `.yaml` / `.yml` files for
+  the existing validate and run-plan facades while preserving JSON behavior.
+- Added read-only `runtime_smoke_validate_probe` for single-probe v2 authoring
+  and validation without durable run creation, target launch, session ownership,
+  or evidence-directory side effects.
+- App diagnostics freshness contracts now include top-level `loaded_sources`
+  and schema validation for source expectations.
+
+### Fixed
+- Durable v2 runtime-smoke runner exceptions now return v2-shaped exception
+  evidence, run declared cleanup, preserve cleanup contamination guidance, and
+  expose exception type/message instead of falling back to opaque legacy
+  teardown.
+- App-written diagnostic `PASS` results are checked against live debug freshness
+  expectations for process, module, source, workspace, and artifact evidence.
+- `wait_json` / `poll` app-diagnostic payload merging preserves caller-declared
+  nested freshness expectations when an artifact reports only a partial `app`
+  object.
+
 ## [0.18.1] - 2026-06-19
 
 ### Fixed
