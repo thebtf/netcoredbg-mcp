@@ -451,10 +451,15 @@ def register_runtime_smoke_tools(
                     debug_preflight=debug_preflight,
                     tracepoint_guard=tracepoint_guard,
                 )
+            next_actions = (
+                ["runtime_smoke_run_probe", "runtime_smoke_validate_plan"]
+                if data.get("can_run") is True
+                else ["runtime_smoke_validate_probe", "runtime_smoke_validate_plan"]
+            )
             return _build_runtime_smoke_response(
                 session,
                 data,
-                ["runtime_smoke_run_probe", "runtime_smoke_validate_plan"],
+                next_actions,
             )
         except Exception as exc:
             return build_error_response(str(exc), state=session.state.state)
@@ -1624,16 +1629,49 @@ def _apply_runtime_smoke_validate_probe_agent_mode(
     debug_preflight: bool,
     tracepoint_guard: dict[str, Any] | None,
 ) -> None:
+    arguments = _runtime_smoke_validate_probe_arguments(
+        probe=probe,
+        name=name,
+        phase=phase,
+        budgets=budgets,
+        debug_preflight=debug_preflight,
+        tracepoint_guard=tracepoint_guard,
+        agent_mode=True,
+    )
     if data.get("can_run") is not True:
         data["agent_mode"] = _runtime_smoke_agent_mode_payload(
             "runtime_smoke_validate_probe",
+            next_request={
+                "tool": "runtime_smoke_validate_probe",
+                "arguments": arguments,
+            },
             metrics=_runtime_smoke_agent_metrics(data),
         )
         return
 
+    data["agent_mode"] = _runtime_smoke_agent_mode_payload(
+        "runtime_smoke_run_probe",
+        next_request={
+            "tool": "runtime_smoke_run_probe",
+            "arguments": arguments,
+        },
+        metrics=_runtime_smoke_agent_metrics(data),
+    )
+
+
+def _runtime_smoke_validate_probe_arguments(
+    *,
+    probe: dict[str, Any],
+    name: str | None,
+    phase: str,
+    budgets: dict[str, Any] | None,
+    debug_preflight: bool,
+    tracepoint_guard: dict[str, Any] | None,
+    agent_mode: bool,
+) -> dict[str, Any]:
     arguments: dict[str, Any] = {
         "probe": dict(probe) if isinstance(probe, dict) else probe,
-        "agent_mode": True,
+        "agent_mode": agent_mode,
     }
     if name is not None:
         arguments["name"] = name
@@ -1649,15 +1687,7 @@ def _apply_runtime_smoke_validate_probe_agent_mode(
             if isinstance(tracepoint_guard, dict)
             else tracepoint_guard
         )
-
-    data["agent_mode"] = _runtime_smoke_agent_mode_payload(
-        "runtime_smoke_run_probe",
-        next_request={
-            "tool": "runtime_smoke_run_probe",
-            "arguments": arguments,
-        },
-        metrics=_runtime_smoke_agent_metrics(data),
-    )
+    return arguments
 
 
 def _runtime_smoke_agent_mode_payload(

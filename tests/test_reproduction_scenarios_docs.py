@@ -308,10 +308,12 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "CR-041",
             "CR-046",
             "CR-047",
+            "CR-059",
             "metrics_contract",
             "agent_mode.defaults",
             "runtime_smoke_validate_probe",
             "read-only probe validation",
+            "invalid-probe repair guidance",
             "exception verdict",
             "cleanup-contract guidance",
             "event_limit=20",
@@ -745,6 +747,17 @@ def test_issue_268_269_record_validate_probe_slice_without_broad_closure() -> No
         assert "read-only probe validation" in lifecycle_row
         assert "generic probe UX" in remaining
         assert "generic probe UX" in lifecycle_remaining
+
+    row_269 = _issue_row(backlog, "#269")
+    lifecycle_row_269 = _section_issue_row(
+        backlog,
+        "## CR-022 Issue Lifecycle Refresh",
+        "#269",
+    )
+    assert "CR-059" in row_269
+    assert "CR-059" in lifecycle_row_269
+    assert "invalid-probe repair guidance" in row_269
+    assert "invalid-probe repair guidance" in lifecycle_row_269
 
 
 def test_issue_271_records_cleanup_and_trace_delta_slices() -> None:
