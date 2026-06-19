@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeSession
-from netcoredbg_mcp.session.state import DebugState
+from netcoredbg_mcp.session.state import DebugState, OutputEntry
 from netcoredbg_mcp.tools.runtime_smoke import register_runtime_smoke_tools
 
 
@@ -260,6 +260,34 @@ async def test_runtime_smoke_mark_event_cursor_agent_mode_adds_delta_request(
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_mark_event_cursor_can_capture_debug_output_cursor(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    session.state.output_buffer = deque(
+        [
+            OutputEntry(text="before\n", category="stdout", sequence=1),
+            OutputEntry(text="after\n", category="stderr", sequence=2),
+        ]
+    )
+    session.state.output_sequence = 2
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_mark_event_cursor"](
+        ctx=None,
+        run_id="run-1",
+        include_debug_output=True,
+    )
+    data = response["data"]
+
+    assert data["status"] == "PASS"
+    assert data["cursor"]["sources"]["debug_output"] == {
+        "after_sequence": 2,
+        "trimmed_before": 0,
+    }
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_get_event_delta_returns_bounded_events_after_mark(
     capturing_mcp,
 ) -> None:
@@ -307,6 +335,112 @@ async def test_runtime_smoke_get_event_delta_returns_bounded_events_after_mark(
         {"cursor": 6, "kind": "completed", "status": "COMPLETED"}
     ]
     assert next_response["data"]["cursor"]["after_cursor"] == 6
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_get_event_delta_returns_debug_output_source_delta(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    session.state.output_buffer = deque(
+        [
+            OutputEntry(text="old\n", category="stdout", sequence=1),
+            OutputEntry(text="new-1\n", category="stdout", sequence=2),
+            OutputEntry(text="new-2\n", category="stderr", sequence=3),
+        ]
+    )
+    session.state.output_sequence = 3
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor={
+            "run_id": "run-1",
+            "after_cursor": 4,
+            "sources": {
+                "debug_output": {
+                    "after_sequence": 1,
+                    "trimmed_before": 0,
+                }
+            },
+        },
+        event_limit=1,
+    )
+    data = response["data"]
+
+    assert data["status"] == "PASS"
+    assert data["events"] == [{"cursor": 5, "kind": "progress", "status": "RUNNING"}]
+    assert data["source_deltas"]["debug_output"] == {
+        "entries": [
+            {
+                "text": "new-1\n",
+                "category": "stdout",
+                "variables_reference": 0,
+                "sequence": 2,
+            }
+        ],
+        "available": 2,
+        "limit": 1,
+        "limited": True,
+        "stale_cursor": False,
+        "dropped_count": 0,
+    }
+    assert data["cursor"]["sources"]["debug_output"] == {
+        "after_sequence": 2,
+        "trimmed_before": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_get_event_delta_marks_debug_output_cursor_stale(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    session.state.output_buffer = deque(
+        [
+            OutputEntry(text="retained\n", category="stdout", sequence=4),
+        ]
+    )
+    session.state.output_sequence = 4
+    session.state.output_trimmed_before = 3
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor={
+            "run_id": "run-1",
+            "after_cursor": 4,
+            "sources": {
+                "debug_output": {
+                    "after_sequence": 1,
+                    "trimmed_before": 0,
+                }
+            },
+        },
+        event_limit=5,
+    )
+    data = response["data"]
+
+    assert data["status"] == "PASS"
+    assert data["source_deltas"]["debug_output"] == {
+        "entries": [
+            {
+                "text": "retained\n",
+                "category": "stdout",
+                "variables_reference": 0,
+                "sequence": 4,
+            }
+        ],
+        "available": 1,
+        "limit": 5,
+        "limited": False,
+        "stale_cursor": True,
+        "dropped_count": 2,
+    }
+    assert data["cursor"]["sources"]["debug_output"] == {
+        "after_sequence": 4,
+        "trimmed_before": 3,
+    }
 
 
 @pytest.mark.asyncio
