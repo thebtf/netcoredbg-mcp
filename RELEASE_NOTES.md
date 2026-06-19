@@ -1,31 +1,29 @@
-# netcoredbg-mcp v0.18.4
+# netcoredbg-mcp v0.18.5
 
 Released: 2026-06-19
 
 ## Summary
 
-`v0.18.4` is a patch release for the runtime-smoke and UI-emulation hardening
-roadmap. It publishes CR-050 and CR-051 after `v0.18.3`, so package consumers
-can test external app-diagnostics directory polling and wait-for-condition JSON
-oracle semantics.
+`v0.18.5` is a patch release for the runtime-smoke and UI-emulation hardening
+roadmap. It publishes CR-052 after `v0.18.4`, so package consumers can request
+bounded DataGrid viewport identity evidence through the public MCP helper
+surface.
 
 ## Highlights
 
-- `app_diagnostics.poll` can now consume an explicit evidence directory with a
-  file-name glob pattern such as `diagnostic-*.json`.
-- Directory poll result metadata includes the matched path, observation state,
-  poll count, timeout, and pattern details.
-- Matched directory-poll files are revalidated through the session path policy
-  before read, preventing out-of-scope or symlinked matches from being consumed.
-- `app_diagnostics.wait_json.condition` now waits for a JSONPath value to equal
-  the requested `expected` value before returning `PASS`.
-- Unsatisfied wait-json conditions return actionable `BLOCKED` metadata with
-  the candidate observation state and condition details.
-- JSON condition matching is type-aware, so booleans no longer match numeric
-  `0` / `1` expectations through Python equality.
-- Broad issue `#272` remains open for `since` cursors, diagnostics event
-  streams, product-specific defaults, generic probe UX/v3 DSL, and full
-  app-diagnostics/oracle lifecycle closure.
+- `ui_grid(action="viewport")` now returns bounded visible-row DataGrid viewport
+  identity snapshots by delegating to the existing runtime-smoke
+  `ui.grid.viewport` adapter.
+- The helper forwards selector, `rows`, `identity`, adapter-owned `expect`,
+  `phase`, and `probe_name` fields without duplicating runtime-smoke v2
+  before/after comparison logic.
+- Direct public helper calls now fail closed for comparison-only expectations
+  such as `viewport_moved` or `direction`; use `runtime_smoke_run_probe` or
+  `runtime_smoke_run_plan` with `kind="ui.grid.viewport"` for before/after
+  viewport comparisons.
+- Broad issue `#270` remains open for broader DataGrid offscreen/scroll action
+  semantics, arbitrary click variants, downstream replay tails, and broader
+  helper ergonomics.
 
 ## Upgrade Notes
 
@@ -34,14 +32,14 @@ oracle semantics.
 - Upgrade an existing pip or pipx install with one of:
 
   ```powershell
-  python -m pip install --upgrade netcoredbg-mcp==0.18.4
+  python -m pip install --upgrade netcoredbg-mcp==0.18.5
   pipx upgrade netcoredbg-mcp
   ```
 
 - For a new workstation install:
 
   ```powershell
-  pipx install netcoredbg-mcp==0.18.4
+  pipx install netcoredbg-mcp==0.18.5
   netcoredbg-mcp --setup
   ```
 

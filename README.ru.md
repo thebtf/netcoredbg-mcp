@@ -14,7 +14,7 @@
 вычислять выражения, читать вывод отладки и управлять поверхностями Windows UI
 Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 
-**131 MCP-инструмент · 8 промптов · 4 ресурса · 1618 собранных тестов · релиз v0.18.4**
+**131 MCP-инструмент · 8 промптов · 4 ресурса · 1621 собранных тестов · релиз v0.18.5**
 
 ## Быстрые ссылки
 
@@ -23,18 +23,17 @@ Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 - **Справочник:** [Доступные инструменты](#доступные-инструменты) · [Ресурсы](#mcp-ресурсы) · [Промпты](#mcp-промпты) · [Архитектура](#обзор-архитектуры)
 - **Проект:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## Что нового в v0.18.4
+## Что нового в v0.18.5
 
-- **Внешние директории app diagnostics** — `app_diagnostics.poll` теперь может
-  читать явную evidence-директорию с file-name glob вроде
-  `diagnostic-*.json`.
-- **Ожидание oracle-условия** — `app_diagnostics.wait_json.condition` ждет,
-  пока значение по JSONPath станет равно ожидаемому `expected`, и только после
-  этого возвращает `PASS`.
-- **Безопасное чтение diagnostics** — найденные directory-poll кандидаты перед
-  чтением повторно проверяются через session path policy.
-- **Type-aware JSON comparison** — condition matching больше не считает
-  booleans числовыми значениями `0` / `1`.
+- **Public DataGrid viewport helper** — `ui_grid(action="viewport")` возвращает
+  bounded visible-row identity snapshots через существующий runtime-smoke
+  adapter `ui.grid.viewport`.
+- **Безопасная граница ожиданий** — direct viewport helper отклоняет
+  comparison-only expectations вроде `viewport_moved` или `direction`, а не
+  возвращает single-snapshot false `PASS`.
+- **Runtime-smoke comparison route сохранен** — before/after viewport checks
+  остаются в `runtime_smoke_run_probe` / `runtime_smoke_run_plan` с
+  `kind="ui.grid.viewport"`.
 
 ## Основные возможности
 
