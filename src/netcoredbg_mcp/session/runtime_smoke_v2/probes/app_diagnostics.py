@@ -310,6 +310,9 @@ async def _read_wait_json(
         "polls": 0,
         "timeout_ms": timeout_ms,
     }
+    pattern = _diagnostic_pattern(wait_json)
+    if pattern is not None:
+        metadata["pattern"] = pattern
     if not raw_path:
         metadata["reason"] = "diagnostic JSON path is required"
         return None, metadata
@@ -326,7 +329,11 @@ async def _read_wait_json(
     while True:
         metadata["polls"] += 1
         try:
-            file_text = await asyncio.to_thread(_read_file_if_present, path)
+            candidate = await asyncio.to_thread(_first_diagnostic_candidate, path, pattern)
+            file_text = None
+            if candidate is not None:
+                metadata["matched_path"] = str(candidate)
+                file_text = await asyncio.to_thread(_read_file_if_present, candidate)
         except OSError as exc:
             metadata["reason"] = "diagnostic JSON is not readable"
             metadata["error"] = str(exc)
@@ -372,6 +379,31 @@ def _read_file_if_present(path: Path) -> str | None:
     if not path.is_file():
         return None
     return path.read_text(encoding="utf-8")
+
+
+def _diagnostic_pattern(source: dict[str, Any]) -> str | None:
+    pattern = source.get("pattern")
+    if isinstance(pattern, str) and pattern:
+        return pattern
+    return None
+
+
+def _first_diagnostic_candidate(path: Path, pattern: str | None) -> Path | None:
+    if path.is_file():
+        return path
+    if not path.is_dir():
+        return None
+    matches = [
+        candidate for candidate in path.glob(pattern or "*.json") if candidate.is_file()
+    ]
+    if not matches:
+        return None
+    return max(matches, key=_diagnostic_candidate_sort_key)
+
+
+def _diagnostic_candidate_sort_key(path: Path) -> tuple[int, str]:
+    stat = path.stat()
+    return (stat.st_mtime_ns, path.name)
 
 
 def _bounded_int(value: Any, *, default: int) -> int:

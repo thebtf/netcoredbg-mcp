@@ -684,6 +684,14 @@ def _validate_wait_json_schema(
     path = wait_json.get("path")
     if not isinstance(path, str) or not path:
         errors.append(f"app_diagnostics.{field_name}.path is required")
+    pattern = wait_json.get("pattern")
+    if pattern is not None:
+        if not isinstance(pattern, str) or not pattern:
+            errors.append(f"app_diagnostics.{field_name}.pattern must be a string")
+        elif "/" in pattern or "\\" in pattern:
+            errors.append(
+                f"app_diagnostics.{field_name}.pattern must be a file-name pattern"
+            )
     for numeric_field in ("timeout_ms", "poll_interval_ms"):
         if numeric_field not in wait_json:
             continue

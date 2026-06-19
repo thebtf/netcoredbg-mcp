@@ -479,6 +479,7 @@ def test_app_diagnostics_schema_rejects_invalid_poll() -> None:
         "observations": [],
         "poll": {
             "path": "",
+            "pattern": "nested/diagnostic-*.json",
             "timeout_ms": -1,
             "poll_interval_ms": "soon",
         },
@@ -493,6 +494,7 @@ def test_app_diagnostics_schema_rejects_invalid_poll() -> None:
     errors = validate_diagnostic_schema_example(payload, kind="app_diagnostics")
 
     assert "app_diagnostics.poll.path is required" in errors
+    assert "app_diagnostics.poll.pattern must be a file-name pattern" in errors
     assert "app_diagnostics.poll.timeout_ms must be >= 0" in errors
     assert "app_diagnostics.poll.poll_interval_ms must be an integer" in errors
 

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from collections import deque
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -1225,3 +1227,69 @@ async def test_runtime_smoke_run_probe_starts_app_diagnostics_probe_run(
     assert bundle["result"]["status"] == "BLOCKED"
     assert "runtime_smoke_wait_for_result" in bundle["next_actions"]
     assert "runtime_smoke_evidence_bundle" in bundle["next_actions"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_run_probe_reads_external_app_diagnostics_directory(
+    capturing_mcp,
+    tmp_path: Path,
+) -> None:
+    diagnostic_dir = tmp_path / "novascript-evidence"
+    diagnostic_dir.mkdir()
+    diagnostic_path = diagnostic_dir / "diagnostic-cue-change.json"
+    diagnostic_path.write_text(
+        json.dumps(
+            _app_diagnostics_probe(
+                status="PASS",
+            )
+            | {
+                "app": {"name": "NovaScript", "process_name": "RunProbeFacade"},
+                "observations": [
+                    {
+                        "kind": "app.snapshot",
+                        "status": "PASS",
+                        "reason": "NovaScript diagnostic snapshot observed",
+                        "next_step": "No action required.",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    session = RunProbeFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_run_probe"](
+        ctx=None,
+        probe=_app_diagnostics_probe(status="PASS")
+        | {
+            "app": {"name": "PlaceholderApp"},
+            "observations": [],
+            "poll": {
+                "path": str(diagnostic_dir),
+                "pattern": "diagnostic-*.json",
+                "timeout_ms": 0,
+                "poll_interval_ms": 0,
+            },
+        },
+        name="external-app-diagnostics",
+    )
+    data = response["data"]
+
+    assert data["status"] == "RUNNING"
+    assert data["run_created"] is True
+    assert data["generated_plan"]["action_kind"] == "ui.noop"
+    assert session.launch_calls == 0
+
+    bundle = await _wait_for_bundle(capturing_mcp, data["run_id"])
+    result = bundle["result"]
+    assert bundle["status"] == "PASS"
+    assert result["status"] == "PASS"
+    assert bundle["evidence_refs"] == [
+        {
+            "case_id": "run_probe",
+            "phase": "after",
+            "probe": "app_diagnostics",
+            "evidence_ref": "diagnostic:app_diagnostics:NovaScript",
+        }
+    ]

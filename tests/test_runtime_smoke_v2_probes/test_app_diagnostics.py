@@ -856,6 +856,58 @@ async def test_app_diagnostics_poll_reads_live_diagnostic_artifact(
 
 
 @pytest.mark.asyncio
+async def test_app_diagnostics_poll_reads_matching_json_from_directory(
+    tmp_path: Path,
+) -> None:
+    diagnostic_dir = tmp_path / "novascript-evidence"
+    diagnostic_dir.mkdir()
+    diagnostic_path = diagnostic_dir / "diagnostic-cue-change.json"
+    diagnostic_path.write_text(
+        json.dumps(
+            _app_diagnostics(
+                app={"name": "NovaScript", "process_name": "NovaScript.Wpf"},
+                status="PASS",
+                observations=[
+                    {
+                        "kind": "app.snapshot",
+                        "status": "PASS",
+                        "reason": "NovaScript diagnostic snapshot observed",
+                        "next_step": "No action required.",
+                    }
+                ],
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    result = await runner(ProbeSmokeSession()).run(
+        one_probe_plan(
+            _app_diagnostics(
+                phase="after",
+                app={"name": "PlaceholderApp"},
+                status="PASS",
+                observations=[],
+                poll={
+                    "path": str(diagnostic_dir),
+                    "pattern": "diagnostic-*.json",
+                    "timeout_ms": 0,
+                    "poll_interval_ms": 0,
+                },
+            )
+        )
+    )
+
+    probe = after_probe(result)
+    assert result["status"] == "PASS"
+    assert probe["status"] == "PASS"
+    assert probe["value"]["app"]["name"] == "NovaScript"
+    assert probe["value"]["poll"]["path"] == str(diagnostic_dir)
+    assert probe["value"]["poll"]["pattern"] == "diagnostic-*.json"
+    assert probe["value"]["poll"]["matched_path"] == str(diagnostic_path)
+    assert probe["value"]["poll"]["observed"] is True
+
+
+@pytest.mark.asyncio
 async def test_app_diagnostics_wait_json_invalid_source_fails_schema_before_poll() -> None:
     result = await runner(ProbeSmokeSession()).run(
         one_probe_plan(
