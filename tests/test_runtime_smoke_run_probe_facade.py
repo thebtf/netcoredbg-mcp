@@ -1293,3 +1293,66 @@ async def test_runtime_smoke_run_probe_reads_external_app_diagnostics_directory(
             "evidence_ref": "diagnostic:app_diagnostics:NovaScript",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_run_probe_app_diagnostics_poll_since_ignores_old_snapshot(
+    capturing_mcp,
+    tmp_path: Path,
+) -> None:
+    diagnostic_dir = tmp_path / "novascript-evidence"
+    diagnostic_dir.mkdir()
+    diagnostic_path = diagnostic_dir / "diagnostic-old.json"
+    diagnostic_path.write_text(
+        json.dumps(
+            _app_diagnostics_probe(status="PASS")
+            | {
+                "app": {"name": "StaleNovaScript", "process_name": "RunProbeFacade"},
+                "observations": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    os.utime(diagnostic_path, ns=(1_000_000_000, 1_000_000_000))
+    session = RunProbeFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_run_probe"](
+        ctx=None,
+        probe=_app_diagnostics_probe(status="PASS")
+        | {
+            "app": {"name": "PlaceholderApp"},
+            "observations": [],
+            "poll": {
+                "path": str(diagnostic_dir),
+                "pattern": "diagnostic-*.json",
+                "since": {
+                    "mtime_ns": diagnostic_path.stat().st_mtime_ns,
+                    "name": diagnostic_path.name,
+                },
+                "timeout_ms": 0,
+                "poll_interval_ms": 0,
+            },
+        },
+        name="external-app-diagnostics-since",
+    )
+    data = response["data"]
+
+    assert data["status"] == "RUNNING"
+    assert data["run_created"] is True
+    assert session.launch_calls == 0
+
+    bundle = await _wait_for_bundle(capturing_mcp, data["run_id"])
+    result = bundle["result"]
+    assert bundle["status"] == "BLOCKED"
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "diagnostic JSON not observed after since cursor"
+    assert bundle["reason"] == "diagnostic JSON not observed after since cursor"
+    assert bundle["evidence_refs"] == [
+        {
+            "case_id": "run_probe",
+            "phase": "after",
+            "probe": "app_diagnostics",
+            "evidence_ref": "diagnostic:app_diagnostics:PlaceholderApp",
+        }
+    ]

@@ -563,7 +563,12 @@ def test_app_diagnostics_poll_example_remains_schema_compatible() -> None:
     payload = json.loads(APP_DIAGNOSTICS_POLL_EXAMPLE_PATH.read_text(encoding="utf-8"))
 
     assert validate_diagnostic_schema_example(payload, kind="app_diagnostics") == []
-    assert payload["poll"]["path"] == ".agent/runtime-smoke/app-diagnostics.json"
+    assert payload["poll"]["path"] == ".agent/runtime-smoke/app-diagnostics"
+    assert payload["poll"]["pattern"] == "app-diagnostics-*.json"
+    assert payload["poll"]["since"] == {
+        "mtime_ns": 0,
+        "name": "app-diagnostics-0000.json",
+    }
     assert payload["poll"]["timeout_ms"] == 5000
     assert payload["poll"]["poll_interval_ms"] == 100
     assert "wait_json" not in payload
