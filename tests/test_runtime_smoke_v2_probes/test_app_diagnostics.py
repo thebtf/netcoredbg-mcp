@@ -502,6 +502,49 @@ async def test_app_diagnostics_wait_json_fails_pass_artifact_on_freshness_mismat
 
 
 @pytest.mark.asyncio
+async def test_app_diagnostics_wait_json_preserves_declared_app_freshness(
+    tmp_path: Path,
+) -> None:
+    diagnostic_path = tmp_path / "app-diagnostics-artifact-app.json"
+    diagnostic_path.write_text(
+        json.dumps(
+            _app_diagnostics(
+                app={"name": "ArtifactReportedApp"},
+                status="PASS",
+                observations=[],
+            )
+        ),
+        encoding="utf-8",
+    )
+    session = _session_with_debug_freshness(process_id=9999)
+
+    result = await runner(session).run(
+        one_probe_plan(
+            _app_diagnostics(
+                phase="after",
+                app={"name": "DeclaredApp", "process_id": 1234},
+                status="PASS",
+                observations=[],
+                wait_json={
+                    "path": str(diagnostic_path),
+                    "timeout_ms": 0,
+                    "poll_interval_ms": 0,
+                },
+            )
+        )
+    )
+
+    probe = after_probe(result)
+    assert result["status"] == "FAIL"
+    assert probe["value"]["app"]["name"] == "ArtifactReportedApp"
+    assert probe["value"]["app"]["process_id"] == 1234
+    freshness = probe["value"]["freshness"]
+    assert freshness["status"] == "FAIL"
+    mismatch_kinds = {mismatch["kind"] for mismatch in freshness["mismatches"]}
+    assert "process_id_mismatch" in mismatch_kinds
+
+
+@pytest.mark.asyncio
 async def test_app_diagnostics_wait_json_keeps_pass_with_incomplete_freshness_warning(
     tmp_path: Path,
 ) -> None:

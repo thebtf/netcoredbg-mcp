@@ -242,10 +242,25 @@ async def _probe_with_diagnostic_json(
     acquired, metadata = await _read_wait_json(source, context)
     if acquired is None:
         return probe, metadata, field
-    merged = dict(probe)
-    merged.update(acquired)
+    merged = _merge_diagnostic_payload(probe, acquired)
     merged[field] = source
     return merged, metadata, field
+
+
+def _merge_diagnostic_payload(
+    probe: dict[str, Any],
+    acquired: dict[str, Any],
+) -> dict[str, Any]:
+    merged = dict(probe)
+    merged.update(acquired)
+    for key in ("app", "process", "workspace"):
+        declared = probe.get(key)
+        observed = acquired.get(key)
+        if isinstance(declared, dict) and isinstance(observed, dict):
+            nested = dict(declared)
+            nested.update(observed)
+            merged[key] = nested
+    return merged
 
 
 def _diagnostic_json_source(
