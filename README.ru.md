@@ -25,13 +25,13 @@ Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 
 ## Что нового в v0.18.5
 
-- **Public DataGrid viewport helper** — `ui_grid(action="viewport")` возвращает
+- **Публичный DataGrid viewport helper** — `ui_grid(action="viewport")` возвращает
   bounded visible-row identity snapshots через существующий runtime-smoke
   adapter `ui.grid.viewport`.
 - **Безопасная граница ожиданий** — direct viewport helper отклоняет
   comparison-only expectations вроде `viewport_moved` или `direction`, а не
   возвращает single-snapshot false `PASS`.
-- **Runtime-smoke comparison route сохранен** — before/after viewport checks
+- **Runtime-smoke маршрут сравнения сохранен** — before/after viewport checks
   остаются в `runtime_smoke_run_probe` / `runtime_smoke_run_plan` с
   `kind="ui.grid.viewport"`.
 
