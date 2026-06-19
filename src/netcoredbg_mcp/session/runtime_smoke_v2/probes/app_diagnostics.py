@@ -314,6 +314,9 @@ async def _read_wait_json(
     pattern = _diagnostic_pattern(wait_json)
     if pattern is not None:
         metadata["pattern"] = pattern
+    since_cursor = _diagnostic_since_cursor(wait_json)
+    if since_cursor is not None:
+        metadata["since"] = _diagnostic_cursor_payload(since_cursor)
     if not raw_path:
         metadata["reason"] = "diagnostic JSON path is required"
         return None, metadata
@@ -330,12 +333,20 @@ async def _read_wait_json(
     while True:
         metadata["polls"] += 1
         try:
-            candidate = await asyncio.to_thread(_first_diagnostic_candidate, path, pattern)
+            candidate = await asyncio.to_thread(
+                _first_diagnostic_candidate,
+                path,
+                pattern,
+                since_cursor,
+            )
             file_text = None
             if candidate is not None:
                 metadata["matched_path"] = str(candidate)
                 candidate = _resolve_matched_candidate_path(candidate, context)
                 metadata["matched_path"] = str(candidate)
+                metadata["cursor"] = _diagnostic_cursor_payload(
+                    _diagnostic_candidate_sort_key(candidate)
+                )
                 file_text = await asyncio.to_thread(_read_file_if_present, candidate)
         except ValueError as exc:
             metadata["reason"] = "matched diagnostic JSON is outside allowed scope"
@@ -397,7 +408,10 @@ async def _read_wait_json(
             ),
         )
 
-    metadata.setdefault("reason", "diagnostic JSON not observed")
+    if since_cursor is not None:
+        metadata.setdefault("reason", "diagnostic JSON not observed after since cursor")
+    else:
+        metadata.setdefault("reason", "diagnostic JSON not observed")
     return None, metadata
 
 
@@ -433,6 +447,19 @@ def _diagnostic_pattern(source: dict[str, Any]) -> str | None:
 def _diagnostic_condition(source: dict[str, Any]) -> dict[str, Any] | None:
     condition = source.get("condition")
     return condition if isinstance(condition, dict) else None
+
+
+def _diagnostic_since_cursor(source: dict[str, Any]) -> tuple[int, str] | None:
+    since = source.get("since")
+    if not isinstance(since, dict):
+        return None
+    mtime_ns = since.get("mtime_ns")
+    name = since.get("name")
+    if isinstance(mtime_ns, bool) or not isinstance(mtime_ns, int):
+        return None
+    if not isinstance(name, str) or not name:
+        return None
+    return (max(0, mtime_ns), name)
 
 
 def _evaluate_diagnostic_condition(
@@ -506,13 +533,19 @@ def _diagnostic_jsonpath_value(payload: dict[str, Any], jsonpath: str) -> Any:
     return matches
 
 
-def _first_diagnostic_candidate(path: Path, pattern: str | None) -> Path | None:
+def _first_diagnostic_candidate(
+    path: Path,
+    pattern: str | None,
+    since: tuple[int, str] | None = None,
+) -> Path | None:
     if path.is_file():
-        return path
+        return path if _diagnostic_candidate_is_after(path, since) else None
     if not path.is_dir():
         return None
     matches = [
-        candidate for candidate in path.glob(pattern or "*.json") if candidate.is_file()
+        candidate
+        for candidate in path.glob(pattern or "*.json")
+        if candidate.is_file() and _diagnostic_candidate_is_after(candidate, since)
     ]
     if not matches:
         return None
@@ -522,6 +555,19 @@ def _first_diagnostic_candidate(path: Path, pattern: str | None) -> Path | None:
 def _diagnostic_candidate_sort_key(path: Path) -> tuple[int, str]:
     stat = path.stat()
     return (stat.st_mtime_ns, path.name)
+
+
+def _diagnostic_candidate_is_after(
+    path: Path,
+    since: tuple[int, str] | None,
+) -> bool:
+    if since is None:
+        return True
+    return _diagnostic_candidate_sort_key(path) > since
+
+
+def _diagnostic_cursor_payload(cursor: tuple[int, str]) -> dict[str, Any]:
+    return {"mtime_ns": cursor[0], "name": cursor[1]}
 
 
 def _bounded_int(value: Any, *, default: int) -> int:

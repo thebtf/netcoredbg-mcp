@@ -10,7 +10,12 @@
   "status": "PASS",
   "observations": [],
   "poll": {
-    "path": ".agent/runtime-smoke/app-diagnostics.json",
+    "path": ".agent/runtime-smoke/app-diagnostics",
+    "pattern": "app-diagnostics-*.json",
+    "since": {
+      "mtime_ns": 0,
+      "name": "app-diagnostics-0000.json"
+    },
     "timeout_ms": 5000,
     "poll_interval_ms": 100
   },

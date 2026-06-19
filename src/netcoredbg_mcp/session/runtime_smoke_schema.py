@@ -698,6 +698,7 @@ def _validate_wait_json_schema(
             errors.append(
                 f"app_diagnostics.{field_name}.pattern must be a file-name pattern"
             )
+    _validate_wait_json_since_schema(wait_json, errors, field_name=field_name)
     _validate_wait_json_condition_schema(wait_json, errors, field_name=field_name)
     for numeric_field in ("timeout_ms", "poll_interval_ms"):
         if numeric_field not in wait_json:
@@ -709,6 +710,31 @@ def _validate_wait_json_schema(
             )
         elif value < 0:
             errors.append(f"app_diagnostics.{field_name}.{numeric_field} must be >= 0")
+
+
+def _validate_wait_json_since_schema(
+    wait_json: dict[str, Any],
+    errors: list[str],
+    *,
+    field_name: str,
+) -> None:
+    since = wait_json.get("since")
+    if since is None:
+        return
+    if field_name != "poll":
+        errors.append(f"app_diagnostics.{field_name}.since is not accepted")
+        return
+    if not isinstance(since, dict):
+        errors.append("app_diagnostics.poll.since must be an object")
+        return
+    mtime_ns = since.get("mtime_ns")
+    if isinstance(mtime_ns, bool) or not isinstance(mtime_ns, int):
+        errors.append("app_diagnostics.poll.since.mtime_ns must be an integer")
+    elif mtime_ns < 0:
+        errors.append("app_diagnostics.poll.since.mtime_ns must be >= 0")
+    name = since.get("name")
+    if not isinstance(name, str) or not name:
+        errors.append("app_diagnostics.poll.since.name must be a non-empty string")
 
 
 def _validate_wait_json_condition_schema(

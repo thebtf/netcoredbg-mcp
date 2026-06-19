@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `app_diagnostics.poll` now accepts an optional `since` cursor
+  `{mtime_ns, name}` for directory polling, ignores stale/equal diagnostic
+  snapshots, and returns the matched file cursor for the next incremental poll.
+
 ## [0.18.7] - 2026-06-19
 
 ### Added

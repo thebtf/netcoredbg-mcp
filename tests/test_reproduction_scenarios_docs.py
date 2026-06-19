@@ -603,6 +603,28 @@ def test_issue_272_records_cr050_cr051_app_diagnostics_source_slices() -> None:
     assert "broader app diagnostics lifecycle/orchestration" in remaining
 
 
+def test_issue_272_records_cr056_app_diagnostics_poll_cursor_slice() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#272")
+    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#272")
+    _issue, _state, _evidence, remaining = _issue_cells(backlog, "#272")
+    _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
+        cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
+    )
+
+    for text in (row, lifecycle_row):
+        assert "CR-056" in text
+        assert "app_diagnostics.poll.since" in text
+        assert "(mtime_ns, name)" in text
+        assert "stale/equal" in text
+        assert "cursor" in text
+
+    assert "poll cursor" in remaining
+    assert "poll cursor" in lifecycle_remaining
+    assert "broader app diagnostics lifecycle/orchestration" in remaining
+    assert "broader app diagnostics lifecycle/orchestration" in lifecycle_remaining
+
+
 def test_issue_271_272_record_cr048_app_diagnostics_freshness_slice() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
     row_271 = _issue_row(backlog, "#271")
@@ -636,6 +658,7 @@ def test_issue_272_remaining_scope_excludes_covered_launch_contract_and_default(
     assert "app diagnostics orchestration beyond local-file acquisition" not in remaining
     assert "launch-to-artifact default acquisition" in remaining
     assert "directory poll" in remaining
+    assert "poll cursor" in remaining
     assert "broader app diagnostics lifecycle/orchestration" in remaining
     assert "wait-json condition semantics" in remaining
     assert "diagnostic env/evidence-dir advertisement" not in lifecycle_remaining
@@ -643,6 +666,7 @@ def test_issue_272_remaining_scope_excludes_covered_launch_contract_and_default(
     assert "app diagnostics orchestration beyond local-file acquisition" not in lifecycle_remaining
     assert "launch-to-artifact default acquisition" in lifecycle_remaining
     assert "directory poll" in lifecycle_remaining
+    assert "poll cursor" in lifecycle_remaining
     assert "wait-json condition semantics" in lifecycle_remaining
 
 

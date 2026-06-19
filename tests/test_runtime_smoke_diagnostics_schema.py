@@ -481,6 +481,33 @@ def test_app_diagnostics_schema_rejects_invalid_wait_json() -> None:
     assert "app_diagnostics.wait_json.poll_interval_ms must be an integer" in errors
 
 
+def test_app_diagnostics_schema_rejects_wait_json_since_cursor() -> None:
+    from netcoredbg_mcp.session.runtime_smoke_schema import (
+        validate_diagnostic_schema_example,
+    )
+
+    payload = {
+        "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
+        "app": {"name": "WpfSmokeApp"},
+        "status": "PASS",
+        "observations": [],
+        "wait_json": {
+            "path": ".agent/runtime-smoke/app-diagnostics.json",
+            "since": {"mtime_ns": 0, "name": "diagnostic-old.json"},
+        },
+        "redaction": {"omit_fields": ["raw_tree"]},
+        "limits": {
+            "max_text_length": 240,
+            "max_list_items": 8,
+            "max_json_bytes": 32768,
+        },
+    }
+
+    errors = validate_diagnostic_schema_example(payload, kind="app_diagnostics")
+
+    assert errors == ["app_diagnostics.wait_json.since is not accepted"]
+
+
 def test_app_diagnostics_schema_rejects_invalid_poll() -> None:
     from netcoredbg_mcp.session.runtime_smoke_schema import (
         validate_diagnostic_schema_example,
@@ -495,6 +522,7 @@ def test_app_diagnostics_schema_rejects_invalid_poll() -> None:
             "path": "",
             "pattern": "nested/diagnostic-*.json",
             "condition": {"jsonpath": "$.status", "expected": "PASS"},
+            "since": {"mtime_ns": -1, "name": ""},
             "timeout_ms": -1,
             "poll_interval_ms": "soon",
         },
@@ -511,6 +539,8 @@ def test_app_diagnostics_schema_rejects_invalid_poll() -> None:
     assert "app_diagnostics.poll.path is required" in errors
     assert "app_diagnostics.poll.pattern must be a file-name pattern" in errors
     assert "app_diagnostics.poll.condition is not accepted" in errors
+    assert "app_diagnostics.poll.since.mtime_ns must be >= 0" in errors
+    assert "app_diagnostics.poll.since.name must be a non-empty string" in errors
     assert "app_diagnostics.poll.timeout_ms must be >= 0" in errors
     assert "app_diagnostics.poll.poll_interval_ms must be an integer" in errors
 

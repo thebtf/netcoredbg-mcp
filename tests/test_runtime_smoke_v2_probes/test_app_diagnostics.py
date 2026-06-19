@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -67,6 +68,35 @@ class _RewriteJsonOnSleepClock:
         if not self._rewritten:
             self._path.write_text(json.dumps(self._payload), encoding="utf-8")
             self._rewritten = True
+        self._now += max(1, idle_ms) / 1000
+
+
+class _WriteDiagnosticOnSleepClock:
+    def __init__(
+        self,
+        path: Path,
+        payload: dict[str, Any],
+        *,
+        mtime_ns: int,
+    ) -> None:
+        self._path = path
+        self._payload = payload
+        self._mtime_ns = mtime_ns
+        self._now = 0.0
+        self._written = False
+
+    def __call__(self) -> float:
+        return self._now
+
+    @property
+    def written(self) -> bool:
+        return self._written
+
+    def sleep_ms(self, idle_ms: int) -> None:
+        if not self._written:
+            self._path.write_text(json.dumps(self._payload), encoding="utf-8")
+            os.utime(self._path, ns=(self._mtime_ns, self._mtime_ns))
+            self._written = True
         self._now += max(1, idle_ms) / 1000
 
 
@@ -1115,6 +1145,135 @@ async def test_app_diagnostics_poll_reads_matching_json_from_directory(
     assert probe["value"]["poll"]["pattern"] == "diagnostic-*.json"
     assert probe["value"]["poll"]["matched_path"] == str(diagnostic_path)
     assert probe["value"]["poll"]["observed"] is True
+
+
+@pytest.mark.asyncio
+async def test_app_diagnostics_poll_since_blocks_when_only_old_matching_json_exists(
+    tmp_path: Path,
+) -> None:
+    diagnostic_dir = tmp_path / "novascript-evidence"
+    diagnostic_dir.mkdir()
+    diagnostic_path = diagnostic_dir / "diagnostic-old.json"
+    diagnostic_path.write_text(
+        json.dumps(
+            _app_diagnostics(
+                app={"name": "NovaScript", "process_name": "NovaScript.Wpf"},
+                status="PASS",
+                observations=[],
+            )
+        ),
+        encoding="utf-8",
+    )
+    os.utime(diagnostic_path, ns=(1_000_000_000, 1_000_000_000))
+
+    result = await runner(ProbeSmokeSession()).run(
+        one_probe_plan(
+            _app_diagnostics(
+                phase="after",
+                app={"name": "PlaceholderApp"},
+                status="PASS",
+                observations=[],
+                poll={
+                    "path": str(diagnostic_dir),
+                    "pattern": "diagnostic-*.json",
+                    "since": {
+                        "mtime_ns": diagnostic_path.stat().st_mtime_ns,
+                        "name": diagnostic_path.name,
+                    },
+                    "timeout_ms": 0,
+                    "poll_interval_ms": 0,
+                },
+            )
+        )
+    )
+
+    probe = after_probe(result)
+    assert result["status"] == "BLOCKED"
+    assert probe["status"] == "BLOCKED"
+    assert probe["reason"] == "diagnostic JSON not observed after since cursor"
+    assert probe["value"]["poll"]["observed"] is False
+    assert "matched_path" not in probe["value"]["poll"]
+    assert probe["value"]["poll"]["since"] == {
+        "mtime_ns": 1_000_000_000,
+        "name": "diagnostic-old.json",
+    }
+
+
+@pytest.mark.asyncio
+async def test_app_diagnostics_poll_since_waits_for_new_matching_json_before_merging(
+    tmp_path: Path,
+) -> None:
+    diagnostic_dir = tmp_path / "novascript-evidence"
+    diagnostic_dir.mkdir()
+    old_path = diagnostic_dir / "diagnostic-old.json"
+    old_path.write_text(
+        json.dumps(
+            _app_diagnostics(
+                app={"name": "StaleNovaScript"},
+                status="PASS",
+                observations=[],
+            )
+        ),
+        encoding="utf-8",
+    )
+    os.utime(old_path, ns=(1_000_000_000, 1_000_000_000))
+    new_path = diagnostic_dir / "diagnostic-new.json"
+    new_payload = _app_diagnostics(
+        app={"name": "NovaScript", "process_name": "NovaScript.Wpf"},
+        status="PASS",
+        observations=[
+            {
+                "kind": "app.snapshot",
+                "status": "PASS",
+                "reason": "fresh diagnostic snapshot observed",
+                "next_step": "No action required.",
+            }
+        ],
+    )
+    clock = _WriteDiagnosticOnSleepClock(
+        new_path,
+        new_payload,
+        mtime_ns=2_000_000_000,
+    )
+    session = ProbeSmokeSession()
+
+    result = await RuntimeSmokeRunner(
+        session,
+        service_adapters={"ui.invoke": session.invoke},
+        clock=clock,
+    ).run(
+        one_probe_plan(
+            _app_diagnostics(
+                phase="after",
+                app={"name": "PlaceholderApp"},
+                status="PASS",
+                observations=[],
+                poll={
+                    "path": str(diagnostic_dir),
+                    "pattern": "diagnostic-*.json",
+                    "since": {
+                        "mtime_ns": old_path.stat().st_mtime_ns,
+                        "name": old_path.name,
+                    },
+                    "timeout_ms": 5,
+                    "poll_interval_ms": 1,
+                },
+            )
+        )
+    )
+
+    probe = after_probe(result)
+    assert result["status"] == "PASS"
+    assert probe["status"] == "PASS"
+    assert probe["value"]["app"]["name"] == "NovaScript"
+    assert probe["value"]["poll"]["matched_path"] == str(new_path)
+    assert probe["value"]["poll"]["cursor"] == {
+        "mtime_ns": 2_000_000_000,
+        "name": "diagnostic-new.json",
+    }
+    assert probe["value"]["poll"]["observed"] is True
+    assert probe["value"]["poll"]["polls"] >= 1
+    assert clock.written is True
 
 
 @pytest.mark.asyncio
