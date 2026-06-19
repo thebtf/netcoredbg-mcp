@@ -1585,6 +1585,22 @@ def _apply_runtime_smoke_agent_mode(
             metrics=_runtime_smoke_agent_metrics(data),
         )
         return data
+    if (
+        data.get("contaminated") is True
+        and data.get("final") is True
+        and isinstance(data.get("cleanup_contract"), dict)
+        and data["cleanup_contract"].get("next_action") == "runtime_smoke_cleanup_contract"
+    ):
+        data["agent_mode"] = _runtime_smoke_agent_mode_payload(
+            "runtime_smoke_cleanup_contract",
+            next_request={
+                "tool": "runtime_smoke_cleanup_contract",
+                "arguments": {},
+            },
+            cursor=_runtime_smoke_agent_cursor(data),
+            metrics=_runtime_smoke_agent_metrics(data),
+        )
+        return data
     if _runtime_smoke_agent_fail_closed(data):
         data["agent_mode"] = _runtime_smoke_agent_mode_payload(
             "runtime_smoke_run_plan",

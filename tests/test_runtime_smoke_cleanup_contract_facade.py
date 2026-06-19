@@ -385,3 +385,76 @@ async def test_runtime_smoke_evidence_and_wait_preserve_contamination_guidance(
     assert tail["data"]["cleanup_contract"]["next_action"] == "runtime_smoke_cleanup_contract"
     assert "runtime_smoke_cleanup_contract" in tail["next_actions"]
     assert "runtime_smoke_run_plan" not in tail["next_actions"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_evidence_bundle_agent_mode_contamination_prefers_cleanup_contract(
+    capturing_mcp,
+) -> None:
+    session = CleanupContractFacadeSession()
+    session.fail_cleanup = True
+    session.runtime_smoke.instrumentation_groups["flow"] = {"breakpoints": [1]}
+    _register(capturing_mcp, session)
+    started = await session.runtime_smoke.lifecycle_runs.start(
+        {
+            "name": "cleanup-failure-agent-bundle",
+            "actions": [{"name": "wait_until_released"}],
+            "teardown": {"instrumentation_groups": ["flow"]},
+        },
+        lambda: _runner(session),
+    )
+
+    session.release_event.set()
+    await _wait_for_final(session.runtime_smoke.lifecycle_runs, started["run_id"])
+
+    bundle = await capturing_mcp.tools["runtime_smoke_evidence_bundle"](
+        ctx=None,
+        run_id=started["run_id"],
+        agent_mode=True,
+    )
+    agent = bundle["data"]["agent_mode"]
+
+    assert bundle["data"]["contaminated"] is True
+    assert bundle["data"]["cleanup_contract"]["next_action"] == "runtime_smoke_cleanup_contract"
+    assert agent["primary_next_action"] == "runtime_smoke_cleanup_contract"
+    assert agent["next_request"] == {
+        "tool": "runtime_smoke_cleanup_contract",
+        "arguments": {},
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_wait_agent_mode_contamination_prefers_cleanup_contract(
+    capturing_mcp,
+) -> None:
+    session = CleanupContractFacadeSession()
+    session.fail_cleanup = True
+    session.runtime_smoke.instrumentation_groups["flow"] = {"breakpoints": [1]}
+    _register(capturing_mcp, session)
+    started = await session.runtime_smoke.lifecycle_runs.start(
+        {
+            "name": "cleanup-failure-agent-wait",
+            "actions": [{"name": "wait_until_released"}],
+            "teardown": {"instrumentation_groups": ["flow"]},
+        },
+        lambda: _runner(session),
+    )
+
+    session.release_event.set()
+    await _wait_for_final(session.runtime_smoke.lifecycle_runs, started["run_id"])
+
+    waited = await capturing_mcp.tools["runtime_smoke_wait_for_result"](
+        ctx=None,
+        run_id=started["run_id"],
+        timeout_ms=100,
+        agent_mode=True,
+    )
+    agent = waited["data"]["agent_mode"]
+
+    assert waited["data"]["contaminated"] is True
+    assert waited["data"]["cleanup_contract"]["next_action"] == "runtime_smoke_cleanup_contract"
+    assert agent["primary_next_action"] == "runtime_smoke_cleanup_contract"
+    assert agent["next_request"] == {
+        "tool": "runtime_smoke_cleanup_contract",
+        "arguments": {},
+    }
