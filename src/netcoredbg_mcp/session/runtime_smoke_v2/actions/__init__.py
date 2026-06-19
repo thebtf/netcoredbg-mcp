@@ -334,6 +334,42 @@ async def _handle_ui_grid_select_row(
     identity = _mapping_from_action(action, "identity")
     rows = _mapping_from_action(action, "rows")
     columns = _list_from_action(action, "columns")
+    ensure_visible = action.get("ensure_visible") is True
+    max_scrolls = action.get("max_scrolls")
+    scroll_settle_ms = action.get("scroll_settle_ms")
+    ensure_visible_result: dict[str, Any] | None = None
+    if ensure_visible:
+        ensure_visible_result = await context.call_adapter(
+            "ui.grid.ensure_visible",
+            selector=selector,
+            row=row,
+            identity=identity,
+            rows=rows,
+            columns=columns,
+            max_scrolls=max_scrolls,
+            scroll_settle_ms=scroll_settle_ms,
+        )
+        if not _is_adapter_success(ensure_visible_result):
+            result = dict(ensure_visible_result)
+            status = _terminal_failure_status(str(result.get("status", "BLOCKED")).upper())
+            result["status"] = status
+            result["ensure_visible_result"] = ensure_visible_result
+            result["action_skipped"] = True
+            return _action_result(
+                status=status,
+                route="grid_select_row",
+                selector=selector,
+                row=row,
+                identity=identity,
+                rows=rows,
+                columns=columns,
+                ensure_visible=True,
+                max_scrolls=max_scrolls,
+                scroll_settle_ms=scroll_settle_ms,
+                action_skipped=True,
+                duration_ms=context.elapsed_ms(started),
+                result=result,
+            )
     result = await context.call_adapter(
         "ui.grid.select_row",
         selector=selector,
@@ -342,17 +378,27 @@ async def _handle_ui_grid_select_row(
         rows=rows,
         columns=columns,
     )
-    return _action_result(
-        status=result.get("status", "PASS"),
-        route="grid_select_row",
-        selector=selector,
-        row=row,
-        identity=identity,
-        rows=rows,
-        columns=columns,
-        duration_ms=context.elapsed_ms(started),
-        result=result,
-    )
+    if ensure_visible_result is not None:
+        result = dict(result)
+        result["ensure_visible_result"] = ensure_visible_result
+    action_payload = {
+        "status": result.get("status", "PASS"),
+        "route": "grid_select_row",
+        "selector": selector,
+        "row": row,
+        "identity": identity,
+        "rows": rows,
+        "columns": columns,
+        "duration_ms": context.elapsed_ms(started),
+        "result": result,
+    }
+    if ensure_visible:
+        action_payload["ensure_visible"] = True
+        if max_scrolls is not None:
+            action_payload["max_scrolls"] = max_scrolls
+        if scroll_settle_ms is not None:
+            action_payload["scroll_settle_ms"] = scroll_settle_ms
+    return _action_result(**action_payload)
 
 
 async def _handle_ui_grid_ensure_visible(
@@ -427,6 +473,43 @@ async def _handle_ui_grid_click_row(
     rows = _mapping_from_action(action, "rows")
     columns = _list_from_action(action, "columns")
     column = action.get("column")
+    ensure_visible = action.get("ensure_visible") is True
+    max_scrolls = action.get("max_scrolls")
+    scroll_settle_ms = action.get("scroll_settle_ms")
+    ensure_visible_result: dict[str, Any] | None = None
+    if ensure_visible:
+        ensure_visible_result = await context.call_adapter(
+            "ui.grid.ensure_visible",
+            selector=selector,
+            row=row,
+            identity=identity,
+            rows=rows,
+            columns=columns,
+            max_scrolls=max_scrolls,
+            scroll_settle_ms=scroll_settle_ms,
+        )
+        if not _is_adapter_success(ensure_visible_result):
+            result = dict(ensure_visible_result)
+            status = _terminal_failure_status(str(result.get("status", "BLOCKED")).upper())
+            result["status"] = status
+            result["ensure_visible_result"] = ensure_visible_result
+            result["action_skipped"] = True
+            return _action_result(
+                status=status,
+                route="grid_click_row",
+                selector=selector,
+                row=row,
+                identity=identity,
+                rows=rows,
+                columns=columns,
+                column=str(column) if column is not None else None,
+                ensure_visible=True,
+                max_scrolls=max_scrolls,
+                scroll_settle_ms=scroll_settle_ms,
+                action_skipped=True,
+                duration_ms=context.elapsed_ms(started),
+                result=result,
+            )
     result = await context.call_adapter(
         "ui.grid.click_row",
         selector=selector,
@@ -436,18 +519,28 @@ async def _handle_ui_grid_click_row(
         columns=columns,
         column=str(column) if column is not None else None,
     )
-    return _action_result(
-        status=result.get("status", "PASS"),
-        route="grid_click_row",
-        selector=selector,
-        row=row,
-        identity=identity,
-        rows=rows,
-        columns=columns,
-        column=str(column) if column is not None else None,
-        duration_ms=context.elapsed_ms(started),
-        result=result,
-    )
+    if ensure_visible_result is not None:
+        result = dict(result)
+        result["ensure_visible_result"] = ensure_visible_result
+    action_payload = {
+        "status": result.get("status", "PASS"),
+        "route": "grid_click_row",
+        "selector": selector,
+        "row": row,
+        "identity": identity,
+        "rows": rows,
+        "columns": columns,
+        "column": str(column) if column is not None else None,
+        "duration_ms": context.elapsed_ms(started),
+        "result": result,
+    }
+    if ensure_visible:
+        action_payload["ensure_visible"] = True
+        if max_scrolls is not None:
+            action_payload["max_scrolls"] = max_scrolls
+        if scroll_settle_ms is not None:
+            action_payload["scroll_settle_ms"] = scroll_settle_ms
+    return _action_result(**action_payload)
 
 
 async def _handle_wait(action: dict[str, Any], context: ActionContext) -> dict[str, Any]:

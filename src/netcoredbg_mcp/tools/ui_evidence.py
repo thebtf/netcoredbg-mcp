@@ -471,6 +471,7 @@ def register_ui_evidence_tools(
         probe_name: str | None = None,
         max_scrolls: int | None = None,
         scroll_settle_ms: int | None = None,
+        ensure_visible: bool = False,
     ) -> dict:
         """Read, select, or assert WPF DataGrid row evidence."""
         try:
@@ -580,6 +581,9 @@ def register_ui_evidence_tools(
                         columns=columns,
                         rows=rows,
                         identity=identity,
+                        ensure_visible=ensure_visible,
+                        max_scrolls=max_scrolls,
+                        scroll_settle_ms=scroll_settle_ms,
                     )
                 elif canonical_action == "click_row":
                     result = await click_grid_row(
@@ -591,6 +595,9 @@ def register_ui_evidence_tools(
                         columns=columns,
                         rows=rows,
                         identity=identity,
+                        ensure_visible=ensure_visible,
+                        max_scrolls=max_scrolls,
+                        scroll_settle_ms=scroll_settle_ms,
                     )
                 elif canonical_action == "assert_range":
                     start, end = _require_range(start_index, end_index)

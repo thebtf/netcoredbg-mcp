@@ -214,10 +214,34 @@ async def select_grid_row(
     columns: list[str] | None = None,
     identity: Mapping[str, Any] | None = None,
     rows: dict[str, Any] | None = None,
+    ensure_visible: bool = False,
+    max_scrolls: int | None = None,
+    scroll_settle_ms: int | None = None,
 ) -> dict[str, Any]:
     """Select one currently visible DataGrid row and confirm the selection."""
     identity_payload = _identity_payload(identity, columns)
     evidence_columns = _identity_columns(identity_payload, columns)
+    ensure_visible_result: dict[str, Any] | None = None
+    if ensure_visible:
+        ensure_visible_result = await ensure_grid_row_visible(
+            backend,
+            selector,
+            row_index=row_index,
+            row_key=row_key,
+            identity=identity_payload,
+            rows=rows,
+            columns=evidence_columns,
+            max_scrolls=max_scrolls,
+            scroll_settle_ms=scroll_settle_ms,
+        )
+        if not _passes(ensure_visible_result):
+            result = dict(ensure_visible_result) if isinstance(ensure_visible_result, dict) else {}
+            result["status"] = _blocked_status(result)
+            result.setdefault("reason", "grid ensure-visible failed before row selection")
+            result["ensure_visible_result"] = ensure_visible_result
+            result["action_skipped"] = True
+            return result
+
     resolved, blocked = await resolve_visible_grid_row(
         backend,
         selector,
@@ -297,6 +321,8 @@ async def select_grid_row(
     result["resolved_row"] = _compact_row_ref(resolved, identity_payload)
     result["selected_rows"] = selected_rows
     result["observed_selected_indices"] = observed
+    if ensure_visible_result is not None:
+        result["ensure_visible_result"] = ensure_visible_result
     return result
 
 
@@ -539,10 +565,34 @@ async def click_grid_row(
     columns: list[str] | None = None,
     identity: Mapping[str, Any] | None = None,
     rows: dict[str, Any] | None = None,
+    ensure_visible: bool = False,
+    max_scrolls: int | None = None,
+    scroll_settle_ms: int | None = None,
 ) -> dict[str, Any]:
     """Click one currently visible DataGrid row through a backend primitive."""
     identity_payload = _identity_payload(identity, columns)
     evidence_columns = _identity_columns(identity_payload, columns)
+    ensure_visible_result: dict[str, Any] | None = None
+    if ensure_visible:
+        ensure_visible_result = await ensure_grid_row_visible(
+            backend,
+            selector,
+            row_index=row_index,
+            row_key=row_key,
+            identity=identity_payload,
+            rows=rows,
+            columns=evidence_columns,
+            max_scrolls=max_scrolls,
+            scroll_settle_ms=scroll_settle_ms,
+        )
+        if not _passes(ensure_visible_result):
+            result = dict(ensure_visible_result) if isinstance(ensure_visible_result, dict) else {}
+            result["status"] = _blocked_status(result)
+            result.setdefault("reason", "grid ensure-visible failed before row click")
+            result["ensure_visible_result"] = ensure_visible_result
+            result["action_skipped"] = True
+            return result
+
     resolved, blocked = await resolve_visible_grid_row(
         backend,
         selector,
@@ -588,6 +638,8 @@ async def click_grid_row(
     output = dict(result)
     output.setdefault("status", "PASS")
     output["resolved_row"] = _compact_row_ref(resolved, identity_payload)
+    if ensure_visible_result is not None:
+        output["ensure_visible_result"] = ensure_visible_result
     return output
 
 

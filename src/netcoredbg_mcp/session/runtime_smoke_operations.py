@@ -150,6 +150,9 @@ def ui_operation_adapters(
             rows=args.get("rows"),
             columns=args.get("columns"),
             identity=dict(args.get("identity") or {}),
+            ensure_visible=args.get("ensure_visible") is True,
+            max_scrolls=args.get("max_scrolls"),
+            scroll_settle_ms=args.get("scroll_settle_ms"),
         )
 
     async def grid_ensure_visible(**args: Any) -> dict[str, Any]:
@@ -193,6 +196,9 @@ def ui_operation_adapters(
             rows=args.get("rows"),
             columns=args.get("columns"),
             identity=dict(args.get("identity") or {}),
+            ensure_visible=args.get("ensure_visible") is True,
+            max_scrolls=args.get("max_scrolls"),
+            scroll_settle_ms=args.get("scroll_settle_ms"),
         )
 
     async def grid_select_indices(**args: Any) -> dict[str, Any]:

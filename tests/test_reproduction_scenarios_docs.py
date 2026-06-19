@@ -227,8 +227,11 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
     assert "CR-031" in row
     assert "CR-032" in row
     assert "CR-052" in row
+    assert "CR-053" in row
     assert 'ui_text(action="set_text")' in row
     assert 'ui_grid(action="viewport")' in row
+    assert "opt-in DataGrid row action ensure-visible composition" in row
+    assert "visible-row-only defaults" in row
     assert "ui.text.read" in row
     assert "ui.text.type_replace_selection" in row
     assert "ui.text.get_state" in row
@@ -317,9 +320,11 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "CR-031",
             "CR-032",
             "CR-052",
+            "CR-053",
             "ui.text.set_text",
             'ui_grid(action="viewport")',
             "ui.grid.viewport",
+            "opt-in ensure-visible row actions",
             "DataGrid offscreen/scroll action semantics",
         ],
         "#271": [
@@ -451,9 +456,12 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "CR-031",
             "CR-032",
             "CR-052",
+            "CR-053",
             "ui.text.set_text",
             'ui_grid(action="viewport")',
             "ui.grid.viewport",
+            "opt-in ensure-visible composition",
+            "visible-row-only defaults",
             "visible-row-only DataGrid",
             "bridge-owned",
             "ui_focus",
