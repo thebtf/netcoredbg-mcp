@@ -230,3 +230,53 @@ def test_novascript_action_oracle_template_generates_route_action_and_file_oracl
             "expected": "PASS",
         },
     ]
+
+
+def test_novascript_action_oracle_template_generates_app_diagnostics_probe() -> None:
+    generated, errors = expand_generated_cases(
+        {
+            "generate": {
+                "template": "novascript-action-oracle",
+                "matrix": [
+                    {
+                        "id": "route_apply",
+                        "action": {"kind": "wait", "idle_ms": 0},
+                        "oracles": [
+                            {
+                                "kind": "app_diagnostics",
+                                "name": "diagnostic",
+                                "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
+                                "app": {"name": "PlaceholderApp"},
+                                "status": "PASS",
+                                "observations": [],
+                                "redaction": {"omit_fields": ["raw_tree"]},
+                                "limits": {
+                                    "max_text_length": 240,
+                                    "max_list_items": 8,
+                                    "max_json_bytes": 32768,
+                                },
+                                "poll": {
+                                    "path": "Tmp/evidence/{id}.json",
+                                    "timeout_ms": 0,
+                                    "poll_interval_ms": 0,
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
+        }
+    )
+
+    assert errors == []
+    probe = generated[0]["transitions"][0]["probes"][0]
+    assert probe["kind"] == "app_diagnostics"
+    assert probe["name"] == "diagnostic"
+    assert probe["phase"] == "after"
+    assert probe["schema"] == "netcoredbg.runtime_smoke.diagnostics.v1"
+    assert probe["app"] == {"name": "PlaceholderApp"}
+    assert probe["poll"] == {
+        "path": "Tmp/evidence/route_apply.json",
+        "timeout_ms": 0,
+        "poll_interval_ms": 0,
+    }

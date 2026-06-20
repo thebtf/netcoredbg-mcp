@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -251,6 +252,80 @@ async def test_novascript_action_oracle_matrix_runs_generated_cases(tmp_path: Pa
         case["transitions"][0]["action"] == {"kind": "wait", "idle_ms": 0}
         for case in generated
     )
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_novascript_action_oracle_matrix_runs_generated_app_diagnostics_cases(
+    tmp_path: Path,
+) -> None:
+    diagnostic_path = tmp_path / "diagnostic-route-apply.json"
+    diagnostic_path.write_text(
+        json.dumps(
+            {
+                "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
+                "app": {"name": "NovaScript", "process_name": "NovaScript.Wpf"},
+                "status": "PASS",
+                "observations": [
+                    {
+                        "kind": "app.snapshot",
+                        "status": "PASS",
+                        "reason": "NovaScript diagnostic snapshot observed",
+                        "next_step": "No action required.",
+                    }
+                ],
+                "redaction": {"omit_fields": ["raw_tree"]},
+                "limits": {
+                    "max_text_length": 240,
+                    "max_list_items": 8,
+                    "max_json_bytes": 32768,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    session = GenerateSmokeSession()
+    plan = {
+        "schema": "netcoredbg.runtime_smoke.v2",
+        "generate": {
+            "template": "novascript-action-oracle",
+            "matrix": [
+                {
+                    "id": "route_apply",
+                    "action": {"kind": "wait", "idle_ms": 0},
+                    "oracles": [
+                        {
+                            "kind": "app_diagnostics",
+                            "name": "diagnostic",
+                            "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
+                            "app": {"name": "PlaceholderApp"},
+                            "status": "PASS",
+                            "observations": [],
+                            "redaction": {"omit_fields": ["raw_tree"]},
+                            "limits": {
+                                "max_text_length": 240,
+                                "max_list_items": 8,
+                                "max_json_bytes": 32768,
+                            },
+                            "poll": {
+                                "path": str(diagnostic_path),
+                                "timeout_ms": 0,
+                                "poll_interval_ms": 0,
+                            },
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+
+    result = await _runner(session).run(plan)
+
+    assert result["status"] == "PASS"
+    assert result["generated_case_count"] == 1
+    assert result["cases"][0]["id"] == "route_apply"
+    assert result["cases"][0]["rendered_from"]["id"] == "route_apply"
     assert session.calls == []
 
 

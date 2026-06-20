@@ -44,10 +44,18 @@ def file_json_probes_from_record(record: dict[str, Any]) -> list[dict[str, Any]]
         if not isinstance(raw_oracle, dict):
             continue
         oracle = dict(raw_oracle)
+        kind = str(oracle.get("kind") or "file.json")
+        if kind != "file.json":
+            probe = deepcopy(render_template_value(oracle, record))
+            probe["kind"] = kind
+            probe.setdefault("phase", str(oracle.get("phase", "after")))
+            probe.setdefault("name", str(oracle.get("name", f"oracle_{index}")))
+            probes.append(probe)
+            continue
         path = oracle.get("path", record.get("path", record.get("evidence_path", "")))
         jsonpath = oracle.get("jsonpath", oracle.get("path_expr", record.get("jsonpath", "")))
         probe = {
-            "kind": "file.json",
+            "kind": kind,
             "phase": str(oracle.get("phase", "after")),
             "name": str(oracle.get("name", f"oracle_{index}")),
             "path": render_template_value(path, record),
