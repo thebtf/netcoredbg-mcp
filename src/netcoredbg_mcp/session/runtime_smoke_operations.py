@@ -1463,6 +1463,32 @@ async def _drag_route(
     if blocked is not None:
         return {}, {}, blocked
 
+    if (
+        source.get("kind") in {"row_index", "row_identity"}
+        and isinstance(target_evidence.get("ensure_visible_result"), Mapping)
+    ):
+        refreshed_source_point, refreshed_source_evidence, blocked = await _resolve_drag_endpoint(
+            backend,
+            source,
+            role="source",
+            identity=identity,
+        )
+        if blocked is not None:
+            return {}, {}, _drag_blocked(
+                reason="drag source row no longer visible after target ensure-visible",
+                requested={"source": source, "target": target_payload},
+                accepted={
+                    "source": "row-based source that remains visible after target realization",
+                    "target": "row-based drop endpoint with bounded ensure-visible evidence",
+                },
+                next_step=(
+                    "Use a closer row-based drop target, or add backend support that "
+                    "preserves the drag start anchor across target-side scrolling."
+                ),
+            )
+        source_point = refreshed_source_point
+        source_evidence = refreshed_source_evidence
+
     route_evidence = {
         "source": source,
         "target": target_payload,

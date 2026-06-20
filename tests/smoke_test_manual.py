@@ -3582,6 +3582,304 @@ def _v2_visible_row_drag_summary(result: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
+async def run_wpf_v2_offscreen_row_target_drag_runtime_smoke() -> dict[str, Any]:
+    from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner
+    from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
+    from netcoredbg_mcp.ui.backend import create_backend
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    if sys.platform != "win32":
+        return {
+            "status": "BLOCKED",
+            "reason": "WPF v2 offscreen row-target drag smoke requires Windows UI automation",
+        }
+
+    m = SessionManager(project_path=BASE)
+    backend_holder: dict[str, object | None] = {"backend": None}
+    backend_holder["backend"] = create_backend(process_registry=m.process_registry)
+    if not isinstance(backend_holder["backend"], FlaUIBackend):
+        return {
+            "status": "BLOCKED",
+            "backend": type(backend_holder["backend"]).__name__,
+            "reason": "FlaUI bridge required for WPF v2 offscreen row-target drag smoke",
+            "accepted": {
+                "backend": "FlaUI drag_path with source/drop row ensure_visible proof"
+            },
+            "next_step": "Build the FlaUI bridge and run on a Windows desktop session.",
+        }
+
+    async def ensure_ui_connected():
+        backend = backend_holder["backend"]
+        if backend is None:
+            backend = create_backend(process_registry=m.process_registry)
+            backend_holder["backend"] = backend
+        pid = m.state.process_id
+        if not pid:
+            raise RuntimeError(
+                "Process ID not available for WPF v2 offscreen row-target drag smoke"
+            )
+        if getattr(backend, "process_id", None) != pid:
+            await backend.connect(pid)
+        return backend
+
+    plan = _v2_offscreen_row_target_drag_plan(
+        program=WPF_DLL,
+        build_project=os.path.join(
+            BASE,
+            "tests",
+            "fixtures",
+            "WpfSmokeApp",
+            "WpfSmokeApp.csproj",
+        ),
+    )
+
+    try:
+        result = await RuntimeSmokeRunner(
+            m,
+            service_adapters=ui_operation_adapters(ensure_ui_connected, session=m),
+        ).run(plan)
+        return _v2_offscreen_row_target_drag_summary(result)
+    finally:
+        if backend_holder["backend"] is not None:
+            try:
+                await backend_holder["backend"].disconnect()
+            except Exception as exc:
+                print(
+                    "  [DEBUG] WPF v2 offscreen row-target drag "
+                    f"backend.disconnect() failed: {exc}"
+                )
+        await m.stop()
+
+
+def _v2_offscreen_row_target_drag_plan(
+    *,
+    program: str,
+    build_project: str,
+) -> dict[str, Any]:
+    selector = {"automation_id": "dataGrid"}
+    status_selector = {"automation_id": "txtOutput"}
+    source_identity = "Fixture cue two"
+    target_identity = "Fixture cue nineteen"
+    return {
+        "schema": "netcoredbg.runtime_smoke.v2",
+        "name": "wpf v2 offscreen row-target drag replay",
+        "baseline": {
+            "steps": [
+                {
+                    "id": "launch_fixture",
+                    "kind": "isolated_profile.launch",
+                    "launch": {
+                        "program": program,
+                        "cwd": os.path.dirname(program),
+                        "pre_build": True,
+                        "build_project": build_project,
+                        "build_configuration": "Debug",
+                    },
+                }
+            ]
+        },
+        "cases": [
+            {
+                "id": "wpf_offscreen_row_target_drag_replay",
+                "transitions": [
+                    {
+                        "id": "drag_visible_row_to_offscreen_row_target",
+                        "action": {
+                            "kind": "ui.drag",
+                            "ensure_visible": True,
+                            "source": {
+                                "selector": selector,
+                                "row_identity": source_identity,
+                            },
+                            "path": [
+                                {"relative_to": "source", "x": 0.5, "y": 0.5},
+                                {"relative_to": "drop", "x": 0.5, "y": 0.5},
+                            ],
+                            "drop": {
+                                "selector": selector,
+                                "row_identity": target_identity,
+                                "identity": {"column": "Phrase"},
+                                "rows": {"visible_only": True, "max": 8},
+                                "columns": ["Phrase"],
+                                "ensure_visible": True,
+                                "max_scrolls": 12,
+                                "scroll_settle_ms": 25,
+                                "position": "center",
+                            },
+                            "identity": {"column": "Phrase"},
+                            "duration_ms": 650,
+                            "expect": {
+                                "row_count_preserved": True,
+                                "identity_set_preserved": True,
+                                "single_move": {
+                                    "source_identity": source_identity,
+                                    "target_identity": target_identity,
+                                },
+                            },
+                        },
+                        "settle": {"idle_ms": 700},
+                        "probes": [
+                            {
+                                "kind": "ui.grid.viewport",
+                                "name": "offscreen_target_viewport",
+                                "selector": selector,
+                                "identity": {"column": "Phrase"},
+                                "rows": {"visible_only": True, "max": 8},
+                                "expect": {
+                                    "row_count_preserved": True,
+                                },
+                            },
+                            {
+                                "kind": "ui.property",
+                                "name": "offscreen_target_status",
+                                "selector": status_selector,
+                                "property": "Text",
+                                "phase": "after",
+                            },
+                            {
+                                "kind": "process.metric",
+                                "name": "offscreen_target_process",
+                            },
+                        ],
+                    }
+                ],
+            }
+        ],
+        "cleanup": {
+            "steps": [
+                {"kind": "debug.stop"},
+                {"kind": "process.registry.assert_empty"},
+            ]
+        },
+    }
+
+
+def _v2_offscreen_row_target_drag_summary(result: dict[str, Any]) -> dict[str, Any]:
+    transition = _first_v2_transition(result)
+    action = _first_transition_action(transition)
+    route_evidence = dict(action.get("route_evidence") or {}) if action else {}
+    status = _parse_drag_reorder_status(
+        _transition_probe_value(
+            transition,
+            "after",
+            "ui.property.offscreen_target_status",
+        )
+    )
+    viewport = _transition_probe_result(
+        transition,
+        "after",
+        "ui.grid.viewport.offscreen_target_viewport",
+    )
+    comparison = dict(viewport.get("comparison") or {})
+    process_metric = _transition_probe_value(
+        transition,
+        "after",
+        "process.metric.offscreen_target_process",
+    )
+    expected_source = "Fixture cue two"
+    expected_target = "Fixture cue nineteen"
+    initial_order = _wpf_fixture_cue_order()
+    target_index = initial_order.index(expected_target)
+    expected_order = _moved_refs_by_identity(
+        initial_order,
+        source=expected_source,
+        target=expected_target,
+    )
+    edge_first = status.get("edge_first_visible")
+    edge_last = status.get("edge_last_visible")
+    target_visible_after_drop = (
+        isinstance(edge_first, int)
+        and isinstance(edge_last, int)
+        and edge_first <= target_index <= edge_last
+    )
+    order = status.get("order") or []
+    compact = {
+        "status": result.get("status"),
+        "reason": result.get("reason"),
+        "source_identity_requested": expected_source,
+        "target_identity_requested": expected_target,
+        "target_index": target_index,
+        "drop_ensure_visible_requested": True,
+        "source_ensure_visible_requested": True,
+        "expected_source": expected_source,
+        "expected_target": expected_target,
+        "status_text": status,
+        "source_identity_matches": status.get("source_identity") == expected_source,
+        "target_identity_matches": status.get("target_identity") == expected_target,
+        "target_visible_after_drop": target_visible_after_drop,
+        "final_order_matches": order == expected_order,
+        "route_evidence": {
+            "backend": action.get("backend") if action else None,
+            "source_bounds": route_evidence.get("source_bounds"),
+            "target_bounds": route_evidence.get("target_bounds"),
+            "move_points": route_evidence.get("move_points"),
+            "final_pointer": route_evidence.get("final_pointer"),
+        },
+        "viewport": comparison,
+        "process_metric": process_metric,
+        "cleanup": result.get("cleanup"),
+        "blocked": result.get("blocked"),
+    }
+    if result.get("status") == "BLOCKED":
+        compact["status"] = "BLOCKED"
+        return compact
+    if result.get("status") != "PASS":
+        compact["status"] = "FAIL"
+        return compact
+
+    missing_evidence = []
+    if not action:
+        missing_evidence.append("drag action result")
+    if not route_evidence.get("source_bounds"):
+        missing_evidence.append("source row bounds")
+    if not route_evidence.get("target_bounds"):
+        missing_evidence.append("target row bounds after drop.ensure_visible")
+    if not route_evidence.get("move_points"):
+        missing_evidence.append("drag move path")
+    if not route_evidence.get("final_pointer"):
+        missing_evidence.append("final pointer position")
+    if not status.get("order"):
+        missing_evidence.append("fixture status order fingerprint")
+    if not isinstance(edge_first, int) or not isinstance(edge_last, int):
+        missing_evidence.append("viewport range after drop.ensure_visible")
+    if "row_count_preserved" not in comparison:
+        missing_evidence.append("viewport row-count comparison")
+    if not isinstance(process_metric, dict):
+        missing_evidence.append("process metric probe")
+    if missing_evidence:
+        compact.update(
+            {
+                "status": "BLOCKED",
+                "reason": (
+                    "Backend/platform did not return enough evidence to prove "
+                    "the offscreen row-target drag replay seam"
+                ),
+                "missing_evidence": missing_evidence,
+                "accepted": {
+                    "source": {"row_identity": expected_source, "ensure_visible": True},
+                    "drop": {"row_identity": expected_target, "ensure_visible": True},
+                    "expected_target": expected_target,
+                },
+                "next_step": (
+                    "Expose route evidence and viewport/status proof for "
+                    "row-based drop.ensure_visible in the WPF runtime-smoke backend."
+                ),
+            }
+        )
+        return compact
+
+    compact["status"] = (
+        "PASS"
+        if compact["source_identity_matches"]
+        and compact["target_identity_matches"]
+        and compact["target_visible_after_drop"]
+        and compact["final_order_matches"]
+        and comparison.get("row_count_preserved") is True
+        else "FAIL"
+    )
+    return compact
+
+
 async def run_wpf_v2_edge_scroll_drag_runtime_smoke() -> dict[str, Any]:
     from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner
     from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
@@ -4597,6 +4895,42 @@ async def test_wpf_v2_visible_row_drag_runtime_smoke():
     )
 
 
+async def test_wpf_v2_offscreen_row_target_drag_runtime_smoke():
+    print("\nWPF V2 OFFSCREEN ROW-TARGET DRAG RUNTIME SMOKE")
+    evidence = await run_wpf_v2_offscreen_row_target_drag_runtime_smoke()
+    print(f"  evidence: {evidence}")
+    if evidence.get("status") == "BLOCKED":
+        check(
+            "WPF v2 offscreen row-target drag reports actionable BLOCKED",
+            True,
+            str(evidence),
+        )
+        return
+    check(
+        "WPF v2 offscreen row-target drag returned PASS",
+        evidence.get("status") == "PASS",
+        str(evidence),
+    )
+    check(
+        "WPF v2 offscreen row-target drag requested source/drop visibility",
+        evidence.get("source_ensure_visible_requested") is True
+        and evidence.get("drop_ensure_visible_requested") is True,
+        str(evidence),
+    )
+    check(
+        "WPF v2 offscreen row-target drag proved target row became visible",
+        bool(evidence.get("target_visible_after_drop"))
+        and bool(evidence.get("target_identity_matches")),
+        str(evidence),
+    )
+    check(
+        "WPF v2 offscreen row-target drag preserves final order expectations",
+        bool(evidence.get("source_identity_matches"))
+        and bool(evidence.get("final_order_matches")),
+        str(evidence),
+    )
+
+
 async def test_wpf_v2_edge_scroll_drag_runtime_smoke():
     print("\nWPF V2 EDGE-SCROLL DRAG RUNTIME SMOKE")
     evidence = await run_wpf_v2_edge_scroll_drag_runtime_smoke()
@@ -5092,6 +5426,10 @@ def get_scenarios():
         (
             "WPF V2 Visible-Row Drag Runtime Smoke",
             test_wpf_v2_visible_row_drag_runtime_smoke,
+        ),
+        (
+            "WPF V2 Offscreen Row-Target Drag Runtime Smoke",
+            test_wpf_v2_offscreen_row_target_drag_runtime_smoke,
         ),
         (
             "WPF V2 Edge-Scroll Drag Runtime Smoke",

@@ -355,6 +355,7 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "CR-057",
             "CR-058",
             "CR-074",
+            "CR-075",
             "ui.text.set_text",
             'ui_grid(action="viewport")',
             'ui_grid(action="right_click_row")',
@@ -363,6 +364,8 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "drop.ensure_visible=true",
             "row-based drop endpoint",
             "target-side offscreen row-target drag ensure-visible semantics",
+            "bounded broad-#270 replay-proof plus fail-closed source-anchor guard slice",
+            "actionable `BLOCKED` verdict when target-side realization hides the drag source",
             "opt-in ensure-visible row actions",
             "ui.right_click_verified",
             "ui.double_click_verified",
@@ -821,6 +824,50 @@ def test_issue_270_records_cr074_target_drop_ensure_visible_slice_without_broad_
         "target-side offscreen row-target drag ensure-visible semantics"
         in lifecycle_remaining
     )
+    assert "broader" in remaining
+    assert "broader" in lifecycle_remaining
+
+
+def test_issue_270_records_cr075_docs_evidence_replay_proof_without_broad_closure() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#270")
+    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#270")
+    _issue, _state, _evidence, remaining = _issue_cells(backlog, "#270")
+    _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
+        cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
+    )
+
+    for text in (row, lifecycle_row):
+        assert "CR-075" in text
+        assert "bounded broad-#270 replay-proof plus fail-closed source-anchor guard slice" in text
+        assert (
+            "docs/examples/runtime-smoke-v2-drag-drop-grid.json" in text
+            or "public example" in text
+        )
+        assert (
+            "docs/PRODUCTION-TESTING-PLAYBOOK.md" in text
+            or "production playbook" in text
+        )
+        assert "docs guard tests" in text
+        assert "runtime-smoke manual scenario" in text
+        assert "adapter guard" in text
+        assert "offscreen row-target" in text
+        assert "drop.ensure_visible=true" in text
+        assert "bounded route" in text or "route evidence" in text
+        assert "viewport evidence" in text or "ui.grid.viewport" in text
+        assert "actionable `BLOCKED` verdict" in text
+        assert (
+            "without closing broad `#270`" in text
+            or "broad closure" in text
+            or "keep open or split" in text
+        )
+
+    expected_remaining = (
+        "live downstream replay tails beyond the CR-075 replay-proof plus "
+        "fail-closed source-anchor guard contract"
+    )
+    assert expected_remaining in remaining
+    assert expected_remaining in lifecycle_remaining
     assert "broader" in remaining
     assert "broader" in lifecycle_remaining
 
