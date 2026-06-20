@@ -122,6 +122,21 @@ class CursorFacadeRegistry:
         entry_count: int,
         limit: int,
     ) -> tuple[dict[str, Any], dict[str, int]] | None:
+        if run_id == "bool-available-run":
+            return (
+                {
+                    "entries": [],
+                    "available": True,
+                    "limit": limit,
+                    "limited": False,
+                    "stale_cursor": False,
+                    "dropped_count": 0,
+                },
+                {
+                    "after_index": after_index,
+                    "entry_count": entry_count,
+                },
+            )
         if run_id != "intracase-appdiag-run":
             return None
         entries = [_app_diagnostics_progress_entry()]
@@ -247,6 +262,28 @@ class CursorFacadeRegistry:
                 "events": [],
                 "next_cursor": 12,
                 "oldest_cursor": 12,
+                "dropped_count": 0,
+                "stale_cursor": False,
+                "final": False,
+            }
+        if run_id == "bool-available-run":
+            return {
+                "status": "RUNNING",
+                "run_id": run_id,
+                "events": [],
+                "next_cursor": 12,
+                "oldest_cursor": 12,
+                "dropped_count": 0,
+                "stale_cursor": False,
+                "final": False,
+            }
+        if run_id == "quiet-active-run":
+            return {
+                "status": "RUNNING",
+                "run_id": run_id,
+                "events": [],
+                "next_cursor": after_cursor,
+                "oldest_cursor": after_cursor,
                 "dropped_count": 0,
                 "stale_cursor": False,
                 "final": False,
@@ -1044,6 +1081,55 @@ async def test_runtime_smoke_get_event_delta_app_diagnostics_missing_run_fails_c
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_get_event_delta_agent_mode_quiet_app_diagnostics_delta_waits(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor={
+            "run_id": "intracase-appdiag-run",
+            "after_cursor": 12,
+            "sources": {
+                "app_diagnostics": {
+                    "after_index": 1,
+                    "entry_count": 1,
+                }
+            },
+        },
+        event_limit=5,
+        agent_mode=True,
+    )
+    data = response["data"]
+    agent = data["agent_mode"]
+
+    assert data["status"] == "RUNNING"
+    assert data["final"] is False
+    assert data["events"] == []
+    assert data["source_deltas"]["app_diagnostics"] == {
+        "entries": [],
+        "available": 0,
+        "limit": 5,
+        "limited": False,
+        "stale_cursor": False,
+        "dropped_count": 0,
+    }
+    assert agent["primary_next_action"] == "runtime_smoke_wait_for_result"
+    assert agent["next_request"] == {
+        "tool": "runtime_smoke_wait_for_result",
+        "arguments": {
+            "run_id": "intracase-appdiag-run",
+            "after_cursor": 12,
+            "agent_mode": True,
+            "event_limit": 20,
+        },
+    }
+    assert agent["cursor"] == data["cursor"]
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_get_event_delta_compacts_large_debug_output_entries(
     capturing_mcp,
 ) -> None:
@@ -1670,3 +1756,127 @@ async def test_runtime_smoke_get_event_delta_agent_mode_missing_run_has_no_delta
     assert agent["primary_next_action"] == "runtime_smoke_run_plan"
     assert "next_request" not in agent
     assert "cursor" not in agent
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_get_event_delta_agent_mode_quiet_active_routes_to_wait(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor={"run_id": "quiet-active-run", "after_cursor": 20},
+        event_limit=5,
+        agent_mode=True,
+    )
+    data = response["data"]
+    agent = data["agent_mode"]
+
+    assert data["status"] == "PASS"
+    assert data["events"] == []
+    assert "source_deltas" not in data
+    assert data["final"] is False
+    assert agent["primary_next_action"] == "runtime_smoke_wait_for_result"
+    assert agent["cursor"] == data["cursor"]
+    assert agent["next_request"] == {
+        "tool": "runtime_smoke_wait_for_result",
+        "arguments": {
+            "run_id": "quiet-active-run",
+            "agent_mode": True,
+            "after_cursor": 20,
+            "event_limit": 20,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_get_event_delta_agent_mode_bool_available_stays_on_delta(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor={
+            "run_id": "bool-available-run",
+            "after_cursor": 12,
+            "sources": {
+                "app_diagnostics": {
+                    "after_index": 1,
+                    "entry_count": 1,
+                }
+            },
+        },
+        event_limit=5,
+        agent_mode=True,
+    )
+    data = response["data"]
+    agent = data["agent_mode"]
+
+    assert data["status"] == "PASS"
+    assert data["final"] is False
+    assert data["events"] == []
+    assert data["source_deltas"]["app_diagnostics"]["available"] is True
+    assert agent["primary_next_action"] == "runtime_smoke_get_event_delta"
+    assert agent["next_request"] == {
+        "tool": "runtime_smoke_get_event_delta",
+        "arguments": {
+            "cursor": agent["cursor"],
+            "agent_mode": True,
+            "event_limit": 20,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_get_event_delta_agent_mode_quiet_debug_output_stays_on_delta(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    session.state.output_buffer = deque(
+        [OutputEntry(text="existing\n", category="stdout", sequence=1)]
+    )
+    session.state.output_sequence = 1
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor={
+            "run_id": "quiet-active-run",
+            "after_cursor": 20,
+            "sources": {
+                "debug_output": {
+                    "after_sequence": 1,
+                    "trimmed_before": 0,
+                }
+            },
+        },
+        event_limit=5,
+        agent_mode=True,
+    )
+    data = response["data"]
+    agent = data["agent_mode"]
+
+    assert data["status"] == "PASS"
+    assert data["final"] is False
+    assert data["events"] == []
+    assert data["source_deltas"]["debug_output"] == {
+        "entries": [],
+        "available": 0,
+        "limit": 5,
+        "limited": False,
+        "stale_cursor": False,
+        "dropped_count": 0,
+    }
+    assert agent["primary_next_action"] == "runtime_smoke_get_event_delta"
+    assert agent["next_request"] == {
+        "tool": "runtime_smoke_get_event_delta",
+        "arguments": {
+            "cursor": agent["cursor"],
+            "agent_mode": True,
+            "event_limit": 20,
+        },
+    }

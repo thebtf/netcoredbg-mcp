@@ -676,7 +676,19 @@ def register_runtime_smoke_tools(
                 tracepoint_manager=getattr(session, "_tracepoint_manager", None),
             )
             if agent_mode:
-                _apply_runtime_smoke_agent_mode(data, "runtime_smoke_get_event_delta")
+                quiet_active = _runtime_smoke_event_delta_is_quiet_active(data)
+                quiet_wait = _runtime_smoke_agent_quiet_delta_should_wait(data)
+                if (
+                    quiet_wait
+                    and _runtime_smoke_agent_quiet_app_diagnostics_delta_should_wait(data)
+                ):
+                    data["status"] = "RUNNING"
+                primary = (
+                    "runtime_smoke_wait_for_result"
+                    if quiet_active and quiet_wait
+                    else "runtime_smoke_get_event_delta"
+                )
+                _apply_runtime_smoke_agent_mode(data, primary)
             return _build_runtime_smoke_response(
                 session,
                 data,
@@ -2568,6 +2580,29 @@ def _runtime_smoke_agent_run_id(data: dict[str, Any]) -> str:
     return str(data.get("run_id") or data.get("active_run_id") or "")
 
 
+def _runtime_smoke_agent_quiet_app_diagnostics_delta_should_wait(
+    data: dict[str, Any],
+) -> bool:
+    if data.get("final") is True:
+        return False
+    if data.get("events"):
+        return False
+    source_deltas = data.get("source_deltas")
+    if not isinstance(source_deltas, dict):
+        return False
+    app_diagnostics = source_deltas.get("app_diagnostics")
+    if not isinstance(app_diagnostics, dict):
+        return False
+    entries = app_diagnostics.get("entries")
+    if entries:
+        return False
+    available = app_diagnostics.get("available")
+    try:
+        return int(available or 0) == 0
+    except (TypeError, ValueError):
+        return False
+
+
 def _runtime_smoke_agent_cursor(data: dict[str, Any]) -> dict[str, Any]:
     cursor = data.get("cursor")
     if isinstance(cursor, dict):
@@ -2607,6 +2642,49 @@ def _runtime_smoke_agent_cursor(data: dict[str, Any]) -> dict[str, Any]:
         "dropped_count": data.get("dropped_count", 0),
         "stale_cursor": data.get("stale_cursor", False),
     }
+
+
+def _runtime_smoke_event_delta_is_quiet_active(data: dict[str, Any]) -> bool:
+    if data.get("final") is not False:
+        return False
+    if data.get("events"):
+        return False
+
+    source_deltas = data.get("source_deltas")
+    if not isinstance(source_deltas, dict):
+        return True
+    return not any(
+        _runtime_smoke_source_delta_has_entries(delta)
+        for delta in source_deltas.values()
+    )
+
+
+def _runtime_smoke_source_delta_has_entries(delta: Any) -> bool:
+    if not isinstance(delta, dict):
+        return bool(delta)
+
+    entries = delta.get("entries")
+    if entries:
+        return True
+
+    available = delta.get("available")
+    if isinstance(available, bool):
+        return available
+    if isinstance(available, int):
+        return available > 0
+    if isinstance(available, str):
+        try:
+            return int(available) > 0
+        except ValueError:
+            return True
+    return "entries" not in delta and "available" not in delta and bool(delta)
+
+
+def _runtime_smoke_agent_quiet_delta_should_wait(data: dict[str, Any]) -> bool:
+    source_deltas = data.get("source_deltas")
+    if not isinstance(source_deltas, dict) or not source_deltas:
+        return True
+    return set(source_deltas.keys()) <= {"app_diagnostics"}
 
 
 def _runtime_smoke_run_missing(result: dict[str, Any]) -> bool:
