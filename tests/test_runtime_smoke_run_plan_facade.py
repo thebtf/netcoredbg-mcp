@@ -722,7 +722,7 @@ async def test_runtime_smoke_evidence_bundle_agent_mode_guides_active_app_diagno
     assert agent["cursor"]["run_id"] == "active-appdiag-run"
     assert agent["cursor"]["after_cursor"] == data["event_cursor"]["next_cursor"]
     assert agent["cursor"]["sources"]["app_diagnostics"] == {
-        "after_index": 1,
+        "after_index": 0,
         "entry_count": 1,
     }
     assert agent["next_request"] == {

@@ -150,6 +150,18 @@ class ActiveAppDiagnosticsProgressRegistry:
 
 
 class EmptyActiveAppDiagnosticsCursorRegistry(ActiveAppDiagnosticsProgressRegistry):
+    async def get_result(self, run_id: str) -> dict[str, Any]:
+        self.get_result_calls += 1
+        return {
+            "status": "RUNNING",
+            "run_id": run_id,
+            "plan_name": "active-app-diagnostics",
+            "lifecycle_status": "RUNNING",
+            "final": False,
+            "evidence_refs": [],
+            "cleanup": None,
+        }
+
     async def get_app_diagnostics_source_cursor(
         self,
         run_id: str,
@@ -480,7 +492,7 @@ async def test_runtime_smoke_wait_for_result_agent_mode_guides_active_app_diagno
     assert agent["cursor"]["run_id"] == "active-appdiag-run"
     assert agent["cursor"]["after_cursor"] == data["event_cursor"]["next_cursor"]
     assert agent["cursor"]["sources"]["app_diagnostics"] == {
-        "after_index": 1,
+        "after_index": 0,
         "entry_count": 1,
     }
     assert agent["next_request"] == {

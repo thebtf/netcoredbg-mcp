@@ -1199,6 +1199,7 @@ async def _runtime_smoke_evidence_bundle(
             registry,
             run_id,
             event_cursor,
+            result=result,
         )
 
     bundle = {
@@ -1788,7 +1789,19 @@ async def _runtime_smoke_attach_live_app_diagnostics_source_cursor(
     registry: Any,
     run_id: str,
     cursor: dict[str, Any],
+    result: dict[str, Any] | None = None,
 ) -> None:
+    if isinstance(result, dict):
+        buffered_cursor = _runtime_smoke_current_app_diagnostics_cursor(
+            result,
+            from_start=True,
+        )
+        if buffered_cursor is not None:
+            sources = dict(cursor.get("sources") or {})
+            sources["app_diagnostics"] = buffered_cursor
+            cursor["sources"] = sources
+            return
+
     live_cursor_reader = getattr(
         registry,
         "get_app_diagnostics_source_cursor",
