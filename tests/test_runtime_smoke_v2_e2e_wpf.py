@@ -175,3 +175,23 @@ def test_parse_drag_reorder_status_reads_drop_time_diagnostics() -> None:
     assert status["drop_bounds_index"] == 18
     assert status["drop_bounds_top"] == 44
     assert status["drop_bounds_bottom"] == 63
+
+
+def test_parse_drag_reorder_status_reads_blocked_drop_time_diagnostics() -> None:
+    status = smoke_test_manual._parse_drag_reorder_status(
+        "WpfWorkflow DragReorder blocked "
+        "sourceIdentity=Fixture cue two targetIdentity=<none> "
+        "dropPoint=354,63 dropOriginTarget=<none> dropBoundsTarget=Fixture cue eighteen "
+        "dropBoundsIndex=17 dropBoundsTop=44 dropBoundsBottom=63"
+    )
+
+    assert status["source_identity"] == "Fixture cue two"
+    assert status["target_identity"] == "<none>"
+    assert status["drop_point_x"] == 354
+    assert status["drop_point_y"] == 63
+    assert status["drop_origin_target"] == "<none>"
+    assert status["drop_bounds_target"] == "Fixture cue eighteen"
+    assert status["drop_bounds_index"] == 17
+    assert status["drop_bounds_top"] == 44
+    assert status["drop_bounds_bottom"] == 63
+    assert status["order"] == []

@@ -4816,6 +4816,33 @@ def _moved_refs_by_identity(
 
 def _parse_drag_reorder_status(value: Any) -> dict[str, Any]:
     text = str(value or "")
+    blocked_match = re.search(
+        r"sourceIdentity=(.*?) targetIdentity=(.*?) "
+        r"dropPoint=(-?\d+),(-?\d+) "
+        r"dropOriginTarget=(.*?) dropBoundsTarget=(.*?) "
+        r"dropBoundsIndex=(-?\d+) dropBoundsTop=(-?\d+) dropBoundsBottom=(-?\d+)$",
+        text,
+    )
+    if blocked_match:
+        return {
+            "raw": text,
+            "source_identity": blocked_match.group(1),
+            "target_identity": blocked_match.group(2),
+            "selected_payload_mode": None,
+            "selected_payload_before": [],
+            "selected_payload_after": [],
+            "edge_scroll_direction": None,
+            "edge_first_visible": None,
+            "edge_last_visible": None,
+            "drop_point_x": int(blocked_match.group(3)),
+            "drop_point_y": int(blocked_match.group(4)),
+            "drop_origin_target": blocked_match.group(5),
+            "drop_bounds_target": blocked_match.group(6),
+            "drop_bounds_index": int(blocked_match.group(7)),
+            "drop_bounds_top": int(blocked_match.group(8)),
+            "drop_bounds_bottom": int(blocked_match.group(9)),
+            "order": [],
+        }
     match = re.search(
         r"sourceIdentity=(.*?) targetIdentity=(.*?) "
         r"(?:selectedPayloadMode=(.*?) selectedPayloadBefore=(.*?) "
