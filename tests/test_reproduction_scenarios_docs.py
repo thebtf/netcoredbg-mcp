@@ -297,6 +297,7 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
         assert "Schema slice merged" in row
         assert "broader FR remains open" in row
         assert "None in netcoredbg-mcp." not in row
+    assert "CR-091" in _issue_row(backlog, "#271")
 
 
 def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -> None:
@@ -431,10 +432,12 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "get_trace_delta",
             "CR-046",
             "CR-048",
+            "CR-091",
             "debug.stop",
             "process-registry assertion",
             "app diagnostics live-target freshness",
-            "broader diagnostics orchestration",
+            "split/comment closure evidence",
+            "diagnostics-orchestration tail",
         ],
         "#272": [
             "app diagnostics",
@@ -637,6 +640,7 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "CR-042",
             "CR-046",
             "CR-048",
+            "CR-091",
             "mark_trace_cursor",
             "get_trace_delta",
             "cleanup_contract",
@@ -646,6 +650,8 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "single-flight",
             "app diagnostics live-target freshness",
             "PDB/process proof",
+            "split/comment closure evidence",
+            "diagnostics-orchestration tail",
         ],
         "#272": [
             "commented",
@@ -1450,7 +1456,7 @@ def test_issue_271_272_record_cr048_app_diagnostics_freshness_slice() -> None:
 
     assert "live-target PDB/process proof" not in remaining_271
     assert "PDB/process proof" not in remaining_272
-    assert "broader diagnostics orchestration" in remaining_271
+    assert "diagnostics-orchestration lifecycle tail" in remaining_271
     assert "broader app diagnostics lifecycle/orchestration" in remaining_272
 
 
@@ -1676,11 +1682,60 @@ def test_issue_271_records_cleanup_and_trace_delta_slices() -> None:
     assert "TracepointManager.get_trace_delta" in lifecycle_row
     assert "debug.stop" in lifecycle_row
     assert "process-registry assertion" in lifecycle_row
+    assert "CR-091" in row
+    assert "CR-091" in lifecycle_row
+    assert "split/comment closure evidence" in row
+    assert "split/comment closure evidence" in lifecycle_row
     assert "trace-specific cursor/delta APIs" not in remaining
     assert "trace-specific cursor/delta APIs" not in lifecycle_remaining
-    assert "broader diagnostics orchestration" in remaining
+    assert "broader diagnostics orchestration" not in remaining
+    assert "diagnostics-orchestration lifecycle tail" in remaining
+    assert "split/comment closure territory" in remaining
     assert "live-target PDB/process proof" not in remaining
-    assert "freshness paths" in remaining
+    assert "freshness paths" not in remaining
+    assert "diagnostics-orchestration lifecycle tail" in lifecycle_remaining
+    assert "split or comment evidence" in lifecycle_remaining
+
+
+def test_issue_271_records_cr091_split_remaining_scope_without_broad_closure() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#271")
+    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#271")
+    _issue, _state, _evidence, remaining = _issue_cells(backlog, "#271")
+    _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
+        cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
+    )
+
+    for text in (row, lifecycle_row):
+        assert "CR-091" in text
+        assert "split/comment closure evidence" in text
+        assert "already-covered" in text
+        assert "diagnostics-orchestration" in text or "diagnostics orchestration" in text
+
+    for clause in (
+        _clause_containing(row, "CR-091"),
+        _clause_containing(lifecycle_row, "CR-091"),
+    ):
+        assert "#268" not in clause
+        assert "#269" not in clause
+        assert "#270" not in clause
+        assert "#272" not in clause
+        assert "app diagnostics lifecycle" not in clause
+        assert "DataGrid" not in clause
+
+    assert "broader FR remains open" in row
+    assert "keep open" in lifecycle_row
+    for tail in (remaining, lifecycle_remaining):
+        assert "diagnostics-orchestration lifecycle tail" in tail
+        assert (
+            "split/comment closure territory" in tail
+            or "split or comment evidence" in tail
+        )
+        assert "before closing the full FR" in tail or "before closing" in tail
+        assert "trace-specific cursor/delta APIs" not in tail
+        assert "cleanup contamination contract" not in tail
+        assert "runner-exception cleanup proof" not in tail
+        assert "freshness/PDB-process proof" not in tail
 
 
 def test_cr022_broad_issues_require_split_or_comment_evidence_before_closure() -> None:
