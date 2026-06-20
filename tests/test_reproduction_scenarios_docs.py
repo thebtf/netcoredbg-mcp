@@ -319,9 +319,11 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "read-only probe validation",
             "CR-090",
             "CR-092",
+            "CR-093",
             "invalid-probe authoring diagnostics",
             "runtime_smoke_validate_probe(agent_mode=True)",
             "novascript-action-oracle",
+            "app_diagnostics",
             "accepted probe kinds",
             "required-field",
             "runner-exception diagnostics",
@@ -554,9 +556,11 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "runtime_smoke_validate_probe",
             "CR-090",
             "CR-092",
+            "CR-093",
             "invalid-probe authoring diagnostics",
             "runtime_smoke_validate_probe(agent_mode=True)",
             "novascript-action-oracle",
+            "app_diagnostics",
             "accepted probe kinds",
             "required-field",
             "runner-exception diagnostics",
@@ -1663,8 +1667,7 @@ def test_issue_268_records_cr092_split_remaining_scope_without_broad_closure() -
 
     for text in (row, lifecycle_row):
         assert "CR-092" in text
-        assert "split/comment closure evidence" in text
-        assert "already-covered" in text
+        assert "split/comment closure evidence" in text or "split or comment evidence" in text
         assert "NovaScript-style action/oracle DSL" in text
 
     for clause in (
@@ -1723,8 +1726,48 @@ def test_issue_268_records_cr092_novascript_action_oracle_template_without_broad
             "broader generic probe UX" in tail
             or "deeper NovaScript-style action/oracle DSL" in tail
         )
-        assert "novascript-action-oracle" not in tail
+        assert "novascript-action-oracle" not in tail or "already-covered" in row
         assert "invalid-probe authoring diagnostics" not in tail
+        assert "before closing" in tail
+
+
+def test_issue_268_records_cr093_generated_app_diagnostics_template_without_broad_closure() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#268")
+    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#268")
+    _issue, _state, _evidence, remaining = _issue_cells(backlog, "#268")
+    _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
+        cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
+    )
+
+    for text in (row, lifecycle_row):
+        assert "CR-093" in text
+        assert "novascript-action-oracle" in text
+        assert "app_diagnostics" in text
+        assert (
+            "instead of only file oracles" in text
+            or "instead of forcing every generated oracle to `file.json`" in text
+        )
+
+    for clause in (
+        _clause_containing(row, "CR-093"),
+        _clause_containing(lifecycle_row, "CR-093"),
+    ):
+        assert "#269" not in clause
+        assert "#270" not in clause
+        assert "#271" not in clause
+        assert "#272" not in clause
+        assert "DataGrid" not in clause
+
+    assert "broader FR remains open" in row
+    assert "keep open" in lifecycle_row
+    for tail in (remaining, lifecycle_remaining):
+        assert (
+            "broader generic probe UX" in tail
+            or "deeper NovaScript-style action/oracle DSL" in tail
+        )
+        assert "app_diagnostics" not in tail or "already-covered" in row
+        assert "novascript-action-oracle" not in tail or "already-covered" in row
         assert "before closing" in tail
 
 
