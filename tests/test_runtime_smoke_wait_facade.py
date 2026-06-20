@@ -260,14 +260,20 @@ async def test_runtime_smoke_event_delta_streams_wait_json_progress_before_case_
         "entry_count": 0,
     }
 
-    await asyncio.sleep(0.06)
-
-    delta = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
-        ctx=None,
-        cursor=mark["data"]["cursor"],
-        event_limit=10,
-    )
-    data = delta["data"]
+    deadline = asyncio.get_running_loop().time() + 1.0
+    while True:
+        delta = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+            ctx=None,
+            cursor=mark["data"]["cursor"],
+            event_limit=10,
+        )
+        data = delta["data"]
+        app_diagnostics = data.get("source_deltas", {}).get("app_diagnostics", {})
+        if app_diagnostics.get("entries"):
+            break
+        if asyncio.get_running_loop().time() >= deadline:
+            pytest.fail("did not observe live app_diagnostics progress before case completion")
+        await asyncio.sleep(0.02)
 
     assert data["final"] is False
     app_diagnostics = data["source_deltas"]["app_diagnostics"]
