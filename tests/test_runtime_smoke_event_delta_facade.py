@@ -722,6 +722,44 @@ async def test_runtime_smoke_mark_event_cursor_can_capture_active_app_diagnostic
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_mark_event_cursor_agent_mode_active_app_diagnostics_routes_to_delta(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_mark_event_cursor"](
+        ctx=None,
+        run_id="active-appdiag-run",
+        include_app_diagnostics=True,
+        agent_mode=True,
+    )
+    data = response["data"]
+    agent = data["agent_mode"]
+
+    assert data["status"] == "PASS"
+    assert data["final"] is False
+    assert data["cursor"]["sources"]["app_diagnostics"] == {
+        "after_index": 1,
+        "entry_count": 1,
+    }
+    assert agent["primary_next_action"] == "runtime_smoke_get_event_delta"
+    assert agent["cursor"] == data["cursor"]
+    assert agent["next_request"]["tool"] == "runtime_smoke_get_event_delta"
+    assert agent["next_request"]["arguments"] == {
+        "cursor": data["cursor"],
+        "agent_mode": True,
+        "event_limit": 20,
+    }
+    assert agent["next_request"]["arguments"]["cursor"]["sources"][
+        "app_diagnostics"
+    ] == {
+        "after_index": 1,
+        "entry_count": 1,
+    }
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_get_event_delta_returns_bounded_events_after_mark(
     capturing_mcp,
 ) -> None:
