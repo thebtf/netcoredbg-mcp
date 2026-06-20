@@ -561,6 +561,17 @@ async def test_flaui_backend_forwards_grid_helpers_to_bridge() -> None:
     await backend.grid_click_row(selector, 1, column="Phrase", columns=["Phrase"])
     await backend.grid_right_click_row(selector, 1, column="Phrase", columns=["Phrase"])
     await backend.grid_double_click_row(selector, 1, column="Phrase", columns=["Phrase"])
+    await backend.grid_drag_row_to_row(
+        selector,
+        source_row_key="Cue source",
+        target_row_key="Cue target eighteen",
+        identity={"column": "Phrase"},
+        rows={"visible_only": True, "max": 8},
+        columns=["Phrase"],
+        max_scrolls=12,
+        scroll_settle_ms=25,
+        speed_ms=450,
+    )
     await backend.grid_assert_range(selector, 0, 2)
     await snapshot_grid(backend, selector, columns=["Start"])
     await assert_grid_rows(
@@ -591,10 +602,20 @@ async def test_flaui_backend_forwards_grid_helpers_to_bridge() -> None:
     assert calls[5].args[1]["row_index"] == 1
     assert calls[5].args[1]["column"] == "Phrase"
     assert calls[5].args[1]["columns"] == ["Phrase"]
-    assert calls[7].args[0] == "grid_snapshot"
-    assert calls[7].args[1]["columns"] == ["Start"]
-    assert calls[8].args[0] == "grid_assert_rows"
+    assert calls[6].args[0] == "grid_drag_row_to_row"
+    assert calls[6].args[1]["source_row_key"] == "Cue source"
+    assert calls[6].args[1]["target_row_key"] == "Cue target eighteen"
+    assert calls[6].args[1]["identity"] == {"column": "Phrase"}
+    assert calls[6].args[1]["rows"] == {"visible_only": True, "max": 8}
+    assert calls[6].args[1]["columns"] == ["Phrase"]
+    assert calls[6].args[1]["max_scrolls"] == 12
+    assert calls[6].args[1]["scroll_settle_ms"] == 25
+    assert calls[6].args[1]["speed_ms"] == 450
+    assert calls[7].args[0] == "grid_assert_range"
+    assert calls[8].args[0] == "grid_snapshot"
     assert calls[8].args[1]["columns"] == ["Start"]
+    assert calls[9].args[0] == "grid_assert_rows"
+    assert calls[9].args[1]["columns"] == ["Start"]
 
 
 @pytest.mark.asyncio
@@ -696,7 +717,12 @@ def test_bridge_grid_builds_cell_text_evidence_for_rows() -> None:
     ).read_text(
         encoding="utf-8",
     )
-    command = grid_command + "\n" + ensure_visible_command
+    drag_row_to_row_command = (
+        PROJECT_ROOT / "bridge" / "Commands" / "GridCommands.DragRowToRow.cs"
+    ).read_text(
+        encoding="utf-8",
+    )
+    command = grid_command + "\n" + ensure_visible_command + "\n" + drag_row_to_row_command
     handler = (PROJECT_ROOT / "bridge" / "JsonRpcHandler.cs").read_text(
         encoding="utf-8",
     )
@@ -708,6 +734,7 @@ def test_bridge_grid_builds_cell_text_evidence_for_rows() -> None:
     assert '["grid_click_row"] = GridCommands.ClickRow' in handler
     assert '["grid_right_click_row"] = GridCommands.RightClickRow' in handler
     assert '["grid_double_click_row"] = GridCommands.DoubleClickRow' in handler
+    assert '["grid_drag_row_to_row"] = GridCommands.DragRowToRow' in handler
     assert '["grid_ensure_visible"] = GridCommands.EnsureVisible' in handler
     assert '["cells"]' in command
     assert '["grid_bounds"] = SafeRect(grid)' in command
@@ -720,6 +747,7 @@ def test_bridge_grid_builds_cell_text_evidence_for_rows() -> None:
     assert "public static JsonNode ClickRow(" in command
     assert "public static JsonNode RightClickRow(" in command
     assert "public static JsonNode DoubleClickRow(" in command
+    assert "public static JsonNode DragRowToRow(" in command
     assert "public static JsonNode EnsureVisible(" in command
     assert "ScrollIntoView()" in command
     assert "ScanForRowWithBoundedScroll" in command

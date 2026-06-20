@@ -92,6 +92,7 @@ public static class JsonRpcHandler
             ["grid_click_row"] = GridCommands.ClickRow,
             ["grid_right_click_row"] = GridCommands.RightClickRow,
             ["grid_double_click_row"] = GridCommands.DoubleClickRow,
+            ["grid_drag_row_to_row"] = GridCommands.DragRowToRow,
             ["grid_ensure_visible"] = GridCommands.EnsureVisible,
             ["grid_assert_range"] = GridCommands.AssertRange,
             ["grid_assert_rows"] = GridCommands.AssertRows,

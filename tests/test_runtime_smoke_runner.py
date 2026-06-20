@@ -2699,6 +2699,105 @@ async def test_ui_drag_blocks_when_target_ensure_visible_hides_shorthand_source(
 
 
 @pytest.mark.asyncio
+async def test_ui_operation_adapters_drag_uses_grid_row_to_row_backend_for_offscreen_target(
+) -> None:
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.drag_calls: list[tuple[int, int, int, int, int, list[str]]] = []
+            self.grid_drag_row_to_row_calls: list[dict[str, Any]] = []
+
+        async def grid_drag_row_to_row(
+            self,
+            selector: dict[str, Any],
+            *,
+            source_row_key: str | None = None,
+            source_row_index: int | None = None,
+            target_row_key: str | None = None,
+            target_row_index: int | None = None,
+            identity: dict[str, Any] | None = None,
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+            max_scrolls: int | None = None,
+            scroll_settle_ms: int | None = None,
+            speed_ms: int | None = None,
+            hold_modifiers: list[str] | None = None,
+        ) -> dict[str, Any]:
+            self.grid_drag_row_to_row_calls.append(
+                {
+                    "selector": dict(selector),
+                    "source_row_key": source_row_key,
+                    "source_row_index": source_row_index,
+                    "target_row_key": target_row_key,
+                    "target_row_index": target_row_index,
+                    "identity": dict(identity or {}),
+                    "rows": dict(rows or {}),
+                    "columns": list(columns or []),
+                    "max_scrolls": max_scrolls,
+                    "scroll_settle_ms": scroll_settle_ms,
+                    "speed_ms": speed_ms,
+                    "hold_modifiers": list(hold_modifiers or []),
+                }
+            )
+            return {
+                "status": "PASS",
+                "route_evidence": {
+                    "source_bounds": {"x": 10, "y": 60, "width": 120, "height": 30},
+                    "target_bounds": {"x": 10, "y": 340, "width": 120, "height": 30},
+                    "source_identity": "Cue source",
+                    "target_identity": "Cue target eighteen",
+                    "move_points": [{"x": 70, "y": 75}, {"x": 70, "y": 355}],
+                    "final_pointer": {"x": 70, "y": 355},
+                },
+            }
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    selector = {"automation_id": "CueDataGrid"}
+    result = await ui_operation_adapters(backend_provider)["ui.drag"](
+        source={"selector": selector, "row_identity": "Cue source"},
+        path=[
+            {"relative_to": "source", "x": 0.5, "y": 0.5},
+            {"relative_to": "drop", "x": 0.5, "y": 0.5},
+        ],
+        drop={
+            "selector": selector,
+            "row_identity": "Cue target eighteen",
+            "ensure_visible": True,
+            "max_scrolls": 12,
+            "scroll_settle_ms": 25,
+        },
+        identity={"column": "Phrase"},
+        rows={"visible_only": True, "max": 8},
+        columns=["Phrase"],
+        duration_ms=450,
+    )
+
+    assert result["status"] == "PASS"
+    assert backend.grid_drag_row_to_row_calls == [
+        {
+            "selector": selector,
+            "source_row_key": "Cue source",
+            "source_row_index": None,
+            "target_row_key": "Cue target eighteen",
+            "target_row_index": None,
+            "identity": {"column": "Phrase"},
+            "rows": {"visible_only": True, "max": 8},
+            "columns": ["Phrase"],
+            "max_scrolls": 12,
+            "scroll_settle_ms": 25,
+            "speed_ms": 450,
+            "hold_modifiers": [],
+        }
+    ]
+    assert backend.drag_calls == []
+    assert result["route_evidence"]["source_identity"] == "Cue source"
+    assert result["route_evidence"]["target_identity"] == "Cue target eighteen"
+
+
+@pytest.mark.asyncio
 async def test_ui_operation_adapters_drag_preserves_row_identity_source_offset() -> None:
     class FakeBackend:
         def __init__(self) -> None:
