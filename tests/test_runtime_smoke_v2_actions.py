@@ -2290,6 +2290,31 @@ async def test_v2_ui_grid_get_state_routes_selector_identity_to_adapter() -> Non
 @pytest.mark.asyncio
 async def test_v2_ui_grid_ensure_visible_routes_selector_identity_to_adapter() -> None:
     session = ActionSmokeSession()
+    session.grid_ensure_visible_results = [
+        {
+            "status": "PASS",
+            "already_visible": False,
+            "resolved_row": {"identity": "Cue 042"},
+            "viewport_delta": {
+                "before": {
+                    "first_visible_index": 18,
+                    "last_visible_index": 18,
+                    "visible_rows": [{"index": 0, "row_index": 18, "identity": "Cue 018"}],
+                },
+                "after": {
+                    "first_visible_index": 42,
+                    "last_visible_index": 42,
+                    "visible_rows": [{"index": 0, "row_index": 42, "identity": "Cue 042"}],
+                },
+                "comparison": {
+                    "first_visible_index_changed": True,
+                    "last_visible_index_changed": True,
+                    "viewport_moved": True,
+                    "direction": "down",
+                },
+            },
+        }
+    ]
 
     result = await _runner(session).run(
         {
@@ -2330,6 +2355,12 @@ async def test_v2_ui_grid_ensure_visible_routes_selector_identity_to_adapter() -
     assert ensure_call[1]["columns"] == ["PhraseId"]
     assert ensure_call[1]["max_scrolls"] == 11
     assert ensure_call[1]["scroll_settle_ms"] == 30
+    assert action["result"]["viewport_delta"]["comparison"] == {
+        "first_visible_index_changed": True,
+        "last_visible_index_changed": True,
+        "viewport_moved": True,
+        "direction": "down",
+    }
 
 
 @pytest.mark.asyncio

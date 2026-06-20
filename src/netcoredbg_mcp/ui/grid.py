@@ -112,7 +112,7 @@ async def ensure_grid_row_visible(
     evidence_columns = _identity_columns(identity_payload, columns)
     requested = {"row_index": row_index, "row_key": row_key}
 
-    resolved, blocked = await resolve_visible_grid_row(
+    resolved, blocked, before_snapshot = await _resolve_visible_grid_row_snapshot(
         backend,
         selector,
         row_index=row_index,
@@ -121,12 +121,17 @@ async def ensure_grid_row_visible(
         rows=rows,
         columns=evidence_columns,
     )
+    before_viewport = _compact_viewport_snapshot(before_snapshot, identity_payload)
     if blocked is None:
-        return {
+        return _attach_viewport_delta(
+            {
             "status": "PASS",
             "already_visible": True,
             "resolved_row": _compact_row_ref(resolved, identity_payload),
-        }
+            },
+            before=before_viewport,
+            after=before_viewport,
+        )
     if blocked.get("reason") != "grid row is not visible":
         return blocked
 
@@ -170,7 +175,7 @@ async def ensure_grid_row_visible(
         result.setdefault("requested", requested)
         return result
 
-    confirmed, confirm_blocked = await resolve_visible_grid_row(
+    confirmed, confirm_blocked, after_snapshot = await _resolve_visible_grid_row_snapshot(
         backend,
         selector,
         row_index=row_index,
@@ -179,6 +184,7 @@ async def ensure_grid_row_visible(
         rows=rows,
         columns=evidence_columns,
     )
+    after_viewport = _compact_viewport_snapshot(after_snapshot, identity_payload)
     if confirm_blocked is not None:
         result = dict(confirm_blocked)
         result["status"] = _blocked_status(result)
@@ -186,13 +192,13 @@ async def ensure_grid_row_visible(
             result["reason"] = "grid row is not visible after ensure_visible"
         result["requested"] = requested
         result["ensure_result"] = ensure_result
-        return result
+        return _attach_viewport_delta(result, before=before_viewport, after=after_viewport)
 
     output = dict(ensure_result)
     output["status"] = "PASS"
     output["already_visible"] = False
     output["resolved_row"] = _compact_row_ref(confirmed, identity_payload)
-    return output
+    return _attach_viewport_delta(output, before=before_viewport, after=after_viewport)
 
 
 async def select_grid_range(
@@ -936,6 +942,29 @@ async def resolve_visible_grid_row(
     columns: list[str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """Resolve a requested row against current visible row evidence."""
+    resolved, blocked, _snapshot = await _resolve_visible_grid_row_snapshot(
+        backend,
+        selector,
+        row_index=row_index,
+        row_key=row_key,
+        identity=identity,
+        rows=rows,
+        columns=columns,
+    )
+    return resolved, blocked
+
+
+async def _resolve_visible_grid_row_snapshot(
+    backend: Any,
+    selector: dict[str, Any],
+    *,
+    row_index: int | None = None,
+    row_key: str | None = None,
+    identity: Mapping[str, Any] | None = None,
+    rows: dict[str, Any] | None = None,
+    columns: list[str] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None]:
+    """Resolve a requested row and preserve the visible-row snapshot used for it."""
     if row_index is None and not row_key:
         return {}, {
             "status": "BLOCKED",
@@ -946,7 +975,7 @@ async def resolve_visible_grid_row(
                 "Provide row_index for a visible logical row or row_key for a "
                 "unique visible row identity."
             ),
-        }
+        }, None
 
     snapshot = await snapshot_grid(
         backend,
@@ -959,14 +988,14 @@ async def resolve_visible_grid_row(
         result["status"] = _blocked_status(result)
         result.setdefault("reason", "grid visible row lookup failed")
         result["requested"] = {"row_index": row_index, "row_key": row_key}
-        return {}, result
+        return {}, result, dict(snapshot) if isinstance(snapshot, dict) else None
     if not isinstance(snapshot, dict):
         return {}, {
             "status": "BLOCKED",
             "reason": "grid visible row lookup returned non-object result",
             "requested": {"row_index": row_index, "row_key": row_key},
             "snapshot_result": snapshot,
-        }
+        }, None
     visible_rows = snapshot.get("visible_rows")
     if not isinstance(visible_rows, list):
         return {}, {
@@ -975,7 +1004,7 @@ async def resolve_visible_grid_row(
             "requested": {"row_index": row_index, "row_key": row_key},
             "accepted": {"visible_rows": "list of visible row objects"},
             "next_step": "Use a DataGrid backend that returns visible row evidence.",
-        }
+        }, snapshot
 
     matches = _matching_visible_rows(
         visible_rows,
@@ -984,7 +1013,7 @@ async def resolve_visible_grid_row(
         identity=identity,
     )
     if len(matches) == 1:
-        return matches[0], None
+        return matches[0], None, snapshot
     if not matches:
         return {}, {
             "status": "BLOCKED",
@@ -992,14 +1021,14 @@ async def resolve_visible_grid_row(
             "requested": {"row_index": row_index, "row_key": row_key},
             "accepted": {"row": "currently visible row index or unique row key"},
             "next_step": "Scroll the grid or choose a currently visible row before acting.",
-        }
+        }, snapshot
     return {}, {
         "status": "AMBIGUOUS",
         "reason": "grid row identity is ambiguous",
         "requested": {"row_index": row_index, "row_key": row_key},
         "matches": [_compact_row_ref(row, identity) for row in matches],
         "next_step": "Disambiguate the row with row_index or a unique row_key.",
-    }
+    }, snapshot
 
 
 def _matching_visible_rows(
@@ -1085,6 +1114,86 @@ def _compact_row_ref(
     if row.get("row_index") is not None:
         result["row_index"] = row.get("row_index")
     return result
+
+
+def _compact_viewport_snapshot(
+    snapshot: Mapping[str, Any] | None,
+    identity: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if not isinstance(snapshot, Mapping):
+        return None
+    visible_rows = snapshot.get("visible_rows")
+    if not isinstance(visible_rows, list):
+        return None
+
+    compact_rows = [
+        _compact_row_ref(row, identity)
+        for row in visible_rows
+        if isinstance(row, Mapping)
+    ]
+    logical_indices = [
+        logical_index
+        for row in visible_rows
+        if isinstance(row, Mapping)
+        for logical_index in [_logical_index(row)]
+        if logical_index is not None
+    ]
+
+    result: dict[str, Any] = {
+        "first_visible_index": logical_indices[0] if logical_indices else None,
+        "last_visible_index": logical_indices[-1] if logical_indices else None,
+        "visible_rows": compact_rows,
+        "identity_strategy": _identity_strategy(identity or {}),
+    }
+    row_count = _int_or_none(snapshot.get("row_count"))
+    if row_count is not None:
+        result["row_count"] = row_count
+    return result
+
+
+def _attach_viewport_delta(
+    result: dict[str, Any],
+    *,
+    before: dict[str, Any] | None,
+    after: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if before is None or after is None:
+        return result
+    result["viewport_delta"] = {
+        "before": before,
+        "after": after,
+        "comparison": _compare_viewport_snapshots(before, after),
+    }
+    return result
+
+
+def _compare_viewport_snapshots(
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> dict[str, Any]:
+    before_first = _int_or_none(before.get("first_visible_index"))
+    after_first = _int_or_none(after.get("first_visible_index"))
+    before_last = _int_or_none(before.get("last_visible_index"))
+    after_last = _int_or_none(after.get("last_visible_index"))
+    first_changed = before_first != after_first
+    last_changed = before_last != after_last
+    direction = "unchanged"
+    if before_first is not None and after_first is not None:
+        if after_first > before_first:
+            direction = "down"
+        elif after_first < before_first:
+            direction = "up"
+    if direction == "unchanged" and before_last is not None and after_last is not None:
+        if after_last > before_last:
+            direction = "down"
+        elif after_last < before_last:
+            direction = "up"
+    return {
+        "first_visible_index_changed": first_changed,
+        "last_visible_index_changed": last_changed,
+        "viewport_moved": first_changed or last_changed,
+        "direction": direction,
+    }
 
 
 def _identity_columns(
