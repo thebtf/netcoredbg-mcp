@@ -1829,3 +1829,54 @@ async def test_runtime_smoke_get_event_delta_agent_mode_bool_available_stays_on_
             "event_limit": 20,
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_get_event_delta_agent_mode_quiet_debug_output_stays_on_delta(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    session.state.output_buffer = deque(
+        [OutputEntry(text="existing\n", category="stdout", sequence=1)]
+    )
+    session.state.output_sequence = 1
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor={
+            "run_id": "quiet-active-run",
+            "after_cursor": 20,
+            "sources": {
+                "debug_output": {
+                    "after_sequence": 1,
+                    "trimmed_before": 0,
+                }
+            },
+        },
+        event_limit=5,
+        agent_mode=True,
+    )
+    data = response["data"]
+    agent = data["agent_mode"]
+
+    assert data["status"] == "PASS"
+    assert data["final"] is False
+    assert data["events"] == []
+    assert data["source_deltas"]["debug_output"] == {
+        "entries": [],
+        "available": 0,
+        "limit": 5,
+        "limited": False,
+        "stale_cursor": False,
+        "dropped_count": 0,
+    }
+    assert agent["primary_next_action"] == "runtime_smoke_get_event_delta"
+    assert agent["next_request"] == {
+        "tool": "runtime_smoke_get_event_delta",
+        "arguments": {
+            "cursor": agent["cursor"],
+            "agent_mode": True,
+            "event_limit": 20,
+        },
+    }

@@ -677,11 +677,15 @@ def register_runtime_smoke_tools(
             )
             if agent_mode:
                 quiet_active = _runtime_smoke_event_delta_is_quiet_active(data)
-                if _runtime_smoke_agent_quiet_app_diagnostics_delta_should_wait(data):
+                quiet_wait = _runtime_smoke_agent_quiet_delta_should_wait(data)
+                if (
+                    quiet_wait
+                    and _runtime_smoke_agent_quiet_app_diagnostics_delta_should_wait(data)
+                ):
                     data["status"] = "RUNNING"
                 primary = (
                     "runtime_smoke_wait_for_result"
-                    if quiet_active
+                    if quiet_active and quiet_wait
                     else "runtime_smoke_get_event_delta"
                 )
                 _apply_runtime_smoke_agent_mode(data, primary)
@@ -2674,6 +2678,13 @@ def _runtime_smoke_source_delta_has_entries(delta: Any) -> bool:
         except ValueError:
             return True
     return "entries" not in delta and "available" not in delta and bool(delta)
+
+
+def _runtime_smoke_agent_quiet_delta_should_wait(data: dict[str, Any]) -> bool:
+    source_deltas = data.get("source_deltas")
+    if not isinstance(source_deltas, dict) or not source_deltas:
+        return True
+    return set(source_deltas.keys()) <= {"app_diagnostics"}
 
 
 def _runtime_smoke_run_missing(result: dict[str, Any]) -> bool:

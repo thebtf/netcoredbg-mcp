@@ -208,7 +208,7 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
     assert "CR-082" in row_269
     assert "metrics_contract" in row_269
     assert "agent_mode.defaults" in row_269
-    assert "quiet active event-delta wait-continuation guidance" in row_269
+    assert "quiet active app-diagnostics delta wait-continuation guidance" in row_269
     assert "event_limit=20" in row_269
     assert "NO DATA" in row_269
     assert "None in netcoredbg-mcp." not in row_269
@@ -340,7 +340,7 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "source_deltas.trace_source",
             "source-aware mark-cursor guidance",
             "active app-diagnostics wait/evidence source-cursor guidance",
-            "quiet active event-delta wait-continuation guidance",
+            "quiet active app-diagnostics delta wait-continuation guidance",
             "exception verdict",
             "cleanup-contract guidance",
             "event_limit=20",
@@ -522,7 +522,7 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "CR-080",
             "active app-diagnostics wait/evidence source-cursor guidance",
             "CR-082",
-            "quiet active event-delta wait-continuation guidance",
+            "quiet active app-diagnostics delta wait-continuation guidance",
             "exception verdict",
             "broad lifecycle/orchestration",
         ],
@@ -908,15 +908,18 @@ def test_issue_269_records_cr082_quiet_active_delta_wait_guidance_without_broad_
 
     for text in (row, lifecycle_row):
         assert "CR-082" in text
-        assert "quiet active event-delta wait-continuation guidance" in text
+        assert "quiet active app-diagnostics delta wait-continuation guidance" in text
         assert "runtime_smoke_get_event_delta(agent_mode=True)" in text
         assert "runtime_smoke_wait_for_result" in text
         assert "empty delta poll" in text
 
     assert "broader FR remains open" in row
     assert "keep open" in lifecycle_row
-    assert "quiet active event-delta wait-continuation guidance" not in remaining
-    assert "quiet active event-delta wait-continuation guidance" not in lifecycle_remaining
+    assert "quiet active app-diagnostics delta wait-continuation guidance" not in remaining
+    assert (
+        "quiet active app-diagnostics delta wait-continuation guidance"
+        not in lifecycle_remaining
+    )
     assert "remaining multi-source event deltas" in remaining
     assert "broad lifecycle/orchestration" in remaining
     assert "broad lifecycle/orchestration" in lifecycle_remaining
