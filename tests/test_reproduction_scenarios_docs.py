@@ -682,6 +682,45 @@ def test_issue_272_records_cr067_launch_directory_fallback_slice() -> None:
     assert "launch-directory fallback" in lifecycle_remaining
 
 
+def test_issue_269_records_cr073_app_diagnostics_event_delta_slice() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#269")
+    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#269")
+    _issue, _state, _evidence, remaining = _issue_cells(backlog, "#269")
+    _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
+        cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
+    )
+
+    for text in (row, lifecycle_row):
+        assert "CR-073" in text
+        assert "include_app_diagnostics=True" in text
+        assert "source delta" in text
+        assert "retained-final-result" in text or "retained final result" in text
+        assert "live diagnostics history" in text or "live diagnostics streaming" in text
+
+    assert "retained-final-result app diagnostics" in remaining
+    assert "retained-final-result app diagnostics" in lifecycle_remaining
+
+
+def test_issue_272_records_cr073_app_diagnostics_event_delta_slice() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#272")
+    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#272")
+    _issue, _state, _evidence, remaining = _issue_cells(backlog, "#272")
+    _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
+        cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
+    )
+
+    for text in (row, lifecycle_row):
+        assert "CR-073" in text
+        assert "include_app_diagnostics=True" in text
+        assert "source delta" in text
+        assert "live diagnostics streaming" in text or "live app-diagnostics streaming" in text
+
+    assert "live app-diagnostics streaming/history" in remaining
+    assert "live app-diagnostics streaming/history" in lifecycle_remaining
+
+
 def test_issue_270_records_cr070_ensure_visible_viewport_delta_slice() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#270")
