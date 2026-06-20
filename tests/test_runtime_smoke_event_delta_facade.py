@@ -9,7 +9,8 @@ from typing import Any
 import pytest
 
 from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeSession
-from netcoredbg_mcp.session.state import DebugState, OutputEntry
+from netcoredbg_mcp.session.state import DebugState, OutputEntry, TraceEntry
+from netcoredbg_mcp.session.tracepoints import TracepointManager
 from netcoredbg_mcp.tools.runtime_smoke import register_runtime_smoke_tools
 
 
@@ -172,6 +173,7 @@ class CursorFacadeSession:
             loaded_sources={},
         )
         self.process_registry = None
+        self._tracepoint_manager = TracepointManager()
 
     async def launch(self, **_: Any) -> dict[str, Any]:
         self.launch_calls += 1
@@ -288,6 +290,40 @@ async def test_runtime_smoke_mark_event_cursor_can_capture_debug_output_cursor(
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_mark_event_cursor_can_capture_trace_source_cursor(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    session._tracepoint_manager._trace_buffer.append(
+        TraceEntry(1.0, "a.cs", 10, "expr", "before", 1, "tp-1")
+    )
+    session._tracepoint_manager._trace_buffer.append(
+        TraceEntry(2.0, "a.cs", 10, "expr", "after", 1, "tp-1")
+    )
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_mark_event_cursor"](
+        ctx=None,
+        run_id="run-1",
+        include_trace_source=True,
+    )
+    data = response["data"]
+
+    assert data["status"] == "PASS"
+    assert data["cursor"]["sources"]["trace_source"] == {
+        "after_timestamp": 2.0,
+        "after_ordinal": 1,
+        "global_after_timestamp": 2.0,
+        "global_after_ordinal": 1,
+        "tracepoint_id": None,
+        "buffer_start_timestamp": 1.0,
+        "buffer_size": 2,
+        "append_generation": 2,
+        "drop_generation": 0,
+    }
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_get_event_delta_returns_bounded_events_after_mark(
     capturing_mcp,
 ) -> None:
@@ -335,6 +371,67 @@ async def test_runtime_smoke_get_event_delta_returns_bounded_events_after_mark(
         {"cursor": 6, "kind": "completed", "status": "COMPLETED"}
     ]
     assert next_response["data"]["cursor"]["after_cursor"] == 6
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_get_event_delta_returns_trace_source_delta(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    session._tracepoint_manager._trace_buffer.append(
+        TraceEntry(1.0, "a.cs", 10, "expr", "old", 1, "tp-1")
+    )
+    trace_cursor = session._tracepoint_manager.mark_trace_cursor()
+    session._tracepoint_manager._trace_buffer.append(
+        TraceEntry(2.0, "a.cs", 10, "expr", "new-1", 1, "tp-1")
+    )
+    session._tracepoint_manager._trace_buffer.append(
+        TraceEntry(3.0, "b.cs", 20, "other", "new-2", 2, "tp-2")
+    )
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor={
+            "run_id": "run-1",
+            "after_cursor": 4,
+            "sources": {
+                "trace_source": trace_cursor,
+            },
+        },
+        event_limit=1,
+    )
+    data = response["data"]
+
+    assert data["status"] == "PASS"
+    assert data["source_deltas"]["trace_source"] == {
+        "entries": [
+            {
+                "timestamp": 2.0,
+                "file": "a.cs",
+                "line": 10,
+                "expression": "expr",
+                "value": "new-1",
+                "thread_id": 1,
+                "tracepoint_id": "tp-1",
+            }
+        ],
+        "available": 2,
+        "limit": 1,
+        "limited": True,
+        "stale_cursor": False,
+        "dropped_count": 0,
+        "truncated": False,
+    }
+    assert data["cursor"]["sources"]["trace_source"] == {
+        "after_timestamp": 2.0,
+        "after_ordinal": 1,
+        "tracepoint_id": None,
+        "buffer_start_timestamp": 1.0,
+        "buffer_size": 3,
+        "append_generation": 3,
+        "drop_generation": 0,
+    }
 
 
 @pytest.mark.asyncio
@@ -693,6 +790,106 @@ async def test_runtime_smoke_get_event_delta_preserves_retained_failed_run_event
     }
     assert data["final"] is True
     assert data["cursor"]["after_cursor"] == 8
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_get_event_delta_marks_trace_source_cursor_stale(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    session._tracepoint_manager._trace_buffer = deque(maxlen=2)
+    session._tracepoint_manager._trace_buffer.append(
+        TraceEntry(1.0, "a.cs", 10, "expr", "boundary", 1, "tp-1")
+    )
+    trace_cursor = session._tracepoint_manager.mark_trace_cursor()
+    session._tracepoint_manager._trace_buffer.append(
+        TraceEntry(2.0, "a.cs", 10, "expr", "evicted", 1, "tp-1")
+    )
+    session._tracepoint_manager._trace_buffer.append(
+        TraceEntry(3.0, "a.cs", 10, "expr", "retained-1", 1, "tp-1")
+    )
+    session._tracepoint_manager._trace_buffer.append(
+        TraceEntry(4.0, "a.cs", 10, "expr", "retained-2", 1, "tp-1")
+    )
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor={
+            "run_id": "run-1",
+            "after_cursor": 4,
+            "sources": {
+                "trace_source": trace_cursor,
+            },
+        },
+        event_limit=5,
+    )
+    data = response["data"]
+
+    assert data["status"] == "PASS"
+    assert data["source_deltas"]["trace_source"] == {
+        "entries": [
+            {
+                "timestamp": 3.0,
+                "file": "a.cs",
+                "line": 10,
+                "expression": "expr",
+                "value": "retained-1",
+                "thread_id": 1,
+                "tracepoint_id": "tp-1",
+            },
+            {
+                "timestamp": 4.0,
+                "file": "a.cs",
+                "line": 10,
+                "expression": "expr",
+                "value": "retained-2",
+                "thread_id": 1,
+                "tracepoint_id": "tp-1",
+            },
+        ],
+        "available": 2,
+        "limit": 5,
+        "limited": False,
+        "stale_cursor": True,
+        "dropped_count": None,
+        "truncated": True,
+    }
+    assert data["cursor"]["sources"]["trace_source"] == {
+        "after_timestamp": 4.0,
+        "after_ordinal": 1,
+        "tracepoint_id": None,
+        "buffer_start_timestamp": 3.0,
+        "buffer_size": 2,
+        "append_generation": 4,
+        "drop_generation": 2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_get_event_delta_invalid_trace_source_cursor_fails_closed(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor={
+            "run_id": "run-1",
+            "after_cursor": 2,
+            "sources": {
+                "trace_source": {
+                    "after_timestamp": "bad",
+                }
+            },
+        },
+    )
+    data = response["data"]
+
+    assert data["status"] == "INVALID_SETUP"
+    assert data["reason"] == "cursor token trace_source cursor is invalid"
+    assert "runtime_smoke_mark_event_cursor" in response["next_actions"]
 
 
 @pytest.mark.asyncio
