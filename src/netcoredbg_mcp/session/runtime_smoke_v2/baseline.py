@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from ..runtime_smoke_schema import (
@@ -88,6 +89,10 @@ async def _execute_step(
             step,
             fallback=diagnostic_launch,
         )
+        effective_diagnostic_launch = _diagnostic_launch_with_boundary(
+            effective_diagnostic_launch,
+            context,
+        )
         if effective_diagnostic_launch:
             launch_args["env"] = {
                 **dict(launch_args.get("env") or {}),
@@ -147,3 +152,58 @@ def _accepted_step_kinds() -> list[str]:
         "fixture.restore",
         "isolated_profile.launch",
     ]
+
+
+def _diagnostic_launch_with_boundary(
+    contract: dict[str, Any] | None,
+    context: ActionContext,
+) -> dict[str, Any] | None:
+    if not isinstance(contract, dict):
+        return contract
+    evidence = contract.get("evidence")
+    if not isinstance(evidence, dict):
+        return contract
+    directory = evidence.get("directory")
+    if not isinstance(directory, str) or not directory:
+        return contract
+    boundary = _diagnostic_directory_boundary(directory, context)
+    if boundary is None:
+        return contract
+    return {
+        **contract,
+        "_launch_boundary_since": {
+            "mtime_ns": boundary[0],
+            "name": boundary[1],
+        },
+    }
+
+
+def _diagnostic_directory_boundary(
+    raw_directory: str,
+    context: ActionContext,
+) -> tuple[int, str] | None:
+    try:
+        directory = _resolve_diagnostic_launch_path(raw_directory, context)
+    except ValueError:
+        return None
+    if not directory.is_dir():
+        return None
+    boundary: tuple[int, str] | None = None
+    for candidate in directory.glob("*.json"):
+        if not candidate.is_file():
+            continue
+        key = (candidate.stat().st_mtime_ns, candidate.name)
+        if boundary is None or key > boundary:
+            boundary = key
+    return boundary
+
+
+def _resolve_diagnostic_launch_path(
+    raw_path: str,
+    context: ActionContext,
+) -> Path:
+    session = getattr(context, "session", None)
+    validate_path = getattr(session, "validate_path", None)
+    if callable(validate_path):
+        return Path(validate_path(raw_path, must_exist=False))
+    return Path(raw_path).resolve()
