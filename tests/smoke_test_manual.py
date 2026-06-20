@@ -3806,6 +3806,8 @@ def _v2_offscreen_row_target_drag_summary(result: dict[str, Any]) -> dict[str, A
         "status_text": status,
         "source_identity_matches": status.get("source_identity") == expected_source,
         "target_identity_matches": status.get("target_identity") == expected_target,
+        "drop_origin_target_matches": status.get("drop_origin_target") == expected_target,
+        "drop_bounds_target_matches": status.get("drop_bounds_target") == expected_target,
         "target_visible_after_drop": target_visible_after_drop,
         "final_order_matches": order == expected_order,
         "route_evidence": {
@@ -3872,6 +3874,8 @@ def _v2_offscreen_row_target_drag_summary(result: dict[str, Any]) -> dict[str, A
         "PASS"
         if compact["source_identity_matches"]
         and compact["target_identity_matches"]
+        and compact["drop_origin_target_matches"]
+        and compact["drop_bounds_target_matches"]
         and compact["target_visible_after_drop"]
         and compact["final_order_matches"]
         and comparison.get("row_count_preserved") is True
@@ -4931,7 +4935,9 @@ async def test_wpf_v2_offscreen_row_target_drag_runtime_smoke():
     check(
         "WPF v2 offscreen row-target drag proved target row became visible",
         bool(evidence.get("target_visible_after_drop"))
-        and bool(evidence.get("target_identity_matches")),
+        and bool(evidence.get("target_identity_matches"))
+        and bool(evidence.get("drop_origin_target_matches"))
+        and bool(evidence.get("drop_bounds_target_matches")),
         str(evidence),
     )
     check(
