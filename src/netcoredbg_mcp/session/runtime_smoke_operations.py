@@ -850,23 +850,8 @@ def ui_operation_adapters(
         identity = dict(args.get("identity") or {})
         cancel = dict(args.get("cancel") or {})
         cancel_key = _drag_cancel_key(cancel)
-        try:
-            route, route_evidence, blocked = await _drag_route(
-                backend,
-                source=source,
-                path=path,
-                drop=drop,
-                identity=identity,
-            )
-        except Exception as exc:
-            return _drag_backend_exception_blocked("drag route resolution", exc)
-        if blocked is not None:
-            return blocked
-
         modifiers = [str(modifier) for modifier in args.get("modifiers") or []]
         speed_ms = _positive_int(args.get("duration_ms"), default=200)
-        use_path_drag = _requires_path_drag(path) or cancel_key is not None
-        resolved_path_points: list[dict[str, int]] = []
         selected_payload_before: list[dict[str, Any]] = []
         selected_payload_selector = (
             _selector_from_endpoint(source)
@@ -884,6 +869,86 @@ def ui_operation_adapters(
                 return _drag_backend_exception_blocked("selected payload preflight", exc)
             if blocked is not None:
                 return blocked
+
+        grid_drag_row_to_row = getattr(backend, "grid_drag_row_to_row", None)
+        if (
+            cancel_key is None
+            and callable(grid_drag_row_to_row)
+            and _should_use_grid_row_to_row_drag(
+            source=source,
+            path=path,
+            drop=drop,
+        )
+        ):
+            source_row_index, source_row_key = _grid_row_drag_request(source)
+            target_row_index, target_row_key = _grid_row_drag_request(drop)
+            raw_rows = drop.get("rows")
+            if not isinstance(raw_rows, Mapping):
+                raw_rows = args.get("rows")
+            grid_rows = (
+                dict(raw_rows)
+                if isinstance(raw_rows, Mapping)
+                else {"visible_only": True}
+            )
+            raw_columns = drop.get("columns")
+            if not isinstance(raw_columns, list):
+                raw_columns = args.get("columns")
+            grid_columns = (
+                [str(item) for item in raw_columns if item]
+                if isinstance(raw_columns, list)
+                else _viewport_columns(identity)
+            )
+            try:
+                result = await grid_drag_row_to_row(
+                    dict(drop.get("selector") or source.get("selector") or {}),
+                    source_row_key=source_row_key,
+                    source_row_index=source_row_index,
+                    target_row_key=target_row_key,
+                    target_row_index=target_row_index,
+                    identity=identity,
+                    rows=grid_rows,
+                    columns=grid_columns,
+                    max_scrolls=_int_or_none(drop.get("max_scrolls")),
+                    scroll_settle_ms=_int_or_none(drop.get("scroll_settle_ms")),
+                    speed_ms=speed_ms,
+                    hold_modifiers=modifiers,
+                )
+            except Exception as exc:
+                return _drag_backend_exception_blocked("grid row-to-row drag", exc)
+            if not isinstance(result, dict):
+                return {
+                    "status": "FAIL",
+                    "reason": "grid row-to-row drag backend returned non-object result",
+                    "result": result,
+                }
+            return await _drag_result_with_selected_payload(
+                backend=backend,
+                result=result,
+                source=source,
+                drop=drop,
+                path=path,
+                identity=identity,
+                expect=expect,
+                selected_payload_selector=selected_payload_selector,
+                selected_payload_before=selected_payload_before,
+                modifiers=modifiers,
+            )
+
+        try:
+            route, route_evidence, blocked = await _drag_route(
+                backend,
+                source=source,
+                path=path,
+                drop=drop,
+                identity=identity,
+            )
+        except Exception as exc:
+            return _drag_backend_exception_blocked("drag route resolution", exc)
+        if blocked is not None:
+            return blocked
+
+        use_path_drag = _requires_path_drag(path) or cancel_key is not None
+        resolved_path_points: list[dict[str, int]] = []
         try:
             if use_path_drag:
                 backend_drag_path = getattr(backend, "drag_path", None)
@@ -927,91 +992,22 @@ def ui_operation_adapters(
                 "result": result,
             }
 
-        selected_payload: dict[str, Any] | None = None
-        if expect.get("selected_payload_preserved") is True:
-            selected_before_refs = _selected_payload_refs(selected_payload_before)
-            try:
-                selected_payload_after, blocked = await _selected_viewport_rows_after_drag(
-                    backend,
-                    selected_payload_selector,
-                    identity,
-                    expected_refs=selected_before_refs,
-                )
-            except Exception as exc:
-                return _drag_backend_exception_blocked("selected payload postflight", exc)
-            if blocked is not None:
-                return blocked
-            selected_after_refs = _selected_payload_refs(selected_payload_after)
-            selected_payload = {
-                "before": selected_before_refs,
-                "after": selected_after_refs,
-                "preserved": (
-                    bool(selected_before_refs)
-                    and selected_before_refs == selected_after_refs
-                    and len(selected_before_refs) == len(set(selected_before_refs))
-                    and len(selected_after_refs) == len(set(selected_after_refs))
-                ),
-            }
-
-        backend_route = _mapping_evidence_from_result(result, "route_evidence") or {}
-        path_points = result.get("path_points")
-        hold_points = result.get("hold_points")
-        final_pointer = result.get("final_pointer")
-        if use_path_drag and _is_backend_success(result) and not _has_backend_path_evidence(
-            result,
-            backend_route,
-        ):
-            return _path_drag_blocked("path-aware drag backend did not return route evidence")
-        route_evidence = {
-            **route_evidence,
-            **backend_route,
-            "modifiers": modifiers,
-            "start": {"x": route["from_x"], "y": route["from_y"]},
-            "drop": {"x": route["to_x"], "y": route["to_y"]},
-        }
-        if isinstance(path_points, list):
-            route_evidence["move_points"] = list(path_points)
-        if isinstance(hold_points, list):
-            route_evidence["hold_points"] = list(hold_points)
-        if isinstance(final_pointer, Mapping):
-            route_evidence["final_pointer"] = dict(final_pointer)
-        if selected_payload is not None:
-            route_evidence["selected_payload"] = selected_payload
-        status = str(result.get("status", "PASS")).upper()
-        output: dict[str, Any] = {
-            "status": status,
-            "backend": type(backend).__name__,
-            "route_evidence": route_evidence,
-            "result": result,
-        }
-        no_op = _mapping_evidence_from_result(result, "no_op")
-        if no_op is not None:
-            output["no_op"] = no_op
-        cleanup = _drag_cleanup_evidence(result)
-        if cleanup is not None:
-            output["cleanup"] = cleanup
-        target_ensure_visible_result = route_evidence.get("target_ensure_visible_result")
-        if isinstance(target_ensure_visible_result, Mapping):
-            output["drop_ensure_visible_result"] = dict(target_ensure_visible_result)
-        cancel_evidence = result.get("cancel")
-        if isinstance(cancel_evidence, Mapping):
-            output["cancel"] = dict(cancel_evidence)
-        if selected_payload is not None:
-            output["selected_payload"] = selected_payload
-        if (
-            status == "PASS"
-            and expect.get("selected_payload_preserved") is True
-            and selected_payload is not None
-            and selected_payload.get("preserved") is not True
-        ):
-            output["status"] = "FAIL"
-            output["reason"] = "selected payload was not preserved after drag"
-        if status != "PASS":
-            output["reason"] = str(result.get("reason") or "ui.drag backend did not pass")
-            for key in ("reason", "requested", "accepted", "next_step"):
-                if key in result:
-                    output[key] = result[key]
-        return output
+        return await _drag_result_with_selected_payload(
+            backend=backend,
+            result=result,
+            source=source,
+            drop=drop,
+            path=path,
+            identity=identity,
+            expect=expect,
+            selected_payload_selector=selected_payload_selector,
+            selected_payload_before=selected_payload_before,
+            modifiers=modifiers,
+            route=route,
+            route_evidence=route_evidence,
+            use_path_drag=use_path_drag,
+            cancel_key=cancel_key,
+        )
 
     adapters: OperationAdapterMap = {
         "ui.ensure_connected": ensure_connected,
@@ -1571,6 +1567,150 @@ def _drag_cleanup_evidence(
             if isinstance(value, Mapping):
                 cleanup[key] = dict(value)
     return cleanup or None
+
+
+def _should_use_grid_row_to_row_drag(
+    *,
+    source: Mapping[str, Any],
+    path: list[dict[str, Any]],
+    drop: Mapping[str, Any],
+) -> bool:
+    source_kind = str(source.get("kind") or _endpoint_kind(dict(source)) or "")
+    drop_kind = str(drop.get("kind") or _endpoint_kind(dict(drop)) or "")
+    if source_kind not in {"row_index", "row_identity"}:
+        return False
+    if drop_kind not in {"row_index", "row_identity"}:
+        return False
+    if drop.get("ensure_visible") is not True:
+        return False
+    source_selector = _selector_from_endpoint(source)
+    drop_selector = _selector_from_endpoint(drop)
+    if not source_selector or not drop_selector or source_selector != drop_selector:
+        return False
+    if len(path) > 2:
+        return False
+    return all(
+        str(point.get("relative_to") or "") in {"source", "drop", "target"}
+        for point in path
+        if isinstance(point, Mapping)
+    )
+
+
+def _grid_row_drag_request(endpoint: Mapping[str, Any]) -> tuple[int | None, str | None]:
+    kind = str(endpoint.get("kind") or _endpoint_kind(dict(endpoint)) or "")
+    if kind == "row_index":
+        return _non_bool_int(endpoint.get("row_index")), None
+    if kind == "row_identity":
+        value = str(endpoint.get("row_identity") or "")
+        return None, value or None
+    return None, None
+
+
+async def _drag_result_with_selected_payload(
+    *,
+    backend: Any,
+    result: dict[str, Any],
+    source: dict[str, Any],
+    drop: dict[str, Any],
+    path: list[dict[str, Any]],
+    identity: dict[str, Any],
+    expect: dict[str, Any],
+    selected_payload_selector: dict[str, Any],
+    selected_payload_before: list[dict[str, Any]],
+    modifiers: list[str],
+    route: dict[str, int] | None = None,
+    route_evidence: dict[str, Any] | None = None,
+    use_path_drag: bool = False,
+    cancel_key: str | None = None,
+) -> dict[str, Any]:
+    selected_payload: dict[str, Any] | None = None
+    if expect.get("selected_payload_preserved") is True:
+        selected_before_refs = _selected_payload_refs(selected_payload_before)
+        try:
+            selected_payload_after, blocked = await _selected_viewport_rows_after_drag(
+                backend,
+                selected_payload_selector,
+                identity,
+                expected_refs=selected_before_refs,
+            )
+        except Exception as exc:
+            return _drag_backend_exception_blocked("selected payload postflight", exc)
+        if blocked is not None:
+            return blocked
+        selected_after_refs = _selected_payload_refs(selected_payload_after)
+        selected_payload = {
+            "before": selected_before_refs,
+            "after": selected_after_refs,
+            "preserved": (
+                bool(selected_before_refs)
+                and selected_before_refs == selected_after_refs
+                and len(selected_before_refs) == len(set(selected_before_refs))
+                and len(selected_after_refs) == len(set(selected_after_refs))
+            ),
+        }
+
+    backend_route = _mapping_evidence_from_result(result, "route_evidence") or {}
+    path_points = result.get("path_points")
+    hold_points = result.get("hold_points")
+    final_pointer = result.get("final_pointer")
+    if use_path_drag and _is_backend_success(result) and not _has_backend_path_evidence(
+        result,
+        backend_route,
+    ):
+        return _path_drag_blocked("path-aware drag backend did not return route evidence")
+    merged_route_evidence = {
+        **(route_evidence or {}),
+        **backend_route,
+        "modifiers": modifiers,
+    }
+    if route is not None:
+        merged_route_evidence["start"] = {"x": route["from_x"], "y": route["from_y"]}
+        merged_route_evidence["drop"] = {"x": route["to_x"], "y": route["to_y"]}
+    if isinstance(path_points, list):
+        merged_route_evidence["move_points"] = list(path_points)
+    if isinstance(hold_points, list):
+        merged_route_evidence["hold_points"] = list(hold_points)
+    if isinstance(final_pointer, Mapping):
+        merged_route_evidence["final_pointer"] = dict(final_pointer)
+    if selected_payload is not None:
+        merged_route_evidence["selected_payload"] = selected_payload
+    status = str(result.get("status", "PASS")).upper()
+    output: dict[str, Any] = {
+        "status": status,
+        "backend": type(backend).__name__,
+        "route_evidence": merged_route_evidence,
+        "result": result,
+    }
+    no_op = _mapping_evidence_from_result(result, "no_op")
+    if no_op is not None:
+        output["no_op"] = no_op
+    cleanup = _drag_cleanup_evidence(result)
+    if cleanup is not None:
+        output["cleanup"] = cleanup
+    target_ensure_visible_result = merged_route_evidence.get("target_ensure_visible_result")
+    if isinstance(target_ensure_visible_result, Mapping):
+        output["drop_ensure_visible_result"] = dict(target_ensure_visible_result)
+    cancel_evidence = result.get("cancel")
+    if isinstance(cancel_evidence, Mapping):
+        output["cancel"] = dict(cancel_evidence)
+    elif cancel_key is not None:
+        output["cancel"] = {"key": cancel_key, "sent": True}
+    if selected_payload is not None:
+        output["selected_payload"] = selected_payload
+    if (
+        status == "PASS"
+        and expect.get("selected_payload_preserved") is True
+        and selected_payload is not None
+        and selected_payload.get("preserved") is not True
+    ):
+        output["status"] = "FAIL"
+        output["reason"] = "selected payload was not preserved after drag"
+    if status != "PASS":
+        output["reason"] = str(result.get("reason") or "ui.drag backend did not pass")
+        for key in ("reason", "requested", "accepted", "next_step"):
+            if key in result:
+                output[key] = result[key]
+    return output
 
 
 def _mapping_evidence_from_result(

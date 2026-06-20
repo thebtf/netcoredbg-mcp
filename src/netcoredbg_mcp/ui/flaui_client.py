@@ -35,6 +35,7 @@ GRID_ENSURE_VISIBLE_MAX_SETTLE_MS = 2_000
 GRID_ENSURE_VISIBLE_SCAN_PASSES = 4
 GRID_ENSURE_VISIBLE_SCROLL_UIA_OVERHEAD_SECONDS = 0.2
 GRID_ENSURE_VISIBLE_TIMEOUT_MARGIN_SECONDS = 5.0
+GRID_DRAG_ROW_TO_ROW_TIMEOUT_MARGIN_SECONDS = 3.0
 
 
 def _is_window_not_ready(exc: RuntimeError) -> bool:
@@ -107,6 +108,25 @@ def _grid_ensure_visible_timeout_seconds(
     return max(
         BRIDGE_DEFAULT_CALL_TIMEOUT_SECONDS,
         estimated_seconds + GRID_ENSURE_VISIBLE_TIMEOUT_MARGIN_SECONDS,
+    )
+
+
+def _grid_drag_row_to_row_timeout_seconds(
+    max_scrolls: int | None,
+    scroll_settle_ms: int | None,
+    speed_ms: int,
+) -> float:
+    ensure_visible_timeout = _grid_ensure_visible_timeout_seconds(
+        max_scrolls,
+        scroll_settle_ms,
+    )
+    drag_timeout = _drag_path_timeout_seconds(
+        [{"x": 0, "y": 0}, {"x": 1, "y": 1}],
+        speed_ms,
+    )
+    return max(
+        BRIDGE_DEFAULT_CALL_TIMEOUT_SECONDS,
+        ensure_visible_timeout + drag_timeout + GRID_DRAG_ROW_TO_ROW_TIMEOUT_MARGIN_SECONDS,
     )
 
 
@@ -888,6 +908,53 @@ class FlaUIBackend:
             call_timeout=_grid_ensure_visible_timeout_seconds(
                 max_scrolls,
                 scroll_settle_ms,
+            ),
+            **payload,
+        )
+
+    async def grid_drag_row_to_row(
+        self,
+        selector: dict[str, Any],
+        *,
+        source_row_key: str | None = None,
+        source_row_index: int | None = None,
+        target_row_key: str | None = None,
+        target_row_index: int | None = None,
+        identity: dict[str, Any] | None = None,
+        rows: dict[str, Any] | None = None,
+        columns: list[str] | None = None,
+        max_scrolls: int | None = None,
+        scroll_settle_ms: int | None = None,
+        speed_ms: int = 200,
+        hold_modifiers: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Drag from one DataGrid row to another while preserving the source anchor."""
+        payload: dict[str, Any] = {
+            "identity": dict(identity or {}),
+            "rows": dict(rows or {}),
+            "columns": list(columns or []),
+            "speed_ms": speed_ms,
+            "hold_modifiers": list(hold_modifiers or []),
+        }
+        if source_row_key is not None:
+            payload["source_row_key"] = source_row_key
+        if source_row_index is not None:
+            payload["source_row_index"] = source_row_index
+        if target_row_key is not None:
+            payload["target_row_key"] = target_row_key
+        if target_row_index is not None:
+            payload["target_row_index"] = target_row_index
+        if max_scrolls is not None:
+            payload["max_scrolls"] = max_scrolls
+        if scroll_settle_ms is not None:
+            payload["scroll_settle_ms"] = scroll_settle_ms
+        return await self._call_grid(
+            "grid_drag_row_to_row",
+            selector,
+            call_timeout=_grid_drag_row_to_row_timeout_seconds(
+                max_scrolls,
+                scroll_settle_ms,
+                speed_ms,
             ),
             **payload,
         )

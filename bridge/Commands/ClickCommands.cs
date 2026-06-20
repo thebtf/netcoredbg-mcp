@@ -371,7 +371,7 @@ public static class ClickCommands
         return output;
     }
 
-    private static void MoveCursor(int x, int y)
+    internal static void MoveCursor(int x, int y)
     {
         if (!SetCursorPos(x, y))
         {
@@ -812,7 +812,7 @@ public static class ClickCommands
         return waypoints;
     }
 
-    private static void EnsureForeground(AutomationElement? mainWindow)
+    internal static void EnsureForeground(AutomationElement? mainWindow)
     {
         if (JsonRpcHandler.Stealth)
         {

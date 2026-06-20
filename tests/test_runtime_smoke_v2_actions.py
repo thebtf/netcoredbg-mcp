@@ -2251,6 +2251,99 @@ async def test_v2_ui_drag_passes_through_drop_ensure_visible_result() -> None:
 
 
 @pytest.mark.asyncio
+async def test_v2_ui_drag_preserves_row_target_drag_evidence_for_offscreen_target() -> None:
+    session = ActionSmokeSession()
+    session.drag_results.append(
+        {
+            "status": "PASS",
+            "backend": "fake",
+            "route_evidence": {
+                "source_bounds": {"x": 10, "y": 60, "width": 120, "height": 30},
+                "target_bounds": {"x": 10, "y": 340, "width": 120, "height": 30},
+                "source_anchor_preserved": True,
+                "move_points": [
+                    {"x": 70, "y": 75},
+                    {"x": 70, "y": 355},
+                ],
+                "final_pointer": {"x": 70, "y": 355},
+                "target_ensure_visible_result": {
+                    "status": "PASS",
+                    "already_visible": False,
+                    "resolved_row": {"identity": "Fixture cue nineteen"},
+                },
+            },
+            "drop_ensure_visible_result": {
+                "status": "PASS",
+                "already_visible": False,
+                "resolved_row": {"identity": "Fixture cue nineteen"},
+            },
+        }
+    )
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "row target drag offscreen evidence passthrough",
+            "cases": [
+                {
+                    "id": "row_target_drag_offscreen_evidence_passthrough",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.drag",
+                                "source": {
+                                    "selector": {"automation_id": "CueDataGrid"},
+                                    "row_identity": "Fixture cue two",
+                                },
+                                "path": [
+                                    {"relative_to": "source", "x": 0.5, "y": 0.5},
+                                    {"relative_to": "drop", "x": 0.5, "y": 0.5},
+                                ],
+                                "drop": {
+                                    "selector": {"automation_id": "CueDataGrid"},
+                                    "row_identity": "Fixture cue nineteen",
+                                    "identity": {"column": "Phrase"},
+                                    "rows": {"visible_only": True, "max": 8},
+                                    "columns": ["Phrase"],
+                                    "ensure_visible": True,
+                                    "max_scrolls": 12,
+                                    "scroll_settle_ms": 25,
+                                },
+                                "identity": {"column": "Phrase"},
+                                "duration_ms": 650,
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    drag_call = next(call for call in session.calls if call[0] == "drag")
+
+    assert result["status"] == "PASS"
+    assert drag_call[1]["source"]["row_identity"] == "Fixture cue two"
+    assert drag_call[1]["drop"]["row_identity"] == "Fixture cue nineteen"
+    assert drag_call[1]["drop"]["rows"] == {"visible_only": True, "max": 8}
+    assert drag_call[1]["drop"]["columns"] == ["Phrase"]
+    assert drag_call[1]["drop"]["max_scrolls"] == 12
+    assert drag_call[1]["drop"]["scroll_settle_ms"] == 25
+    assert action["route_evidence"]["source_anchor_preserved"] is True
+    assert action["route_evidence"]["target_ensure_visible_result"] == {
+        "status": "PASS",
+        "already_visible": False,
+        "resolved_row": {"identity": "Fixture cue nineteen"},
+    }
+    assert action["drop_ensure_visible_result"] == {
+        "status": "PASS",
+        "already_visible": False,
+        "resolved_row": {"identity": "Fixture cue nineteen"},
+    }
+
+
+@pytest.mark.asyncio
 async def test_v2_ui_drag_passes_through_drop_ensure_visible_blocked_result() -> None:
     session = ActionSmokeSession()
     session.drag_results.append(

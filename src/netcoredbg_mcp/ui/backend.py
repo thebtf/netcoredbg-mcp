@@ -241,6 +241,25 @@ class UIBackend(Protocol):
         """Make a DataGrid row visible by backend-owned realization/scroll support."""
         ...
 
+    async def grid_drag_row_to_row(
+        self,
+        selector: dict[str, Any],
+        *,
+        source_row_key: str | None = None,
+        source_row_index: int | None = None,
+        target_row_key: str | None = None,
+        target_row_index: int | None = None,
+        identity: dict[str, Any] | None = None,
+        rows: dict[str, Any] | None = None,
+        columns: list[str] | None = None,
+        max_scrolls: int | None = None,
+        scroll_settle_ms: int | None = None,
+        speed_ms: int = 200,
+        hold_modifiers: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Perform a same-grid row-to-row drag while preserving the source anchor."""
+        ...
+
     async def grid_assert_range(
         self,
         selector: dict[str, Any],
