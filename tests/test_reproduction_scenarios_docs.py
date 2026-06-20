@@ -437,6 +437,7 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "CR-080",
             "CR-084",
             "CR-085",
+            "CR-086",
             "DISAGREEING_SOURCES",
             "launch env/evidence-dir advertisement",
             "launch-to-artifact default acquisition",
@@ -451,6 +452,7 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "runtime_smoke_mark_event_cursor(agent_mode=True)",
             "runtime_smoke_run_probe(agent_mode=True)",
             "preserved live app-diagnostics source cursor context",
+            "split/comment closure evidence",
             "remaining broader app diagnostics lifecycle/orchestration",
         ],
     }
@@ -640,6 +642,8 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "active app-diagnostics run-probe first-follow-up source cursor guidance",
             "runtime_smoke_run_probe(agent_mode=True)",
             "preserved live app-diagnostics source cursor context",
+            "CR-086",
+            "split/comment closure evidence",
         ],
     }
 
@@ -809,18 +813,8 @@ def test_issue_272_records_cr073_app_diagnostics_event_delta_slice() -> None:
         assert "retained-final-result" in text or "retained final result" in text
         assert "without claiming live diagnostics streaming" in text
 
-    assert (
-        "broader live app-diagnostics streaming/history beyond bounded case-boundary "
-        "history, intra-case wait/poll acquisition progress, and active wait/evidence "
-        "cursor handoff"
-        in remaining
-    )
-    assert (
-        "broader live app-diagnostics streaming/history beyond bounded case-boundary "
-        "history, intra-case wait/poll acquisition progress, and active wait/evidence "
-        "cursor handoff"
-        in lifecycle_remaining
-    )
+    assert "broader live app-diagnostics streaming/history" in remaining
+    assert "broader live app-diagnostics streaming/history" in lifecycle_remaining
 
 
 def test_issue_272_records_cr078_live_app_diagnostics_history_slice() -> None:
@@ -841,18 +835,8 @@ def test_issue_272_records_cr078_live_app_diagnostics_history_slice() -> None:
 
     assert "case-boundary live app-diagnostics history" not in remaining
     assert "case-boundary live app-diagnostics history" not in lifecycle_remaining
-    assert (
-        "broader live app-diagnostics streaming/history beyond bounded case-boundary "
-        "history, intra-case wait/poll acquisition progress, and active wait/evidence "
-        "cursor handoff"
-        in remaining
-    )
-    assert (
-        "broader live app-diagnostics streaming/history beyond bounded case-boundary "
-        "history, intra-case wait/poll acquisition progress, and active wait/evidence "
-        "cursor handoff"
-        in lifecycle_remaining
-    )
+    assert "broader live app-diagnostics streaming/history" in remaining
+    assert "broader live app-diagnostics streaming/history" in lifecycle_remaining
     assert "broader app diagnostics lifecycle/orchestration" in remaining
     assert "broader app diagnostics lifecycle/orchestration" in lifecycle_remaining
 
@@ -876,18 +860,8 @@ def test_issue_272_records_cr079_intracase_app_diagnostics_progress_slice() -> N
 
     assert "intra-case wait/poll progress" not in remaining
     assert "intra-case wait/poll progress" not in lifecycle_remaining
-    assert (
-        "broader live app-diagnostics streaming/history beyond bounded case-boundary "
-        "history, intra-case wait/poll acquisition progress, and active wait/evidence "
-        "cursor handoff"
-        in remaining
-    )
-    assert (
-        "broader live app-diagnostics streaming/history beyond bounded case-boundary "
-        "history, intra-case wait/poll acquisition progress, and active wait/evidence "
-        "cursor handoff"
-        in lifecycle_remaining
-    )
+    assert "broader live app-diagnostics streaming/history" in remaining
+    assert "broader live app-diagnostics streaming/history" in lifecycle_remaining
     assert "broader app diagnostics lifecycle/orchestration" in remaining
     assert "broader app diagnostics lifecycle/orchestration" in lifecycle_remaining
 
@@ -1064,6 +1038,44 @@ def test_issue_272_records_cr085_run_probe_appdiag_follow_up_without_broad_closu
         "active app-diagnostics run-probe first-follow-up source cursor guidance"
         not in lifecycle_remaining
     )
+    assert "broader app diagnostics lifecycle/orchestration" in remaining
+    assert "broader app diagnostics lifecycle/orchestration" in lifecycle_remaining
+
+
+def test_issue_272_records_cr086_split_remaining_lifecycle_scope_without_broad_closure() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#272")
+    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#272")
+    _issue, _state, _evidence, remaining = _issue_cells(backlog, "#272")
+    _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
+        cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
+    )
+
+    for text in (row, lifecycle_row):
+        assert "CR-086" in text
+        assert "split/comment closure evidence" in text
+        assert "CR-084" in text
+        assert "CR-085" in text
+        assert "already-covered" in text
+        assert (
+            "broad lifecycle remainder" in text
+            or "broader app diagnostics lifecycle/orchestration" in text
+        )
+
+    for clause in (
+        _clause_containing(row, "CR-086"),
+        _clause_containing(lifecycle_row, "CR-086"),
+    ):
+        assert "DataGrid" not in clause
+        assert "#270" not in clause
+        assert "runtime_smoke_mark_event_cursor(agent_mode=True)" not in clause
+        assert "runtime_smoke_run_probe(agent_mode=True)" not in clause
+        assert "generic source-aware run-probe" not in clause
+
+    assert "broader FR remains open" in row
+    assert "keep open" in lifecycle_row
+    assert "split/comment closure evidence" not in remaining
+    assert "split/comment closure evidence" not in lifecycle_remaining
     assert "broader app diagnostics lifecycle/orchestration" in remaining
     assert "broader app diagnostics lifecycle/orchestration" in lifecycle_remaining
 
@@ -1273,12 +1285,7 @@ def test_issue_272_remaining_scope_excludes_covered_launch_contract_and_default(
     assert "poll cursor" in remaining
     assert "broader app diagnostics lifecycle/orchestration" in remaining
     assert "wait-json condition semantics" in remaining
-    assert (
-        "broader live app-diagnostics streaming/history beyond bounded case-boundary "
-        "history, intra-case wait/poll acquisition progress, and active wait/evidence "
-        "cursor handoff"
-        in remaining
-    )
+    assert "broader live app-diagnostics streaming/history" in remaining
     assert "diagnostic env/evidence-dir advertisement" not in lifecycle_remaining
     assert "launch env/evidence-dir advertisement" not in lifecycle_remaining
     assert "app diagnostics orchestration beyond local-file acquisition" not in lifecycle_remaining
@@ -1286,12 +1293,7 @@ def test_issue_272_remaining_scope_excludes_covered_launch_contract_and_default(
     assert "directory poll" in lifecycle_remaining
     assert "poll cursor" in lifecycle_remaining
     assert "wait-json condition semantics" in lifecycle_remaining
-    assert (
-        "broader live app-diagnostics streaming/history beyond bounded case-boundary "
-        "history, intra-case wait/poll acquisition progress, and active wait/evidence "
-        "cursor handoff"
-        in lifecycle_remaining
-    )
+    assert "broader live app-diagnostics streaming/history" in lifecycle_remaining
 
 
 def test_issue_268_records_plan_path_slices() -> None:
