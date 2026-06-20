@@ -521,6 +521,10 @@ def register_runtime_smoke_tools(
             data["run_created"] = bool(data.get("run_id"))
             next_actions = _runtime_smoke_lifecycle_next_actions(data)
             if agent_mode:
+                await _runtime_smoke_attach_run_probe_app_diagnostics_agent_cursor(
+                    session.runtime_smoke.lifecycle_runs,
+                    data,
+                )
                 _apply_runtime_smoke_agent_mode(
                     data,
                     _runtime_smoke_run_probe_agent_next_action(data, next_actions[0]),
@@ -2334,6 +2338,34 @@ def _runtime_smoke_run_probe_agent_next_action(
     if isinstance(sources, dict) and sources:
         return "runtime_smoke_get_event_delta"
     return fallback
+
+
+async def _runtime_smoke_attach_run_probe_app_diagnostics_agent_cursor(
+    registry: Any,
+    data: dict[str, Any],
+) -> None:
+    generated_plan = data.get("generated_plan")
+    if not isinstance(generated_plan, dict):
+        return
+    if generated_plan.get("probe_kind") != "app_diagnostics":
+        return
+    if data.get("status") != "RUNNING" or data.get("final") is True:
+        return
+    run_id = data.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        return
+
+    cursor = _runtime_smoke_agent_cursor(data)
+    if not cursor:
+        return
+    await _runtime_smoke_attach_live_app_diagnostics_source_cursor(
+        registry,
+        run_id,
+        cursor,
+    )
+    sources = cursor.get("sources")
+    if isinstance(sources, dict) and "app_diagnostics" in sources:
+        data["cursor"] = cursor
 
 
 def _apply_runtime_smoke_validate_probe_agent_mode(
