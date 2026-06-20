@@ -16,14 +16,15 @@
       "transitions": [
         {
           "action": {
-            "kind": "ui.grid.ensure_visible",
-            "selector": {
-              "automation_id": "DataGridUnderTest",
-              "control_type": "DataGrid"
+            "kind": "ui.drag",
+            "source": {
+              "selector": {
+                "automation_id": "DataGridUnderTest",
+                "control_type": "DataGrid"
+              },
+              "row_identity": "ROW-010"
             },
-            "row": {
-              "identity": "ROW-010"
-            },
+            "ensure_visible": true,
             "identity": {
               "column": "StableRowId"
             },
@@ -33,20 +34,9 @@
             },
             "columns": [
               "StableRowId"
-            ]
-          },
-          "probes": []
-        },
-        {
-          "action": {
-            "kind": "ui.drag",
-            "source": {
-              "selector": {
-                "automation_id": "DataGridUnderTest",
-                "control_type": "DataGrid"
-              },
-              "row_identity": "ROW-010"
-            },
+            ],
+            "max_scrolls": 12,
+            "scroll_settle_ms": 25,
             "path": [
               {
                 "relative_to": "source",
@@ -70,9 +60,6 @@
               "relative_to": "viewport",
               "x": 0.5,
               "y": 0.82
-            },
-            "identity": {
-              "column": "StableRowId"
             },
             "duration_ms": 1600,
             "step_count": 8,
