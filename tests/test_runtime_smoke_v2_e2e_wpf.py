@@ -152,3 +152,26 @@ def test_manual_smoke_lists_offscreen_row_target_drag_scenario() -> None:
 
     scenario_names = {name for name, _fn in smoke_test_manual.get_scenarios()}
     assert "WPF V2 Offscreen Row-Target Drag Runtime Smoke" in scenario_names
+
+
+def test_parse_drag_reorder_status_reads_drop_time_diagnostics() -> None:
+    status = smoke_test_manual._parse_drag_reorder_status(
+        "WpfWorkflow DragReorder "
+        "sourceIdentity=Fixture cue two targetIdentity=Fixture cue nineteen "
+        "selectedPayloadMode=single selectedPayloadBefore=Fixture cue two "
+        "selectedPayloadAfter=Fixture cue two edgeScrollDirection=down "
+        "edgeFirstVisible=1 edgeLastVisible=21 dropPoint=354,63 "
+        "dropOriginTarget=Fixture cue nineteen dropBoundsTarget=Fixture cue nineteen "
+        "dropBoundsIndex=18 dropBoundsTop=44 dropBoundsBottom=63 "
+        "orderFingerprint=Fixture cue one>Fixture cue three>Fixture cue nineteen"
+    )
+
+    assert status["source_identity"] == "Fixture cue two"
+    assert status["target_identity"] == "Fixture cue nineteen"
+    assert status["drop_point_x"] == 354
+    assert status["drop_point_y"] == 63
+    assert status["drop_origin_target"] == "Fixture cue nineteen"
+    assert status["drop_bounds_target"] == "Fixture cue nineteen"
+    assert status["drop_bounds_index"] == 18
+    assert status["drop_bounds_top"] == 44
+    assert status["drop_bounds_bottom"] == 63

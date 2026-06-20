@@ -43,6 +43,33 @@ public partial class MainWindow : Window
         public string SelectionMode { get; }
     }
 
+    private sealed class CueDropDiagnostics
+    {
+        public CueDropDiagnostics(
+            Point dropPoint,
+            CueRow? originalTarget,
+            CueRow? boundsTarget,
+            int boundsTargetIndex,
+            Rect bounds)
+        {
+            DropPoint = dropPoint;
+            OriginalTarget = originalTarget;
+            BoundsTarget = boundsTarget;
+            BoundsTargetIndex = boundsTargetIndex;
+            Bounds = bounds;
+        }
+
+        public Point DropPoint { get; }
+
+        public CueRow? OriginalTarget { get; }
+
+        public CueRow? BoundsTarget { get; }
+
+        public int BoundsTargetIndex { get; }
+
+        public Rect Bounds { get; }
+    }
+
     public MainWindow()
     {
         InitializeComponent();
@@ -191,15 +218,28 @@ public partial class MainWindow : Window
             return;
         }
 
+        var dropPoint = e.GetPosition(CueDataGrid);
+        var (boundsTargetRow, boundsTargetIndex, boundsTarget) = FindVisibleCueRowAtPoint(dropPoint);
         var targetRow = FindCueRowFromEventSource(e.OriginalSource);
+        var diagnostics = new CueDropDiagnostics(
+            dropPoint,
+            targetRow,
+            boundsTargetRow,
+            boundsTargetIndex,
+            boundsTarget);
         if (targetRow is null)
         {
-            _viewModel.StatusText = $"WpfWorkflow DragReorder blocked sourceIdentity={payload.SourceRow.Phrase} targetIdentity=<none>";
+            _viewModel.StatusText =
+                $"WpfWorkflow DragReorder blocked sourceIdentity={payload.SourceRow.Phrase} targetIdentity=<none> " +
+                $"dropPoint={Math.Round(diagnostics.DropPoint.X)},{Math.Round(diagnostics.DropPoint.Y)} " +
+                $"dropOriginTarget=<none> dropBoundsTarget={boundsTargetRow?.Phrase ?? "<none>"} " +
+                $"dropBoundsIndex={boundsTargetIndex} dropBoundsTop={RoundedRectEdge(boundsTarget.Top)} " +
+                $"dropBoundsBottom={RoundedRectEdge(boundsTarget.Bottom)}";
             Console.WriteLine(_viewModel.StatusText);
             return;
         }
 
-        MoveCueRows(payload, targetRow);
+        MoveCueRows(payload, targetRow, diagnostics);
     }
 
     private void CharactersListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -369,7 +409,10 @@ public partial class MainWindow : Window
             indices[^1] - indices[0] + 1 == selectedRows.Count;
     }
 
-    private void MoveCueRows(CueDragPayload payload, CueRow targetRow)
+    private void MoveCueRows(
+        CueDragPayload payload,
+        CueRow targetRow,
+        CueDropDiagnostics diagnostics)
     {
         var rows = _viewModel.CueRows;
         var targetIndex = rows.IndexOf(targetRow);
@@ -434,7 +477,17 @@ public partial class MainWindow : Window
         var selectedPayloadAfter = SelectedPayloadIdentities(payloadRows);
         var orderFingerprint = string.Join(">", rows.Select(row => row.Phrase));
         _viewModel.StatusText =
-            $"WpfWorkflow DragReorder sourceIdentity={payload.SourceRow.Phrase} targetIdentity={targetRow.Phrase} selectedPayloadMode={payload.SelectionMode} selectedPayloadBefore={selectedPayloadBefore} selectedPayloadAfter={selectedPayloadAfter} edgeScrollDirection={edgeScrollDirection} edgeFirstVisible={edgeFirstVisible} edgeLastVisible={edgeLastVisible} orderFingerprint={orderFingerprint}";
+            $"WpfWorkflow DragReorder sourceIdentity={payload.SourceRow.Phrase} targetIdentity={targetRow.Phrase} " +
+            $"selectedPayloadMode={payload.SelectionMode} selectedPayloadBefore={selectedPayloadBefore} " +
+            $"selectedPayloadAfter={selectedPayloadAfter} edgeScrollDirection={edgeScrollDirection} " +
+            $"edgeFirstVisible={edgeFirstVisible} edgeLastVisible={edgeLastVisible} " +
+            $"dropPoint={Math.Round(diagnostics.DropPoint.X)},{Math.Round(diagnostics.DropPoint.Y)} " +
+            $"dropOriginTarget={diagnostics.OriginalTarget?.Phrase ?? "<none>"} " +
+            $"dropBoundsTarget={diagnostics.BoundsTarget?.Phrase ?? "<none>"} " +
+            $"dropBoundsIndex={diagnostics.BoundsTargetIndex} " +
+            $"dropBoundsTop={RoundedRectEdge(diagnostics.Bounds.Top)} " +
+            $"dropBoundsBottom={RoundedRectEdge(diagnostics.Bounds.Bottom)} " +
+            $"orderFingerprint={orderFingerprint}";
         Console.WriteLine(_viewModel.StatusText);
         WriteMutableState($"drag-reorder={payload.SourceRow.Phrase}->{targetRow.Phrase};selected={selectedPayloadAfter};order={orderFingerprint}");
     }
@@ -507,6 +560,42 @@ public partial class MainWindow : Window
         }
 
         return (first, last);
+    }
+
+    private (CueRow? Row, int Index, Rect Bounds) FindVisibleCueRowAtPoint(Point point)
+    {
+        for (var index = 0; index < CueDataGrid.Items.Count; index++)
+        {
+            if (CueDataGrid.ItemContainerGenerator.ContainerFromIndex(index) is not DataGridRow row ||
+                row.Item is not CueRow cueRow)
+            {
+                continue;
+            }
+
+            Rect bounds;
+            try
+            {
+                bounds = row
+                    .TransformToAncestor(CueDataGrid)
+                    .TransformBounds(new Rect(new Size(row.ActualWidth, row.ActualHeight)));
+            }
+            catch (InvalidOperationException)
+            {
+                continue;
+            }
+
+            if (bounds.Contains(point))
+            {
+                return (cueRow, index, bounds);
+            }
+        }
+
+        return (null, -1, Rect.Empty);
+    }
+
+    private static int RoundedRectEdge(double value)
+    {
+        return double.IsFinite(value) ? (int)Math.Round(value) : -1;
     }
 
     private void ResetEdgeScrollEvidence()

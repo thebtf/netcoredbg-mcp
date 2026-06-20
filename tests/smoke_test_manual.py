@@ -4817,7 +4817,11 @@ def _parse_drag_reorder_status(value: Any) -> dict[str, Any]:
         r"(?:selectedPayloadMode=(.*?) selectedPayloadBefore=(.*?) "
         r"selectedPayloadAfter=(.*?) )?"
         r"edgeScrollDirection=(.*?) "
-        r"edgeFirstVisible=(-?\d+) edgeLastVisible=(-?\d+) orderFingerprint=(.*)$",
+        r"edgeFirstVisible=(-?\d+) edgeLastVisible=(-?\d+) "
+        r"(?:dropPoint=(-?\d+),(-?\d+) dropOriginTarget=(.*?) "
+        r"dropBoundsTarget=(.*?) dropBoundsIndex=(-?\d+) "
+        r"dropBoundsTop=(-?\d+) dropBoundsBottom=(-?\d+) )?"
+        r"orderFingerprint=(.*)$",
         text,
     )
     if not match:
@@ -4834,7 +4838,14 @@ def _parse_drag_reorder_status(value: Any) -> dict[str, Any]:
         "edge_scroll_direction": match.group(6),
         "edge_first_visible": int(match.group(7)),
         "edge_last_visible": int(match.group(8)),
-        "order": match.group(9).split(">") if match.group(9) else [],
+        "drop_point_x": int(match.group(9)) if match.group(9) else None,
+        "drop_point_y": int(match.group(10)) if match.group(10) else None,
+        "drop_origin_target": match.group(11) if match.group(11) else None,
+        "drop_bounds_target": match.group(12) if match.group(12) else None,
+        "drop_bounds_index": int(match.group(13)) if match.group(13) else None,
+        "drop_bounds_top": int(match.group(14)) if match.group(14) else None,
+        "drop_bounds_bottom": int(match.group(15)) if match.group(15) else None,
+        "order": match.group(16).split(">") if match.group(16) else [],
     }
 
 
