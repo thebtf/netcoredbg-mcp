@@ -205,8 +205,10 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
     assert "broader FR remains open" in row_269
     assert "CR-039" in row_269
     assert "CR-041" in row_269
+    assert "CR-082" in row_269
     assert "metrics_contract" in row_269
     assert "agent_mode.defaults" in row_269
+    assert "quiet active event-delta wait-continuation guidance" in row_269
     assert "event_limit=20" in row_269
     assert "NO DATA" in row_269
     assert "None in netcoredbg-mcp." not in row_269
@@ -324,6 +326,7 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "CR-066",
             "CR-069",
             "CR-080",
+            "CR-082",
             "metrics_contract",
             "agent_mode.defaults",
             "runtime_smoke_validate_probe",
@@ -337,6 +340,7 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "source_deltas.trace_source",
             "source-aware mark-cursor guidance",
             "active app-diagnostics wait/evidence source-cursor guidance",
+            "quiet active event-delta wait-continuation guidance",
             "exception verdict",
             "cleanup-contract guidance",
             "event_limit=20",
@@ -517,6 +521,8 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "success-metrics evidence",
             "CR-080",
             "active app-diagnostics wait/evidence source-cursor guidance",
+            "CR-082",
+            "quiet active event-delta wait-continuation guidance",
             "exception verdict",
             "broad lifecycle/orchestration",
         ],
@@ -889,6 +895,31 @@ def test_issue_269_272_record_cr080_active_wait_evidence_delta_guidance_slice() 
     assert "active app-diagnostics wait/evidence source-cursor guidance" not in remaining_272
     assert "broader app diagnostics lifecycle/orchestration" in remaining_272
     assert "broader app diagnostics lifecycle/orchestration" in lifecycle_remaining_272
+
+
+def test_issue_269_records_cr082_quiet_active_delta_wait_guidance_without_broad_closure() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#269")
+    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#269")
+    _issue, _state, _evidence, remaining = _issue_cells(backlog, "#269")
+    _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
+        cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
+    )
+
+    for text in (row, lifecycle_row):
+        assert "CR-082" in text
+        assert "quiet active event-delta wait-continuation guidance" in text
+        assert "runtime_smoke_get_event_delta(agent_mode=True)" in text
+        assert "runtime_smoke_wait_for_result" in text
+        assert "empty delta poll" in text
+
+    assert "broader FR remains open" in row
+    assert "keep open" in lifecycle_row
+    assert "quiet active event-delta wait-continuation guidance" not in remaining
+    assert "quiet active event-delta wait-continuation guidance" not in lifecycle_remaining
+    assert "remaining multi-source event deltas" in remaining
+    assert "broad lifecycle/orchestration" in remaining
+    assert "broad lifecycle/orchestration" in lifecycle_remaining
 
 
 def test_issue_270_records_cr070_ensure_visible_viewport_delta_slice() -> None:
