@@ -12,6 +12,7 @@ from netcoredbg_mcp.session.runtime_smoke_v2.templates._substituter import (
 
 def test_template_registry_exposes_builtin_templates() -> None:
     assert accepted_template_names() == [
+        "novascript-action-oracle",
         "radio-group-set",
         "setting-ab-row-effect",
         "state-only-file-json",
@@ -168,3 +169,64 @@ def test_placeholder_substituter_rejects_unknown_without_recursive_rendering() -
 def test_placeholder_substituter_wraps_malformed_template() -> None:
     with pytest.raises(TemplateRenderError, match="malformed template"):
         render_template_value("{broken", {"id": "a"})
+
+
+def test_novascript_action_oracle_template_generates_route_action_and_file_oracles() -> None:
+    generated, errors = expand_generated_cases(
+        {
+            "generate": {
+                "template": "novascript-action-oracle",
+                "matrix": [
+                    {
+                        "id": "route_apply",
+                        "action": {
+                            "kind": "ui.invoke",
+                            "selector": {"automation_id": "applyButton"},
+                        },
+                        "settle": {"idle_ms": 0},
+                        "oracles": [
+                            {
+                                "name": "route",
+                                "path": "Tmp/evidence/{id}.json",
+                                "jsonpath": "$.route",
+                                "expected": "apply",
+                            },
+                            {
+                                "name": "verdict",
+                                "path": "Tmp/evidence/{id}.json",
+                                "jsonpath": "$.verdict",
+                                "expected": "PASS",
+                            },
+                        ],
+                    }
+                ],
+            }
+        }
+    )
+
+    assert errors == []
+    case = generated[0]
+    assert case["id"] == "route_apply"
+    assert case["transitions"][0]["action"] == {
+        "kind": "ui.invoke",
+        "selector": {"automation_id": "applyButton"},
+    }
+    assert case["transitions"][0]["settle"] == {"idle_ms": 0}
+    assert case["transitions"][0]["probes"] == [
+        {
+            "kind": "file.json",
+            "phase": "after",
+            "name": "route",
+            "path": "Tmp/evidence/route_apply.json",
+            "jsonpath": "$.route",
+            "expected": "apply",
+        },
+        {
+            "kind": "file.json",
+            "phase": "after",
+            "name": "verdict",
+            "path": "Tmp/evidence/route_apply.json",
+            "jsonpath": "$.verdict",
+            "expected": "PASS",
+        },
+    ]
