@@ -358,6 +358,11 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "CR-058",
             "CR-074",
             "CR-075",
+            "CR-076",
+            "CR-077",
+            "PR #178",
+            "PR #179",
+            "PR #180",
             "ui.text.set_text",
             'ui_grid(action="viewport")',
             'ui_grid(action="right_click_row")',
@@ -367,6 +372,12 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "row-based drop endpoint",
             "target-side offscreen row-target drag ensure-visible semantics",
             "bounded broad-#270 replay-proof plus fail-closed source-anchor guard slice",
+            "source-anchor-preserving offscreen row-target drag",
+            "merged-state replay stabilization",
+            "drop-time evidence",
+            "fresh automation-element bounds",
+            "drop_origin_target",
+            "drop_bounds_target",
             "actionable `BLOCKED` verdict when target-side realization hides the drag source",
             "opt-in ensure-visible row actions",
             "ui.right_click_verified",
@@ -522,6 +533,12 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "CR-057",
             "CR-058",
             "CR-074",
+            "CR-075",
+            "CR-076",
+            "CR-077",
+            "PR #178",
+            "PR #179",
+            "PR #180",
             "ui.text.set_text",
             'ui_grid(action="viewport")',
             'ui_grid(action="right_click_row")',
@@ -541,6 +558,12 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "ui_focus",
             "confirmed DataGrid selection",
             "bounded visible-row identity snapshots",
+            "source-anchor-preserving offscreen row-target drag",
+            "merged-state replay stabilization",
+            "drop-time evidence",
+            "fresh automation-element bounds",
+            "drop_origin_target",
+            "drop_bounds_target",
             "DataGrid offscreen/scroll action semantics",
         ],
         "#271": [
@@ -995,13 +1018,46 @@ def test_issue_270_records_cr075_docs_evidence_replay_proof_without_broad_closur
         )
 
     expected_remaining = (
-        "live downstream replay tails beyond the CR-075 replay-proof plus "
-        "fail-closed source-anchor guard contract"
+        "live downstream replay tails beyond the CR-075/CR-076/CR-077 replay, "
+        "stability, and drop-time evidence contract"
     )
     assert expected_remaining in remaining
     assert expected_remaining in lifecycle_remaining
     assert "broader" in remaining
     assert "broader" in lifecycle_remaining
+
+
+def test_issue_270_records_cr076_cr077_replay_reconciliation_without_broad_closure() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#270")
+    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#270")
+    _issue, _state, _evidence, remaining = _issue_cells(backlog, "#270")
+    _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
+        cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
+    )
+
+    for text in (row, lifecycle_row):
+        assert "CR-076 / PR #178" in text
+        assert "PR #179" in text
+        assert "CR-077 / PR #180" in text
+        assert "source-anchor-preserving offscreen row-target drag" in text
+        assert "merged-state replay stabilization" in text
+        assert "drop-time evidence" in text
+        assert "fresh automation-element bounds" in text
+        assert "drop_origin_target" in text
+        assert "drop_bounds_target" in text
+        assert "Fixture cue nineteen" in text
+
+    expected_remaining = (
+        "live downstream replay tails beyond the CR-075/CR-076/CR-077 replay, "
+        "stability, and drop-time evidence contract"
+    )
+    assert expected_remaining in remaining
+    assert expected_remaining in lifecycle_remaining
+    assert "broader" in remaining
+    assert "broader" in lifecycle_remaining
+    assert "before closing" in remaining
+    assert "before closing" in lifecycle_remaining
 
 
 def test_issue_271_272_record_cr048_app_diagnostics_freshness_slice() -> None:
