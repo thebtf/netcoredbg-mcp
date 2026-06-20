@@ -153,6 +153,8 @@ async def handle_ui_drag(
         max_scrolls=max_scrolls,
         scroll_settle_ms=scroll_settle_ms,
         ensure_visible_result=ensure_visible_result,
+        drop_ensure_visible_result=result.get("drop_ensure_visible_result"),
+        action_skipped=bool(result.get("action_skipped")),
         duration_ms=context.elapsed_ms(started),
     )
 
@@ -520,6 +522,7 @@ def _action_result(
     max_scrolls: Any = None,
     scroll_settle_ms: Any = None,
     ensure_visible_result: Any = None,
+    drop_ensure_visible_result: Any = None,
     action_skipped: bool = False,
     duration_ms: int,
 ) -> dict[str, Any]:
@@ -551,6 +554,8 @@ def _action_result(
             output["scroll_settle_ms"] = scroll_settle_ms
     if ensure_visible_result is not None:
         output["ensure_visible_result"] = compact_evidence(ensure_visible_result)
+    if drop_ensure_visible_result is not None:
+        output["drop_ensure_visible_result"] = compact_evidence(drop_ensure_visible_result)
     if action_skipped:
         output["action_skipped"] = True
     if output["route_evidence"]:

@@ -285,6 +285,10 @@ def assert_drag_drop_docs_contract(plan: dict[str, Any]) -> None:
     assert "BLOCKED" in notes
     assert "route_evidence" in notes
     assert "ui.grid.viewport" in notes
+    assert "offscreen" in notes
+    assert "row-based drop endpoint" in notes
+    assert "drop.ensure_visible=true" in notes
+    assert "raw viewport guessing" in notes
 
 
 def test_drag_drop_grid_example_declares_documented_protocol_contract() -> None:
@@ -384,6 +388,19 @@ def test_drag_drop_grid_example_rejects_missing_inline_ensure_visible_preflight(
     first_action.pop("ensure_visible", None)
     first_action.pop("max_scrolls", None)
     first_action.pop("scroll_settle_ms", None)
+
+    with pytest.raises(AssertionError):
+        assert_drag_drop_docs_contract(plan)
+
+
+def test_drag_drop_grid_example_rejects_missing_offscreen_drop_note() -> None:
+    plan = copy.deepcopy(_load_example())
+    for case in plan["cases"]:
+        case["notes"] = [
+            note
+            for note in case.get("notes", [])
+            if "drop.ensure_visible" not in str(note)
+        ]
 
     with pytest.raises(AssertionError):
         assert_drag_drop_docs_contract(plan)

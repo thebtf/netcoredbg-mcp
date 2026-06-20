@@ -2232,6 +2232,245 @@ async def test_ui_operation_adapters_resolve_visible_row_drag_sources_to_backend
 
 
 @pytest.mark.asyncio
+async def test_ui_operation_adapters_drag_can_ensure_visible_drop_row() -> None:
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.drag_calls: list[tuple[int, int, int, int, int, list[str]]] = []
+            self.grid_ensure_visible_calls: list[dict[str, Any]] = []
+            self.target_visible = False
+
+        async def grid_snapshot(
+            self,
+            selector: dict[str, Any],
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            visible_rows: list[dict[str, Any]] = [
+                {
+                    "index": 1,
+                    "bounds": {"x": 10, "y": 60, "width": 120, "height": 30},
+                    "cells": {"Phrase": "Cue source"},
+                }
+            ]
+            if self.target_visible:
+                visible_rows.append(
+                    {
+                        "index": 8,
+                        "bounds": {"x": 10, "y": 340, "width": 120, "height": 30},
+                        "cells": {"Phrase": "Cue target eight"},
+                    }
+                )
+            return {
+                "status": "PASS",
+                "row_count": 24,
+                "visible_rows": visible_rows,
+            }
+
+        async def grid_ensure_visible(
+            self,
+            selector: dict[str, Any],
+            *,
+            row_key: str | None = None,
+            row_index: int | None = None,
+            identity: dict[str, Any] | None = None,
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+            max_scrolls: int | None = None,
+            scroll_settle_ms: int | None = None,
+        ) -> dict[str, Any]:
+            self.grid_ensure_visible_calls.append(
+                {
+                    "selector": dict(selector),
+                    "row_key": row_key,
+                    "row_index": row_index,
+                    "identity": dict(identity or {}),
+                    "rows": dict(rows or {}),
+                    "columns": list(columns or []),
+                    "max_scrolls": max_scrolls,
+                    "scroll_settle_ms": scroll_settle_ms,
+                }
+            )
+            self.target_visible = True
+            return {
+                "status": "PASS",
+                "already_visible": False,
+                "resolved_row": {"identity": row_key, "index": row_index},
+            }
+
+        async def drag(
+            self,
+            from_x: int,
+            from_y: int,
+            to_x: int,
+            to_y: int,
+            speed_ms: int = 200,
+            hold_modifiers: list[str] | None = None,
+        ) -> dict[str, Any]:
+            modifiers = list(hold_modifiers or [])
+            self.drag_calls.append((from_x, from_y, to_x, to_y, speed_ms, modifiers))
+            return {
+                "status": "PASS",
+                "path_points": [
+                    {"x": from_x, "y": from_y},
+                    {"x": to_x, "y": to_y},
+                ],
+                "final_pointer": {"x": to_x, "y": to_y},
+            }
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    selector = {"automation_id": "CueDataGrid"}
+    result = await ui_operation_adapters(backend_provider)["ui.drag"](
+        source={"kind": "row_index", "selector": selector, "row_index": 1},
+        path=[
+            {"relative_to": "source", "x": 0.5, "y": 0.5},
+            {"relative_to": "drop", "x": 0.5, "y": 0.5},
+        ],
+        drop={
+            "selector": selector,
+            "row_identity": "Cue target eight",
+            "ensure_visible": True,
+            "max_scrolls": 12,
+            "scroll_settle_ms": 25,
+        },
+        identity={"column": "Phrase"},
+        duration_ms=450,
+    )
+
+    assert result["status"] == "PASS"
+    assert backend.grid_ensure_visible_calls == [
+        {
+            "selector": selector,
+            "row_key": "Cue target eight",
+            "row_index": None,
+            "identity": {"column": "Phrase"},
+            "rows": {"visible_only": True},
+            "columns": ["Phrase"],
+            "max_scrolls": 12,
+            "scroll_settle_ms": 25,
+        }
+    ]
+    assert backend.drag_calls == [(70, 75, 70, 355, 450, [])]
+    assert result["route_evidence"]["target_identity"] == "Cue target eight"
+    assert result["route_evidence"]["target_bounds"] == {
+        "x": 10,
+        "y": 340,
+        "width": 120,
+        "height": 30,
+    }
+    assert result["drop_ensure_visible_result"]["status"] == "PASS"
+
+
+@pytest.mark.asyncio
+async def test_ui_operation_adapters_drag_blocks_when_drop_ensure_visible_fails() -> None:
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.drag_calls: list[tuple[int, int, int, int, int, list[str]]] = []
+            self.grid_ensure_visible_calls: list[dict[str, Any]] = []
+
+        async def grid_snapshot(
+            self,
+            selector: dict[str, Any],
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "row_count": 24,
+                "visible_rows": [
+                    {
+                        "index": 1,
+                        "bounds": {"x": 10, "y": 60, "width": 120, "height": 30},
+                        "cells": {"Phrase": "Cue source"},
+                    }
+                ],
+            }
+
+        async def grid_ensure_visible(
+            self,
+            selector: dict[str, Any],
+            *,
+            row_key: str | None = None,
+            row_index: int | None = None,
+            identity: dict[str, Any] | None = None,
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+            max_scrolls: int | None = None,
+            scroll_settle_ms: int | None = None,
+        ) -> dict[str, Any]:
+            self.grid_ensure_visible_calls.append(
+                {
+                    "selector": dict(selector),
+                    "row_key": row_key,
+                    "row_index": row_index,
+                    "identity": dict(identity or {}),
+                    "rows": dict(rows or {}),
+                    "columns": list(columns or []),
+                }
+            )
+            return {
+                "status": "UNSUPPORTED",
+                "reason": "grid backend cannot realize target row",
+            }
+
+        async def drag(
+            self,
+            from_x: int,
+            from_y: int,
+            to_x: int,
+            to_y: int,
+            speed_ms: int = 200,
+            hold_modifiers: list[str] | None = None,
+        ) -> dict[str, Any]:
+            modifiers = list(hold_modifiers or [])
+            self.drag_calls.append((from_x, from_y, to_x, to_y, speed_ms, modifiers))
+            return {"status": "PASS"}
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    selector = {"automation_id": "CueDataGrid"}
+    result = await ui_operation_adapters(backend_provider)["ui.drag"](
+        source={"kind": "row_index", "selector": selector, "row_index": 1},
+        path=[
+            {"relative_to": "source", "x": 0.5, "y": 0.5},
+            {"relative_to": "drop", "x": 0.5, "y": 0.5},
+        ],
+        drop={
+            "selector": selector,
+                "row_identity": "Cue target eight",
+            "ensure_visible": True,
+        },
+        identity={"column": "Phrase"},
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "grid backend cannot realize target row"
+    assert result["action_skipped"] is True
+    assert result["drop_ensure_visible_result"] == {
+        "status": "UNSUPPORTED",
+        "reason": "grid backend cannot realize target row",
+        "requested": {"row_index": None, "row_key": "Cue target eight"},
+    }
+    assert backend.grid_ensure_visible_calls == [
+        {
+            "selector": selector,
+            "row_key": "Cue target eight",
+            "row_index": None,
+            "identity": {"column": "Phrase"},
+            "rows": {"visible_only": True},
+            "columns": ["Phrase"],
+        }
+    ]
+    assert backend.drag_calls == []
+
+
+@pytest.mark.asyncio
 async def test_ui_operation_adapters_drag_preserves_row_identity_source_offset() -> None:
     class FakeBackend:
         def __init__(self) -> None:
