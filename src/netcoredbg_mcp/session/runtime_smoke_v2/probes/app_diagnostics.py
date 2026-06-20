@@ -495,11 +495,6 @@ async def _read_wait_json(
                     metadata["observed"] = True
                     metadata.pop("reason", None)
                     metadata.pop("error", None)
-                    await _maybe_report_diagnostic_progress(
-                        progress_reporter,
-                        metadata,
-                        previous_fingerprint=last_progress_fingerprint,
-                    )
                     return payload, metadata
                 metadata["reason"] = "diagnostic JSON must be an object"
         last_progress_fingerprint = await _maybe_report_diagnostic_progress(
@@ -536,18 +531,21 @@ async def _maybe_report_diagnostic_progress(
         return previous_fingerprint
     if not _metadata_has_progress_signal(metadata):
         return previous_fingerprint
-    progress_payload = compact_value(metadata)
-    fingerprint = json.dumps(
-        _diagnostic_progress_fingerprint_payload(progress_payload),
-        sort_keys=True,
-        ensure_ascii=False,
-    )
-    if fingerprint == previous_fingerprint:
+    try:
+        progress_payload = compact_value(metadata)
+        fingerprint = json.dumps(
+            _diagnostic_progress_fingerprint_payload(progress_payload),
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        if fingerprint == previous_fingerprint:
+            return previous_fingerprint
+        result = progress_reporter(dict(progress_payload))
+        if inspect.isawaitable(result):
+            await result
+        return fingerprint
+    except Exception:
         return previous_fingerprint
-    result = progress_reporter(dict(progress_payload))
-    if inspect.isawaitable(result):
-        await result
-    return fingerprint
 
 
 def _metadata_has_progress_signal(metadata: dict[str, Any]) -> bool:
@@ -570,8 +568,8 @@ async def _publish_app_diagnostics_progress(
     field: str,
     metadata: dict[str, Any],
 ) -> None:
-    action_context = getattr(context, "action_context", None)
-    if action_context is None:
+    action_context = getattr(context, "action_context", context)
+    if not hasattr(action_context, "publish_app_diagnostics_progress"):
         return
     app = dict(probe.get("app") or {})
     entry = compact_value(
