@@ -320,6 +320,7 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "CR-090",
             "CR-092",
             "CR-093",
+            "CR-094",
             "invalid-probe authoring diagnostics",
             "runtime_smoke_validate_probe(agent_mode=True)",
             "novascript-action-oracle",
@@ -328,6 +329,8 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "required-field",
             "runner-exception diagnostics",
             "debug.stop",
+            "already-covered authoring/template slices",
+            "split/comment closure territory",
             "oracle-pack",
             "remaining lifecycle/orchestration closure",
         ],
@@ -557,12 +560,15 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "CR-090",
             "CR-092",
             "CR-093",
+            "CR-094",
             "invalid-probe authoring diagnostics",
             "runtime_smoke_validate_probe(agent_mode=True)",
             "novascript-action-oracle",
             "app_diagnostics",
             "accepted probe kinds",
             "required-field",
+            "already-covered authoring/template slices",
+            "split/comment closure territory",
             "runner-exception diagnostics",
             "broad orchestration",
         ],
@@ -1863,6 +1869,45 @@ def test_issue_271_records_cr091_split_remaining_scope_without_broad_closure() -
         assert "cleanup contamination contract" not in tail
         assert "runner-exception cleanup proof" not in tail
         assert "freshness/PDB-process proof" not in tail
+
+
+def test_issue_268_records_cr094_remaining_scope_split_after_cr093_without_broad_closure() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#268")
+    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#268")
+    _issue, _state, _evidence, remaining = _issue_cells(backlog, "#268")
+    _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
+        cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
+    )
+
+    for text in (row, lifecycle_row):
+        assert "CR-094" in text
+        assert "already-covered authoring/template slices" in text
+        assert "broad orchestration" in text
+        assert "broader" in text
+
+    for clause in (
+        _clause_containing(row, "CR-094"),
+        _clause_containing(lifecycle_row, "CR-094"),
+    ):
+        assert "#269" not in clause
+        assert "#270" not in clause
+        assert "#271" not in clause
+        assert "#272" not in clause
+        assert "DataGrid" not in clause
+        assert "tracepoint" not in clause
+
+    assert "broader FR remains open" in row
+    assert "keep open" in lifecycle_row
+    for tail in (remaining, lifecycle_remaining):
+        assert "split/comment closure territory" in tail
+        assert "before closing the full FR" in tail or "before closing" in tail
+        assert "oracle-pack orchestration" in tail
+        assert "broader generic probe UX" in tail
+        assert "already-covered authoring/template slices" in tail
+        assert "runtime_smoke_validate_probe" not in tail
+        assert "runtime_smoke_run_plan" not in tail
+        assert "generated app-diagnostics template support" not in tail
 
 
 def test_cr022_broad_issues_require_split_or_comment_evidence_before_closure() -> None:
