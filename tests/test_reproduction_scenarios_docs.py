@@ -210,7 +210,7 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
     row_269 = _issue_row(backlog, "#269")
     assert (
         "Target metrics/profile-defaults/probe-validation/source-aware run-probe "
-        "guidance slices covered"
+        "guidance and split/comment remaining-scope evidence slices covered"
         in row_269
     )
     assert "broader FR remains open" in row_269
@@ -367,7 +367,9 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "event_limit=20",
             "NO DATA",
             "agent_mode",
-            "broad lifecycle/orchestration closure",
+            "CR-088",
+            "split/comment closure evidence",
+            "agent-mode/generic-probe lifecycle/orchestration tail",
         ],
         "#270": [
             "CR-017",
@@ -476,8 +478,13 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
     _, _status, _evidence, remaining_269 = _issue_cells(backlog, "#269")
     assert "profile defaults" not in remaining_269
     assert "full `agent_mode=true` profile defaults" not in remaining_269
-    assert "generic probe UX" in remaining_269
-    assert "multi-source event deltas" in remaining_269
+    assert "agent-mode/generic-probe lifecycle/orchestration tail" in remaining_269
+    assert "split/comment closure territory" in remaining_269
+    assert "invalid-probe repair guidance" not in remaining_269
+    assert "invalid-run-probe repair guidance" not in remaining_269
+    assert "event-delta cursor repair guidance" not in remaining_269
+    assert "source-aware mark-cursor guidance" not in remaining_269
+    assert "remaining multi-source event deltas" not in remaining_269
 
 
 def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> None:
@@ -559,7 +566,10 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "mixed-source `runtime_smoke_get_event_delta` guidance",
             "source-level unavailable `app_diagnostics` evidence",
             "exception verdict",
-            "broad lifecycle/orchestration",
+            "CR-088",
+            "split/comment closure evidence",
+            "already-covered CR-059/060/061/062/063/069/087",
+            "agent-mode/generic-probe lifecycle/orchestration",
         ],
         "#270": [
             "commented",
@@ -802,8 +812,13 @@ def test_issue_269_records_cr073_app_diagnostics_event_delta_slice() -> None:
         assert "retained-final-result" in text or "retained final result" in text
         assert "live diagnostics history" in text or "live diagnostics streaming" in text
 
-    assert "retained-final-result app diagnostics" in remaining
-    assert "retained-final-result app diagnostics" in lifecycle_remaining
+    assert "retained-final-result app diagnostics" not in remaining
+    assert "retained-final-result app diagnostics" not in lifecycle_remaining
+    assert "agent-mode/generic-probe lifecycle/orchestration tail" in remaining
+    assert (
+        "agent-mode/generic-probe lifecycle/orchestration tail"
+        in lifecycle_remaining
+    )
 
 
 def test_issue_272_records_cr073_app_diagnostics_event_delta_slice() -> None:
@@ -904,8 +919,9 @@ def test_issue_269_272_record_cr080_active_wait_evidence_delta_guidance_slice() 
     )
 
     assert "active app-diagnostics wait/evidence source-cursor guidance" not in remaining_269
-    assert "remaining multi-source event deltas" in remaining_269
-    assert "broad lifecycle/orchestration closure" in remaining_269
+    assert "remaining multi-source event deltas" not in remaining_269
+    assert "agent-mode/generic-probe lifecycle/orchestration tail" in remaining_269
+    assert "split/comment closure territory" in remaining_269
     assert "active app-diagnostics wait/evidence source-cursor guidance" not in remaining_272
     assert "broader app diagnostics lifecycle/orchestration" in remaining_272
     assert "broader app diagnostics lifecycle/orchestration" in lifecycle_remaining_272
@@ -934,9 +950,11 @@ def test_issue_269_records_cr082_quiet_active_delta_wait_guidance_without_broad_
         "quiet active app-diagnostics delta wait-continuation guidance"
         not in lifecycle_remaining
     )
-    assert "remaining multi-source event deltas" in remaining
-    assert "broad lifecycle/orchestration" in remaining
-    assert "broad lifecycle/orchestration" in lifecycle_remaining
+    assert "remaining multi-source event deltas" not in remaining
+    assert "agent-mode/generic-probe lifecycle/orchestration tail" in remaining
+    assert "split/comment closure territory" in remaining
+    assert "agent-mode/generic-probe lifecycle/orchestration tail" in lifecycle_remaining
+    assert "split/comment closure territory" in lifecycle_remaining
 
 
 def test_issue_269_records_cr083_run_probe_follow_up_without_broad_closure() -> None:
@@ -964,10 +982,10 @@ def test_issue_269_records_cr083_run_probe_follow_up_without_broad_closure() -> 
     assert "keep open" in lifecycle_row
     assert "source-aware run-probe first-follow-up guidance" not in remaining
     assert "source-aware run-probe first-follow-up guidance" not in lifecycle_remaining
-    assert "generic probe UX" in remaining
-    assert "generic probe UX" in lifecycle_remaining
-    assert "broad lifecycle/orchestration" in remaining
-    assert "broad lifecycle/orchestration" in lifecycle_remaining
+    assert "generic probe UX" not in remaining
+    assert "generic probe UX" not in lifecycle_remaining
+    assert "agent-mode/generic-probe lifecycle/orchestration tail" in remaining
+    assert "agent-mode/generic-probe lifecycle/orchestration tail" in lifecycle_remaining
 
 
 def test_issue_269_records_cr087_mixed_source_event_delta_guidance_without_broad_closure() -> None:
@@ -1009,13 +1027,59 @@ def test_issue_269_records_cr087_mixed_source_event_delta_guidance_without_broad
         "mixed-source `runtime_smoke_get_event_delta` guidance"
         not in lifecycle_remaining
     )
-    assert "remaining multi-source event deltas outside the covered" in remaining
+    assert "remaining multi-source event deltas outside the covered" not in remaining
     assert (
         "remaining multi-source event deltas outside the covered"
-        in lifecycle_remaining
+        not in lifecycle_remaining
     )
-    assert "broad lifecycle/orchestration" in remaining
-    assert "broad lifecycle/orchestration" in lifecycle_remaining
+    assert "mixed-source `runtime_smoke_get_event_delta` guidance" not in remaining
+    assert (
+        "mixed-source `runtime_smoke_get_event_delta` guidance"
+        not in lifecycle_remaining
+    )
+    assert "agent-mode/generic-probe lifecycle/orchestration tail" in remaining
+    assert "agent-mode/generic-probe lifecycle/orchestration tail" in lifecycle_remaining
+
+
+def test_issue_269_records_cr088_split_remaining_agent_mode_scope_without_broad_closure() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#269")
+    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#269")
+    _issue, _state, _evidence, remaining = _issue_cells(backlog, "#269")
+    _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
+        cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
+    )
+
+    for text in (row, lifecycle_row):
+        assert "CR-088" in text
+        assert "split/comment closure evidence" in text
+        assert "already-covered CR-059/060/061/062/063/069/087" in text
+        assert "agent-mode/generic-probe" in text
+        assert "open runtime work" in text
+
+    for clause in (
+        _clause_containing(row, "CR-088"),
+        _clause_containing(lifecycle_row, "CR-088"),
+    ):
+        assert "#270" not in clause
+        assert "#272" not in clause
+        assert "DataGrid" not in clause
+        assert "app-diagnostics lifecycle" not in clause
+        assert "runtime_smoke_mark_event_cursor(agent_mode=True)" not in clause
+        assert "runtime_smoke_run_probe(agent_mode=True)" not in clause
+
+    assert "broader FR remains open" in row
+    assert "keep open" in lifecycle_row
+    for tail in (remaining, lifecycle_remaining):
+        assert "agent-mode/generic-probe lifecycle/orchestration tail" in tail
+        assert "split/comment closure territory" in tail
+        assert "before closing the full FR" in tail
+        assert "invalid-probe repair guidance" not in tail
+        assert "invalid-run-probe repair guidance" not in tail
+        assert "event-delta cursor repair guidance" not in tail
+        assert "agent-mode source-aware mark-cursor guidance" not in tail
+        assert "remaining multi-source event deltas" not in tail
+        assert "mixed-source `runtime_smoke_get_event_delta` guidance" not in tail
 
 
 def test_issue_272_records_cr084_mark_cursor_entrypoint_without_broad_closure() -> None:
@@ -1411,9 +1475,21 @@ def test_issue_268_269_record_validate_probe_slice_without_broad_closure() -> No
         assert "runtime_smoke_validate_probe" in row
         assert "runtime_smoke_validate_probe" in lifecycle_row
         assert "read-only probe validation" in row
-        assert "read-only probe validation" in lifecycle_row
-        assert "generic probe UX" in remaining
-        assert "generic probe UX" in lifecycle_remaining
+        if issue == "#269":
+            assert "read-only `runtime_smoke_validate_probe` probe validation" in (
+                lifecycle_row
+            )
+            assert "generic probe UX" not in remaining
+            assert "generic probe UX" not in lifecycle_remaining
+            assert "agent-mode/generic-probe lifecycle/orchestration tail" in remaining
+            assert (
+                "agent-mode/generic-probe lifecycle/orchestration tail"
+                in lifecycle_remaining
+            )
+        else:
+            assert "read-only probe validation" in lifecycle_row
+            assert "generic probe UX" in remaining
+            assert "generic probe UX" in lifecycle_remaining
 
     row_269 = _issue_row(backlog, "#269")
     lifecycle_row_269 = _section_issue_row(
