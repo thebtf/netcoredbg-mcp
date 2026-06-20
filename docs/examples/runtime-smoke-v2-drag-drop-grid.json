@@ -171,6 +171,111 @@
           }
         }
       ]
+    },
+    {
+      "id": "offscreen-row-target-drop-ensure-visible",
+      "description": "Drag a visible source row onto an offscreen row target by resolving the drop endpoint through DataGrid row identity before the backend releases the pointer.",
+      "notes": [
+        "This is a customer-mode replay proof contract for CR-075 and broad #270 remains open beyond this bounded slice.",
+        "The source row must be visible at the start of the gesture; the offscreen target is expressed as a row-based drop endpoint with drop.ensure_visible=true.",
+        "Classify the run as BLOCKED, not PASS, if the backend cannot provide bounded drop ensure-visible evidence, route_evidence, and before/after ui.grid.viewport identity snapshots."
+      ],
+      "transitions": [
+        {
+          "action": {
+            "kind": "ui.drag",
+            "ensure_visible": true,
+            "source": {
+              "selector": {
+                "automation_id": "DataGridUnderTest",
+                "control_type": "DataGrid"
+              },
+              "row_identity": "ROW-010"
+            },
+            "identity": {
+              "column": "StableRowId"
+            },
+            "rows": {
+              "visible_only": true,
+              "max": 20
+            },
+            "columns": [
+              "StableRowId"
+            ],
+            "path": [
+              {
+                "relative_to": "source",
+                "x": 0.5,
+                "y": 0.5
+              },
+              {
+                "relative_to": "viewport",
+                "x": 0.5,
+                "y": 0.9,
+                "hold_ms": 750
+              },
+              {
+                "relative_to": "drop",
+                "x": 0.5,
+                "y": 0.5
+              }
+            ],
+            "drop": {
+              "selector": {
+                "automation_id": "DataGridUnderTest",
+                "control_type": "DataGrid"
+              },
+              "row_identity": "ROW-060",
+              "identity": {
+                "column": "StableRowId"
+              },
+              "rows": {
+                "visible_only": true,
+                "max": 20
+              },
+              "columns": [
+                "StableRowId"
+              ],
+              "ensure_visible": true,
+              "max_scrolls": 24,
+              "scroll_settle_ms": 25,
+              "position": "center"
+            },
+            "duration_ms": 1800,
+            "step_count": 10,
+            "expect": {
+              "selected_payload_preserved": true
+            }
+          },
+          "probes": [
+            {
+              "kind": "ui.grid.viewport",
+              "name": "offscreen_drop_viewport",
+              "phase": "both",
+              "selector": {
+                "automation_id": "DataGridUnderTest",
+                "control_type": "DataGrid"
+              },
+              "identity": {
+                "column": "StableRowId"
+              },
+              "rows": {
+                "visible_only": true,
+                "max": 20
+              },
+              "expect": {
+                "viewport_moved": true,
+                "direction": "down",
+                "row_count_preserved": true,
+                "selected_payload_preserved": true
+              }
+            }
+          ],
+          "settle": {
+            "idle_ms": 250
+          }
+        }
+      ]
     }
   ]
 }

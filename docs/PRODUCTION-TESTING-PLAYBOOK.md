@@ -149,7 +149,13 @@ Customer-mode setup:
 3. Run the v2 plan through `run_runtime_smoke` on a Windows GUI workstation with
    a backend that can produce real pointer route evidence and
    `ui.grid.viewport` identity evidence.
-4. Run the release-critical guard:
+4. Include the offscreen row-target drag/drop case from the example: the target
+   row is offscreen, the drop endpoint is expressed as a row-based target with
+   `drop.ensure_visible=true`, and the run must either prove the gesture or
+   fail closed before side effects if target-side realization hides the drag
+   source. This is a bounded CR-075 customer-mode proof contract for broad
+   `#270`; it does not close the broad helper family by itself.
+5. Run the release-critical guard:
 
 ```powershell
 python -m pytest tests/test_runtime_smoke_v2_docs.py
@@ -161,14 +167,18 @@ Expected result:
 - `PRODUCT_WORKS`: the configured WPF stand returns `PASS`, the result includes
   backend-produced `ui.drag` `route_evidence`, before/after `ui.grid.viewport`
   snapshots, selected payload identity continuity, row count preservation, and
-  negative no-op cleanup evidence.
+  negative no-op cleanup evidence. The offscreen row-target case also includes
+  bounded drop ensure-visible evidence for the row-based `drop.ensure_visible=true`
+  endpoint.
 - `PARTIALLY_WORKS`: the JSON example parses and the critical guard passes, but
   the live stand is absent or returns an honest `BLOCKED` result that names the
-  missing pointer, route, viewport, selected-payload, no-op, or cleanup
-  capability with a concrete `next_step`.
+  missing pointer, route, viewport, selected-payload, drop ensure-visible,
+  no-op, or cleanup capability with a concrete `next_step`.
 - `BROKEN`: the plan returns `FAIL` or `INVALID_SETUP`; a drag result reports
   `PASS` without backend-produced route evidence; viewport or row identity
-  evidence is missing without `BLOCKED`; or docs/tests use another fixture as a
+  evidence is missing without `BLOCKED`; the offscreen row-target case is
+  represented as raw viewport guessing instead of a row-based
+  `drop.ensure_visible=true` endpoint; or docs/tests use another fixture as a
   substitute for WPF DataGrid acceptance.
 
 WinForms `dragList` primitive smoke is not a substitute for WPF DataGrid CR-001
@@ -221,6 +231,8 @@ python -m pytest tests/test_runtime_smoke_diagnostics_schema.py
   evidence from the fixture.
 - WPF DataGrid drag/drop is marked passing without `ui.drag` route evidence,
   before/after `ui.grid.viewport` evidence, or selected row identity checks.
+- The offscreen row-target drag/drop proof is omitted, or uses raw viewport
+  coordinates instead of a row-based drop endpoint with `drop.ensure_visible=true`.
 - WinForms `dragList` primitive smoke is used as a substitute for WPF DataGrid
   CR-001 acceptance.
 
@@ -234,7 +246,7 @@ python -m pytest tests/test_runtime_smoke_diagnostics_schema.py
 | Manual smoke surface inventory | WPF, WPF one-call, and Avalonia scenarios listed |  |  |
 | WPF one-call runtime smoke | One `run_runtime_smoke` plan returns PASS or an honest BLOCKED/FAIL with cleanup evidence |  |  |
 | Avalonia fixture compatibility | Fixture found; key cleanup succeeds; UIA gaps are bounded UNSUPPORTED/BLOCKED evidence |  |  |
-| WPF DataGrid drag/drop customer-mode gate | `docs/examples/runtime-smoke-v2-drag-drop-grid.json` returns PASS or an honest BLOCKED with route and viewport evidence requirements named |  |  |
+| WPF DataGrid drag/drop customer-mode gate | `docs/examples/runtime-smoke-v2-drag-drop-grid.json` returns PASS or an honest BLOCKED with route, viewport, selected-payload, negative no-op, and offscreen row-target `drop.ensure_visible=true` evidence requirements named |  |  |
 
 Overall verdict: `PRODUCT_WORKS` / `PARTIALLY_WORKS` / `BROKEN`
 

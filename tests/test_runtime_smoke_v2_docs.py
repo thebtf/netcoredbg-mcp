@@ -71,6 +71,36 @@ class DocsExampleSmokeSession:
                         "pointer_cleanup": {"left_button_released": True},
                     },
                 },
+                {
+                    "status": "PASS",
+                    "backend": "fake-flaui",
+                    "drop_ensure_visible_result": {
+                        "status": "PASS",
+                        "already_visible": False,
+                        "resolved_row": {
+                            "identity": "ROW-060",
+                            "index": 60,
+                        },
+                    },
+                    "route_evidence": {
+                        "move_points": [
+                            {"relative_to": "source", "x": 0.5, "y": 0.5},
+                            {"relative_to": "viewport", "x": 0.5, "y": 0.9},
+                        ],
+                        "hold_points": [
+                            {"relative_to": "viewport", "x": 0.5, "y": 0.9, "hold_ms": 750},
+                        ],
+                        "final_pointer": {
+                            "relative_to": "row",
+                            "row_identity": "ROW-060",
+                            "position": "center",
+                        },
+                    },
+                    "selected_payload": {
+                        "before": ["ROW-010"],
+                        "after": ["ROW-010"],
+                    },
+                },
             ]
         )
         self.viewport_results: deque[dict[str, Any]] = deque(
@@ -107,6 +137,24 @@ class DocsExampleSmokeSession:
                         first=14,
                         last=23,
                         visible=["ROW-014", "ROW-015", "ROW-016", "ROW-017", "ROW-018"],
+                    ),
+                },
+                {
+                    "status": "PASS",
+                    "snapshot": _viewport_snapshot(
+                        first=8,
+                        last=17,
+                        visible=["ROW-008", "ROW-009", "ROW-010", "ROW-011", "ROW-012"],
+                        selected=["ROW-010"],
+                    ),
+                },
+                {
+                    "status": "PASS",
+                    "snapshot": _viewport_snapshot(
+                        first=56,
+                        last=65,
+                        visible=["ROW-056", "ROW-057", "ROW-058", "ROW-059", "ROW-060"],
+                        selected=["ROW-010"],
                     ),
                 },
             ]
@@ -263,6 +311,25 @@ def assert_drag_drop_docs_contract(plan: dict[str, Any]) -> None:
         for waypoint in action.get("path", [])
         if isinstance(waypoint, dict)
     )
+    offscreen_drop_actions = [
+        action
+        for action in drag_actions
+        if action.get("drop", {}).get("ensure_visible") is True
+    ]
+    assert offscreen_drop_actions
+    for action in offscreen_drop_actions:
+        assert action.get("ensure_visible") is True
+        drop = action["drop"]
+        assert drop.get("selector") == action["source"]["selector"]
+        assert drop.get("row_identity")
+        assert drop.get("identity", {}).get("column") == action.get("identity", {}).get("column")
+        assert drop.get("rows", {}).get("visible_only") is True
+        assert drop.get("rows", {}).get("max") == action.get("rows", {}).get("max")
+        assert drop.get("columns") == action.get("columns")
+        assert isinstance(drop.get("max_scrolls"), int)
+        assert drop["max_scrolls"] > first_row_drag["max_scrolls"]
+        assert isinstance(drop.get("scroll_settle_ms"), int)
+        assert drop["scroll_settle_ms"] > 0
 
     viewport_probes = [probe for probe in _probes(plan) if probe.get("kind") == "ui.grid.viewport"]
     assert viewport_probes
@@ -289,6 +356,8 @@ def assert_drag_drop_docs_contract(plan: dict[str, Any]) -> None:
     assert "row-based drop endpoint" in notes
     assert "drop.ensure_visible=true" in notes
     assert "raw viewport guessing" in notes
+    assert "CR-075" in notes
+    assert "broad #270 remains open" in notes
 
 
 def test_drag_drop_grid_example_declares_documented_protocol_contract() -> None:
@@ -406,6 +475,19 @@ def test_drag_drop_grid_example_rejects_missing_offscreen_drop_note() -> None:
         assert_drag_drop_docs_contract(plan)
 
 
+def test_drag_drop_grid_example_rejects_missing_offscreen_row_target_drop_contract() -> None:
+    plan = copy.deepcopy(_load_example())
+    for action in _actions(plan):
+        drop = action.get("drop")
+        if isinstance(drop, dict):
+            drop.pop("ensure_visible", None)
+            drop.pop("row_identity", None)
+            drop.pop("selector", None)
+
+    with pytest.raises(AssertionError):
+        assert_drag_drop_docs_contract(plan)
+
+
 @pytest.mark.asyncio
 async def test_drag_drop_grid_example_runs_through_v2_parser_with_fake_ui_evidence() -> None:
     session = DocsExampleSmokeSession()
@@ -423,10 +505,10 @@ async def test_drag_drop_grid_example_runs_through_v2_parser_with_fake_ui_eviden
     assert "ui.grid.ensure_visible" in result["accepted_action_kinds"]
     assert "ui.drag" in result["accepted_action_kinds"]
     assert "ui.grid.viewport" in result["accepted_probe_kinds"]
-    assert result["action_count"] == 2
-    assert len(session.ensure_visible_requests) == 1
-    assert len(session.drag_requests) == 2
-    assert len(session.viewport_requests) == 4
+    assert result["action_count"] == 3
+    assert len(session.ensure_visible_requests) == 2
+    assert len(session.drag_requests) == 3
+    assert len(session.viewport_requests) == 6
     assert session.operation_order.index("ui.grid.ensure_visible") < session.operation_order.index(
         "ui.drag"
     )
@@ -438,8 +520,38 @@ async def test_drag_drop_grid_example_runs_through_v2_parser_with_fake_ui_eviden
     assert session.ensure_visible_requests[0]["identity"] == {"column": "StableRowId"}
     assert session.ensure_visible_requests[0]["rows"] == {"visible_only": True, "max": 20}
     assert session.ensure_visible_requests[0]["columns"] == ["StableRowId"]
+    assert session.ensure_visible_requests[1]["row"] == {"identity": "ROW-010"}
+    assert session.ensure_visible_requests[1]["identity"] == {"column": "StableRowId"}
+    assert session.ensure_visible_requests[1]["rows"] == {"visible_only": True, "max": 20}
+    assert session.ensure_visible_requests[1]["columns"] == ["StableRowId"]
     assert session.drag_requests[0]["source"]["row_identity"] == "ROW-010"
     assert session.drag_requests[0]["path"] != session.drag_requests[1]["path"]
+    offscreen_drop = session.drag_requests[2]["drop"]
+    assert offscreen_drop == {
+        "selector": {
+            "automation_id": "DataGridUnderTest",
+            "control_type": "DataGrid",
+        },
+        "row_identity": "ROW-060",
+        "identity": {"column": "StableRowId"},
+        "rows": {"visible_only": True, "max": 20},
+        "columns": ["StableRowId"],
+        "ensure_visible": True,
+        "max_scrolls": 24,
+        "scroll_settle_ms": 25,
+        "position": "center",
+    }
+    offscreen_action_result = result["cases"][2]["transitions"][0]["actions"][0]
+    assert offscreen_action_result["drop_ensure_visible_result"]["status"] == "PASS"
+    assert offscreen_action_result["drop_ensure_visible_result"]["resolved_row"] == {
+        "identity": "ROW-060",
+        "index": 60,
+    }
+    assert offscreen_action_result["route_evidence"]["final_pointer"] == {
+        "relative_to": "row",
+        "row_identity": "ROW-060",
+        "position": "center",
+    }
 
 
 def test_readme_and_playbook_document_customer_mode_drag_drop_gate() -> None:
@@ -459,6 +571,12 @@ def test_readme_and_playbook_document_customer_mode_drag_drop_gate() -> None:
     assert "PARTIALLY_WORKS" in playbook
     assert "BROKEN" in playbook
     assert "BLOCK_RELEASE" in playbook
+    assert "offscreen row-target" in playbook
+    assert "drop.ensure_visible=true" in playbook
+    assert "row-based" in playbook
+    assert "bounded CR-075 customer-mode proof contract" in playbook
+    assert "#270" in playbook
+    assert "fail closed before side effects if target-side realization hides the drag" in playbook
 
 
 def test_readme_and_playbook_document_diagnostic_schema_gate() -> None:

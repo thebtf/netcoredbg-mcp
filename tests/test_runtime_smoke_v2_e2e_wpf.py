@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner, RuntimeSmokeSession
+from tests import smoke_test_manual
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "WpfSmokeApp"
 
@@ -114,3 +115,40 @@ async def test_v2_wpf_state_oracle_runs_five_ab_cases_with_diffs() -> None:
     assert any(
         any(path.startswith("ui.property.") for path in case["before"]) for case in result["cases"]
     )
+
+
+def test_manual_smoke_exposes_offscreen_row_target_drag_entrypoint() -> None:
+    assert hasattr(smoke_test_manual, "test_wpf_v2_offscreen_row_target_drag_runtime_smoke")
+
+
+def test_offscreen_row_target_drag_plan_uses_source_and_drop_ensure_visible() -> None:
+    plan = smoke_test_manual._v2_offscreen_row_target_drag_plan(
+        program="WpfSmokeApp.dll",
+        build_project="tests/fixtures/WpfSmokeApp/WpfSmokeApp.csproj",
+    )
+
+    transition = plan["cases"][0]["transitions"][0]
+    action = transition["action"]
+
+    assert action["kind"] == "ui.drag"
+    assert action["ensure_visible"] is True
+    assert action["drop"]["ensure_visible"] is True
+    assert action["source"]["row_identity"] == "Fixture cue two"
+    assert action["drop"]["row_identity"] == "Fixture cue nineteen"
+    assert action["drop"]["identity"] == {"column": "Phrase"}
+    assert action["drop"]["rows"] == {"visible_only": True, "max": 8}
+    assert action["drop"]["columns"] == ["Phrase"]
+    assert action["expect"]["row_count_preserved"] is True
+    assert action["expect"]["identity_set_preserved"] is True
+    assert any(
+        probe["kind"] == "ui.grid.viewport" and probe["name"] == "offscreen_target_viewport"
+        for probe in transition["probes"]
+    )
+
+
+def test_manual_smoke_lists_offscreen_row_target_drag_scenario() -> None:
+    if not smoke_test_manual.WPF_GUI_ENABLED:
+        pytest.skip("WPF fixture build required for WPF manual-smoke scenario inventory")
+
+    scenario_names = {name for name, _fn in smoke_test_manual.get_scenarios()}
+    assert "WPF V2 Offscreen Row-Target Drag Runtime Smoke" in scenario_names
