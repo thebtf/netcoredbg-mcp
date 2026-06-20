@@ -30,6 +30,7 @@ from ..session.runtime_smoke_schema import (
 )
 from ..session.runtime_smoke_v2.result_envelope import compact_value
 from ..session.state import DebugState
+from ..session.tracepoints import TracepointManager
 
 _NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _RUNTIME_SMOKE_AGENT_DEFAULT_TIMEOUT_MS = 5000
@@ -602,6 +603,7 @@ def register_runtime_smoke_tools(
         run_id: str,
         agent_mode: bool = False,
         include_debug_output: bool = False,
+        include_trace_source: bool = False,
     ) -> dict:
         """Return a compact cursor token for the current durable run event position."""
         try:
@@ -613,6 +615,8 @@ def register_runtime_smoke_tools(
                 run_id,
                 session_state=session.state,
                 include_debug_output=include_debug_output,
+                tracepoint_manager=getattr(session, "_tracepoint_manager", None),
+                include_trace_source=include_trace_source,
             )
             if agent_mode:
                 _apply_runtime_smoke_agent_mode(data, "runtime_smoke_get_event_delta")
@@ -641,6 +645,7 @@ def register_runtime_smoke_tools(
                 cursor,
                 event_limit=event_limit,
                 session_state=session.state,
+                tracepoint_manager=getattr(session, "_tracepoint_manager", None),
             )
             if agent_mode:
                 _apply_runtime_smoke_agent_mode(data, "runtime_smoke_get_event_delta")
@@ -1343,6 +1348,8 @@ async def _runtime_smoke_mark_event_cursor(
     *,
     session_state: Any | None = None,
     include_debug_output: bool = False,
+    tracepoint_manager: TracepointManager | None = None,
+    include_trace_source: bool = False,
 ) -> dict[str, Any]:
     tail = await registry.tail_events(run_id, after_cursor=0, limit=0)
     if _runtime_smoke_tail_missing(tail):
@@ -1356,6 +1363,8 @@ async def _runtime_smoke_mark_event_cursor(
     )
     if include_debug_output:
         _runtime_smoke_attach_debug_output_cursor(cursor, session_state)
+    if include_trace_source:
+        _runtime_smoke_attach_trace_source_cursor(cursor, tracepoint_manager)
     return {
         "status": "PASS",
         "reason": "runtime smoke event cursor marked",
@@ -1376,6 +1385,7 @@ async def _runtime_smoke_get_event_delta(
     *,
     event_limit: int = 50,
     session_state: Any | None = None,
+    tracepoint_manager: TracepointManager | None = None,
 ) -> dict[str, Any]:
     if not isinstance(cursor, dict):
         return _runtime_smoke_invalid_event_delta(
@@ -1387,6 +1397,14 @@ async def _runtime_smoke_get_event_delta(
     if parsed_debug_output_cursor is False:
         return _runtime_smoke_invalid_event_delta(
             "cursor token debug_output cursor is invalid",
+            after_cursor=0,
+            limit=event_limit,
+            run_id=str(cursor.get("run_id") or ""),
+        )
+    parsed_trace_source_cursor = _runtime_smoke_parse_trace_source_cursor(cursor)
+    if parsed_trace_source_cursor is False:
+        return _runtime_smoke_invalid_event_delta(
+            "cursor token trace_source cursor is invalid",
             after_cursor=0,
             limit=event_limit,
             run_id=str(cursor.get("run_id") or ""),
@@ -1437,6 +1455,7 @@ async def _runtime_smoke_get_event_delta(
         tail=tail,
     )
     source_deltas: dict[str, Any] = {}
+    source_cursors = dict(next_cursor.get("sources") or {})
     if parsed_debug_output_cursor is not None:
         debug_output_delta, debug_output_cursor = _runtime_smoke_debug_output_delta(
             session_state,
@@ -1445,7 +1464,17 @@ async def _runtime_smoke_get_event_delta(
             limit=limit,
         )
         source_deltas["debug_output"] = debug_output_delta
-        next_cursor["sources"] = {"debug_output": debug_output_cursor}
+        source_cursors["debug_output"] = debug_output_cursor
+    if parsed_trace_source_cursor is not None:
+        trace_source_delta, trace_source_cursor = _runtime_smoke_trace_source_delta(
+            tracepoint_manager,
+            parsed_trace_source_cursor,
+            limit=limit,
+        )
+        source_deltas["trace_source"] = trace_source_delta
+        source_cursors["trace_source"] = trace_source_cursor
+    if source_cursors:
+        next_cursor["sources"] = source_cursors
     return {
         "status": "PASS",
         "reason": "runtime smoke event delta read",
@@ -1608,6 +1637,18 @@ def _runtime_smoke_attach_debug_output_cursor(
     cursor["sources"] = sources
 
 
+def _runtime_smoke_attach_trace_source_cursor(
+    cursor: dict[str, Any],
+    tracepoint_manager: TracepointManager | None,
+) -> None:
+    trace_source_cursor = _runtime_smoke_current_trace_source_cursor(tracepoint_manager)
+    if trace_source_cursor is None:
+        return
+    sources = dict(cursor.get("sources") or {})
+    sources["trace_source"] = trace_source_cursor
+    cursor["sources"] = sources
+
+
 def _runtime_smoke_current_debug_output_cursor(
     session_state: Any | None,
 ) -> dict[str, int] | None:
@@ -1619,6 +1660,13 @@ def _runtime_smoke_current_debug_output_cursor(
             0, int(getattr(session_state, "output_trimmed_before", 0) or 0)
         ),
     }
+
+
+def _runtime_smoke_current_trace_source_cursor(
+    tracepoint_manager: TracepointManager | None,
+) -> dict[str, Any] | None:
+    manager = tracepoint_manager or TracepointManager()
+    return compact_value(manager.mark_trace_cursor())
 
 
 def _runtime_smoke_parse_debug_output_source_cursor(
@@ -1645,6 +1693,87 @@ def _runtime_smoke_parse_debug_output_source_cursor(
     return {
         "after_sequence": after_sequence,
         "trimmed_before": trimmed_before,
+    }
+
+
+def _runtime_smoke_parse_optional_float(value: Any) -> float | None | bool:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return False
+
+
+def _runtime_smoke_parse_trace_source_cursor(
+    cursor: dict[str, Any],
+) -> dict[str, Any] | None | bool:
+    sources = cursor.get("sources")
+    if sources is None:
+        return None
+    if not isinstance(sources, dict):
+        return False
+    trace_source = sources.get("trace_source")
+    if trace_source is None:
+        return None
+    if not isinstance(trace_source, dict):
+        return False
+    after_timestamp = _runtime_smoke_parse_optional_float(
+        trace_source.get("after_timestamp")
+    )
+    raw_global_after_timestamp = (
+        trace_source.get("global_after_timestamp")
+        if "global_after_timestamp" in trace_source
+        else trace_source.get("after_timestamp")
+    )
+    global_after_timestamp = _runtime_smoke_parse_optional_float(
+        raw_global_after_timestamp
+    )
+    buffer_start_timestamp = _runtime_smoke_parse_optional_float(
+        trace_source.get("buffer_start_timestamp")
+    )
+    after_ordinal = _runtime_smoke_parse_nonnegative_int(
+        trace_source.get("after_ordinal")
+    )
+    raw_global_after_ordinal = (
+        trace_source.get("global_after_ordinal")
+        if "global_after_ordinal" in trace_source
+        else trace_source.get("after_ordinal")
+    )
+    global_after_ordinal = _runtime_smoke_parse_nonnegative_int(
+        raw_global_after_ordinal
+    )
+    buffer_size = _runtime_smoke_parse_nonnegative_int(trace_source.get("buffer_size"))
+    append_generation = _runtime_smoke_parse_nonnegative_int(
+        trace_source.get("append_generation")
+    )
+    drop_generation = _runtime_smoke_parse_nonnegative_int(
+        trace_source.get("drop_generation")
+    )
+    if (
+        after_timestamp is False
+        or global_after_timestamp is False
+        or buffer_start_timestamp is False
+        or after_ordinal is None
+        or global_after_ordinal is None
+        or buffer_size is None
+        or append_generation is None
+        or drop_generation is None
+    ):
+        return False
+    tracepoint_id = trace_source.get("tracepoint_id")
+    if tracepoint_id is not None:
+        tracepoint_id = str(tracepoint_id)
+    return {
+        "after_timestamp": after_timestamp,
+        "after_ordinal": after_ordinal,
+        "global_after_timestamp": global_after_timestamp,
+        "global_after_ordinal": global_after_ordinal,
+        "tracepoint_id": tracepoint_id,
+        "buffer_start_timestamp": buffer_start_timestamp,
+        "buffer_size": buffer_size,
+        "append_generation": append_generation,
+        "drop_generation": drop_generation,
     }
 
 
@@ -1724,6 +1853,31 @@ def _runtime_smoke_debug_output_delta(
     )
 
 
+def _runtime_smoke_trace_source_delta(
+    tracepoint_manager: TracepointManager | None,
+    trace_source_cursor: dict[str, Any],
+    *,
+    limit: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    manager = tracepoint_manager or TracepointManager()
+    delta = manager.get_trace_delta(trace_source_cursor, limit=max(0, int(limit)))
+    return (
+        {
+            "entries": [
+                _runtime_smoke_trace_entry_to_dict(entry)
+                for entry in delta.get("entries", [])
+            ],
+            "available": delta.get("available", 0),
+            "limit": delta.get("limit"),
+            "limited": delta.get("limited", False),
+            "stale_cursor": delta.get("stale", False),
+            "dropped_count": delta.get("dropped_count"),
+            "truncated": delta.get("truncated", False),
+        },
+        compact_value(delta.get("next_cursor", {})),
+    )
+
+
 def _runtime_smoke_output_entry_to_dict(entry: Any) -> dict[str, Any]:
     return compact_value(
         {
@@ -1733,6 +1887,20 @@ def _runtime_smoke_output_entry_to_dict(entry: Any) -> dict[str, Any]:
             0, int(getattr(entry, "variables_reference", 0) or 0)
         ),
         "sequence": max(0, int(getattr(entry, "sequence", 0) or 0)),
+        }
+    )
+
+
+def _runtime_smoke_trace_entry_to_dict(entry: Any) -> dict[str, Any]:
+    return compact_value(
+        {
+            "timestamp": float(getattr(entry, "timestamp", 0.0) or 0.0),
+            "file": str(getattr(entry, "file", "")),
+            "line": max(0, int(getattr(entry, "line", 0) or 0)),
+            "expression": str(getattr(entry, "expression", "")),
+            "value": str(getattr(entry, "value", "")),
+            "thread_id": max(0, int(getattr(entry, "thread_id", 0) or 0)),
+            "tracepoint_id": str(getattr(entry, "tracepoint_id", "")),
         }
     )
 
