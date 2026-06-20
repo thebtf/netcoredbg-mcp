@@ -46,6 +46,7 @@ class ActionSmokeSession:
         self.grid_select_identities_results: list[dict[str, Any]] = []
         self.grid_state_results: list[dict[str, Any]] = []
         self.grid_ensure_visible_results: list[dict[str, Any]] = []
+        self.grid_assert_range_results: list[dict[str, Any]] = []
         self.grid_select_row_results: list[dict[str, Any]] = []
         self.grid_click_row_results: list[dict[str, Any]] = []
         self.grid_right_click_row_results: list[dict[str, Any]] = []
@@ -144,6 +145,18 @@ class ActionSmokeSession:
             "resolved_row": {"identity": request.get("row", {}).get("identity")},
         }
 
+    async def grid_assert_range(self, **request: Any) -> dict[str, Any]:
+        self.calls.append(("grid_assert_range", request))
+        if self.grid_assert_range_results:
+            return self.grid_assert_range_results.pop(0)
+        return {
+            "status": "PASS",
+            "asserted_range": {
+                "start_index": request.get("start_index"),
+                "end_index": request.get("end_index"),
+            },
+        }
+
     async def grid_select_row(self, **request: Any) -> dict[str, Any]:
         self.calls.append(("grid_select_row", request))
         if self.grid_select_row_results:
@@ -216,6 +229,7 @@ def _runner(session: ActionSmokeSession) -> RuntimeSmokeRunner:
             "ui.drag": session.drag,
             "ui.grid.get_state": session.grid_get_state,
             "ui.grid.ensure_visible": session.grid_ensure_visible,
+            "ui.grid.assert_range": session.grid_assert_range,
             "ui.grid.select_row": session.grid_select_row,
             "ui.grid.click_row": session.grid_click_row,
             "ui.grid.right_click_row": session.grid_right_click_row,
@@ -2361,6 +2375,43 @@ async def test_v2_ui_grid_ensure_visible_routes_selector_identity_to_adapter() -
         "viewport_moved": True,
         "direction": "down",
     }
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_grid_assert_range_routes_indices_to_adapter() -> None:
+    session = ActionSmokeSession()
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "grid assert range",
+            "cases": [
+                {
+                    "id": "grid_assert_range",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.grid.assert_range",
+                                "selector": {"automation_id": "CueDataGrid"},
+                                "start_index": 2,
+                                "end_index": 5,
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    range_call = next(call for call in session.calls if call[0] == "grid_assert_range")
+    assert result["status"] == "PASS"
+    assert "ui.grid.assert_range" in result["accepted_action_kinds"]
+    assert action["route"] == "grid_assert_range"
+    assert range_call[1]["selector"] == {"automation_id": "CueDataGrid"}
+    assert range_call[1]["start_index"] == 2
+    assert range_call[1]["end_index"] == 5
 
 
 @pytest.mark.asyncio

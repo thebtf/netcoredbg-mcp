@@ -44,6 +44,16 @@ class SchemaSmokeSession:
             "resolved_row": dict(request.get("row") or {}),
         }
 
+    async def grid_assert_range(self, **request: Any) -> dict[str, Any]:
+        self.adapter_calls.append(("ui.grid.assert_range", request))
+        return {
+            "status": "PASS",
+            "asserted_range": {
+                "start_index": request.get("start_index"),
+                "end_index": request.get("end_index"),
+            },
+        }
+
     async def grid_select_row(self, **request: Any) -> dict[str, Any]:
         self.adapter_calls.append(("ui.grid.select_row", request))
         return {"status": "PASS", "selected_row": dict(request.get("row") or {})}
@@ -280,6 +290,41 @@ async def test_legacy_runtime_smoke_grid_ensure_visible_reaches_adapter() -> Non
                 "columns": ["PhraseId"],
                 "max_scrolls": 11,
                 "scroll_settle_ms": 30,
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_legacy_runtime_smoke_grid_assert_range_reaches_adapter() -> None:
+    session = SchemaSmokeSession()
+    plan = {
+        "schema": "netcoredbg.runtime_smoke.v1",
+        "steps": [
+            {
+                "op": "ui.grid.assert_range",
+                "selector": {"automation_id": "CueDataGrid"},
+                "start_index": 2,
+                "end_index": 5,
+            }
+        ],
+    }
+
+    result = await RuntimeSmokeRunner(
+        session,
+        service_adapters={"ui.grid.assert_range": session.grid_assert_range},
+    ).run(plan)
+
+    assert validate_plan(plan) == []
+    assert result["status"] == "PASS"
+    assert "validation_errors" not in result
+    assert session.adapter_calls == [
+        (
+            "ui.grid.assert_range",
+            {
+                "selector": {"automation_id": "CueDataGrid"},
+                "start_index": 2,
+                "end_index": 5,
             },
         )
     ]

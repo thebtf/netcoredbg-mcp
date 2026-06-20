@@ -355,6 +355,42 @@ async def _handle_ui_grid_get_state(
     )
 
 
+async def _handle_ui_grid_assert_range(
+    action: dict[str, Any],
+    context: ActionContext,
+) -> dict[str, Any]:
+    started = context.clock()
+    selector, blocked = _selector_from_action(action)
+    if blocked is not None:
+        return {
+            **blocked,
+            "duration_ms": context.elapsed_ms(started),
+            "route": "grid_assert_range",
+        }
+    start_index, end_index, blocked = _range_from_action(action)
+    if blocked is not None:
+        return {
+            **blocked,
+            "duration_ms": context.elapsed_ms(started),
+            "route": "grid_assert_range",
+        }
+    result = await context.call_adapter(
+        "ui.grid.assert_range",
+        selector=selector,
+        start_index=start_index,
+        end_index=end_index,
+    )
+    return _action_result(
+        status=result.get("status", "PASS"),
+        route="grid_assert_range",
+        selector=selector,
+        start_index=start_index,
+        end_index=end_index,
+        duration_ms=context.elapsed_ms(started),
+        result=result,
+    )
+
+
 async def _handle_ui_grid_select_row(
     action: dict[str, Any],
     context: ActionContext,
@@ -1401,6 +1437,32 @@ def _indices_from_action(action: dict[str, Any]) -> tuple[list[int], dict[str, A
     return indices, None
 
 
+def _range_from_action(
+    action: dict[str, Any],
+) -> tuple[int, int, dict[str, Any] | None]:
+    start_index = _grid_range_index(action.get("start_index"), field_name="start_index")
+    if isinstance(start_index, dict):
+        return 0, 0, start_index
+    end_index = _grid_range_index(action.get("end_index"), field_name="end_index")
+    if isinstance(end_index, dict):
+        return 0, 0, end_index
+    return start_index, end_index, None
+
+
+def _grid_range_index(value: Any, *, field_name: str) -> int | dict[str, Any]:
+    if isinstance(value, bool):
+        return _invalid_grid_range_index(field_name, value)
+    if isinstance(value, int):
+        index = value
+    elif isinstance(value, str) and _INTEGER_TEXT.fullmatch(value.strip()):
+        index = int(value)
+    else:
+        return _invalid_grid_range_index(field_name, value)
+    if index < 0:
+        return _invalid_grid_range_index(field_name, value)
+    return index
+
+
 def _row_identities_from_action(
     action: dict[str, Any],
 ) -> tuple[list[str], dict[str, Any] | None]:
@@ -1471,6 +1533,16 @@ def _invalid_grid_row_index(raw_index: Any) -> dict[str, Any]:
         requested={"index": raw_index},
         accepted={"index": "non-negative integer"},
         next_step="Use an integer row index for visible DataGrid row actions.",
+    )
+    return {"status": "BLOCKED", **blocked}
+
+
+def _invalid_grid_range_index(field_name: str, value: Any) -> dict[str, Any]:
+    blocked = build_blocked(
+        reason="invalid grid range index",
+        requested={field_name: value},
+        accepted={field_name: "non-negative integer"},
+        next_step=f"Use a non-negative integer for {field_name}.",
     )
     return {"status": "BLOCKED", **blocked}
 
@@ -1547,6 +1619,7 @@ register_action("ui.right_click_verified", _handle_ui_right_click_verified)
 register_action("ui.double_click_verified", _handle_ui_double_click_verified)
 register_action("ui.drag", handle_ui_drag)
 register_action("ui.grid.get_state", _handle_ui_grid_get_state)
+register_action("ui.grid.assert_range", _handle_ui_grid_assert_range)
 register_action("ui.grid.ensure_visible", _handle_ui_grid_ensure_visible)
 register_action("ui.grid.select_row", _handle_ui_grid_select_row)
 register_action("ui.grid.click_row", _handle_ui_grid_click_row)

@@ -704,6 +704,27 @@ def test_issue_270_records_cr070_ensure_visible_viewport_delta_slice() -> None:
     assert "broader" in lifecycle_remaining
 
 
+def test_issue_270_records_cr071_assert_range_slice_without_broad_closure() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#270")
+    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#270")
+    _issue, _state, _evidence, remaining = _issue_cells(backlog, "#270")
+    _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
+        cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
+    )
+
+    for text in (row, lifecycle_row):
+        assert "CR-071" in text
+        assert 'ui_grid(action="assert_range")' in text
+        assert "ui.grid.assert_range" in text
+        assert "selector/start_index/end_index" in text
+
+    assert "assert-range parity" in remaining
+    assert "assert-range parity" in lifecycle_remaining
+    assert "broader" in remaining
+    assert "broader" in lifecycle_remaining
+
+
 def test_issue_271_272_record_cr048_app_diagnostics_freshness_slice() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
     row_271 = _issue_row(backlog, "#271")

@@ -3150,6 +3150,48 @@ async def test_grid_select_indices_uses_backend_multi_select_for_sparse_indices(
 
 
 @pytest.mark.asyncio
+async def test_ui_operation_adapters_grid_assert_range_routes_to_backend() -> None:
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.request: dict[str, Any] | None = None
+
+        async def grid_assert_range(
+            self,
+            selector: dict[str, Any],
+            start_index: int,
+            end_index: int,
+        ) -> dict[str, Any]:
+            self.request = {
+                "selector": dict(selector),
+                "start_index": start_index,
+                "end_index": end_index,
+            }
+            return {
+                "status": "PASS",
+                "asserted_range": {"start_index": start_index, "end_index": end_index},
+            }
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    result = await ui_operation_adapters(backend_provider)["ui.grid.assert_range"](
+        selector={"automation_id": "dataGrid"},
+        start_index=2,
+        end_index=5,
+    )
+
+    assert backend.request == {
+        "selector": {"automation_id": "dataGrid"},
+        "start_index": 2,
+        "end_index": 5,
+    }
+    assert result["status"] == "PASS"
+    assert result["asserted_range"] == {"start_index": 2, "end_index": 5}
+
+
+@pytest.mark.asyncio
 async def test_ui_operation_adapters_grid_select_indices_blocks_empty_indices() -> None:
     class FakeBackend:
         async def multi_select(self, container_id: str, indices: list[int]) -> int:
