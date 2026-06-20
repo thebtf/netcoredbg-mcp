@@ -682,7 +682,7 @@ class RuntimeSmokeRunRecord:
         self.app_diagnostics_source_enabled = True
         if not entries:
             return
-        self.app_diagnostics_entries.extend(compact_value(entry) for entry in entries)
+        self.app_diagnostics_entries.extend(dict(entry) for entry in entries)
         if len(self.app_diagnostics_entries) > self.max_events:
             excess = len(self.app_diagnostics_entries) - self.max_events
             del self.app_diagnostics_entries[:excess]
@@ -734,7 +734,7 @@ class RuntimeSmokeRunRecord:
         next_after_index = start_index + len(bounded_entries)
         return (
             {
-                "entries": compact_value(bounded_entries),
+                "entries": [dict(entry) for entry in bounded_entries],
                 "available": available,
                 "limit": bounded_limit,
                 "limited": available > bounded_limit,
@@ -910,7 +910,9 @@ class RuntimeSmokeRunRegistry:
             record = self._runs.get(run_id)
             if record is None:
                 return None
-            if record.result is not None and not record.app_diagnostics_entries:
+            if not record.app_diagnostics_source_enabled:
+                return None
+            if record.result is not None:
                 return None
             return record.app_diagnostics_delta(
                 after_index=after_index,
@@ -1467,10 +1469,10 @@ class RuntimeSmokeRunRegistry:
             "dropped_count": record.dropped_count,
             "final": False,
         }
-        if record.app_diagnostics_entries:
-            payload["app_diagnostics_history"] = compact_value(
-                record.app_diagnostics_entries
-            )
+        if record.app_diagnostics_source_enabled:
+            payload["app_diagnostics_history"] = [
+                dict(entry) for entry in record.app_diagnostics_entries
+            ]
         if self._contamination is not None:
             payload.update(_contamination_metadata(self._contamination))
         return payload

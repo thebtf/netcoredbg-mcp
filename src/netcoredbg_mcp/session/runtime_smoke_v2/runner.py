@@ -246,9 +246,12 @@ class RuntimeStateOracleRunner:
             action_count += executed_actions
             case_results.append(case_result)
             if self._case_progress_notifier is not None:
-                notify_result = self._case_progress_notifier(case_result)
-                if inspect.isawaitable(notify_result):
-                    await notify_result
+                try:
+                    notify_result = self._case_progress_notifier(case_result)
+                    if inspect.isawaitable(notify_result):
+                        await notify_result
+                except Exception:
+                    pass
             if isinstance(case_result.get("cleanup"), dict):
                 case_cleanups.append(case_result["cleanup"])
             if case_result["status"] == "BLOCKED":

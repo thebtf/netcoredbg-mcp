@@ -320,6 +320,39 @@ async def test_runtime_smoke_get_result_running_payload_includes_live_app_diagno
     ]
 
 
+@pytest.mark.asyncio
+async def test_runtime_smoke_registry_falls_back_to_final_result_after_completion() -> None:
+    registry = RuntimeSmokeRunRegistry()
+    record = RuntimeSmokeRunRecord(
+        run_id="run-1",
+        plan_name="live-appdiag-history",
+        created_at=0.0,
+        max_events=1,
+        app_diagnostics_source_enabled=True,
+        app_diagnostics_entries=[
+            {
+                "case_id": "case-2",
+                "transition_index": 0,
+                "phase": "after",
+                "probe": "app_diagnostics",
+                "status": "PASS",
+            }
+        ],
+        app_diagnostics_dropped_count=1,
+        result={"status": "PASS", "final": True},
+    )
+    registry._runs["run-1"] = record
+
+    delta = await registry.get_app_diagnostics_source_delta(
+        "run-1",
+        after_index=1,
+        entry_count=2,
+        limit=10,
+    )
+
+    assert delta is None
+
+
 def test_runtime_smoke_session_reset_clears_owned_state() -> None:
     smoke = RuntimeSmokeSession()
     smoke.instrumentation_groups["group"] = {"breakpoints": [1]}
