@@ -388,6 +388,46 @@ async def test_runtime_smoke_validate_probe_agent_mode_invalid_known_probe_prese
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_validate_probe_agent_mode_invalid_probe_exposes_authoring_contract(
+    capturing_mcp,
+) -> None:
+    session = RunProbeFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_validate_probe"](
+        ctx=None,
+        probe={"kind": "ui.colorscheme", "name": "theme"},
+        agent_mode=True,
+    )
+    data = response["data"]
+    agent = data["agent_mode"]
+
+    assert data["status"] == "INVALID_SETUP"
+    assert data["can_run"] is False
+    assert data["run_created"] is False
+    assert any("ui.colorscheme" in error for error in data["validation_errors"])
+    assert "ui.text" in data["accepted_probe_kinds"]
+    assert "noop" in data["accepted_action_kinds"]
+    assert "ui.text.read" in data["accepted_operation_names"]
+    assert "ui.grid.click_row" in data["operation_required_fields"]
+    assert set(data["operation_required_fields"]["ui.grid.click_row"]) == {
+        "selector",
+        "row",
+    }
+    assert data["evidence_contract"]["diagnostics"]["semantic_probe"]["probe_kinds"]
+    assert agent["primary_next_action"] == "runtime_smoke_validate_probe"
+    assert agent["next_request"] == {
+        "tool": "runtime_smoke_validate_probe",
+        "arguments": {
+            "probe": {"kind": "ui.colorscheme", "name": "theme"},
+            "agent_mode": True,
+        },
+    }
+    assert "cursor" not in agent
+    assert session.runtime_smoke.lifecycle_runs.retained_run_ids() == []
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_validate_probe_advertises_app_diagnostics_launch_contract(
     capturing_mcp,
 ) -> None:
