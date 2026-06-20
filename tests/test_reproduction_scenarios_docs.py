@@ -50,6 +50,27 @@ def _clause_containing(text: str, marker: str) -> str:
     raise AssertionError(f"missing clause for {marker!r}")
 
 
+def _follow_up_block(text: str, issue: str) -> str:
+    block: list[str] = []
+    capture = False
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(f"- `{issue}`:"):
+            capture = True
+        elif capture and stripped.startswith("- `#"):
+            break
+        elif capture and stripped.startswith("Add an Engram comment"):
+            break
+
+        if capture:
+            block.append(stripped)
+
+    if not block:
+        raise AssertionError(f"missing follow-up block for {issue}")
+    return " ".join(block)
+
+
 def test_novascript_cr003_replay_packet_is_actionable() -> None:
     packet = _read(REPLAY_PACKET)
     required_terms = {
@@ -1993,3 +2014,26 @@ def test_post_cr094_lifecycle_followup_queue_without_reopening_slices() -> None:
         assert issue in follow_up
         for term in terms:
             assert term in follow_up
+
+
+def test_post_cr095_engram_followup_queue_is_recorded() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    follow_up = backlog.split("## Remaining Follow-Up", 1)[1]
+
+    assert "still pending while Engram transport is down" not in follow_up
+    assert "when Engram returns" not in follow_up
+
+    expected_issue_terms = {
+        "#268": ["CR-090", "CR-092", "CR-093", "CR-094"],
+        "#269": ["CR-087", "CR-088"],
+        "#270": ["CR-089"],
+        "#271": ["CR-091"],
+        "#272": ["CR-086"],
+    }
+
+    for issue, terms in expected_issue_terms.items():
+        block = _follow_up_block(follow_up, issue)
+        for term in terms:
+            assert term in block
+        assert "Engram comment" in block or "split follow-up issue" in block
+        assert "re-read" in block or "confirmed" in block
