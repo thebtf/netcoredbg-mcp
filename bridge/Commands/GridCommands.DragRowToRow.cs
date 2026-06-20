@@ -320,7 +320,13 @@ public static partial class GridCommands
         }
 
         var finalTarget = targetMatch!;
-        var finalTargetPoint = ClickPoint(finalTarget.Element).Point;
+        var finalTargetPointResult = ClickPoint(finalTarget.Element);
+        if (finalTargetPointResult.Blocked is not null)
+        {
+            finalTargetPointResult.Blocked["cleanup"] = cleanup.DeepClone();
+            return finalTargetPointResult.Blocked;
+        }
+        var finalTargetPoint = finalTargetPointResult.Point;
         var routePoints = new JsonArray
         {
             DragPointJson(sourcePoint),
