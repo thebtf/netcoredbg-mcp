@@ -86,6 +86,89 @@ class NeverFinalRegistry:
         }
 
 
+class ActiveAppDiagnosticsProgressRegistry:
+    def __init__(self) -> None:
+        self.get_result_calls = 0
+        self.tail_calls: list[dict[str, Any]] = []
+
+    async def get_result(self, run_id: str) -> dict[str, Any]:
+        self.get_result_calls += 1
+        return {
+            "status": "RUNNING",
+            "run_id": run_id,
+            "plan_name": "active-app-diagnostics",
+            "lifecycle_status": "RUNNING",
+            "final": False,
+            "evidence_refs": [],
+            "cleanup": None,
+            "app_diagnostics_history": [
+                {
+                    "case_id": "run_probe",
+                    "transition_index": 0,
+                    "phase": "after",
+                    "probe": "app_diagnostics",
+                    "status": "RUNNING",
+                    "reason": "waiting for app_diagnostics.wait_json",
+                    "evidence_ref": "diagnostic:app_diagnostics:WpfSmokeApp",
+                }
+            ],
+        }
+
+    async def tail_events(
+        self,
+        run_id: str,
+        *,
+        after_cursor: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        self.tail_calls.append(
+            {"run_id": run_id, "after_cursor": after_cursor, "limit": limit}
+        )
+        return {
+            "status": "RUNNING",
+            "run_id": run_id,
+            "events": [
+                {
+                    "cursor": 7,
+                    "kind": "progress",
+                    "status": "RUNNING",
+                    "summary": "waiting for app diagnostics evidence",
+                }
+            ],
+            "next_cursor": 7,
+            "oldest_cursor": 7,
+            "dropped_count": 0,
+            "stale_cursor": False,
+            "final": False,
+        }
+
+    async def get_app_diagnostics_source_cursor(
+        self,
+        run_id: str,
+    ) -> dict[str, int] | None:
+        return {"after_index": 1, "entry_count": 1}
+
+
+class EmptyActiveAppDiagnosticsCursorRegistry(ActiveAppDiagnosticsProgressRegistry):
+    async def get_result(self, run_id: str) -> dict[str, Any]:
+        self.get_result_calls += 1
+        return {
+            "status": "RUNNING",
+            "run_id": run_id,
+            "plan_name": "active-app-diagnostics",
+            "lifecycle_status": "RUNNING",
+            "final": False,
+            "evidence_refs": [],
+            "cleanup": None,
+        }
+
+    async def get_app_diagnostics_source_cursor(
+        self,
+        run_id: str,
+    ) -> dict[str, int] | None:
+        return {"after_index": 0, "entry_count": 0}
+
+
 class CompletesBetweenResultAndTailRegistry:
     def __init__(self) -> None:
         self.get_result_calls = 0
@@ -375,6 +458,84 @@ async def test_runtime_smoke_wait_for_result_agent_mode_retry_advances_cursor(
         "arguments": {
             "run_id": "slow-run",
             "after_cursor": 1,
+            "agent_mode": True,
+            "event_limit": 20,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_wait_for_result_agent_mode_guides_active_app_diagnostics_delta(
+    capturing_mcp,
+) -> None:
+    session = WaitFacadeSession()
+    registry = ActiveAppDiagnosticsProgressRegistry()
+    session.runtime_smoke.lifecycle_runs = registry
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_wait_for_result"](
+        ctx=None,
+        run_id="active-appdiag-run",
+        timeout_ms=1,
+        poll_interval_ms=1,
+        after_cursor=0,
+        event_limit=5,
+        agent_mode=True,
+    )
+    data = response["data"]
+    agent = data["agent_mode"]
+
+    assert data["status"] == "BLOCKED"
+    assert data["reason"] == "runtime smoke wait timed out"
+    assert data["final"] is False
+    assert agent["primary_next_action"] == "runtime_smoke_get_event_delta"
+    assert agent["cursor"]["run_id"] == "active-appdiag-run"
+    assert agent["cursor"]["after_cursor"] == data["event_cursor"]["next_cursor"]
+    assert agent["cursor"]["sources"]["app_diagnostics"] == {
+        "after_index": 0,
+        "entry_count": 1,
+    }
+    assert agent["next_request"] == {
+        "tool": "runtime_smoke_get_event_delta",
+        "arguments": {
+            "cursor": agent["cursor"],
+            "agent_mode": True,
+            "event_limit": 20,
+        },
+    }
+    assert registry.tail_calls
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_wait_for_result_agent_mode_keeps_wait_for_empty_app_diagnostics_cursor(
+    capturing_mcp,
+) -> None:
+    session = WaitFacadeSession()
+    registry = EmptyActiveAppDiagnosticsCursorRegistry()
+    session.runtime_smoke.lifecycle_runs = registry
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_wait_for_result"](
+        ctx=None,
+        run_id="active-appdiag-run",
+        timeout_ms=1,
+        poll_interval_ms=1,
+        after_cursor=0,
+        event_limit=5,
+        agent_mode=True,
+    )
+    data = response["data"]
+    agent = data["agent_mode"]
+
+    assert data["status"] == "BLOCKED"
+    assert data["reason"] == "runtime smoke wait timed out"
+    assert data["final"] is False
+    assert agent["primary_next_action"] == "runtime_smoke_wait_for_result"
+    assert agent["next_request"] == {
+        "tool": "runtime_smoke_wait_for_result",
+        "arguments": {
+            "run_id": "active-appdiag-run",
+            "after_cursor": 7,
             "agent_mode": True,
             "event_limit": 20,
         },

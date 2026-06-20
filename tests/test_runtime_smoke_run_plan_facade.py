@@ -115,6 +115,61 @@ class RenamedMissingRunRegistry:
         raise AssertionError("missing run should fail closed before tailing events")
 
 
+class ActiveAppDiagnosticsBundleRegistry:
+    async def get_result(self, run_id: str) -> dict[str, Any]:
+        return {
+            "status": "RUNNING",
+            "run_id": run_id,
+            "plan_name": "active-app-diagnostics",
+            "lifecycle_status": "RUNNING",
+            "final": False,
+            "evidence_refs": [],
+            "cleanup": None,
+            "app_diagnostics_history": [
+                {
+                    "case_id": "run_probe",
+                    "transition_index": 0,
+                    "phase": "after",
+                    "probe": "app_diagnostics",
+                    "status": "RUNNING",
+                    "reason": "waiting for app_diagnostics.wait_json",
+                    "evidence_ref": "diagnostic:app_diagnostics:WpfSmokeApp",
+                }
+            ],
+        }
+
+    async def tail_events(
+        self,
+        run_id: str,
+        *,
+        after_cursor: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        return {
+            "status": "RUNNING",
+            "run_id": run_id,
+            "events": [
+                {
+                    "cursor": 7,
+                    "kind": "progress",
+                    "status": "RUNNING",
+                    "summary": "waiting for app diagnostics evidence",
+                }
+            ],
+            "next_cursor": 7,
+            "oldest_cursor": 7,
+            "dropped_count": 0,
+            "stale_cursor": False,
+            "final": False,
+        }
+
+    async def get_app_diagnostics_source_cursor(
+        self,
+        run_id: str,
+    ) -> dict[str, int] | None:
+        return {"after_index": 1, "entry_count": 1}
+
+
 async def _resolve_project_root(_ctx: Any, _session: Any) -> None:
     raise AssertionError("run-plan facade test plan must not resolve project paths")
 
@@ -633,6 +688,43 @@ async def test_runtime_smoke_evidence_bundle_agent_mode_adds_delta_guidance(
     assert agent["primary_next_action"] == "runtime_smoke_get_event_delta"
     assert agent["cursor"]["run_id"] == run_id
     assert agent["cursor"]["after_cursor"] == response["data"]["event_cursor"]["next_cursor"]
+    assert agent["next_request"] == {
+        "tool": "runtime_smoke_get_event_delta",
+        "arguments": {
+            "cursor": agent["cursor"],
+            "agent_mode": True,
+            "event_limit": 20,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_evidence_bundle_agent_mode_guides_active_app_diagnostics_delta(
+    capturing_mcp,
+) -> None:
+    session = RunPlanFacadeSession()
+    session.runtime_smoke.lifecycle_runs = ActiveAppDiagnosticsBundleRegistry()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_evidence_bundle"](
+        ctx=None,
+        run_id="active-appdiag-run",
+        after_cursor=0,
+        event_limit=5,
+        agent_mode=True,
+    )
+    data = response["data"]
+    agent = data["agent_mode"]
+
+    assert data["status"] == "RUNNING"
+    assert data["final"] is False
+    assert agent["primary_next_action"] == "runtime_smoke_get_event_delta"
+    assert agent["cursor"]["run_id"] == "active-appdiag-run"
+    assert agent["cursor"]["after_cursor"] == data["event_cursor"]["next_cursor"]
+    assert agent["cursor"]["sources"]["app_diagnostics"] == {
+        "after_index": 0,
+        "entry_count": 1,
+    }
     assert agent["next_request"] == {
         "tool": "runtime_smoke_get_event_delta",
         "arguments": {
