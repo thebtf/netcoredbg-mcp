@@ -1951,3 +1951,45 @@ def test_cr022_issue_226_requires_downstream_pass_before_closure() -> None:
         assert "keep open" in remaining_action.lower()
         assert "target-side" in backlog.lower()
         assert "not enough to close" in backlog.lower()
+
+
+def test_post_cr094_lifecycle_followup_queue_without_reopening_slices() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    follow_up = backlog.split("## Remaining Follow-Up", 1)[1]
+
+    expected_queue_terms = {
+        "#268": [
+            "CR-090",
+            "CR-092",
+            "CR-093",
+            "CR-094",
+            "do not reopen",
+            "authoring/template",
+        ],
+        "#269": [
+            "CR-087",
+            "CR-088",
+            "do not reopen",
+            "repair/mark-cursor/mixed-source",
+        ],
+        "#270": [
+            "CR-089",
+            "do not reopen",
+            "helper/replay",
+        ],
+        "#271": [
+            "CR-091",
+            "do not reopen",
+            "cleanup/trace/freshness",
+        ],
+        "#272": [
+            "CR-086",
+            "do not reopen",
+            "handoff",
+        ],
+    }
+
+    for issue, terms in expected_queue_terms.items():
+        assert issue in follow_up
+        for term in terms:
+            assert term in follow_up
