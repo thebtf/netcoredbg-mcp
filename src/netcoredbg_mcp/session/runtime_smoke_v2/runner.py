@@ -572,6 +572,10 @@ def _diagnostic_launch_from_baseline_result(
         diagnostic_launch = result.get("diagnostic_launch")
         normalized = normalize_app_diagnostics_launch_contract(diagnostic_launch)
         if normalized is not None:
+            if isinstance(diagnostic_launch, dict):
+                boundary_since = diagnostic_launch.get("_launch_boundary_since")
+                if isinstance(boundary_since, dict):
+                    normalized["_launch_boundary_since"] = dict(boundary_since)
             return normalized
     return None
 

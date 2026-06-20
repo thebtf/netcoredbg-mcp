@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -114,12 +115,15 @@ class _RecordingAdvancingClock:
 
 
 class LaunchDiagnosticSmokeSession(ProbeSmokeSession):
-    def __init__(self) -> None:
+    def __init__(self, *, on_launch: Callable[[], None] | None = None) -> None:
         super().__init__()
         self.launches: list[dict[str, Any]] = []
+        self.on_launch = on_launch
 
     async def launch(self, **kwargs: Any) -> dict[str, Any]:
         self.launches.append(dict(kwargs))
+        if self.on_launch is not None:
+            self.on_launch()
         return {"status": "PASS", "profile": kwargs.get("profile", "isolated")}
 
 
@@ -318,17 +322,20 @@ async def test_app_diagnostics_launch_default_falls_back_to_directory_when_path_
     )
     fallback_path = diagnostic_path.parent / "newer-launch-advertised-app-diagnostics.json"
     fallback_path.parent.mkdir(parents=True)
-    fallback_path.write_text(
-        json.dumps(
-            _app_diagnostics(
-                app={"name": "DirectoryFallbackApp"},
-                status="PASS",
-                observations=[],
-            )
-        ),
-        encoding="utf-8",
-    )
-    session = LaunchDiagnosticSmokeSession()
+
+    def write_fallback() -> None:
+        fallback_path.write_text(
+            json.dumps(
+                _app_diagnostics(
+                    app={"name": "DirectoryFallbackApp"},
+                    status="PASS",
+                    observations=[],
+                )
+            ),
+            encoding="utf-8",
+        )
+
+    session = LaunchDiagnosticSmokeSession(on_launch=write_fallback)
 
     result = await _launch_diagnostics_runner(session).run(
         _launch_diagnostics_plan(
@@ -352,6 +359,54 @@ async def test_app_diagnostics_launch_default_falls_back_to_directory_when_path_
 
 
 @pytest.mark.asyncio
+async def test_app_diagnostics_launch_default_blocks_with_only_stale_directory_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    diagnostic_path = Path("runtime-smoke-diagnostics") / (
+        "missing-launch-advertised-app-diagnostics.json"
+    )
+    stale_path = diagnostic_path.parent / "stale-launch-advertised-app-diagnostics.json"
+    stale_path.parent.mkdir(parents=True)
+    stale_path.write_text(
+        json.dumps(
+            _app_diagnostics(
+                app={"name": "StaleDirectoryFallbackApp"},
+                status="PASS",
+                observations=[],
+            )
+        ),
+        encoding="utf-8",
+    )
+    session = LaunchDiagnosticSmokeSession()
+
+    result = await _launch_diagnostics_runner(session).run(
+        _launch_diagnostics_plan(
+            diagnostic_path,
+            _app_diagnostics(
+                phase="after",
+                app={"name": "LaunchAdvertisedApp"},
+                status="PASS",
+                observations=[],
+            ),
+        )
+    )
+
+    probe = after_probe(result)
+    assert result["status"] == "BLOCKED"
+    assert probe["status"] == "BLOCKED"
+    assert probe["reason"] == "diagnostic JSON not observed after since cursor"
+    assert probe["value"]["poll"]["path"] == diagnostic_path.parent.as_posix()
+    assert probe["value"]["poll"]["observed"] is False
+    assert probe["value"]["poll"]["since"] == {
+        "mtime_ns": stale_path.stat().st_mtime_ns,
+        "name": stale_path.name,
+    }
+    assert probe["requested"]["poll"]["path"] == diagnostic_path.parent.as_posix()
+
+
+@pytest.mark.asyncio
 async def test_app_diagnostics_launch_default_falls_back_to_directory_when_path_stale(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -371,18 +426,20 @@ async def test_app_diagnostics_launch_default_falls_back_to_directory_when_path_
     )
     os.utime(diagnostic_path, ns=(1_000_000_000, 1_000_000_000))
     newer_path = diagnostic_path.parent / "newer-launch-advertised-app-diagnostics.json"
-    newer_path.write_text(
-        json.dumps(
-            _app_diagnostics(
-                app={"name": "FreshLaunchAdvertisedApp"},
-                status="PASS",
-                observations=[],
-            )
-        ),
-        encoding="utf-8",
-    )
-    os.utime(newer_path, ns=(2_000_000_000, 2_000_000_000))
-    session = LaunchDiagnosticSmokeSession()
+    def write_newer() -> None:
+        newer_path.write_text(
+            json.dumps(
+                _app_diagnostics(
+                    app={"name": "FreshLaunchAdvertisedApp"},
+                    status="PASS",
+                    observations=[],
+                )
+            ),
+            encoding="utf-8",
+        )
+        os.utime(newer_path, ns=(2_000_000_000, 2_000_000_000))
+
+    session = LaunchDiagnosticSmokeSession(on_launch=write_newer)
 
     result = await _launch_diagnostics_runner(session).run(
         _launch_diagnostics_plan(
