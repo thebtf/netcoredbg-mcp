@@ -526,6 +526,65 @@ async def test_runtime_smoke_get_event_delta_marks_cleared_debug_output_gap_stal
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_get_event_delta_marks_cleared_gap_stale_before_retained_output(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    session.state.output_buffer = deque(
+        [
+            OutputEntry(text="retained-1\n", category="stdout", sequence=5),
+            OutputEntry(text="retained-2\n", category="stderr", sequence=6),
+        ]
+    )
+    session.state.output_sequence = 6
+    session.state.output_trimmed_before = 0
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor={
+            "run_id": "run-1",
+            "after_cursor": 4,
+            "sources": {
+                "debug_output": {
+                    "after_sequence": 1,
+                    "trimmed_before": 0,
+                }
+            },
+        },
+        event_limit=5,
+    )
+    data = response["data"]
+
+    assert data["status"] == "PASS"
+    assert data["source_deltas"]["debug_output"] == {
+        "entries": [
+            {
+                "text": "retained-1\n",
+                "category": "stdout",
+                "variables_reference": 0,
+                "sequence": 5,
+            },
+            {
+                "text": "retained-2\n",
+                "category": "stderr",
+                "variables_reference": 0,
+                "sequence": 6,
+            },
+        ],
+        "available": 2,
+        "limit": 5,
+        "limited": False,
+        "stale_cursor": True,
+        "dropped_count": 3,
+    }
+    assert data["cursor"]["sources"]["debug_output"] == {
+        "after_sequence": 6,
+        "trimmed_before": 0,
+    }
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_get_event_delta_zero_limit_does_not_advance_cursor(
     capturing_mcp,
 ) -> None:

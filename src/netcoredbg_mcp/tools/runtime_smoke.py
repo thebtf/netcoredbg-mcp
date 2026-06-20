@@ -1678,13 +1678,26 @@ def _runtime_smoke_debug_output_delta(
     ]
     available = len(filtered_entries)
     bounded_entries = filtered_entries[:bounded_limit]
+    first_retained_sequence = (
+        int(getattr(filtered_entries[0], "sequence", 0) or 0)
+        if filtered_entries
+        else None
+    )
     cleared_gap = available == 0 and current_sequence > after_sequence
+    retained_gap = (
+        first_retained_sequence is not None
+        and first_retained_sequence > max(after_sequence + 1, trimmed_before + 1)
+    )
     stale_cursor = (
-        current_trimmed_before > max(after_sequence, trimmed_before) or cleared_gap
+        current_trimmed_before > max(after_sequence, trimmed_before)
+        or cleared_gap
+        or retained_gap
     )
     dropped_count = max(0, current_trimmed_before - max(after_sequence, trimmed_before))
     if cleared_gap:
         dropped_count = max(dropped_count, current_sequence - after_sequence)
+    if retained_gap and first_retained_sequence is not None:
+        dropped_count = max(dropped_count, first_retained_sequence - after_sequence - 1)
     if bounded_entries:
         next_after_sequence = max(
             int(getattr(entry, "sequence", 0) or 0) for entry in bounded_entries
