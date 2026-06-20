@@ -30,6 +30,39 @@ class CursorFacadeRegistry:
                 "reason": "runtime smoke run not found",
                 "run_id": run_id,
             }
+        if run_id == "appdiag-run":
+            return {
+                "status": "BLOCKED",
+                "reason": "app diagnostics reported BLOCKED",
+                "run_id": run_id,
+                "plan_name": "appdiag-cursor-plan",
+                "lifecycle_status": "COMPLETED",
+                "final": True,
+                "action_count": 1,
+                "evidence_refs": [
+                    {
+                        "case_id": "run_probe",
+                        "phase": "after",
+                        "probe": "app_diagnostics",
+                        "evidence_ref": "diagnostic:app_diagnostics:NovaScript",
+                    }
+                ],
+                "cleanup": {"status": "PASS"},
+                "cases": [
+                    {
+                        "id": "run_probe",
+                        "transitions": [
+                            {
+                                "action": {"kind": "ui.noop"},
+                                "probes": {
+                                    "after": [_app_diagnostics_probe_output()],
+                                    "before": [],
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
         return {
             "status": "RUNNING",
             "reason": "runtime smoke run still running",
@@ -97,6 +130,22 @@ class CursorFacadeRegistry:
                 "next_cursor": 8,
                 "oldest_cursor": 3,
                 "dropped_count": 1,
+                "stale_cursor": False,
+                "final": True,
+            }
+        if run_id == "appdiag-run":
+            appdiag_events = [{"cursor": 8, "kind": "completed", "status": "BLOCKED"}]
+            appdiag_events = [
+                event for event in appdiag_events if int(event["cursor"]) > after_cursor
+            ][:limit]
+            return {
+                "status": "BLOCKED",
+                "reason": "app diagnostics reported BLOCKED",
+                "run_id": run_id,
+                "events": appdiag_events,
+                "next_cursor": 8,
+                "oldest_cursor": 3,
+                "dropped_count": 0,
                 "stale_cursor": False,
                 "final": True,
             }
@@ -198,6 +247,37 @@ def _register(capturing_mcp, session: CursorFacadeSession) -> list[Any]:
         resolve_project_root=_resolve_project_root,
     )
     return access_calls
+
+
+def _app_diagnostics_probe_output() -> dict[str, Any]:
+    return {
+        "name": "app_diagnostics",
+        "kind": "app_diagnostics",
+        "status": "BLOCKED",
+        "reason": "app diagnostics reported BLOCKED",
+        "value": {
+            "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
+            "app": {"name": "NovaScript", "process_name": "RunProbeFacade"},
+            "status": "BLOCKED",
+            "observation_count": 1,
+            "observations": [
+                {
+                    "kind": "ui.backend",
+                    "status": "BLOCKED",
+                    "reason": "GridPattern unavailable",
+                    "requested": {"control_type": "DataGrid"},
+                    "accepted": {"fallback": "bounded descendant text"},
+                    "next_step": "Run WPF fixture replay on a GUI worker.",
+                }
+            ],
+            "limits": {
+                "max_text_length": 240,
+                "max_list_items": 8,
+                "max_json_bytes": 32768,
+            },
+        },
+        "evidence_ref": "diagnostic:app_diagnostics:NovaScript",
+    }
 
 
 @pytest.mark.asyncio
@@ -395,6 +475,45 @@ async def test_runtime_smoke_mark_event_cursor_can_capture_trace_source_cursor(
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_mark_event_cursor_can_capture_app_diagnostics_cursor(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_mark_event_cursor"](
+        ctx=None,
+        run_id="appdiag-run",
+        include_app_diagnostics=True,
+    )
+    data = response["data"]
+
+    assert data["status"] == "PASS"
+    assert data["cursor"]["sources"]["app_diagnostics"] == {
+        "after_index": 0,
+        "entry_count": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_mark_event_cursor_app_diagnostics_running_run_has_no_source(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_mark_event_cursor"](
+        ctx=None,
+        run_id="run-1",
+        include_app_diagnostics=True,
+    )
+    data = response["data"]
+
+    assert data["status"] == "PASS"
+    assert "sources" not in data["cursor"] or "app_diagnostics" not in data["cursor"]["sources"]
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_get_event_delta_returns_bounded_events_after_mark(
     capturing_mcp,
 ) -> None:
@@ -585,6 +704,85 @@ async def test_runtime_smoke_get_event_delta_returns_debug_output_source_delta(
         "after_sequence": 2,
         "trimmed_before": 0,
     }
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_get_event_delta_returns_app_diagnostics_source_delta(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor={
+            "run_id": "appdiag-run",
+            "after_cursor": 7,
+            "sources": {
+                "app_diagnostics": {
+                    "after_index": 0,
+                    "entry_count": 1,
+                }
+            },
+        },
+        event_limit=1,
+    )
+    data = response["data"]
+
+    assert data["status"] == "PASS"
+    assert data["events"] == [{"cursor": 8, "kind": "completed", "status": "BLOCKED"}]
+    assert data["source_deltas"]["app_diagnostics"] == {
+        "entries": [
+            {
+                "case_id": "run_probe",
+                "transition_index": 0,
+                "phase": "after",
+                "probe": "app_diagnostics",
+                "status": "BLOCKED",
+                "reason": "app diagnostics reported BLOCKED",
+                "value": _app_diagnostics_probe_output()["value"],
+                "evidence_ref": "diagnostic:app_diagnostics:NovaScript",
+            }
+        ],
+        "available": 1,
+        "limit": 1,
+        "limited": False,
+        "stale_cursor": False,
+        "dropped_count": 0,
+    }
+    assert data["cursor"]["sources"]["app_diagnostics"] == {
+        "after_index": 1,
+        "entry_count": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_get_event_delta_app_diagnostics_missing_run_fails_closed(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor={
+            "run_id": "missing-run",
+            "after_cursor": 0,
+            "sources": {
+                "app_diagnostics": {
+                    "after_index": 0,
+                    "entry_count": 1,
+                }
+            },
+        },
+        event_limit=1,
+    )
+    data = response["data"]
+
+    assert data["status"] == "FAIL"
+    assert data["reason"] == "runtime smoke run not found"
+    assert data["run_id"] == "missing-run"
+    assert "source_deltas" not in data
 
 
 @pytest.mark.asyncio
