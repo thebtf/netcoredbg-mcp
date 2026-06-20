@@ -275,11 +275,11 @@ def _diagnostic_json_source(
         return "poll", poll
     launch_source = _launch_diagnostic_json_source(context)
     if launch_source is not None:
-        return "wait_json", launch_source
+        return launch_source
     return "wait_json", None
 
 
-def _launch_diagnostic_json_source(context: Any) -> dict[str, Any] | None:
+def _launch_diagnostic_json_source(context: Any) -> tuple[str, dict[str, Any]] | None:
     action_context = getattr(context, "action_context", context)
     diagnostic_launch = getattr(action_context, "diagnostic_launch", None)
     if not isinstance(diagnostic_launch, dict):
@@ -289,12 +289,61 @@ def _launch_diagnostic_json_source(context: Any) -> dict[str, Any] | None:
         return None
     path = evidence.get("path")
     if not isinstance(path, str) or not path:
+        directory = evidence.get("directory")
+        if isinstance(directory, str) and directory:
+            return "poll", _launch_diagnostic_source(directory)
         return None
-    return {
+    directory = evidence.get("directory")
+    if isinstance(directory, str) and directory:
+        fallback = _launch_diagnostic_directory_fallback_source(
+            path,
+            directory,
+            context,
+        )
+        if fallback is not None:
+            return "poll", fallback
+    return "wait_json", _launch_diagnostic_source(path)
+
+
+def _launch_diagnostic_source(
+    path: str,
+    *,
+    since: tuple[int, str] | None = None,
+) -> dict[str, Any]:
+    source: dict[str, Any] = {
         "path": path,
         "timeout_ms": LAUNCH_DIAGNOSTIC_WAIT_TIMEOUT_MS,
         "poll_interval_ms": LAUNCH_DIAGNOSTIC_WAIT_POLL_INTERVAL_MS,
     }
+    if since is not None:
+        source["since"] = _diagnostic_cursor_payload(since)
+    return source
+
+
+def _launch_diagnostic_directory_fallback_source(
+    path: str,
+    directory: str,
+    context: Any,
+) -> dict[str, Any] | None:
+    try:
+        resolved_path = _resolve_wait_json_path(path, context)
+    except ValueError:
+        return None
+    if not resolved_path.is_file():
+        return _launch_diagnostic_source(directory)
+    try:
+        since = _diagnostic_candidate_sort_key(resolved_path)
+        resolved_directory = _resolve_wait_json_path(directory, context)
+        newer_candidate = _first_diagnostic_candidate(
+            resolved_directory,
+            None,
+            since,
+        )
+    except (OSError, ValueError):
+        return None
+    if newer_candidate is None:
+        return None
+    return _launch_diagnostic_source(directory, since=since)
 
 
 async def _read_wait_json(

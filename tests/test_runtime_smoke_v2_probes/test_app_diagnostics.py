@@ -276,7 +276,7 @@ async def test_app_diagnostics_defaults_to_launch_advertised_json_path(
 
 
 @pytest.mark.asyncio
-async def test_app_diagnostics_launch_advertised_default_blocks_with_path(
+async def test_app_diagnostics_launch_advertised_default_blocks_with_empty_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -302,9 +302,115 @@ async def test_app_diagnostics_launch_advertised_default_blocks_with_path(
     assert result["status"] == "BLOCKED"
     assert probe["status"] == "BLOCKED"
     assert probe["reason"] == "diagnostic JSON not observed"
-    assert probe["value"]["wait_json"]["path"] == diagnostic_path.as_posix()
-    assert probe["value"]["wait_json"]["observed"] is False
-    assert probe["requested"]["wait_json"]["path"] == diagnostic_path.as_posix()
+    assert probe["value"]["poll"]["path"] == diagnostic_path.parent.as_posix()
+    assert probe["value"]["poll"]["observed"] is False
+    assert probe["requested"]["poll"]["path"] == diagnostic_path.parent.as_posix()
+
+
+@pytest.mark.asyncio
+async def test_app_diagnostics_launch_default_falls_back_to_directory_when_path_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    diagnostic_path = Path("runtime-smoke-diagnostics") / (
+        "missing-launch-advertised-app-diagnostics.json"
+    )
+    fallback_path = diagnostic_path.parent / "newer-launch-advertised-app-diagnostics.json"
+    fallback_path.parent.mkdir(parents=True)
+    fallback_path.write_text(
+        json.dumps(
+            _app_diagnostics(
+                app={"name": "DirectoryFallbackApp"},
+                status="PASS",
+                observations=[],
+            )
+        ),
+        encoding="utf-8",
+    )
+    session = LaunchDiagnosticSmokeSession()
+
+    result = await _launch_diagnostics_runner(session).run(
+        _launch_diagnostics_plan(
+            diagnostic_path,
+            _app_diagnostics(
+                phase="after",
+                app={"name": "PlaceholderApp"},
+                status="PASS",
+                observations=[],
+            ),
+        )
+    )
+
+    probe = after_probe(result)
+    assert result["status"] == "PASS"
+    assert probe["status"] == "PASS"
+    assert probe["value"]["app"]["name"] == "DirectoryFallbackApp"
+    assert probe["value"]["poll"]["path"] == diagnostic_path.parent.as_posix()
+    assert probe["value"]["poll"]["matched_path"] == str(fallback_path.resolve())
+    assert probe["value"]["poll"]["observed"] is True
+
+
+@pytest.mark.asyncio
+async def test_app_diagnostics_launch_default_falls_back_to_directory_when_path_stale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    diagnostic_path = Path("runtime-smoke-diagnostics") / "launch-advertised-app-diagnostics.json"
+    diagnostic_path.parent.mkdir(parents=True)
+    diagnostic_path.write_text(
+        json.dumps(
+            _app_diagnostics(
+                app={"name": "StaleLaunchAdvertisedApp"},
+                status="PASS",
+                observations=[],
+            )
+        ),
+        encoding="utf-8",
+    )
+    os.utime(diagnostic_path, ns=(1_000_000_000, 1_000_000_000))
+    newer_path = diagnostic_path.parent / "newer-launch-advertised-app-diagnostics.json"
+    newer_path.write_text(
+        json.dumps(
+            _app_diagnostics(
+                app={"name": "FreshLaunchAdvertisedApp"},
+                status="PASS",
+                observations=[],
+            )
+        ),
+        encoding="utf-8",
+    )
+    os.utime(newer_path, ns=(2_000_000_000, 2_000_000_000))
+    session = LaunchDiagnosticSmokeSession()
+
+    result = await _launch_diagnostics_runner(session).run(
+        _launch_diagnostics_plan(
+            diagnostic_path,
+            _app_diagnostics(
+                phase="after",
+                app={"name": "PlaceholderApp"},
+                status="PASS",
+                observations=[],
+            ),
+        )
+    )
+
+    probe = after_probe(result)
+    assert result["status"] == "PASS"
+    assert probe["status"] == "PASS"
+    assert probe["value"]["app"]["name"] == "FreshLaunchAdvertisedApp"
+    assert probe["value"]["poll"]["path"] == diagnostic_path.parent.as_posix()
+    assert probe["value"]["poll"]["matched_path"] == str(newer_path.resolve())
+    assert probe["value"]["poll"]["since"] == {
+        "mtime_ns": 1_000_000_000,
+        "name": "launch-advertised-app-diagnostics.json",
+    }
+    assert probe["value"]["poll"]["cursor"] == {
+        "mtime_ns": 2_000_000_000,
+        "name": "newer-launch-advertised-app-diagnostics.json",
+    }
+    assert probe["value"]["poll"]["observed"] is True
 
 
 @pytest.mark.asyncio
@@ -359,6 +465,68 @@ async def test_app_diagnostics_explicit_wait_json_overrides_launch_default(
     assert result["status"] == "PASS"
     assert probe["value"]["app"]["name"] == "ExplicitDiagnosticApp"
     assert probe["value"]["wait_json"]["path"] == str(explicit_path)
+    assert result["diagnostic_launch"]["evidence"]["path"] == launch_path.as_posix()
+
+
+@pytest.mark.asyncio
+async def test_app_diagnostics_explicit_poll_overrides_launch_directory_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    launch_path = Path("runtime-smoke-diagnostics") / "launch-advertised-app-diagnostics.json"
+    launch_fallback_path = launch_path.parent / "launch-fallback-app-diagnostics.json"
+    explicit_dir = tmp_path / "explicit-diagnostics"
+    explicit_path = explicit_dir / "explicit-app-diagnostics.json"
+    launch_fallback_path.parent.mkdir(parents=True)
+    explicit_dir.mkdir()
+    launch_fallback_path.write_text(
+        json.dumps(
+            _app_diagnostics(
+                app={"name": "LaunchFallbackApp"},
+                status="PASS",
+                observations=[],
+            )
+        ),
+        encoding="utf-8",
+    )
+    explicit_path.write_text(
+        json.dumps(
+            _app_diagnostics(
+                app={"name": "ExplicitPollApp"},
+                status="PASS",
+                observations=[],
+            )
+        ),
+        encoding="utf-8",
+    )
+    session = LaunchDiagnosticSmokeSession()
+
+    result = await _launch_diagnostics_runner(session).run(
+        _launch_diagnostics_plan(
+            launch_path,
+            _app_diagnostics(
+                phase="after",
+                app={"name": "PlaceholderApp"},
+                status="PASS",
+                observations=[],
+                poll={
+                    "path": str(explicit_dir),
+                    "pattern": "explicit-*.json",
+                    "timeout_ms": 0,
+                    "poll_interval_ms": 0,
+                },
+            ),
+        )
+    )
+
+    probe = after_probe(result)
+    assert result["status"] == "PASS"
+    assert probe["status"] == "PASS"
+    assert probe["value"]["app"]["name"] == "ExplicitPollApp"
+    assert probe["value"]["poll"]["path"] == str(explicit_dir)
+    assert probe["value"]["poll"]["matched_path"] == str(explicit_path)
+    assert "wait_json" not in probe["value"]
     assert result["diagnostic_launch"]["evidence"]["path"] == launch_path.as_posix()
 
 
