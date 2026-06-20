@@ -602,21 +602,27 @@ def register_runtime_smoke_tools(
         ctx: Context,
         run_id: str,
         agent_mode: bool = False,
-        include_debug_output: bool = False,
-        include_trace_source: bool = False,
+        include_debug_output: bool | None = None,
+        include_trace_source: bool | None = None,
     ) -> dict:
         """Return a compact cursor token for the current durable run event position."""
         try:
             access_error = check_session_access(ctx)
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
+            effective_include_debug_output = (
+                True if agent_mode and include_debug_output is None else bool(include_debug_output)
+            )
+            effective_include_trace_source = (
+                True if agent_mode and include_trace_source is None else bool(include_trace_source)
+            )
             data = await _runtime_smoke_mark_event_cursor(
                 session.runtime_smoke.lifecycle_runs,
                 run_id,
                 session_state=session.state,
-                include_debug_output=include_debug_output,
+                include_debug_output=effective_include_debug_output,
                 tracepoint_manager=getattr(session, "_tracepoint_manager", None),
-                include_trace_source=include_trace_source,
+                include_trace_source=effective_include_trace_source,
             )
             if agent_mode:
                 _apply_runtime_smoke_agent_mode(data, "runtime_smoke_get_event_delta")

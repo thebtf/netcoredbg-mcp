@@ -238,6 +238,19 @@ async def test_runtime_smoke_mark_event_cursor_agent_mode_adds_delta_request(
     capturing_mcp,
 ) -> None:
     session = CursorFacadeSession()
+    session.state.output_buffer = deque(
+        [
+            OutputEntry(text="before\n", category="stdout", sequence=1),
+            OutputEntry(text="after\n", category="stderr", sequence=2),
+        ]
+    )
+    session.state.output_sequence = 2
+    session._tracepoint_manager._trace_buffer.append(
+        TraceEntry(1.0, "a.cs", 10, "expr", "before", 1, "tp-1")
+    )
+    session._tracepoint_manager._trace_buffer.append(
+        TraceEntry(2.0, "a.cs", 10, "expr", "after", 1, "tp-1")
+    )
     _register(capturing_mcp, session)
 
     response = await capturing_mcp.tools["runtime_smoke_mark_event_cursor"](
@@ -249,8 +262,66 @@ async def test_runtime_smoke_mark_event_cursor_agent_mode_adds_delta_request(
     agent = data["agent_mode"]
 
     assert data["status"] == "PASS"
+    assert data["cursor"]["sources"]["debug_output"] == {
+        "after_sequence": 2,
+        "trimmed_before": 0,
+    }
+    assert data["cursor"]["sources"]["trace_source"] == {
+        "after_timestamp": 2.0,
+        "after_ordinal": 1,
+        "global_after_timestamp": 2.0,
+        "global_after_ordinal": 1,
+        "tracepoint_id": None,
+        "buffer_start_timestamp": 1.0,
+        "buffer_size": 2,
+        "append_generation": 2,
+        "drop_generation": 0,
+    }
     assert agent["primary_next_action"] == "runtime_smoke_get_event_delta"
     assert agent["cursor"] == data["cursor"]
+    assert agent["next_request"] == {
+        "tool": "runtime_smoke_get_event_delta",
+        "arguments": {
+            "cursor": data["cursor"],
+            "agent_mode": True,
+            "event_limit": 20,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_mark_event_cursor_agent_mode_explicit_false_suppresses_sources(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    session.state.output_buffer = deque(
+        [
+            OutputEntry(text="before\n", category="stdout", sequence=1),
+            OutputEntry(text="after\n", category="stderr", sequence=2),
+        ]
+    )
+    session.state.output_sequence = 2
+    session._tracepoint_manager._trace_buffer.append(
+        TraceEntry(1.0, "a.cs", 10, "expr", "before", 1, "tp-1")
+    )
+    session._tracepoint_manager._trace_buffer.append(
+        TraceEntry(2.0, "a.cs", 10, "expr", "after", 1, "tp-1")
+    )
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_mark_event_cursor"](
+        ctx=None,
+        run_id="run-1",
+        agent_mode=True,
+        include_debug_output=False,
+        include_trace_source=False,
+    )
+    data = response["data"]
+    agent = data["agent_mode"]
+
+    assert data["status"] == "PASS"
+    assert "sources" not in data["cursor"]
+    assert "sources" not in agent["cursor"]
     assert agent["next_request"] == {
         "tool": "runtime_smoke_get_event_delta",
         "arguments": {

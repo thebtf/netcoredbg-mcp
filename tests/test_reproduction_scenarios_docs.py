@@ -315,6 +315,7 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "CR-063",
             "CR-064",
             "CR-066",
+            "CR-069",
             "metrics_contract",
             "agent_mode.defaults",
             "runtime_smoke_validate_probe",
@@ -326,6 +327,7 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "contaminated-final cleanup-contract routing",
             "source_deltas.debug_output",
             "source_deltas.trace_source",
+            "source-aware mark-cursor guidance",
             "exception verdict",
             "cleanup-contract guidance",
             "event_limit=20",
@@ -667,7 +669,10 @@ def test_issue_272_records_cr067_launch_directory_fallback_slice() -> None:
     for text in (row, lifecycle_row):
         assert "CR-067" in text
         assert "launch-directory fallback" in text
-        assert "explicit `wait_json` / `poll` precedence" in text or "explicit source precedence" in text
+        assert (
+            "explicit `wait_json` / `poll` precedence" in text
+            or "explicit source precedence" in text
+        )
         assert "stale pre-existing directory artifacts" in text
 
     assert "launch-directory fallback" in remaining
@@ -801,6 +806,8 @@ def test_issue_268_269_record_validate_probe_slice_without_broad_closure() -> No
     assert "CR-064" in lifecycle_row_269
     assert "CR-066" in row_269
     assert "CR-066" in lifecycle_row_269
+    assert "CR-069" in row_269
+    assert "CR-069" in lifecycle_row_269
     assert "invalid-probe repair guidance" in row_269
     assert "invalid-probe repair guidance" in lifecycle_row_269
     assert "invalid-run-probe repair guidance" in row_269
@@ -815,6 +822,8 @@ def test_issue_268_269_record_validate_probe_slice_without_broad_closure() -> No
     assert "source_deltas.debug_output" in lifecycle_row_269
     assert "source_deltas.trace_source" in row_269
     assert "source_deltas.trace_source" in lifecycle_row_269
+    assert "source-aware mark-cursor guidance" in row_269
+    assert "source-aware mark-cursor guidance" in lifecycle_row_269
 
 
 def test_issue_271_records_cleanup_and_trace_delta_slices() -> None:
