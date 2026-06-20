@@ -41,9 +41,92 @@ async def handle_ui_drag(
     if blocked is not None:
         return _with_duration(blocked, context=context, started=started)
 
+    ensure_visible = action.get("ensure_visible") is True
+    max_scrolls = action.get("max_scrolls")
+    scroll_settle_ms = action.get("scroll_settle_ms")
+    rows = _mapping_from_action(action, "rows")
+    columns = _list_from_action(action, "columns")
+    ensure_visible_result: Any | None = None
+    if ensure_visible:
+        blocked = _ensure_visible_source_blocked(source)
+        if blocked is not None:
+            blocked["action_skipped"] = True
+            return _action_result(
+                blocked,
+                source=source,
+                path=path,
+                drop=drop,
+                modifiers=modifiers,
+                cancel=cancel,
+                identity=identity,
+                expect=dict(action.get("expect") or {}),
+                ensure_visible=True,
+                max_scrolls=max_scrolls,
+                scroll_settle_ms=scroll_settle_ms,
+                action_skipped=True,
+                duration_ms=context.elapsed_ms(started),
+            )
+
     blocked = _zero_distance_blocked(source=source, path=path, drop=drop)
     if blocked is not None:
         return _with_duration(blocked, context=context, started=started)
+
+    if ensure_visible:
+        ensure_visible_result = await context.call_adapter(
+            "ui.grid.ensure_visible",
+            selector=dict(source["selector"]),
+            row=_ensure_visible_row(source),
+            identity=identity,
+            rows=rows,
+            columns=columns,
+            max_scrolls=max_scrolls,
+            scroll_settle_ms=scroll_settle_ms,
+        )
+        non_object_failure = _object_only_adapter_failure(
+            ensure_visible_result,
+            reason="grid ensure-visible returned non-object result",
+            raw_key="ensure_visible_result",
+        )
+        if non_object_failure is not None:
+            non_object_failure["action_skipped"] = True
+            return _action_result(
+                non_object_failure,
+                source=source,
+                path=path,
+                drop=drop,
+                modifiers=modifiers,
+                cancel=cancel,
+                identity=identity,
+                expect=dict(action.get("expect") or {}),
+                ensure_visible=True,
+                max_scrolls=max_scrolls,
+                scroll_settle_ms=scroll_settle_ms,
+                ensure_visible_result=ensure_visible_result,
+                action_skipped=True,
+                duration_ms=context.elapsed_ms(started),
+            )
+        if not _is_adapter_success(ensure_visible_result):
+            result = dict(ensure_visible_result)
+            status = _terminal_failure_status(str(result.get("status", "BLOCKED")).upper())
+            result["status"] = status
+            result["ensure_visible_result"] = ensure_visible_result
+            result["action_skipped"] = True
+            return _action_result(
+                result,
+                source=source,
+                path=path,
+                drop=drop,
+                modifiers=modifiers,
+                cancel=cancel,
+                identity=identity,
+                expect=dict(action.get("expect") or {}),
+                ensure_visible=True,
+                max_scrolls=max_scrolls,
+                scroll_settle_ms=scroll_settle_ms,
+                ensure_visible_result=ensure_visible_result,
+                action_skipped=True,
+                duration_ms=context.elapsed_ms(started),
+            )
 
     result = await context.call_adapter(
         "ui.drag",
@@ -66,6 +149,10 @@ async def handle_ui_drag(
         cancel=cancel,
         identity=identity,
         expect=dict(action.get("expect") or {}),
+        ensure_visible=ensure_visible,
+        max_scrolls=max_scrolls,
+        scroll_settle_ms=scroll_settle_ms,
+        ensure_visible_result=ensure_visible_result,
         duration_ms=context.elapsed_ms(started),
     )
 
@@ -179,6 +266,41 @@ def _identity_from_action(action: dict[str, Any]) -> tuple[dict[str, Any], dict[
             next_step="Provide identity as an object when row identity evidence is required.",
         )
     return dict(raw_identity), None
+
+
+def _mapping_from_action(action: dict[str, Any], key: str) -> dict[str, Any]:
+    value = action.get(key)
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _list_from_action(action: dict[str, Any], key: str) -> list[Any]:
+    value = action.get(key)
+    return list(value) if isinstance(value, list) else []
+
+
+def _ensure_visible_source_blocked(source: dict[str, Any]) -> dict[str, Any] | None:
+    if source.get("kind") in {"row_index", "row_identity"}:
+        return None
+    return _blocked(
+        reason="ensure-visible requires a DataGrid row drag source",
+        requested={"ensure_visible": True, "source": source},
+        accepted={
+            "source": [
+                "source.selector with source.row_index",
+                "source.selector with source.row_identity",
+            ],
+        },
+        next_step=(
+            "Use a row_index or row_identity drag source, or remove ensure_visible "
+            "for non-row drags."
+        ),
+    )
+
+
+def _ensure_visible_row(source: dict[str, Any]) -> dict[str, Any]:
+    if source.get("kind") == "row_index":
+        return {"index": source["row_index"]}
+    return {"identity": source["row_identity"]}
 
 
 def _row_index_from_source(source: dict[str, Any]) -> tuple[int, dict[str, Any] | None]:
@@ -345,6 +467,45 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
+def _is_adapter_success(result: Any) -> bool:
+    if not isinstance(result, Mapping):
+        return False
+    return str(result.get("status", "PASS")).upper() in {"PASS", "OK", "SUCCESS"}
+
+
+def _terminal_failure_status(adapter_status: str) -> str:
+    if adapter_status in {"FAIL", "BLOCKED", "IMPASSE"}:
+        return adapter_status
+    if adapter_status in {"UNSUPPORTED", "INVALID_SETUP"}:
+        return "BLOCKED"
+    return "FAIL"
+
+
+def _object_only_adapter_failure(
+    result: Any,
+    *,
+    reason: str,
+    raw_key: str,
+) -> dict[str, Any] | None:
+    if not isinstance(result, Mapping):
+        return {
+            "status": "BLOCKED",
+            "reason": reason,
+            raw_key: result,
+        }
+    if (
+        str(result.get("status", "PASS")).upper() == "PASS"
+        and "value" in result
+        and len(result) == 2
+    ):
+        return {
+            "status": "BLOCKED",
+            "reason": reason,
+            raw_key: result.get("value"),
+        }
+    return None
+
+
 def _action_result(
     result: dict[str, Any],
     *,
@@ -355,6 +516,11 @@ def _action_result(
     cancel: dict[str, Any],
     identity: dict[str, Any],
     expect: dict[str, Any],
+    ensure_visible: bool = False,
+    max_scrolls: Any = None,
+    scroll_settle_ms: Any = None,
+    ensure_visible_result: Any = None,
+    action_skipped: bool = False,
     duration_ms: int,
 ) -> dict[str, Any]:
     status = str(result.get("status", "PASS"))
@@ -377,6 +543,16 @@ def _action_result(
         output["identity"] = identity
     if cancel:
         output["cancel"] = cancel
+    if ensure_visible:
+        output["ensure_visible"] = True
+        if max_scrolls is not None:
+            output["max_scrolls"] = max_scrolls
+        if scroll_settle_ms is not None:
+            output["scroll_settle_ms"] = scroll_settle_ms
+    if ensure_visible_result is not None:
+        output["ensure_visible_result"] = compact_evidence(ensure_visible_result)
+    if action_skipped:
+        output["action_skipped"] = True
     if output["route_evidence"]:
         output["route_evidence"].setdefault("source", source)
         output["route_evidence"].setdefault("modifiers", modifiers)

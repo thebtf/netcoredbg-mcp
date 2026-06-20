@@ -228,8 +228,9 @@ def assert_drag_drop_docs_contract(plan: dict[str, Any]) -> None:
     assert validate_plan(plan) == []
 
     actions = _actions(plan)
-    drag_actions = [action for action in _actions(plan) if action.get("kind") == "ui.drag"]
+    drag_actions = [action for action in actions if action.get("kind") == "ui.drag"]
     assert drag_actions
+    assert not any(action.get("kind") == "ui.grid.ensure_visible" for action in actions)
     assert any(action.get("source", {}).get("row_identity") for action in drag_actions)
     assert all(action.get("identity", {}).get("column") for action in drag_actions)
     first_row_drag_index, first_row_drag = next(
@@ -240,14 +241,17 @@ def assert_drag_drop_docs_contract(plan: dict[str, Any]) -> None:
     first_drag_selector = first_row_drag.get("source", {}).get("selector")
     first_drag_identity = first_row_drag.get("source", {}).get("row_identity")
     first_drag_identity_column = first_row_drag.get("identity", {}).get("column")
-    assert any(
-        index < first_row_drag_index
-        and action.get("kind") == "ui.grid.ensure_visible"
-        and action.get("selector") == first_drag_selector
-        and action.get("row", {}).get("identity") == first_drag_identity
-        and action.get("identity", {}).get("column") == first_drag_identity_column
-        for index, action in enumerate(actions)
-    )
+    assert first_row_drag_index == 0
+    assert first_drag_selector
+    assert first_drag_identity
+    assert first_drag_identity_column
+    assert first_row_drag.get("ensure_visible") is True
+    assert first_row_drag.get("rows", {}).get("visible_only") is True
+    assert first_drag_identity_column in first_row_drag.get("columns", [])
+    assert isinstance(first_row_drag.get("max_scrolls"), int)
+    assert first_row_drag["max_scrolls"] > 0
+    assert isinstance(first_row_drag.get("scroll_settle_ms"), int)
+    assert first_row_drag["scroll_settle_ms"] > 0
     assert any(
         action.get("expect", {}).get("selected_payload_preserved") is True
         for action in drag_actions
@@ -374,14 +378,12 @@ def test_drag_drop_grid_example_rejects_missing_row_identity_checks() -> None:
         assert_drag_drop_docs_contract(plan)
 
 
-def test_drag_drop_grid_example_rejects_missing_ensure_visible_setup() -> None:
+def test_drag_drop_grid_example_rejects_missing_inline_ensure_visible_preflight() -> None:
     plan = copy.deepcopy(_load_example())
-    transitions = plan["cases"][0]["transitions"]
-    plan["cases"][0]["transitions"] = [
-        transition
-        for transition in transitions
-        if transition.get("action", {}).get("kind") != "ui.grid.ensure_visible"
-    ]
+    first_action = plan["cases"][0]["transitions"][0]["action"]
+    first_action.pop("ensure_visible", None)
+    first_action.pop("max_scrolls", None)
+    first_action.pop("scroll_settle_ms", None)
 
     with pytest.raises(AssertionError):
         assert_drag_drop_docs_contract(plan)
@@ -404,7 +406,7 @@ async def test_drag_drop_grid_example_runs_through_v2_parser_with_fake_ui_eviden
     assert "ui.grid.ensure_visible" in result["accepted_action_kinds"]
     assert "ui.drag" in result["accepted_action_kinds"]
     assert "ui.grid.viewport" in result["accepted_probe_kinds"]
-    assert result["action_count"] == 3
+    assert result["action_count"] == 2
     assert len(session.ensure_visible_requests) == 1
     assert len(session.drag_requests) == 2
     assert len(session.viewport_requests) == 4
