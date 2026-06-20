@@ -266,6 +266,7 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
     assert "CR-053" in row
     assert "CR-070" in row
     assert "CR-074" in row
+    assert "CR-089" in row
     assert 'ui_text(action="set_text")' in row
     assert 'ui_grid(action="viewport")' in row
     assert "ui.grid.ensure_visible" in row
@@ -387,6 +388,7 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "CR-075",
             "CR-076",
             "CR-077",
+            "CR-089",
             "PR #178",
             "PR #179",
             "PR #180",
@@ -397,22 +399,22 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "ui.grid.viewport",
             "drop.ensure_visible=true",
             "row-based drop endpoint",
-            "target-side offscreen row-target drag ensure-visible semantics",
+            "bounded target-side ensure-visible drag slice for offscreen row targets",
             "bounded broad-#270 replay-proof plus fail-closed source-anchor guard slice",
             "source-anchor-preserving offscreen row-target drag",
             "merged-state replay stabilization",
-            "drop-time evidence",
+            "drop-time diagnostics",
             "fresh automation-element bounds",
             "drop_origin_target",
             "drop_bounds_target",
+            "split/comment remaining-scope closure evidence",
             "actionable `BLOCKED` verdict when target-side realization hides the drag source",
-            "opt-in ensure-visible row actions",
+            "opt-in DataGrid row action ensure-visible composition",
             "ui.right_click_verified",
             "ui.double_click_verified",
-            "generic verified right/double-click slice",
             "right_click_row",
             "double_click_row",
-            "DataGrid offscreen/scroll action semantics",
+            "remaining helper/downstream replay lifecycle tail",
         ],
         "#271": [
             "CR-019",
@@ -587,6 +589,7 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "CR-075",
             "CR-076",
             "CR-077",
+            "CR-089",
             "PR #178",
             "PR #179",
             "PR #180",
@@ -615,7 +618,8 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "fresh automation-element bounds",
             "drop_origin_target",
             "drop_bounds_target",
-            "DataGrid offscreen/scroll action semantics",
+            "split/comment remaining-scope closure evidence",
+            "already-covered CR-057/058/070/071/072/074/075/076/077",
         ],
         "#271": [
             "commented",
@@ -1217,10 +1221,12 @@ def test_issue_270_records_cr070_ensure_visible_viewport_delta_slice() -> None:
         assert "ui.grid.ensure_visible" in text
         assert "ensure_visible_result" in text
 
-    assert "viewport-delta evidence" in remaining
-    assert "viewport-delta evidence" in lifecycle_remaining
-    assert "broader" in remaining
-    assert "broader" in lifecycle_remaining
+    assert "viewport-delta evidence" not in remaining
+    assert "viewport-delta evidence" not in lifecycle_remaining
+    assert "helper/downstream replay lifecycle tail" in remaining
+    assert "helper/downstream replay lifecycle tail" in lifecycle_remaining
+    assert "split/comment closure territory" in remaining
+    assert "split/comment closure territory" in lifecycle_remaining
 
 
 def test_issue_270_records_cr071_assert_range_slice_without_broad_closure() -> None:
@@ -1238,10 +1244,12 @@ def test_issue_270_records_cr071_assert_range_slice_without_broad_closure() -> N
         assert "ui.grid.assert_range" in text
         assert "selector/start_index/end_index" in text
 
-    assert "assert-range parity" in remaining
-    assert "assert-range parity" in lifecycle_remaining
-    assert "broader" in remaining
-    assert "broader" in lifecycle_remaining
+    assert "assert-range parity" not in remaining
+    assert "assert-range parity" not in lifecycle_remaining
+    assert "helper/downstream replay lifecycle tail" in remaining
+    assert "helper/downstream replay lifecycle tail" in lifecycle_remaining
+    assert "split/comment closure territory" in remaining
+    assert "split/comment closure territory" in lifecycle_remaining
 
 
 def test_issue_270_records_cr072_drag_ensure_visible_slice_without_broad_closure() -> None:
@@ -1261,10 +1269,12 @@ def test_issue_270_records_cr072_drag_ensure_visible_slice_without_broad_closure
         assert "row_identity" in text
         assert "inline docs parity" in text
 
-    assert "drag-source ensure-visible preflight" in remaining
-    assert "drag-source ensure-visible preflight" in lifecycle_remaining
-    assert "broader" in remaining
-    assert "broader" in lifecycle_remaining
+    assert "drag-source ensure-visible preflight" not in remaining
+    assert "drag-source ensure-visible preflight" not in lifecycle_remaining
+    assert "helper/downstream replay lifecycle tail" in remaining
+    assert "helper/downstream replay lifecycle tail" in lifecycle_remaining
+    assert "split/comment closure territory" in remaining
+    assert "split/comment closure territory" in lifecycle_remaining
 
 
 def test_issue_270_records_cr074_target_drop_ensure_visible_slice_without_broad_closure() -> None:
@@ -1284,13 +1294,15 @@ def test_issue_270_records_cr074_target_drop_ensure_visible_slice_without_broad_
         assert "drop.ensure_visible=true" in text
         assert "raw viewport guessing" in text
 
-    assert "target-side offscreen row-target drag ensure-visible semantics" in remaining
+    assert "target-side offscreen row-target drag ensure-visible semantics" not in remaining
     assert (
         "target-side offscreen row-target drag ensure-visible semantics"
-        in lifecycle_remaining
+        not in lifecycle_remaining
     )
-    assert "broader" in remaining
-    assert "broader" in lifecycle_remaining
+    assert "helper/downstream replay lifecycle tail" in remaining
+    assert "helper/downstream replay lifecycle tail" in lifecycle_remaining
+    assert "split/comment closure territory" in remaining
+    assert "split/comment closure territory" in lifecycle_remaining
 
 
 def test_issue_270_records_cr075_docs_evidence_replay_proof_without_broad_closure() -> None:
@@ -1327,14 +1339,16 @@ def test_issue_270_records_cr075_docs_evidence_replay_proof_without_broad_closur
             or "keep open or split" in text
         )
 
-    expected_remaining = (
-        "live downstream replay tails beyond the CR-075/CR-076/CR-077 replay, "
-        "stability, and drop-time evidence contract"
-    )
+    expected_remaining = "helper/downstream replay lifecycle tail"
     assert expected_remaining in remaining
     assert expected_remaining in lifecycle_remaining
-    assert "broader" in remaining
-    assert "broader" in lifecycle_remaining
+    assert "live downstream replay tails beyond the CR-075/CR-076/CR-077 replay" not in remaining
+    assert (
+        "live downstream replay tails beyond the CR-075/CR-076/CR-077 replay"
+        not in lifecycle_remaining
+    )
+    assert "split/comment closure territory" in remaining
+    assert "split/comment closure territory" in lifecycle_remaining
 
 
 def test_issue_270_records_cr076_cr077_replay_reconciliation_without_broad_closure() -> None:
@@ -1352,22 +1366,62 @@ def test_issue_270_records_cr076_cr077_replay_reconciliation_without_broad_closu
         assert "CR-077 / PR #180" in text
         assert "source-anchor-preserving offscreen row-target drag" in text
         assert "merged-state replay stabilization" in text
-        assert "drop-time evidence" in text
+        assert "drop-time evidence" in text or "drop-time diagnostics" in text
         assert "fresh automation-element bounds" in text
         assert "drop_origin_target" in text
         assert "drop_bounds_target" in text
         assert "Fixture cue nineteen" in text
 
-    expected_remaining = (
-        "live downstream replay tails beyond the CR-075/CR-076/CR-077 replay, "
-        "stability, and drop-time evidence contract"
-    )
+    expected_remaining = "helper/downstream replay lifecycle tail"
     assert expected_remaining in remaining
     assert expected_remaining in lifecycle_remaining
-    assert "broader" in remaining
-    assert "broader" in lifecycle_remaining
+    assert "live downstream replay tails beyond the CR-075/CR-076/CR-077 replay" not in remaining
+    assert (
+        "live downstream replay tails beyond the CR-075/CR-076/CR-077 replay"
+        not in lifecycle_remaining
+    )
     assert "before closing" in remaining
     assert "before closing" in lifecycle_remaining
+
+
+def test_issue_270_records_cr089_split_remaining_scope_after_replay_stabilization() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#270")
+    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#270")
+    _issue, _state, _evidence, remaining = _issue_cells(backlog, "#270")
+    _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
+        cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
+    )
+
+    for text in (row, lifecycle_row):
+        assert "CR-089" in text
+        assert "split/comment remaining-scope closure evidence" in text
+        assert "already-covered CR-057/058/070/071/072/074/075/076/077" in text
+        assert "open runtime work" in text
+
+    for clause in (
+        _clause_containing(row, "CR-089"),
+        _clause_containing(lifecycle_row, "CR-089"),
+    ):
+        assert "#269" not in clause
+        assert "#272" not in clause
+        assert "app diagnostics" not in clause
+        assert "runtime_smoke_mark_event_cursor" not in clause
+        assert "runtime_smoke_run_probe" not in clause
+
+    assert "broader FR remains open" in row
+    assert "keep open" in lifecycle_row
+    for tail in (remaining, lifecycle_remaining):
+        assert "helper/downstream replay lifecycle tail" in tail
+        assert "split/comment closure territory" in tail
+        assert "before closing the full FR" in tail
+        assert "right_click_row" not in tail
+        assert "double_click_row" not in tail
+        assert "drop_origin_target" not in tail
+        assert "drop_bounds_target" not in tail
+        assert "assert-range parity" not in tail
+        assert "target-side offscreen row-target drag ensure-visible semantics" not in tail
+        assert "live downstream replay tails beyond the CR-075/CR-076/CR-077 replay" not in tail
 
 
 def test_issue_271_272_record_cr048_app_diagnostics_freshness_slice() -> None:
