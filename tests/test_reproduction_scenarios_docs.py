@@ -383,9 +383,11 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "CR-048",
             "CR-050",
             "CR-051",
+            "CR-067",
             "DISAGREEING_SOURCES",
             "launch env/evidence-dir advertisement",
             "launch-to-artifact default acquisition",
+            "launch-directory fallback",
             "evidence-directory poll",
             "wait-json condition semantics",
             "remaining broader app diagnostics lifecycle/orchestration",
@@ -651,6 +653,25 @@ def test_issue_272_records_cr056_app_diagnostics_poll_cursor_slice() -> None:
     assert "poll cursor" in lifecycle_remaining
     assert "broader app diagnostics lifecycle/orchestration" in remaining
     assert "broader app diagnostics lifecycle/orchestration" in lifecycle_remaining
+
+
+def test_issue_272_records_cr067_launch_directory_fallback_slice() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#272")
+    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#272")
+    _issue, _state, _evidence, remaining = _issue_cells(backlog, "#272")
+    _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
+        cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
+    )
+
+    for text in (row, lifecycle_row):
+        assert "CR-067" in text
+        assert "launch-directory fallback" in text
+        assert "explicit `wait_json` / `poll` precedence" in text or "explicit source precedence" in text
+        assert "stale pre-existing directory artifacts" in text
+
+    assert "launch-directory fallback" in remaining
+    assert "launch-directory fallback" in lifecycle_remaining
 
 
 def test_issue_271_272_record_cr048_app_diagnostics_freshness_slice() -> None:
