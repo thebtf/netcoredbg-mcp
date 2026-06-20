@@ -1480,6 +1480,35 @@ async def test_runtime_smoke_run_probe_starts_app_diagnostics_probe_run(
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_run_probe_agent_mode_active_app_diagnostics_routes_to_delta(
+    capturing_mcp,
+) -> None:
+    session = RunProbeFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_run_probe"](
+        ctx=None,
+        probe=_app_diagnostics_probe(),
+        name="app-diagnostics-agent-probe",
+        agent_mode=True,
+    )
+    data = response["data"]
+    agent = data["agent_mode"]
+    expected_source_cursor = {"after_index": 0, "entry_count": 0}
+
+    assert data["status"] == "RUNNING"
+    assert data["run_created"] is True
+    assert data["probe"]["kind"] == "app_diagnostics"
+    assert agent["primary_next_action"] == "runtime_smoke_get_event_delta"
+    assert agent["cursor"]["sources"]["app_diagnostics"] == expected_source_cursor
+    assert agent["next_request"]["tool"] == "runtime_smoke_get_event_delta"
+    assert (
+        agent["next_request"]["arguments"]["cursor"]["sources"]["app_diagnostics"]
+        == expected_source_cursor
+    )
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_run_probe_reads_external_app_diagnostics_directory(
     capturing_mcp,
     tmp_path: Path,
