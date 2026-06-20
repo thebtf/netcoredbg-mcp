@@ -149,6 +149,14 @@ class ActiveAppDiagnosticsProgressRegistry:
         return {"after_index": 1, "entry_count": 1}
 
 
+class EmptyActiveAppDiagnosticsCursorRegistry(ActiveAppDiagnosticsProgressRegistry):
+    async def get_app_diagnostics_source_cursor(
+        self,
+        run_id: str,
+    ) -> dict[str, int] | None:
+        return {"after_index": 0, "entry_count": 0}
+
+
 class CompletesBetweenResultAndTailRegistry:
     def __init__(self) -> None:
         self.get_result_calls = 0
@@ -484,6 +492,42 @@ async def test_runtime_smoke_wait_for_result_agent_mode_guides_active_app_diagno
         },
     }
     assert registry.tail_calls
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_wait_for_result_agent_mode_keeps_wait_for_empty_app_diagnostics_cursor(
+    capturing_mcp,
+) -> None:
+    session = WaitFacadeSession()
+    registry = EmptyActiveAppDiagnosticsCursorRegistry()
+    session.runtime_smoke.lifecycle_runs = registry
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_wait_for_result"](
+        ctx=None,
+        run_id="active-appdiag-run",
+        timeout_ms=1,
+        poll_interval_ms=1,
+        after_cursor=0,
+        event_limit=5,
+        agent_mode=True,
+    )
+    data = response["data"]
+    agent = data["agent_mode"]
+
+    assert data["status"] == "BLOCKED"
+    assert data["reason"] == "runtime smoke wait timed out"
+    assert data["final"] is False
+    assert agent["primary_next_action"] == "runtime_smoke_wait_for_result"
+    assert agent["next_request"] == {
+        "tool": "runtime_smoke_wait_for_result",
+        "arguments": {
+            "run_id": "active-appdiag-run",
+            "after_cursor": 7,
+            "agent_mode": True,
+            "event_limit": 20,
+        },
+    }
 
 
 @pytest.mark.asyncio

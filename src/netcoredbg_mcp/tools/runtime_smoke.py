@@ -589,13 +589,18 @@ def register_runtime_smoke_tools(
                     if isinstance(event_cursor, dict)
                     else None
                 )
-                has_app_diagnostics_source = (
-                    isinstance(event_cursor_sources, dict)
-                    and "app_diagnostics" in event_cursor_sources
+                app_diagnostics_source = (
+                    event_cursor_sources.get("app_diagnostics")
+                    if isinstance(event_cursor_sources, dict)
+                    else None
+                )
+                has_app_diagnostics_entries = (
+                    isinstance(app_diagnostics_source, dict)
+                    and int(app_diagnostics_source.get("entry_count", 0) or 0) > 0
                 )
                 primary = (
                     "runtime_smoke_get_event_delta"
-                    if data.get("final") or has_app_diagnostics_source
+                    if data.get("final") or has_app_diagnostics_entries
                     else "runtime_smoke_wait_for_result"
                 )
                 _apply_runtime_smoke_agent_mode(data, primary)
