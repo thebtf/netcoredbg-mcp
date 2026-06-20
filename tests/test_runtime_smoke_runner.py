@@ -3647,6 +3647,85 @@ async def test_ui_operation_adapters_drag_passes_cancel_to_path_backend() -> Non
 
 
 @pytest.mark.asyncio
+async def test_ui_operation_adapters_drag_keeps_cancel_on_offscreen_row_target_path() -> None:
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.cancel_key: str | None = None
+            self.grid_drag_row_to_row_calls = 0
+
+        async def grid_snapshot(
+            self,
+            selector: dict[str, Any],
+            rows: dict[str, Any] | None = None,
+            columns: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "row_count": 3,
+                "visible_rows": [
+                    {
+                        "index": 1,
+                        "bounds": {"x": 10, "y": 60, "width": 120, "height": 30},
+                        "cells": {"Phrase": "Cue source"},
+                    },
+                    {
+                        "index": 2,
+                        "bounds": {"x": 10, "y": 100, "width": 120, "height": 30},
+                        "cells": {"Phrase": "Cue target"},
+                    },
+                ],
+            }
+
+        async def drag_path(
+            self,
+            points: list[dict[str, Any]],
+            speed_ms: int = 200,
+            hold_modifiers: list[str] | None = None,
+            cancel_key: str | None = None,
+        ) -> dict[str, Any]:
+            self.cancel_key = cancel_key
+            return {
+                "status": "PASS",
+                "path_points": points,
+                "final_pointer": points[-1],
+                "modifier_cleanup": {"released": []},
+                "pointer_cleanup": {"left_button_released": True},
+                "no_op": {"expected": True, "reason": "cancelled"},
+                "cancel": {"key": cancel_key, "sent": True},
+            }
+
+        async def grid_drag_row_to_row(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            self.grid_drag_row_to_row_calls += 1
+            return {"status": "FAIL", "reason": "unexpected grid row-to-row path"}
+
+    backend = FakeBackend()
+
+    async def backend_provider() -> FakeBackend:
+        return backend
+
+    result = await ui_operation_adapters(backend_provider)["ui.drag"](
+        source={"selector": {"automation_id": "dataGrid"}, "row_identity": "Cue source"},
+        path=[
+            {"relative_to": "source", "x": 0.5, "y": 0.5},
+            {"relative_to": "drop", "x": 0.5, "y": 0.5},
+        ],
+        drop={
+            "selector": {"automation_id": "dataGrid"},
+            "row_identity": "Cue target",
+            "ensure_visible": True,
+        },
+        cancel={"key": "escape"},
+        expect={"no_op": True, "no_op_reason": "cancelled"},
+    )
+
+    assert result["status"] == "PASS"
+    assert backend.grid_drag_row_to_row_calls == 0
+    assert backend.cancel_key == "escape"
+    assert result["cancel"] == {"key": "escape", "sent": True}
+    assert result["no_op"]["reason"] == "cancelled"
+
+
+@pytest.mark.asyncio
 async def test_grid_select_indices_uses_grid_select_range_for_contiguous_indices() -> None:
     class FakeBackend:
         async def grid_select_range(

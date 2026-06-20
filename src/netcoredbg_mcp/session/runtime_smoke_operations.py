@@ -871,10 +871,14 @@ def ui_operation_adapters(
                 return blocked
 
         grid_drag_row_to_row = getattr(backend, "grid_drag_row_to_row", None)
-        if callable(grid_drag_row_to_row) and _should_use_grid_row_to_row_drag(
+        if (
+            cancel_key is None
+            and callable(grid_drag_row_to_row)
+            and _should_use_grid_row_to_row_drag(
             source=source,
             path=path,
             drop=drop,
+        )
         ):
             source_row_index, source_row_key = _grid_row_drag_request(source)
             target_row_index, target_row_key = _grid_row_drag_request(drop)

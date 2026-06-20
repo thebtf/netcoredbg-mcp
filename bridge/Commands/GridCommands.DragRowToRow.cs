@@ -156,7 +156,7 @@ public static partial class GridCommands
 
             if (targetMatch is null)
             {
-                var targetScan = ScanForRowWithHeldDragNearEdge(
+                var targetScan = ScanForRowWithHeldDrag(
                     grid,
                     automation,
                     columns,
@@ -428,6 +428,51 @@ public static partial class GridCommands
         return new RowSearchResult(null, null, attempts);
     }
 
+    private static RowSearchResult ScanForRowWithHeldDrag(
+        AutomationElement grid,
+        UIA3Automation automation,
+        List<string> columns,
+        List<string> headers,
+        int? rowIndex,
+        string? rowKey,
+        DragScrollDirection preferredDirection,
+        int maxScrolls,
+        int holdMs)
+    {
+        var primary = ScanForRowWithHeldDragNearEdge(
+            grid,
+            automation,
+            columns,
+            headers,
+            rowIndex,
+            rowKey,
+            preferredDirection,
+            maxScrolls,
+            holdMs);
+        if (primary.Blocked is not null || primary.Match is not null)
+            return primary;
+
+        if (rowIndex is not null || string.IsNullOrWhiteSpace(rowKey))
+            return primary;
+
+        var secondary = ScanForRowWithHeldDragNearEdge(
+            grid,
+            automation,
+            columns,
+            headers,
+            rowIndex,
+            rowKey,
+            ReverseDragScrollDirection(preferredDirection),
+            maxScrolls,
+            holdMs);
+        AppendAttempts(primary.Attempts, secondary.Attempts);
+        if (secondary.Blocked is not null)
+            return new RowSearchResult(null, secondary.Blocked, primary.Attempts);
+        if (secondary.Match is not null)
+            return new RowSearchResult(secondary.Match, null, primary.Attempts);
+        return new RowSearchResult(null, null, primary.Attempts);
+    }
+
     private static Point EdgeScrollPoint(JsonObject gridBounds, DragScrollDirection direction)
     {
         var x = gridBounds["x"]?.GetValue<int>() ?? 0;
@@ -440,6 +485,13 @@ public static partial class GridCommands
             : RowDragEdgeScrollUpRatio;
         var edgeY = y + (int)Math.Round((height - 1) * ratio);
         return new Point(centerX, edgeY);
+    }
+
+    private static DragScrollDirection ReverseDragScrollDirection(DragScrollDirection direction)
+    {
+        return direction == DragScrollDirection.Down
+            ? DragScrollDirection.Up
+            : DragScrollDirection.Down;
     }
 
     private static Point NeutralViewportPoint(JsonObject gridBounds)

@@ -748,6 +748,8 @@ def test_bridge_grid_builds_cell_text_evidence_for_rows() -> None:
     assert "public static JsonNode RightClickRow(" in command
     assert "public static JsonNode DoubleClickRow(" in command
     assert "public static JsonNode DragRowToRow(" in command
+    assert "private static RowSearchResult ScanForRowWithHeldDrag(" in command
+    assert "private static DragScrollDirection ReverseDragScrollDirection(" in command
     assert "public static JsonNode EnsureVisible(" in command
     assert "ScrollIntoView()" in command
     assert "ScanForRowWithBoundedScroll" in command
