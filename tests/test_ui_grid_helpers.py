@@ -361,6 +361,42 @@ async def test_ensure_grid_row_visible_returns_already_visible_without_backend_r
         "index": 1,
         "identity": "Fixture cue two",
     }
+    assert result["viewport_delta"] == {
+        "before": {
+            "first_visible_index": 0,
+            "last_visible_index": 1,
+            "visible_rows": [
+                {"index": 0, "identity": "Fixture cue one"},
+                {"index": 1, "identity": "Fixture cue two"},
+            ],
+            "identity_strategy": {
+                "kind": "configured_column",
+                "column": "Phrase",
+                "derived": True,
+            },
+            "row_count": 3,
+        },
+        "after": {
+            "first_visible_index": 0,
+            "last_visible_index": 1,
+            "visible_rows": [
+                {"index": 0, "identity": "Fixture cue one"},
+                {"index": 1, "identity": "Fixture cue two"},
+            ],
+            "identity_strategy": {
+                "kind": "configured_column",
+                "column": "Phrase",
+                "derived": True,
+            },
+            "row_count": 3,
+        },
+        "comparison": {
+            "first_visible_index_changed": False,
+            "last_visible_index_changed": False,
+            "viewport_moved": False,
+            "direction": "unchanged",
+        },
+    }
     assert ("snapshot", {"automation_id": "CueGrid"}) in backend.calls
 
 

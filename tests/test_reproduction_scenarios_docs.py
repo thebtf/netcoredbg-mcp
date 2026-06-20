@@ -247,8 +247,11 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
     assert "CR-032" in row
     assert "CR-052" in row
     assert "CR-053" in row
+    assert "CR-070" in row
     assert 'ui_text(action="set_text")' in row
     assert 'ui_grid(action="viewport")' in row
+    assert "ui.grid.ensure_visible" in row
+    assert "viewport_delta.before" in row
     assert "opt-in DataGrid row action ensure-visible composition" in row
     assert "visible-row-only defaults" in row
     assert "ui.text.read" in row
@@ -677,6 +680,28 @@ def test_issue_272_records_cr067_launch_directory_fallback_slice() -> None:
 
     assert "launch-directory fallback" in remaining
     assert "launch-directory fallback" in lifecycle_remaining
+
+
+def test_issue_270_records_cr070_ensure_visible_viewport_delta_slice() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#270")
+    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#270")
+    _issue, _state, _evidence, remaining = _issue_cells(backlog, "#270")
+    _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
+        cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
+    )
+
+    for text in (row, lifecycle_row):
+        assert "CR-070" in text
+        assert "viewport_delta.before" in text
+        assert "comparison" in text
+        assert "ui.grid.ensure_visible" in text
+        assert "ensure_visible_result" in text
+
+    assert "viewport-delta evidence" in remaining
+    assert "viewport-delta evidence" in lifecycle_remaining
+    assert "broader" in remaining
+    assert "broader" in lifecycle_remaining
 
 
 def test_issue_271_272_record_cr048_app_diagnostics_freshness_slice() -> None:

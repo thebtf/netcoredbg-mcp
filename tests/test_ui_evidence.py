@@ -2823,6 +2823,38 @@ async def test_ui_grid_ensure_visible_realizes_identity_and_confirms_visible(
         "row_index": 42,
         "identity": "Cue 042",
     }
+    assert response["data"]["viewport_delta"] == {
+        "before": {
+            "first_visible_index": 18,
+            "last_visible_index": 18,
+            "visible_rows": [
+                {"index": 0, "row_index": 18, "identity": "Cue 018"},
+            ],
+            "identity_strategy": {
+                "kind": "configured_column",
+                "column": "PhraseId",
+                "derived": True,
+            },
+        },
+        "after": {
+            "first_visible_index": 42,
+            "last_visible_index": 42,
+            "visible_rows": [
+                {"index": 0, "row_index": 42, "identity": "Cue 042"},
+            ],
+            "identity_strategy": {
+                "kind": "configured_column",
+                "column": "PhraseId",
+                "derived": True,
+            },
+        },
+        "comparison": {
+            "first_visible_index_changed": True,
+            "last_visible_index_changed": True,
+            "viewport_moved": True,
+            "direction": "down",
+        },
+    }
     assert response["data"]["requested_action"] == "ensure_visible"
     assert response["data"]["canonical_action"] == "ensure_visible"
     assert backend.ensure_calls == [
@@ -2935,6 +2967,38 @@ async def test_ui_grid_click_row_can_opt_in_to_ensure_visible(
         "realized": True,
         "already_visible": False,
         "resolved_row": {"index": 0, "row_index": 42, "identity": "Cue 042"},
+        "viewport_delta": {
+            "before": {
+                "first_visible_index": 18,
+                "last_visible_index": 18,
+                "visible_rows": [
+                    {"index": 0, "row_index": 18, "identity": "Cue 018"},
+                ],
+                "identity_strategy": {
+                    "kind": "configured_column",
+                    "column": "PhraseId",
+                    "derived": True,
+                },
+            },
+            "after": {
+                "first_visible_index": 42,
+                "last_visible_index": 42,
+                "visible_rows": [
+                    {"index": 0, "row_index": 42, "identity": "Cue 042"},
+                ],
+                "identity_strategy": {
+                    "kind": "configured_column",
+                    "column": "PhraseId",
+                    "derived": True,
+                },
+            },
+            "comparison": {
+                "first_visible_index_changed": True,
+                "last_visible_index_changed": True,
+                "viewport_moved": True,
+                "direction": "down",
+            },
+        },
     }
     assert response["data"]["clicked"] is True
     assert response["data"]["resolved_row"] == {

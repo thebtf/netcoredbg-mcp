@@ -3923,6 +3923,38 @@ async def test_ui_operation_adapters_grid_select_row_can_opt_in_to_ensure_visibl
         "realized": True,
         "already_visible": False,
         "resolved_row": {"index": 0, "row_index": 42, "identity": "Cue 042"},
+        "viewport_delta": {
+            "before": {
+                "first_visible_index": 18,
+                "last_visible_index": 18,
+                "visible_rows": [
+                    {"index": 0, "row_index": 18, "identity": "Cue 018"},
+                ],
+                "identity_strategy": {
+                    "kind": "configured_column",
+                    "column": "PhraseId",
+                    "derived": True,
+                },
+            },
+            "after": {
+                "first_visible_index": 42,
+                "last_visible_index": 42,
+                "visible_rows": [
+                    {"index": 0, "row_index": 42, "identity": "Cue 042"},
+                ],
+                "identity_strategy": {
+                    "kind": "configured_column",
+                    "column": "PhraseId",
+                    "derived": True,
+                },
+            },
+            "comparison": {
+                "first_visible_index_changed": True,
+                "last_visible_index_changed": True,
+                "viewport_moved": True,
+                "direction": "down",
+            },
+        },
     }
     assert result["resolved_row"] == {
         "index": 0,
@@ -4249,6 +4281,38 @@ async def test_ui_operation_adapters_grid_click_row_can_opt_in_to_ensure_visible
         "realized": True,
         "already_visible": False,
         "resolved_row": {"index": 0, "row_index": 42, "identity": "Cue 042"},
+        "viewport_delta": {
+            "before": {
+                "first_visible_index": 18,
+                "last_visible_index": 18,
+                "visible_rows": [
+                    {"index": 0, "row_index": 18, "identity": "Cue 018"},
+                ],
+                "identity_strategy": {
+                    "kind": "configured_column",
+                    "column": "PhraseId",
+                    "derived": True,
+                },
+            },
+            "after": {
+                "first_visible_index": 42,
+                "last_visible_index": 42,
+                "visible_rows": [
+                    {"index": 0, "row_index": 42, "identity": "Cue 042"},
+                ],
+                "identity_strategy": {
+                    "kind": "configured_column",
+                    "column": "PhraseId",
+                    "derived": True,
+                },
+            },
+            "comparison": {
+                "first_visible_index_changed": True,
+                "last_visible_index_changed": True,
+                "viewport_moved": True,
+                "direction": "down",
+            },
+        },
     }
     assert result["resolved_row"] == {
         "index": 0,
@@ -4460,6 +4524,38 @@ async def test_ui_operation_adapters_grid_ensure_visible_confirms_after_backend_
         "index": 0,
         "row_index": 42,
         "identity": "Cue 042",
+    }
+    assert result["viewport_delta"] == {
+        "before": {
+            "first_visible_index": 18,
+            "last_visible_index": 18,
+            "visible_rows": [
+                {"index": 0, "row_index": 18, "identity": "Cue 018"},
+            ],
+            "identity_strategy": {
+                "kind": "configured_column",
+                "column": "PhraseId",
+                "derived": True,
+            },
+        },
+        "after": {
+            "first_visible_index": 42,
+            "last_visible_index": 42,
+            "visible_rows": [
+                {"index": 0, "row_index": 42, "identity": "Cue 042"},
+            ],
+            "identity_strategy": {
+                "kind": "configured_column",
+                "column": "PhraseId",
+                "derived": True,
+            },
+        },
+        "comparison": {
+            "first_visible_index_changed": True,
+            "last_visible_index_changed": True,
+            "viewport_moved": True,
+            "direction": "down",
+        },
     }
     assert backend.ensure_calls == [
         {
