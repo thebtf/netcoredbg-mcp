@@ -725,6 +725,29 @@ def test_issue_270_records_cr071_assert_range_slice_without_broad_closure() -> N
     assert "broader" in lifecycle_remaining
 
 
+def test_issue_270_records_cr072_drag_ensure_visible_slice_without_broad_closure() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#270")
+    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#270")
+    _issue, _state, _evidence, remaining = _issue_cells(backlog, "#270")
+    _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
+        cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
+    )
+
+    for text in (row, lifecycle_row):
+        assert "CR-072" in text
+        assert "ui.drag" in text
+        assert "ensure-visible preflight" in text
+        assert "row_index" in text
+        assert "row_identity" in text
+        assert "inline docs parity" in text
+
+    assert "drag-source ensure-visible preflight" in remaining
+    assert "drag-source ensure-visible preflight" in lifecycle_remaining
+    assert "broader" in remaining
+    assert "broader" in lifecycle_remaining
+
+
 def test_issue_271_272_record_cr048_app_diagnostics_freshness_slice() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
     row_271 = _issue_row(backlog, "#271")

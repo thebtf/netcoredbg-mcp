@@ -2076,6 +2076,279 @@ async def test_v2_ui_drag_distinguishes_source_forms_in_request_and_evidence() -
 
 
 @pytest.mark.asyncio
+async def test_v2_ui_drag_with_ensure_visible_calls_grid_preflight_before_drag() -> None:
+    session = ActionSmokeSession()
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "drag row source with ensure visible",
+            "cases": [
+                {
+                    "id": "drag_row_source_with_ensure_visible",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.drag",
+                                "source": {
+                                    "selector": {"automation_id": "CueDataGrid"},
+                                    "row_identity": "Cue 042",
+                                },
+                                "identity": {"column": "PhraseId"},
+                                "rows": {"visible_only": True, "max": 20},
+                                "columns": ["PhraseId"],
+                                "ensure_visible": True,
+                                "max_scrolls": 12,
+                                "scroll_settle_ms": 25,
+                                "path": [
+                                    {"relative_to": "source", "x": 0.5, "y": 0.5},
+                                    {"relative_to": "viewport", "x": 0.5, "y": 0.8},
+                                ],
+                                "drop": {"relative_to": "viewport", "x": 0.5, "y": 0.8},
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    ensure_calls = [
+        (index, call)
+        for index, call in enumerate(session.calls)
+        if call[0] == "grid_ensure_visible"
+    ]
+    drag_calls = [
+        (index, call) for index, call in enumerate(session.calls) if call[0] == "drag"
+    ]
+
+    assert result["status"] == "PASS"
+    assert action["route"] == "drag"
+    assert action["ensure_visible"] is True
+    assert len(ensure_calls) == 1
+    assert len(drag_calls) == 1
+    assert ensure_calls[0][0] < drag_calls[0][0]
+    assert ensure_calls[0][1][1]["selector"] == {"automation_id": "CueDataGrid"}
+    assert ensure_calls[0][1][1]["row"] == {"identity": "Cue 042"}
+    assert ensure_calls[0][1][1]["identity"] == {"column": "PhraseId"}
+    assert ensure_calls[0][1][1]["rows"] == {"visible_only": True, "max": 20}
+    assert ensure_calls[0][1][1]["columns"] == ["PhraseId"]
+    assert ensure_calls[0][1][1]["max_scrolls"] == 12
+    assert ensure_calls[0][1][1]["scroll_settle_ms"] == 25
+    assert drag_calls[0][1][1]["source"]["row_identity"] == "Cue 042"
+    assert action["ensure_visible_result"]["status"] == "PASS"
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_drag_without_ensure_visible_keeps_default_no_preflight_behavior() -> None:
+    session = ActionSmokeSession()
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "drag row source default no ensure visible",
+            "cases": [
+                {
+                    "id": "drag_row_source_default",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.drag",
+                                "source": {
+                                    "selector": {"automation_id": "CueDataGrid"},
+                                    "row_identity": "Cue 042",
+                                },
+                                "identity": {"column": "PhraseId"},
+                                "path": [
+                                    {"relative_to": "source", "x": 0.5, "y": 0.5},
+                                    {"relative_to": "viewport", "x": 0.5, "y": 0.8},
+                                ],
+                                "drop": {"relative_to": "viewport", "x": 0.5, "y": 0.8},
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    drag_call = next(call for call in session.calls if call[0] == "drag")
+
+    assert result["status"] == "PASS"
+    assert action["route"] == "drag"
+    assert "ensure_visible" not in action
+    assert "ensure_visible_result" not in action
+    assert not any(call[0] == "grid_ensure_visible" for call in session.calls)
+    assert drag_call[1]["source"]["row_identity"] == "Cue 042"
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_drag_ensure_visible_blocks_unsupported_preflight_before_drag() -> None:
+    session = ActionSmokeSession()
+    session.grid_ensure_visible_results = [
+        {
+            "status": "UNSUPPORTED",
+            "reason": "pywinauto grid backend cannot realize rows",
+        }
+    ]
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "drag row source ensure visible unsupported preflight",
+            "cases": [
+                {
+                    "id": "drag_row_source_ensure_visible_unsupported",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.drag",
+                                "source": {
+                                    "selector": {"automation_id": "CueDataGrid"},
+                                    "row_identity": "Cue 042",
+                                },
+                                "identity": {"column": "PhraseId"},
+                                "ensure_visible": True,
+                                "path": [
+                                    {"relative_to": "source", "x": 0.5, "y": 0.5},
+                                    {"relative_to": "viewport", "x": 0.5, "y": 0.8},
+                                ],
+                                "drop": {"relative_to": "viewport", "x": 0.5, "y": 0.8},
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    transition = result["cases"][0]["transitions"][0]
+
+    assert result["status"] == "BLOCKED"
+    assert transition["status"] == "BLOCKED"
+    assert action["status"] == "BLOCKED"
+    assert action["route"] == "drag"
+    assert action["action_skipped"] is True
+    assert action["reason"] == "pywinauto grid backend cannot realize rows"
+    assert action["ensure_visible_result"] == {
+        "status": "UNSUPPORTED",
+        "reason": "pywinauto grid backend cannot realize rows",
+    }
+    assert any(call[0] == "grid_ensure_visible" for call in session.calls)
+    assert not any(call[0] == "drag" for call in session.calls)
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_drag_ensure_visible_blocks_non_dict_preflight_result() -> None:
+    session = ActionSmokeSession()
+    session.grid_ensure_visible_results = ["not-a-dict"]  # type: ignore[list-item]
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "drag row source bad ensure visible result",
+            "cases": [
+                {
+                    "id": "drag_row_source_bad_ensure_visible_result",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.drag",
+                                "source": {
+                                    "selector": {"automation_id": "CueDataGrid"},
+                                    "row_index": 19,
+                                },
+                                "identity": {"column": "PhraseId"},
+                                "ensure_visible": True,
+                                "path": [
+                                    {"relative_to": "source", "x": 0.5, "y": 0.5},
+                                    {"relative_to": "viewport", "x": 0.5, "y": 0.8},
+                                ],
+                                "drop": {"relative_to": "viewport", "x": 0.5, "y": 0.8},
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+
+    assert result["status"] == "BLOCKED"
+    assert action["status"] == "BLOCKED"
+    assert action["route"] == "drag"
+    assert action["action_skipped"] is True
+    assert action["reason"] == "grid ensure-visible returned non-object result"
+    assert action["ensure_visible_result"] == {"status": "PASS", "value": "not-a-dict"}
+    assert any(call[0] == "grid_ensure_visible" for call in session.calls)
+    assert not any(call[0] == "drag" for call in session.calls)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        {"selector": {"automation_id": "CueDragHandle"}},
+        {"point": {"relative_to": "screen", "x": 25, "y": 40}},
+    ],
+)
+@pytest.mark.asyncio
+async def test_v2_ui_drag_ensure_visible_rejects_non_row_sources(
+    source: dict[str, Any],
+) -> None:
+    session = ActionSmokeSession()
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "drag ensure visible requires row source",
+            "cases": [
+                {
+                    "id": "drag_ensure_visible_requires_row_source",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.drag",
+                                "source": source,
+                                "ensure_visible": True,
+                                "path": [
+                                    {"relative_to": "source", "x": 0.5, "y": 0.5},
+                                    {"relative_to": "viewport", "x": 0.5, "y": 0.8},
+                                ],
+                                "drop": {"relative_to": "viewport", "x": 0.5, "y": 0.8},
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+
+    assert result["status"] == "BLOCKED"
+    assert action["status"] == "BLOCKED"
+    assert action["route"] == "drag"
+    assert action["reason"] == "ensure-visible requires a DataGrid row drag source"
+    expected_source = dict(source)
+    if "selector" in expected_source:
+        expected_source = {"kind": "selector", "selector": expected_source["selector"]}
+    else:
+        expected_source = {"kind": "point", "point": expected_source["point"]}
+    assert action["requested"] == {"ensure_visible": True, "source": expected_source}
+    assert not any(call[0] == "grid_ensure_visible" for call in session.calls)
+    assert not any(call[0] == "drag" for call in session.calls)
+
+
+@pytest.mark.asyncio
 async def test_v2_ui_drag_rejects_fractional_row_index() -> None:
     session = ActionSmokeSession()
 
