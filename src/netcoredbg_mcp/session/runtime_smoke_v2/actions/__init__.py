@@ -24,6 +24,9 @@ class ActionContext:
     clock: Callable[[], float]
     session: Any | None = None
     diagnostic_launch: dict[str, Any] | None = None
+    case_id: str | None = None
+    transition_index: int | None = None
+    app_diagnostics_progress_notifier: Callable[[dict[str, Any]], Any] | None = None
 
     async def call_adapter(self, name: str, **kwargs: Any) -> dict[str, Any]:
         adapter = self.service_adapters.get(name)
@@ -42,6 +45,17 @@ class ActionContext:
 
     def elapsed_ms(self, started: float) -> int:
         return int(max(0.0, self.clock() - started) * 1000)
+
+    async def publish_app_diagnostics_progress(self, entry: dict[str, Any]) -> None:
+        notifier = self.app_diagnostics_progress_notifier
+        if notifier is None:
+            return
+        try:
+            result = notifier(entry)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            pass
 
 
 def register_action(kind: str, handler: ActionHandler) -> None:

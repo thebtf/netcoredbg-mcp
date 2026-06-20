@@ -217,6 +217,91 @@ async def test_runtime_smoke_wait_for_result_returns_final_app_diagnostics_bundl
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_event_delta_streams_wait_json_progress_before_case_completion(
+    capturing_mcp,
+    tmp_path,
+) -> None:
+    session = WaitFacadeSession()
+    _register(capturing_mcp, session)
+    missing_path = tmp_path / "pending-app-diagnostics.json"
+
+    started = await capturing_mcp.tools["runtime_smoke_run_probe"](
+        ctx=None,
+        probe={
+            "kind": "app_diagnostics",
+            "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
+            "app": {"name": "WpfSmokeApp", "process_name": "dotnet"},
+            "status": "PASS",
+            "observations": [],
+            "redaction": {"omit_fields": ["raw_tree", "screenshot_base64", "secret"]},
+            "limits": {
+                "max_text_length": 240,
+                "max_list_items": 8,
+                "max_json_bytes": 32768,
+            },
+            "wait_json": {
+                "path": str(missing_path),
+                "timeout_ms": 500,
+                "poll_interval_ms": 20,
+            },
+        },
+        name="app-diagnostics-live-wait-json",
+    )
+    run_id = started["data"]["run_id"]
+
+    mark = await capturing_mcp.tools["runtime_smoke_mark_event_cursor"](
+        ctx=None,
+        run_id=run_id,
+        include_app_diagnostics=True,
+    )
+    assert mark["data"]["final"] is False
+    assert mark["data"]["cursor"]["sources"]["app_diagnostics"] == {
+        "after_index": 0,
+        "entry_count": 0,
+    }
+
+    await asyncio.sleep(0.06)
+
+    delta = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor=mark["data"]["cursor"],
+        event_limit=10,
+    )
+    data = delta["data"]
+
+    assert data["final"] is False
+    app_diagnostics = data["source_deltas"]["app_diagnostics"]
+    assert app_diagnostics["available"] >= 1
+    assert app_diagnostics["entries"][0] == {
+        "case_id": "run_probe",
+        "transition_index": 0,
+        "phase": "after",
+        "probe": "app_diagnostics",
+        "status": "RUNNING",
+        "reason": "waiting for app_diagnostics.wait_json",
+        "progress": {
+            "field": "wait_json",
+            "metadata": {
+                "path": str(missing_path),
+                "observed": False,
+                "polls": 1,
+                "timeout_ms": 500,
+            },
+        },
+        "evidence_ref": "diagnostic:app_diagnostics:WpfSmokeApp",
+    }
+    assert data["cursor"]["sources"]["app_diagnostics"]["after_index"] >= 1
+
+    await capturing_mcp.tools["runtime_smoke_wait_for_result"](
+        ctx=None,
+        run_id=run_id,
+        timeout_ms=1000,
+        poll_interval_ms=1,
+        event_limit=10,
+    )
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_wait_for_result_times_out_with_latest_cursor(
     capturing_mcp,
 ) -> None:

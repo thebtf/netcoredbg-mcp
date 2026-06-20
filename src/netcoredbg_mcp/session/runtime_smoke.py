@@ -133,12 +133,19 @@ class RuntimeSmokeRunner:
         self._service_adapters = dict(service_adapters or {})
         self._clock = clock
         self._case_progress_notifier: Callable[[dict[str, Any]], Any] | None = None
+        self._app_diagnostics_progress_notifier: Callable[[dict[str, Any]], Any] | None = None
 
     def attach_case_progress_notifier(
         self,
         notifier: Callable[[dict[str, Any]], Any] | None,
     ) -> None:
         self._case_progress_notifier = notifier
+
+    def attach_app_diagnostics_progress_notifier(
+        self,
+        notifier: Callable[[dict[str, Any]], Any] | None,
+    ) -> None:
+        self._app_diagnostics_progress_notifier = notifier
 
     async def run(self, plan: Any) -> dict[str, Any]:
         started = self._clock()
@@ -180,6 +187,7 @@ class RuntimeSmokeRunner:
                 service_adapters=self._service_adapters,
                 clock=self._clock,
                 case_progress_notifier=self._case_progress_notifier,
+                app_diagnostics_progress_notifier=self._app_diagnostics_progress_notifier,
             ).run(plan)
 
         budgets = _budgets(plan)
@@ -920,6 +928,17 @@ class RuntimeSmokeRunRegistry:
                 limit=limit,
             )
 
+    async def record_app_diagnostics_progress(
+        self,
+        run_id: str,
+        entry: dict[str, Any],
+    ) -> None:
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None or not record.app_diagnostics_source_enabled:
+                return
+            record.append_app_diagnostics_entries([entry])
+
     async def stop(
         self,
         run_id: str,
@@ -1144,6 +1163,15 @@ class RuntimeSmokeRunRegistry:
                     record.run_id,
                     case_result,
                 )
+            )
+        attach_app_diagnostics_progress_notifier = getattr(
+            runner,
+            "attach_app_diagnostics_progress_notifier",
+            None,
+        )
+        if callable(attach_app_diagnostics_progress_notifier):
+            attach_app_diagnostics_progress_notifier(
+                lambda entry: self.record_app_diagnostics_progress(record.run_id, entry)
             )
         try:
             result = await runner.run(plan)

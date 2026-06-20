@@ -81,12 +81,14 @@ class RuntimeStateOracleRunner:
         service_adapters: dict[str, Callable[..., Any]] | None = None,
         clock: Callable[[], float] = time.monotonic,
         case_progress_notifier: Callable[[dict[str, Any]], Any] | None = None,
+        app_diagnostics_progress_notifier: Callable[[dict[str, Any]], Any] | None = None,
     ) -> None:
         self._session = session
         self._service_adapters = dict(service_adapters or {})
         self._clock = clock
         self._diagnostic_launch: dict[str, Any] | None = None
         self._case_progress_notifier = case_progress_notifier
+        self._app_diagnostics_progress_notifier = app_diagnostics_progress_notifier
 
     async def run(self, plan: dict[str, Any]) -> dict[str, Any]:
         started = self._clock()
@@ -140,6 +142,7 @@ class RuntimeStateOracleRunner:
             clock=self._clock,
             session=self._session,
             diagnostic_launch=self._diagnostic_launch,
+            app_diagnostics_progress_notifier=self._app_diagnostics_progress_notifier,
         )
         try:
             budgets = _budgets_from_plan(plan)
@@ -194,6 +197,7 @@ class RuntimeStateOracleRunner:
                 clock=self._clock,
                 session=self._session,
                 diagnostic_launch=self._diagnostic_launch,
+                app_diagnostics_progress_notifier=self._app_diagnostics_progress_notifier,
             )
 
         case_results: list[dict[str, Any]] = []
