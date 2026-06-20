@@ -433,6 +433,34 @@ async def test_runtime_smoke_get_event_delta_returns_trace_source_delta(
         "drop_generation": 0,
     }
 
+    next_response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor=data["cursor"],
+        event_limit=1,
+    )
+    next_data = next_response["data"]
+
+    assert next_data["status"] == "PASS"
+    assert next_data["source_deltas"]["trace_source"] == {
+        "entries": [
+            {
+                "timestamp": 3.0,
+                "file": "b.cs",
+                "line": 20,
+                "expression": "other",
+                "value": "new-2",
+                "thread_id": 2,
+                "tracepoint_id": "tp-2",
+            }
+        ],
+        "available": 1,
+        "limit": 1,
+        "limited": False,
+        "stale_cursor": False,
+        "dropped_count": 0,
+        "truncated": False,
+    }
+
 
 @pytest.mark.asyncio
 async def test_runtime_smoke_get_event_delta_returns_debug_output_source_delta(

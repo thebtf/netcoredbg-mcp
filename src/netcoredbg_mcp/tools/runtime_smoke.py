@@ -1721,8 +1721,13 @@ def _runtime_smoke_parse_trace_source_cursor(
     after_timestamp = _runtime_smoke_parse_optional_float(
         trace_source.get("after_timestamp")
     )
-    global_after_timestamp = _runtime_smoke_parse_optional_float(
+    raw_global_after_timestamp = (
         trace_source.get("global_after_timestamp")
+        if "global_after_timestamp" in trace_source
+        else trace_source.get("after_timestamp")
+    )
+    global_after_timestamp = _runtime_smoke_parse_optional_float(
+        raw_global_after_timestamp
     )
     buffer_start_timestamp = _runtime_smoke_parse_optional_float(
         trace_source.get("buffer_start_timestamp")
@@ -1730,8 +1735,13 @@ def _runtime_smoke_parse_trace_source_cursor(
     after_ordinal = _runtime_smoke_parse_nonnegative_int(
         trace_source.get("after_ordinal")
     )
-    global_after_ordinal = _runtime_smoke_parse_nonnegative_int(
+    raw_global_after_ordinal = (
         trace_source.get("global_after_ordinal")
+        if "global_after_ordinal" in trace_source
+        else trace_source.get("after_ordinal")
+    )
+    global_after_ordinal = _runtime_smoke_parse_nonnegative_int(
+        raw_global_after_ordinal
     )
     buffer_size = _runtime_smoke_parse_nonnegative_int(trace_source.get("buffer_size"))
     append_generation = _runtime_smoke_parse_nonnegative_int(
