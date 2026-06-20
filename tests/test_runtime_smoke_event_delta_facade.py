@@ -122,6 +122,21 @@ class CursorFacadeRegistry:
         entry_count: int,
         limit: int,
     ) -> tuple[dict[str, Any], dict[str, int]] | None:
+        if run_id == "bool-available-run":
+            return (
+                {
+                    "entries": [],
+                    "available": True,
+                    "limit": limit,
+                    "limited": False,
+                    "stale_cursor": False,
+                    "dropped_count": 0,
+                },
+                {
+                    "after_index": after_index,
+                    "entry_count": entry_count,
+                },
+            )
         if run_id != "intracase-appdiag-run":
             return None
         entries = [_app_diagnostics_progress_entry()]
@@ -241,6 +256,17 @@ class CursorFacadeRegistry:
                 "final": False,
             }
         if run_id == "intracase-appdiag-run":
+            return {
+                "status": "RUNNING",
+                "run_id": run_id,
+                "events": [],
+                "next_cursor": 12,
+                "oldest_cursor": 12,
+                "dropped_count": 0,
+                "stale_cursor": False,
+                "final": False,
+            }
+        if run_id == "bool-available-run":
             return {
                 "status": "RUNNING",
                 "run_id": run_id,
@@ -1760,6 +1786,46 @@ async def test_runtime_smoke_get_event_delta_agent_mode_quiet_active_routes_to_w
             "run_id": "quiet-active-run",
             "agent_mode": True,
             "after_cursor": 20,
+            "event_limit": 20,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_get_event_delta_agent_mode_bool_available_stays_on_delta(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor={
+            "run_id": "bool-available-run",
+            "after_cursor": 12,
+            "sources": {
+                "app_diagnostics": {
+                    "after_index": 1,
+                    "entry_count": 1,
+                }
+            },
+        },
+        event_limit=5,
+        agent_mode=True,
+    )
+    data = response["data"]
+    agent = data["agent_mode"]
+
+    assert data["status"] == "PASS"
+    assert data["final"] is False
+    assert data["events"] == []
+    assert data["source_deltas"]["app_diagnostics"]["available"] is True
+    assert agent["primary_next_action"] == "runtime_smoke_get_event_delta"
+    assert agent["next_request"] == {
+        "tool": "runtime_smoke_get_event_delta",
+        "arguments": {
+            "cursor": agent["cursor"],
+            "agent_mode": True,
             "event_limit": 20,
         },
     }

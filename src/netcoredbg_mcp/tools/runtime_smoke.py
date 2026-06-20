@@ -2260,12 +2260,6 @@ def _apply_runtime_smoke_agent_mode(
         )
         return data
 
-    if (
-        primary_next_action == "runtime_smoke_get_event_delta"
-        and _runtime_smoke_agent_quiet_app_diagnostics_delta_should_wait(data)
-    ):
-        primary_next_action = "runtime_smoke_wait_for_result"
-
     cursor = _runtime_smoke_agent_cursor(data)
     run_id = _runtime_smoke_agent_run_id(data)
     next_request: dict[str, Any] | None = None
@@ -2671,7 +2665,7 @@ def _runtime_smoke_source_delta_has_entries(delta: Any) -> bool:
 
     available = delta.get("available")
     if isinstance(available, bool):
-        return False
+        return available
     if isinstance(available, int):
         return available > 0
     if isinstance(available, str):
