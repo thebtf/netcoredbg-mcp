@@ -752,6 +752,14 @@ def test_bridge_grid_builds_cell_text_evidence_for_rows() -> None:
     assert "private static DragScrollDirection ReverseDragScrollDirection(" in command
     assert "allowFallback: targetWasAlreadyVisible" in command
     assert "bool allowFallback = false" in command
+    assert '"actual_drop_point"' in command
+    assert '"pre_release_target_bounds"' in command
+    assert '"resolved_direction"' in command
+    assert '"drop_point_strategy"' in command
+    assert '"edge_scan_attempts"' in command
+    assert '"stabilization_attempts"' in command
+    assert '"drop_band_diagnostics"' in command
+    assert "private static JsonObject DropBandDiagnostics(" in command
     assert 'finalTargetPointResult.Blocked["cleanup"] = cleanup.DeepClone();' in command
     assert "public static JsonNode EnsureVisible(" in command
     assert "ScrollIntoView()" in command

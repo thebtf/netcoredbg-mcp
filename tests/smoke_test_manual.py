@@ -3806,6 +3806,8 @@ def _v2_offscreen_row_target_drag_summary(result: dict[str, Any]) -> dict[str, A
         "status_text": status,
         "source_identity_matches": status.get("source_identity") == expected_source,
         "target_identity_matches": status.get("target_identity") == expected_target,
+        "drop_origin_target_matches": status.get("drop_origin_target") == expected_target,
+        "drop_bounds_target_matches": status.get("drop_bounds_target") == expected_target,
         "target_visible_after_drop": target_visible_after_drop,
         "final_order_matches": order == expected_order,
         "route_evidence": {
@@ -3872,6 +3874,8 @@ def _v2_offscreen_row_target_drag_summary(result: dict[str, Any]) -> dict[str, A
         "PASS"
         if compact["source_identity_matches"]
         and compact["target_identity_matches"]
+        and compact["drop_origin_target_matches"]
+        and compact["drop_bounds_target_matches"]
         and compact["target_visible_after_drop"]
         and compact["final_order_matches"]
         and comparison.get("row_count_preserved") is True
@@ -4812,12 +4816,43 @@ def _moved_refs_by_identity(
 
 def _parse_drag_reorder_status(value: Any) -> dict[str, Any]:
     text = str(value or "")
+    blocked_match = re.search(
+        r"sourceIdentity=(.*?) targetIdentity=(.*?) "
+        r"dropPoint=(-?\d+),(-?\d+) "
+        r"dropOriginTarget=(.*?) dropBoundsTarget=(.*?) "
+        r"dropBoundsIndex=(-?\d+) dropBoundsTop=(-?\d+) dropBoundsBottom=(-?\d+)$",
+        text,
+    )
+    if blocked_match:
+        return {
+            "raw": text,
+            "source_identity": blocked_match.group(1),
+            "target_identity": blocked_match.group(2),
+            "selected_payload_mode": None,
+            "selected_payload_before": [],
+            "selected_payload_after": [],
+            "edge_scroll_direction": None,
+            "edge_first_visible": None,
+            "edge_last_visible": None,
+            "drop_point_x": int(blocked_match.group(3)),
+            "drop_point_y": int(blocked_match.group(4)),
+            "drop_origin_target": blocked_match.group(5),
+            "drop_bounds_target": blocked_match.group(6),
+            "drop_bounds_index": int(blocked_match.group(7)),
+            "drop_bounds_top": int(blocked_match.group(8)),
+            "drop_bounds_bottom": int(blocked_match.group(9)),
+            "order": [],
+        }
     match = re.search(
         r"sourceIdentity=(.*?) targetIdentity=(.*?) "
         r"(?:selectedPayloadMode=(.*?) selectedPayloadBefore=(.*?) "
         r"selectedPayloadAfter=(.*?) )?"
         r"edgeScrollDirection=(.*?) "
-        r"edgeFirstVisible=(-?\d+) edgeLastVisible=(-?\d+) orderFingerprint=(.*)$",
+        r"edgeFirstVisible=(-?\d+) edgeLastVisible=(-?\d+) "
+        r"(?:dropPoint=(-?\d+),(-?\d+) dropOriginTarget=(.*?) "
+        r"dropBoundsTarget=(.*?) dropBoundsIndex=(-?\d+) "
+        r"dropBoundsTop=(-?\d+) dropBoundsBottom=(-?\d+) )?"
+        r"orderFingerprint=(.*)$",
         text,
     )
     if not match:
@@ -4834,7 +4869,14 @@ def _parse_drag_reorder_status(value: Any) -> dict[str, Any]:
         "edge_scroll_direction": match.group(6),
         "edge_first_visible": int(match.group(7)),
         "edge_last_visible": int(match.group(8)),
-        "order": match.group(9).split(">") if match.group(9) else [],
+        "drop_point_x": int(match.group(9)) if match.group(9) else None,
+        "drop_point_y": int(match.group(10)) if match.group(10) else None,
+        "drop_origin_target": match.group(11) if match.group(11) else None,
+        "drop_bounds_target": match.group(12) if match.group(12) else None,
+        "drop_bounds_index": int(match.group(13)) if match.group(13) else None,
+        "drop_bounds_top": int(match.group(14)) if match.group(14) else None,
+        "drop_bounds_bottom": int(match.group(15)) if match.group(15) else None,
+        "order": match.group(16).split(">") if match.group(16) else [],
     }
 
 
@@ -4920,7 +4962,9 @@ async def test_wpf_v2_offscreen_row_target_drag_runtime_smoke():
     check(
         "WPF v2 offscreen row-target drag proved target row became visible",
         bool(evidence.get("target_visible_after_drop"))
-        and bool(evidence.get("target_identity_matches")),
+        and bool(evidence.get("target_identity_matches"))
+        and bool(evidence.get("drop_origin_target_matches"))
+        and bool(evidence.get("drop_bounds_target_matches")),
         str(evidence),
     )
     check(

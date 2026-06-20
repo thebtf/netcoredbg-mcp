@@ -27,8 +27,8 @@ public static partial class GridCommands
     private const int RowDragEdgeHoldPulseMs = 120;
     private const double RowDragEdgeScrollDownRatio = 0.96;
     private const double RowDragEdgeScrollUpRatio = 0.25;
-    private const double RowDragNeutralBandTopRatio = 0.34;
-    private const double RowDragNeutralBandBottomRatio = 0.80;
+    private const double RowDragNeutralBandTopRatio = 0.33;
+    private const double RowDragNeutralBandBottomRatio = 0.81;
     private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
     private const uint MOUSEEVENTF_LEFTUP = 0x0004;
 
@@ -139,6 +139,11 @@ public static partial class GridCommands
         RowMatch? targetMatch = targetSearchBeforeDrag.Match;
         JsonNode? targetEnsureVisibleResult = null;
         var targetWasAlreadyVisible = targetMatch is not null;
+        JsonArray edgeScanAttempts = targetSearchBeforeDrag.Attempts.DeepClone() as JsonArray ?? new JsonArray();
+        JsonArray stabilizationAttempts = new JsonArray();
+        Point? actualDropPoint = null;
+        JsonObject? preReleaseTargetBounds = null;
+        var dropPointStrategy = targetWasAlreadyVisible ? "visible-edge-fallback" : "neutral-band";
 
         ClickCommands.EnsureForeground(mainWindow);
         var stopwatch = Stopwatch.StartNew();
@@ -196,6 +201,7 @@ public static partial class GridCommands
                 else
                 {
                     targetMatch = targetScan.Match;
+                    edgeScanAttempts = targetScan.Attempts.DeepClone() as JsonArray ?? new JsonArray();
                     targetEnsureVisibleResult = new JsonObject
                     {
                         ["status"] = "PASS",
@@ -220,13 +226,69 @@ public static partial class GridCommands
 
             if (blockedResult is null && targetMatch is not null)
             {
+                if (!targetWasAlreadyVisible)
+                {
+                    var stabilizedTarget = StabilizeHeldDragTarget(
+                        grid,
+                        gridBounds,
+                        automation,
+                        columns,
+                        headers,
+                        targetRowIndex,
+                        targetRowKey,
+                        resolvedTargetDirection,
+                        Math.Max(settleMs, RowDragFinalDropSettleMs));
+                    stabilizationAttempts = stabilizedTarget.Attempts.DeepClone() as JsonArray ?? new JsonArray();
+                    if (stabilizedTarget.Blocked is not null)
+                    {
+                        blockedResult = stabilizedTarget.Blocked;
+                    }
+                    else if (stabilizedTarget.Match is null)
+                    {
+                        blockedResult = new JsonObject
+                        {
+                            ["status"] = "BLOCKED",
+                            ["reason"] = "target row could not be stabilized before mouse-up",
+                            ["requested"] = RequestedRow(targetRowIndex, targetRowKey),
+                            ["attempts"] = stabilizationAttempts.DeepClone(),
+                            ["next_step"] = "Capture stabilization attempts and adjust the final drop strategy."
+                        };
+                    }
+                    else
+                    {
+                        targetMatch = stabilizedTarget.Match;
+                        dropPointStrategy = "stabilized-neutral-band";
+                        targetEnsureVisibleResult = new JsonObject
+                        {
+                            ["status"] = "PASS",
+                            ["already_visible"] = false,
+                            ["resolved_row"] = CompactRow(targetMatch.Row),
+                            ["row"] = targetMatch.Row.DeepClone(),
+                            ["attempts"] = edgeScanAttempts.DeepClone(),
+                            ["stabilization_attempts"] = stabilizationAttempts.DeepClone()
+                        };
+                    }
+                }
+            }
+
+            if (blockedResult is null && targetMatch is not null)
+            {
+                var liveTargetRow = RefreshRowBounds(targetMatch);
+                var allowStabilizedFallback = !targetWasAlreadyVisible && stabilizationAttempts.Count > 0;
                 var targetPoint = TargetDropPoint(
-                    targetMatch.Row,
+                    liveTargetRow,
                     gridBounds,
                     resolvedTargetDirection,
-                    allowFallback: targetWasAlreadyVisible);
+                    allowFallback: targetWasAlreadyVisible || allowStabilizedFallback);
+                if (targetPoint is not null && allowStabilizedFallback)
+                {
+                    dropPointStrategy = "stabilized-band-adjacent-fallback";
+                }
+                preReleaseTargetBounds = liveTargetRow["bounds"] as JsonObject;
                 if (targetPoint is null)
                 {
+                    dropPointStrategy = "neutral-band-blocked";
+                    var dropBandDiagnostics = DropBandDiagnostics(liveTargetRow, gridBounds);
                     blockedResult = new JsonObject
                     {
                         ["status"] = "BLOCKED",
@@ -236,11 +298,19 @@ public static partial class GridCommands
                         {
                             ["target"] = "row whose bounds intersect the neutral viewport drop band"
                         },
+                        ["resolved_direction"] = resolvedTargetDirection.ToString().ToLowerInvariant(),
+                        ["drop_point_strategy"] = dropPointStrategy,
+                        ["target_row"] = liveTargetRow.DeepClone(),
+                        ["pre_release_target_bounds"] = preReleaseTargetBounds?.DeepClone(),
+                        ["drop_band_diagnostics"] = dropBandDiagnostics,
+                        ["edge_scan_attempts"] = edgeScanAttempts.DeepClone(),
+                        ["stabilization_attempts"] = stabilizationAttempts.DeepClone(),
                         ["next_step"] = "Keep dragging until the target row settles farther from the viewport edge."
                     };
                 }
                 if (blockedResult is null && targetPoint is not null)
                 {
+                    actualDropPoint = targetPoint.Value;
                     ClickCommands.MoveCursor(targetPoint.Value.X, targetPoint.Value.Y);
                     Thread.Sleep(Math.Max(RowDragFinalDropSettleMs, speedMs / 10));
                 }
@@ -330,6 +400,12 @@ public static partial class GridCommands
                 ["source_identity"] = RowIdentity(sourceMatch.Row),
                 ["target_identity"] = RowIdentity(finalTarget.Row),
                 ["move_points"] = routePoints.DeepClone(),
+                ["actual_drop_point"] = actualDropPoint is null ? null : DragPointJson(actualDropPoint.Value),
+                ["pre_release_target_bounds"] = preReleaseTargetBounds?.DeepClone(),
+                ["resolved_direction"] = resolvedTargetDirection.ToString().ToLowerInvariant(),
+                ["drop_point_strategy"] = dropPointStrategy,
+                ["edge_scan_attempts"] = edgeScanAttempts.DeepClone(),
+                ["stabilization_attempts"] = stabilizationAttempts.DeepClone(),
                 ["final_pointer"] = DragPointJson(finalTargetPoint),
                 ["target_ensure_visible_result"] = targetEnsureVisibleResult?.DeepClone(),
                 ["source_anchor_preserved"] = true
@@ -409,7 +485,8 @@ public static partial class GridCommands
                 return new RowSearchResult(null, result.Blocked, attempts);
             if (result.Match is not null)
             {
-                if (TargetDropPoint(result.Match.Row, gridBounds, direction) is not null)
+                var liveRow = RefreshRowBounds(result.Match);
+                if (TargetDropPoint(liveRow, gridBounds, direction) is not null)
                     return new RowSearchResult(result.Match, null, attempts);
             }
             if (step >= maxScrolls)
@@ -505,11 +582,13 @@ public static partial class GridCommands
 
     private static RowSearchResult StabilizeHeldDragTarget(
         AutomationElement grid,
+        JsonObject gridBounds,
         UIA3Automation automation,
         List<string> columns,
         List<string> headers,
         int? rowIndex,
         string? rowKey,
+        DragScrollDirection direction,
         int settleMs)
     {
         var attempts = new JsonArray();
@@ -535,8 +614,17 @@ public static partial class GridCommands
             if (result.Match is null)
                 return new RowSearchResult(null, null, attempts);
 
-            var signature = RowBoundsSignature(result.Match.Row);
-            if (!string.IsNullOrWhiteSpace(signature) && signature == previousSignature)
+            var liveRow = RefreshRowBounds(result.Match);
+            var stableDropPoint = TargetDropPoint(
+                liveRow,
+                gridBounds,
+                direction);
+            var signature = RowBoundsSignature(liveRow);
+            if (
+                stableDropPoint is not null
+                && !string.IsNullOrWhiteSpace(signature)
+                && signature == previousSignature
+            )
                 return new RowSearchResult(result.Match, null, attempts);
             previousSignature = signature;
         }
@@ -555,6 +643,13 @@ public static partial class GridCommands
         if (final.Match is null)
             return new RowSearchResult(null, null, attempts);
         return new RowSearchResult(final.Match, null, attempts);
+    }
+
+    private static JsonObject RefreshRowBounds(RowMatch match)
+    {
+        var row = match.Row.DeepClone() as JsonObject ?? new JsonObject();
+        row["bounds"] = SafeRect(match.Element);
+        return row;
     }
 
     private static Point? TargetDropPoint(
@@ -584,17 +679,54 @@ public static partial class GridCommands
             if (!allowFallback)
                 return null;
 
-            var inset = Math.Max(2, height / 4);
-            var fallbackY = direction == DragScrollDirection.Down
-                ? y + inset
-                : y + Math.Max(inset, height - inset);
+            var inset = Math.Max(3, Math.Min(8, height / 4));
+            var fallbackY = rowBottom < neutralTop
+                ? Math.Max(rowTop, rowBottom - inset)
+                : Math.Min(rowBottom, rowTop + inset);
             return new Point(dropX, fallbackY);
         }
 
-        var dropY = direction == DragScrollDirection.Down
-            ? safeTop
-            : safeBottom;
+        var overlapHeight = safeBottom - safeTop;
+        if (overlapHeight < 4)
+        {
+            var inset = Math.Max(3, Math.Min(8, height / 4));
+            var edgeSafeY = direction == DragScrollDirection.Down
+                ? Math.Min(rowBottom, safeTop + inset)
+                : Math.Max(rowTop, safeBottom - inset);
+            return new Point(dropX, edgeSafeY);
+        }
+
+        var dropY = safeTop + (overlapHeight / 2);
         return new Point(dropX, dropY);
+    }
+
+    private static JsonObject DropBandDiagnostics(JsonObject row, JsonObject gridBounds)
+    {
+        var output = new JsonObject();
+        if (row["bounds"] is not JsonObject bounds)
+            return output;
+
+        var y = bounds["y"]?.GetValue<int>() ?? 0;
+        var height = Math.Max(1, bounds["height"]?.GetValue<int>() ?? 1);
+        var gridY = gridBounds["y"]?.GetValue<int>() ?? y;
+        var gridHeight = Math.Max(1, gridBounds["height"]?.GetValue<int>() ?? height);
+        var neutralTop = gridY + (int)Math.Round(gridHeight * RowDragNeutralBandTopRatio);
+        var neutralBottom = gridY + (int)Math.Round(gridHeight * RowDragNeutralBandBottomRatio);
+        var rowTop = y;
+        var rowBottom = y + Math.Max(1, height) - 1;
+        var safeTop = Math.Max(rowTop, neutralTop);
+        var safeBottom = Math.Min(rowBottom, neutralBottom);
+
+        output["grid_top"] = gridY;
+        output["grid_bottom"] = gridY + gridHeight - 1;
+        output["neutral_top"] = neutralTop;
+        output["neutral_bottom"] = neutralBottom;
+        output["row_top"] = rowTop;
+        output["row_bottom"] = rowBottom;
+        output["safe_top"] = safeTop;
+        output["safe_bottom"] = safeBottom;
+        output["overlap_height"] = safeBottom - safeTop;
+        return output;
     }
 
     private static string RowBoundsSignature(JsonObject row)
