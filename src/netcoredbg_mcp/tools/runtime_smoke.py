@@ -521,7 +521,10 @@ def register_runtime_smoke_tools(
             data["run_created"] = bool(data.get("run_id"))
             next_actions = _runtime_smoke_lifecycle_next_actions(data)
             if agent_mode:
-                _apply_runtime_smoke_agent_mode(data, next_actions[0])
+                _apply_runtime_smoke_agent_mode(
+                    data,
+                    _runtime_smoke_run_probe_agent_next_action(data, next_actions[0]),
+                )
             return _build_runtime_smoke_response(
                 session,
                 data,
@@ -2318,6 +2321,19 @@ def _apply_runtime_smoke_agent_mode(
         metrics=_runtime_smoke_agent_metrics(data),
     )
     return data
+
+
+def _runtime_smoke_run_probe_agent_next_action(
+    data: dict[str, Any],
+    fallback: str,
+) -> str:
+    if fallback != "runtime_smoke_evidence_bundle":
+        return fallback
+    cursor = _runtime_smoke_agent_cursor(data)
+    sources = cursor.get("sources") if isinstance(cursor, dict) else None
+    if isinstance(sources, dict) and sources:
+        return "runtime_smoke_get_event_delta"
+    return fallback
 
 
 def _apply_runtime_smoke_validate_probe_agent_mode(
