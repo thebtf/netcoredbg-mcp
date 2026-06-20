@@ -22,6 +22,7 @@ from .runtime_smoke_schema import (
 )
 from .runtime_smoke_v2.result_envelope import (
     compact_runtime_smoke_result,
+    compact_value,
     finalize_result,
 )
 from .state import EvidenceRef
@@ -131,6 +132,13 @@ class RuntimeSmokeRunner:
         self._session = session
         self._service_adapters = dict(service_adapters or {})
         self._clock = clock
+        self._case_progress_notifier: Callable[[dict[str, Any]], Any] | None = None
+
+    def attach_case_progress_notifier(
+        self,
+        notifier: Callable[[dict[str, Any]], Any] | None,
+    ) -> None:
+        self._case_progress_notifier = notifier
 
     async def run(self, plan: Any) -> dict[str, Any]:
         started = self._clock()
@@ -171,6 +179,7 @@ class RuntimeSmokeRunner:
                 self._session,
                 service_adapters=self._service_adapters,
                 clock=self._clock,
+                case_progress_notifier=self._case_progress_notifier,
             ).run(plan)
 
         budgets = _budgets(plan)
@@ -616,6 +625,9 @@ class RuntimeSmokeRunRecord:
     task: asyncio.Task | None = None
     result: dict[str, Any] | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
+    app_diagnostics_source_enabled: bool = False
+    app_diagnostics_entries: list[dict[str, Any]] = field(default_factory=list)
+    app_diagnostics_dropped_count: int = 0
     next_cursor: int = 1
     dropped_count: int = 0
     stop_requested: bool = False
@@ -666,6 +678,117 @@ class RuntimeSmokeRunRecord:
             "final": self.result is not None,
         }
 
+    def append_app_diagnostics_entries(self, entries: list[dict[str, Any]]) -> None:
+        self.app_diagnostics_source_enabled = True
+        if not entries:
+            return
+        self.app_diagnostics_entries.extend(dict(entry) for entry in entries)
+        if len(self.app_diagnostics_entries) > self.max_events:
+            excess = len(self.app_diagnostics_entries) - self.max_events
+            del self.app_diagnostics_entries[:excess]
+            self.app_diagnostics_dropped_count += excess
+
+    def app_diagnostics_cursor(
+        self,
+        *,
+        from_start: bool,
+        allow_empty: bool,
+    ) -> dict[str, int] | None:
+        if not self.app_diagnostics_source_enabled:
+            return None
+        total_entries = self.app_diagnostics_dropped_count + len(
+            self.app_diagnostics_entries
+        )
+        if total_entries == 0 and not allow_empty:
+            return None
+        return {
+            "after_index": 0 if from_start else total_entries,
+            "entry_count": total_entries,
+        }
+
+    def app_diagnostics_delta(
+        self,
+        *,
+        after_index: int,
+        entry_count: int,
+        limit: int,
+    ) -> tuple[dict[str, Any], dict[str, int]]:
+        total_entries = self.app_diagnostics_dropped_count + len(
+            self.app_diagnostics_entries
+        )
+        bounded_limit = max(0, int(limit))
+        bounded_after_index = max(0, int(after_index))
+        start_index = min(
+            max(bounded_after_index, self.app_diagnostics_dropped_count),
+            total_entries,
+        )
+        start_offset = start_index - self.app_diagnostics_dropped_count
+        stale_cursor = (
+            int(entry_count) > total_entries
+            or bounded_after_index > total_entries
+            or bounded_after_index < self.app_diagnostics_dropped_count
+        )
+        available_entries = self.app_diagnostics_entries[start_offset:]
+        available = len(available_entries)
+        bounded_entries = available_entries[:bounded_limit]
+        next_after_index = start_index + len(bounded_entries)
+        return (
+            {
+                "entries": [dict(entry) for entry in bounded_entries],
+                "available": available,
+                "limit": bounded_limit,
+                "limited": available > bounded_limit,
+                "stale_cursor": stale_cursor,
+                "dropped_count": self.app_diagnostics_dropped_count,
+            },
+            {
+                "after_index": next_after_index,
+                "entry_count": total_entries,
+            },
+        )
+
+
+def _collect_case_app_diagnostics_entries(
+    case_result: dict[str, Any],
+) -> list[dict[str, Any]]:
+    case_id = case_result.get("id")
+    transitions = case_result.get("transitions")
+    if not isinstance(transitions, list):
+        return []
+
+    entries: list[dict[str, Any]] = []
+    for transition_index, transition in enumerate(transitions):
+        if not isinstance(transition, dict):
+            continue
+        probes = transition.get("probes")
+        if not isinstance(probes, dict):
+            continue
+        for phase in ("before", "after"):
+            phase_probes = probes.get(phase, [])
+            if not isinstance(phase_probes, list):
+                continue
+            for probe in phase_probes:
+                if (
+                    not isinstance(probe, dict)
+                    or probe.get("kind") != "app_diagnostics"
+                ):
+                    continue
+                entry: dict[str, Any] = {
+                    "case_id": case_id,
+                    "transition_index": transition_index,
+                    "phase": phase,
+                    "probe": str(probe.get("name") or probe.get("kind") or ""),
+                    "status": probe.get("status"),
+                }
+                if "reason" in probe:
+                    entry["reason"] = probe.get("reason")
+                if "value" in probe:
+                    entry["value"] = compact_value(probe.get("value"))
+                if "evidence_ref" in probe:
+                    entry["evidence_ref"] = probe.get("evidence_ref")
+                entries.append(compact_value(entry))
+    return entries
+
 
 class RuntimeSmokeRunRegistry:
     """Per-session durable runtime-smoke lifecycle run registry."""
@@ -706,6 +829,9 @@ class RuntimeSmokeRunRegistry:
                 plan_name=_plan_name(plan),
                 created_at=self._clock(),
                 max_events=self._max_events_per_run,
+                app_diagnostics_source_enabled=(
+                    isinstance(plan, dict) and plan.get("schema") == SCHEMA_VERSION_V2
+                ),
             )
             record.append_event(
                 "started",
@@ -745,6 +871,54 @@ class RuntimeSmokeRunRegistry:
             if record.result is None:
                 return self._running_payload(record)
             return self._final_payload(record)
+
+    async def record_case_progress(
+        self,
+        run_id: str,
+        case_result: dict[str, Any],
+    ) -> None:
+        entries = _collect_case_app_diagnostics_entries(case_result)
+        if not entries:
+            return
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None:
+                return
+            record.append_app_diagnostics_entries(entries)
+
+    async def get_app_diagnostics_source_cursor(
+        self,
+        run_id: str,
+    ) -> dict[str, int] | None:
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None:
+                return None
+            if record.result is None:
+                return record.app_diagnostics_cursor(from_start=False, allow_empty=True)
+            return record.app_diagnostics_cursor(from_start=True, allow_empty=False)
+
+    async def get_app_diagnostics_source_delta(
+        self,
+        run_id: str,
+        *,
+        after_index: int,
+        entry_count: int,
+        limit: int,
+    ) -> tuple[dict[str, Any], dict[str, int]] | None:
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None:
+                return None
+            if not record.app_diagnostics_source_enabled:
+                return None
+            if record.result is not None:
+                return None
+            return record.app_diagnostics_delta(
+                after_index=after_index,
+                entry_count=entry_count,
+                limit=limit,
+            )
 
     async def stop(
         self,
@@ -959,6 +1133,18 @@ class RuntimeSmokeRunRegistry:
         runner_factory: Callable[[], RuntimeSmokeRunner],
     ) -> None:
         runner = runner_factory()
+        attach_case_progress_notifier = getattr(
+            runner,
+            "attach_case_progress_notifier",
+            None,
+        )
+        if callable(attach_case_progress_notifier):
+            attach_case_progress_notifier(
+                lambda case_result: self.record_case_progress(
+                    record.run_id,
+                    case_result,
+                )
+            )
         try:
             result = await runner.run(plan)
             status = str(result.get("status") or "FAIL")
@@ -1283,6 +1469,10 @@ class RuntimeSmokeRunRegistry:
             "dropped_count": record.dropped_count,
             "final": False,
         }
+        if record.app_diagnostics_source_enabled:
+            payload["app_diagnostics_history"] = [
+                dict(entry) for entry in record.app_diagnostics_entries
+            ]
         if self._contamination is not None:
             payload.update(_contamination_metadata(self._contamination))
         return payload
