@@ -17,6 +17,7 @@ from netcoredbg_mcp.tools.runtime_smoke import register_runtime_smoke_tools
 class CursorFacadeRegistry:
     def __init__(self) -> None:
         self.tail_calls: list[dict[str, Any]] = []
+        self.result_calls: dict[str, int] = {}
         self.start_calls = 0
 
     async def start(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
@@ -62,6 +63,39 @@ class CursorFacadeRegistry:
                         ],
                     }
                 ],
+            }
+        if run_id == "active-appdiag-run":
+            call_count = self.result_calls.get(run_id, 0) + 1
+            self.result_calls[run_id] = call_count
+            history = [
+                _app_diagnostics_history_entry(
+                    case_id="case-1",
+                    transition_index=0,
+                    phase="after",
+                    status="PASS",
+                    reason="initial app diagnostics PASS",
+                    evidence_ref="diagnostic:app_diagnostics:NovaScript:case-1",
+                )
+            ]
+            if call_count > 1:
+                history.append(
+                    _app_diagnostics_history_entry(
+                        case_id="case-2",
+                        transition_index=1,
+                        phase="before",
+                        status="BLOCKED",
+                        reason="case-boundary app diagnostics BLOCKED",
+                        evidence_ref="diagnostic:app_diagnostics:NovaScript:case-2",
+                    )
+                )
+            return {
+                "status": "RUNNING",
+                "reason": "runtime smoke run still running",
+                "run_id": run_id,
+                "plan_name": "appdiag-history-plan",
+                "lifecycle_status": "RUNNING",
+                "final": False,
+                "app_diagnostics_history": history,
             }
         return {
             "status": "RUNNING",
@@ -148,6 +182,28 @@ class CursorFacadeRegistry:
                 "dropped_count": 0,
                 "stale_cursor": False,
                 "final": True,
+            }
+        if run_id == "active-appdiag-run":
+            active_events = [
+                {
+                    "cursor": 11,
+                    "kind": "progress",
+                    "status": "RUNNING",
+                    "case_id": "case-2",
+                }
+            ]
+            active_events = [
+                event for event in active_events if int(event["cursor"]) > after_cursor
+            ][:limit]
+            return {
+                "status": "RUNNING",
+                "run_id": run_id,
+                "events": active_events,
+                "next_cursor": 10 if limit == 0 else 11,
+                "oldest_cursor": 10,
+                "dropped_count": 0,
+                "stale_cursor": False,
+                "final": False,
             }
         if run_id == "cursorless-run":
             return {
@@ -277,6 +333,32 @@ def _app_diagnostics_probe_output() -> dict[str, Any]:
             },
         },
         "evidence_ref": "diagnostic:app_diagnostics:NovaScript",
+    }
+
+
+def _app_diagnostics_history_entry(
+    *,
+    case_id: str,
+    transition_index: int,
+    phase: str,
+    status: str,
+    reason: str,
+    evidence_ref: str,
+) -> dict[str, Any]:
+    value = {
+        **_app_diagnostics_probe_output()["value"],
+        "app": {"name": "NovaScript", "process_name": "RunProbeFacade"},
+        "status": status,
+    }
+    return {
+        "case_id": case_id,
+        "transition_index": transition_index,
+        "phase": phase,
+        "probe": "app_diagnostics",
+        "status": status,
+        "reason": reason,
+        "value": value,
+        "evidence_ref": evidence_ref,
     }
 
 
@@ -511,6 +593,28 @@ async def test_runtime_smoke_mark_event_cursor_app_diagnostics_running_run_has_n
 
     assert data["status"] == "PASS"
     assert "sources" not in data["cursor"] or "app_diagnostics" not in data["cursor"]["sources"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_mark_event_cursor_can_capture_active_app_diagnostics_history_cursor(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_mark_event_cursor"](
+        ctx=None,
+        run_id="active-appdiag-run",
+        include_app_diagnostics=True,
+    )
+    data = response["data"]
+
+    assert data["status"] == "PASS"
+    assert data["final"] is False
+    assert data["cursor"]["sources"]["app_diagnostics"] == {
+        "after_index": 1,
+        "entry_count": 1,
+    }
 
 
 @pytest.mark.asyncio
@@ -753,6 +857,58 @@ async def test_runtime_smoke_get_event_delta_returns_app_diagnostics_source_delt
     assert data["cursor"]["sources"]["app_diagnostics"] == {
         "after_index": 1,
         "entry_count": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_get_event_delta_returns_active_app_diagnostics_history_delta(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    _register(capturing_mcp, session)
+
+    mark_response = await capturing_mcp.tools["runtime_smoke_mark_event_cursor"](
+        ctx=None,
+        run_id="active-appdiag-run",
+        include_app_diagnostics=True,
+    )
+    response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor=mark_response["data"]["cursor"],
+        event_limit=1,
+    )
+    data = response["data"]
+
+    assert data["status"] == "PASS"
+    assert data["final"] is False
+    assert data["events"] == [
+        {
+            "cursor": 11,
+            "kind": "progress",
+            "status": "RUNNING",
+            "case_id": "case-2",
+        }
+    ]
+    assert data["source_deltas"]["app_diagnostics"] == {
+        "entries": [
+            _app_diagnostics_history_entry(
+                case_id="case-2",
+                transition_index=1,
+                phase="before",
+                status="BLOCKED",
+                reason="case-boundary app diagnostics BLOCKED",
+                evidence_ref="diagnostic:app_diagnostics:NovaScript:case-2",
+            )
+        ],
+        "available": 1,
+        "limit": 1,
+        "limited": False,
+        "stale_cursor": False,
+        "dropped_count": 0,
+    }
+    assert data["cursor"]["sources"]["app_diagnostics"] == {
+        "after_index": 2,
+        "entry_count": 2,
     }
 
 

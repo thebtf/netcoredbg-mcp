@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import math
 import time
 from collections.abc import Callable
@@ -79,11 +80,13 @@ class RuntimeStateOracleRunner:
         *,
         service_adapters: dict[str, Callable[..., Any]] | None = None,
         clock: Callable[[], float] = time.monotonic,
+        case_progress_notifier: Callable[[dict[str, Any]], Any] | None = None,
     ) -> None:
         self._session = session
         self._service_adapters = dict(service_adapters or {})
         self._clock = clock
         self._diagnostic_launch: dict[str, Any] | None = None
+        self._case_progress_notifier = case_progress_notifier
 
     async def run(self, plan: dict[str, Any]) -> dict[str, Any]:
         started = self._clock()
@@ -242,6 +245,10 @@ class RuntimeStateOracleRunner:
 
             action_count += executed_actions
             case_results.append(case_result)
+            if self._case_progress_notifier is not None:
+                notify_result = self._case_progress_notifier(case_result)
+                if inspect.isawaitable(notify_result):
+                    await notify_result
             if isinstance(case_result.get("cleanup"), dict):
                 case_cleanups.append(case_result["cleanup"])
             if case_result["status"] == "BLOCKED":

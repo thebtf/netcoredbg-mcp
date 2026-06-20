@@ -12,6 +12,7 @@ import pytest
 
 from netcoredbg_mcp.session.runtime_smoke import (
     RuntimeSmokeRunner,
+    RuntimeSmokeRunRecord,
     RuntimeSmokeRunRegistry,
     RuntimeSmokeSession,
 )
@@ -165,6 +166,158 @@ def _v2_exception_cleanup_plan() -> dict[str, Any]:
             ]
         },
     }
+
+
+def _app_diagnostics_case_result(
+    *,
+    case_id: str,
+    transition_index: int,
+    phase: str,
+    status: str,
+    reason: str,
+    evidence_ref: str,
+) -> dict[str, Any]:
+    return {
+        "id": case_id,
+        "status": status,
+        "reason": reason,
+        "transitions": [
+            {
+                "probes": {
+                    phase: [
+                        {
+                            "name": "app_diagnostics",
+                            "kind": "app_diagnostics",
+                            "status": status,
+                            "reason": reason,
+                            "value": {
+                                "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
+                                "app": {"name": "NovaScript"},
+                                "status": status,
+                            },
+                            "evidence_ref": evidence_ref,
+                        }
+                    ]
+                },
+                "transition_index": transition_index,
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_registry_tracks_live_app_diagnostics_history() -> None:
+    registry = RuntimeSmokeRunRegistry()
+    record = RuntimeSmokeRunRecord(
+        run_id="run-1",
+        plan_name="live-appdiag-history",
+        created_at=0.0,
+        max_events=8,
+    )
+    registry._runs["run-1"] = record
+
+    await registry.record_case_progress(
+        "run-1",
+        _app_diagnostics_case_result(
+            case_id="case-1",
+            transition_index=0,
+            phase="after",
+            status="PASS",
+            reason="first app diagnostics PASS",
+            evidence_ref="diagnostic:app_diagnostics:NovaScript:case-1",
+        ),
+    )
+
+    active_cursor = await registry.get_app_diagnostics_source_cursor("run-1")
+    assert active_cursor == {"after_index": 1, "entry_count": 1}
+
+    await registry.record_case_progress(
+        "run-1",
+        _app_diagnostics_case_result(
+            case_id="case-2",
+            transition_index=1,
+            phase="before",
+            status="BLOCKED",
+            reason="second app diagnostics BLOCKED",
+            evidence_ref="diagnostic:app_diagnostics:NovaScript:case-2",
+        ),
+    )
+
+    delta = await registry.get_app_diagnostics_source_delta(
+        "run-1",
+        after_index=1,
+        entry_count=1,
+        limit=10,
+    )
+    assert delta is not None
+    delta_payload, next_cursor = delta
+    assert delta_payload["entries"] == [
+        {
+            "case_id": "case-2",
+            "transition_index": 0,
+            "phase": "before",
+            "probe": "app_diagnostics",
+            "status": "BLOCKED",
+            "reason": "second app diagnostics BLOCKED",
+            "value": {
+                "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
+                "app": {"name": "NovaScript"},
+                "status": "BLOCKED",
+            },
+            "evidence_ref": "diagnostic:app_diagnostics:NovaScript:case-2",
+        }
+    ]
+    assert delta_payload["stale_cursor"] is False
+    assert next_cursor == {"after_index": 2, "entry_count": 2}
+
+    record.result = {"status": "PASS", "final": True}
+    final_cursor = await registry.get_app_diagnostics_source_cursor("run-1")
+    assert final_cursor == {"after_index": 0, "entry_count": 2}
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_get_result_running_payload_includes_live_app_diagnostics_history(
+) -> None:
+    registry = RuntimeSmokeRunRegistry()
+    record = RuntimeSmokeRunRecord(
+        run_id="run-1",
+        plan_name="live-appdiag-history",
+        created_at=0.0,
+        max_events=8,
+    )
+    registry._runs["run-1"] = record
+
+    await registry.record_case_progress(
+        "run-1",
+        _app_diagnostics_case_result(
+            case_id="case-1",
+            transition_index=0,
+            phase="after",
+            status="PASS",
+            reason="first app diagnostics PASS",
+            evidence_ref="diagnostic:app_diagnostics:NovaScript:case-1",
+        ),
+    )
+
+    payload = await registry.get_result("run-1")
+
+    assert payload["final"] is False
+    assert payload["app_diagnostics_history"] == [
+        {
+            "case_id": "case-1",
+            "transition_index": 0,
+            "phase": "after",
+            "probe": "app_diagnostics",
+            "status": "PASS",
+            "reason": "first app diagnostics PASS",
+            "value": {
+                "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
+                "app": {"name": "NovaScript"},
+                "status": "PASS",
+            },
+            "evidence_ref": "diagnostic:app_diagnostics:NovaScript:case-1",
+        }
+    ]
 
 
 def test_runtime_smoke_session_reset_clears_owned_state() -> None:
