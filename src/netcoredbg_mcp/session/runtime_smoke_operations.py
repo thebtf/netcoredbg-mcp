@@ -10,6 +10,7 @@ from typing import Any, cast
 
 from ..ui.focus import assert_focus
 from ..ui.grid import (
+    assert_grid_range,
     assert_grid_rows,
     click_grid_row,
     double_click_grid_row,
@@ -128,6 +129,17 @@ def ui_operation_adapters(
         if isinstance(backend, dict):
             return backend
         return await select_grid_range(
+            backend,
+            _selector(args),
+            int(args["start_index"]),
+            int(args["end_index"]),
+        )
+
+    async def grid_assert_range(**args: Any) -> dict[str, Any]:
+        backend = await _backend_or_blocked(ensure_ui_connected)
+        if isinstance(backend, dict):
+            return backend
+        return await assert_grid_range(
             backend,
             _selector(args),
             int(args["start_index"]),
@@ -1007,6 +1019,7 @@ def ui_operation_adapters(
         "ui.grid.select_indices": grid_select_indices,
         "ui.grid.select_identities": grid_select_identities,
         "ui.grid.select_range": grid_select_range,
+        "ui.grid.assert_range": grid_assert_range,
         "ui.grid.select_row": grid_select_row,
         "ui.grid.click_row": grid_click_row,
         "ui.grid.right_click_row": grid_right_click_row,

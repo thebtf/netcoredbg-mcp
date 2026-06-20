@@ -129,6 +129,10 @@ OPERATION_SCHEMAS: dict[str, OperationSchema] = {
         "ui.grid.select_range",
         ("selector", "start_index", "end_index"),
     ),
+    "ui.grid.assert_range": OperationSchema(
+        "ui.grid.assert_range",
+        ("selector", "start_index", "end_index"),
+    ),
     "ui.grid.select_row": OperationSchema(
         "ui.grid.select_row",
         ("selector", "row"),
@@ -1081,7 +1085,7 @@ def _validate_op_args(
         if op_name in {"ui.grid.click_row", "ui.grid.right_click_row", "ui.grid.double_click_row"}:
             if "column" in args and not isinstance(args["column"], str):
                 errors.append(f"{prefix}.column must be a string for op {op_name}")
-    elif op_name == "ui.grid.select_range":
+    elif op_name in {"ui.grid.select_range", "ui.grid.assert_range"}:
         _validate_int_arg(prefix, op_name, args, "start_index", errors)
         _validate_int_arg(prefix, op_name, args, "end_index", errors)
     elif op_name == "ui.grid.assert_rows":
