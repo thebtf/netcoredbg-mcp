@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -180,6 +181,77 @@ def test_state_only_single_oracle_does_not_invent_null_expectation() -> None:
     assert "expected" not in generated[0]["transitions"][0]["probes"][0]
     assert "expect" not in generated[0]["transitions"][0]["probes"][0]
     assert generated[1]["transitions"][0]["probes"][0]["expect"] == "fresh"
+
+
+@pytest.mark.asyncio
+async def test_novascript_action_oracle_matrix_runs_generated_cases(tmp_path: Path) -> None:
+    session = GenerateSmokeSession()
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    first.write_text('{"route":"apply","verdict":"PASS"}', encoding="utf-8")
+    second.write_text('{"route":"cancel","verdict":"PASS"}', encoding="utf-8")
+    plan = {
+        "schema": "netcoredbg.runtime_smoke.v2",
+        "generate": {
+            "template": "novascript-action-oracle",
+            "matrix": [
+                {
+                    "id": "route_apply",
+                    "action": {"kind": "wait", "idle_ms": 0},
+                    "oracles": [
+                        {
+                            "name": "route",
+                            "path": str(first),
+                            "jsonpath": "$.route",
+                            "expected": "apply",
+                        },
+                        {
+                            "name": "verdict",
+                            "path": str(first),
+                            "jsonpath": "$.verdict",
+                            "expected": "PASS",
+                        },
+                    ],
+                },
+                {
+                    "id": "route_cancel",
+                    "action": {"kind": "wait", "idle_ms": 0},
+                    "oracles": [
+                        {
+                            "name": "route",
+                            "path": str(second),
+                            "jsonpath": "$.route",
+                            "expected": "cancel",
+                        },
+                        {
+                            "name": "verdict",
+                            "path": str(second),
+                            "jsonpath": "$.verdict",
+                            "expected": "PASS",
+                        },
+                    ],
+                },
+            ],
+        },
+    }
+
+    result = await _runner(session).run(plan)
+
+    assert result["status"] == "PASS"
+    assert result["generated_case_count"] == 2
+    generated, errors = expand_generated_cases(plan)
+    assert errors == []
+    assert [case["id"] for case in result["cases"]] == [
+        "route_apply",
+        "route_cancel",
+    ]
+    assert result["cases"][0]["rendered_from"]["id"] == "route_apply"
+    assert result["cases"][1]["rendered_from"]["id"] == "route_cancel"
+    assert all(
+        case["transitions"][0]["action"] == {"kind": "wait", "idle_ms": 0}
+        for case in generated
+    )
+    assert session.calls == []
 
 
 @pytest.mark.asyncio

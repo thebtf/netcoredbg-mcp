@@ -10,7 +10,7 @@ from ._helpers import (
 )
 
 
-def render_state_only_file_json(
+def render_novascript_action_oracle(
     record: dict[str, Any],
     id_pattern: str,
 ) -> dict[str, Any]:

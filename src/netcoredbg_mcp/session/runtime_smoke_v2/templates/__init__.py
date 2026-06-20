@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ._substituter import TemplateRenderError as TemplateRenderError
+from .novascript_action_oracle import render_novascript_action_oracle
 from .radio_group_set import render_radio_group_set
 from .setting_ab_row_effect import render_setting_ab_row_effect
 from .state_only_file_json import render_state_only_file_json
@@ -25,6 +26,11 @@ class TemplateDefinition:
 
 
 _TEMPLATES: dict[str, TemplateDefinition] = {
+    "novascript-action-oracle": TemplateDefinition(
+        name="novascript-action-oracle",
+        default_id_pattern="{id}",
+        render=render_novascript_action_oracle,
+    ),
     "radio-group-set": TemplateDefinition(
         name="radio-group-set",
         default_id_pattern="{id}.{value}",
