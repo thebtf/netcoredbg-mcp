@@ -43,6 +43,13 @@ def _issue_cells(backlog: str, issue: str) -> tuple[str, str, str, str]:
     return cells
 
 
+def _clause_containing(text: str, marker: str) -> str:
+    for clause in text.replace("|", ";").split(";"):
+        if marker in clause:
+            return clause.strip()
+    raise AssertionError(f"missing clause for {marker!r}")
+
+
 def test_novascript_cr003_replay_packet_is_actionable() -> None:
     packet = _read(REPLAY_PACKET)
     required_terms = {
@@ -428,6 +435,7 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "CR-078",
             "CR-079",
             "CR-080",
+            "CR-084",
             "DISAGREEING_SOURCES",
             "launch env/evidence-dir advertisement",
             "launch-to-artifact default acquisition",
@@ -437,6 +445,8 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "case-boundary live app-diagnostics history",
             "intra-case wait/poll progress",
             "active app-diagnostics wait/evidence source-cursor guidance",
+            "active app-diagnostics mark-cursor agent-mode entrypoint guidance",
+            "runtime_smoke_mark_event_cursor(agent_mode=True)",
             "remaining broader app diagnostics lifecycle/orchestration",
         ],
     }
@@ -619,6 +629,9 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "before case completion",
             "CR-080",
             "active app-diagnostics wait/evidence source-cursor guidance",
+            "CR-084",
+            "active app-diagnostics mark-cursor agent-mode entrypoint guidance",
+            "runtime_smoke_mark_event_cursor(agent_mode=True)",
         ],
     }
 
@@ -964,6 +977,45 @@ def test_issue_269_records_cr083_run_probe_follow_up_without_broad_closure() -> 
     assert "generic probe UX" in lifecycle_remaining
     assert "broad lifecycle/orchestration" in remaining
     assert "broad lifecycle/orchestration" in lifecycle_remaining
+
+
+def test_issue_272_records_cr084_mark_cursor_entrypoint_without_broad_closure() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#272")
+    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#272")
+    _issue, _state, _evidence, remaining = _issue_cells(backlog, "#272")
+    _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
+        cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
+    )
+
+    for text in (row, lifecycle_row):
+        assert "CR-084" in text
+        assert "active app-diagnostics mark-cursor agent-mode entrypoint guidance" in text
+        assert "runtime_smoke_mark_event_cursor(agent_mode=True)" in text
+        assert "runtime_smoke_get_event_delta" in text
+        assert "active app-diagnostics entrypoint" in text
+        assert "preserved live app-diagnostics source cursor context" in text
+
+    for clause in (
+        _clause_containing(row, "CR-084"),
+        _clause_containing(lifecycle_row, "CR-084"),
+    ):
+        assert "runtime_smoke_run_probe" not in clause
+        assert "#269" not in clause
+        assert "#270" not in clause
+        assert "DataGrid" not in clause
+        assert "offscreen" not in clause
+        assert "generic source-aware run-probe" not in clause
+
+    assert "broader FR remains open" in row
+    assert "keep open" in lifecycle_row
+    assert "active app-diagnostics mark-cursor agent-mode entrypoint guidance" not in remaining
+    assert (
+        "active app-diagnostics mark-cursor agent-mode entrypoint guidance"
+        not in lifecycle_remaining
+    )
+    assert "broader app diagnostics lifecycle/orchestration" in remaining
+    assert "broader app diagnostics lifecycle/orchestration" in lifecycle_remaining
 
 
 def test_issue_270_records_cr070_ensure_visible_viewport_delta_slice() -> None:
