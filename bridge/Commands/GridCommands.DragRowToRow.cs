@@ -138,6 +138,7 @@ public static partial class GridCommands
         JsonObject? blockedResult = null;
         RowMatch? targetMatch = targetSearchBeforeDrag.Match;
         JsonNode? targetEnsureVisibleResult = null;
+        var targetWasAlreadyVisible = targetMatch is not null;
 
         ClickCommands.EnsureForeground(mainWindow);
         var stopwatch = Stopwatch.StartNew();
@@ -222,7 +223,8 @@ public static partial class GridCommands
                 var targetPoint = TargetDropPoint(
                     targetMatch.Row,
                     gridBounds,
-                    resolvedTargetDirection);
+                    resolvedTargetDirection,
+                    allowFallback: targetWasAlreadyVisible);
                 if (targetPoint is null)
                 {
                     blockedResult = new JsonObject
@@ -558,7 +560,8 @@ public static partial class GridCommands
     private static Point? TargetDropPoint(
         JsonObject row,
         JsonObject gridBounds,
-        DragScrollDirection direction)
+        DragScrollDirection direction,
+        bool allowFallback = false)
     {
         if (row["bounds"] is not JsonObject bounds)
             return null;
@@ -577,7 +580,16 @@ public static partial class GridCommands
         var safeTop = Math.Max(rowTop, neutralTop);
         var safeBottom = Math.Min(rowBottom, neutralBottom);
         if (safeBottom < safeTop)
-            return null;
+        {
+            if (!allowFallback)
+                return null;
+
+            var inset = Math.Max(2, height / 4);
+            var fallbackY = direction == DragScrollDirection.Down
+                ? y + inset
+                : y + Math.Max(inset, height - inset);
+            return new Point(dropX, fallbackY);
+        }
 
         var dropY = direction == DragScrollDirection.Down
             ? safeTop
