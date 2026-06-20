@@ -218,10 +218,12 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
     assert "CR-041" in row_269
     assert "CR-082" in row_269
     assert "CR-083" in row_269
+    assert "CR-087" in row_269
     assert "metrics_contract" in row_269
     assert "agent_mode.defaults" in row_269
     assert "quiet active app-diagnostics delta wait-continuation guidance" in row_269
     assert "source-aware run-probe first-follow-up guidance" in row_269
+    assert "mixed-source `runtime_smoke_get_event_delta` guidance" in row_269
     assert "event_limit=20" in row_269
     assert "NO DATA" in row_269
     assert "None in netcoredbg-mcp." not in row_269
@@ -341,6 +343,7 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "CR-080",
             "CR-082",
             "CR-083",
+            "CR-087",
             "metrics_contract",
             "agent_mode.defaults",
             "runtime_smoke_validate_probe",
@@ -356,6 +359,9 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "active app-diagnostics wait/evidence source-cursor guidance",
             "quiet active app-diagnostics delta wait-continuation guidance",
             "source-aware run-probe first-follow-up guidance",
+            "mixed-source `runtime_smoke_get_event_delta` guidance",
+            "source-level unavailable `app_diagnostics` evidence",
+            "source delta/cursor",
             "exception verdict",
             "cleanup-contract guidance",
             "event_limit=20",
@@ -549,6 +555,9 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "quiet active app-diagnostics delta wait-continuation guidance",
             "CR-083",
             "source-aware run-probe first-follow-up guidance",
+            "CR-087",
+            "mixed-source `runtime_smoke_get_event_delta` guidance",
+            "source-level unavailable `app_diagnostics` evidence",
             "exception verdict",
             "broad lifecycle/orchestration",
         ],
@@ -957,6 +966,54 @@ def test_issue_269_records_cr083_run_probe_follow_up_without_broad_closure() -> 
     assert "source-aware run-probe first-follow-up guidance" not in lifecycle_remaining
     assert "generic probe UX" in remaining
     assert "generic probe UX" in lifecycle_remaining
+    assert "broad lifecycle/orchestration" in remaining
+    assert "broad lifecycle/orchestration" in lifecycle_remaining
+
+
+def test_issue_269_records_cr087_mixed_source_event_delta_guidance_without_broad_closure() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#269")
+    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#269")
+    _issue, _state, _evidence, remaining = _issue_cells(backlog, "#269")
+    _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
+        cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
+    )
+
+    for text in (row, lifecycle_row):
+        assert "CR-087" in text
+        assert "mixed-source `runtime_smoke_get_event_delta` guidance" in text
+        assert "runtime_smoke_get_event_delta(agent_mode=True)" in text
+        assert "`debug_output` / `trace_source`" in text
+        assert "preserves fresh" in text
+        assert "source delta/cursor evidence" in text
+        assert "source-level unavailable `app_diagnostics` evidence" in text
+        assert "same cursor" in text
+
+    for clause in (
+        _clause_containing(row, "CR-087"),
+        _clause_containing(lifecycle_row, "CR-087"),
+    ):
+        assert "#270" not in clause
+        assert "#272" not in clause
+        assert "DataGrid" not in clause
+        assert "offscreen" not in clause
+        assert "wait_json" not in clause
+        assert "poll" not in clause
+        assert "live app-diagnostics history" not in clause
+        assert "lifecycle/orchestration" not in clause
+
+    assert "broader FR remains open" in row
+    assert "keep open" in lifecycle_row
+    assert "mixed-source `runtime_smoke_get_event_delta` guidance" not in remaining
+    assert (
+        "mixed-source `runtime_smoke_get_event_delta` guidance"
+        not in lifecycle_remaining
+    )
+    assert "remaining multi-source event deltas outside the covered" in remaining
+    assert (
+        "remaining multi-source event deltas outside the covered"
+        in lifecycle_remaining
+    )
     assert "broad lifecycle/orchestration" in remaining
     assert "broad lifecycle/orchestration" in lifecycle_remaining
 
