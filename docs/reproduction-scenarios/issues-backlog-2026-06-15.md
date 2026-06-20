@@ -69,6 +69,20 @@ They are not the current expected behavior after the linked PRs merged.
 - `#226`, `#250`, and `#267`: target-side Engram status is `resolved` after
   CR-055. Source-side owners may close after verifying the named evidence, or
   reopen with contradictory fresh consumer evidence.
-- `#268` through `#272`: do not close the full Engram issues from narrow merged
-  CR slices alone. Add an Engram comment or split follow-up issue that names
-  which sub-slice is resolved and which requested capability remains open.
+- `#268` through `#272`: post-CR094 broad-issue lifecycle follow-up queue is
+  still pending while Engram transport is down. Do not close the full Engram
+  issues from narrow merged CR slices alone.
+  - `#268`: when Engram returns, post follow-up covering CR-090, CR-092,
+    CR-093, and CR-094; do not reopen already-covered authoring/template
+    slices while the broader DSL/orchestration tail stays open.
+  - `#269`: when Engram returns, post follow-up covering CR-087 and CR-088; do
+    not reopen already-covered repair/mark-cursor/mixed-source seams.
+  - `#270`: when Engram returns, post follow-up covering CR-089; do not reopen
+    already-covered helper/replay seams.
+  - `#271`: when Engram returns, post follow-up covering CR-091; do not reopen
+    already-covered cleanup/trace/freshness seams.
+  - `#272`: when Engram returns, post follow-up covering CR-086; do not reopen
+    already-covered handoff seams while the broader app-diagnostics
+    lifecycle/orchestration tail stays open.
+  Add an Engram comment or split follow-up issue that names which sub-slice is
+  resolved and which requested capability remains open.
