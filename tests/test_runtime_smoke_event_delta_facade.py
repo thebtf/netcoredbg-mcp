@@ -953,6 +953,100 @@ async def test_runtime_smoke_get_event_delta_returns_debug_output_source_delta(
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_get_event_delta_keeps_debug_output_when_app_diagnostics_unavailable(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    session.state.output_buffer = deque(
+        [
+            OutputEntry(text="old\n", category="stdout", sequence=1),
+            OutputEntry(text="new-1\n", category="stdout", sequence=2),
+            OutputEntry(text="new-2\n", category="stderr", sequence=3),
+        ]
+    )
+    session.state.output_sequence = 3
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor={
+            "run_id": "run-1",
+            "after_cursor": 4,
+            "sources": {
+                "debug_output": {
+                    "after_sequence": 1,
+                    "trimmed_before": 0,
+                },
+                "app_diagnostics": {
+                    "after_index": 0,
+                    "entry_count": 0,
+                },
+            },
+        },
+        event_limit=1,
+    )
+    data = response["data"]
+
+    assert data["status"] == "PASS"
+    assert data["events"] == [{"cursor": 5, "kind": "progress", "status": "RUNNING"}]
+    assert data["source_deltas"]["debug_output"] == {
+        "entries": [
+            {
+                "text": "new-1\n",
+                "category": "stdout",
+                "variables_reference": 0,
+                "sequence": 2,
+            }
+        ],
+        "available": 2,
+        "limit": 1,
+        "limited": True,
+        "stale_cursor": False,
+        "dropped_count": 0,
+    }
+    assert data["source_deltas"]["app_diagnostics"] == {
+        "entries": [],
+        "available": 0,
+        "limit": 1,
+        "limited": False,
+        "stale_cursor": False,
+        "dropped_count": 0,
+        "unavailable": True,
+        "reason": "source unavailable for this run",
+    }
+    assert data["cursor"]["sources"]["debug_output"] == {
+        "after_sequence": 2,
+        "trimmed_before": 0,
+    }
+    assert "app_diagnostics" not in data["cursor"]["sources"]
+
+    next_response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor=data["cursor"],
+        event_limit=1,
+    )
+    next_data = next_response["data"]
+
+    assert next_data["status"] == "PASS"
+    assert next_data["source_deltas"]["debug_output"] == {
+        "entries": [
+            {
+                "text": "new-2\n",
+                "category": "stderr",
+                "variables_reference": 0,
+                "sequence": 3,
+            }
+        ],
+        "available": 1,
+        "limit": 1,
+        "limited": False,
+        "stale_cursor": False,
+        "dropped_count": 0,
+    }
+    assert "app_diagnostics" not in next_data["cursor"]["sources"]
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_get_event_delta_returns_app_diagnostics_source_delta(
     capturing_mcp,
 ) -> None:

@@ -1602,15 +1602,29 @@ async def _runtime_smoke_get_event_delta(
                 limit=limit,
             )
             if app_diagnostics_delta is None:
-                return _runtime_smoke_invalid_event_delta(
-                    "cursor token app_diagnostics source is unavailable for this run",
-                    after_cursor=after_cursor,
-                    limit=limit,
-                    run_id=run_id,
-                )
-        delta_payload, source_cursor = app_diagnostics_delta
-        source_deltas["app_diagnostics"] = delta_payload
-        source_cursors["app_diagnostics"] = source_cursor
+                if any(
+                    _runtime_smoke_source_delta_has_entries(delta)
+                    for name, delta in source_deltas.items()
+                    if name != "app_diagnostics"
+                ):
+                    source_deltas["app_diagnostics"] = (
+                        _runtime_smoke_app_diagnostics_unavailable_delta(limit=limit)
+                    )
+                else:
+                    return _runtime_smoke_invalid_event_delta(
+                        "cursor token app_diagnostics source is unavailable for this run",
+                        after_cursor=after_cursor,
+                        limit=limit,
+                        run_id=run_id,
+                    )
+            else:
+                delta_payload, source_cursor = app_diagnostics_delta
+                source_deltas["app_diagnostics"] = delta_payload
+                source_cursors["app_diagnostics"] = source_cursor
+        else:
+            delta_payload, source_cursor = app_diagnostics_delta
+            source_deltas["app_diagnostics"] = delta_payload
+            source_cursors["app_diagnostics"] = source_cursor
     if source_cursors:
         next_cursor["sources"] = source_cursors
     return {
@@ -2145,6 +2159,19 @@ def _runtime_smoke_app_diagnostics_delta(
             "entry_count": total_entries,
         },
     )
+
+
+def _runtime_smoke_app_diagnostics_unavailable_delta(*, limit: int) -> dict[str, Any]:
+    return {
+        "entries": [],
+        "available": 0,
+        "limit": max(0, int(limit)),
+        "limited": False,
+        "stale_cursor": False,
+        "dropped_count": 0,
+        "unavailable": True,
+        "reason": "source unavailable for this run",
+    }
 
 
 def _runtime_smoke_extract_app_diagnostics_entries(
