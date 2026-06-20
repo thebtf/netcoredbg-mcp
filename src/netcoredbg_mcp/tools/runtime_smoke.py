@@ -583,9 +583,19 @@ def register_runtime_smoke_tools(
                 event_limit=event_limit,
             )
             if agent_mode:
+                event_cursor = data.get("event_cursor")
+                event_cursor_sources = (
+                    event_cursor.get("sources")
+                    if isinstance(event_cursor, dict)
+                    else None
+                )
+                has_app_diagnostics_source = (
+                    isinstance(event_cursor_sources, dict)
+                    and "app_diagnostics" in event_cursor_sources
+                )
                 primary = (
                     "runtime_smoke_get_event_delta"
-                    if data.get("final")
+                    if data.get("final") or has_app_diagnostics_source
                     else "runtime_smoke_wait_for_result"
                 )
                 _apply_runtime_smoke_agent_mode(data, primary)
@@ -1174,6 +1184,17 @@ async def _runtime_smoke_evidence_bundle(
         ]
         next_actions.append("runtime_smoke_run_plan" if final else "runtime_smoke_stop")
     diagnostic_launch = result.get("diagnostic_launch")
+    event_cursor = _runtime_smoke_event_cursor(
+        after_cursor=max(0, int(after_cursor)),
+        tail=tail,
+        limit=max(0, int(event_limit)),
+    )
+    if not final:
+        await _runtime_smoke_attach_live_app_diagnostics_source_cursor(
+            registry,
+            run_id,
+            event_cursor,
+        )
 
     bundle = {
         "status": result.get("status", tail.get("status", "UNKNOWN")),
@@ -1183,14 +1204,7 @@ async def _runtime_smoke_evidence_bundle(
         "lifecycle_status": result.get("lifecycle_status", tail.get("status")),
         "final": final,
         "events": compact_value(tail.get("events", [])),
-        "event_cursor": {
-            "after_cursor": max(0, int(after_cursor)),
-            "next_cursor": tail.get("next_cursor"),
-            "oldest_cursor": tail.get("oldest_cursor"),
-            "dropped_count": tail.get("dropped_count", 0),
-            "stale_cursor": tail.get("stale_cursor", False),
-            "limit": max(0, int(event_limit)),
-        },
+        "event_cursor": event_cursor,
         "result": _bounded_runtime_smoke_result(result) if final else None,
         "evidence_refs": compact_value(result.get("evidence_refs", [])),
         "cleanup": compact_value(result.get("cleanup")),
@@ -1762,6 +1776,28 @@ def _runtime_smoke_attach_app_diagnostics_cursor(
         return
     sources = dict(cursor.get("sources") or {})
     sources["app_diagnostics"] = app_diagnostics_cursor
+    cursor["sources"] = sources
+
+
+async def _runtime_smoke_attach_live_app_diagnostics_source_cursor(
+    registry: Any,
+    run_id: str,
+    cursor: dict[str, Any],
+) -> None:
+    live_cursor_reader = getattr(
+        registry,
+        "get_app_diagnostics_source_cursor",
+        None,
+    )
+    live_cursor = (
+        await live_cursor_reader(run_id)
+        if callable(live_cursor_reader)
+        else None
+    )
+    if live_cursor is None:
+        return
+    sources = dict(cursor.get("sources") or {})
+    sources["app_diagnostics"] = live_cursor
     cursor["sources"] = sources
 
 
@@ -2529,7 +2565,7 @@ def _runtime_smoke_agent_cursor(data: dict[str, Any]) -> dict[str, Any]:
             event_cursor,
             event_cursor.get("after_cursor", 0),
         )
-        return {
+        agent_cursor = {
             "run_id": run_id,
             "after_cursor": next_cursor,
             "next_cursor": next_cursor,
@@ -2537,6 +2573,12 @@ def _runtime_smoke_agent_cursor(data: dict[str, Any]) -> dict[str, Any]:
             "dropped_count": event_cursor.get("dropped_count", 0),
             "stale_cursor": event_cursor.get("stale_cursor", False),
         }
+        sources = event_cursor.get("sources")
+        if sources is not None:
+            agent_cursor["sources"] = (
+                dict(sources) if isinstance(sources, dict) else sources
+            )
+        return agent_cursor
 
     next_cursor = _runtime_smoke_tail_next_cursor(data, 0)
     return {

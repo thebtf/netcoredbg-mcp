@@ -323,6 +323,7 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "CR-064",
             "CR-066",
             "CR-069",
+            "CR-080",
             "metrics_contract",
             "agent_mode.defaults",
             "runtime_smoke_validate_probe",
@@ -335,6 +336,7 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "source_deltas.debug_output",
             "source_deltas.trace_source",
             "source-aware mark-cursor guidance",
+            "active app-diagnostics wait/evidence source-cursor guidance",
             "exception verdict",
             "cleanup-contract guidance",
             "event_limit=20",
@@ -402,6 +404,7 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "CR-067",
             "CR-078",
             "CR-079",
+            "CR-080",
             "DISAGREEING_SOURCES",
             "launch env/evidence-dir advertisement",
             "launch-to-artifact default acquisition",
@@ -410,6 +413,7 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "wait-json condition semantics",
             "case-boundary live app-diagnostics history",
             "intra-case wait/poll progress",
+            "active app-diagnostics wait/evidence source-cursor guidance",
             "remaining broader app diagnostics lifecycle/orchestration",
         ],
     }
@@ -500,6 +504,8 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "agent_mode.defaults",
             "runtime_smoke_validate_probe",
             "success-metrics evidence",
+            "CR-080",
+            "active app-diagnostics wait/evidence source-cursor guidance",
             "exception verdict",
             "broad lifecycle/orchestration",
         ],
@@ -572,6 +578,8 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "intra-case live app-diagnostics progress",
             "active `wait_json` / `poll` acquisition",
             "before case completion",
+            "CR-080",
+            "active app-diagnostics wait/evidence source-cursor guidance",
         ],
     }
 
@@ -743,12 +751,14 @@ def test_issue_272_records_cr073_app_diagnostics_event_delta_slice() -> None:
 
     assert (
         "broader live app-diagnostics streaming/history beyond bounded case-boundary "
-        "history and intra-case wait/poll acquisition progress"
+        "history, intra-case wait/poll acquisition progress, and active wait/evidence "
+        "cursor handoff"
         in remaining
     )
     assert (
         "broader live app-diagnostics streaming/history beyond bounded case-boundary "
-        "history and intra-case wait/poll acquisition progress"
+        "history, intra-case wait/poll acquisition progress, and active wait/evidence "
+        "cursor handoff"
         in lifecycle_remaining
     )
 
@@ -773,12 +783,14 @@ def test_issue_272_records_cr078_live_app_diagnostics_history_slice() -> None:
     assert "case-boundary live app-diagnostics history" not in lifecycle_remaining
     assert (
         "broader live app-diagnostics streaming/history beyond bounded case-boundary "
-        "history and intra-case wait/poll acquisition progress"
+        "history, intra-case wait/poll acquisition progress, and active wait/evidence "
+        "cursor handoff"
         in remaining
     )
     assert (
         "broader live app-diagnostics streaming/history beyond bounded case-boundary "
-        "history and intra-case wait/poll acquisition progress"
+        "history, intra-case wait/poll acquisition progress, and active wait/evidence "
+        "cursor handoff"
         in lifecycle_remaining
     )
     assert "broader app diagnostics lifecycle/orchestration" in remaining
@@ -806,16 +818,54 @@ def test_issue_272_records_cr079_intracase_app_diagnostics_progress_slice() -> N
     assert "intra-case wait/poll progress" not in lifecycle_remaining
     assert (
         "broader live app-diagnostics streaming/history beyond bounded case-boundary "
-        "history and intra-case wait/poll acquisition progress"
+        "history, intra-case wait/poll acquisition progress, and active wait/evidence "
+        "cursor handoff"
         in remaining
     )
     assert (
         "broader live app-diagnostics streaming/history beyond bounded case-boundary "
-        "history and intra-case wait/poll acquisition progress"
+        "history, intra-case wait/poll acquisition progress, and active wait/evidence "
+        "cursor handoff"
         in lifecycle_remaining
     )
     assert "broader app diagnostics lifecycle/orchestration" in remaining
     assert "broader app diagnostics lifecycle/orchestration" in lifecycle_remaining
+
+
+def test_issue_269_272_record_cr080_active_wait_evidence_delta_guidance_slice() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+
+    for issue in ("#269", "#272"):
+        row = _issue_row(backlog, issue)
+        lifecycle_row = _section_issue_row(
+            backlog,
+            "## CR-022 Issue Lifecycle Refresh",
+            issue,
+        )
+        for text in (row, lifecycle_row):
+            assert "CR-080" in text
+            assert "active app-diagnostics wait/evidence source-cursor guidance" in text
+            assert "runtime_smoke_wait_for_result(agent_mode=True)" in text
+            assert "runtime_smoke_evidence_bundle(agent_mode=True)" in text
+            assert "runtime_smoke_get_event_delta" in text
+
+    _issue, _state, _evidence, remaining_269 = _issue_cells(backlog, "#269")
+    _issue, _state, _evidence, remaining_272 = _issue_cells(backlog, "#272")
+    lifecycle_row_272 = _section_issue_row(
+        backlog,
+        "## CR-022 Issue Lifecycle Refresh",
+        "#272",
+    )
+    _life_issue, _life_state, _life_evidence, lifecycle_remaining_272 = (
+        cell.strip() for cell in lifecycle_row_272.strip().strip("|").split("|")
+    )
+
+    assert "active app-diagnostics wait/evidence source-cursor guidance" not in remaining_269
+    assert "remaining multi-source event deltas" in remaining_269
+    assert "broad lifecycle/orchestration closure" in remaining_269
+    assert "active app-diagnostics wait/evidence source-cursor guidance" not in remaining_272
+    assert "broader app diagnostics lifecycle/orchestration" in remaining_272
+    assert "broader app diagnostics lifecycle/orchestration" in lifecycle_remaining_272
 
 
 def test_issue_270_records_cr070_ensure_visible_viewport_delta_slice() -> None:
@@ -992,7 +1042,8 @@ def test_issue_272_remaining_scope_excludes_covered_launch_contract_and_default(
     assert "wait-json condition semantics" in remaining
     assert (
         "broader live app-diagnostics streaming/history beyond bounded case-boundary "
-        "history and intra-case wait/poll acquisition progress"
+        "history, intra-case wait/poll acquisition progress, and active wait/evidence "
+        "cursor handoff"
         in remaining
     )
     assert "diagnostic env/evidence-dir advertisement" not in lifecycle_remaining
@@ -1004,7 +1055,8 @@ def test_issue_272_remaining_scope_excludes_covered_launch_contract_and_default(
     assert "wait-json condition semantics" in lifecycle_remaining
     assert (
         "broader live app-diagnostics streaming/history beyond bounded case-boundary "
-        "history and intra-case wait/poll acquisition progress"
+        "history, intra-case wait/poll acquisition progress, and active wait/evidence "
+        "cursor handoff"
         in lifecycle_remaining
     )
 
