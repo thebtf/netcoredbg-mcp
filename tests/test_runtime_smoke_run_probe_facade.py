@@ -41,6 +41,68 @@ class RunProbeFacadeSession:
         raise AssertionError("run-probe facade must not launch directly")
 
 
+class SourceAwareRunProbeRegistry:
+    def __init__(self) -> None:
+        self.start_calls: list[dict[str, Any]] = []
+
+    async def start(self, plan: dict[str, Any], _runner_factory: Any) -> dict[str, Any]:
+        self.start_calls.append(plan)
+        return {
+            "status": "RUNNING",
+            "run_id": "source-aware-probe-run",
+            "plan_name": plan["name"],
+            "final": False,
+            "event_cursor": {
+                "after_cursor": 0,
+                "next_cursor": 2,
+                "oldest_cursor": 1,
+                "dropped_count": 0,
+                "stale_cursor": False,
+                "sources": {
+                    "debug_output": {
+                        "after_sequence": 7,
+                        "trimmed_before": 0,
+                    },
+                },
+            },
+        }
+
+
+class ConflictingCursorRunProbeRegistry:
+    def __init__(self) -> None:
+        self.start_calls: list[dict[str, Any]] = []
+
+    async def start(self, plan: dict[str, Any], _runner_factory: Any) -> dict[str, Any]:
+        self.start_calls.append(plan)
+        return {
+            "status": "RUNNING",
+            "run_id": "conflicting-cursor-probe-run",
+            "plan_name": plan["name"],
+            "final": False,
+            "cursor": {
+                "run_id": "conflicting-cursor-probe-run",
+                "after_cursor": 0,
+                "next_cursor": 1,
+                "oldest_cursor": 0,
+                "dropped_count": 0,
+                "stale_cursor": False,
+            },
+            "event_cursor": {
+                "after_cursor": 0,
+                "next_cursor": 2,
+                "oldest_cursor": 1,
+                "dropped_count": 0,
+                "stale_cursor": False,
+                "sources": {
+                    "debug_output": {
+                        "after_sequence": 7,
+                        "trimmed_before": 0,
+                    },
+                },
+            },
+        }
+
+
 class GuardedTracepointRunProbeSession(RunProbeFacadeSession):
     def __init__(self) -> None:
         super().__init__()
@@ -561,6 +623,90 @@ async def test_runtime_smoke_run_probe_agent_mode_adds_evidence_guidance(
         "runtime_smoke_mark_event_cursor",
         "runtime_smoke_get_event_delta",
     ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_run_probe_agent_mode_uses_source_cursor_delta_guidance(
+    capturing_mcp,
+) -> None:
+    session = RunProbeFacadeSession()
+    session.runtime_smoke.lifecycle_runs = SourceAwareRunProbeRegistry()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_run_probe"](
+        ctx=None,
+        probe={
+            "kind": "process.metric",
+            "name": "process_memory",
+            "pid": os.getpid(),
+        },
+        name="source-aware-agent-probe",
+        agent_mode=True,
+    )
+    data = response["data"]
+    agent = data["agent_mode"]
+
+    assert data["status"] == "RUNNING"
+    assert data["run_created"] is True
+    assert data["event_cursor"]["sources"] == {
+        "debug_output": {
+            "after_sequence": 7,
+            "trimmed_before": 0,
+        },
+    }
+    assert agent["primary_next_action"] == "runtime_smoke_get_event_delta"
+    assert agent["cursor"]["sources"] == data["event_cursor"]["sources"]
+    assert agent["next_request"] == {
+        "tool": "runtime_smoke_get_event_delta",
+        "arguments": {
+            "cursor": agent["cursor"],
+            "agent_mode": True,
+            "event_limit": 20,
+        },
+    }
+    assert (
+        agent["next_request"]["arguments"]["cursor"]["sources"]
+        == data["event_cursor"]["sources"]
+    )
+    assert session.runtime_smoke.lifecycle_runs.start_calls
+    assert session.launch_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_run_probe_agent_mode_requires_real_source_cursor(
+    capturing_mcp,
+) -> None:
+    session = RunProbeFacadeSession()
+    session.runtime_smoke.lifecycle_runs = ConflictingCursorRunProbeRegistry()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_run_probe"](
+        ctx=None,
+        probe={
+            "kind": "process.metric",
+            "name": "process_memory",
+            "pid": os.getpid(),
+        },
+        name="conflicting-cursor-agent-probe",
+        agent_mode=True,
+    )
+    data = response["data"]
+    agent = data["agent_mode"]
+
+    assert data["status"] == "RUNNING"
+    assert data["run_created"] is True
+    assert "sources" not in agent["cursor"]
+    assert agent["primary_next_action"] == "runtime_smoke_evidence_bundle"
+    assert agent["next_request"] == {
+        "tool": "runtime_smoke_evidence_bundle",
+        "arguments": {
+            "run_id": data["run_id"],
+            "agent_mode": True,
+            "event_limit": 20,
+        },
+    }
+    assert session.runtime_smoke.lifecycle_runs.start_calls
+    assert session.launch_calls == 0
 
 
 @pytest.mark.asyncio

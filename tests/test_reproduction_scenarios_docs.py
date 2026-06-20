@@ -201,14 +201,20 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
         assert "None in netcoredbg-mcp." not in row
 
     row_269 = _issue_row(backlog, "#269")
-    assert "Target metrics/profile-defaults/probe-validation slices covered" in row_269
+    assert (
+        "Target metrics/profile-defaults/probe-validation/source-aware run-probe "
+        "guidance slices covered"
+        in row_269
+    )
     assert "broader FR remains open" in row_269
     assert "CR-039" in row_269
     assert "CR-041" in row_269
     assert "CR-082" in row_269
+    assert "CR-083" in row_269
     assert "metrics_contract" in row_269
     assert "agent_mode.defaults" in row_269
     assert "quiet active app-diagnostics delta wait-continuation guidance" in row_269
+    assert "source-aware run-probe first-follow-up guidance" in row_269
     assert "event_limit=20" in row_269
     assert "NO DATA" in row_269
     assert "None in netcoredbg-mcp." not in row_269
@@ -327,6 +333,7 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "CR-069",
             "CR-080",
             "CR-082",
+            "CR-083",
             "metrics_contract",
             "agent_mode.defaults",
             "runtime_smoke_validate_probe",
@@ -341,6 +348,7 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "source-aware mark-cursor guidance",
             "active app-diagnostics wait/evidence source-cursor guidance",
             "quiet active app-diagnostics delta wait-continuation guidance",
+            "source-aware run-probe first-follow-up guidance",
             "exception verdict",
             "cleanup-contract guidance",
             "event_limit=20",
@@ -523,6 +531,8 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "active app-diagnostics wait/evidence source-cursor guidance",
             "CR-082",
             "quiet active app-diagnostics delta wait-continuation guidance",
+            "CR-083",
+            "source-aware run-probe first-follow-up guidance",
             "exception verdict",
             "broad lifecycle/orchestration",
         ],
@@ -921,6 +931,37 @@ def test_issue_269_records_cr082_quiet_active_delta_wait_guidance_without_broad_
         not in lifecycle_remaining
     )
     assert "remaining multi-source event deltas" in remaining
+    assert "broad lifecycle/orchestration" in remaining
+    assert "broad lifecycle/orchestration" in lifecycle_remaining
+
+
+def test_issue_269_records_cr083_run_probe_follow_up_without_broad_closure() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#269")
+    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#269")
+    _issue, _state, _evidence, remaining = _issue_cells(backlog, "#269")
+    _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
+        cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
+    )
+
+    for text in (row, lifecycle_row):
+        assert "CR-083" in text
+        assert "source-aware run-probe first-follow-up guidance" in text
+        assert "runtime_smoke_run_probe(agent_mode=True)" in text
+        assert "runtime_smoke_get_event_delta" in text
+        assert "first follow-up" in text
+        assert "preserved source cursor context" in text
+        assert "event_cursor.sources" in text
+        assert "app-diagnostics acquisition" not in text
+        assert "#270" not in text
+        assert "DataGrid" not in text
+
+    assert "broader FR remains open" in row
+    assert "keep open" in lifecycle_row
+    assert "source-aware run-probe first-follow-up guidance" not in remaining
+    assert "source-aware run-probe first-follow-up guidance" not in lifecycle_remaining
+    assert "generic probe UX" in remaining
+    assert "generic probe UX" in lifecycle_remaining
     assert "broad lifecycle/orchestration" in remaining
     assert "broad lifecycle/orchestration" in lifecycle_remaining
 
