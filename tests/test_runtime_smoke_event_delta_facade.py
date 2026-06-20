@@ -106,6 +106,41 @@ class CursorFacadeRegistry:
             "final": False,
         }
 
+    async def get_app_diagnostics_source_cursor(
+        self,
+        run_id: str,
+    ) -> dict[str, int] | None:
+        if run_id == "intracase-appdiag-run":
+            return {"after_index": 0, "entry_count": 0}
+        return None
+
+    async def get_app_diagnostics_source_delta(
+        self,
+        run_id: str,
+        *,
+        after_index: int,
+        entry_count: int,
+        limit: int,
+    ) -> tuple[dict[str, Any], dict[str, int]] | None:
+        if run_id != "intracase-appdiag-run":
+            return None
+        entries = [_app_diagnostics_progress_entry()]
+        bounded_entries = entries[after_index:][:limit]
+        return (
+            {
+                "entries": bounded_entries,
+                "available": max(0, len(entries) - after_index),
+                "limit": limit,
+                "limited": False,
+                "stale_cursor": False,
+                "dropped_count": 0,
+            },
+            {
+                "after_index": after_index + len(bounded_entries),
+                "entry_count": len(entries),
+            },
+        )
+
     async def tail_events(
         self,
         run_id: str,
@@ -201,6 +236,17 @@ class CursorFacadeRegistry:
                 "events": active_events,
                 "next_cursor": 10 if limit == 0 else 11,
                 "oldest_cursor": 10,
+                "dropped_count": 0,
+                "stale_cursor": False,
+                "final": False,
+            }
+        if run_id == "intracase-appdiag-run":
+            return {
+                "status": "RUNNING",
+                "run_id": run_id,
+                "events": [],
+                "next_cursor": 12,
+                "oldest_cursor": 12,
                 "dropped_count": 0,
                 "stale_cursor": False,
                 "final": False,
@@ -359,6 +405,27 @@ def _app_diagnostics_history_entry(
         "reason": reason,
         "value": value,
         "evidence_ref": evidence_ref,
+    }
+
+
+def _app_diagnostics_progress_entry() -> dict[str, Any]:
+    return {
+        "case_id": "probe_case",
+        "transition_index": 0,
+        "phase": "before",
+        "probe": "app_diagnostics",
+        "status": "RUNNING",
+        "reason": "waiting for app_diagnostics.wait_json",
+        "progress": {
+            "field": "wait_json",
+            "metadata": {
+                "path": "D:/diag.json",
+                "observed": False,
+                "polls": 1,
+                "timeout_ms": 5000,
+            },
+        },
+        "evidence_ref": "diagnostic:app_diagnostics:NovaScript",
     }
 
 
@@ -909,6 +976,41 @@ async def test_runtime_smoke_get_event_delta_returns_active_app_diagnostics_hist
     assert data["cursor"]["sources"]["app_diagnostics"] == {
         "after_index": 2,
         "entry_count": 2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_get_event_delta_returns_intracase_app_diagnostics_wait_progress(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    _register(capturing_mcp, session)
+
+    mark_response = await capturing_mcp.tools["runtime_smoke_mark_event_cursor"](
+        ctx=None,
+        run_id="intracase-appdiag-run",
+        include_app_diagnostics=True,
+    )
+    response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor=mark_response["data"]["cursor"],
+        event_limit=1,
+    )
+    data = response["data"]
+
+    assert data["status"] == "PASS"
+    assert data["final"] is False
+    assert data["source_deltas"]["app_diagnostics"] == {
+        "entries": [_app_diagnostics_progress_entry()],
+        "available": 1,
+        "limit": 1,
+        "limited": False,
+        "stale_cursor": False,
+        "dropped_count": 0,
+    }
+    assert data["cursor"]["sources"]["app_diagnostics"] == {
+        "after_index": 1,
+        "entry_count": 1,
     }
 
 

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from ...freshness import DebugFreshnessVerifier
 from ...runtime_smoke_schema import DIAGNOSTIC_SCHEMA_VERSION
 from ..blocked import build_blocked
+from ..result_envelope import compact_value
 from ..timing import sleep_ms
 from ._common import probe_name
 from ._diagnostic_common import (
@@ -33,7 +36,11 @@ async def handle_app_diagnostics(
     if base_errors:
         return invalid_diagnostic_probe(probe, kind=kind, errors=base_errors)
 
-    probe, acquisition, acquisition_field = await _probe_with_diagnostic_json(probe, context)
+    probe, acquisition, acquisition_field = await _probe_with_diagnostic_json(
+        probe,
+        context,
+        phase=phase,
+    )
     if acquisition is not None and acquisition.get("observed") is not True:
         return _blocked_diagnostic_json_probe(
             probe,
@@ -234,12 +241,27 @@ def _string_list(value: Any) -> list[str]:
 async def _probe_with_diagnostic_json(
     probe: dict[str, Any],
     context: Any,
+    *,
+    phase: str,
 ) -> tuple[dict[str, Any], dict[str, Any] | None, str | None]:
     field, source = _diagnostic_json_source(probe, context)
     if source is None:
         return probe, None, None
 
-    acquired, metadata = await _read_wait_json(source, context)
+    async def progress_reporter(metadata: dict[str, Any]) -> None:
+        await _publish_app_diagnostics_progress(
+            probe,
+            context,
+            phase=phase,
+            field=field,
+            metadata=metadata,
+        )
+
+    acquired, metadata = await _read_wait_json(
+        source,
+        context,
+        progress_reporter=progress_reporter,
+    )
     if acquired is None:
         return probe, metadata, field
     merged = _merge_diagnostic_payload(probe, acquired)
@@ -367,6 +389,8 @@ def _launch_diagnostic_boundary_since(
 async def _read_wait_json(
     wait_json: dict[str, Any],
     context: Any,
+    *,
+    progress_reporter: Callable[[dict[str, Any]], Any] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     raw_path = str(wait_json.get("path") or "")
     timeout_ms = _bounded_int(wait_json.get("timeout_ms"), default=0)
@@ -397,6 +421,7 @@ async def _read_wait_json(
 
     clock = context.action_context.clock
     deadline = clock() + (timeout_ms / 1000)
+    last_progress_fingerprint: str | None = None
     while True:
         metadata["polls"] += 1
         try:
@@ -442,8 +467,18 @@ async def _read_wait_json(
                             if condition_result.get("error"):
                                 metadata["error"] = condition_result["error"]
                             if condition_result.get("terminal"):
+                                last_progress_fingerprint = await _maybe_report_diagnostic_progress(
+                                    progress_reporter,
+                                    metadata,
+                                    previous_fingerprint=last_progress_fingerprint,
+                                )
                                 break
                             if clock() < deadline:
+                                last_progress_fingerprint = await _maybe_report_diagnostic_progress(
+                                    progress_reporter,
+                                    metadata,
+                                    previous_fingerprint=last_progress_fingerprint,
+                                )
                                 await sleep_ms(
                                     clock,
                                     _poll_sleep_ms(
@@ -462,6 +497,11 @@ async def _read_wait_json(
                     metadata.pop("error", None)
                     return payload, metadata
                 metadata["reason"] = "diagnostic JSON must be an object"
+        last_progress_fingerprint = await _maybe_report_diagnostic_progress(
+            progress_reporter,
+            metadata,
+            previous_fingerprint=last_progress_fingerprint,
+        )
 
         if clock() >= deadline:
             break
@@ -479,6 +519,75 @@ async def _read_wait_json(
     else:
         metadata.setdefault("reason", "diagnostic JSON not observed")
     return None, metadata
+
+
+async def _maybe_report_diagnostic_progress(
+    progress_reporter: Callable[[dict[str, Any]], Any] | None,
+    metadata: dict[str, Any],
+    *,
+    previous_fingerprint: str | None,
+) -> str | None:
+    if progress_reporter is None:
+        return previous_fingerprint
+    if not _metadata_has_progress_signal(metadata):
+        return previous_fingerprint
+    try:
+        progress_payload = compact_value(metadata)
+        fingerprint = json.dumps(
+            _diagnostic_progress_fingerprint_payload(progress_payload),
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        if fingerprint == previous_fingerprint:
+            return previous_fingerprint
+        result = progress_reporter(dict(progress_payload))
+        if inspect.isawaitable(result):
+            await result
+        return fingerprint
+    except Exception:
+        return previous_fingerprint
+
+
+def _metadata_has_progress_signal(metadata: dict[str, Any]) -> bool:
+    return True
+
+
+def _diagnostic_progress_fingerprint_payload(
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    fingerprint_payload = dict(metadata)
+    fingerprint_payload.pop("polls", None)
+    return fingerprint_payload
+
+
+async def _publish_app_diagnostics_progress(
+    probe: dict[str, Any],
+    context: Any,
+    *,
+    phase: str,
+    field: str,
+    metadata: dict[str, Any],
+) -> None:
+    action_context = getattr(context, "action_context", context)
+    if not hasattr(action_context, "publish_app_diagnostics_progress"):
+        return
+    app = dict(probe.get("app") or {})
+    entry = compact_value(
+        {
+            "case_id": getattr(action_context, "case_id", None),
+            "transition_index": getattr(action_context, "transition_index", None),
+            "phase": phase,
+            "probe": probe_name(probe, "app_diagnostics"),
+            "status": "RUNNING",
+            "reason": str(metadata.get("reason") or f"waiting for app_diagnostics.{field}"),
+            "progress": {
+                "field": field,
+                "metadata": compact_value(metadata),
+            },
+            "evidence_ref": f"diagnostic:app_diagnostics:{app.get('name') or 'app'}",
+        }
+    )
+    await action_context.publish_app_diagnostics_progress(entry)
 
 
 def _resolve_wait_json_path(raw_path: str, context: Any) -> Path:

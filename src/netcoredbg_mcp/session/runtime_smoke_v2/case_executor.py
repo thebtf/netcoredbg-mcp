@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from .actions import ActionContext
@@ -29,7 +30,7 @@ async def execute_case(
     reason = "case passed"
     deadline = None if timeout_seconds is None else context.clock() + timeout_seconds
 
-    for transition in case.get("transitions", []):
+    for transition_index, transition in enumerate(case.get("transitions", [])):
         if max_actions is not None and action_count >= max_actions:
             status = "IMPASSE"
             reason = "action budget exhausted"
@@ -39,9 +40,14 @@ async def execute_case(
             status = "IMPASSE"
             reason = "elapsed time budget exhausted"
             break
+        transition_context = replace(
+            context,
+            case_id=str(case.get("id") or ""),
+            transition_index=transition_index,
+        )
         transition_result, transition_actions = await execute_transition(
             dict(transition),
-            context,
+            transition_context,
             timeout_seconds=remaining,
         )
         action_count += transition_actions

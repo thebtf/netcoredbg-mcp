@@ -401,6 +401,7 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "CR-051",
             "CR-067",
             "CR-078",
+            "CR-079",
             "DISAGREEING_SOURCES",
             "launch env/evidence-dir advertisement",
             "launch-to-artifact default acquisition",
@@ -408,6 +409,7 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "evidence-directory poll",
             "wait-json condition semantics",
             "case-boundary live app-diagnostics history",
+            "intra-case wait/poll progress",
             "remaining broader app diagnostics lifecycle/orchestration",
         ],
     }
@@ -566,6 +568,10 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "launch-to-artifact default acquisition",
             "PDB/process proof",
             "wait_json.condition",
+            "CR-079",
+            "intra-case live app-diagnostics progress",
+            "active `wait_json` / `poll` acquisition",
+            "before case completion",
         ],
     }
 
@@ -736,11 +742,13 @@ def test_issue_272_records_cr073_app_diagnostics_event_delta_slice() -> None:
         assert "without claiming live diagnostics streaming" in text
 
     assert (
-        "broader live app-diagnostics streaming/history beyond case-boundary live history"
+        "broader live app-diagnostics streaming/history beyond bounded case-boundary "
+        "history and intra-case wait/poll acquisition progress"
         in remaining
     )
     assert (
-        "broader live app-diagnostics streaming/history beyond case-boundary live history"
+        "broader live app-diagnostics streaming/history beyond bounded case-boundary "
+        "history and intra-case wait/poll acquisition progress"
         in lifecycle_remaining
     )
 
@@ -764,11 +772,46 @@ def test_issue_272_records_cr078_live_app_diagnostics_history_slice() -> None:
     assert "case-boundary live app-diagnostics history" not in remaining
     assert "case-boundary live app-diagnostics history" not in lifecycle_remaining
     assert (
-        "broader live app-diagnostics streaming/history beyond case-boundary live history"
+        "broader live app-diagnostics streaming/history beyond bounded case-boundary "
+        "history and intra-case wait/poll acquisition progress"
         in remaining
     )
     assert (
-        "broader live app-diagnostics streaming/history beyond case-boundary live history"
+        "broader live app-diagnostics streaming/history beyond bounded case-boundary "
+        "history and intra-case wait/poll acquisition progress"
+        in lifecycle_remaining
+    )
+    assert "broader app diagnostics lifecycle/orchestration" in remaining
+    assert "broader app diagnostics lifecycle/orchestration" in lifecycle_remaining
+
+
+def test_issue_272_records_cr079_intracase_app_diagnostics_progress_slice() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#272")
+    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#272")
+    _issue, _state, _evidence, remaining = _issue_cells(backlog, "#272")
+    _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
+        cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
+    )
+
+    for text in (row, lifecycle_row):
+        assert "CR-079" in text
+        assert "intra-case live app-diagnostics progress" in text
+        assert "active `wait_json` / `poll` acquisition" in text
+        assert "before case completion" in text
+        assert "include_app_diagnostics=True" in text
+        assert "event-delta source" in text
+
+    assert "intra-case wait/poll progress" not in remaining
+    assert "intra-case wait/poll progress" not in lifecycle_remaining
+    assert (
+        "broader live app-diagnostics streaming/history beyond bounded case-boundary "
+        "history and intra-case wait/poll acquisition progress"
+        in remaining
+    )
+    assert (
+        "broader live app-diagnostics streaming/history beyond bounded case-boundary "
+        "history and intra-case wait/poll acquisition progress"
         in lifecycle_remaining
     )
     assert "broader app diagnostics lifecycle/orchestration" in remaining
@@ -948,7 +991,8 @@ def test_issue_272_remaining_scope_excludes_covered_launch_contract_and_default(
     assert "broader app diagnostics lifecycle/orchestration" in remaining
     assert "wait-json condition semantics" in remaining
     assert (
-        "broader live app-diagnostics streaming/history beyond case-boundary live history"
+        "broader live app-diagnostics streaming/history beyond bounded case-boundary "
+        "history and intra-case wait/poll acquisition progress"
         in remaining
     )
     assert "diagnostic env/evidence-dir advertisement" not in lifecycle_remaining
@@ -959,7 +1003,8 @@ def test_issue_272_remaining_scope_excludes_covered_launch_contract_and_default(
     assert "poll cursor" in lifecycle_remaining
     assert "wait-json condition semantics" in lifecycle_remaining
     assert (
-        "broader live app-diagnostics streaming/history beyond case-boundary live history"
+        "broader live app-diagnostics streaming/history beyond bounded case-boundary "
+        "history and intra-case wait/poll acquisition progress"
         in lifecycle_remaining
     )
 

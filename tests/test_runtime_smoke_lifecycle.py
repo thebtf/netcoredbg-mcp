@@ -205,6 +205,77 @@ def _app_diagnostics_case_result(
     }
 
 
+def _app_diagnostics_progress_entry(
+    *,
+    case_id: str,
+    transition_index: int,
+    phase: str,
+    acquisition: str,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "case_id": case_id,
+        "transition_index": transition_index,
+        "phase": phase,
+        "probe": "app_diagnostics",
+        "status": "RUNNING",
+        "reason": reason,
+        "progress": {
+            "field": acquisition,
+            "metadata": {
+                "path": ".agent/runtime-smoke/app-diagnostics.json",
+                "observed": False,
+                "polls": 1,
+                "timeout_ms": 5000,
+            },
+        },
+        "evidence_ref": "diagnostic:app_diagnostics:NovaScript:progress",
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_registry_tracks_live_app_diagnostics_progress_before_case_completion(
+) -> None:
+    registry = RuntimeSmokeRunRegistry()
+    record = RuntimeSmokeRunRecord(
+        run_id="run-1",
+        plan_name="live-appdiag-progress",
+        created_at=0.0,
+        max_events=8,
+        app_diagnostics_source_enabled=True,
+    )
+    registry._runs["run-1"] = record
+    progress = _app_diagnostics_progress_entry(
+        case_id="case-1",
+        transition_index=0,
+        phase="after",
+        acquisition="wait_json",
+        reason="waiting for app_diagnostics.wait_json",
+    )
+
+    await registry.record_app_diagnostics_progress("run-1", progress)
+
+    payload = await registry.get_result("run-1")
+    assert payload["final"] is False
+    assert payload["app_diagnostics_history"] == [progress]
+
+    active_cursor = await registry.get_app_diagnostics_source_cursor("run-1")
+    assert active_cursor == {"after_index": 1, "entry_count": 1}
+
+    delta = await registry.get_app_diagnostics_source_delta(
+        "run-1",
+        after_index=0,
+        entry_count=0,
+        limit=1,
+    )
+    assert delta is not None
+    delta_payload, next_cursor = delta
+    assert delta_payload["entries"] == [progress]
+    assert delta_payload["stale_cursor"] is False
+    assert next_cursor == {"after_index": 1, "entry_count": 1}
+    assert record.result is None
+
+
 @pytest.mark.asyncio
 async def test_runtime_smoke_registry_tracks_live_app_diagnostics_history() -> None:
     registry = RuntimeSmokeRunRegistry()
@@ -351,6 +422,86 @@ async def test_runtime_smoke_registry_falls_back_to_final_result_after_completio
     )
 
     assert delta is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_registry_tracks_intracase_app_diagnostics_progress_delta() -> None:
+    registry = RuntimeSmokeRunRegistry()
+    record = RuntimeSmokeRunRecord(
+        run_id="run-1",
+        plan_name="intracase-appdiag-progress",
+        created_at=0.0,
+        max_events=8,
+        app_diagnostics_source_enabled=True,
+    )
+    registry._runs["run-1"] = record
+
+    active_cursor = await registry.get_app_diagnostics_source_cursor("run-1")
+    assert active_cursor == {"after_index": 0, "entry_count": 0}
+
+    await registry.record_app_diagnostics_progress(
+        "run-1",
+        {
+            "case_id": "probe_case",
+            "transition_index": 0,
+            "phase": "before",
+            "probe": "app_diagnostics",
+            "status": "RUNNING",
+            "reason": "diagnostic JSON condition not satisfied",
+            "progress": {
+                "field": "wait_json",
+                "metadata": {
+                    "path": "D:/diag.json",
+                    "polls": 1,
+                    "candidate_observed": True,
+                    "condition": {
+                        "jsonpath": "$.status",
+                        "expected": "PASS",
+                        "value": "BLOCKED",
+                        "matched": False,
+                    },
+                },
+            },
+            "evidence_ref": "diagnostic:app_diagnostics:NovaScript",
+        },
+    )
+
+    delta = await registry.get_app_diagnostics_source_delta(
+        "run-1",
+        after_index=0,
+        entry_count=0,
+        limit=10,
+    )
+
+    assert delta is not None
+    delta_payload, next_cursor = delta
+    assert delta_payload["entries"] == [
+        {
+            "case_id": "probe_case",
+            "transition_index": 0,
+            "phase": "before",
+            "probe": "app_diagnostics",
+            "status": "RUNNING",
+            "reason": "diagnostic JSON condition not satisfied",
+            "progress": {
+                "field": "wait_json",
+                "metadata": {
+                    "path": "D:/diag.json",
+                    "polls": 1,
+                    "candidate_observed": True,
+                    "condition": {
+                        "jsonpath": "$.status",
+                        "expected": "PASS",
+                        "value": "BLOCKED",
+                        "matched": False,
+                    },
+                },
+            },
+            "evidence_ref": "diagnostic:app_diagnostics:NovaScript",
+        }
+    ]
+    assert delta_payload["stale_cursor"] is False
+    assert next_cursor == {"after_index": 1, "entry_count": 1}
 
 
 def test_runtime_smoke_session_reset_clears_owned_state() -> None:

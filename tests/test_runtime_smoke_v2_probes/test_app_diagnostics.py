@@ -15,6 +15,8 @@ from netcoredbg_mcp.session.runtime_smoke_schema import (
     DIAGNOSTIC_SCHEMA_VERSION,
     app_diagnostics_launch_contract,
 )
+from netcoredbg_mcp.session.runtime_smoke_v2.actions import ActionContext
+from netcoredbg_mcp.session.runtime_smoke_v2.probe_dispatcher import ProbeContext
 from netcoredbg_mcp.session.runtime_smoke_v2.probes.app_diagnostics import (
     handle_app_diagnostics,
 )
@@ -218,6 +220,28 @@ def _launch_diagnostics_runner(
             "launch": session.launch,
             "ui.invoke": session.invoke,
         },
+    )
+
+
+def _probe_context_with_app_diagnostics_progress(
+    *,
+    clock: Callable[[], float],
+    progress_entries: list[dict[str, Any]],
+    case_id: str,
+    transition_index: int,
+) -> ProbeContext:
+    def publish_progress(entry: dict[str, Any]) -> None:
+        progress_entries.append(dict(entry))
+
+    return ProbeContext(
+        action_context=ActionContext(
+            service_adapters={},
+            clock=clock,
+            session=ProbeSmokeSession(),
+            case_id=case_id,
+            transition_index=transition_index,
+            app_diagnostics_progress_notifier=publish_progress,
+        )
     )
 
 
@@ -777,6 +801,85 @@ async def test_app_diagnostics_wait_json_waits_until_condition_matches(
 
 
 @pytest.mark.asyncio
+async def test_app_diagnostics_wait_json_publishes_live_source_progress_before_condition_matches(
+    tmp_path: Path,
+) -> None:
+    diagnostic_path = tmp_path / "app-diagnostics-condition-progress.json"
+    diagnostic_path.write_text(
+        json.dumps(
+            _app_diagnostics(
+                app={"name": "LiveWpfSmokeApp", "process_name": "dotnet"},
+                status="PASS",
+                observations=[
+                    {
+                        "kind": "app.snapshot",
+                        "status": "PASS",
+                        "reason": "cue selection not ready",
+                        "value": {"activeCueIndex": 0},
+                        "next_step": "Wait for the selected cue binding to settle.",
+                    }
+                ],
+            )
+        ),
+        encoding="utf-8",
+    )
+    ready_payload = _app_diagnostics(
+        app={"name": "LiveWpfSmokeApp", "process_name": "dotnet"},
+        status="PASS",
+        observations=[
+            {
+                "kind": "app.snapshot",
+                "status": "PASS",
+                "reason": "cue selection settled",
+                "value": {"activeCueIndex": 1},
+                "next_step": "No action required.",
+            }
+        ],
+    )
+    clock = _RewriteJsonOnSleepClock(diagnostic_path, ready_payload)
+    session = ProbeSmokeSession()
+    progress_entries: list[dict[str, Any]] = []
+    smoke_runner = RuntimeSmokeRunner(
+        session,
+        service_adapters={"ui.invoke": session.invoke},
+        clock=clock,
+    )
+    smoke_runner.attach_app_diagnostics_progress_notifier(progress_entries.append)
+
+    result = await smoke_runner.run(
+        one_probe_plan(
+            _app_diagnostics(
+                phase="before",
+                app={"name": "PlaceholderApp"},
+                status="PASS",
+                observations=[],
+                wait_json={
+                    "path": str(diagnostic_path),
+                    "condition": {
+                        "jsonpath": "$.observations[0].value.activeCueIndex",
+                        "expected": 1,
+                    },
+                    "timeout_ms": 100,
+                    "poll_interval_ms": 10,
+                },
+            )
+        )
+    )
+
+    assert result["status"] == "PASS"
+    assert progress_entries
+    assert progress_entries[0]["case_id"] == "probe_case"
+    assert progress_entries[0]["transition_index"] == 0
+    assert progress_entries[0]["phase"] == "before"
+    assert progress_entries[0]["probe"] == "app_diagnostics"
+    assert progress_entries[0]["status"] == "RUNNING"
+    assert progress_entries[0]["reason"] == "diagnostic JSON condition not satisfied"
+    assert progress_entries[0]["progress"]["field"] == "wait_json"
+    assert progress_entries[0]["progress"]["metadata"]["candidate_observed"] is True
+    assert progress_entries[0]["progress"]["metadata"]["condition"]["matched"] is False
+
+
+@pytest.mark.asyncio
 async def test_app_diagnostics_wait_json_blocks_when_condition_times_out(
     tmp_path: Path,
 ) -> None:
@@ -1239,6 +1342,71 @@ async def test_app_diagnostics_wait_json_clamps_zero_poll_interval_for_positive_
 
 
 @pytest.mark.asyncio
+async def test_app_diagnostics_wait_json_publishes_progress_before_artifact_arrives(
+    tmp_path: Path,
+) -> None:
+    diagnostic_path = tmp_path / "eventual-app-diagnostics-progress.json"
+    progress_entries: list[dict[str, Any]] = []
+    clock = _WriteDiagnosticOnSleepClock(
+        diagnostic_path,
+        _app_diagnostics(
+            app={"name": "ProgressWpfSmokeApp", "process_name": "dotnet"},
+            status="PASS",
+            observations=[
+                {
+                    "kind": "artifact",
+                    "status": "PASS",
+                    "reason": "diagnostic artifact arrived after wait",
+                    "next_step": "No action required.",
+                }
+            ],
+        ),
+        mtime_ns=2_000_000_000,
+    )
+
+    result = await handle_app_diagnostics(
+        _app_diagnostics(
+            phase="after",
+            app={"name": "PlaceholderProgressApp", "process_name": "dotnet"},
+            status="PASS",
+            observations=[],
+            wait_json={
+                "path": str(diagnostic_path),
+                "timeout_ms": 5,
+                "poll_interval_ms": 1,
+            },
+        ),
+        _probe_context_with_app_diagnostics_progress(
+            clock=clock,
+            progress_entries=progress_entries,
+            case_id="case-wait-json-progress",
+            transition_index=2,
+        ),
+        phase="after",
+    )
+
+    assert result["status"] == "PASS"
+    assert result["value"]["app"]["name"] == "ProgressWpfSmokeApp"
+    assert clock.written is True
+    assert progress_entries, "expected wait_json progress before final acquisition"
+    progress = progress_entries[0]
+    assert progress["case_id"] == "case-wait-json-progress"
+    assert progress["transition_index"] == 2
+    assert progress["phase"] == "after"
+    assert progress["probe"] == "app_diagnostics"
+    assert progress["status"] == "RUNNING"
+    assert progress["reason"] == "waiting for app_diagnostics.wait_json"
+    assert progress["evidence_ref"] == "diagnostic:app_diagnostics:PlaceholderProgressApp"
+    assert progress["progress"]["field"] == "wait_json"
+    wait_json = progress["progress"]["metadata"]
+    assert wait_json["path"] == str(diagnostic_path)
+    assert wait_json["observed"] is False
+    assert wait_json["polls"] == 1
+    assert wait_json["timeout_ms"] == 5
+    assert "matched_path" not in wait_json
+
+
+@pytest.mark.asyncio
 async def test_app_diagnostics_poll_times_out_with_poll_metadata(
     tmp_path: Path,
 ) -> None:
@@ -1546,6 +1714,75 @@ async def test_app_diagnostics_poll_since_waits_for_new_matching_json_before_mer
     assert probe["value"]["poll"]["observed"] is True
     assert probe["value"]["poll"]["polls"] >= 1
     assert clock.written is True
+
+
+@pytest.mark.asyncio
+async def test_app_diagnostics_poll_publishes_progress_before_artifact_arrives(
+    tmp_path: Path,
+) -> None:
+    diagnostic_dir = tmp_path / "novascript-progress-evidence"
+    diagnostic_dir.mkdir()
+    diagnostic_path = diagnostic_dir / "diagnostic-progress.json"
+    progress_entries: list[dict[str, Any]] = []
+    clock = _WriteDiagnosticOnSleepClock(
+        diagnostic_path,
+        _app_diagnostics(
+            app={"name": "ProgressNovaScript", "process_name": "NovaScript.Wpf"},
+            status="PASS",
+            observations=[
+                {
+                    "kind": "app.snapshot",
+                    "status": "PASS",
+                    "reason": "fresh diagnostic snapshot observed after poll",
+                    "next_step": "No action required.",
+                }
+            ],
+        ),
+        mtime_ns=3_000_000_000,
+    )
+
+    result = await handle_app_diagnostics(
+        _app_diagnostics(
+            phase="before",
+            app={"name": "PlaceholderPollApp", "process_name": "NovaScript.Wpf"},
+            status="PASS",
+            observations=[],
+            poll={
+                "path": str(diagnostic_dir),
+                "pattern": "diagnostic-*.json",
+                "timeout_ms": 5,
+                "poll_interval_ms": 1,
+            },
+        ),
+        _probe_context_with_app_diagnostics_progress(
+            clock=clock,
+            progress_entries=progress_entries,
+            case_id="case-poll-progress",
+            transition_index=1,
+        ),
+        phase="before",
+    )
+
+    assert result["status"] == "PASS"
+    assert result["value"]["app"]["name"] == "ProgressNovaScript"
+    assert clock.written is True
+    assert progress_entries, "expected poll progress before final acquisition"
+    progress = progress_entries[0]
+    assert progress["case_id"] == "case-poll-progress"
+    assert progress["transition_index"] == 1
+    assert progress["phase"] == "before"
+    assert progress["probe"] == "app_diagnostics"
+    assert progress["status"] == "RUNNING"
+    assert progress["reason"] == "waiting for app_diagnostics.poll"
+    assert progress["evidence_ref"] == "diagnostic:app_diagnostics:PlaceholderPollApp"
+    assert progress["progress"]["field"] == "poll"
+    poll = progress["progress"]["metadata"]
+    assert poll["path"] == str(diagnostic_dir)
+    assert poll["pattern"] == "diagnostic-*.json"
+    assert poll["observed"] is False
+    assert poll["polls"] == 1
+    assert poll["timeout_ms"] == 5
+    assert "matched_path" not in poll
 
 
 @pytest.mark.asyncio
