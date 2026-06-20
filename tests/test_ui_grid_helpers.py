@@ -750,6 +750,8 @@ def test_bridge_grid_builds_cell_text_evidence_for_rows() -> None:
     assert "public static JsonNode DragRowToRow(" in command
     assert "private static RowSearchResult ScanForRowWithHeldDrag(" in command
     assert "private static DragScrollDirection ReverseDragScrollDirection(" in command
+    assert "allowFallback: targetWasAlreadyVisible" in command
+    assert "bool allowFallback = false" in command
     assert 'finalTargetPointResult.Blocked["cleanup"] = cleanup.DeepClone();' in command
     assert "public static JsonNode EnsureVisible(" in command
     assert "ScrollIntoView()" in command

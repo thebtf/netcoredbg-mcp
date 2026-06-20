@@ -27,6 +27,8 @@ public static partial class GridCommands
     private const int RowDragEdgeHoldPulseMs = 120;
     private const double RowDragEdgeScrollDownRatio = 0.96;
     private const double RowDragEdgeScrollUpRatio = 0.25;
+    private const double RowDragNeutralBandTopRatio = 0.34;
+    private const double RowDragNeutralBandBottomRatio = 0.80;
     private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
     private const uint MOUSEEVENTF_LEFTUP = 0x0004;
 
@@ -44,6 +46,7 @@ public static partial class GridCommands
         var grid = ResolveGrid(@params, automation, mainWindow);
         if (!grid.Patterns.Grid.TryGetPattern(out _))
             return Unsupported("GridPattern");
+        var gridBounds = SafeRect(grid);
 
         var sourceRowKey = StringValue(@params?["source_row_key"]);
         var sourceRowIndex = ReadOptionalInt(@params, "source_row_index");
@@ -115,6 +118,7 @@ public static partial class GridCommands
         var sourceBounds = SafeRect(sourceMatch.Element);
         var sourceThresholdPoint = DragThresholdPoint(sourceBounds, sourcePoint);
         var targetDirection = RowDragDirection(sourceMatch.Row, targetRowIndex);
+        var resolvedTargetDirection = targetDirection;
         var targetSearchBeforeDrag = SearchCurrentRows(
             grid,
             automation,
@@ -134,6 +138,7 @@ public static partial class GridCommands
         JsonObject? blockedResult = null;
         RowMatch? targetMatch = targetSearchBeforeDrag.Match;
         JsonNode? targetEnsureVisibleResult = null;
+        var targetWasAlreadyVisible = targetMatch is not null;
 
         ClickCommands.EnsureForeground(mainWindow);
         var stopwatch = Stopwatch.StartNew();
@@ -158,6 +163,7 @@ public static partial class GridCommands
             {
                 var targetScan = ScanForRowWithHeldDrag(
                     grid,
+                    gridBounds,
                     automation,
                     columns,
                     headers,
@@ -165,7 +171,8 @@ public static partial class GridCommands
                     targetRowKey,
                     targetDirection,
                     maxScrolls,
-                    Math.Max(settleMs, 300));
+                    Math.Max(settleMs, 300),
+                    out resolvedTargetDirection);
                 if (targetScan.Blocked is not null)
                 {
                     blockedResult = targetScan.Blocked;
@@ -213,49 +220,24 @@ public static partial class GridCommands
 
             if (blockedResult is null && targetMatch is not null)
             {
-                var stabilizedTarget = StabilizeHeldDragTarget(
-                    grid,
-                    automation,
-                    columns,
-                    headers,
-                    targetRowIndex,
-                    targetRowKey,
-                    Math.Max(settleMs, RowDragFinalDropSettleMs));
-                if (stabilizedTarget.Blocked is not null)
-                {
-                    blockedResult = stabilizedTarget.Blocked;
-                }
-                else if (stabilizedTarget.Match is null)
+                var targetPoint = TargetDropPoint(
+                    targetMatch.Row,
+                    gridBounds,
+                    resolvedTargetDirection,
+                    allowFallback: targetWasAlreadyVisible);
+                if (targetPoint is null)
                 {
                     blockedResult = new JsonObject
                     {
                         ["status"] = "BLOCKED",
-                        ["reason"] = "target row disappeared after leaving drag edge scroll",
+                        ["reason"] = "target row remained inside the drag edge-scroll zone",
                         ["requested"] = RequestedRow(targetRowIndex, targetRowKey),
-                        ["attempts"] = stabilizedTarget.Attempts,
-                        ["next_step"] = "Keep the drag edge active longer or reduce the final drop distance."
+                        ["accepted"] = new JsonObject
+                        {
+                            ["target"] = "row whose bounds intersect the neutral viewport drop band"
+                        },
+                        ["next_step"] = "Keep dragging until the target row settles farther from the viewport edge."
                     };
-                }
-                else
-                {
-                    targetMatch = stabilizedTarget.Match;
-                }
-            }
-
-            if (blockedResult is null && targetMatch is not null)
-            {
-                var targetPoint = TargetDropPoint(targetMatch.Row);
-                if (targetPoint is null)
-                {
-                    var targetPointResult = ClickPoint(targetMatch.Element);
-                    if (targetPointResult.Blocked is not null)
-                    {
-                        blockedResult = targetPointResult.Blocked;
-                    }
-                    else
-                    {
-                        targetPoint = targetPointResult.Point;
-                    }
                 }
                 if (blockedResult is null && targetPoint is not null)
                 {
@@ -392,6 +374,7 @@ public static partial class GridCommands
 
     private static RowSearchResult ScanForRowWithHeldDragNearEdge(
         AutomationElement grid,
+        JsonObject gridBounds,
         UIA3Automation automation,
         List<string> columns,
         List<string> headers,
@@ -425,7 +408,10 @@ public static partial class GridCommands
             if (result.Blocked is not null)
                 return new RowSearchResult(null, result.Blocked, attempts);
             if (result.Match is not null)
-                return new RowSearchResult(result.Match, null, attempts);
+            {
+                if (TargetDropPoint(result.Match.Row, gridBounds, direction) is not null)
+                    return new RowSearchResult(result.Match, null, attempts);
+            }
             if (step >= maxScrolls)
                 break;
             PulseHeldDragPoint(edgePoint, holdMs);
@@ -436,6 +422,7 @@ public static partial class GridCommands
 
     private static RowSearchResult ScanForRowWithHeldDrag(
         AutomationElement grid,
+        JsonObject gridBounds,
         UIA3Automation automation,
         List<string> columns,
         List<string> headers,
@@ -443,10 +430,13 @@ public static partial class GridCommands
         string? rowKey,
         DragScrollDirection preferredDirection,
         int maxScrolls,
-        int holdMs)
+        int holdMs,
+        out DragScrollDirection resolvedDirection)
     {
+        resolvedDirection = preferredDirection;
         var primary = ScanForRowWithHeldDragNearEdge(
             grid,
+            gridBounds,
             automation,
             columns,
             headers,
@@ -463,6 +453,7 @@ public static partial class GridCommands
 
         var secondary = ScanForRowWithHeldDragNearEdge(
             grid,
+            gridBounds,
             automation,
             columns,
             headers,
@@ -471,6 +462,7 @@ public static partial class GridCommands
             ReverseDragScrollDirection(preferredDirection),
             maxScrolls,
             holdMs);
+        resolvedDirection = ReverseDragScrollDirection(preferredDirection);
         AppendAttempts(primary.Attempts, secondary.Attempts);
         if (secondary.Blocked is not null)
             return new RowSearchResult(null, secondary.Blocked, primary.Attempts);
@@ -565,7 +557,11 @@ public static partial class GridCommands
         return new RowSearchResult(final.Match, null, attempts);
     }
 
-    private static Point? TargetDropPoint(JsonObject row)
+    private static Point? TargetDropPoint(
+        JsonObject row,
+        JsonObject gridBounds,
+        DragScrollDirection direction,
+        bool allowFallback = false)
     {
         if (row["bounds"] is not JsonObject bounds)
             return null;
@@ -575,7 +571,29 @@ public static partial class GridCommands
         var width = Math.Max(1, bounds["width"]?.GetValue<int>() ?? 1);
         var height = Math.Max(1, bounds["height"]?.GetValue<int>() ?? 1);
         var dropX = x + (width / 2);
-        var dropY = y + Math.Max(2, height / 3);
+        var gridY = gridBounds["y"]?.GetValue<int>() ?? y;
+        var gridHeight = Math.Max(1, gridBounds["height"]?.GetValue<int>() ?? height);
+        var neutralTop = gridY + (int)Math.Round(gridHeight * RowDragNeutralBandTopRatio);
+        var neutralBottom = gridY + (int)Math.Round(gridHeight * RowDragNeutralBandBottomRatio);
+        var rowTop = y;
+        var rowBottom = y + Math.Max(1, height) - 1;
+        var safeTop = Math.Max(rowTop, neutralTop);
+        var safeBottom = Math.Min(rowBottom, neutralBottom);
+        if (safeBottom < safeTop)
+        {
+            if (!allowFallback)
+                return null;
+
+            var inset = Math.Max(2, height / 4);
+            var fallbackY = direction == DragScrollDirection.Down
+                ? y + inset
+                : y + Math.Max(inset, height - inset);
+            return new Point(dropX, fallbackY);
+        }
+
+        var dropY = direction == DragScrollDirection.Down
+            ? safeTop
+            : safeBottom;
         return new Point(dropX, dropY);
     }
 
