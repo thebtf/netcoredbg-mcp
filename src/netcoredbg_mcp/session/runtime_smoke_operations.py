@@ -1463,8 +1463,9 @@ async def _drag_route(
     if blocked is not None:
         return {}, {}, blocked
 
+    source_kind = str(source.get("kind") or _endpoint_kind(source) or "")
     if (
-        source.get("kind") in {"row_index", "row_identity"}
+        source_kind in {"row_index", "row_identity"}
         and isinstance(target_evidence.get("ensure_visible_result"), Mapping)
     ):
         refreshed_source_point, refreshed_source_evidence, blocked = await _resolve_drag_endpoint(
