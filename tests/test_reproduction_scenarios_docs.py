@@ -316,6 +316,11 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             'plan_source.format="yaml"',
             "runtime_smoke_validate_probe",
             "read-only probe validation",
+            "CR-090",
+            "invalid-probe authoring diagnostics",
+            "runtime_smoke_validate_probe(agent_mode=True)",
+            "accepted probe kinds",
+            "required-field",
             "runner-exception diagnostics",
             "debug.stop",
             "oracle-pack",
@@ -542,6 +547,11 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "YAML",
             'plan_source.format="yaml"',
             "runtime_smoke_validate_probe",
+            "CR-090",
+            "invalid-probe authoring diagnostics",
+            "runtime_smoke_validate_probe(agent_mode=True)",
+            "accepted probe kinds",
+            "required-field",
             "runner-exception diagnostics",
             "broad orchestration",
         ],
@@ -1501,6 +1511,10 @@ def test_issue_268_records_plan_path_slices() -> None:
     assert "YAML" in lifecycle_row
     assert 'plan_source.format="yaml"' in lifecycle_row
     assert "runner-exception diagnostics" in lifecycle_row
+    assert "CR-090" in row
+    assert "CR-090" in lifecycle_row
+    assert "invalid-probe authoring diagnostics" in row
+    assert "invalid-probe authoring diagnostics" in lifecycle_row
     assert "plan_path input" not in remaining
     assert "plan_path input" not in lifecycle_remaining
     assert "YAML/v3 authoring" not in remaining
@@ -1541,7 +1555,9 @@ def test_issue_268_269_record_validate_probe_slice_without_broad_closure() -> No
                 in lifecycle_remaining
             )
         else:
-            assert "read-only probe validation" in lifecycle_row
+            assert "probe validation/authoring" in lifecycle_row
+            assert "CR-090" in lifecycle_row
+            assert "invalid-probe authoring diagnostics" in lifecycle_row
             assert "generic probe UX" in remaining
             assert "generic probe UX" in lifecycle_remaining
 
@@ -1583,6 +1599,43 @@ def test_issue_268_269_record_validate_probe_slice_without_broad_closure() -> No
     assert "source_deltas.trace_source" in lifecycle_row_269
     assert "source-aware mark-cursor guidance" in row_269
     assert "source-aware mark-cursor guidance" in lifecycle_row_269
+
+
+def test_issue_268_records_cr090_invalid_probe_authoring_contract_without_broad_closure() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#268")
+    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#268")
+    _issue, _state, _evidence, remaining = _issue_cells(backlog, "#268")
+    _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
+        cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
+    )
+
+    for text in (row, lifecycle_row):
+        assert "CR-090" in text
+        assert "invalid-probe authoring diagnostics" in text
+        assert "runtime_smoke_validate_probe(agent_mode=True)" in text
+        assert "accepted probe kinds" in text
+        assert "required-field" in text or "required field" in text
+        assert "without creating a run" in text
+
+    for clause in (
+        _clause_containing(row, "CR-090"),
+        _clause_containing(lifecycle_row, "CR-090"),
+    ):
+        assert "#269" not in clause
+        assert "#270" not in clause
+        assert "#272" not in clause
+        assert "app diagnostics lifecycle" not in clause
+        assert "DataGrid" not in clause
+
+    assert "broader FR remains open" in row
+    assert "keep open" in lifecycle_row
+    assert "invalid-probe authoring diagnostics" not in remaining
+    assert "invalid-probe authoring diagnostics" not in lifecycle_remaining
+    assert "generic probe UX" in remaining
+    assert "generic probe UX" in lifecycle_remaining
+    assert "before closing the full FR" in remaining
+    assert "before closing" in lifecycle_remaining
 
 
 def test_issue_271_records_cleanup_and_trace_delta_slices() -> None:
