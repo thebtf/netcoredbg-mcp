@@ -990,6 +990,9 @@ def ui_operation_adapters(
         cleanup = _drag_cleanup_evidence(result)
         if cleanup is not None:
             output["cleanup"] = cleanup
+        target_ensure_visible_result = route_evidence.get("target_ensure_visible_result")
+        if isinstance(target_ensure_visible_result, Mapping):
+            output["drop_ensure_visible_result"] = dict(target_ensure_visible_result)
         cancel_evidence = result.get("cancel")
         if isinstance(cancel_evidence, Mapping):
             output["cancel"] = dict(cancel_evidence)
@@ -1470,6 +1473,10 @@ async def _drag_route(
         "source_point": source_point,
         "target_point": target_point,
     }
+    if isinstance(target_evidence.get("ensure_visible_result"), Mapping):
+        route_evidence["target_ensure_visible_result"] = dict(
+            target_evidence["ensure_visible_result"]
+        )
     source_point = _route_point_from_relative_waypoint(
         route_evidence,
         prefix="source",
@@ -1708,6 +1715,18 @@ async def _resolve_drag_endpoint(
                 next_step=f"Provide {role}.selector with {role}.{kind}.",
             )
         endpoint_identity = _identity_from_endpoint(endpoint, identity)
+        ensure_visible_result: dict[str, Any] | None = None
+        if endpoint.get("ensure_visible") is True:
+            ensure_visible_result, blocked = await _ensure_drag_row_endpoint_visible(
+                backend,
+                selector,
+                endpoint,
+                role=role,
+                kind=kind,
+                identity=endpoint_identity,
+            )
+            if blocked is not None:
+                return {}, {}, blocked
         snapshot, blocked = await _grid_snapshot_for_drag(
             backend,
             selector,
@@ -1739,6 +1758,11 @@ async def _resolve_drag_endpoint(
                 "bounds": bounds,
                 "identity": _row_identity(row, endpoint_identity),
                 "row": _compact_row_ref(row, endpoint_identity),
+                **(
+                    {"ensure_visible_result": ensure_visible_result}
+                    if ensure_visible_result is not None
+                    else {}
+                ),
             },
             None,
         )
@@ -1983,6 +2007,60 @@ async def _grid_snapshot_for_drag(
             next_step="Resolve the grid selector or backend capability before dragging.",
         )
     return dict(result), None
+
+
+async def _ensure_drag_row_endpoint_visible(
+    backend: Any,
+    selector: dict[str, Any],
+    endpoint: dict[str, Any],
+    *,
+    role: str,
+    kind: str,
+    identity: Mapping[str, Any],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    if kind not in {"row_index", "row_identity"}:
+        return None, _drag_blocked(
+            reason=f"drag {role} ensure-visible requires row endpoint",
+            requested={role: endpoint},
+            accepted={f"{role}.kind": "row_index or row_identity"},
+            next_step=f"Use {role}.ensure_visible only with row_index or row_identity targets.",
+        )
+
+    row_index = endpoint.get("row_index") if kind == "row_index" else None
+    row_key = str(endpoint.get("row_identity") or "") if kind == "row_identity" else None
+    rows = (
+        dict(endpoint.get("rows"))
+        if isinstance(endpoint.get("rows"), Mapping)
+        else {"visible_only": True}
+    )
+    columns = (
+        [str(item) for item in endpoint.get("columns", []) if item]
+        if isinstance(endpoint.get("columns"), list)
+        else _viewport_columns(identity)
+    )
+    result = await ensure_grid_row_visible(
+        backend,
+        selector,
+        row_index=row_index,
+        row_key=row_key,
+        identity=identity,
+        rows=rows,
+        columns=columns,
+        max_scrolls=endpoint.get("max_scrolls"),
+        scroll_settle_ms=endpoint.get("scroll_settle_ms"),
+    )
+    if _is_backend_success(result):
+        return dict(result), None
+    blocked = dict(result) if isinstance(result, Mapping) else {}
+    status = str(blocked.get("status", "BLOCKED")).upper()
+    blocked["status"] = status if status in {"FAIL", "BLOCKED", "IMPASSE"} else "BLOCKED"
+    blocked.setdefault(
+        "reason",
+        f"grid ensure-visible failed before drag {role} resolution",
+    )
+    blocked["drop_ensure_visible_result"] = result
+    blocked["action_skipped"] = True
+    return None, blocked
 
 
 def _row_from_drag_endpoint(

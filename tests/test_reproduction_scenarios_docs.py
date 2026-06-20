@@ -248,9 +248,13 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
     assert "CR-052" in row
     assert "CR-053" in row
     assert "CR-070" in row
+    assert "CR-074" in row
     assert 'ui_text(action="set_text")' in row
     assert 'ui_grid(action="viewport")' in row
     assert "ui.grid.ensure_visible" in row
+    assert "drop.ensure_visible=true" in row
+    assert "row-based drop endpoint" in row
+    assert "raw viewport guessing" in row
     assert "viewport_delta.before" in row
     assert "opt-in DataGrid row action ensure-visible composition" in row
     assert "visible-row-only defaults" in row
@@ -350,11 +354,15 @@ def test_issues_backlog_does_not_close_broad_issue_bodies_from_narrow_slices() -
             "CR-054",
             "CR-057",
             "CR-058",
+            "CR-074",
             "ui.text.set_text",
             'ui_grid(action="viewport")',
             'ui_grid(action="right_click_row")',
             'ui_grid(action="double_click_row")',
             "ui.grid.viewport",
+            "drop.ensure_visible=true",
+            "row-based drop endpoint",
+            "target-side offscreen row-target drag ensure-visible semantics",
             "opt-in ensure-visible row actions",
             "ui.right_click_verified",
             "ui.double_click_verified",
@@ -500,6 +508,7 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "CR-053",
             "CR-057",
             "CR-058",
+            "CR-074",
             "ui.text.set_text",
             'ui_grid(action="viewport")',
             'ui_grid(action="right_click_row")',
@@ -509,6 +518,9 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
             "ui.grid.double_click_row",
             "grid_right_click_row",
             "grid_double_click_row",
+            "drop.ensure_visible=true",
+            "row-based drop endpoint",
+            "raw viewport guessing",
             "opt-in ensure-visible composition",
             "visible-row-only defaults",
             "visible-row-only DataGrid",
@@ -783,6 +795,32 @@ def test_issue_270_records_cr072_drag_ensure_visible_slice_without_broad_closure
 
     assert "drag-source ensure-visible preflight" in remaining
     assert "drag-source ensure-visible preflight" in lifecycle_remaining
+    assert "broader" in remaining
+    assert "broader" in lifecycle_remaining
+
+
+def test_issue_270_records_cr074_target_drop_ensure_visible_slice_without_broad_closure() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    row = _issue_row(backlog, "#270")
+    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#270")
+    _issue, _state, _evidence, remaining = _issue_cells(backlog, "#270")
+    _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
+        cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
+    )
+
+    for text in (row, lifecycle_row):
+        assert "CR-074" in text
+        assert "target-side" in text
+        assert "offscreen row" in text
+        assert "row-based drop endpoint" in text
+        assert "drop.ensure_visible=true" in text
+        assert "raw viewport guessing" in text
+
+    assert "target-side offscreen row-target drag ensure-visible semantics" in remaining
+    assert (
+        "target-side offscreen row-target drag ensure-visible semantics"
+        in lifecycle_remaining
+    )
     assert "broader" in remaining
     assert "broader" in lifecycle_remaining
 

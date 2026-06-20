@@ -2187,6 +2187,129 @@ async def test_v2_ui_drag_without_ensure_visible_keeps_default_no_preflight_beha
 
 
 @pytest.mark.asyncio
+async def test_v2_ui_drag_passes_through_drop_ensure_visible_result() -> None:
+    session = ActionSmokeSession()
+    session.drag_results.append(
+        {
+            "status": "PASS",
+            "backend": "fake",
+            "route_evidence": {
+                "move_points": [
+                    {"relative_to": "source", "x": 0.5, "y": 0.5},
+                    {"relative_to": "drop", "x": 0.5, "y": 0.5},
+                ],
+                "final_pointer": {"relative_to": "drop", "x": 0.5, "y": 0.5},
+            },
+            "drop_ensure_visible_result": {
+                "status": "PASS",
+                "already_visible": False,
+                "resolved_row": {"identity": "ROW-008-UNIQUE-PHRASE"},
+            },
+        }
+    )
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "drag target ensure visible passthrough",
+            "cases": [
+                {
+                    "id": "drag_target_ensure_visible_passthrough",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.drag",
+                                "source": {
+                                    "selector": {"automation_id": "CueDataGrid"},
+                                    "row_identity": "Cue 042",
+                                },
+                                "drop": {
+                                    "selector": {"automation_id": "CueDataGrid"},
+                                    "row_identity": "ROW-008-UNIQUE-PHRASE",
+                                    "ensure_visible": True,
+                                },
+                                "path": [
+                                    {"relative_to": "source", "x": 0.5, "y": 0.5},
+                                    {"relative_to": "drop", "x": 0.5, "y": 0.5},
+                                ],
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == "PASS"
+    assert action["drop_ensure_visible_result"] == {
+        "status": "PASS",
+        "already_visible": False,
+        "resolved_row": {"identity": "ROW-008-UNIQUE-PHRASE"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_drag_passes_through_drop_ensure_visible_blocked_result() -> None:
+    session = ActionSmokeSession()
+    session.drag_results.append(
+        {
+            "status": "BLOCKED",
+            "reason": "grid backend cannot realize target row",
+            "action_skipped": True,
+            "drop_ensure_visible_result": {
+                "status": "UNSUPPORTED",
+                "reason": "grid backend cannot realize target row",
+            },
+        }
+    )
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "drag target ensure visible blocked passthrough",
+            "cases": [
+                {
+                    "id": "drag_target_ensure_visible_blocked_passthrough",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.drag",
+                                "source": {
+                                    "selector": {"automation_id": "CueDataGrid"},
+                                    "row_identity": "Cue 042",
+                                },
+                                "drop": {
+                                    "selector": {"automation_id": "CueDataGrid"},
+                                    "row_identity": "ROW-008-UNIQUE-PHRASE",
+                                    "ensure_visible": True,
+                                },
+                                "path": [
+                                    {"relative_to": "source", "x": 0.5, "y": 0.5},
+                                    {"relative_to": "drop", "x": 0.5, "y": 0.5},
+                                ],
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == "BLOCKED"
+    assert action["status"] == "BLOCKED"
+    assert action["reason"] == "grid backend cannot realize target row"
+    assert action["action_skipped"] is True
+    assert action["drop_ensure_visible_result"] == {
+        "status": "UNSUPPORTED",
+        "reason": "grid backend cannot realize target row",
+    }
+
+
+@pytest.mark.asyncio
 async def test_v2_ui_drag_ensure_visible_blocks_unsupported_preflight_before_drag() -> None:
     session = ActionSmokeSession()
     session.grid_ensure_visible_results = [

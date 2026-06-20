@@ -11,7 +11,8 @@
       "description": "Drag a visible row toward the bottom viewport edge, hold long enough for auto-scroll, then drop into a new visible position.",
       "notes": [
         "Requires a WPF-capable UI backend that performs real pointer movement and returns backend-produced route_evidence.",
-        "Classify the run as BLOCKED, not PASS, if ui.drag route_evidence or ui.grid.viewport identity evidence is unavailable."
+        "Classify the run as BLOCKED, not PASS, if ui.drag route_evidence or ui.grid.viewport identity evidence is unavailable.",
+        "When the target row is offscreen, use a row-based drop endpoint with drop.ensure_visible=true instead of raw viewport guessing."
       ],
       "transitions": [
         {
