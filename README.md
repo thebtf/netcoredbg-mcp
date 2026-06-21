@@ -382,6 +382,11 @@ the examples under `docs/examples/runtime-smoke-oracle-pack.json`,
 `docs/examples/runtime-smoke-semantic-probe.json`, and
 `docs/examples/runtime-smoke-tracepoint-guardrail.json` when adding oracle
 packs, app diagnostics, semantic probes, or instrumentation guardrails.
+NovaScript consumers validating the v0.19.0 action-oracle path can adapt
+[`docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json`](docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json)
+to generate a bounded `app_diagnostics` probe from the
+`novascript-action-oracle` template while using launch-scoped diagnostic
+evidence acquisition.
 Diagnostic payloads use only `PASS`, `BLOCKED`, and `FAIL`; evidence is bounded
 by `max_text_length`, `max_list_items`, and `max_json_bytes`; `raw_tree`,
 `window_tree`, `ui_tree`, `screenshot_base64`, `access_token`, `api_key`,

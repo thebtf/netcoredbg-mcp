@@ -13,9 +13,13 @@ from netcoredbg_mcp.session.runtime_smoke_schema import (
     validate_diagnostic_schema_example,
     validate_plan,
 )
+from netcoredbg_mcp.session.runtime_smoke_v2.generate import expand_generated_cases
 
 EXAMPLE_PATH = Path("docs/examples/runtime-smoke-v2-drag-drop-grid.json")
 SELECTOR_SAFETY_EXAMPLE_PATH = Path("docs/examples/runtime-smoke-v2-selector-safety.json")
+NOVASCRIPT_ACTION_ORACLE_APP_DIAGNOSTICS_EXAMPLE_PATH = Path(
+    "docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json"
+)
 APP_DIAGNOSTICS_WAIT_JSON_EXAMPLE_PATH = Path(
     "docs/examples/runtime-smoke-app-diagnostics-wait-json.json"
 )
@@ -223,6 +227,12 @@ def _load_example() -> dict[str, Any]:
 
 def _load_selector_safety_example() -> dict[str, Any]:
     return json.loads(SELECTOR_SAFETY_EXAMPLE_PATH.read_text(encoding="utf-8"))
+
+
+def _load_novascript_action_oracle_app_diagnostics_example() -> dict[str, Any]:
+    return json.loads(
+        NOVASCRIPT_ACTION_ORACLE_APP_DIAGNOSTICS_EXAMPLE_PATH.read_text(encoding="utf-8")
+    )
 
 
 def _viewport_snapshot(
@@ -585,6 +595,7 @@ def test_readme_and_playbook_document_diagnostic_schema_gate() -> None:
     diagnostic_examples = {
         "docs/examples/runtime-smoke-oracle-pack.json",
         "docs/examples/runtime-smoke-app-diagnostics.json",
+        "docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json",
         "docs/examples/runtime-smoke-semantic-probe.json",
         "docs/examples/runtime-smoke-tracepoint-guardrail.json",
     }
@@ -635,6 +646,88 @@ def test_readme_and_playbook_document_diagnostic_schema_gate() -> None:
     )
 
 
+def test_readme_and_playbook_document_novascript_action_oracle_app_diagnostics_gate() -> None:
+    readme = README_PATH.read_text(encoding="utf-8")
+    playbook = PLAYBOOK_PATH.read_text(encoding="utf-8")
+    example_path = "docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json"
+    required_terms = {
+        "NovaScript Action-Oracle App-Diagnostics Consumer Gate",
+        "uv run --no-sync --project <NETCOREDBG_MCP_REPO> netcoredbg-mcp --version",
+        "netcoredbg-mcp 0.19.0",
+        "0.19.0",
+        "<NOVASCRIPT_PROCESS_NAME>",
+        "<NOVASCRIPT_PRIMARY_MODULE>",
+        "run_runtime_smoke",
+        "runtime_smoke_start",
+        "runtime_smoke_tail_events",
+        "runtime_smoke_get_result",
+        "runtime_smoke_stop",
+        "app_diagnostics",
+        "novascript-action-oracle",
+        "action_oracle_diagnostics",
+        "freshness",
+        "cleanup",
+        "PRODUCT_WORKS",
+        "PARTIALLY_WORKS",
+        "BROKEN",
+    }
+
+    assert example_path in readme
+    assert example_path in playbook
+    assert "NovaScript consumers validating the v0.19.0 action-oracle path" in readme
+    for term in required_terms:
+        assert term in playbook
+    assert "does not replace the CR-003 DataGrid drag/drop replay gate" in _collapsed(playbook)
+
+
+def test_novascript_action_oracle_app_diagnostics_example_is_consumer_ready() -> None:
+    plan = _load_novascript_action_oracle_app_diagnostics_example()
+
+    assert validate_plan(plan) == []
+    diagnostic_launch = plan["diagnostics"]["app_diagnostics"]["diagnostic_launch"]
+    assert diagnostic_launch["evidence"] == {
+        "directory": ".agent/runtime-smoke/app-diagnostics",
+        "path": ".agent/runtime-smoke/app-diagnostics/novascript-action-oracle.json",
+    }
+    assert plan["baseline"]["steps"][0]["kind"] == "isolated_profile.launch"
+    launch = plan["baseline"]["steps"][0]["launch"]
+    assert launch["pre_build"] is True
+    assert launch["env"]["NOVASCRIPT_UI_TEST_MODE"] == "1"
+    assert launch["env"]["NOVASCRIPT_UI_TEST_AUTO_OPEN_DOCUMENT"] == "1"
+    assert launch["env"]["NOVASCRIPT_UI_TEST_DISABLE_RESTORE"] == "1"
+
+    generated, errors = expand_generated_cases(plan)
+
+    assert errors == []
+    assert len(generated) == 1
+    case = generated[0]
+    assert case["id"] == "action_oracle_diagnostics"
+    transition = case["transitions"][0]
+    assert transition["action"]["kind"] == "ui.invoke"
+    assert transition["settle"] == {"idle_ms": 500}
+    probes = transition["probes"]
+    assert len(probes) == 1
+    probe = probes[0]
+    assert probe["kind"] == "app_diagnostics"
+    assert probe["phase"] == "after"
+    assert probe["name"] == "novascript_action_oracle"
+    assert "wait_json" not in probe
+    assert "poll" not in probe
+    assert probe["schema"] == "netcoredbg.runtime_smoke.diagnostics.v1"
+    assert probe["app"] == {
+        "name": "NovaScript",
+        "process_name": "<NOVASCRIPT_PROCESS_NAME>",
+        "expected_modules": ["<NOVASCRIPT_PRIMARY_MODULE>"],
+        "require_active_process": True,
+    }
+    assert probe["artifacts"] == {
+        "expected": [
+            ".agent/runtime-smoke/app-diagnostics/novascript-action-oracle.json"
+        ]
+    }
+    assert validate_diagnostic_schema_example(probe, kind="app_diagnostics") == []
+
+
 def test_runtime_smoke_examples_remain_schema_compatible() -> None:
     examples = [
         Path("docs/examples/runtime-smoke-v2-drag-drop-grid.json"),
@@ -642,6 +735,7 @@ def test_runtime_smoke_examples_remain_schema_compatible() -> None:
         Path("docs/examples/runtime-smoke-v2-handwritten.json"),
         Path("docs/examples/runtime-smoke-v2-matrix-toggle.json"),
         Path("docs/examples/runtime-smoke-v2-state-only-file-json-matrix.json"),
+        Path("docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json"),
         Path("docs/examples/runtime-smoke-wpf-workflow-plan.json"),
     ]
 

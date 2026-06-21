@@ -248,6 +248,7 @@ Contract sources:
 
 - `docs/examples/runtime-smoke-oracle-pack.json`
 - `docs/examples/runtime-smoke-app-diagnostics.json`
+- `docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json`
 - `docs/examples/runtime-smoke-semantic-probe.json`
 - `docs/examples/runtime-smoke-tracepoint-guardrail.json`
 
@@ -276,6 +277,66 @@ Verification:
 uv run --locked --extra dev pytest tests/test_runtime_smoke_diagnostics_schema.py
 ```
 
+### 9. NovaScript Action-Oracle App-Diagnostics Consumer Gate
+
+Contract source:
+
+- `docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json`
+
+Provider version preflight:
+
+```powershell
+uv run --no-sync --project <NETCOREDBG_MCP_REPO> netcoredbg-mcp --version
+```
+
+Expected preflight result:
+
+- Exit code `0`.
+- Output is `netcoredbg-mcp 0.19.0`.
+- If a live MCP mux session holds the development `.venv` executable, use the
+  direct `.venv\Scripts\netcoredbg-mcp.exe --version` route instead of treating
+  the uv sync lock as stale code.
+
+Consumer procedure:
+
+1. Copy the contract source into the NovaScript checkout.
+2. Replace `<NOVASCRIPT_PROGRAM_DLL_OR_EXE>`,
+   `<NOVASCRIPT_DEBUG_OUTPUT_DIR>`, `<NOVASCRIPT_PROJECT_FILE>`,
+   `<NOVASCRIPT_REPO>`, `<ACTION_ORACLE_TRIGGER_AUTOMATION_ID>`,
+   `<NOVASCRIPT_PROCESS_NAME>`, and `<NOVASCRIPT_PRIMARY_MODULE>` with the
+   local NovaScript Debug build paths, the UI action that writes the
+   action-oracle diagnostic payload, and the freshness identity for the actual
+   launched process. EXE launches normally use the NovaScript process name;
+   DLL launches through a host process should use that host process name while
+   keeping the NovaScript assembly as the expected module.
+3. Run the plan through the active v0.19.0 MCP server with the
+   `run_runtime_smoke` tool from the NovaScript repository root.
+4. Record the returned runtime-smoke envelope as the consumer evidence. A
+   lifecycle run may use `runtime_smoke_start`, `runtime_smoke_tail_events`,
+   `runtime_smoke_get_result`, and `runtime_smoke_stop` when observation or
+   cancellation is needed.
+
+Expected result:
+
+- `PRODUCT_WORKS`: the final runtime-smoke status is `PASS`; the generated case
+  id is `action_oracle_diagnostics`; the probe kind is `app_diagnostics`; the
+  diagnostic payload uses schema `netcoredbg.runtime_smoke.diagnostics.v1`;
+  freshness evidence confirms the NovaScript process/module/workspace/artifact
+  expectations; cleanup reports debug stop success and an empty process
+  registry.
+- `PARTIALLY_WORKS`: the example parses and expands, but the live NovaScript
+  stand is absent or returns a bounded `BLOCKED` result that names the missing
+  launch, UI selector, diagnostic artifact, freshness, or cleanup capability
+  with a concrete `next_step`.
+- `BROKEN`: the plan returns `FAIL` or `INVALID_SETUP`; the generated
+  action-oracle case falls back to `file.json`; app diagnostics pass without a
+  fresh diagnostic artifact; unsafe diagnostic fields leave the runtime-smoke
+  boundary; or cleanup leaves NovaScript/netcoredbg processes behind.
+
+This gate is the post-release consumer-readiness slice for the v0.19.0
+NovaScript-facing action-oracle/app-diagnostics path. It does not replace the
+CR-003 DataGrid drag/drop replay gate above.
+
 ## Failure-Mode Catalog
 
 - CLI exits non-zero or fails to import the package.
@@ -293,6 +354,8 @@ uv run --locked --extra dev pytest tests/test_runtime_smoke_diagnostics_schema.p
   coordinates instead of a row-based drop endpoint with `drop.ensure_visible=true`.
 - WinForms `dragList` primitive smoke is used as a substitute for WPF DataGrid
   CR-001 acceptance.
+- NovaScript action-oracle verification uses `file.json` only, omits a generated
+  `app_diagnostics` probe, or accepts stale app-diagnostics evidence.
 
 ## Verdict Template
 
@@ -305,6 +368,7 @@ uv run --locked --extra dev pytest tests/test_runtime_smoke_diagnostics_schema.p
 | WPF one-call runtime smoke | One `run_runtime_smoke` plan returns PASS or an honest BLOCKED/FAIL with cleanup evidence |  |  |
 | Avalonia fixture compatibility | Fixture found; key cleanup succeeds; UIA gaps are bounded UNSUPPORTED/BLOCKED evidence |  |  |
 | WPF DataGrid drag/drop customer-mode gate | `docs/examples/runtime-smoke-v2-drag-drop-grid.json` returns PASS or an honest BLOCKED with route, viewport, selected-payload, negative no-op, and offscreen row-target `drop.ensure_visible=true` evidence requirements named |  |  |
+| NovaScript action-oracle app diagnostics | `docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json` expands to `app_diagnostics` and returns PASS or an honest BLOCKED with freshness and cleanup evidence |  |  |
 
 Overall verdict: `PRODUCT_WORKS` / `PARTIALLY_WORKS` / `BROKEN`
 
