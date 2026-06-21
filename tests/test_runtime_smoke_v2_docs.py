@@ -650,8 +650,13 @@ def test_readme_and_playbook_document_novascript_action_oracle_app_diagnostics_g
     readme = README_PATH.read_text(encoding="utf-8")
     playbook = PLAYBOOK_PATH.read_text(encoding="utf-8")
     example_path = "docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json"
+    replay_packet_path = (
+        "docs/reproduction-scenarios/"
+        "novascript-action-oracle-app-diagnostics-replay-2026-06-21.md"
+    )
     required_terms = {
         "NovaScript Action-Oracle App-Diagnostics Consumer Gate",
+        replay_packet_path,
         "uv run --no-sync --project <NETCOREDBG_MCP_REPO> netcoredbg-mcp --version",
         "netcoredbg-mcp 0.19.0",
         "0.19.0",
@@ -674,6 +679,7 @@ def test_readme_and_playbook_document_novascript_action_oracle_app_diagnostics_g
 
     assert example_path in readme
     assert example_path in playbook
+    assert replay_packet_path in playbook
     assert "NovaScript consumers validating the v0.19.0 action-oracle path" in readme
     for term in required_terms:
         assert term in playbook

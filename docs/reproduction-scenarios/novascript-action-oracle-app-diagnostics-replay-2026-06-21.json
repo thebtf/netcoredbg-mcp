@@ -1,0 +1,92 @@
+{
+  "schema": "netcoredbg.downstream_replay_packet.v1",
+  "id": "novascript-action-oracle-app-diagnostics-replay-2026-06-21",
+  "status": "PROVIDER_READY_CONSUMER_REPLAY_PENDING",
+  "issue": "#268",
+  "issues": ["#268", "#272"],
+  "provider_baseline": {
+    "repo": "thebtf/netcoredbg-mcp",
+    "commit": "e6d3fac78ae2aaa1e6b1cde8b3f7c5d703c03093",
+    "version": "0.19.0",
+    "evidence_boundary": "CR-099 proves provider-side readiness for a NovaScript action-oracle app-diagnostics replay; it is not live NovaScript product behavior proof."
+  },
+  "source_contract": {
+    "example_path": "docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json",
+    "playbook_section": "docs/PRODUCTION-TESTING-PLAYBOOK.md#9-novascript-action-oracle-app-diagnostics-consumer-gate",
+    "template": "novascript-action-oracle",
+    "generated_case_id": "action_oracle_diagnostics",
+    "generated_probe_kind": "app_diagnostics",
+    "expected_provider_preflight": "netcoredbg-mcp 0.19.0"
+  },
+  "downstream": {
+    "repo_name": "NovaScript",
+    "expected_local_path": "<NOVASCRIPT_REPO>",
+    "plan_path": "NovaScript.Tests.UI/Scenarios/action-oracle-app-diagnostics.runtime-smoke-v2.json",
+    "adapted_plan_path": "<NOVASCRIPT_REPO>/NovaScript.Tests.UI/Scenarios/action-oracle-app-diagnostics.runtime-smoke-v2.json",
+    "source_plan_to_copy": "docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json",
+    "placeholders": [
+      "<NOVASCRIPT_PROGRAM_DLL_OR_EXE>",
+      "<NOVASCRIPT_DEBUG_OUTPUT_DIR>",
+      "<NOVASCRIPT_PROJECT_FILE>",
+      "<NOVASCRIPT_REPO>",
+      "<ACTION_ORACLE_TRIGGER_AUTOMATION_ID>",
+      "<NOVASCRIPT_PROCESS_NAME>",
+      "<NOVASCRIPT_PRIMARY_MODULE>"
+    ]
+  },
+  "required_verdicts": ["PASS", "BLOCKED", "FAIL"],
+  "pass_criteria": [
+    "The adapted runtime-smoke v2 plan returns final status PASS from the NovaScript repository root.",
+    "The generated case action_oracle_diagnostics runs the requested UI action.",
+    "The generated app_diagnostics probe observes the action-written diagnostic payload.",
+    "Freshness evidence matches the launched NovaScript process or host process plus the NovaScript primary module.",
+    "Cleanup runs debug.stop and process.registry.assert_empty successfully."
+  ],
+  "blocked_criteria": [
+    "NovaScript checkout, GUI desktop, Debug build, selector, provider runtime, or MCP tool access is missing.",
+    "The diagnostic payload is not written in time, but the blocker names the exact missing artifact, freshness identity, owner, and next step.",
+    "The result is bounded and actionable rather than a false PASS."
+  ],
+  "fail_criteria": [
+    "The NovaScript target launches and the action route executes, but the expected action-oracle diagnostic state is wrong.",
+    "Freshness or module evidence contradicts the launched consumer process.",
+    "Cleanup cannot stop the debuggee or leaves process registry entries."
+  ],
+  "not_claimed": [
+    "live_consumer_behavior",
+    "broad_issue_closure",
+    "cr003_datagrid_drag_drop_replay_replacement"
+  ],
+  "commands": {
+    "provider_preflight": "uv run --no-sync --project <NETCOREDBG_MCP_REPO> netcoredbg-mcp --version",
+    "consumer_runtime_smoke": "run_runtime_smoke with the adapted NovaScript action-oracle app-diagnostics plan",
+    "runtime_smoke_lifecycle": [
+      "runtime_smoke_start",
+      "runtime_smoke_tail_events",
+      "runtime_smoke_get_result",
+      "runtime_smoke_stop"
+    ]
+  },
+  "evidence_output": {
+    "path": ".agent/specs/issue-backlog-hardening-roadmap/evidence/CR-100.novascript-action-oracle-app-diagnostics.downstream.json",
+    "required_fields": [
+      "status",
+      "timestamp",
+      "netcoredbg_mcp_commit",
+      "netcoredbg_mcp_version",
+      "novascript_path",
+      "novascript_branch",
+      "adapted_plan_path",
+      "provider_preflight",
+      "runtime_smoke_command_or_tool",
+      "generated_case_id",
+      "generated_probe_kind",
+      "app_diagnostics_status",
+      "freshness",
+      "cleanup",
+      "issue_lifecycle_decision"
+    ],
+    "status_values": ["PASS", "BLOCKED", "FAIL"]
+  },
+  "closure_rule": "Do not close #268, #272, or related broad issues from this packet alone. Issue lifecycle requires the returned live consumer evidence or an explicit split/closure decision."
+}
