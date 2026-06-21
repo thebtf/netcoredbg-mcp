@@ -421,6 +421,78 @@ async def test_v2_no_global_input_plan_records_result_and_compact_evidence() -> 
 
 
 @pytest.mark.asyncio
+async def test_v2_no_global_input_allows_app_dispatch_click_route() -> None:
+    session = ActionSmokeSession()
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "cases": [
+                {
+                    "id": "isolated_click",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.click",
+                                "input_policy": {"no_global_input": True},
+                                "selector": {"automation_id": "ApplyButton"},
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == "PASS"
+    assert action["status"] == "PASS"
+    assert action["input_classification"] == "APP_DISPATCH_SAFE"
+    assert action["input_policy"] == {"no_global_input": True}
+    assert action["operator_isolated"] is True
+    assert action["physical_fallback_attempted"] is False
+    assert session.calls == [("click", {"automation_id": "ApplyButton"})]
+
+
+@pytest.mark.asyncio
+async def test_v2_no_global_input_rejects_malformed_action_policy_before_adapter() -> None:
+    session = ActionSmokeSession()
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "cases": [
+                {
+                    "id": "malformed_action_policy",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.drag",
+                                "input_policy": {"no_global_input": "true"},
+                                "source": {"point": {"x": 10, "y": 10}},
+                                "path": [{"relative_to": "screen", "x": 12, "y": 14}],
+                                "drop": {"relative_to": "screen", "x": 20, "y": 30},
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert result["status"] == "INVALID_SETUP"
+    assert result["reason"] == "invalid plan schema"
+    assert result["validation_errors"] == [
+        "cases[0].transitions[0].action.input_policy.no_global_input "
+        "must be a boolean"
+    ]
+    assert result["action_count"] == 0
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
 async def test_v2_no_global_input_blocks_ensure_target_focus_before_adapter() -> None:
     session = ActionSmokeSession()
 

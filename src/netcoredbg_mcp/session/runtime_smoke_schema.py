@@ -87,6 +87,7 @@ V2_ONLY_TOP_LEVEL_KEYS = (
 )
 ACCEPTED_TOP_LEVEL_KEYS_V2 = ACCEPTED_TOP_LEVEL_KEYS + V2_ONLY_TOP_LEVEL_KEYS
 V1_EXECUTION_KEYS = ("steps", "actions", "assertions", "evidence")
+INPUT_POLICY_KEYS = ("no_global_input",)
 
 
 @dataclass(frozen=True)
@@ -955,22 +956,27 @@ def normalize_input_policy(payload: Any) -> dict[str, bool]:
     return {"no_global_input": payload.get("no_global_input") is True}
 
 
+def validate_input_policy_payload(prefix: str, payload: Any, errors: list[str]) -> None:
+    if not isinstance(payload, dict):
+        errors.append(f"{prefix} must be an object")
+        return
+    accepted_keys = set(INPUT_POLICY_KEYS)
+    for key in payload:
+        if key not in accepted_keys:
+            expected = ", ".join(sorted(accepted_keys))
+            errors.append(f"{prefix}.{key} is not accepted; expected one of: {expected}")
+    if "no_global_input" in payload and not isinstance(payload["no_global_input"], bool):
+        errors.append(f"{prefix}.no_global_input must be a boolean")
+
+
 def _validate_input_policy(plan: dict[str, Any], errors: list[str]) -> None:
     if "input_policy" not in plan:
         return
-    policy = plan["input_policy"]
-    if not isinstance(policy, dict):
-        errors.append("input_policy must be an object")
-        return
-    accepted_keys = {"no_global_input"}
-    for key in policy:
-        if key not in accepted_keys:
-            expected = ", ".join(sorted(accepted_keys))
-            errors.append(
-                f"input_policy.{key} is not accepted; expected one of: {expected}"
-            )
-    if "no_global_input" in policy and not isinstance(policy["no_global_input"], bool):
-        errors.append("input_policy.no_global_input must be a boolean")
+    validate_input_policy_payload(
+        "input_policy",
+        plan["input_policy"],
+        errors,
+    )
 
 
 def _validate_schema_value(plan: dict[str, Any], errors: list[str]) -> None:

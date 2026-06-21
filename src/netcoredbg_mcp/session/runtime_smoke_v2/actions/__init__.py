@@ -32,7 +32,6 @@ _GLOBAL_INPUT_CAPABILITY = "global keyboard/mouse/foreground"
 
 _REQUIRES_GLOBAL_INPUT_ACTION_KINDS = frozenset(
     {
-        "ui.click",
         "ui.click_verified",
         "ui.double_click_verified",
         "ui.drag",
@@ -56,7 +55,7 @@ _BACKGROUND_SAFE_ACTION_KINDS = frozenset(
         "ui.grid.select_row",
     }
 )
-_APP_DISPATCH_SAFE_ACTION_KINDS = frozenset({"ui.invoke"})
+_APP_DISPATCH_SAFE_ACTION_KINDS = frozenset({"ui.click", "ui.invoke"})
 
 
 @dataclass(frozen=True)

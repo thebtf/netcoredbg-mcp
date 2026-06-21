@@ -13,6 +13,7 @@ from ..runtime_smoke_schema import (
     normalize_app_diagnostics_launch_contract,
     normalize_input_policy,
     validate_diagnostic_schema_example,
+    validate_input_policy_payload,
 )
 from ..tracepoint_policy import tracepoint_expression_policy_error
 from .actions import ActionContext, accepted_action_kinds
@@ -410,16 +411,24 @@ def _validate_v2_plan(
                 errors.append(
                     f"cases[{case_index}].transitions[{transition_index}].action must be an object"
                 )
-            elif not action:
+                action = None
+            if isinstance(action, dict) and not action:
                 errors.append(
                     f"cases[{case_index}].transitions[{transition_index}].action.kind "
                     "is required when action is present"
                 )
-            elif action.get("kind") not in known_actions:
-                errors.append(
-                    f"cases[{case_index}].transitions[{transition_index}].action.kind "
-                    f"is not accepted: {action.get('kind')}"
-                )
+            if isinstance(action, dict) and action:
+                action_path = f"cases[{case_index}].transitions[{transition_index}].action"
+                if action.get("kind") not in known_actions:
+                    errors.append(
+                        f"{action_path}.kind is not accepted: {action.get('kind')}"
+                    )
+                if "input_policy" in action:
+                    validate_input_policy_payload(
+                        action_path + ".input_policy",
+                        action["input_policy"],
+                        errors,
+                    )
             probes = transition.get("probes", [])
             if not isinstance(probes, list):
                 errors.append(
