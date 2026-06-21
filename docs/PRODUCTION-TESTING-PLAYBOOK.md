@@ -162,7 +162,47 @@ Customer-mode setup:
 ```powershell
 if (-not $env:NETCOREDBG_PATH) { throw "Set NETCOREDBG_PATH to netcoredbg.exe before running GUI smoke." }
 if (-not (Test-Path -LiteralPath $env:NETCOREDBG_PATH)) { throw "NETCOREDBG_PATH does not exist: $env:NETCOREDBG_PATH" }
-uv run --locked --extra dev python -c "import asyncio, sys; import tests.smoke_test_manual as s; asyncio.run(s.test_wpf_v2_visible_row_drag_runtime_smoke()); asyncio.run(s.test_wpf_v2_offscreen_row_target_drag_runtime_smoke()); asyncio.run(s.test_wpf_v2_edge_scroll_drag_runtime_smoke()); asyncio.run(s.test_wpf_v2_multi_row_drag_runtime_smoke()); asyncio.run(s.test_wpf_v2_negative_drag_runtime_smoke()); print(f'RESULTS: {s.passed} passed, {s.failed} failed out of {s.passed + s.failed} checks'); sys.exit(0 if s.failed == 0 else 1)"
+$script = @'
+import asyncio
+import json
+import sys
+
+import tests.smoke_test_manual as s
+
+async def main():
+    positive = {
+        "visible_row": s.run_wpf_v2_visible_row_drag_runtime_smoke,
+        "offscreen_row_target": s.run_wpf_v2_offscreen_row_target_drag_runtime_smoke,
+        "edge_scroll": s.run_wpf_v2_edge_scroll_drag_runtime_smoke,
+        "multi_row": s.run_wpf_v2_multi_row_drag_runtime_smoke,
+    }
+    summary = {}
+    failed = []
+    for name, runner in positive.items():
+        evidence = await runner()
+        summary[name] = {
+            "status": evidence.get("status"),
+            "reason": evidence.get("reason"),
+        }
+        if evidence.get("status") != "PASS":
+            failed.append(name)
+    negative = await s.run_wpf_v2_negative_drag_runtime_smoke()
+    negative_status = negative.get("status")
+    summary["negative_no_op"] = {
+        "status": negative_status,
+        "reason": negative.get("reason"),
+        "next_step": (negative.get("blocked") or {}).get("next_step"),
+    }
+    if negative_status not in {"PASS", "BLOCKED"}:
+        failed.append("negative_no_op")
+    if negative_status == "BLOCKED" and not (negative.get("blocked") or {}).get("next_step"):
+        failed.append("negative_no_op_missing_next_step")
+    print(json.dumps({"summary": summary, "failed": failed}, indent=2, sort_keys=True))
+    sys.exit(1 if failed else 0)
+
+asyncio.run(main())
+'@
+uv run --locked --extra dev python -c $script
 ```
 
 The offscreen row-target function is the minimum proof for the
