@@ -1,56 +1,72 @@
-# netcoredbg-mcp v0.18.8
+# netcoredbg-mcp v0.19.0
 
-Released: 2026-06-19
+Released: 2026-06-21
 
 ## Summary
 
-`v0.18.8` is a patch release for the runtime-smoke and UI-emulation hardening
-roadmap. It publishes CR-056 after `v0.18.7`, giving package consumers
-incremental `app_diagnostics.poll` acquisition through a durable `since` cursor
-without changing existing poll calls that do not provide a cursor.
+`v0.19.0` is a feature release for the runtime-smoke and UI-emulation roadmap.
+It publishes the accumulated post-`v0.18.8` provider-side work for WPF DataGrid
+drag/drop evidence gates, richer app-diagnostics evidence, NovaScript action
+oracles, and stricter fail-closed runtime-smoke behavior.
 
 ## Highlights
 
-- `app_diagnostics.poll.since` accepts `{mtime_ns, name}` cursor values that use
-  the same ordering as directory candidate selection.
-- Directory polling ignores stale or equal diagnostic JSON snapshots instead of
-  re-consuming a previous app-written `PASS` artifact.
-- Successful directory polls return a `cursor` with the matched file's
-  `mtime_ns` and `name`, so the next consumer poll can continue from that point.
-- Public `runtime_smoke_run_probe` app-diagnostics runs inherit the same
-  fail-closed stale-snapshot behavior.
-- Broad issue `#272` remains open for the remaining app-diagnostics lifecycle,
-  orchestration, and generic probe-authoring scope beyond this bounded cursor
-  slice.
+- WPF DataGrid drag/drop plans now cover positive row-target drops, offscreen
+  target realization, viewport preflight, and before/after `ui.grid.viewport`
+  evidence; negative no-op evidence remains backend-limited and explicitly
+  bounded in the playbook.
+- Runtime-smoke v2 now carries clearer app-diagnostics event deltas, live
+  diagnostic history, intra-case progress, and source-aware cursor guidance.
+- NovaScript action-oracle generation can emit bounded `app_diagnostics` probes
+  for action success oracles instead of routing every oracle through `file.json`.
+- UI grid helpers expanded across viewport, assert-range, ensure-visible,
+  right-click row, and double-click row evidence paths.
+- Reproduction/backlog notes were reconciled with Engram follow-up comments for
+  the broad `#268` through `#272` issue group while keeping those broad rows
+  open for remaining lifecycle scope.
 
 ## Upgrade Notes
 
-- This is a PATCH release. It preserves the `v0.18.x` public API shape and
-  adds optional incremental app-diagnostics polling. Existing `poll` payloads
-  without `since` keep their previous latest-matching-file behavior.
+- This is a MINOR feature release. It keeps the existing MCP server shape while
+  adding runtime-smoke v2 and UI evidence capabilities.
+- Review the updated WPF drag/drop example and production testing playbook before
+  adopting the new customer-mode flows:
+  `docs/examples/runtime-smoke-v2-drag-drop-grid.json` and
+  `docs/PRODUCTION-TESTING-PLAYBOOK.md`.
 - Upgrade an existing pip or pipx install with one of:
 
   ```powershell
-  python -m pip install --upgrade netcoredbg-mcp==0.18.8
+  python -m pip install --upgrade netcoredbg-mcp==0.19.0
   pipx upgrade netcoredbg-mcp
   ```
 
 - For a new workstation install:
 
   ```powershell
-  pipx install netcoredbg-mcp==0.18.8
+  pipx install netcoredbg-mcp==0.19.0
   netcoredbg-mcp --setup
   ```
 
-- Runtime-smoke and UI helper failures continue to prefer bounded `BLOCKED`,
-  `INVALID_SETUP`, `WARN`, or `FAIL` evidence over false `PASS` results.
-- Broad issue-backlog rows remain open by design; this release ships bounded
-  provider-side slices, not every downstream consumer replay.
+## Known Residual Scope
+
+- Broad issue-backlog rows `#268`, `#269`, `#270`, `#271`, and `#272` remain open
+  by design. This release ships bounded provider-side slices and recorded
+  lifecycle follow-up evidence; it does not claim full downstream replay closure.
+- Some UI automation behavior remains Windows GUI and backend dependent. Release
+  claims are scoped to the documented runtime-smoke and production-playbook
+  evidence paths.
+- WPF DataGrid negative no-op drag evidence remains backend-limited in the local
+  FlaUI fixture. The release playbook records it as actionable bounded `BLOCKED`
+  coverage; positive drag/drop, offscreen row-target, edge-scroll, multi-row
+  payload, and cleanup checks passed.
 
 ## Release Gates
 
+- Release-git-readiness has current PASS evidence after stale dirty work was
+  preserved with patch artifacts, stash entries, and backup refs.
 - Release-prep PR must pass MCP PR review before merge.
-- Critical suite must pass with `uv run --locked --extra dev pytest tests/critical -m critical`.
+- Critical suite must pass with
+  `uv run --locked --extra dev pytest tests/critical -m critical`.
 - Runtime-smoke docs/schema gates must pass for the shipped examples.
 - Package build and disposable wheel install smoke must pass.
 - Production playbook must be executed and recorded before tagging.

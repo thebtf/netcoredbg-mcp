@@ -21,12 +21,12 @@ because it is a future migration path for the UI automation surface.
 ## Prerequisites
 
 - Python 3.10 or newer.
-- Development dependencies installed.
+- Development dependencies installed through the locked `uv` environment.
 - Commands run from the repository root.
 - `NETCOREDBG_PATH` points at the installed `netcoredbg.exe` for GUI smoke
   commands.
 - For package installation checks, a local wheel can be built with
-  `python -m build`.
+  `uv build`.
 - For full GUI smoke coverage, build all three fixture apps:
   `tests/fixtures/SmokeTestApp`, `tests/fixtures/WpfSmokeApp`, and
   `tests/fixtures/AvaloniaSmokeApp`.
@@ -38,7 +38,7 @@ because it is a future migration path for the UI automation surface.
 Command:
 
 ```powershell
-python -m netcoredbg_mcp --version
+uv run --locked --extra dev python -m netcoredbg_mcp --version
 ```
 
 Expected result:
@@ -51,7 +51,7 @@ Expected result:
 Command:
 
 ```powershell
-python -m pytest tests/critical/test_release_critical.py -m critical
+uv run --locked --extra dev pytest tests/critical/test_release_critical.py -m critical
 ```
 
 Expected result:
@@ -67,7 +67,7 @@ Expected result:
 Command:
 
 ```powershell
-python -m pytest tests/critical/test_release_critical.py::test_launch_profile_metadata_never_exposes_environment_values
+uv run --locked --extra dev pytest tests/critical/test_release_critical.py::test_launch_profile_metadata_never_exposes_environment_values
 ```
 
 Expected result:
@@ -85,7 +85,7 @@ Commands:
 dotnet build tests/fixtures/SmokeTestApp -c Debug
 dotnet build tests/fixtures/WpfSmokeApp -c Debug
 dotnet build tests/fixtures/AvaloniaSmokeApp -c Debug
-python tests/smoke_test_manual.py --list
+uv run --locked --extra dev python tests/smoke_test_manual.py --list
 ```
 
 Expected result:
@@ -105,8 +105,9 @@ Expected result:
 Command:
 
 ```powershell
-$env:NETCOREDBG_PATH = "C:\Tools\netcoredbg\netcoredbg.exe"
-python -c "import asyncio, sys; import tests.smoke_test_manual as s; asyncio.run(s.test_wpf_one_call_runtime_smoke_workflow()); print(f'RESULTS: {s.passed} passed, {s.failed} failed out of {s.passed + s.failed} checks'); sys.exit(0 if s.failed == 0 else 1)"
+if (-not $env:NETCOREDBG_PATH) { throw "Set NETCOREDBG_PATH to netcoredbg.exe before running GUI smoke." }
+if (-not (Test-Path -LiteralPath $env:NETCOREDBG_PATH)) { throw "NETCOREDBG_PATH does not exist: $env:NETCOREDBG_PATH" }
+uv run --locked --extra dev python -c "import asyncio, sys; import tests.smoke_test_manual as s; asyncio.run(s.test_wpf_one_call_runtime_smoke_workflow()); print(f'RESULTS: {s.passed} passed, {s.failed} failed out of {s.passed + s.failed} checks'); sys.exit(0 if s.failed == 0 else 1)"
 ```
 
 Expected result:
@@ -122,8 +123,9 @@ Expected result:
 Command:
 
 ```powershell
-$env:NETCOREDBG_PATH = "C:\Tools\netcoredbg\netcoredbg.exe"
-python -c "import asyncio, sys; import tests.smoke_test_manual as s; asyncio.run(s.test_avalonia_ui_fixture_compatibility()); print(f'RESULTS: {s.passed} passed, {s.failed} failed out of {s.passed + s.failed} checks'); sys.exit(0 if s.failed == 0 else 1)"
+if (-not $env:NETCOREDBG_PATH) { throw "Set NETCOREDBG_PATH to netcoredbg.exe before running GUI smoke." }
+if (-not (Test-Path -LiteralPath $env:NETCOREDBG_PATH)) { throw "NETCOREDBG_PATH does not exist: $env:NETCOREDBG_PATH" }
+uv run --locked --extra dev python -c "import asyncio, sys; import tests.smoke_test_manual as s; asyncio.run(s.test_avalonia_ui_fixture_compatibility()); print(f'RESULTS: {s.passed} passed, {s.failed} failed out of {s.passed + s.failed} checks'); sys.exit(0 if s.failed == 0 else 1)"
 ```
 
 Expected result:
@@ -155,11 +157,64 @@ Customer-mode setup:
    fail closed before side effects if target-side realization hides the drag
    source. This is a bounded CR-075 customer-mode proof contract for broad
    `#270`; it does not close the broad helper family by itself.
-5. Run the release-critical guard:
+5. Run the fixture-backed WPF v2 drag/drop customer-mode smoke:
 
 ```powershell
-python -m pytest tests/test_runtime_smoke_v2_docs.py
-python -m pytest tests/critical/test_runtime_smoke_v2_critical.py -m critical
+if (-not $env:NETCOREDBG_PATH) { throw "Set NETCOREDBG_PATH to netcoredbg.exe before running GUI smoke." }
+if (-not (Test-Path -LiteralPath $env:NETCOREDBG_PATH)) { throw "NETCOREDBG_PATH does not exist: $env:NETCOREDBG_PATH" }
+$script = @'
+import asyncio
+import json
+import sys
+
+import tests.smoke_test_manual as s
+
+async def main():
+    positive = {
+        "visible_row": s.run_wpf_v2_visible_row_drag_runtime_smoke,
+        "offscreen_row_target": s.run_wpf_v2_offscreen_row_target_drag_runtime_smoke,
+        "edge_scroll": s.run_wpf_v2_edge_scroll_drag_runtime_smoke,
+        "multi_row": s.run_wpf_v2_multi_row_drag_runtime_smoke,
+    }
+    summary = {}
+    failed = []
+    for name, runner in positive.items():
+        evidence = await runner()
+        summary[name] = {
+            "status": evidence.get("status"),
+            "reason": evidence.get("reason"),
+        }
+        if evidence.get("status") != "PASS":
+            failed.append(name)
+    negative = await s.run_wpf_v2_negative_drag_runtime_smoke()
+    negative_status = negative.get("status")
+    summary["negative_no_op"] = {
+        "status": negative_status,
+        "reason": negative.get("reason"),
+        "next_step": (negative.get("blocked") or {}).get("next_step"),
+    }
+    if negative_status not in {"PASS", "BLOCKED"}:
+        failed.append("negative_no_op")
+    if negative_status == "BLOCKED" and not (negative.get("blocked") or {}).get("next_step"):
+        failed.append("negative_no_op_missing_next_step")
+    print(json.dumps({"summary": summary, "failed": failed}, indent=2, sort_keys=True))
+    sys.exit(1 if failed else 0)
+
+asyncio.run(main())
+'@
+uv run --locked --extra dev python -c $script
+```
+
+The offscreen row-target function is the minimum proof for the
+`drop.ensure_visible=true` part of this gate; the full command above is the
+release gate because it also exercises visible-row route evidence, edge-scroll,
+multi-row payload identity, and bounded negative no-op handling.
+
+6. Run the release-critical guard:
+
+```powershell
+uv run --locked --extra dev pytest tests/test_runtime_smoke_v2_docs.py
+uv run --locked --extra dev pytest tests/critical/test_runtime_smoke_v2_critical.py -m critical
 ```
 
 Expected result:
@@ -173,7 +228,10 @@ Expected result:
 - `PARTIALLY_WORKS`: the JSON example parses and the critical guard passes, but
   the live stand is absent or returns an honest `BLOCKED` result that names the
   missing pointer, route, viewport, selected-payload, drop ensure-visible,
-  no-op, or cleanup capability with a concrete `next_step`.
+  no-op, or cleanup capability with a concrete `next_step`. A negative no-op
+  backend limitation is acceptable only when the positive drag/drop, offscreen
+  row-target, edge-scroll, multi-row payload, and cleanup checks still pass and
+  the missing no-op evidence is explicitly recorded.
 - `BROKEN`: the plan returns `FAIL` or `INVALID_SETUP`; a drag result reports
   `PASS` without backend-produced route evidence; viewport or row identity
   evidence is missing without `BLOCKED`; the offscreen row-target case is
@@ -215,7 +273,7 @@ Expected result:
 Verification:
 
 ```powershell
-python -m pytest tests/test_runtime_smoke_diagnostics_schema.py
+uv run --locked --extra dev pytest tests/test_runtime_smoke_diagnostics_schema.py
 ```
 
 ## Failure-Mode Catalog
