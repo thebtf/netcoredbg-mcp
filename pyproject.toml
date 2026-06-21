@@ -38,6 +38,7 @@ dev = [
     "pytest-asyncio>=0.21",
     "ruff>=0.1",
     "mypy>=1.0",
+    "tomli>=2.0; python_version < '3.11'",
 ]
 
 [project.scripts]

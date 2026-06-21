@@ -689,6 +689,10 @@ def test_readme_and_playbook_document_novascript_action_oracle_app_diagnostics_g
 def test_novascript_action_oracle_app_diagnostics_example_is_consumer_ready() -> None:
     plan = _load_novascript_action_oracle_app_diagnostics_example()
 
+    assert "v0.20.0" in plan["name"]
+    assert "netcoredbg-mcp 0.20.0" in plan["description"]
+    assert "0.19.0" not in plan["name"]
+    assert "0.19.0" not in plan["description"]
     assert validate_plan(plan) == []
     diagnostic_launch = plan["diagnostics"]["app_diagnostics"]["diagnostic_launch"]
     assert diagnostic_launch["evidence"] == {

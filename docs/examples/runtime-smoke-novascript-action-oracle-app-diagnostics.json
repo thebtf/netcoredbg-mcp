@@ -1,7 +1,7 @@
 {
   "schema": "netcoredbg.runtime_smoke.v2",
-  "name": "NovaScript v0.19.0 action-oracle app diagnostics consumer check",
-  "description": "Copy this plan into a NovaScript checkout, replace the placeholder launch paths and UI selector, then run it with netcoredbg-mcp 0.19.0 to verify generated action-oracle app_diagnostics evidence.",
+  "name": "NovaScript v0.20.0 action-oracle app diagnostics consumer check",
+  "description": "Copy this plan into a NovaScript checkout, replace the placeholder launch paths and UI selector, then run it with netcoredbg-mcp 0.20.0 to verify generated action-oracle app_diagnostics evidence.",
   "diagnostics": {
     "app_diagnostics": {
       "diagnostic_launch": {
