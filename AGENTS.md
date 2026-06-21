@@ -97,6 +97,10 @@ tracked files:**
 - Committing generated residue just because the worktree is dirty.
 - Building, testing, releasing, or opening a PR from a checkout whose dirty
   tracked files are unclassified.
+- Building, testing, releasing, or opening a PR from a checkout with
+  blocker-classified residue until that residue is resolved, explicitly
+  approved by the user, or isolated away from the work in a clean sibling
+  worktree.
 
 **Lockfile rule:** `uv.lock` is a reproducibility artifact. Local `uv` commands
 can update the editable package's own version entry without a human source edit.
