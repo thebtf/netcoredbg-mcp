@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 MANIFEST_SCHEMA = "netcoredbg.runtime_smoke.evidence_pack"
@@ -83,8 +83,15 @@ def validate_manifest_ref(ref: str, *, evidence_dir: Path | str) -> str:
 
     if not isinstance(ref, str) or not ref.strip():
         raise ValueError("manifest ref must be a non-empty string")
-    ref_path = Path(ref.replace("\\", "/"))
-    if ref_path.is_absolute() or ref_path.drive:
+    normalized_ref = ref.replace("\\", "/")
+    windows_ref = PureWindowsPath(normalized_ref)
+    ref_path = Path(normalized_ref)
+    if (
+        ref_path.is_absolute()
+        or ref_path.drive
+        or windows_ref.drive
+        or str(windows_ref).startswith("\\")
+    ):
         raise ValueError("manifest ref must be relative to evidence_dir")
     if any(part in {"", ".", ".."} for part in ref_path.parts):
         raise ValueError("manifest ref must not contain traversal segments")

@@ -103,6 +103,8 @@ def test_named_pack_manifest_rejects_malformed_or_unsafe_refs(
 
     with pytest.raises(ValueError, match="manifest ref"):
         validate_manifest_ref("../secrets/app-diagnostics.json", evidence_dir=tmp_path)
+    with pytest.raises(ValueError, match="manifest ref"):
+        validate_manifest_ref(r"C:\temp\app-diagnostics.json", evidence_dir=tmp_path)
     assert (
         validate_manifest_ref(
             "sources\\app-diagnostics.json",

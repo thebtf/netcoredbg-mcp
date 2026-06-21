@@ -2356,9 +2356,18 @@ def _runtime_smoke_merge_pack_manifest(
         return remembered_descriptor
     if remembered_descriptor is None:
         return actual_descriptor
+    actual_rank = _runtime_smoke_pack_manifest_status_rank(actual_descriptor["status"])
+    remembered_rank = _runtime_smoke_pack_manifest_status_rank(
+        remembered_descriptor["status"]
+    )
+    pack_id = (
+        actual_descriptor["pack_id"]
+        if actual_rank > remembered_rank
+        else remembered_descriptor["pack_id"]
+    )
     return _runtime_smoke_compact_pack_manifest(
         {
-            "pack_id": remembered_descriptor["pack_id"],
+            "pack_id": pack_id,
             "status": actual_descriptor["status"],
             "manifest_ref": actual_descriptor["manifest_ref"],
             "materialized": bool(
@@ -2590,10 +2599,7 @@ def _runtime_smoke_pack_manifest_from_cases(
             descriptor["status"]
         )
         if selected is None or descriptor_rank >= selected_rank:
-            selected = _runtime_smoke_merge_pack_manifest(
-                actual=descriptor,
-                remembered=selected,
-            )
+            selected = descriptor
             selected_rank = descriptor_rank
     return selected
 

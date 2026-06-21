@@ -241,6 +241,66 @@ class FinalPackManifestStatusRegistry:
         }
 
 
+class MultiPackManifestStatusRegistry:
+    async def get_result(self, run_id: str) -> dict[str, Any]:
+        return {
+            "status": "FAIL",
+            "reason": "second pack failed",
+            "run_id": run_id,
+            "plan_name": "multi-pack-plan",
+            "lifecycle_status": "COMPLETED",
+            "final": True,
+            "action_count": 1,
+            "evidence_refs": [],
+            "cleanup": {"status": "PASS"},
+            "cases": [
+                {
+                    "id": "case-1",
+                    "transitions": [
+                        {
+                            "action": {"kind": "ui.noop"},
+                            "probes": {
+                                "after": [
+                                    {
+                                        "kind": "oracle_pack",
+                                        "id": "pack-a",
+                                        "status": "PASS",
+                                        "value": {"manifest": {"sources": []}},
+                                    },
+                                    {
+                                        "kind": "oracle_pack",
+                                        "id": "pack-b",
+                                        "status": "FAIL",
+                                        "value": {"manifest": {"sources": []}},
+                                    },
+                                ],
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+
+    async def tail_events(
+        self,
+        run_id: str,
+        *,
+        after_cursor: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        return {
+            "status": "FAIL",
+            "reason": "second pack failed",
+            "run_id": run_id,
+            "events": [{"cursor": 9, "kind": "failed", "status": "FAIL"}],
+            "next_cursor": 9,
+            "oldest_cursor": 9,
+            "dropped_count": 0,
+            "stale_cursor": False,
+            "final": True,
+        }
+
+
 async def _resolve_project_root(_ctx: Any, _session: Any) -> None:
     raise AssertionError("run-plan facade test plan must not resolve project paths")
 
@@ -755,6 +815,30 @@ async def test_runtime_smoke_evidence_bundle_uses_terminal_pack_manifest_status(
     assert data["pack_manifest"] == {
         "pack_id": "terminal-oracle-pack",
         "status": "BLOCKED",
+        "manifest_ref": "pack-manifest.json",
+        "materialized": False,
+    }
+    assert data["result"]["pack_manifest"] == data["pack_manifest"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_evidence_bundle_preserves_selected_pack_manifest_id(
+    capturing_mcp,
+) -> None:
+    session = RunPlanFacadeSession()
+    session.runtime_smoke.lifecycle_runs = MultiPackManifestStatusRegistry()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_evidence_bundle"](
+        ctx=None,
+        run_id="multi-pack-run",
+    )
+    data = response["data"]
+
+    assert data["status"] == "FAIL"
+    assert data["pack_manifest"] == {
+        "pack_id": "pack-b",
+        "status": "FAIL",
         "manifest_ref": "pack-manifest.json",
         "materialized": False,
     }
