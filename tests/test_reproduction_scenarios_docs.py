@@ -384,6 +384,32 @@ def test_issues_backlog_records_cr100_action_oracle_replay_pass_boundary() -> No
         assert "Source-side owner may close" not in guard_text
 
 
+def test_issues_backlog_records_cr103_post_cr102_lifecycle_decision() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    heading = "## CR-103 Post-CR102 Broad Issue Lifecycle Decision"
+
+    assert heading in backlog
+    section = backlog.split(heading, 1)[1].split("\n## ", 1)[0]
+
+    for issue in ("#268", "#269", "#270", "#271", "#272"):
+        assert issue in section
+
+    required_terms = (
+        "CR-102",
+        "DOWNSTREAM_REPLAY_PASS",
+        "bounded",
+        "broad issue closure",
+        "CR-092/CR-093",
+        "CR-100/CR-101/CR-102",
+        "#269 event-delta/source-cursor",
+        "#270 TextBox/DataGrid/helper/replay",
+        "#271 cleanup/trace/freshness",
+    )
+
+    for term in required_terms:
+        assert term in section
+
+
 def test_issues_backlog_links_novascript_replay_packet() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
 
