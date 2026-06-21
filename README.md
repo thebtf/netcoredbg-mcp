@@ -14,7 +14,7 @@ set breakpoints, step through code, inspect variables, evaluate expressions, rea
 debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
 and Avalonia windows without opening an IDE.
 
-**131 MCP tools · 8 prompts · 4 resources · 1775 collected tests · release v0.19.0**
+**131 MCP tools · 8 prompts · 4 resources · 1792 collected tests · release v0.20.0**
 
 ## Quick Links
 
@@ -23,17 +23,18 @@ and Avalonia windows without opening an IDE.
 - **Reference:** [Available Tools](#available-tools) · [Resources](#mcp-resources) · [Prompts](#mcp-prompts) · [Architecture](#architecture-overview)
 - **Project:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## What's New in v0.19.0
+## What's New in v0.20.0
 
-- **Runtime-smoke v2 drag/drop evidence gates** — WPF DataGrid plans can use
-  positive row-target drag/drop with offscreen target realization and
-  before/after viewport evidence; negative no-op backend gaps are bounded.
-- **App diagnostics action oracles** — NovaScript action-oracle generation can
-  emit bounded `app_diagnostics` probes instead of forcing every oracle through
-  `file.json`.
-- **Fail-closed diagnostic deltas** — runtime-smoke wait, event-delta, and
-  run-probe flows now preserve source-aware cursors and report explicit
-  guidance for stale or empty diagnostic states.
+- **Named pack manifests** — `oracle_pack` and `app_diagnostics` runs now expose
+  bounded `pack_manifest` descriptors and `pack-manifest.json` refs through
+  run-plan, run-probe, evidence-bundle, and event-delta facades.
+- **Source classifications and rollups** — named packs record per-source
+  classifications plus cleanup, freshness, redaction, and limits rollups so
+  agents can audit oracle evidence without reconstructing transient state.
+- **NovaScript replay ledger closure** — the bounded action-oracle
+  app-diagnostics replay is tracked as downstream `PASS`, while broad
+  `#268..#272` issue tails stay explicitly open for non-duplicate follow-up
+  work.
 
 ## Highlights
 
@@ -382,7 +383,7 @@ the examples under `docs/examples/runtime-smoke-oracle-pack.json`,
 `docs/examples/runtime-smoke-semantic-probe.json`, and
 `docs/examples/runtime-smoke-tracepoint-guardrail.json` when adding oracle
 packs, app diagnostics, semantic probes, or instrumentation guardrails.
-NovaScript consumers validating the v0.19.0 action-oracle path can adapt
+NovaScript consumers validating the v0.20.0 action-oracle path can adapt
 [`docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json`](docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json)
 to generate a bounded `app_diagnostics` probe from the
 `novascript-action-oracle` template while using launch-scoped diagnostic

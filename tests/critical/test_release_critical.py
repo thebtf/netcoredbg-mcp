@@ -14,6 +14,11 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
+    import tomli as tomllib
+
 import pytest
 
 from netcoredbg_mcp import __version__
@@ -26,7 +31,9 @@ from netcoredbg_mcp.session.runtime_smoke import (
 )
 from netcoredbg_mcp.session.state import DebugState
 
-PUBLISH_WORKFLOW = Path(".github/workflows/publish.yml")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PUBLISH_WORKFLOW = PROJECT_ROOT / ".github/workflows/publish.yml"
+PYPROJECT = PROJECT_ROOT / "pyproject.toml"
 NODE20_ACTION_PINS = {
     "actions/checkout@v4",
     "softprops/action-gh-release@v2",
@@ -143,6 +150,27 @@ def test_publish_workflow_uses_node24_compatible_action_pins() -> None:
 
     assert old_pins == []
     assert missing_new_pins == []
+
+
+@pytest.mark.critical
+def test_sdist_excludes_agent_and_build_residue() -> None:
+    """@critical category: data-consistency — release sdist excludes local residue."""
+
+    assert PYPROJECT.exists(), "pyproject.toml is missing"
+    pyproject_data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    exclude = pyproject_data["tool"]["hatch"]["build"]["targets"]["sdist"]["exclude"]
+
+    for pattern in (
+        "/.agent*",
+        "/.agent*/**",
+        "/.venv/**",
+        "/dist/**",
+        "/**/bin",
+        "/**/bin/**",
+        "/**/obj",
+        "/**/obj/**",
+    ):
+        assert pattern in exclude
 
 
 @pytest.mark.critical

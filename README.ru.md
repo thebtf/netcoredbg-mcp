@@ -14,7 +14,7 @@
 вычислять выражения, читать вывод отладки и управлять поверхностями Windows UI
 Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 
-**131 MCP-инструмент · 8 промптов · 4 ресурса · 1775 собранных тестов · релиз v0.19.0**
+**131 MCP-инструмент · 8 промптов · 4 ресурса · 1792 собранных теста · релиз v0.20.0**
 
 ## Быстрые ссылки
 
@@ -23,18 +23,18 @@ Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 - **Справочник:** [Доступные инструменты](#доступные-инструменты) · [Ресурсы](#mcp-ресурсы) · [Промпты](#mcp-промпты) · [Архитектура](#обзор-архитектуры)
 - **Проект:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## Что нового в v0.19.0
+## Что нового в v0.20.0
 
-- **Runtime-smoke v2 drag/drop evidence gates** — WPF DataGrid планы
-  поддерживают positive row-target drag/drop, реализацию offscreen target и
-  before/after viewport evidence; negative no-op backend gaps ограничиваются
-  явным bounded evidence.
-- **App diagnostics action oracles** — генерация NovaScript action-oracle может
-  выпускать bounded `app_diagnostics` probes вместо принудительного маршрута
-  через `file.json`.
-- **Fail-closed diagnostic deltas** — runtime-smoke wait, event-delta и
-  run-probe flows сохраняют source-aware cursors и дают явные подсказки для
-  stale или empty diagnostic states.
+- **Named pack manifests** — запуски `oracle_pack` и `app_diagnostics` теперь
+  отдают bounded `pack_manifest` descriptors и refs на `pack-manifest.json`
+  через run-plan, run-probe, evidence-bundle и event-delta facades.
+- **Source classifications and rollups** — named packs записывают
+  per-source classifications, cleanup/freshness/redaction/limits rollups и
+  безопасные evidence refs, чтобы агент мог аудировать oracle evidence без
+  восстановления transient state.
+- **NovaScript replay ledger closure** — bounded action-oracle
+  app-diagnostics replay записан как downstream `PASS`, а broad tails
+  `#268..#272` остаются явно open для non-duplicate follow-up work.
 
 ## Основные возможности
 
