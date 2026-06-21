@@ -28,6 +28,12 @@ from ..session.runtime_smoke_schema import (
     schema_help_fields,
     validate_plan,
 )
+from ..session.runtime_smoke_v2.evidence_manifest import (
+    MANIFEST_FILE_NAME,
+    build_pack_manifest,
+    validate_manifest_ref,
+    write_pack_manifest,
+)
 from ..session.runtime_smoke_v2.result_envelope import compact_value
 from ..session.state import DebugState
 from ..session.tracepoints import TracepointManager
@@ -404,6 +410,14 @@ def register_runtime_smoke_tools(
 
             data = await session.runtime_smoke.lifecycle_runs.start(loaded_plan, _runner)
             data["validation"] = _runtime_smoke_validation_summary(validation)
+            pack_manifest = _runtime_smoke_pack_manifest_from_plan(loaded_plan)
+            if pack_manifest is not None:
+                _runtime_smoke_remember_pack_manifest(
+                    session.runtime_smoke.lifecycle_runs,
+                    data.get("run_id"),
+                    pack_manifest,
+                )
+                data["pack_manifest"] = pack_manifest
             next_actions = _runtime_smoke_lifecycle_next_actions(data)
             if agent_mode:
                 _apply_runtime_smoke_agent_mode(data, next_actions[0])
@@ -519,6 +533,14 @@ def register_runtime_smoke_tools(
             data["probe"] = _runtime_smoke_probe_summary(probe)
             data["generated_plan"] = generated
             data["run_created"] = bool(data.get("run_id"))
+            pack_manifest = _runtime_smoke_pack_manifest_from_plan(plan)
+            if pack_manifest is not None:
+                _runtime_smoke_remember_pack_manifest(
+                    session.runtime_smoke.lifecycle_runs,
+                    data.get("run_id"),
+                    pack_manifest,
+                )
+                data["pack_manifest"] = pack_manifest
             next_actions = _runtime_smoke_lifecycle_next_actions(data)
             if agent_mode:
                 await _runtime_smoke_attach_run_probe_app_diagnostics_agent_cursor(
@@ -1235,6 +1257,19 @@ async def _runtime_smoke_evidence_bundle(
         "cleanup": compact_value(result.get("cleanup")),
         "next_actions": next_actions,
     }
+    pack_manifest = _runtime_smoke_merge_pack_manifest(
+        actual=_runtime_smoke_pack_manifest(result),
+        remembered=_runtime_smoke_remembered_pack_manifest(registry, run_id),
+    )
+    pack_manifest = _runtime_smoke_materialize_pack_manifest(
+        result,
+        run_id=run_id,
+        descriptor=pack_manifest,
+    )
+    if pack_manifest is not None:
+        bundle["pack_manifest"] = pack_manifest
+        if isinstance(bundle.get("result"), dict):
+            bundle["result"]["pack_manifest"] = pack_manifest
     if isinstance(diagnostic_launch, dict):
         bundle["diagnostic_launch"] = compact_value(diagnostic_launch)
     if result.get("contaminated") is True:
@@ -1627,7 +1662,12 @@ async def _runtime_smoke_get_event_delta(
             source_cursors["app_diagnostics"] = source_cursor
     if source_cursors:
         next_cursor["sources"] = source_cursors
-    return {
+    if final_result is None and tail.get("final"):
+        result_reader = getattr(registry, "get_result", None)
+        refreshed_result = await result_reader(run_id) if callable(result_reader) else None
+        if not _runtime_smoke_run_missing(refreshed_result):
+            final_result = refreshed_result
+    delta = {
         "status": "PASS",
         "reason": "runtime smoke event delta read",
         "run_id": run_id,
@@ -1647,6 +1687,18 @@ async def _runtime_smoke_get_event_delta(
         ],
         **({"source_deltas": source_deltas} if source_deltas else {}),
     }
+    pack_manifest = _runtime_smoke_merge_pack_manifest(
+        actual=_runtime_smoke_pack_manifest(final_result),
+        remembered=_runtime_smoke_remembered_pack_manifest(registry, run_id),
+    )
+    pack_manifest = _runtime_smoke_materialize_pack_manifest(
+        final_result,
+        run_id=run_id,
+        descriptor=pack_manifest,
+    )
+    if pack_manifest is not None:
+        delta["pack_manifest"] = pack_manifest
+    return delta
 
 
 def _runtime_smoke_invalid_event_delta(
@@ -2224,6 +2276,478 @@ def _runtime_smoke_extract_app_diagnostics_entries(
                         entry["evidence_ref"] = probe.get("evidence_ref")
                     entries.append(compact_value(entry))
     return entries
+
+
+def _runtime_smoke_pack_manifest(data: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(data, dict):
+        return None
+
+    explicit = _runtime_smoke_compact_pack_manifest(data.get("pack_manifest"))
+    if explicit is not None:
+        return explicit
+
+    nested_result = data.get("result")
+    if isinstance(nested_result, dict):
+        nested = _runtime_smoke_pack_manifest(nested_result)
+        if nested is not None:
+            return nested
+
+    default_pack_id = _runtime_smoke_text_or_none(data.get("plan_name"))
+    default_status = _runtime_smoke_text_or_none(data.get("status"))
+    return _runtime_smoke_pack_manifest_from_cases(
+        data.get("cases"),
+        default_pack_id=default_pack_id,
+        default_status=default_status,
+        require_manifest=True,
+    )
+
+
+def _runtime_smoke_pack_manifest_from_plan(
+    plan: dict[str, Any],
+) -> dict[str, Any] | None:
+    return _runtime_smoke_pack_manifest_from_cases(
+        plan.get("cases") if isinstance(plan, dict) else None,
+        default_pack_id=_runtime_smoke_text_or_none(plan.get("name"))
+        if isinstance(plan, dict)
+        else None,
+        default_status=None,
+        require_manifest=False,
+    )
+
+
+def _runtime_smoke_remember_pack_manifest(
+    registry: Any,
+    run_id: Any,
+    pack_manifest: dict[str, Any] | None,
+) -> None:
+    run_id_text = _runtime_smoke_text_or_none(run_id)
+    descriptor = _runtime_smoke_compact_pack_manifest(pack_manifest)
+    if run_id_text is None or descriptor is None:
+        return
+    manifests = getattr(registry, "_netcoredbg_mcp_pack_manifests", None)
+    if not isinstance(manifests, dict):
+        manifests = {}
+        try:
+            setattr(registry, "_netcoredbg_mcp_pack_manifests", manifests)
+        except Exception:
+            return
+    manifests[run_id_text] = descriptor
+
+
+def _runtime_smoke_remembered_pack_manifest(
+    registry: Any,
+    run_id: Any,
+) -> dict[str, Any] | None:
+    run_id_text = _runtime_smoke_text_or_none(run_id)
+    manifests = getattr(registry, "_netcoredbg_mcp_pack_manifests", None)
+    if run_id_text is None or not isinstance(manifests, dict):
+        return None
+    return _runtime_smoke_compact_pack_manifest(manifests.get(run_id_text))
+
+
+def _runtime_smoke_merge_pack_manifest(
+    *,
+    actual: dict[str, Any] | None,
+    remembered: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    actual_descriptor = _runtime_smoke_compact_pack_manifest(actual)
+    remembered_descriptor = _runtime_smoke_compact_pack_manifest(remembered)
+    if actual_descriptor is None:
+        return remembered_descriptor
+    if remembered_descriptor is None:
+        return actual_descriptor
+    actual_rank = _runtime_smoke_pack_manifest_status_rank(actual_descriptor["status"])
+    remembered_rank = _runtime_smoke_pack_manifest_status_rank(
+        remembered_descriptor["status"]
+    )
+    pack_id = (
+        actual_descriptor["pack_id"]
+        if actual_rank > remembered_rank
+        else remembered_descriptor["pack_id"]
+    )
+    return _runtime_smoke_compact_pack_manifest(
+        {
+            "pack_id": pack_id,
+            "status": actual_descriptor["status"],
+            "manifest_ref": actual_descriptor["manifest_ref"],
+            "materialized": bool(
+                actual_descriptor.get("materialized")
+                or remembered_descriptor.get("materialized")
+            ),
+        }
+    )
+
+
+def _runtime_smoke_materialize_pack_manifest(
+    result: dict[str, Any] | None,
+    *,
+    run_id: str,
+    descriptor: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    descriptor = _runtime_smoke_compact_pack_manifest(descriptor)
+    if descriptor is None:
+        return None
+    if not isinstance(result, dict) or not result.get("final"):
+        return _runtime_smoke_pack_manifest_materialized(descriptor, False)
+
+    evidence_dir = _runtime_smoke_pack_manifest_evidence_dir(result)
+    if evidence_dir is None:
+        return _runtime_smoke_pack_manifest_materialized(descriptor, False)
+
+    sources = _runtime_smoke_pack_manifest_sources(result, evidence_dir=evidence_dir)
+    rollups = _runtime_smoke_pack_manifest_rollups(
+        descriptor,
+        sources=sources,
+        result=result,
+    )
+    try:
+        manifest = build_pack_manifest(
+            pack_id=descriptor["pack_id"],
+            run_id=run_id,
+            evidence_dir=evidence_dir,
+            sources=sources,
+            rollups=rollups,
+        )
+        write_pack_manifest(manifest, evidence_dir=evidence_dir)
+    except (OSError, TypeError, ValueError):
+        return _runtime_smoke_pack_manifest_materialized(descriptor, False)
+    return _runtime_smoke_pack_manifest_materialized(descriptor, True)
+
+
+def _runtime_smoke_pack_manifest_materialized(
+    descriptor: dict[str, Any],
+    materialized: bool,
+) -> dict[str, Any] | None:
+    return _runtime_smoke_compact_pack_manifest(
+        {**descriptor, "materialized": materialized}
+    )
+
+
+def _runtime_smoke_pack_manifest_evidence_dir(data: dict[str, Any]) -> Path | None:
+    cases = data.get("cases")
+    if isinstance(cases, list):
+        for probe in _runtime_smoke_iter_case_probes(cases):
+            artifact_path = _runtime_smoke_probe_diagnostic_artifact_path(probe)
+            if artifact_path is None:
+                continue
+            path = Path(artifact_path)
+            return path.parent if path.suffix else path
+
+    diagnostic_launch = data.get("diagnostic_launch")
+    if isinstance(diagnostic_launch, dict):
+        evidence = diagnostic_launch.get("evidence")
+        if isinstance(evidence, dict):
+            directory = _runtime_smoke_text_or_none(evidence.get("directory"))
+            if directory is not None:
+                return Path(directory)
+    return None
+
+
+def _runtime_smoke_probe_diagnostic_artifact_path(
+    probe: dict[str, Any],
+) -> str | None:
+    value = probe.get("value") if isinstance(probe.get("value"), dict) else {}
+    for field_name in ("wait_json", "poll"):
+        acquisition = value.get(field_name)
+        if not isinstance(acquisition, dict):
+            continue
+        path = _runtime_smoke_first_text(
+            acquisition.get("matched_path"),
+            acquisition.get("path"),
+        )
+        if path is not None:
+            return path
+    return None
+
+
+def _runtime_smoke_pack_manifest_sources(
+    data: dict[str, Any],
+    *,
+    evidence_dir: Path,
+) -> list[dict[str, Any]]:
+    cases = data.get("cases")
+    if not isinstance(cases, list):
+        return []
+    sources: list[dict[str, Any]] = []
+    for probe in _runtime_smoke_iter_case_probes(cases):
+        value = probe.get("value") if isinstance(probe.get("value"), dict) else {}
+        manifest = value.get("manifest")
+        if not isinstance(manifest, dict):
+            continue
+        raw_sources = manifest.get("sources")
+        if not isinstance(raw_sources, list):
+            continue
+        for raw_source in raw_sources:
+            if isinstance(raw_source, dict):
+                sources.append(
+                    _runtime_smoke_normalize_pack_manifest_source(
+                        raw_source,
+                        evidence_dir=evidence_dir,
+                    )
+                )
+    return sources
+
+
+def _runtime_smoke_normalize_pack_manifest_source(
+    source: dict[str, Any],
+    *,
+    evidence_dir: Path,
+) -> dict[str, Any]:
+    normalized = compact_value(dict(source))
+    artifact_path = normalized.get("artifact_path")
+    if artifact_path is not None:
+        try:
+            normalized["artifact_path"] = validate_manifest_ref(
+                str(artifact_path),
+                evidence_dir=evidence_dir,
+            )
+        except ValueError:
+            normalized.pop("artifact_path", None)
+    return normalized
+
+
+def _runtime_smoke_pack_manifest_rollups(
+    descriptor: dict[str, Any],
+    *,
+    sources: list[dict[str, Any]],
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    source_ids = [
+        source_id
+        for source in sources
+        if (source_id := _runtime_smoke_text_or_none(source.get("id"))) is not None
+    ]
+    default_status = str(descriptor.get("status") or result.get("status") or "UNKNOWN")
+    cleanup = result.get("cleanup")
+    cleanup_status = (
+        _runtime_smoke_text_or_none(cleanup.get("status"))
+        if isinstance(cleanup, dict)
+        else None
+    )
+    return {
+        "cleanup": {
+            "status": cleanup_status or default_status,
+            "source_ids": source_ids,
+        },
+        "freshness": {
+            "status": _runtime_smoke_manifest_rollup_status(
+                "freshness",
+                sources,
+                default_status=default_status,
+            ),
+            "source_ids": source_ids,
+        },
+        "redaction": {
+            "status": _runtime_smoke_manifest_rollup_status(
+                "redaction",
+                sources,
+                default_status=default_status,
+            ),
+            "source_ids": source_ids,
+        },
+        "limits": {
+            "status": _runtime_smoke_manifest_rollup_status(
+                "limits",
+                sources,
+                default_status=default_status,
+            ),
+            "source_ids": source_ids,
+        },
+    }
+
+
+def _runtime_smoke_manifest_rollup_status(
+    field_name: str,
+    sources: list[dict[str, Any]],
+    *,
+    default_status: str,
+) -> str:
+    statuses: list[str] = []
+    for source in sources:
+        value = source.get(field_name)
+        if not isinstance(value, dict):
+            continue
+        status = _runtime_smoke_text_or_none(value.get("status"))
+        if status is not None:
+            statuses.append(status)
+    if not statuses:
+        return default_status
+    return max(statuses, key=_runtime_smoke_pack_manifest_status_rank)
+
+
+def _runtime_smoke_pack_manifest_from_cases(
+    cases: Any,
+    *,
+    default_pack_id: str | None,
+    default_status: str | None,
+    require_manifest: bool,
+) -> dict[str, Any] | None:
+    if not isinstance(cases, list):
+        return None
+    selected: dict[str, Any] | None = None
+    selected_rank = -1
+    for probe in _runtime_smoke_iter_case_probes(cases):
+        descriptor = _runtime_smoke_pack_manifest_from_probe(
+            probe,
+            default_pack_id=default_pack_id,
+            default_status=default_status,
+            require_manifest=require_manifest,
+        )
+        if descriptor is None:
+            continue
+        descriptor_rank = _runtime_smoke_pack_manifest_status_rank(
+            descriptor["status"]
+        )
+        if selected is None or descriptor_rank >= selected_rank:
+            selected = descriptor
+            selected_rank = descriptor_rank
+    return selected
+
+
+def _runtime_smoke_pack_manifest_status_rank(status: str) -> int:
+    normalized = status.strip().upper().replace("-", "_")
+    if normalized in {"PASS", "PASSED", "SUCCESS", "COMPLETED"}:
+        return 0
+    if normalized in {"RUNNING", "PENDING", "WAITING", "STARTED", "UNKNOWN"}:
+        return 1
+    if normalized == "BLOCKED":
+        return 2
+    if normalized in {"FAIL", "FAILED", "ERROR", "INVALID_SETUP", "TIMEOUT", "TIMED_OUT"}:
+        return 3
+    return 1
+
+
+def _runtime_smoke_iter_case_probes(cases: list[Any]) -> list[dict[str, Any]]:
+    probes: list[dict[str, Any]] = []
+    for case in cases:
+        if not isinstance(case, dict):
+            continue
+        transitions = case.get("transitions")
+        if not isinstance(transitions, list):
+            continue
+        for transition in transitions:
+            if not isinstance(transition, dict):
+                continue
+            raw_probes = transition.get("probes")
+            if isinstance(raw_probes, list):
+                probes.extend(probe for probe in raw_probes if isinstance(probe, dict))
+                continue
+            if not isinstance(raw_probes, dict):
+                continue
+            for phase in ("before", "after"):
+                phase_probes = raw_probes.get(phase, [])
+                if isinstance(phase_probes, list):
+                    probes.extend(
+                        probe for probe in phase_probes if isinstance(probe, dict)
+                    )
+    return probes
+
+
+def _runtime_smoke_pack_manifest_from_probe(
+    probe: dict[str, Any],
+    *,
+    default_pack_id: str | None,
+    default_status: str | None,
+    require_manifest: bool,
+) -> dict[str, Any] | None:
+    kind = str(probe.get("kind") or "")
+    if kind not in {"oracle_pack", "app_diagnostics"}:
+        return None
+
+    value = probe.get("value") if isinstance(probe.get("value"), dict) else {}
+    if require_manifest and not isinstance(value.get("manifest"), dict):
+        return None
+
+    pack_id = _runtime_smoke_probe_pack_id(
+        probe,
+        value,
+        kind=kind,
+        default_pack_id=default_pack_id,
+    )
+    status = _runtime_smoke_text_or_none(probe.get("status"))
+    if status is None:
+        status = _runtime_smoke_text_or_none(value.get("status"))
+    if status is None:
+        status = default_status or "PASS"
+    if pack_id is None:
+        return None
+
+    return _runtime_smoke_compact_pack_manifest(
+        {
+            "pack_id": pack_id,
+            "status": status,
+            "manifest_ref": MANIFEST_FILE_NAME,
+            "materialized": False,
+        }
+    )
+
+
+def _runtime_smoke_probe_pack_id(
+    probe: dict[str, Any],
+    value: dict[str, Any],
+    *,
+    kind: str,
+    default_pack_id: str | None,
+) -> str | None:
+    if kind == "oracle_pack":
+        return _runtime_smoke_first_text(
+            value.get("id"),
+            probe.get("id"),
+            probe.get("name"),
+            default_pack_id,
+        )
+
+    return _runtime_smoke_first_text(
+        probe.get("id"),
+        probe.get("name") if probe.get("name") != kind else None,
+        default_pack_id,
+        (value.get("app") or {}).get("name") if isinstance(value.get("app"), dict) else None,
+    )
+
+
+def _runtime_smoke_compact_pack_manifest(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    pack_id = _runtime_smoke_text_or_none(raw.get("pack_id"))
+    status = _runtime_smoke_text_or_none(raw.get("status"))
+    manifest_ref = _runtime_smoke_manifest_ref(raw.get("manifest_ref"))
+    if pack_id is None or status is None or manifest_ref is None:
+        return None
+    descriptor = {
+        "pack_id": pack_id,
+        "status": status,
+        "manifest_ref": manifest_ref,
+    }
+    if isinstance(raw.get("materialized"), bool):
+        descriptor["materialized"] = raw["materialized"]
+    return compact_value(descriptor)
+
+
+def _runtime_smoke_manifest_ref(value: Any) -> str | None:
+    raw = _runtime_smoke_text_or_none(value)
+    if raw is None:
+        return MANIFEST_FILE_NAME
+    ref = Path(raw.replace("\\", "/"))
+    if ref.is_absolute() or ref.drive:
+        return None
+    if any(part in {"", ".", ".."} for part in ref.parts):
+        return None
+    return ref.as_posix()
+
+
+def _runtime_smoke_first_text(*values: Any) -> str | None:
+    for value in values:
+        text = _runtime_smoke_text_or_none(value)
+        if text is not None:
+            return text
+    return None
+
+
+def _runtime_smoke_text_or_none(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
 
 
 def _runtime_smoke_output_entry_to_dict(entry: Any) -> dict[str, Any]:
@@ -2822,6 +3346,9 @@ def _bounded_runtime_smoke_result(result: dict[str, Any]) -> dict[str, Any]:
         bounded["compact"] = compact_value(result["compact"])
     if isinstance(result.get("diagnostic_launch"), dict):
         bounded["diagnostic_launch"] = compact_value(result["diagnostic_launch"])
+    pack_manifest = _runtime_smoke_pack_manifest(result)
+    if pack_manifest is not None:
+        bounded["pack_manifest"] = pack_manifest
     debug_preflight = _bounded_debug_preflight_result(result)
     if debug_preflight is not None:
         bounded["debug_preflight"] = debug_preflight

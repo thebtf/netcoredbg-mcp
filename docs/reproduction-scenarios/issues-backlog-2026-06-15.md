@@ -81,6 +81,18 @@ replay evidence, not broad issue closure evidence.
 | `#271` | Split; keep broad FR open | CR-103 comment `1108` preserves the diagnostics-orchestration/live-target cleanup-proof tail after covered debug preflight, trace, cleanup, single-flight, freshness, and process/PDB proof slices. | Do not reopen `#271 cleanup/trace/freshness` tails or covered trace cursor/delta, runner-exception cleanup, and freshness/PDB-process proof slices. Remaining diagnostics-orchestration closure needs split follow-up issue evidence or fresh broad-closure proof. |
 | `#272` | Split; keep broad FR open | CR-102 records `DOWNSTREAM_REPLAY_PASS` for the bounded CR-100 action-oracle app-diagnostics consumer replay only; CR-103 comment `1109` preserves the broader app-diagnostics/oracle_pack lifecycle tail. | Do not reopen CR-080/084/085 handoff seams, CR-086 split/comment lifecycle boundary, or `CR-100/CR-101/CR-102` bounded replay/ledger work. Remaining app-diagnostics/oracle_pack lifecycle closure needs split follow-up issue evidence or fresh broad-closure proof. |
 
+## CR-104 Named Oracle/App Diagnostics Pack Manifest Lifecycle
+
+CR-104 is a bounded Milestone C runtime slice for named
+oracle/app_diagnostics pack lifecycle evidence. It adds manifest source
+classification and facade manifest-reference UX for named packs; it is not
+broad issue closure evidence for `#268` or `#272`.
+
+| Issue | CR-104 decision | Evidence | No-repeat boundary / next closure gate |
+| --- | --- | --- | --- |
+| `#268` | Split; keep broad FR open | CR-104 records the bounded Milestone C runtime slice for named oracle/app_diagnostics pack lifecycle evidence: `oracle_pack` and generated/direct diagnostic pack runs now expose `value.manifest.sources`, bounded `pack_manifest`, and `pack-manifest.json` references through run-plan, run-probe, evidence-bundle, and event-delta facades; cleanup/freshness/redaction rollups stay inside the manifest lifecycle contract. | Do not reopen `CR-100/CR-101/CR-102` replay/ledger work or `CR-092/CR-093` bounded template generation. Remaining broad action/oracle DSL, v3 authoring, generic probe UX, and broad orchestration closure still need split follow-up issue evidence or fresh broad-closure proof. |
+| `#272` | Split; keep broad FR open | CR-104 records the bounded Milestone C runtime slice for named oracle/app_diagnostics pack lifecycle evidence: app diagnostics and oracle pack sources now expose `value.manifest.sources`, bounded `pack_manifest`, and `pack-manifest.json` references through run-plan, run-probe, evidence-bundle, and event-delta facades; cleanup/freshness/redaction rollups stay inside the manifest lifecycle contract. | Do not reopen `CR-100/CR-101/CR-102` replay/ledger work, CR-080/084/085 handoff seams, or CR-086 split/comment lifecycle boundary. Remaining broader app diagnostics lifecycle/orchestration and oracle_pack lifecycle closure still need split follow-up issue evidence or fresh broad-closure proof. |
+
 ## Remaining Follow-Up
 
 - `#226`, `#250`, and `#267`: target-side Engram status is `resolved` after

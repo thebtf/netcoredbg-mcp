@@ -57,6 +57,12 @@ def _app_diagnostics(**overrides: Any) -> dict[str, Any]:
     return payload
 
 
+def _app_manifest_source(probe: dict[str, Any]) -> dict[str, Any]:
+    sources = probe["value"]["manifest"]["sources"]
+    assert len(sources) == 1
+    return sources[0]
+
+
 class _RewriteJsonOnSleepClock:
     def __init__(self, path: Path, payload: dict[str, Any]) -> None:
         self._path = path
@@ -720,6 +726,48 @@ async def test_app_diagnostics_wait_json_reads_live_diagnostic_artifact(
     assert probe["value"]["wait_json"]["observed"] is True
     assert probe["value"]["wait_json"]["polls"] >= 1
     assert probe["evidence_ref"] == "diagnostic:app_diagnostics:LiveWpfSmokeApp"
+    manifest_source = _app_manifest_source(probe)
+    assert manifest_source["id"] == "app_diagnostics.wait_json"
+    assert manifest_source["kind"] == "app_diagnostics"
+    assert manifest_source["status"] == "PASS"
+    assert manifest_source["classification"] == "APP_DIAGNOSTICS_OBSERVED"
+    assert manifest_source["artifact_path"] == diagnostic_path.name
+    assert manifest_source["evidence_ref"] == "diagnostic:app_diagnostics:LiveWpfSmokeApp"
+
+
+@pytest.mark.asyncio
+async def test_app_diagnostics_wait_json_classifies_unreadable_manifest_source(
+    tmp_path: Path,
+) -> None:
+    diagnostic_path = tmp_path / "unreadable-app-diagnostics.json"
+    diagnostic_path.write_text("{not-json", encoding="utf-8")
+
+    result = await runner(ProbeSmokeSession()).run(
+        one_probe_plan(
+            _app_diagnostics(
+                phase="after",
+                app={"name": "UnreadableDiagnosticApp"},
+                status="PASS",
+                observations=[],
+                wait_json={
+                    "path": str(diagnostic_path),
+                    "timeout_ms": 0,
+                    "poll_interval_ms": 0,
+                },
+            )
+        )
+    )
+
+    probe = after_probe(result)
+    assert result["status"] == "BLOCKED"
+    assert probe["status"] == "BLOCKED"
+    assert probe["reason"] == "diagnostic JSON is not readable"
+    manifest_source = _app_manifest_source(probe)
+    assert manifest_source["id"] == "app_diagnostics.wait_json"
+    assert manifest_source["status"] == "BLOCKED"
+    assert manifest_source["classification"] == "APP_DIAGNOSTICS_UNREADABLE"
+    assert manifest_source["artifact_path"] == diagnostic_path.name
+    assert manifest_source["reason"] == "diagnostic JSON is not readable"
 
 
 @pytest.mark.asyncio
@@ -1437,6 +1485,12 @@ async def test_app_diagnostics_poll_times_out_with_poll_metadata(
     assert probe["value"]["poll"]["polls"] == 1
     assert probe["value"]["poll"]["timeout_ms"] == 0
     assert probe["value"]["poll"]["reason"] == "diagnostic JSON not observed"
+    manifest_source = _app_manifest_source(probe)
+    assert manifest_source["id"] == "app_diagnostics.poll"
+    assert manifest_source["status"] == "BLOCKED"
+    assert manifest_source["classification"] == "APP_DIAGNOSTICS_MISSING"
+    assert manifest_source["artifact_path"] == missing_path.name
+    assert manifest_source["reason"] == "diagnostic JSON not observed"
 
 
 @pytest.mark.asyncio
@@ -1590,6 +1644,12 @@ async def test_app_diagnostics_poll_since_blocks_when_only_old_matching_json_exi
         "mtime_ns": 1_000_000_000,
         "name": "diagnostic-old.json",
     }
+    manifest_source = _app_manifest_source(probe)
+    assert manifest_source["id"] == "app_diagnostics.poll"
+    assert manifest_source["status"] == "BLOCKED"
+    assert manifest_source["classification"] == "APP_DIAGNOSTICS_STALE"
+    assert "artifact_path" not in manifest_source
+    assert manifest_source["reason"] == "diagnostic JSON not observed after since cursor"
 
 
 @pytest.mark.asyncio

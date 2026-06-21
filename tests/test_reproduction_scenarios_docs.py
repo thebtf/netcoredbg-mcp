@@ -410,6 +410,54 @@ def test_issues_backlog_records_cr103_post_cr102_lifecycle_decision() -> None:
         assert term in section
 
 
+def test_issues_backlog_records_cr104_named_pack_manifest_lifecycle_without_broad_closure() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    heading = "## CR-104 Named Oracle/App Diagnostics Pack Manifest Lifecycle"
+
+    assert heading in backlog
+    section = backlog.split(heading, 1)[1].split("\n## ", 1)[0]
+
+    required_terms = (
+        "bounded Milestone C runtime slice",
+        "named oracle/app_diagnostics pack lifecycle",
+        "value.manifest.sources",
+        "pack_manifest",
+        "pack-manifest.json",
+        "cleanup/freshness/redaction rollups",
+        "broad issue closure evidence",
+        "CR-100/CR-101/CR-102",
+    )
+    for term in required_terms:
+        assert term in section
+
+    for issue in ("#268", "#272"):
+        _issue, status, evidence, remaining_action = _issue_cells(backlog, issue)
+        lifecycle_row = _section_issue_row(
+            backlog,
+            "## CR-022 Issue Lifecycle Refresh",
+            issue,
+        )
+        cr104_row = _section_issue_row(backlog, heading, issue)
+        guard_text = " ".join((status, evidence, remaining_action, lifecycle_row, cr104_row))
+
+        assert "broader FR remains open" in status
+        assert "CR-104" in cr104_row
+        assert "bounded Milestone C runtime slice" in guard_text
+        assert "named oracle/app_diagnostics pack lifecycle" in guard_text
+        assert "pack_manifest" in guard_text
+        assert "pack-manifest.json" in guard_text
+        assert "broad issue closure evidence" in guard_text
+        assert "Do not reopen `CR-100/CR-101/CR-102`" in guard_text
+
+    for clause in (
+        _clause_containing(_section_issue_row(backlog, heading, "#268"), "CR-104"),
+        _clause_containing(_section_issue_row(backlog, heading, "#272"), "CR-104"),
+    ):
+        assert "DOWNSTREAM_REPLAY_PASS" not in clause
+        assert "live NovaScript replay" not in clause
+        assert "Source-side owner may close" not in clause
+
+
 def test_issues_backlog_links_novascript_replay_packet() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
 

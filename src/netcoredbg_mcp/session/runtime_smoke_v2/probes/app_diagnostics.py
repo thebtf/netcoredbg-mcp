@@ -10,6 +10,14 @@ from typing import Any
 from ...freshness import DebugFreshnessVerifier
 from ...runtime_smoke_schema import DIAGNOSTIC_SCHEMA_VERSION
 from ..blocked import build_blocked
+from ..evidence_manifest import (
+    APP_DIAGNOSTICS_BLOCKED,
+    APP_DIAGNOSTICS_MISSING,
+    APP_DIAGNOSTICS_OBSERVED,
+    APP_DIAGNOSTICS_REPORTED,
+    APP_DIAGNOSTICS_STALE,
+    APP_DIAGNOSTICS_UNREADABLE,
+)
 from ..result_envelope import compact_value
 from ..timing import sleep_ms
 from ._common import probe_name
@@ -75,6 +83,18 @@ async def handle_app_diagnostics(
         if status == "PASS" and freshness.get("status") == "FAIL":
             status = "FAIL"
             value["status"] = status
+    value["manifest"] = {
+        "sources": [
+            _manifest_source_entry(
+                probe,
+                app=app,
+                status=status,
+                acquisition=acquisition,
+                field=acquisition_field,
+                freshness=freshness,
+            )
+        ]
+    }
     limits = diagnostic_limits(probe)
     output = {
         "name": probe_name(probe, kind),
@@ -784,6 +804,18 @@ def _blocked_diagnostic_json_probe(
         field: acquisition,
         "limits": dict(probe.get("limits") or {}),
     }
+    value["manifest"] = {
+        "sources": [
+            _manifest_source_entry(
+                probe,
+                app=app,
+                status="BLOCKED",
+                acquisition=acquisition,
+                field=field,
+                freshness=None,
+            )
+        ]
+    }
     return {
         "name": probe_name(probe, "app_diagnostics"),
         "kind": "app_diagnostics",
@@ -804,3 +836,86 @@ def _blocked_diagnostic_json_probe(
             ),
         ),
     }
+
+
+def _manifest_source_entry(
+    probe: dict[str, Any],
+    *,
+    app: dict[str, Any],
+    status: str,
+    acquisition: dict[str, Any] | None,
+    field: str | None,
+    freshness: dict[str, Any] | None,
+) -> dict[str, Any]:
+    source_id = f"app_diagnostics.{field}" if field else "app_diagnostics.observations"
+    entry: dict[str, Any] = {
+        "id": source_id,
+        "kind": "app_diagnostics",
+        "status": status,
+        "classification": _manifest_classification(acquisition),
+        "evidence_ref": f"diagnostic:app_diagnostics:{app.get('name') or 'app'}",
+        "limits": dict(probe.get("limits") or {}),
+    }
+    artifact_path = _manifest_artifact_path(acquisition)
+    if artifact_path:
+        entry["artifact_path"] = artifact_path
+    reason = _manifest_reason(acquisition)
+    if reason:
+        entry["reason"] = reason
+    redaction = _manifest_redaction(probe)
+    if redaction:
+        entry["redaction"] = redaction
+    if freshness is not None:
+        entry["freshness"] = freshness
+    return entry
+
+
+def _manifest_classification(acquisition: dict[str, Any] | None) -> str:
+    if acquisition is None:
+        return APP_DIAGNOSTICS_REPORTED
+    if acquisition.get("observed") is True:
+        return APP_DIAGNOSTICS_OBSERVED
+    reason = str(acquisition.get("reason") or "")
+    if reason == "diagnostic JSON is not readable":
+        return APP_DIAGNOSTICS_UNREADABLE
+    if reason == "diagnostic JSON not observed after since cursor":
+        return APP_DIAGNOSTICS_STALE
+    if reason == "diagnostic JSON not observed":
+        return APP_DIAGNOSTICS_MISSING
+    return APP_DIAGNOSTICS_BLOCKED
+
+
+def _manifest_artifact_path(acquisition: dict[str, Any] | None) -> str | None:
+    if not isinstance(acquisition, dict):
+        return None
+    path = acquisition.get("matched_path") or acquisition.get("path")
+    if not path:
+        return None
+    raw = str(path)
+    path_ref = Path(raw.replace("\\", "/"))
+    if path_ref.is_absolute() or path_ref.drive:
+        if not path_ref.suffix:
+            return None
+        return path_ref.name or None
+    if not path_ref.suffix:
+        return None
+    if any(part in {"", ".", ".."} for part in path_ref.parts):
+        return path_ref.name or None
+    return path_ref.as_posix()
+
+
+def _manifest_reason(acquisition: dict[str, Any] | None) -> str | None:
+    if not isinstance(acquisition, dict):
+        return None
+    reason = acquisition.get("reason")
+    return str(reason) if reason else None
+
+
+def _manifest_redaction(probe: dict[str, Any]) -> dict[str, Any] | None:
+    redaction = probe.get("redaction")
+    if not isinstance(redaction, dict):
+        return None
+    omitted = redaction.get("omit_fields")
+    if not isinstance(omitted, list):
+        return None
+    return {"status": "PASS", "omitted_count": len(omitted)}
