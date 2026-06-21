@@ -209,7 +209,7 @@ async def _wait_for_final_bundle(capturing_mcp, run_id: str) -> dict[str, Any]:
         data = response["data"]
         if data.get("final"):
             return data
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.01)
     raise AssertionError("runtime smoke run did not finish")
 
 
@@ -587,6 +587,82 @@ async def test_runtime_smoke_evidence_bundle_returns_bounded_final_packet(
     assert data["event_cursor"]["stale_cursor"] is False
     assert "runtime_smoke_evidence_bundle" in data["next_actions"]
     assert "runtime_smoke_run_plan" in data["next_actions"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_run_plan_exposes_named_pack_manifest_ref(
+    capturing_mcp,
+) -> None:
+    session = RunPlanFacadeSession()
+    _register(capturing_mcp, session)
+
+    started = await capturing_mcp.tools["runtime_smoke_run_plan"](
+        ctx=None,
+        plan={
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "run-plan-named-oracle-pack",
+            "cases": [
+                {
+                    "id": "case-1",
+                    "transitions": [
+                        {
+                            "id": "read-oracle-pack",
+                            "action": {"kind": "ui.noop"},
+                            "probes": [
+                                {
+                                    "kind": "oracle_pack",
+                                    "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
+                                    "id": "run-plan-oracle-pack",
+                                    "status": "PASS",
+                                    "checks": [
+                                        {
+                                            "id": "visible-row-count",
+                                            "probe": "ui.grid",
+                                            "expect": {"min_rows": 1},
+                                            "on_blocked": {
+                                                "next_step": "Run WPF fixture replay."
+                                            },
+                                        }
+                                    ],
+                                    "limits": {
+                                        "max_text_length": 240,
+                                        "max_list_items": 8,
+                                        "max_json_bytes": 32768,
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+    data = started["data"]
+
+    assert data["status"] == "RUNNING"
+    bundle = await _wait_for_final_bundle(capturing_mcp, data["run_id"])
+    assert bundle["status"] == "PASS"
+    assert bundle["result"]["status"] == "PASS"
+    assert bundle["evidence_refs"] == [
+        {
+            "case_id": "case-1",
+            "phase": "before",
+            "probe": "oracle_pack",
+            "evidence_ref": "diagnostic:oracle_pack:run-plan-oracle-pack",
+        },
+        {
+            "case_id": "case-1",
+            "phase": "after",
+            "probe": "oracle_pack",
+            "evidence_ref": "diagnostic:oracle_pack:run-plan-oracle-pack",
+        }
+    ]
+    assert bundle["pack_manifest"] == {
+        "pack_id": "run-plan-oracle-pack",
+        "status": "PASS",
+        "manifest_ref": "pack-manifest.json",
+    }
+    assert bundle["result"]["pack_manifest"] == bundle["pack_manifest"]
 
 
 @pytest.mark.asyncio

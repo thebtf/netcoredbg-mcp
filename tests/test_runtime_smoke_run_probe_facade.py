@@ -1405,6 +1405,12 @@ async def test_runtime_smoke_run_probe_returns_disagreeing_oracle_pack_bundle(
             "evidence_ref": "diagnostic:oracle_pack:status-oracle-pack",
         }
     ]
+    assert bundle["pack_manifest"] == {
+        "pack_id": "status-oracle-pack",
+        "status": "BLOCKED",
+        "manifest_ref": "pack-manifest.json",
+    }
+    assert bundle["result"]["pack_manifest"] == bundle["pack_manifest"]
 
 
 @pytest.mark.asyncio
@@ -1517,6 +1523,12 @@ async def test_runtime_smoke_run_probe_starts_app_diagnostics_probe_run(
     assert bundle["result"]["status"] == "BLOCKED"
     assert "runtime_smoke_wait_for_result" in bundle["next_actions"]
     assert "runtime_smoke_evidence_bundle" in bundle["next_actions"]
+    assert bundle["pack_manifest"] == {
+        "pack_id": "app-diagnostics-probe",
+        "status": "BLOCKED",
+        "manifest_ref": "pack-manifest.json",
+    }
+    assert bundle["result"]["pack_manifest"] == bundle["pack_manifest"]
 
 
 @pytest.mark.asyncio

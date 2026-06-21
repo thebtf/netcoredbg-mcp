@@ -48,6 +48,11 @@ class CursorFacadeRegistry:
                         "evidence_ref": "diagnostic:app_diagnostics:NovaScript",
                     }
                 ],
+                "pack_manifest": {
+                    "pack_id": "NovaScript-app-diagnostics-pack",
+                    "status": "BLOCKED",
+                    "manifest_ref": "pack-manifest.json",
+                },
                 "cleanup": {"status": "PASS"},
                 "cases": [
                     {
@@ -1089,6 +1094,11 @@ async def test_runtime_smoke_get_event_delta_returns_app_diagnostics_source_delt
         "limited": False,
         "stale_cursor": False,
         "dropped_count": 0,
+    }
+    assert data["pack_manifest"] == {
+        "pack_id": "NovaScript-app-diagnostics-pack",
+        "status": "BLOCKED",
+        "manifest_ref": "pack-manifest.json",
     }
     assert data["cursor"]["sources"]["app_diagnostics"] == {
         "after_index": 1,
