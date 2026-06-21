@@ -324,7 +324,50 @@ def diagnostic_schema_contract() -> dict[str, Any]:
             ],
             "runtime_limits": _tracepoint_runtime_limits(),
         },
+        "evidence_pack_manifest": _evidence_pack_manifest_contract(),
     }
+
+
+def _evidence_pack_manifest_contract() -> dict[str, Any]:
+    from .runtime_smoke_v2.evidence_manifest import (
+        MANIFEST_FILE_NAME,
+        MANIFEST_SCHEMA,
+        MANIFEST_SCHEMA_VERSION,
+        REQUIRED_ROLLUP_FIELDS,
+        REQUIRED_SOURCE_FIELDS,
+        SOURCE_REF_FIELDS,
+    )
+
+    return {
+        "schema": MANIFEST_SCHEMA,
+        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "file_name": MANIFEST_FILE_NAME,
+        "required_fields": [
+            "schema",
+            "schema_version",
+            "pack_id",
+            "run_id",
+            "evidence_dir",
+            "sources",
+            "rollups",
+        ],
+        "source_required_fields": list(REQUIRED_SOURCE_FIELDS),
+        "source_ref_fields": list(SOURCE_REF_FIELDS),
+        "rollup_fields": list(REQUIRED_ROLLUP_FIELDS),
+        "ref_policy": "refs are relative to evidence_dir and must stay inside it",
+    }
+
+
+def validate_evidence_pack_manifest(
+    manifest: dict[str, Any],
+    *,
+    evidence_dir: str,
+) -> list[str]:
+    """Return deterministic validation errors for an evidence pack manifest."""
+
+    from .runtime_smoke_v2.evidence_manifest import validate_pack_manifest
+
+    return validate_pack_manifest(manifest, evidence_dir=evidence_dir)
 
 
 def app_diagnostics_launch_contract(

@@ -142,6 +142,85 @@ def test_diagnostic_schema_contract_exposes_app_diagnostics_freshness_contract()
     assert "missing_artifact" in app_diagnostics["failure_modes"]
 
 
+def test_diagnostic_schema_contract_exposes_named_pack_manifest_contract() -> None:
+    from netcoredbg_mcp.session.runtime_smoke_schema import diagnostic_schema_contract
+
+    contract = diagnostic_schema_contract()
+    manifest = contract["evidence_pack_manifest"]
+
+    assert manifest["schema"] == "netcoredbg.runtime_smoke.evidence_pack"
+    assert manifest["schema_version"] == "1.0"
+    assert manifest["file_name"] == "pack-manifest.json"
+    assert manifest["required_fields"] == [
+        "schema",
+        "schema_version",
+        "pack_id",
+        "run_id",
+        "evidence_dir",
+        "sources",
+        "rollups",
+    ]
+    assert manifest["source_required_fields"] == [
+        "id",
+        "kind",
+        "classification",
+        "status",
+    ]
+    assert manifest["source_ref_fields"] == ["evidence_ref", "artifact_path"]
+    assert manifest["rollup_fields"] == ["cleanup", "freshness", "redaction", "limits"]
+    assert manifest["ref_policy"] == (
+        "refs are relative to evidence_dir and must stay inside it"
+    )
+
+
+def test_evidence_pack_manifest_schema_rejects_malformed_payload(tmp_path: Path) -> None:
+    from netcoredbg_mcp.session.runtime_smoke_schema import (
+        validate_evidence_pack_manifest,
+    )
+
+    errors = validate_evidence_pack_manifest(
+        {
+            "schema": "wrong-schema",
+            "schema_version": "0.0",
+            "pack_id": "",
+            "run_id": "",
+            "sources": [
+                {
+                    "id": "",
+                    "kind": "",
+                    "classification": "",
+                    "status": "",
+                    "evidence_ref": "../secret.json",
+                },
+                "not-an-object",
+            ],
+            "rollups": {
+                "cleanup": [],
+                "freshness": {},
+            },
+        },
+        evidence_dir=str(tmp_path),
+    )
+
+    for expected_error in [
+        "manifest.schema is invalid",
+        "manifest.schema_version is invalid",
+        "manifest.pack_id is required",
+        "manifest.run_id is required",
+        "manifest.evidence_dir is required",
+        "manifest.sources[0].id is required",
+        "manifest.sources[0].kind is required",
+        "manifest.sources[0].classification is required",
+        "manifest.sources[0].status is required",
+        "manifest.sources[0].evidence_ref manifest ref must not contain traversal segments",
+        "manifest.sources[1] must be an object",
+        "manifest.rollups.cleanup must be an object",
+        "manifest.rollups.redaction is required",
+        "manifest.rollups.limits is required",
+    ]:
+        assert expected_error in errors
+
+
 def test_app_diagnostics_schema_rejects_invalid_freshness_contract_shapes() -> None:
     from netcoredbg_mcp.session.runtime_smoke_schema import (
         validate_diagnostic_schema_example,
