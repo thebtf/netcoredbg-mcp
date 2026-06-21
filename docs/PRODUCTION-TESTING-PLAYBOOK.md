@@ -294,7 +294,7 @@ uv run --no-sync --project <NETCOREDBG_MCP_REPO> netcoredbg-mcp --version
 Expected preflight result:
 
 - Exit code `0`.
-- Output is `netcoredbg-mcp 0.19.0`.
+- Output is `netcoredbg-mcp 0.20.0`.
 - If a live MCP mux session holds the development `.venv` executable, use the
   direct `.venv\Scripts\netcoredbg-mcp.exe --version` route instead of treating
   the uv sync lock as stale code.
@@ -311,7 +311,7 @@ Consumer procedure:
    launched process. EXE launches normally use the NovaScript process name;
    DLL launches through a host process should use that host process name while
    keeping the NovaScript assembly as the expected module.
-3. Run the plan through the active v0.19.0 MCP server with the
+3. Run the plan through the active v0.20.0 MCP server with the
    `run_runtime_smoke` tool from the NovaScript repository root.
 4. Record the returned runtime-smoke envelope as the consumer evidence. A
    lifecycle run may use `runtime_smoke_start`, `runtime_smoke_tail_events`,
@@ -335,7 +335,7 @@ Expected result:
   fresh diagnostic artifact; unsafe diagnostic fields leave the runtime-smoke
   boundary; or cleanup leaves NovaScript/netcoredbg processes behind.
 
-This gate is the post-release consumer-readiness slice for the v0.19.0
+This gate is the post-release consumer-readiness slice for the v0.20.0
 NovaScript-facing action-oracle/app-diagnostics path. It does not replace the
 CR-003 DataGrid drag/drop replay gate above.
 

@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-06-22
+
+### Added
+- Named `oracle_pack` and `app_diagnostics` runs now expose bounded
+  `pack_manifest` descriptors through `runtime_smoke_run_plan`,
+  `runtime_smoke_run_probe`, `runtime_smoke_evidence_bundle`, and
+  `runtime_smoke_get_event_delta`.
+- Runtime-smoke evidence directories can materialize `pack-manifest.json` for
+  named packs when final evidence is available, with per-source classifications
+  and cleanup, freshness, redaction, and limits rollups.
+- Provider docs now track the NovaScript action-oracle app-diagnostics replay
+  as downstream `PASS`, including the adapted `ui.grid.select` action and
+  bounded broad-issue keep-open decisions.
+
+### Changed
+- Release and reproduction docs now preserve explicit no-repeat boundaries for
+  CR-100 through CR-104 so broad `#268..#272` work is not re-opened from stale
+  roadmap text.
+- Agent workflow docs now include worktree trace and reproduction-first
+  debugging protocols used by release/readiness sessions.
+
+### Fixed
+- Pack manifest refs now reject unsafe absolute or Windows drive-qualified
+  source refs portably and keep app diagnostics artifact refs relative or
+  omitted when no safe artifact is available.
+- Final evidence bundles and event deltas refresh pack manifest status from the
+  retained final result so a before-phase `PASS` cannot mask a later
+  `FAIL` or `BLOCKED`.
+- Multi-pack selection now preserves the selected failing or blocking pack id
+  instead of assigning another pack's status to the first pack.
+- Source distributions now exclude local agent scratch directories, virtual
+  environments, build outputs, and fixture `bin` / `obj` residue so release
+  artifacts cannot ship workstation-only evidence or dependencies.
+
 ## [0.19.0] - 2026-06-21
 
 ### Added

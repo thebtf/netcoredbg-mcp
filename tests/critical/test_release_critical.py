@@ -27,6 +27,7 @@ from netcoredbg_mcp.session.runtime_smoke import (
 from netcoredbg_mcp.session.state import DebugState
 
 PUBLISH_WORKFLOW = Path(".github/workflows/publish.yml")
+PYPROJECT = Path("pyproject.toml")
 NODE20_ACTION_PINS = {
     "actions/checkout@v4",
     "softprops/action-gh-release@v2",
@@ -143,6 +144,25 @@ def test_publish_workflow_uses_node24_compatible_action_pins() -> None:
 
     assert old_pins == []
     assert missing_new_pins == []
+
+
+@pytest.mark.critical
+def test_sdist_excludes_agent_and_build_residue() -> None:
+    """@critical category: data-consistency — release sdist excludes local residue."""
+
+    assert PYPROJECT.exists(), "pyproject.toml is missing"
+    pyproject_text = PYPROJECT.read_text(encoding="utf-8")
+
+    assert "[tool.hatch.build.targets.sdist]" in pyproject_text
+    for pattern in (
+        '"/.agent*"',
+        '"/.agent*/**"',
+        '"/.venv"',
+        '"/dist"',
+        '"/**/bin"',
+        '"/**/obj"',
+    ):
+        assert pattern in pyproject_text
 
 
 @pytest.mark.critical
