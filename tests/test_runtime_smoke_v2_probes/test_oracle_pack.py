@@ -439,7 +439,7 @@ async def test_oracle_pack_probe_blocks_when_source_is_blocked() -> None:
     manifest_source = _manifest_source(probe, "status_text")
     assert manifest_source["status"] == "BLOCKED"
     assert manifest_source["classification"] == "ORACLE_SOURCE_BLOCKED"
-    assert manifest_source["reason"] == "unsupported probe kind"
+    assert manifest_source["reason"] == "probe execution not available"
 
 
 @pytest.mark.asyncio

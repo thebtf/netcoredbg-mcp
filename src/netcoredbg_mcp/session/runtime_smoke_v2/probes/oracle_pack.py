@@ -6,6 +6,13 @@ from typing import Any
 
 from ...runtime_smoke_schema import DIAGNOSTIC_SCHEMA_VERSION
 from ..blocked import build_blocked
+from ..evidence_manifest import (
+    DISAGREEING_SOURCES,
+    ORACLE_SOURCE_BLOCKED,
+    ORACLE_SOURCE_FAILED,
+    ORACLE_SOURCE_IMPASSE,
+    ORACLE_SOURCE_PASS,
+)
 from ._common import probe_name
 from ._diagnostic_common import (
     bounded_diagnostic_value,
@@ -56,6 +63,14 @@ async def handle_oracle_pack(
     elif source_status_drives_pack:
         status = source_status
         value["status"] = status
+    value["manifest"] = {
+        "sources": _source_manifest_entries(
+            sources,
+            classification_override=DISAGREEING_SOURCES
+            if disagreement_blocks_pack
+            else None,
+        )
+    }
     limits = diagnostic_limits(probe)
     output = {
         "name": probe_name(probe, kind),
@@ -164,6 +179,48 @@ def _source_summary(source_id: str, result: dict[str, Any]) -> dict[str, Any]:
     if result.get("evidence_ref"):
         summary["evidence_ref"] = str(result["evidence_ref"])
     return summary
+
+
+def _source_manifest_entries(
+    sources: list[dict[str, Any]],
+    *,
+    classification_override: str | None = None,
+) -> list[dict[str, Any]]:
+    return [
+        _source_manifest_entry(source, classification_override=classification_override)
+        for source in sources
+    ]
+
+
+def _source_manifest_entry(
+    source: dict[str, Any],
+    *,
+    classification_override: str | None,
+) -> dict[str, Any]:
+    entry = {
+        "id": str(source.get("id") or ""),
+        "kind": str(source.get("kind") or ""),
+        "status": str(source.get("status") or "PASS"),
+        "classification": classification_override or _source_manifest_classification(source),
+    }
+    if source.get("reason"):
+        entry["reason"] = str(source["reason"])
+    if source.get("evidence_ref"):
+        entry["evidence_ref"] = str(source["evidence_ref"])
+    return entry
+
+
+def _source_manifest_classification(source: dict[str, Any]) -> str:
+    status = str(source.get("status") or "PASS")
+    if status == "PASS":
+        return ORACLE_SOURCE_PASS
+    if status == "FAIL":
+        return ORACLE_SOURCE_FAILED
+    if status == "IMPASSE":
+        return ORACLE_SOURCE_IMPASSE
+    if status == "BLOCKED":
+        return ORACLE_SOURCE_BLOCKED
+    return f"ORACLE_SOURCE_{status}"
 
 
 def _source_disagreement(sources: list[dict[str, Any]]) -> dict[str, Any] | None:
