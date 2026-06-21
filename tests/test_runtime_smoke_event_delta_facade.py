@@ -19,6 +19,13 @@ class CursorFacadeRegistry:
         self.tail_calls: list[dict[str, Any]] = []
         self.result_calls: dict[str, int] = {}
         self.start_calls = 0
+        self._netcoredbg_mcp_pack_manifests = {
+            "manifest-final-run": {
+                "pack_id": "manifest-final-pack",
+                "status": "PASS",
+                "manifest_ref": "pack-manifest.json",
+            }
+        }
 
     async def start(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
         self.start_calls += 1
@@ -101,6 +108,46 @@ class CursorFacadeRegistry:
                 "lifecycle_status": "RUNNING",
                 "final": False,
                 "app_diagnostics_history": history,
+            }
+        if run_id == "manifest-final-run":
+            return {
+                "status": "FAIL",
+                "reason": "after-phase manifest probe failed",
+                "run_id": run_id,
+                "plan_name": "manifest-final-plan",
+                "lifecycle_status": "COMPLETED",
+                "final": True,
+                "action_count": 1,
+                "evidence_refs": [],
+                "cleanup": {"status": "PASS"},
+                "cases": [
+                    {
+                        "id": "case-1",
+                        "transitions": [
+                            {
+                                "action": {"kind": "ui.noop"},
+                                "probes": {
+                                    "before": [
+                                        {
+                                            "kind": "oracle_pack",
+                                            "id": "manifest-final-pack",
+                                            "status": "PASS",
+                                            "value": {"manifest": {"source_count": 1}},
+                                        }
+                                    ],
+                                    "after": [
+                                        {
+                                            "kind": "oracle_pack",
+                                            "id": "manifest-final-pack",
+                                            "status": "FAIL",
+                                            "value": {"manifest": {"source_count": 1}},
+                                        }
+                                    ],
+                                },
+                            }
+                        ],
+                    }
+                ],
             }
         return {
             "status": "RUNNING",
@@ -234,6 +281,22 @@ class CursorFacadeRegistry:
                 "events": appdiag_events,
                 "next_cursor": 8,
                 "oldest_cursor": 3,
+                "dropped_count": 0,
+                "stale_cursor": False,
+                "final": True,
+            }
+        if run_id == "manifest-final-run":
+            events = [{"cursor": 9, "kind": "failed", "status": "FAIL"}]
+            events = [
+                event for event in events if int(event["cursor"]) > after_cursor
+            ][:limit]
+            return {
+                "status": "FAIL",
+                "reason": "after-phase manifest probe failed",
+                "run_id": run_id,
+                "events": events,
+                "next_cursor": 9,
+                "oldest_cursor": 9,
                 "dropped_count": 0,
                 "stale_cursor": False,
                 "final": True,
@@ -1103,6 +1166,33 @@ async def test_runtime_smoke_get_event_delta_returns_app_diagnostics_source_delt
     assert data["cursor"]["sources"]["app_diagnostics"] == {
         "after_index": 1,
         "entry_count": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_get_event_delta_refreshes_final_pack_manifest_status(
+    capturing_mcp,
+) -> None:
+    session = CursorFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_get_event_delta"](
+        ctx=None,
+        cursor={
+            "run_id": "manifest-final-run",
+            "after_cursor": 8,
+        },
+        event_limit=5,
+    )
+    data = response["data"]
+
+    assert data["status"] == "PASS"
+    assert data["final"] is True
+    assert data["events"] == [{"cursor": 9, "kind": "failed", "status": "FAIL"}]
+    assert data["pack_manifest"] == {
+        "pack_id": "manifest-final-pack",
+        "status": "FAIL",
+        "manifest_ref": "pack-manifest.json",
     }
 
 

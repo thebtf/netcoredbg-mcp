@@ -170,6 +170,77 @@ class ActiveAppDiagnosticsBundleRegistry:
         return {"after_index": 1, "entry_count": 1}
 
 
+class FinalPackManifestStatusRegistry:
+    def __init__(self) -> None:
+        self._netcoredbg_mcp_pack_manifests = {
+            "terminal-pack-run": {
+                "pack_id": "terminal-oracle-pack",
+                "status": "PASS",
+                "manifest_ref": "pack-manifest.json",
+            }
+        }
+
+    async def get_result(self, run_id: str) -> dict[str, Any]:
+        return {
+            "status": "BLOCKED",
+            "reason": "after-phase oracle blocked",
+            "run_id": run_id,
+            "plan_name": "terminal-pack-plan",
+            "lifecycle_status": "COMPLETED",
+            "final": True,
+            "action_count": 1,
+            "evidence_refs": [],
+            "cleanup": {"status": "PASS"},
+            "cases": [
+                {
+                    "id": "case-1",
+                    "transitions": [
+                        {
+                            "action": {"kind": "ui.noop"},
+                            "probes": {
+                                "before": [
+                                    {
+                                        "kind": "oracle_pack",
+                                        "id": "terminal-oracle-pack",
+                                        "status": "PASS",
+                                        "value": {"manifest": {"source_count": 1}},
+                                    }
+                                ],
+                                "after": [
+                                    {
+                                        "kind": "oracle_pack",
+                                        "id": "terminal-oracle-pack",
+                                        "status": "BLOCKED",
+                                        "value": {"manifest": {"source_count": 1}},
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+
+    async def tail_events(
+        self,
+        run_id: str,
+        *,
+        after_cursor: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        return {
+            "status": "BLOCKED",
+            "reason": "after-phase oracle blocked",
+            "run_id": run_id,
+            "events": [{"cursor": 9, "kind": "blocked", "status": "BLOCKED"}],
+            "next_cursor": 9,
+            "oldest_cursor": 9,
+            "dropped_count": 0,
+            "stale_cursor": False,
+            "final": True,
+        }
+
+
 async def _resolve_project_root(_ctx: Any, _session: Any) -> None:
     raise AssertionError("run-plan facade test plan must not resolve project paths")
 
@@ -663,6 +734,29 @@ async def test_runtime_smoke_run_plan_exposes_named_pack_manifest_ref(
         "manifest_ref": "pack-manifest.json",
     }
     assert bundle["result"]["pack_manifest"] == bundle["pack_manifest"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_evidence_bundle_uses_terminal_pack_manifest_status(
+    capturing_mcp,
+) -> None:
+    session = RunPlanFacadeSession()
+    session.runtime_smoke.lifecycle_runs = FinalPackManifestStatusRegistry()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_evidence_bundle"](
+        ctx=None,
+        run_id="terminal-pack-run",
+    )
+    data = response["data"]
+
+    assert data["status"] == "BLOCKED"
+    assert data["pack_manifest"] == {
+        "pack_id": "terminal-oracle-pack",
+        "status": "BLOCKED",
+        "manifest_ref": "pack-manifest.json",
+    }
+    assert data["result"]["pack_manifest"] == data["pack_manifest"]
 
 
 @pytest.mark.asyncio

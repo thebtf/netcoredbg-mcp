@@ -1652,6 +1652,11 @@ async def _runtime_smoke_get_event_delta(
             source_cursors["app_diagnostics"] = source_cursor
     if source_cursors:
         next_cursor["sources"] = source_cursors
+    if final_result is None and tail.get("final"):
+        result_reader = getattr(registry, "get_result", None)
+        refreshed_result = await result_reader(run_id) if callable(result_reader) else None
+        if not _runtime_smoke_run_missing(refreshed_result):
+            final_result = refreshed_result
     delta = {
         "status": "PASS",
         "reason": "runtime smoke event delta read",
@@ -2354,6 +2359,8 @@ def _runtime_smoke_pack_manifest_from_cases(
 ) -> dict[str, Any] | None:
     if not isinstance(cases, list):
         return None
+    selected: dict[str, Any] | None = None
+    selected_rank = -1
     for probe in _runtime_smoke_iter_case_probes(cases):
         descriptor = _runtime_smoke_pack_manifest_from_probe(
             probe,
@@ -2361,9 +2368,31 @@ def _runtime_smoke_pack_manifest_from_cases(
             default_status=default_status,
             require_manifest=require_manifest,
         )
-        if descriptor is not None:
-            return descriptor
-    return None
+        if descriptor is None:
+            continue
+        descriptor_rank = _runtime_smoke_pack_manifest_status_rank(
+            descriptor["status"]
+        )
+        if selected is None or descriptor_rank >= selected_rank:
+            selected = _runtime_smoke_merge_pack_manifest(
+                actual=descriptor,
+                remembered=selected,
+            )
+            selected_rank = descriptor_rank
+    return selected
+
+
+def _runtime_smoke_pack_manifest_status_rank(status: str) -> int:
+    normalized = status.strip().upper().replace("-", "_")
+    if normalized in {"PASS", "PASSED", "SUCCESS", "COMPLETED"}:
+        return 0
+    if normalized in {"RUNNING", "PENDING", "WAITING", "STARTED", "UNKNOWN"}:
+        return 1
+    if normalized == "BLOCKED":
+        return 2
+    if normalized in {"FAIL", "FAILED", "ERROR", "INVALID_SETUP", "TIMEOUT", "TIMED_OUT"}:
+        return 3
+    return 1
 
 
 def _runtime_smoke_iter_case_probes(cases: list[Any]) -> list[dict[str, Any]]:
