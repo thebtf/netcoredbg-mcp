@@ -2474,7 +2474,7 @@ def _runtime_smoke_manifest_ref(value: Any) -> str | None:
     raw = _runtime_smoke_text_or_none(value)
     if raw is None:
         return MANIFEST_FILE_NAME
-    ref = Path(raw)
+    ref = Path(raw.replace("\\", "/"))
     if ref.is_absolute() or ref.drive:
         return None
     if any(part in {"", ".", ".."} for part in ref.parts):

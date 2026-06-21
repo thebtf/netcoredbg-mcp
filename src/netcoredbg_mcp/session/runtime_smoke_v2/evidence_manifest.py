@@ -10,7 +10,7 @@ MANIFEST_SCHEMA_VERSION = "1.0"
 MANIFEST_FILE_NAME = "pack-manifest.json"
 REQUIRED_ROLLUP_FIELDS = ("cleanup", "freshness", "redaction", "limits")
 REQUIRED_SOURCE_FIELDS = ("id", "kind", "classification", "status")
-SOURCE_REF_FIELDS = ("evidence_ref", "artifact_path")
+SOURCE_REF_FIELDS = ("artifact_path",)
 DISAGREEING_SOURCES = "DISAGREEING_SOURCES"
 ORACLE_SOURCE_PASS = "ORACLE_SOURCE_PASS"
 ORACLE_SOURCE_FAILED = "ORACLE_SOURCE_FAILED"
@@ -83,7 +83,7 @@ def validate_manifest_ref(ref: str, *, evidence_dir: Path | str) -> str:
 
     if not isinstance(ref, str) or not ref.strip():
         raise ValueError("manifest ref must be a non-empty string")
-    ref_path = Path(ref)
+    ref_path = Path(ref.replace("\\", "/"))
     if ref_path.is_absolute() or ref_path.drive:
         raise ValueError("manifest ref must be relative to evidence_dir")
     if any(part in {"", ".", ".."} for part in ref_path.parts):
@@ -169,7 +169,10 @@ def _validate_manifest_path(
     evidence_dir: Path | str,
 ) -> Path:
     root = Path(evidence_dir).resolve()
-    path = Path(manifest_path).resolve()
+    path = Path(manifest_path)
+    if not path.is_absolute():
+        path = root / path
+    path = path.resolve()
     if root not in (path, *path.parents):
         raise ValueError("pack manifest path must stay inside evidence_dir")
     return path

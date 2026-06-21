@@ -48,9 +48,14 @@ def test_named_pack_manifest_can_be_written_read_and_bounded(
 
     manifest_path = write_pack_manifest(manifest, evidence_dir=tmp_path)
     loaded = read_pack_manifest(manifest_path, evidence_dir=tmp_path)
+    loaded_from_relative_path = read_pack_manifest(
+        "pack-manifest.json",
+        evidence_dir=tmp_path,
+    )
 
     assert manifest_path == tmp_path / "pack-manifest.json"
     assert loaded["schema"] == "netcoredbg.runtime_smoke.evidence_pack"
+    assert loaded_from_relative_path == loaded
     assert loaded["schema_version"] == MANIFEST_SCHEMA_VERSION
     assert loaded["pack_id"] == "wpf-grid-oracle-pack"
     assert loaded["run_id"] == "run-123"
@@ -98,12 +103,19 @@ def test_named_pack_manifest_rejects_malformed_or_unsafe_refs(
 
     with pytest.raises(ValueError, match="manifest ref"):
         validate_manifest_ref("../secrets/app-diagnostics.json", evidence_dir=tmp_path)
+    assert (
+        validate_manifest_ref(
+            "sources\\app-diagnostics.json",
+            evidence_dir=tmp_path,
+        )
+        == "sources/app-diagnostics.json"
+    )
 
     malformed = build_pack_manifest(
         pack_id="wpf-grid-oracle-pack",
         run_id="run-123",
         evidence_dir=tmp_path,
-        sources=[_source_entry(evidence_ref="../secrets/app-diagnostics.json")],
+        sources=[_source_entry(artifact_path="../secrets/app-diagnostics.json")],
         rollups={
             "cleanup": {"status": "PASS", "source_ids": ["app-diagnostics-main"]},
             "freshness": {"status": "PASS", "source_ids": ["app-diagnostics-main"]},

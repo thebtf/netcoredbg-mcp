@@ -199,7 +199,7 @@ def _source_manifest_entry(
 ) -> dict[str, Any]:
     entry = {
         "id": str(source.get("id") or ""),
-        "kind": str(source.get("kind") or ""),
+        "kind": str(source.get("kind") or "unknown"),
         "status": str(source.get("status") or "PASS"),
         "classification": classification_override or _source_manifest_classification(source),
     }

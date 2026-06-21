@@ -166,7 +166,7 @@ def test_diagnostic_schema_contract_exposes_named_pack_manifest_contract() -> No
         "classification",
         "status",
     ]
-    assert manifest["source_ref_fields"] == ["evidence_ref", "artifact_path"]
+    assert manifest["source_ref_fields"] == ["artifact_path"]
     assert manifest["rollup_fields"] == ["cleanup", "freshness", "redaction", "limits"]
     assert manifest["ref_policy"] == (
         "refs are relative to evidence_dir and must stay inside it"
@@ -190,7 +190,7 @@ def test_evidence_pack_manifest_schema_rejects_malformed_payload(tmp_path: Path)
                     "kind": "",
                     "classification": "",
                     "status": "",
-                    "evidence_ref": "../secret.json",
+                    "artifact_path": "../secret.json",
                 },
                 "not-an-object",
             ],
@@ -212,7 +212,7 @@ def test_evidence_pack_manifest_schema_rejects_malformed_payload(tmp_path: Path)
         "manifest.sources[0].kind is required",
         "manifest.sources[0].classification is required",
         "manifest.sources[0].status is required",
-        "manifest.sources[0].evidence_ref manifest ref must not contain traversal segments",
+        "manifest.sources[0].artifact_path manifest ref must not contain traversal segments",
         "manifest.sources[1] must be an object",
         "manifest.rollups.cleanup must be an object",
         "manifest.rollups.redaction is required",
