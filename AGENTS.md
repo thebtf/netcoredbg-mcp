@@ -105,8 +105,8 @@ intentionally changes dependency resolution or package version metadata. Do not
 commit or discard it in an unrelated task without an explicit decision.
 
 **Clean implementation rule:** If unknown residue exists on `main`, create a
-clean sibling worktree/feature branch for implementation work and keep the
-residue documented in the original checkout.
+clean sibling worktree (using `git worktree`) for implementation work and keep
+the residue documented in the original checkout.
 
 ---
 
