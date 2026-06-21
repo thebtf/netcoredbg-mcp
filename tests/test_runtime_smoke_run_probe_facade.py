@@ -15,6 +15,7 @@ import pytest
 
 from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeSession
 from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
+from netcoredbg_mcp.session.runtime_smoke_v2.evidence_manifest import read_pack_manifest
 from netcoredbg_mcp.session.state import Breakpoint, BreakpointRegistry, DebugState, TraceEntry
 from netcoredbg_mcp.session.tracepoints import TracepointManager
 from netcoredbg_mcp.tools.runtime_smoke import register_runtime_smoke_tools
@@ -1409,6 +1410,7 @@ async def test_runtime_smoke_run_probe_returns_disagreeing_oracle_pack_bundle(
         "pack_id": "status-oracle-pack",
         "status": "BLOCKED",
         "manifest_ref": "pack-manifest.json",
+        "materialized": False,
     }
     assert bundle["result"]["pack_manifest"] == bundle["pack_manifest"]
 
@@ -1527,6 +1529,7 @@ async def test_runtime_smoke_run_probe_starts_app_diagnostics_probe_run(
         "pack_id": "app-diagnostics-probe",
         "status": "BLOCKED",
         "manifest_ref": "pack-manifest.json",
+        "materialized": True,
     }
     assert bundle["result"]["pack_manifest"] == bundle["pack_manifest"]
 
@@ -1616,6 +1619,16 @@ async def test_runtime_smoke_run_probe_reads_external_app_diagnostics_directory(
     result = bundle["result"]
     assert bundle["status"] == "PASS"
     assert result["status"] == "PASS"
+    assert bundle["pack_manifest"] == {
+        "pack_id": "external-app-diagnostics",
+        "status": "PASS",
+        "manifest_ref": "pack-manifest.json",
+        "materialized": True,
+    }
+    manifest = read_pack_manifest("pack-manifest.json", evidence_dir=diagnostic_dir)
+    assert manifest["pack_id"] == "external-app-diagnostics"
+    assert manifest["run_id"] == data["run_id"]
+    assert manifest["sources"][0]["artifact_path"] == diagnostic_path.name
     assert bundle["evidence_refs"] == [
         {
             "case_id": "run_probe",

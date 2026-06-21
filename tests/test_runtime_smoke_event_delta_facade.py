@@ -1162,6 +1162,7 @@ async def test_runtime_smoke_get_event_delta_returns_app_diagnostics_source_delt
         "pack_id": "NovaScript-app-diagnostics-pack",
         "status": "BLOCKED",
         "manifest_ref": "pack-manifest.json",
+        "materialized": False,
     }
     assert data["cursor"]["sources"]["app_diagnostics"] == {
         "after_index": 1,
@@ -1193,6 +1194,7 @@ async def test_runtime_smoke_get_event_delta_refreshes_final_pack_manifest_statu
         "pack_id": "manifest-final-pack",
         "status": "FAIL",
         "manifest_ref": "pack-manifest.json",
+        "materialized": False,
     }
 
 

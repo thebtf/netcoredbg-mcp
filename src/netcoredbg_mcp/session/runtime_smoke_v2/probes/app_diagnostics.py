@@ -889,7 +889,19 @@ def _manifest_artifact_path(acquisition: dict[str, Any] | None) -> str | None:
     if not isinstance(acquisition, dict):
         return None
     path = acquisition.get("matched_path") or acquisition.get("path")
-    return str(path) if path else None
+    if not path:
+        return None
+    raw = str(path)
+    path_ref = Path(raw.replace("\\", "/"))
+    if path_ref.is_absolute() or path_ref.drive:
+        if not path_ref.suffix:
+            return None
+        return path_ref.name or None
+    if not path_ref.suffix:
+        return None
+    if any(part in {"", ".", ".."} for part in path_ref.parts):
+        return path_ref.name or None
+    return path_ref.as_posix()
 
 
 def _manifest_reason(acquisition: dict[str, Any] | None) -> str | None:

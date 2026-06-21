@@ -731,7 +731,7 @@ async def test_app_diagnostics_wait_json_reads_live_diagnostic_artifact(
     assert manifest_source["kind"] == "app_diagnostics"
     assert manifest_source["status"] == "PASS"
     assert manifest_source["classification"] == "APP_DIAGNOSTICS_OBSERVED"
-    assert manifest_source["artifact_path"] == str(diagnostic_path)
+    assert manifest_source["artifact_path"] == diagnostic_path.name
     assert manifest_source["evidence_ref"] == "diagnostic:app_diagnostics:LiveWpfSmokeApp"
 
 
@@ -766,7 +766,7 @@ async def test_app_diagnostics_wait_json_classifies_unreadable_manifest_source(
     assert manifest_source["id"] == "app_diagnostics.wait_json"
     assert manifest_source["status"] == "BLOCKED"
     assert manifest_source["classification"] == "APP_DIAGNOSTICS_UNREADABLE"
-    assert manifest_source["artifact_path"] == str(diagnostic_path)
+    assert manifest_source["artifact_path"] == diagnostic_path.name
     assert manifest_source["reason"] == "diagnostic JSON is not readable"
 
 
@@ -1489,7 +1489,7 @@ async def test_app_diagnostics_poll_times_out_with_poll_metadata(
     assert manifest_source["id"] == "app_diagnostics.poll"
     assert manifest_source["status"] == "BLOCKED"
     assert manifest_source["classification"] == "APP_DIAGNOSTICS_MISSING"
-    assert manifest_source["artifact_path"] == str(missing_path)
+    assert manifest_source["artifact_path"] == missing_path.name
     assert manifest_source["reason"] == "diagnostic JSON not observed"
 
 
@@ -1648,7 +1648,7 @@ async def test_app_diagnostics_poll_since_blocks_when_only_old_matching_json_exi
     assert manifest_source["id"] == "app_diagnostics.poll"
     assert manifest_source["status"] == "BLOCKED"
     assert manifest_source["classification"] == "APP_DIAGNOSTICS_STALE"
-    assert manifest_source["artifact_path"] == str(diagnostic_dir)
+    assert "artifact_path" not in manifest_source
     assert manifest_source["reason"] == "diagnostic JSON not observed after since cursor"
 
 

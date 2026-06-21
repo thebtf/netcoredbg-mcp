@@ -732,6 +732,7 @@ async def test_runtime_smoke_run_plan_exposes_named_pack_manifest_ref(
         "pack_id": "run-plan-oracle-pack",
         "status": "PASS",
         "manifest_ref": "pack-manifest.json",
+        "materialized": False,
     }
     assert bundle["result"]["pack_manifest"] == bundle["pack_manifest"]
 
@@ -755,6 +756,7 @@ async def test_runtime_smoke_evidence_bundle_uses_terminal_pack_manifest_status(
         "pack_id": "terminal-oracle-pack",
         "status": "BLOCKED",
         "manifest_ref": "pack-manifest.json",
+        "materialized": False,
     }
     assert data["result"]["pack_manifest"] == data["pack_manifest"]
 
