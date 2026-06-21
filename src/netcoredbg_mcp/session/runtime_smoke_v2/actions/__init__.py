@@ -17,6 +17,40 @@ _INTEGER_TEXT = re.compile(r"-?\d+")
 
 _ACTION_REGISTRY: dict[str, ActionHandler] = {}
 
+_INPUT_CLASSIFICATION_REQUIRES_GLOBAL = "REQUIRES_GLOBAL_INPUT"
+_INPUT_CLASSIFICATION_BACKGROUND_SAFE = "BACKGROUND_SAFE"
+_INPUT_CLASSIFICATION_APP_DISPATCH_SAFE = "APP_DISPATCH_SAFE"
+_INPUT_CLASSIFICATION_UNSUPPORTED = "UNSUPPORTED_BY_PROVIDER"
+_GLOBAL_INPUT_CAPABILITY = "global keyboard/mouse/foreground"
+
+_REQUIRES_GLOBAL_INPUT_ACTION_KINDS = frozenset(
+    {
+        "ui.click",
+        "ui.click_verified",
+        "ui.double_click_verified",
+        "ui.drag",
+        "ui.grid.click_row",
+        "ui.grid.double_click_row",
+        "ui.grid.right_click_row",
+        "ui.key_sequence",
+        "ui.right_click_verified",
+        "ui.text.type_replace_selection",
+    }
+)
+_BACKGROUND_SAFE_ACTION_KINDS = frozenset(
+    {
+        "noop",
+        "ui.noop",
+        "wait",
+        "ui.grid.assert_range",
+        "ui.grid.ensure_visible",
+        "ui.grid.get_state",
+        "ui.grid.select",
+        "ui.grid.select_row",
+    }
+)
+_APP_DISPATCH_SAFE_ACTION_KINDS = frozenset({"ui.invoke"})
+
 
 @dataclass(frozen=True)
 class ActionContext:
@@ -25,6 +59,7 @@ class ActionContext:
     session: Any | None = None
     diagnostic_launch: dict[str, Any] | None = None
     case_id: str | None = None
+    input_policy: dict[str, Any] | None = None
     transition_index: int | None = None
     app_diagnostics_progress_notifier: Callable[[dict[str, Any]], Any] | None = None
 
@@ -82,7 +117,130 @@ async def dispatch_action(
             next_step="Use one of the accepted action kinds.",
         )
         return {"status": "BLOCKED", **blocked}
-    return await handler(action, context)
+    input_policy = _effective_input_policy(action, context)
+    input_classification = _input_classification_for_action(action)
+    if _no_global_input_enabled(input_policy) and input_classification in {
+        _INPUT_CLASSIFICATION_REQUIRES_GLOBAL,
+        _INPUT_CLASSIFICATION_UNSUPPORTED,
+    }:
+        return _no_global_input_blocked_action(
+            action,
+            input_policy=input_policy,
+            input_classification=input_classification,
+        )
+    result = await handler(action, context)
+    return _attach_input_policy_evidence(
+        result,
+        input_policy=input_policy,
+        input_classification=input_classification,
+    )
+
+
+def _effective_input_policy(
+    action: dict[str, Any],
+    context: ActionContext,
+) -> dict[str, bool]:
+    no_global_input = False
+    if isinstance(context.input_policy, Mapping):
+        no_global_input = context.input_policy.get("no_global_input") is True
+    raw_action_policy = action.get("input_policy")
+    if isinstance(raw_action_policy, Mapping):
+        no_global_input = no_global_input or raw_action_policy.get("no_global_input") is True
+    return {"no_global_input": no_global_input}
+
+
+def _no_global_input_enabled(input_policy: Mapping[str, Any]) -> bool:
+    return input_policy.get("no_global_input") is True
+
+
+def _input_classification_for_action(action: dict[str, Any]) -> str:
+    kind = str(action.get("kind") or "")
+    if kind in _REQUIRES_GLOBAL_INPUT_ACTION_KINDS:
+        return _INPUT_CLASSIFICATION_REQUIRES_GLOBAL
+    if kind == "ui.input.ensure_target":
+        require = action.get("require")
+        if isinstance(require, Mapping) and require.get("focus") is True:
+            return _INPUT_CLASSIFICATION_REQUIRES_GLOBAL
+        return _INPUT_CLASSIFICATION_BACKGROUND_SAFE
+    if kind in _APP_DISPATCH_SAFE_ACTION_KINDS:
+        return _INPUT_CLASSIFICATION_APP_DISPATCH_SAFE
+    if kind in _BACKGROUND_SAFE_ACTION_KINDS:
+        return _INPUT_CLASSIFICATION_BACKGROUND_SAFE
+    return _INPUT_CLASSIFICATION_UNSUPPORTED
+
+
+def _no_global_input_blocked_action(
+    action: dict[str, Any],
+    *,
+    input_policy: dict[str, bool],
+    input_classification: str,
+) -> dict[str, Any]:
+    kind = str(action.get("kind") or "")
+    target = _requested_target_from_action(action)
+    blocked = build_blocked(
+        reason="global input prohibited by no_global_input policy",
+        requested={
+            "action": kind,
+            "target": target,
+            "input_policy": dict(input_policy),
+            "input_classification": input_classification,
+        },
+        accepted={
+            "input_classification": [
+                _INPUT_CLASSIFICATION_BACKGROUND_SAFE,
+                _INPUT_CLASSIFICATION_APP_DISPATCH_SAFE,
+            ],
+            "input_policy": {"no_global_input": False},
+            "capability": "background-safe UI automation route",
+        },
+        next_step=(
+            "Use a background-safe action, add an app-dispatch route, or run the "
+            "scenario in an isolated physical-input runner."
+        ),
+    )
+    return {
+        "status": "BLOCKED",
+        **blocked,
+        "action": kind,
+        "input_policy": dict(input_policy),
+        "input_classification": input_classification,
+        "physical_fallback_attempted": False,
+        "operator_isolated": True,
+        "required_capability": _GLOBAL_INPUT_CAPABILITY,
+        "requested_target": target,
+    }
+
+
+def _requested_target_from_action(action: dict[str, Any]) -> dict[str, Any]:
+    raw_selector = action.get("selector")
+    if isinstance(raw_selector, Mapping):
+        return dict(raw_selector)
+    for container_key in ("source", "drop", "target"):
+        raw_container = action.get(container_key)
+        if isinstance(raw_container, Mapping):
+            nested_selector = raw_container.get("selector")
+            if isinstance(nested_selector, Mapping):
+                return dict(nested_selector)
+    return {}
+
+
+def _attach_input_policy_evidence(
+    result: dict[str, Any],
+    *,
+    input_policy: dict[str, bool],
+    input_classification: str,
+) -> dict[str, Any]:
+    if not _no_global_input_enabled(input_policy):
+        return result
+    enriched = dict(result)
+    enriched.setdefault("input_policy", dict(input_policy))
+    enriched.setdefault("input_classification", input_classification)
+    enriched.setdefault("physical_fallback_attempted", False)
+    enriched.setdefault("operator_isolated", input_classification in {
+        _INPUT_CLASSIFICATION_BACKGROUND_SAFE,
+        _INPUT_CLASSIFICATION_APP_DISPATCH_SAFE,
+    })
+    return enriched
 
 
 async def _handle_ui_invoke(action: dict[str, Any], context: ActionContext) -> dict[str, Any]:

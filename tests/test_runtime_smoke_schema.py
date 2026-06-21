@@ -190,6 +190,38 @@ def test_validate_plan_rejects_unexpected_top_level_keys() -> None:
     ]
 
 
+def test_validate_v2_plan_accepts_no_global_input_policy() -> None:
+    plan = {
+        "schema": "netcoredbg.runtime_smoke.v2",
+        "input_policy": {"no_global_input": True},
+        "cases": [
+            {
+                "id": "isolated_noop",
+                "transitions": [{"action": {"kind": "noop"}, "probes": []}],
+            }
+        ],
+    }
+
+    assert validate_plan(plan) == []
+
+
+def test_validate_v2_plan_rejects_malformed_no_global_input_policy() -> None:
+    errors = validate_plan(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "input_policy": {"no_global_input": "yes"},
+            "cases": [
+                {
+                    "id": "isolated_noop",
+                    "transitions": [{"action": {"kind": "noop"}, "probes": []}],
+                }
+            ],
+        }
+    )
+
+    assert errors == ["input_policy.no_global_input must be a boolean"]
+
+
 def test_validate_plan_rejects_nested_operation_argument_type_errors() -> None:
     errors = validate_plan(
         {
