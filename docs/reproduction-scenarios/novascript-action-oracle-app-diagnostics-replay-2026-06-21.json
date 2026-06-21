@@ -1,14 +1,14 @@
 {
   "schema": "netcoredbg.downstream_replay_packet.v1",
   "id": "novascript-action-oracle-app-diagnostics-replay-2026-06-21",
-  "status": "PROVIDER_READY_CONSUMER_REPLAY_PENDING",
+  "status": "DOWNSTREAM_REPLAY_PASS",
   "issue": "#268",
   "issues": ["#268", "#272"],
   "provider_baseline": {
     "repo": "thebtf/netcoredbg-mcp",
-    "commit": "e6d3fac78ae2aaa1e6b1cde8b3f7c5d703c03093",
+    "commit": "6d777dae788d4b6008fa36f1dc2172fd7e4df208",
     "version": "0.19.0",
-    "evidence_boundary": "CR-099 proves provider-side readiness for a NovaScript action-oracle app-diagnostics replay; it is not live NovaScript product behavior proof."
+    "evidence_boundary": "CR-100 is now backed by a live NovaScript downstream PASS for the bounded action-oracle app-diagnostics replay; it is still not broad issue closure evidence."
   },
   "source_contract": {
     "example_path": "docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json",
@@ -34,6 +34,47 @@
       "<NOVASCRIPT_PRIMARY_MODULE>"
     ]
   },
+  "downstream_result": {
+    "status": "PASS",
+    "source_issue": "#326",
+    "run_id": "1b9814e8099f4d8e9a735eb71a051c40",
+    "provider_source": {
+      "path": "D:/Dev/netcoredbg-mcp",
+      "commit": "6d777dae788d4b6008fa36f1dc2172fd7e4df208",
+      "version_output": "netcoredbg-mcp 0.19.0"
+    },
+    "novascript_source": {
+      "path": "D:/Dev/novascript",
+      "branch": "work/cr-027-session-owned-undo-scope",
+      "commit": "2620c3a4858fc6069404ec56c227b42de5e42442"
+    },
+    "tool_invocation": "mcp__netcoredbg.runtime_smoke_run_plan(plan_path=\"D:/Dev/novascript/NovaScript.Tests.UI/Scenarios/action-oracle-app-diagnostics.runtime-smoke-v2.json\", agent_mode=true)",
+    "adapted_plan_path": "D:/Dev/novascript/NovaScript.Tests.UI/Scenarios/action-oracle-app-diagnostics.runtime-smoke-v2.json",
+    "generated_case_id": "action_oracle_diagnostics",
+    "generated_probe_kind": "app_diagnostics",
+    "action": {
+      "operation": "ui.grid.select",
+      "automation_id": "CueDataGrid",
+      "index": 1
+    },
+    "app_diagnostics_source": ".agent/runtime-smoke/app-diagnostics-cr100-root/diagnostic-cue-change.json",
+    "oracle": {
+      "condition": "$.current_cue_index == 1",
+      "observed": 1,
+      "selected_phrase": "Fixture cue two"
+    },
+    "freshness": {
+      "status": "PASS",
+      "host_process": "dotnet",
+      "modules_loaded": ["NovaScript.dll"],
+      "symbols_loaded": true
+    },
+    "cleanup": {
+      "status": "PASS",
+      "debug_stop": "graceful",
+      "process_registry_after": 0
+    }
+  },
   "required_verdicts": ["PASS", "BLOCKED", "FAIL"],
   "pass_criteria": [
     "The adapted runtime-smoke v2 plan returns final status PASS from the NovaScript repository root.",
@@ -53,13 +94,12 @@
     "Cleanup cannot stop the debuggee or leaves process registry entries."
   ],
   "not_claimed": [
-    "live_consumer_behavior",
     "broad_issue_closure",
     "cr003_datagrid_drag_drop_replay_replacement"
   ],
   "commands": {
     "provider_preflight": "uv run --no-sync --project <NETCOREDBG_MCP_REPO> netcoredbg-mcp --version",
-    "consumer_runtime_smoke": "run_runtime_smoke with the adapted NovaScript action-oracle app-diagnostics plan",
+    "consumer_runtime_smoke": "mcp__netcoredbg.runtime_smoke_run_plan with the adapted NovaScript action-oracle app-diagnostics plan",
     "runtime_smoke_lifecycle": [
       "runtime_smoke_start",
       "runtime_smoke_tail_events",
@@ -88,5 +128,15 @@
     ],
     "status_values": ["PASS", "BLOCKED", "FAIL"]
   },
-  "closure_rule": "Do not close #268, #272, or related broad issues from this packet alone. Issue lifecycle requires the returned live consumer evidence or an explicit split/closure decision."
+  "issue_lifecycle": {
+    "source_issue": "#326",
+    "source_issue_status": "closed",
+    "comments": {
+      "#268": "1099",
+      "#272": "1100"
+    },
+    "broad_issues_remain_open": ["#268", "#272"],
+    "decision": "Record CR-100 downstream PASS as bounded live NovaScript replay evidence; do not close broad issues without explicit split or closure evidence."
+  },
+  "closure_rule": "Do not close #268, #272, or related broad issues from this packet alone. CR-100 downstream PASS proves the bounded action-oracle app-diagnostics replay path only; broad lifecycle closure still requires explicit split/closure evidence."
 }

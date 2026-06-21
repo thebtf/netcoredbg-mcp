@@ -193,7 +193,7 @@ def test_novascript_action_oracle_app_diagnostics_replay_packet_is_actionable() 
     required_terms = {
         "#268",
         "#272",
-        "main@e6d3fac78ae2aaa1e6b1cde8b3f7c5d703c03093",
+        "main@6d777dae788d4b6008fa36f1dc2172fd7e4df208",
         "0.19.0",
         "docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json",
         "<NOVASCRIPT_REPO>",
@@ -214,26 +214,32 @@ def test_novascript_action_oracle_app_diagnostics_replay_packet_is_actionable() 
         "PASS",
         "BLOCKED",
         "FAIL",
+        "DOWNSTREAM_REPLAY_PASS",
+        "Engram `#326`",
+        "1b9814e8099f4d8e9a735eb71a051c40",
+        "Fixture cue two",
+        "comment `1099`",
+        "comment `1100`",
         "CR-100.novascript-action-oracle-app-diagnostics.downstream.json",
     }
 
     for term in required_terms:
         assert term in packet
-    assert "provider-side readiness" in packet
-    assert "not live NovaScript product behavior proof" in packet
+    assert "Downstream Result" in packet
+    assert "live NovaScript product behavior proof for the bounded CR-100 replay" in packet
     assert "does not replace the CR-003 DataGrid drag/drop replay gate" in packet
     assert "Do not close" in packet
 
 
-def test_novascript_action_oracle_app_diagnostics_replay_packet_json_is_machine_readable() -> None:
+def test_action_oracle_replay_packet_json_records_downstream_pass() -> None:
     payload = json.loads(ACTION_ORACLE_REPLAY_PACKET_JSON.read_text(encoding="utf-8"))
 
     assert payload["schema"] == "netcoredbg.downstream_replay_packet.v1"
     assert payload["id"] == "novascript-action-oracle-app-diagnostics-replay-2026-06-21"
     assert payload["issue"] == "#268"
     assert payload["issues"] == ["#268", "#272"]
-    assert payload["status"] == "PROVIDER_READY_CONSUMER_REPLAY_PENDING"
-    assert payload["provider_baseline"]["commit"] == "e6d3fac78ae2aaa1e6b1cde8b3f7c5d703c03093"
+    assert payload["status"] == "DOWNSTREAM_REPLAY_PASS"
+    assert payload["provider_baseline"]["commit"] == "6d777dae788d4b6008fa36f1dc2172fd7e4df208"
     assert payload["provider_baseline"]["version"] == "0.19.0"
     assert payload["downstream"]["repo_name"] == "NovaScript"
     assert (
@@ -257,16 +263,71 @@ def test_novascript_action_oracle_app_diagnostics_replay_packet_json_is_machine_
         == ".agent/specs/issue-backlog-hardening-roadmap/evidence/"
         "CR-100.novascript-action-oracle-app-diagnostics.downstream.json"
     )
-    assert "live_consumer_behavior" in payload["not_claimed"]
+    assert "live_consumer_behavior" not in payload["not_claimed"]
+    assert "broad_issue_closure" in payload["not_claimed"]
+
+    downstream_result = payload["downstream_result"]
+    assert downstream_result["status"] == "PASS"
+    assert downstream_result["source_issue"] == "#326"
+    assert downstream_result["run_id"] == "1b9814e8099f4d8e9a735eb71a051c40"
+    assert downstream_result["provider_source"] == {
+        "path": "D:/Dev/netcoredbg-mcp",
+        "commit": "6d777dae788d4b6008fa36f1dc2172fd7e4df208",
+        "version_output": "netcoredbg-mcp 0.19.0",
+    }
+    assert downstream_result["novascript_source"] == {
+        "path": "D:/Dev/novascript",
+        "branch": "work/cr-027-session-owned-undo-scope",
+        "commit": "2620c3a4858fc6069404ec56c227b42de5e42442",
+    }
+    assert (
+        downstream_result["tool_invocation"]
+        == 'mcp__netcoredbg.runtime_smoke_run_plan(plan_path="D:/Dev/novascript/'
+        'NovaScript.Tests.UI/Scenarios/action-oracle-app-diagnostics.runtime-smoke-v2.json", '
+        "agent_mode=true)"
+    )
+    assert (
+        downstream_result["adapted_plan_path"]
+        == "D:/Dev/novascript/NovaScript.Tests.UI/Scenarios/"
+        "action-oracle-app-diagnostics.runtime-smoke-v2.json"
+    )
+    assert downstream_result["generated_case_id"] == "action_oracle_diagnostics"
+    assert downstream_result["generated_probe_kind"] == "app_diagnostics"
+    assert downstream_result["action"] == {
+        "operation": "ui.grid.select",
+        "automation_id": "CueDataGrid",
+        "index": 1,
+    }
+    assert downstream_result["oracle"] == {
+        "condition": "$.current_cue_index == 1",
+        "observed": 1,
+        "selected_phrase": "Fixture cue two",
+    }
+    assert downstream_result["app_diagnostics_source"] == (
+        ".agent/runtime-smoke/app-diagnostics-cr100-root/diagnostic-cue-change.json"
+    )
+    assert downstream_result["freshness"]["status"] == "PASS"
+    assert "NovaScript.dll" in downstream_result["freshness"]["modules_loaded"]
+    assert downstream_result["cleanup"] == {
+        "status": "PASS",
+        "debug_stop": "graceful",
+        "process_registry_after": 0,
+    }
+
+    lifecycle = payload["issue_lifecycle"]
+    assert lifecycle["source_issue"] == "#326"
+    assert lifecycle["source_issue_status"] == "closed"
+    assert lifecycle["broad_issues_remain_open"] == ["#268", "#272"]
+    assert lifecycle["comments"] == {"#268": "1099", "#272": "1100"}
 
 
-def test_issues_backlog_records_cr100_action_oracle_replay_pending_boundary() -> None:
+def test_issues_backlog_records_cr100_action_oracle_replay_pass_boundary() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
     packet_path = (
         "docs/reproduction-scenarios/"
         "novascript-action-oracle-app-diagnostics-replay-2026-06-21.md"
     )
-    pending_status = "PROVIDER_READY_CONSUMER_REPLAY_PENDING"
+    pass_status = "DOWNSTREAM_REPLAY_PASS"
 
     for issue in ("#268", "#272"):
         _issue, status, evidence, remaining_action = _issue_cells(backlog, issue)
@@ -280,13 +341,17 @@ def test_issues_backlog_records_cr100_action_oracle_replay_pending_boundary() ->
         assert "broader FR remains open" in status
         assert "CR-100" in guard_text
         assert packet_path in guard_text
-        assert pending_status in guard_text
-        assert "CR-100 alone" in guard_text
+        assert pass_status in guard_text
+        assert "Engram `#326`" in guard_text
+        assert "1b9814e8099f4d8e9a735eb71a051c40" in guard_text
+        assert "netcoredbg-mcp 0.19.0" in guard_text
+        assert "Fixture cue two" in guard_text
+        assert "comment `1099`" in guard_text
+        assert "comment `1100`" in guard_text
+        assert "CR-100 downstream PASS" in guard_text
         assert "live NovaScript replay" in guard_text
-        assert "`PASS`" in guard_text
-        assert "`BLOCKED`" in guard_text
-        assert "`FAIL`" in guard_text
-        assert "explicit lifecycle decision" in guard_text
+        assert "broad issue closure" in guard_text
+        assert "PROVIDER_READY_CONSUMER_REPLAY_PENDING" not in guard_text
         assert "Source-side owner may close" not in guard_text
 
 
