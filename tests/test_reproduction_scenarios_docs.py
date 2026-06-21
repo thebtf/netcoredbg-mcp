@@ -5,6 +5,14 @@ from pathlib import Path
 
 REPLAY_PACKET = Path("docs/reproduction-scenarios/novascript-cr003-replay-2026-06-15.md")
 REPLAY_PACKET_JSON = Path("docs/reproduction-scenarios/novascript-cr003-replay-2026-06-15.json")
+ACTION_ORACLE_REPLAY_PACKET = Path(
+    "docs/reproduction-scenarios/"
+    "novascript-action-oracle-app-diagnostics-replay-2026-06-21.md"
+)
+ACTION_ORACLE_REPLAY_PACKET_JSON = Path(
+    "docs/reproduction-scenarios/"
+    "novascript-action-oracle-app-diagnostics-replay-2026-06-21.json"
+)
 BACKLOG_SCENARIOS = Path("docs/reproduction-scenarios/issues-backlog-2026-06-15.md")
 
 
@@ -178,6 +186,78 @@ def test_novascript_cr003_replay_packet_json_is_machine_readable() -> None:
         "cleanup",
         "issue_226_lifecycle_decision",
     }
+
+
+def test_novascript_action_oracle_app_diagnostics_replay_packet_is_actionable() -> None:
+    packet = _read(ACTION_ORACLE_REPLAY_PACKET)
+    required_terms = {
+        "#268",
+        "#272",
+        "main@e6d3fac78ae2aaa1e6b1cde8b3f7c5d703c03093",
+        "0.19.0",
+        "docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json",
+        "<NOVASCRIPT_REPO>",
+        "<NOVASCRIPT_PROGRAM_DLL_OR_EXE>",
+        "<ACTION_ORACLE_TRIGGER_AUTOMATION_ID>",
+        "<NOVASCRIPT_PROCESS_NAME>",
+        "<NOVASCRIPT_PRIMARY_MODULE>",
+        "run_runtime_smoke",
+        "runtime_smoke_start",
+        "runtime_smoke_tail_events",
+        "runtime_smoke_get_result",
+        "runtime_smoke_stop",
+        "action_oracle_diagnostics",
+        "novascript-action-oracle",
+        "app_diagnostics",
+        "freshness",
+        "cleanup",
+        "PASS",
+        "BLOCKED",
+        "FAIL",
+        "CR-100.novascript-action-oracle-app-diagnostics.downstream.json",
+    }
+
+    for term in required_terms:
+        assert term in packet
+    assert "provider-side readiness" in packet
+    assert "not live NovaScript product behavior proof" in packet
+    assert "does not replace the CR-003 DataGrid drag/drop replay gate" in packet
+    assert "Do not close" in packet
+
+
+def test_novascript_action_oracle_app_diagnostics_replay_packet_json_is_machine_readable() -> None:
+    payload = json.loads(ACTION_ORACLE_REPLAY_PACKET_JSON.read_text(encoding="utf-8"))
+
+    assert payload["schema"] == "netcoredbg.downstream_replay_packet.v1"
+    assert payload["id"] == "novascript-action-oracle-app-diagnostics-replay-2026-06-21"
+    assert payload["issue"] == "#268"
+    assert payload["issues"] == ["#268", "#272"]
+    assert payload["status"] == "PROVIDER_READY_CONSUMER_REPLAY_PENDING"
+    assert payload["provider_baseline"]["commit"] == "e6d3fac78ae2aaa1e6b1cde8b3f7c5d703c03093"
+    assert payload["provider_baseline"]["version"] == "0.19.0"
+    assert payload["downstream"]["repo_name"] == "NovaScript"
+    assert (
+        payload["downstream"]["plan_path"]
+        == "NovaScript.Tests.UI/Scenarios/action-oracle-app-diagnostics.runtime-smoke-v2.json"
+    )
+    assert (
+        payload["source_contract"]["example_path"]
+        == "docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json"
+    )
+    assert (
+        payload["source_contract"]["playbook_section"]
+        == "docs/PRODUCTION-TESTING-PLAYBOOK.md"
+        "#9-novascript-action-oracle-app-diagnostics-consumer-gate"
+    )
+    assert payload["source_contract"]["generated_case_id"] == "action_oracle_diagnostics"
+    assert payload["source_contract"]["generated_probe_kind"] == "app_diagnostics"
+    assert payload["required_verdicts"] == ["PASS", "BLOCKED", "FAIL"]
+    assert (
+        payload["evidence_output"]["path"]
+        == ".agent/specs/issue-backlog-hardening-roadmap/evidence/"
+        "CR-100.novascript-action-oracle-app-diagnostics.downstream.json"
+    )
+    assert "live_consumer_behavior" in payload["not_claimed"]
 
 
 def test_issues_backlog_links_novascript_replay_packet() -> None:

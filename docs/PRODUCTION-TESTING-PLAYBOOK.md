@@ -282,6 +282,8 @@ uv run --locked --extra dev pytest tests/test_runtime_smoke_diagnostics_schema.p
 Contract source:
 
 - `docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json`
+- Replay packet:
+  `docs/reproduction-scenarios/novascript-action-oracle-app-diagnostics-replay-2026-06-21.md`
 
 Provider version preflight:
 
