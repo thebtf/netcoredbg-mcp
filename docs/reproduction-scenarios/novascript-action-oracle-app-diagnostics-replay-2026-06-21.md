@@ -50,7 +50,9 @@ NovaScript reported `PASS` through Engram `#326`.
 - Provider source:
   `D:/Dev/netcoredbg-mcp@6d777dae788d4b6008fa36f1dc2172fd7e4df208`.
 - NovaScript source:
-  `D:/Dev/novascript work/cr-027-session-owned-undo-scope@2620c3a4858fc6069404ec56c227b42de5e42442`.
+  - path: `D:/Dev/novascript`
+  - branch: `work/cr-027-session-owned-undo-scope`
+  - commit: `2620c3a4858fc6069404ec56c227b42de5e42442`
 - Tool invocation:
   `mcp__netcoredbg.runtime_smoke_run_plan(plan_path="D:/Dev/novascript/NovaScript.Tests.UI/Scenarios/action-oracle-app-diagnostics.runtime-smoke-v2.json", agent_mode=true)`.
 - Adapted plan:
