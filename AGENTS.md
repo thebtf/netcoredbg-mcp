@@ -113,7 +113,7 @@ If solution contains "simple", "quick", "temporary", "workaround" — **STOP and
 - Prove RED on current code, fix the root cause, prove GREEN on the same check,
   then replay the original user-observable scenario or record an explicit
   blocker naming the missing capability.
-- `nvmd-platform:debug --quick` is allowed only for exact file/line errors with
+- `/nvmd-platform:debug --quick` is allowed only for exact file/line errors with
   a <=2-line non-control-flow fix and no plausible competing hypothesis. The
   smallest regression test still belongs with the fix.
 
