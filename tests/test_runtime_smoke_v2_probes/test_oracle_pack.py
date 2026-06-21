@@ -40,6 +40,11 @@ def _oracle_pack(**overrides: Any) -> dict[str, Any]:
     return payload
 
 
+def _manifest_source(probe: dict[str, Any], source_id: str) -> dict[str, Any]:
+    sources = probe["value"]["manifest"]["sources"]
+    return next(source for source in sources if source["id"] == source_id)
+
+
 async def _read_status_text(**_: Any) -> dict[str, Any]:
     return {
         "status": "PASS",
@@ -200,6 +205,15 @@ async def test_oracle_pack_probe_runs_named_sources_and_returns_source_evidence(
             "value": "Ready",
         },
     ]
+    manifest_status_text = _manifest_source(probe, "status_text")
+    assert manifest_status_text["kind"] == "ui.text"
+    assert manifest_status_text["status"] == "PASS"
+    assert manifest_status_text["classification"] == "ORACLE_SOURCE_PASS"
+    assert manifest_status_text["evidence_ref"] == "ui:text:StatusLabel"
+    manifest_status_property = _manifest_source(probe, "status_property")
+    assert manifest_status_property["kind"] == "ui.property"
+    assert manifest_status_property["status"] == "PASS"
+    assert manifest_status_property["classification"] == "ORACLE_SOURCE_PASS"
 
 
 @pytest.mark.asyncio
@@ -246,6 +260,12 @@ async def test_oracle_pack_probe_blocks_with_disagreeing_sources() -> None:
         "status_text": "Ready",
         "status_property": "Busy",
     }
+    assert _manifest_source(probe, "status_text")["classification"] == (
+        "DISAGREEING_SOURCES"
+    )
+    assert _manifest_source(probe, "status_property")["classification"] == (
+        "DISAGREEING_SOURCES"
+    )
 
 
 @pytest.mark.asyncio
@@ -350,6 +370,10 @@ async def test_oracle_pack_probe_preserves_source_failure_over_disagreement() ->
     assert "classification" not in probe
     assert "source_values" not in probe["value"]
     assert probe["value"]["sources"][2]["status"] == "FAIL"
+    manifest_source = _manifest_source(probe, "missing_status_text")
+    assert manifest_source["status"] == "FAIL"
+    assert manifest_source["classification"] == "ORACLE_SOURCE_FAILED"
+    assert manifest_source["reason"] == "status text unavailable"
 
 
 @pytest.mark.asyncio
@@ -380,6 +404,10 @@ async def test_oracle_pack_probe_preserves_impasse_source_status() -> None:
     assert probe["status"] == "IMPASSE"
     assert probe["reason"] == "oracle source impasse"
     assert probe["value"]["sources"][0]["status"] == "IMPASSE"
+    manifest_source = _manifest_source(probe, "status_text")
+    assert manifest_source["status"] == "IMPASSE"
+    assert manifest_source["classification"] == "ORACLE_SOURCE_IMPASSE"
+    assert manifest_source["reason"] == "status text unavailable after retry budget"
 
 
 @pytest.mark.asyncio
@@ -408,6 +436,10 @@ async def test_oracle_pack_probe_blocks_when_source_is_blocked() -> None:
     assert probe["reason"] == "oracle source blocked"
     assert probe["value"]["sources"][0]["status"] == "BLOCKED"
     assert probe["next_step"] == "Inspect source evidence and make every source runnable."
+    manifest_source = _manifest_source(probe, "status_text")
+    assert manifest_source["status"] == "BLOCKED"
+    assert manifest_source["classification"] == "ORACLE_SOURCE_BLOCKED"
+    assert manifest_source["reason"] == "unsupported probe kind"
 
 
 @pytest.mark.asyncio
