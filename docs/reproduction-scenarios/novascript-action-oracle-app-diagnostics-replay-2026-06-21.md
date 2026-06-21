@@ -2,10 +2,10 @@
 
 ## Purpose
 
-This packet is the downstream replay request for the `v0.19.0` NovaScript
-action-oracle app-diagnostics consumer gate. It exists to keep the boundary
-honest: CR-099 and the provider-side tests prove provider-side readiness, but
-they are not live NovaScript product behavior proof.
+This packet records the downstream replay lifecycle for the `v0.19.0`
+NovaScript action-oracle app-diagnostics consumer gate. It started as the
+provider-side handoff for CR-100 and now also records the returned live
+NovaScript product behavior proof for the bounded CR-100 replay.
 
 Machine-readable sidecar:
 `docs/reproduction-scenarios/novascript-action-oracle-app-diagnostics-replay-2026-06-21.json`.
@@ -16,28 +16,76 @@ close either broad issue.
 ## Provider Baseline
 
 - netcoredbg-mcp source baseline:
-  `main@e6d3fac78ae2aaa1e6b1cde8b3f7c5d703c03093`.
+  `main@6d777dae788d4b6008fa36f1dc2172fd7e4df208`.
 - Package/runtime version: `0.19.0`.
+- Provider preflight output: `netcoredbg-mcp 0.19.0`.
 - Contract source:
   `docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json`.
 - Generated template: `novascript-action-oracle`.
 - Generated case id: `action_oracle_diagnostics`.
 - Generated probe kind: `app_diagnostics`.
 
-Provider-side evidence says the contract validates and expands. It does not say
-the real NovaScript application wrote the expected diagnostic payload.
+Provider-side evidence says the contract validates and expands. The returned
+downstream result below says the real NovaScript application wrote the expected
+diagnostic payload for this bounded replay.
 
 ## Boundary
 
 This replay packet:
 
-- is provider-side readiness handoff material;
-- is not live NovaScript product behavior proof;
+- records status `DOWNSTREAM_REPLAY_PASS`;
+- records live NovaScript product behavior proof for the bounded CR-100 replay;
 - does not replace the CR-003 DataGrid drag/drop replay gate;
 - does not close `#268`, `#272`, or any broad roadmap issue by itself.
 
-Do not close broad issues from this packet alone. Issue lifecycle requires the
-returned live consumer evidence or an explicit split/closure decision.
+Do not close broad issues from this packet alone. Issue lifecycle still requires
+explicit split or closure evidence for broad `#268` and `#272` scope.
+
+## Downstream Result
+
+NovaScript reported `PASS` through Engram `#326`.
+
+- Engram source issue: `#326`, closed after source-side PASS.
+- Run id: `1b9814e8099f4d8e9a735eb71a051c40`.
+- Provider source:
+  `D:/Dev/netcoredbg-mcp@6d777dae788d4b6008fa36f1dc2172fd7e4df208`.
+- NovaScript source:
+  - path: `D:/Dev/novascript`
+  - branch: `work/cr-027-session-owned-undo-scope`
+  - commit: `2620c3a4858fc6069404ec56c227b42de5e42442`
+- Tool invocation:
+  `mcp__netcoredbg.runtime_smoke_run_plan(plan_path="D:/Dev/novascript/NovaScript.Tests.UI/Scenarios/action-oracle-app-diagnostics.runtime-smoke-v2.json", agent_mode=true)`.
+- Adapted plan:
+  `D:/Dev/novascript/NovaScript.Tests.UI/Scenarios/action-oracle-app-diagnostics.runtime-smoke-v2.json`.
+- App diagnostic source:
+  `.agent/runtime-smoke/app-diagnostics-cr100-root/diagnostic-cue-change.json`.
+- Action: `ui.grid.select` on `CueDataGrid`, index `1`.
+- Oracle: `$.current_cue_index == 1`.
+- Observed value: `1`; selected phrase: `Fixture cue two`.
+- Freshness: `PASS`; host process `dotnet`; `NovaScript.dll` loaded; symbols loaded.
+- Cleanup: `PASS`; `debug.stop` graceful; process registry after cleanup `0`.
+- Issue lifecycle comments: `#268` comment `1099`, `#272` comment `1100`.
+
+## Adapted Plan Delta
+
+The provider example remains a reusable template. It contains a placeholder
+`ui.invoke` Button action at
+`docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json`.
+
+For this recorded `DOWNSTREAM_REPLAY_PASS`, use the adapted NovaScript plan at
+`D:/Dev/novascript/NovaScript.Tests.UI/Scenarios/action-oracle-app-diagnostics.runtime-smoke-v2.json`
+or apply this exact delta to the provider example; do not replay the base
+provider example verbatim for this evidence packet:
+
+do not replay the base provider example verbatim for this evidence packet.
+
+- Source example action: `ui.invoke` on Button selector
+  `<ACTION_ORACLE_TRIGGER_AUTOMATION_ID>`.
+- Actual replay action: `ui.grid.select` on `CueDataGrid`, index `1`.
+- Actual replay oracle: `$.current_cue_index == 1`.
+- Observed value: `1`; selected phrase: `Fixture cue two`.
+- App diagnostic source:
+  `.agent/runtime-smoke/app-diagnostics-cr100-root/diagnostic-cue-change.json`.
 
 ## Downstream Inputs
 
@@ -132,7 +180,7 @@ and consumer code but NovaScript behavior violates the plan:
 
 ## Evidence Output
 
-Save the downstream verdict in:
+The downstream verdict was saved by the source side in:
 
 `.agent/specs/issue-backlog-hardening-roadmap/evidence/CR-100.novascript-action-oracle-app-diagnostics.downstream.json`
 
@@ -154,5 +202,5 @@ Required fields:
 - `cleanup`
 - `issue_lifecycle_decision`
 
-Do not close `#268`, `#272`, or related broad issues unless this evidence
-records a live consumer `PASS` or an explicit owner-approved lifecycle decision.
+Do not close `#268`, `#272`, or related broad issues unless a separate issue
+lifecycle decision records broad closure evidence.
