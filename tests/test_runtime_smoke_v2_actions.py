@@ -421,6 +421,44 @@ async def test_v2_no_global_input_plan_records_result_and_compact_evidence() -> 
 
 
 @pytest.mark.asyncio
+async def test_v2_no_global_input_blocks_ensure_target_focus_before_adapter() -> None:
+    session = ActionSmokeSession()
+
+    result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "cases": [
+                {
+                    "id": "isolated_focus",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.input.ensure_target",
+                                "input_policy": {"no_global_input": True},
+                                "selector": {"automation_id": "CueTextBox"},
+                                "require": {"focus": True},
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    action = result["cases"][0]["actions"][0]
+    assert result["status"] == "BLOCKED"
+    assert action["status"] == "BLOCKED"
+    assert action["reason"] == "global input prohibited by no_global_input policy"
+    assert action["action"] == "ui.input.ensure_target"
+    assert action["input_classification"] == "REQUIRES_GLOBAL_INPUT"
+    assert action["physical_fallback_attempted"] is False
+    assert action["operator_isolated"] is True
+    assert action["requested_target"] == {"automation_id": "CueTextBox"}
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
 async def test_v2_ui_input_ensure_target_focuses_and_records_target_evidence() -> None:
     session = ActionSmokeSession()
     session.find_result = {

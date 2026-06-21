@@ -4,7 +4,7 @@ import inspect
 import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from ..blocked import build_blocked
 from ..timing import sleep_ms
@@ -17,10 +17,17 @@ _INTEGER_TEXT = re.compile(r"-?\d+")
 
 _ACTION_REGISTRY: dict[str, ActionHandler] = {}
 
-_INPUT_CLASSIFICATION_REQUIRES_GLOBAL = "REQUIRES_GLOBAL_INPUT"
-_INPUT_CLASSIFICATION_BACKGROUND_SAFE = "BACKGROUND_SAFE"
-_INPUT_CLASSIFICATION_APP_DISPATCH_SAFE = "APP_DISPATCH_SAFE"
-_INPUT_CLASSIFICATION_UNSUPPORTED = "UNSUPPORTED_BY_PROVIDER"
+InputClassification = Literal[
+    "REQUIRES_GLOBAL_INPUT",
+    "BACKGROUND_SAFE",
+    "APP_DISPATCH_SAFE",
+    "UNSUPPORTED_BY_PROVIDER",
+]
+
+_INPUT_CLASSIFICATION_REQUIRES_GLOBAL: InputClassification = "REQUIRES_GLOBAL_INPUT"
+_INPUT_CLASSIFICATION_BACKGROUND_SAFE: InputClassification = "BACKGROUND_SAFE"
+_INPUT_CLASSIFICATION_APP_DISPATCH_SAFE: InputClassification = "APP_DISPATCH_SAFE"
+_INPUT_CLASSIFICATION_UNSUPPORTED: InputClassification = "UNSUPPORTED_BY_PROVIDER"
 _GLOBAL_INPUT_CAPABILITY = "global keyboard/mouse/foreground"
 
 _REQUIRES_GLOBAL_INPUT_ACTION_KINDS = frozenset(
@@ -119,6 +126,7 @@ async def dispatch_action(
         return {"status": "BLOCKED", **blocked}
     input_policy = _effective_input_policy(action, context)
     input_classification = _input_classification_for_action(action)
+    # Registered-but-unclassified actions fail closed under no_global_input.
     if _no_global_input_enabled(input_policy) and input_classification in {
         _INPUT_CLASSIFICATION_REQUIRES_GLOBAL,
         _INPUT_CLASSIFICATION_UNSUPPORTED,
@@ -145,6 +153,8 @@ def _effective_input_policy(
         no_global_input = context.input_policy.get("no_global_input") is True
     raw_action_policy = action.get("input_policy")
     if isinstance(raw_action_policy, Mapping):
+        # Action-level policy can only tighten a plan-level policy.
+        # It cannot disable plan-level no_global_input.
         no_global_input = no_global_input or raw_action_policy.get("no_global_input") is True
     return {"no_global_input": no_global_input}
 
@@ -153,7 +163,7 @@ def _no_global_input_enabled(input_policy: Mapping[str, Any]) -> bool:
     return input_policy.get("no_global_input") is True
 
 
-def _input_classification_for_action(action: dict[str, Any]) -> str:
+def _input_classification_for_action(action: dict[str, Any]) -> InputClassification:
     kind = str(action.get("kind") or "")
     if kind in _REQUIRES_GLOBAL_INPUT_ACTION_KINDS:
         return _INPUT_CLASSIFICATION_REQUIRES_GLOBAL
@@ -173,7 +183,7 @@ def _no_global_input_blocked_action(
     action: dict[str, Any],
     *,
     input_policy: dict[str, bool],
-    input_classification: str,
+    input_classification: InputClassification,
 ) -> dict[str, Any]:
     kind = str(action.get("kind") or "")
     target = _requested_target_from_action(action)
@@ -228,7 +238,7 @@ def _attach_input_policy_evidence(
     result: dict[str, Any],
     *,
     input_policy: dict[str, bool],
-    input_classification: str,
+    input_classification: InputClassification,
 ) -> dict[str, Any]:
     if not _no_global_input_enabled(input_policy):
         return result

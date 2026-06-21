@@ -965,7 +965,10 @@ def _validate_input_policy(plan: dict[str, Any], errors: list[str]) -> None:
     accepted_keys = {"no_global_input"}
     for key in policy:
         if key not in accepted_keys:
-            errors.append(f"input_policy.{key} is not accepted; expected one of: no_global_input")
+            expected = ", ".join(sorted(accepted_keys))
+            errors.append(
+                f"input_policy.{key} is not accepted; expected one of: {expected}"
+            )
     if "no_global_input" in policy and not isinstance(policy["no_global_input"], bool):
         errors.append("input_policy.no_global_input must be a boolean")
 
