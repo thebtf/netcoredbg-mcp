@@ -304,6 +304,10 @@ class RuntimeStateOracleRunner:
         )
 
     def capture_plan_metadata(self, plan: dict[str, Any]) -> None:
+        """Cache plan metadata used by execution.
+
+        run() calls this before validation/dispatch so input_policy is enforced.
+        """
         self._diagnostic_launch = _diagnostic_launch_from_plan(plan)
         self._input_policy = normalize_input_policy(plan.get("input_policy"))
 

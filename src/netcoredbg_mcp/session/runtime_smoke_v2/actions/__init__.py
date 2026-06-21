@@ -125,7 +125,8 @@ async def dispatch_action(
         return {"status": "BLOCKED", **blocked}
     input_policy = _effective_input_policy(action, context)
     input_classification = _input_classification_for_action(action)
-    # Registered-but-unclassified actions fail closed under no_global_input.
+    # UNSUPPORTED_BY_PROVIDER reaches this branch only for registered but
+    # unclassified kinds; unknown kinds return at the registry guard above.
     if _no_global_input_enabled(input_policy) and input_classification in {
         _INPUT_CLASSIFICATION_REQUIRES_GLOBAL,
         _INPUT_CLASSIFICATION_UNSUPPORTED,
