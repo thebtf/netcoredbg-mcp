@@ -653,7 +653,10 @@ def test_readme_and_playbook_document_novascript_action_oracle_app_diagnostics_g
     required_terms = {
         "NovaScript Action-Oracle App-Diagnostics Consumer Gate",
         "uv run --no-sync --project <NETCOREDBG_MCP_REPO> netcoredbg-mcp --version",
+        "netcoredbg-mcp 0.19.0",
         "0.19.0",
+        "<NOVASCRIPT_PROCESS_NAME>",
+        "<NOVASCRIPT_PRIMARY_MODULE>",
         "run_runtime_smoke",
         "runtime_smoke_start",
         "runtime_smoke_tail_events",
@@ -713,8 +716,8 @@ def test_novascript_action_oracle_app_diagnostics_example_is_consumer_ready() ->
     assert probe["schema"] == "netcoredbg.runtime_smoke.diagnostics.v1"
     assert probe["app"] == {
         "name": "NovaScript",
-        "process_name": "NovaScript",
-        "expected_modules": ["NovaScript.dll"],
+        "process_name": "<NOVASCRIPT_PROCESS_NAME>",
+        "expected_modules": ["<NOVASCRIPT_PRIMARY_MODULE>"],
         "require_active_process": True,
     }
     assert probe["artifacts"] == {

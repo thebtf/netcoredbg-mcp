@@ -62,9 +62,9 @@
             "schema": "netcoredbg.runtime_smoke.diagnostics.v1",
             "app": {
               "name": "NovaScript",
-              "process_name": "NovaScript",
+              "process_name": "<NOVASCRIPT_PROCESS_NAME>",
               "expected_modules": [
-                "NovaScript.dll"
+                "<NOVASCRIPT_PRIMARY_MODULE>"
               ],
               "require_active_process": true
             },

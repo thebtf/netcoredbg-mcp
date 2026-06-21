@@ -292,7 +292,7 @@ uv run --no-sync --project <NETCOREDBG_MCP_REPO> netcoredbg-mcp --version
 Expected preflight result:
 
 - Exit code `0`.
-- Output is `0.19.0`.
+- Output is `netcoredbg-mcp 0.19.0`.
 - If a live MCP mux session holds the development `.venv` executable, use the
   direct `.venv\Scripts\netcoredbg-mcp.exe --version` route instead of treating
   the uv sync lock as stale code.
@@ -302,9 +302,13 @@ Consumer procedure:
 1. Copy the contract source into the NovaScript checkout.
 2. Replace `<NOVASCRIPT_PROGRAM_DLL_OR_EXE>`,
    `<NOVASCRIPT_DEBUG_OUTPUT_DIR>`, `<NOVASCRIPT_PROJECT_FILE>`,
-   `<NOVASCRIPT_REPO>`, and `<ACTION_ORACLE_TRIGGER_AUTOMATION_ID>` with the
-   local NovaScript Debug build paths and the UI action that writes the
-   action-oracle diagnostic payload.
+   `<NOVASCRIPT_REPO>`, `<ACTION_ORACLE_TRIGGER_AUTOMATION_ID>`,
+   `<NOVASCRIPT_PROCESS_NAME>`, and `<NOVASCRIPT_PRIMARY_MODULE>` with the
+   local NovaScript Debug build paths, the UI action that writes the
+   action-oracle diagnostic payload, and the freshness identity for the actual
+   launched process. EXE launches normally use the NovaScript process name;
+   DLL launches through a host process should use that host process name while
+   keeping the NovaScript assembly as the expected module.
 3. Run the plan through the active v0.19.0 MCP server with the
    `run_runtime_smoke` tool from the NovaScript repository root.
 4. Record the returned runtime-smoke envelope as the consumer evidence. A
