@@ -11,7 +11,9 @@ from ..runtime_smoke_schema import (
     ACCEPTED_SCHEMA_VALUES,
     ACCEPTED_TOP_LEVEL_KEYS_V2,
     normalize_app_diagnostics_launch_contract,
+    normalize_input_policy,
     validate_diagnostic_schema_example,
+    validate_input_policy_payload,
 )
 from ..tracepoint_policy import tracepoint_expression_policy_error
 from .actions import ActionContext, accepted_action_kinds
@@ -42,6 +44,10 @@ def compact_v2_result(result: dict[str, Any]) -> dict[str, Any]:
     }
     if isinstance(result.get("exception"), dict):
         compact["exception"] = compact_value(result["exception"])
+    if isinstance(result.get("input_policy"), dict):
+        compact["input_policy"] = compact_value(result["input_policy"])
+    if "operator_isolated" in result:
+        compact["operator_isolated"] = result["operator_isolated"]
     return compact
 
 
@@ -88,6 +94,7 @@ class RuntimeStateOracleRunner:
         self._clock = clock
         self._diagnostic_launch: dict[str, Any] | None = None
         self._case_progress_notifier = case_progress_notifier
+        self._input_policy = normalize_input_policy(None)
         self._app_diagnostics_progress_notifier = app_diagnostics_progress_notifier
 
     async def run(self, plan: dict[str, Any]) -> dict[str, Any]:
@@ -142,6 +149,7 @@ class RuntimeStateOracleRunner:
             clock=self._clock,
             session=self._session,
             diagnostic_launch=self._diagnostic_launch,
+            input_policy=self._input_policy,
             app_diagnostics_progress_notifier=self._app_diagnostics_progress_notifier,
         )
         try:
@@ -197,6 +205,7 @@ class RuntimeStateOracleRunner:
                 clock=self._clock,
                 session=self._session,
                 diagnostic_launch=self._diagnostic_launch,
+                input_policy=self._input_policy,
                 app_diagnostics_progress_notifier=self._app_diagnostics_progress_notifier,
             )
 
@@ -295,7 +304,12 @@ class RuntimeStateOracleRunner:
         )
 
     def capture_plan_metadata(self, plan: dict[str, Any]) -> None:
+        """Cache plan metadata used by execution.
+
+        run() calls this before validation/dispatch so input_policy is enforced.
+        """
         self._diagnostic_launch = _diagnostic_launch_from_plan(plan)
+        self._input_policy = normalize_input_policy(plan.get("input_policy"))
 
     def _finalize(
         self,
@@ -324,6 +338,9 @@ class RuntimeStateOracleRunner:
         diagnostic_launch = self._diagnostic_launch
         if diagnostic_launch is not None:
             result_extra["diagnostic_launch"] = diagnostic_launch
+        if self._input_policy.get("no_global_input") is True:
+            result_extra["input_policy"] = dict(self._input_policy)
+            result_extra["operator_isolated"] = True
         if extra:
             result_extra.update(extra)
         return finalize_result(
@@ -398,16 +415,24 @@ def _validate_v2_plan(
                 errors.append(
                     f"cases[{case_index}].transitions[{transition_index}].action must be an object"
                 )
-            elif not action:
+                action = None
+            if isinstance(action, dict) and not action:
                 errors.append(
                     f"cases[{case_index}].transitions[{transition_index}].action.kind "
                     "is required when action is present"
                 )
-            elif action.get("kind") not in known_actions:
-                errors.append(
-                    f"cases[{case_index}].transitions[{transition_index}].action.kind "
-                    f"is not accepted: {action.get('kind')}"
-                )
+            if isinstance(action, dict) and action:
+                action_path = f"cases[{case_index}].transitions[{transition_index}].action"
+                if action.get("kind") not in known_actions:
+                    errors.append(
+                        f"{action_path}.kind is not accepted: {action.get('kind')}"
+                    )
+                if "input_policy" in action:
+                    validate_input_policy_payload(
+                        action_path + ".input_policy",
+                        action["input_policy"],
+                        errors,
+                    )
             probes = transition.get("probes", [])
             if not isinstance(probes, list):
                 errors.append(
