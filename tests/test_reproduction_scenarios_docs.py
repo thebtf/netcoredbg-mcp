@@ -260,6 +260,36 @@ def test_novascript_action_oracle_app_diagnostics_replay_packet_json_is_machine_
     assert "live_consumer_behavior" in payload["not_claimed"]
 
 
+def test_issues_backlog_records_cr100_action_oracle_replay_pending_boundary() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    packet_path = (
+        "docs/reproduction-scenarios/"
+        "novascript-action-oracle-app-diagnostics-replay-2026-06-21.md"
+    )
+    pending_status = "PROVIDER_READY_CONSUMER_REPLAY_PENDING"
+
+    for issue in ("#268", "#272"):
+        _issue, status, evidence, remaining_action = _issue_cells(backlog, issue)
+        lifecycle_row = _section_issue_row(
+            backlog,
+            "## CR-022 Issue Lifecycle Refresh",
+            issue,
+        )
+        guard_text = " ".join((status, evidence, remaining_action, lifecycle_row))
+
+        assert "broader FR remains open" in status
+        assert "CR-100" in guard_text
+        assert packet_path in guard_text
+        assert pending_status in guard_text
+        assert "CR-100 alone" in guard_text
+        assert "live NovaScript replay" in guard_text
+        assert "`PASS`" in guard_text
+        assert "`BLOCKED`" in guard_text
+        assert "`FAIL`" in guard_text
+        assert "explicit lifecycle decision" in guard_text
+        assert "Source-side owner may close" not in guard_text
+
+
 def test_issues_backlog_links_novascript_replay_packet() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
 
