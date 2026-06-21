@@ -157,10 +157,12 @@ def test_sdist_excludes_agent_and_build_residue() -> None:
     for pattern in (
         '"/.agent*"',
         '"/.agent*/**"',
-        '"/.venv"',
-        '"/dist"',
+        '"/.venv/**"',
+        '"/dist/**"',
         '"/**/bin"',
+        '"/**/bin/**"',
         '"/**/obj"',
+        '"/**/obj/**"',
     ):
         assert pattern in pyproject_text
 
