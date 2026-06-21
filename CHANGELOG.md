@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-06-21
+
+### Added
+- Runtime-smoke v2 now records WPF DataGrid positive row-target drag/drop flows
+  with offscreen target realization, viewport preflight evidence, before/after
+  `ui.grid.viewport` proof, and bounded negative no-op backend limitations.
+- Runtime-smoke app-diagnostics event deltas, live diagnostic history, and
+  intra-case progress reporting expose richer evidence for customer-mode UI
+  replay.
+- NovaScript action-oracle templates can generate bounded `app_diagnostics`
+  probes for action success oracles without forcing every oracle through
+  `file.json`.
+- UI grid helpers now cover visible-row viewport evidence, assert-range,
+  ensure-visible, right-click row, and double-click row proof paths.
+
+### Changed
+- Runtime-smoke wait, run-probe, event-delta, and cleanup flows now preserve
+  source-aware cursors and return explicit next-action guidance for empty,
+  stale, or mixed diagnostic states.
+- Production testing guidance and runtime-smoke examples now document the WPF
+  DataGrid drag/drop customer-mode release gate.
+- Reproduction/backlog documentation now keeps broad issues `#268` through
+  `#272` open while recording the bounded slices and Engram follow-up evidence
+  that were completed in this release window.
+
+### Fixed
+- Offscreen drag/drop replay now fails closed when source or target evidence is
+  hidden, stale, or too close to the visible edge instead of reporting a false
+  `PASS`; negative no-op drag still reports actionable bounded `BLOCKED` when
+  the backend lacks no-op evidence.
+- App-diagnostics and event-delta flows no longer consume stale or cleared
+  output as successful evidence.
+- Runtime-smoke agent-mode and validation flows keep cleanup and source cursor
+  routing explicit so contaminated sessions do not silently retarget shared
+  state.
+
 ## [0.18.8] - 2026-06-19
 
 ### Added

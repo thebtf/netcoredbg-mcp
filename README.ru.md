@@ -14,7 +14,7 @@
 вычислять выражения, читать вывод отладки и управлять поверхностями Windows UI
 Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 
-**131 MCP-инструмент · 8 промптов · 4 ресурса · 1649 собранных тестов · релиз v0.18.8**
+**131 MCP-инструмент · 8 промптов · 4 ресурса · 1775 собранных тестов · релиз v0.19.0**
 
 ## Быстрые ссылки
 
@@ -23,16 +23,18 @@ Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 - **Справочник:** [Доступные инструменты](#доступные-инструменты) · [Ресурсы](#mcp-ресурсы) · [Промпты](#mcp-промпты) · [Архитектура](#обзор-архитектуры)
 - **Проект:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## Что нового в v0.18.8
+## Что нового в v0.19.0
 
-- **Инкрементальная app diagnostics** — `app_diagnostics.poll.since` принимает
-  cursor `{mtime_ns, name}` для опроса директории.
-- **Защита от stale snapshots** — directory poll игнорирует старые или равные
-  diagnostic JSON snapshots вместо повторного чтения прежнего app-written
-  `PASS` artifact.
-- **Доказательство следующего cursor** — успешный directory poll возвращает
-  `cursor` с `mtime_ns` и `name` найденного файла, чтобы потребители могли
-  продолжить с уже наблюденного snapshot.
+- **Runtime-smoke v2 drag/drop evidence gates** — WPF DataGrid планы
+  поддерживают positive row-target drag/drop, реализацию offscreen target и
+  before/after viewport evidence; negative no-op backend gaps ограничиваются
+  явным bounded evidence.
+- **App diagnostics action oracles** — генерация NovaScript action-oracle может
+  выпускать bounded `app_diagnostics` probes вместо принудительного маршрута
+  через `file.json`.
+- **Fail-closed diagnostic deltas** — runtime-smoke wait, event-delta и
+  run-probe flows сохраняют source-aware cursors и дают явные подсказки для
+  stale или empty diagnostic states.
 
 ## Основные возможности
 

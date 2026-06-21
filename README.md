@@ -14,7 +14,7 @@ set breakpoints, step through code, inspect variables, evaluate expressions, rea
 debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
 and Avalonia windows without opening an IDE.
 
-**131 MCP tools · 8 prompts · 4 resources · 1649 collected tests · release v0.18.8**
+**131 MCP tools · 8 prompts · 4 resources · 1775 collected tests · release v0.19.0**
 
 ## Quick Links
 
@@ -23,16 +23,17 @@ and Avalonia windows without opening an IDE.
 - **Reference:** [Available Tools](#available-tools) · [Resources](#mcp-resources) · [Prompts](#mcp-prompts) · [Architecture](#architecture-overview)
 - **Project:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## What's New in v0.18.8
+## What's New in v0.19.0
 
-- **Incremental app diagnostics** — `app_diagnostics.poll.since` accepts
-  `{mtime_ns, name}` cursors for directory polling.
-- **Stale snapshot prevention** — directory polling ignores stale or equal
-  diagnostic JSON snapshots instead of re-consuming an earlier app-written
-  `PASS` artifact.
-- **Next cursor evidence** — successful directory polls return a `cursor` with
-  the matched file's `mtime_ns` and `name` so consumers can continue from the
-  observed snapshot.
+- **Runtime-smoke v2 drag/drop evidence gates** — WPF DataGrid plans can use
+  positive row-target drag/drop with offscreen target realization and
+  before/after viewport evidence; negative no-op backend gaps are bounded.
+- **App diagnostics action oracles** — NovaScript action-oracle generation can
+  emit bounded `app_diagnostics` probes instead of forcing every oracle through
+  `file.json`.
+- **Fail-closed diagnostic deltas** — runtime-smoke wait, event-delta, and
+  run-probe flows now preserve source-aware cursors and report explicit
+  guidance for stale or empty diagnostic states.
 
 ## Highlights
 
