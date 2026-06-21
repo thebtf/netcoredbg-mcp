@@ -215,6 +215,10 @@ def test_novascript_action_oracle_app_diagnostics_replay_packet_is_actionable() 
         "BLOCKED",
         "FAIL",
         "DOWNSTREAM_REPLAY_PASS",
+        "Adapted Plan Delta",
+        "ui.invoke",
+        "Button selector",
+        "do not replay the base provider example verbatim",
         "Engram `#326`",
         "1b9814e8099f4d8e9a735eb71a051c40",
         "Fixture cue two",
@@ -291,6 +295,31 @@ def test_action_oracle_replay_packet_json_records_downstream_pass() -> None:
         == "D:/Dev/novascript/NovaScript.Tests.UI/Scenarios/"
         "action-oracle-app-diagnostics.runtime-smoke-v2.json"
     )
+    adapted_plan_record = downstream_result["adapted_plan_record"]
+    assert (
+        adapted_plan_record["base_example_path"]
+        == "docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json"
+    )
+    assert "do not replay the base provider example verbatim" in (
+        adapted_plan_record["replay_instruction"]
+    )
+    assert adapted_plan_record["source_example_action"] == {
+        "kind": "ui.invoke",
+        "selector": {
+            "automation_id": "<ACTION_ORACLE_TRIGGER_AUTOMATION_ID>",
+            "control_type": "Button",
+        },
+    }
+    assert adapted_plan_record["actual_action"] == {
+        "operation": "ui.grid.select",
+        "automation_id": "CueDataGrid",
+        "index": 1,
+    }
+    assert adapted_plan_record["actual_oracle"] == {
+        "condition": "$.current_cue_index == 1",
+        "observed": 1,
+        "selected_phrase": "Fixture cue two",
+    }
     assert downstream_result["generated_case_id"] == "action_oracle_diagnostics"
     assert downstream_result["generated_probe_kind"] == "app_diagnostics"
     assert downstream_result["action"] == {

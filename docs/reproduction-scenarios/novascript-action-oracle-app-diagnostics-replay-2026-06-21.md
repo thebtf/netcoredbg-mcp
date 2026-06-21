@@ -66,6 +66,27 @@ NovaScript reported `PASS` through Engram `#326`.
 - Cleanup: `PASS`; `debug.stop` graceful; process registry after cleanup `0`.
 - Issue lifecycle comments: `#268` comment `1099`, `#272` comment `1100`.
 
+## Adapted Plan Delta
+
+The provider example remains a reusable template. It contains a placeholder
+`ui.invoke` Button action at
+`docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json`.
+
+For this recorded `DOWNSTREAM_REPLAY_PASS`, use the adapted NovaScript plan at
+`D:/Dev/novascript/NovaScript.Tests.UI/Scenarios/action-oracle-app-diagnostics.runtime-smoke-v2.json`
+or apply this exact delta to the provider example; do not replay the base
+provider example verbatim for this evidence packet:
+
+do not replay the base provider example verbatim for this evidence packet.
+
+- Source example action: `ui.invoke` on Button selector
+  `<ACTION_ORACLE_TRIGGER_AUTOMATION_ID>`.
+- Actual replay action: `ui.grid.select` on `CueDataGrid`, index `1`.
+- Actual replay oracle: `$.current_cue_index == 1`.
+- Observed value: `1`; selected phrase: `Fixture cue two`.
+- App diagnostic source:
+  `.agent/runtime-smoke/app-diagnostics-cr100-root/diagnostic-cue-change.json`.
+
 ## Downstream Inputs
 
 Use the NovaScript repository, not a local WPF substitute:

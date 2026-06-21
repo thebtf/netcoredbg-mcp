@@ -50,6 +50,28 @@
     },
     "tool_invocation": "mcp__netcoredbg.runtime_smoke_run_plan(plan_path=\"D:/Dev/novascript/NovaScript.Tests.UI/Scenarios/action-oracle-app-diagnostics.runtime-smoke-v2.json\", agent_mode=true)",
     "adapted_plan_path": "D:/Dev/novascript/NovaScript.Tests.UI/Scenarios/action-oracle-app-diagnostics.runtime-smoke-v2.json",
+    "adapted_plan_record": {
+      "base_example_path": "docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json",
+      "replay_instruction": "For this recorded PASS, use the adapted NovaScript plan or apply this action/oracle delta; do not replay the base provider example verbatim.",
+      "source_example_action": {
+        "kind": "ui.invoke",
+        "selector": {
+          "automation_id": "<ACTION_ORACLE_TRIGGER_AUTOMATION_ID>",
+          "control_type": "Button"
+        }
+      },
+      "actual_action": {
+        "operation": "ui.grid.select",
+        "automation_id": "CueDataGrid",
+        "index": 1
+      },
+      "actual_oracle": {
+        "condition": "$.current_cue_index == 1",
+        "observed": 1,
+        "selected_phrase": "Fixture cue two"
+      },
+      "app_diagnostics_source": ".agent/runtime-smoke/app-diagnostics-cr100-root/diagnostic-cue-change.json"
+    },
     "generated_case_id": "action_oracle_diagnostics",
     "generated_probe_kind": "app_diagnostics",
     "action": {
