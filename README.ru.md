@@ -14,7 +14,7 @@
 вычислять выражения, читать вывод отладки и управлять поверхностями Windows UI
 Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 
-**131 MCP-инструмент · 8 промптов · 4 ресурса · 1800 собранных тестов · релиз v0.20.1**
+**131 MCP-инструмент · 8 промптов · 4 ресурса · 1811 собранных тестов · релиз v0.20.2**
 
 ## Быстрые ссылки
 
@@ -23,16 +23,15 @@ Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 - **Справочник:** [Доступные инструменты](#доступные-инструменты) · [Ресурсы](#mcp-ресурсы) · [Промпты](#mcp-промпты) · [Архитектура](#обзор-архитектуры)
 - **Проект:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## Что нового в v0.20.1
+## Что нового в v0.20.2
 
-- **No-global-input runtime-smoke policy** — v2 plans теперь могут объявлять
-  `input_policy.no_global_input`, чтобы запросить operator-isolated execution.
-- **Action input classification** — runtime-smoke v2 записывает, является ли
-  action `BACKGROUND_SAFE`, `APP_DISPATCH_SAFE`, `REQUIRES_GLOBAL_INPUT` или
-  `UNSUPPORTED_BY_PROVIDER`.
-- **Fail-closed physical fallback** — actions, которым нужны foreground,
-  cursor, mouse, keyboard или physical fallback, теперь возвращают `BLOCKED`
-  до мутации, если активен `no_global_input`.
+- **No-operator run confidence** — v2 plans теперь могут запрашивать
+  `run_confidence.no_operator` вместе с `input_policy.no_global_input`.
+- **Dirty/unproven contamination verdicts** — загрязнение операторским вводом
+  или отсутствие доказуемо чистого monitor evidence теперь возвращает
+  terminal `BLOCKED` с restart guidance вместо product `FAIL`.
+- **Fail-closed monitor contract** — malformed или unknown confidence monitor
+  statuses считаются unproven evidence, а не implicit success.
 
 ## Основные возможности
 

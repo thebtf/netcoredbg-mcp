@@ -14,7 +14,7 @@ set breakpoints, step through code, inspect variables, evaluate expressions, rea
 debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
 and Avalonia windows without opening an IDE.
 
-**131 MCP tools · 8 prompts · 4 resources · 1800 collected tests · release v0.20.1**
+**131 MCP tools · 8 prompts · 4 resources · 1811 collected tests · release v0.20.2**
 
 ## Quick Links
 
@@ -23,16 +23,15 @@ and Avalonia windows without opening an IDE.
 - **Reference:** [Available Tools](#available-tools) · [Resources](#mcp-resources) · [Prompts](#mcp-prompts) · [Architecture](#architecture-overview)
 - **Project:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## What's New in v0.20.1
+## What's New in v0.20.2
 
-- **No-global-input runtime-smoke policy** — v2 plans can declare
-  `input_policy.no_global_input` to request operator-isolated execution.
-- **Action input classification** — runtime-smoke v2 records whether an action
-  is `BACKGROUND_SAFE`, `APP_DISPATCH_SAFE`, `REQUIRES_GLOBAL_INPUT`, or
-  `UNSUPPORTED_BY_PROVIDER`.
-- **Fail-closed physical fallback** — actions that require foreground, cursor,
-  mouse, keyboard, or physical fallback now return `BLOCKED` before mutation
-  when `no_global_input` is active.
+- **No-operator run confidence** — v2 plans can request
+  `run_confidence.no_operator` evidence alongside `input_policy.no_global_input`.
+- **Dirty/unproven contamination verdicts** — operator input contamination or
+  unavailable monitor proof now returns terminal `BLOCKED` with restart guidance
+  instead of being recorded as product `FAIL`.
+- **Fail-closed monitor contract** — malformed or unknown confidence monitor
+  statuses are treated as unproven evidence, not implicit success.
 
 ## Highlights
 
