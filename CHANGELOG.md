@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.2] - 2026-06-22
+
 ### Added
 - Runtime-smoke v2 plans can request `run_confidence.no_operator` evidence for
   no-operator runs, backed by the testable `runtime.input_monitor.check`
