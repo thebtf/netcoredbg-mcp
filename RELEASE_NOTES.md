@@ -80,6 +80,7 @@ window.
     sandbox-only `obj/apphost.exe` access-denied retry, manual smoke inventory
     listed 53 scenarios, and installed-wheel input monitor live-read evidence
     reported `windows.GetLastInputInfo` for the current desktop session.
-- Publication gates still required before this release is marked shipped:
-  MCP PR review, merge to `main`, annotated tag publication, GitHub
-  Release/PyPI publication, and local workstation deploy smoke.
+- Publication gates completed after release-prep: release PR review/merge,
+  annotated tag `v0.20.4`, GitHub Release publication, successful publish
+  workflow for tag `v0.20.4`, and local workstation deploy smoke reporting
+  `netcoredbg-mcp 0.20.4`.
