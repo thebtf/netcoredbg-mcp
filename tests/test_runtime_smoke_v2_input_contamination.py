@@ -11,13 +11,19 @@ from netcoredbg_mcp.session.runtime_smoke_v2.transition_executor import (
 
 
 class ConfidenceSmokeSession:
-    def __init__(self, monitor_result: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        monitor_result: dict[str, Any] | list[dict[str, Any]] | None = None,
+    ) -> None:
         self.runtime_smoke = RuntimeSmokeSession()
         self.monitor_result = monitor_result or {"status": "PASS"}
         self.monitor_calls: list[dict[str, Any]] = []
 
     def input_monitor_check(self, **kwargs: Any) -> dict[str, Any]:
         self.monitor_calls.append(dict(kwargs))
+        if isinstance(self.monitor_result, list):
+            index = min(len(self.monitor_calls) - 1, len(self.monitor_result) - 1)
+            return dict(self.monitor_result[index])
         return dict(self.monitor_result)
 
 
@@ -86,6 +92,35 @@ async def test_no_operator_dirty_monitor_blocks_product_verdict() -> None:
     assert session.monitor_calls
     assert session.monitor_calls[0]["input_policy"] == {"no_global_input": True}
     assert session.monitor_calls[0]["run_confidence"] == {"no_operator": True}
+
+
+@pytest.mark.asyncio
+async def test_no_operator_dirty_after_action_blocks_product_verdict() -> None:
+    session = ConfidenceSmokeSession(
+        [
+            {"status": "PASS", "basis": "external_input_monitor"},
+            {
+                "status": "DIRTY",
+                "source": "keyboard",
+                "window": "after_action",
+                "summary": "external key press observed",
+            },
+        ]
+    )
+
+    result = await _runner(session).run(
+        _no_operator_plan({"metrics_thresholds": {"action_latency_ms": {"max": 1}}})
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["run_confidence"]["classification"] == "DIRTY_UNPROVEN"
+    assert result["run_confidence"]["contamination"]["source"] == "keyboard"
+    assert result["run_confidence"]["contamination"]["window"] == "after_action"
+    assert result["run_confidence"]["product_verdict_allowed"] is False
+    assert [call["window"] for call in session.monitor_calls] == [
+        "before_action",
+        "after_action",
+    ]
 
 
 @pytest.mark.asyncio
