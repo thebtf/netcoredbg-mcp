@@ -361,10 +361,12 @@ needs to prove that a scenario was not contaminated by operator input. Combine
 On supported Windows desktop sessions, the default `runtime.input_monitor.check`
 adapter samples `windows.GetLastInputInfo` before and during action windows.
 `CLEAN_PROVEN` means the bounded scenario can be interpreted as a product
-verdict; `DIRTY` or unproven evidence blocks the product verdict so the caller
-can restart the scenario instead of recording an accidental product `FAIL`.
-This is contamination detection for the current desktop session, not full OS
-keyboard, pointer, foreground-window, or focus isolation.
+verdict. If the adapter reports `DIRTY`, the returned no-operator envelope uses
+`run_confidence.classification == "DIRTY_UNPROVEN"` and blocks the product
+verdict so the caller can restart the scenario instead of recording an
+accidental product `FAIL`. This is contamination detection for the current
+desktop session, not full OS keyboard, pointer, foreground-window, or focus
+isolation.
 
 The manual smoke fixtures now cover the baseline console/WinForms app,
 `tests/fixtures/WpfSmokeApp`, and `tests/fixtures/AvaloniaSmokeApp`. Build all

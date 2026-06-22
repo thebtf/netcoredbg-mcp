@@ -366,11 +366,12 @@ No-operator plans в runtime-smoke могут запросить confidence evid
 В поддерживаемых desktop-сессиях Windows стандартный адаптер
 `runtime.input_monitor.check` снимает сэмплы `windows.GetLastInputInfo` до и во
 время action windows. `CLEAN_PROVEN` означает, что bounded scenario можно
-интерпретировать как продуктовый verdict; `DIRTY` или unproven evidence
-блокирует продуктовый verdict, чтобы вызывающая сторона перезапустила сценарий,
-а не записала случайный product `FAIL`. Это обнаружение загрязнения текущей
-desktop-session, а не полная изоляция клавиатуры, pointer, foreground window или
-focus на уровне ОС.
+интерпретировать как продуктовый verdict. Если адаптер возвращает `DIRTY`,
+no-operator envelope использует `run_confidence.classification ==
+"DIRTY_UNPROVEN"` и блокирует продуктовый verdict, чтобы вызывающая сторона
+перезапустила сценарий, а не записала случайный product `FAIL`. Это обнаружение
+загрязнения текущей desktop-session, а не полная изоляция клавиатуры, pointer,
+foreground window или focus на уровне ОС.
 
 Manual smoke fixtures теперь покрывают базовое console/WinForms-приложение,
 `tests/fixtures/WpfSmokeApp` и `tests/fixtures/AvaloniaSmokeApp`. Соберите все

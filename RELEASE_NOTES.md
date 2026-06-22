@@ -20,8 +20,9 @@ window.
   runtime-smoke v2 plans.
 - Reports `CLEAN_PROVEN` for stable no-operator windows backed by
   `windows.GetLastInputInfo` evidence.
-- Reports `DIRTY` when current desktop-session input advances between or during
-  monitored windows.
+- Maps adapter-level `DIRTY` evidence to returned
+  `run_confidence.classification == "DIRTY_UNPROVEN"` when current
+  desktop-session input advances between or during monitored windows.
 - Reports `BLOCKED` for unsupported platforms, malformed monitor calls, missing
   baselines, or non-monotonic tick evidence.
 - Updates README/README.ru release headlines to `v0.20.4` and documents the new
@@ -32,9 +33,9 @@ window.
 - This is an additive PATCH runtime-smoke release. Existing plans that do not
   request `run_confidence.no_operator` keep their existing behavior.
 - `runtime.input_monitor.check` is Windows desktop-session evidence, not full
-  OS input isolation. A dirty operator action is reported as dirty or unproven
-  evidence so the caller can restart the scenario instead of recording a product
-  failure.
+  OS input isolation. Adapter-level dirty input is returned to callers as
+  `DIRTY_UNPROVEN` confidence evidence so the caller can restart the scenario
+  instead of recording a product failure.
 - Upgrade an existing pip or pipx install with one of:
 
   ```powershell
