@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-06-22
+
+### Added
+- Runtime-smoke v2 plans can declare `input_policy.no_global_input` to request
+  operator-isolated action execution.
+- Runtime-smoke v2 action and result evidence now records input policy, action
+  input classification, physical fallback attempt state, and operator-isolated
+  status.
+
+### Changed
+- Runtime-smoke v2 dispatch now classifies action routes as `BACKGROUND_SAFE`,
+  `APP_DISPATCH_SAFE`, `REQUIRES_GLOBAL_INPUT`, or `UNSUPPORTED_BY_PROVIDER`.
+- Built-in `ui.click` remains available under `no_global_input` through the
+  existing app-dispatch/UIA invoke route instead of being treated as physical
+  pointer input.
+
+### Fixed
+- Physical/global-input runtime-smoke actions now return `BLOCKED` before
+  focus, keyboard, mouse, drag, cursor, or physical fallback adapter calls when
+  `input_policy.no_global_input` is active.
+- Malformed action-level `input_policy` payloads fail validation before action
+  dispatch instead of reaching adapters.
+
 ## [0.20.0] - 2026-06-22
 
 ### Added
