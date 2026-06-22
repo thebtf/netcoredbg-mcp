@@ -14,7 +14,7 @@
 вычислять выражения, читать вывод отладки и управлять поверхностями Windows UI
 Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 
-**131 MCP-инструмент · 8 промптов · 4 ресурса · 1811 собранных тестов · релиз v0.20.2**
+**131 MCP-инструмент · 8 промптов · 4 ресурса · 1812 собранных тестов · релиз v0.20.3**
 
 ## Быстрые ссылки
 
@@ -23,15 +23,17 @@ Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 - **Справочник:** [Доступные инструменты](#доступные-инструменты) · [Ресурсы](#mcp-ресурсы) · [Промпты](#mcp-промпты) · [Архитектура](#обзор-архитектуры)
 - **Проект:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## Что нового в v0.20.2
+## Что нового в v0.20.3
 
-- **No-operator run confidence** — v2 plans теперь могут запрашивать
-  `run_confidence.no_operator` вместе с `input_policy.no_global_input`.
-- **Dirty/unproven contamination verdicts** — загрязнение операторским вводом
-  или отсутствие доказуемо чистого monitor evidence теперь возвращает
-  terminal `BLOCKED` с restart guidance вместо product `FAIL`.
-- **Fail-closed monitor contract** — malformed или unknown confidence monitor
-  statuses считаются unproven evidence, а не implicit success.
+- **Provider-readiness boundary** — релиз фиксирует post-`v0.20.2`
+  downstream-wait состояние: `run_confidence.no_operator` уже выпущен и
+  задеплоен, а NovaScript acceptance остаётся внешним follow-up.
+- **No-repeat roadmap evidence** — reproduction backlog теперь содержит
+  границу `CR-108`, чтобы broad issues не открывались заново без свежего
+  downstream provider failure evidence.
+- **Обновлённые release notes** — operator-facing notes разделяют shipped
+  provider capability, broader consumer acceptance и full isolation roadmap
+  scope.
 
 ## Основные возможности
 
