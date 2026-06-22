@@ -39,7 +39,7 @@ failure evidence.
 
   ```powershell
   pipx install netcoredbg-mcp==0.20.3
-  netcoredbg-mcp --setup
+  netcoredbg-mcp setup
   ```
 
 ## Known Residual Scope
