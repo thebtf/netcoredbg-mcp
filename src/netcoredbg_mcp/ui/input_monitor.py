@@ -10,6 +10,7 @@ from typing import Any
 
 _DWORD_MODULUS = 2**32
 _DWORD_HALF_RANGE = 2**31
+_VALID_WINDOWS = frozenset({"before_action", "after_action"})
 
 
 class InputMonitorUnavailableError(RuntimeError):
@@ -56,7 +57,14 @@ class RuntimeInputMonitor:
         self._last_sample: LastInputSample | None = None
 
     def check(self, **kwargs: Any) -> dict[str, Any]:
-        window = str(kwargs.get("window") or "unknown")
+        window = str(kwargs.get("window") or "").strip()
+        if window not in _VALID_WINDOWS:
+            return _blocked("input monitor unsupported window", window=window or "unknown")
+        if not str(kwargs.get("case_id") or "").strip():
+            return _blocked("input monitor missing case identity", window=window)
+        if kwargs.get("transition_id") is None and kwargs.get("transition_index") is None:
+            return _blocked("input monitor missing transition identity", window=window)
+
         key = _transition_key(kwargs)
         try:
             sample = self._reader()

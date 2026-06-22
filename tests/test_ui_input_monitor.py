@@ -101,6 +101,46 @@ def test_runtime_input_monitor_blocks_when_backend_is_unavailable() -> None:
     assert result["basis"] == "windows_last_input_info"
 
 
+def test_runtime_input_monitor_blocks_unsupported_window_before_reading() -> None:
+    monitor = RuntimeInputMonitor(
+        reader=lambda: (_ for _ in ()).throw(AssertionError("reader should not run"))
+    )
+
+    result = monitor.check(**{**_kwargs("unknown"), "window": "during_action"})
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "input monitor unsupported window"
+    assert result["window"] == "during_action"
+
+
+def test_runtime_input_monitor_blocks_missing_case_identity_before_reading() -> None:
+    monitor = RuntimeInputMonitor(
+        reader=lambda: (_ for _ in ()).throw(AssertionError("reader should not run"))
+    )
+
+    result = monitor.check(**{**_kwargs("before_action"), "case_id": ""})
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "input monitor missing case identity"
+
+
+def test_runtime_input_monitor_blocks_missing_transition_identity_before_reading() -> None:
+    monitor = RuntimeInputMonitor(
+        reader=lambda: (_ for _ in ()).throw(AssertionError("reader should not run"))
+    )
+
+    result = monitor.check(
+        **{
+            **_kwargs("before_action"),
+            "transition_id": None,
+            "transition_index": None,
+        }
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "input monitor missing transition identity"
+
+
 def test_runtime_input_monitor_blocks_when_tick_regresses() -> None:
     samples = iter(
         [
