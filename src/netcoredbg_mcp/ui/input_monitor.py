@@ -29,6 +29,24 @@ class LastInputSample:
 LastInputReader = Callable[[], LastInputSample]
 
 
+class _LASTINPUTINFO(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint32)]
+
+
+if os.name == "nt":
+    _user32 = ctypes.WinDLL("user32", use_last_error=True)
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _get_last_input_info = _user32.GetLastInputInfo
+    _get_last_input_info.argtypes = [ctypes.POINTER(_LASTINPUTINFO)]
+    _get_last_input_info.restype = ctypes.c_int
+    _get_tick_count = _kernel32.GetTickCount
+    _get_tick_count.argtypes = []
+    _get_tick_count.restype = ctypes.c_uint32
+else:
+    _get_last_input_info = None
+    _get_tick_count = None
+
+
 class RuntimeInputMonitor:
     """Stateful monitor backing runtime.input_monitor.check."""
 
@@ -98,32 +116,20 @@ def create_default_runtime_input_monitor() -> RuntimeInputMonitor:
 
 def read_last_input_sample() -> LastInputSample:
     """Read Windows LASTINPUTINFO using the current desktop session."""
-    if os.name != "nt":
+    if os.name != "nt" or _get_last_input_info is None or _get_tick_count is None:
         raise InputMonitorUnavailableError(
             "runtime input monitor requires a Windows desktop session"
         )
 
-    class LASTINPUTINFO(ctypes.Structure):
-        _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint32)]
-
-    last_input = LASTINPUTINFO()
-    last_input.cbSize = ctypes.sizeof(LASTINPUTINFO)
-    user32 = ctypes.WinDLL("user32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    get_last_input_info = user32.GetLastInputInfo
-    get_last_input_info.argtypes = [ctypes.POINTER(LASTINPUTINFO)]
-    get_last_input_info.restype = ctypes.c_int
-    get_tick_count = kernel32.GetTickCount
-    get_tick_count.argtypes = []
-    get_tick_count.restype = ctypes.c_uint32
-
-    if not get_last_input_info(ctypes.byref(last_input)):
+    last_input = _LASTINPUTINFO()
+    last_input.cbSize = ctypes.sizeof(_LASTINPUTINFO)
+    if not _get_last_input_info(ctypes.byref(last_input)):
         error = ctypes.get_last_error()
         raise InputMonitorUnavailableError(f"GetLastInputInfo failed: {error}")
 
     return LastInputSample(
         last_input_tick_ms=int(last_input.dwTime),
-        current_tick_ms=int(get_tick_count()),
+        current_tick_ms=int(_get_tick_count()),
     )
 
 
