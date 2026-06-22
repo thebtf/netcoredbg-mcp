@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Refreshed README, Russian README, production playbook, runtime-smoke example,
+  and release notes for the shipped `v0.20.4` no-operator input-monitor
+  documentation surface.
+
 ## [0.20.4] - 2026-06-22
 
 ### Added

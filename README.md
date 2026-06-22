@@ -346,6 +346,28 @@ lifecycle surface: `runtime_smoke_start` returns a `run_id`,
 `runtime_smoke_get_result` returns the final scenario envelope, and
 `runtime_smoke_stop` idempotently stops an active run with cleanup evidence.
 
+No-operator runtime-smoke plans can request confidence evidence when the agent
+needs to prove that a scenario was not contaminated by operator input. Combine
+`input_policy.no_global_input` with `run_confidence.no_operator`:
+
+```json
+{
+  "schema": "netcoredbg.runtime_smoke.v2",
+  "input_policy": {"no_global_input": true},
+  "run_confidence": {"no_operator": true}
+}
+```
+
+On supported Windows desktop sessions, the default `runtime.input_monitor.check`
+adapter samples `windows.GetLastInputInfo` before and during action windows.
+`CLEAN_PROVEN` means the bounded scenario can be interpreted as a product
+verdict. If the adapter reports `DIRTY`, the returned no-operator envelope uses
+`run_confidence.classification == "DIRTY_UNPROVEN"` and blocks the product
+verdict so the caller can restart the scenario instead of recording an
+accidental product `FAIL`. This is contamination detection for the current
+desktop session, not full OS keyboard, pointer, foreground-window, or focus
+isolation.
+
 The manual smoke fixtures now cover the baseline console/WinForms app,
 `tests/fixtures/WpfSmokeApp`, and `tests/fixtures/AvaloniaSmokeApp`. Build all
 three fixture projects before claiming full GUI smoke coverage; missing fixture
@@ -382,7 +404,8 @@ the examples under `docs/examples/runtime-smoke-oracle-pack.json`,
 `docs/examples/runtime-smoke-semantic-probe.json`, and
 `docs/examples/runtime-smoke-tracepoint-guardrail.json` when adding oracle
 packs, app diagnostics, semantic probes, or instrumentation guardrails.
-NovaScript consumers validating the v0.20.0 action-oracle path can adapt
+NovaScript consumers validating the current action-oracle app-diagnostics path
+can adapt
 [`docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json`](docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json)
 to generate a bounded `app_diagnostics` probe from the
 `novascript-action-oracle` template while using launch-scoped diagnostic
@@ -453,8 +476,8 @@ generics are rejected before runtime application. Use
 | Snapshots and object analysis | 5 | `create_snapshot`, `diff_snapshots`, `list_snapshots`, `analyze_collection`, `summarize_object` |
 | Memory | 2 | `read_memory`, `write_memory` |
 | Output and build diagnostics | 4 | `get_output`, `search_output`, `get_output_tail`, `get_build_diagnostics` |
-| Runtime smoke orchestration | 12 | `debug_hygiene_preflight`, `instrumentation_group_create`, `instrumentation_group_inspect`, `instrumentation_group_clear`, `output_checkpoint`, `output_assert_since`, `verify_debug_freshness`, `run_runtime_smoke`, `runtime_smoke_start`, `runtime_smoke_tail_events`, `runtime_smoke_get_result`, `runtime_smoke_stop` |
-| UI automation | 46 | Window tree, element search, focus, keyboard, mouse, screenshots, annotations, selection, clipboard, window management, expand/collapse, value setting, virtualization, grid evidence, UI snapshots, UI events |
+| Runtime smoke orchestration | 21 | `debug_hygiene_preflight`, instrumentation groups, output checkpoints/assertions, freshness checks, one-shot plan execution, lifecycle start/tail/wait/result/stop, plan/probe validation, probe execution, evidence bundles, event cursors/deltas, and cleanup contracts |
+| UI automation | 54 | Window tree, element search, focus, keyboard, mouse, screenshots, annotations, selection, clipboard, window management, expand/collapse, value setting, virtualization, grid evidence, UI snapshots, UI events, and semantic monitors |
 | Code search | 4 | `find_code_symbol`, `find_code_references`, `get_source_context`, `search_source` |
 | Edit-and-Continue | 1 | `apply_code_change` |
 | Process management | 1 | `cleanup_processes` |
