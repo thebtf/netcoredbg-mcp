@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.3] - 2026-06-22
+
+### Changed
+- Recorded the post-`v0.20.2` downstream-wait boundary so provider-code work is
+  not reopened without fresh downstream provider `FAIL` evidence.
+- Updated README release copy and release notes to distinguish shipped provider
+  readiness from external NovaScript acceptance and broader full-isolation
+  roadmap scope.
+
 ## [0.20.2] - 2026-06-22
 
 ### Added

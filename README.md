@@ -14,7 +14,7 @@ set breakpoints, step through code, inspect variables, evaluate expressions, rea
 debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
 and Avalonia windows without opening an IDE.
 
-**131 MCP tools · 8 prompts · 4 resources · 1811 collected tests · release v0.20.2**
+**131 MCP tools · 8 prompts · 4 resources · 1812 collected tests · release v0.20.3**
 
 ## Quick Links
 
@@ -23,15 +23,17 @@ and Avalonia windows without opening an IDE.
 - **Reference:** [Available Tools](#available-tools) · [Resources](#mcp-resources) · [Prompts](#mcp-prompts) · [Architecture](#architecture-overview)
 - **Project:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## What's New in v0.20.2
+## What's New in v0.20.3
 
-- **No-operator run confidence** — v2 plans can request
-  `run_confidence.no_operator` evidence alongside `input_policy.no_global_input`.
-- **Dirty/unproven contamination verdicts** — operator input contamination or
-  unavailable monitor proof now returns terminal `BLOCKED` with restart guidance
-  instead of being recorded as product `FAIL`.
-- **Fail-closed monitor contract** — malformed or unknown confidence monitor
-  statuses are treated as unproven evidence, not implicit success.
+- **Provider-readiness boundary** — the release records the post-`v0.20.2`
+  downstream-wait state: `run_confidence.no_operator` is released and deployed,
+  while NovaScript acceptance remains an external follow-up.
+- **No-repeat roadmap evidence** — the reproduction backlog now captures the
+  `CR-108` boundary so broad issues are not reopened without fresh downstream
+  provider failure evidence.
+- **Updated release notes** — operator-facing notes now separate shipped
+  provider capability from broader consumer acceptance and full isolation
+  roadmap scope.
 
 ## Highlights
 
