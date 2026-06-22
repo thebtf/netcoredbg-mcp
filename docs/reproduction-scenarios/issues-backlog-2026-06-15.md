@@ -133,6 +133,25 @@ interference is not recorded as product `FAIL`.
 | `#270` | Keep broad FR open | Bounded UI scenario runner confidence prevents operator keyboard/mouse interference from being misread as DataGrid/TextBox helper failure. | Do not reopen already-covered TextBox/DataGrid helper/replay slices from broad issue openness alone; fresh consumer failure evidence is still required for helper work. |
 | `#272` | Keep broad FR open | Bounded dirty/unproven evidence protects app-diagnostics/oracle_pack scenario verdicts from contaminated no-operator windows. | Do not claim app-diagnostics/oracle_pack lifecycle closure or full background isolation from CR-107; remaining lifecycle/orchestration work still needs split follow-up issue evidence or fresh broad-closure proof. |
 
+## CR-108 Post-v0.20.2 Downstream Wait Boundary
+
+CR-108 records the fresh post-`v0.20.2` reconnaissance boundary. The provider
+package is released and deployed, native read-only scouts found
+`NO_NEW_EXECUTABLE_SEAM`, and Engram `#331` has provider comment `1123`
+requesting NovaScript-side verification against `v0.20.2` when testing has not
+already started. At this point there is no downstream NovaScript PASS/FAIL, so
+the next provider-code CR must wait for fresh consumer failure evidence instead
+of treating broad issue openness as runtime work; do not invent provider runtime
+work without a concrete provider `FAIL` or a bounded product-case proof.
+
+| Issue | CR-108 decision | Evidence | No-repeat boundary / next gate |
+| --- | --- | --- | --- |
+| `#268` | Wait for downstream evidence; Keep broad FR open | Post-`v0.20.2` scouts found no new action/oracle provider seam beyond CR-107; Engram `#331` comment `1123` is the current downstream verification request. | Open a provider CR only for a concrete provider `FAIL` or product-case proof that the shipped v2 action/oracle, pack, and no-operator confidence contracts are insufficient. |
+| `#269` | Wait for downstream evidence; Keep broad FR open | Post-`v0.20.2` scouts found no new agent-mode/generic-probe provider seam. | Open a provider CR only for a concrete provider `FAIL` naming generic-probe lifecycle/orchestration behavior not already covered by event-delta, source-cursor, repair, or metrics/defaults slices. |
+| `#270` | Wait for downstream evidence; Keep broad FR open | Post-`v0.20.2` scouts found no new TextBox/DataGrid/helper provider seam beyond the CR-107 dirty/unproven confidence layer. | Open a provider CR only for a concrete provider `FAIL` in downstream UI helper/replay evidence, not from broad `#270` openness alone. |
+| `#271` | Wait for downstream evidence; Keep broad FR open | Post-`v0.20.2` scouts found no new diagnostics-orchestration provider seam. | Open a provider CR only for a concrete provider `FAIL` naming diagnostics-orchestration behavior not already covered by cleanup, trace, freshness, runner-exception, or PDB/process proof slices. |
+| `#272` | Wait for downstream evidence; Keep broad FR open | Post-`v0.20.2` scouts found no new app-diagnostics/oracle_pack provider seam beyond CR-104 and CR-107; Engram `#331` comment `1123` is the current downstream verification request. | Open a provider CR only for a concrete provider `FAIL` or product-case proof that shipped app-diagnostics/oracle_pack lifecycle evidence and no-operator confidence are insufficient. |
+
 ## Remaining Follow-Up
 
 - `#226`, `#250`, and `#267`: target-side Engram status is `resolved` after

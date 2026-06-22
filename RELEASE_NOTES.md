@@ -93,6 +93,7 @@ desktop, VM runner, or background app-dispatch implementation.
   - focused/adjacent/docs gate -> `424 passed in 19.70s`;
   - changed-file Ruff -> `All checks passed!`;
   - `git diff --check HEAD~1..HEAD` -> clean.
-- Release-prep PR must still pass MCP PR review before merge. After tag push,
-  remote tag, GitHub Release, PyPI workflow, and local workstation deployment
-  must still be verified before the release is called shipped.
+- Release-prep PR #212 passed MCP PR review with `0` unresolved comments and
+  merged as `2c06333`. The annotated `v0.20.2` tag, GitHub Release, PyPI
+  publish workflow, PyPI install smoke, and local workstation deployment were
+  all verified before this release was marked shipped.

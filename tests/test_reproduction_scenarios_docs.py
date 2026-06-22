@@ -14,6 +14,7 @@ ACTION_ORACLE_REPLAY_PACKET_JSON = Path(
     "novascript-action-oracle-app-diagnostics-replay-2026-06-21.json"
 )
 BACKLOG_SCENARIOS = Path("docs/reproduction-scenarios/issues-backlog-2026-06-15.md")
+RELEASE_NOTES = Path("RELEASE_NOTES.md")
 
 
 def _read(path: Path) -> str:
@@ -530,6 +531,38 @@ def test_issues_backlog_records_cr107_operator_input_confidence_boundary() -> No
     assert "`#269`" not in section
     assert "`#271`" not in section
     assert "Source-side owner may close" not in section
+
+
+def test_issues_backlog_records_cr108_post_v0202_downstream_wait_boundary() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    release_notes = _read(RELEASE_NOTES)
+    heading = "## CR-108 Post-v0.20.2 Downstream Wait Boundary"
+
+    assert heading in backlog
+    section = backlog.split(heading, 1)[1].split("\n## ", 1)[0]
+    section_text = " ".join(section.split())
+
+    required_terms = (
+        "v0.20.2",
+        "Engram `#331`",
+        "comment `1123`",
+        "NO_NEW_EXECUTABLE_SEAM",
+        "no downstream NovaScript PASS/FAIL",
+        "fresh consumer failure",
+        "do not invent provider runtime work",
+    )
+    for term in required_terms:
+        assert term in section_text
+
+    for issue in ("#268", "#269", "#270", "#271", "#272"):
+        row = _section_issue_row(backlog, heading, issue)
+        assert "Wait for downstream evidence" in row
+        assert "concrete provider `FAIL`" in row
+        assert "Keep broad FR open" in row
+
+    assert "Source-side owner may close" not in section
+    assert "Release-prep PR must still pass MCP PR review" not in release_notes
+    assert "must still be verified before the release is called shipped" not in release_notes
 
 
 def test_issues_backlog_links_novascript_replay_packet() -> None:
