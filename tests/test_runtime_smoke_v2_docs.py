@@ -658,8 +658,8 @@ def test_readme_and_playbook_document_novascript_action_oracle_app_diagnostics_g
         "NovaScript Action-Oracle App-Diagnostics Consumer Gate",
         replay_packet_path,
         "uv run --no-sync --project <NETCOREDBG_MCP_REPO> netcoredbg-mcp --version",
-        "netcoredbg-mcp 0.20.4",
-        "0.20.4",
+        "netcoredbg-mcp 0.20.5",
+        "0.20.5",
         "<NOVASCRIPT_PROCESS_NAME>",
         "<NOVASCRIPT_PRIMARY_MODULE>",
         "run_runtime_smoke",
@@ -692,10 +692,12 @@ def test_readme_and_playbook_document_novascript_action_oracle_app_diagnostics_g
 def test_novascript_action_oracle_app_diagnostics_example_is_consumer_ready() -> None:
     plan = _load_novascript_action_oracle_app_diagnostics_example()
 
-    assert "v0.20.4" in plan["name"]
-    assert "netcoredbg-mcp 0.20.4" in plan["description"]
+    assert "v0.20.5" in plan["name"]
+    assert "netcoredbg-mcp 0.20.5" in plan["description"]
     assert "v0.20.0" not in plan["name"]
     assert "v0.20.0" not in plan["description"]
+    assert "v0.20.4" not in plan["name"]
+    assert "v0.20.4" not in plan["description"]
     assert "0.19.0" not in plan["name"]
     assert "0.19.0" not in plan["description"]
     assert validate_plan(plan) == []

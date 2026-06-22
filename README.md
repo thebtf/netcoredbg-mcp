@@ -14,7 +14,7 @@ set breakpoints, step through code, inspect variables, evaluate expressions, rea
 debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
 and Avalonia windows without opening an IDE.
 
-**131 MCP tools · 8 prompts · 4 resources · 1822 collected tests · release v0.20.4**
+**131 MCP tools · 8 prompts · 4 resources · 1822 collected tests · release v0.20.5**
 
 ## Quick Links
 
@@ -23,17 +23,16 @@ and Avalonia windows without opening an IDE.
 - **Reference:** [Available Tools](#available-tools) · [Resources](#mcp-resources) · [Prompts](#mcp-prompts) · [Architecture](#architecture-overview)
 - **Project:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## What's New in v0.20.4
+## What's New in v0.20.5
 
-- **Default input monitor evidence** — Runtime-smoke v2 now ships a Windows
-  `runtime.input_monitor.check` adapter backed by current desktop-session
-  `GetLastInputInfo` samples.
-- **Operator-contamination detection** — no-operator runs can now report
-  `CLEAN_PROVEN`, `DIRTY`, or fail-closed `BLOCKED` evidence when a monitor
-  window is unsupported or unproven.
-- **Review-hardened monitor lifecycle** — input baselines catch activity before
-  and during action windows, and malformed plan calls are rejected before any
-  Win32 monitor read.
+- **Package documentation refresh** — the PyPI README, Russian README, release
+  notes, production playbook, and NovaScript example now match the shipped
+  `v0.20.4` no-operator input-monitor behavior.
+- **Operator-contamination wording** — no-operator guidance now distinguishes
+  adapter-level `DIRTY` evidence from the returned
+  `run_confidence.classification == "DIRTY_UNPROVEN"` result.
+- **Consumer-facing examples** — the NovaScript action-oracle app-diagnostics
+  example and docs regression oracle now point at the current package release.
 
 ## Highlights
 
