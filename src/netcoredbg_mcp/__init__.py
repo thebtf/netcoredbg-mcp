@@ -1,3 +1,3 @@
 """NetCoreDbg MCP Server - Debug C#/.NET code via MCP protocol."""
 
-__version__ = "0.20.3"
+__version__ = "0.20.4"

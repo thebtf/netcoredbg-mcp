@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.4] - 2026-06-22
+
 ### Added
 - Runtime-smoke v2 now ships a default `runtime.input_monitor.check` adapter on
   Windows, backed by current desktop-session `GetLastInputInfo` evidence for
