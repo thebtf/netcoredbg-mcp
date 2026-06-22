@@ -19,7 +19,13 @@ def confidence_from_monitor_result(
     *,
     window: str,
 ) -> dict[str, Any]:
-    status = str(monitor_result.get("status") or "PASS").upper()
+    raw_status = monitor_result.get("status")
+    if raw_status is None or str(raw_status).strip() == "":
+        return _unproven(
+            reason="input monitor returned no status",
+            basis="monitor_malformed_result",
+        )
+    status = str(raw_status).upper()
     if status in {"PASS", "CLEAN"}:
         return {
             "classification": CLASS_CLEAN_PROVEN,

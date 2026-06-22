@@ -16,7 +16,9 @@ class ConfidenceSmokeSession:
         monitor_result: dict[str, Any] | list[dict[str, Any]] | None = None,
     ) -> None:
         self.runtime_smoke = RuntimeSmokeSession()
-        self.monitor_result = monitor_result or {"status": "PASS"}
+        self.monitor_result = (
+            {"status": "PASS"} if monitor_result is None else monitor_result
+        )
         self.monitor_calls: list[dict[str, Any]] = []
 
     def input_monitor_check(self, **kwargs: Any) -> dict[str, Any]:
@@ -135,6 +137,18 @@ async def test_no_operator_missing_monitor_is_blocked_unproven() -> None:
     assert result["run_confidence"]["product_verdict_allowed"] is False
     assert "runtime.input_monitor.check" in result["run_confidence"]["restart_guidance"]
     assert result["compact"]["run_confidence"]["classification"] == "UNPROVEN"
+
+
+@pytest.mark.asyncio
+async def test_no_operator_malformed_monitor_is_blocked_unproven() -> None:
+    session = ConfidenceSmokeSession({})
+
+    result = await _runner(session).run(_no_operator_plan())
+
+    assert result["status"] == "BLOCKED"
+    assert result["run_confidence"]["classification"] == "UNPROVEN"
+    assert result["run_confidence"]["basis"] == "monitor_malformed_result"
+    assert result["run_confidence"]["product_verdict_allowed"] is False
 
 
 @pytest.mark.asyncio
