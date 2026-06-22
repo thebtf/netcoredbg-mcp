@@ -14,7 +14,7 @@ set breakpoints, step through code, inspect variables, evaluate expressions, rea
 debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
 and Avalonia windows without opening an IDE.
 
-**131 MCP tools · 8 prompts · 4 resources · 1812 collected tests · release v0.20.3**
+**131 MCP tools · 8 prompts · 4 resources · 1822 collected tests · release v0.20.4**
 
 ## Quick Links
 
@@ -23,17 +23,17 @@ and Avalonia windows without opening an IDE.
 - **Reference:** [Available Tools](#available-tools) · [Resources](#mcp-resources) · [Prompts](#mcp-prompts) · [Architecture](#architecture-overview)
 - **Project:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## What's New in v0.20.3
+## What's New in v0.20.4
 
-- **Provider-readiness boundary** — the release records the post-`v0.20.2`
-  downstream-wait state: `run_confidence.no_operator` is released and deployed,
-  while NovaScript acceptance remains an external follow-up.
-- **No-repeat roadmap evidence** — the reproduction backlog now captures the
-  `CR-108` boundary so broad issues are not reopened without fresh downstream
-  provider failure evidence.
-- **Updated release notes** — operator-facing notes now separate shipped
-  provider capability from broader consumer acceptance and full isolation
-  roadmap scope.
+- **Default input monitor evidence** — Runtime-smoke v2 now ships a Windows
+  `runtime.input_monitor.check` adapter backed by current desktop-session
+  `GetLastInputInfo` samples.
+- **Operator-contamination detection** — no-operator runs can now report
+  `CLEAN_PROVEN`, `DIRTY`, or fail-closed `BLOCKED` evidence when a monitor
+  window is unsupported or unproven.
+- **Review-hardened monitor lifecycle** — input baselines catch activity before
+  and during action windows, and malformed plan calls are rejected before any
+  Win32 monitor read.
 
 ## Highlights
 

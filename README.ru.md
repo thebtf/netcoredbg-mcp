@@ -14,7 +14,7 @@
 вычислять выражения, читать вывод отладки и управлять поверхностями Windows UI
 Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 
-**131 MCP-инструмент · 8 промптов · 4 ресурса · 1812 собранных тестов · релиз v0.20.3**
+**131 MCP-инструмент · 8 промптов · 4 ресурса · 1822 собранных тестов · релиз v0.20.4**
 
 ## Быстрые ссылки
 
@@ -23,17 +23,16 @@ Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 - **Справочник:** [Доступные инструменты](#доступные-инструменты) · [Ресурсы](#mcp-ресурсы) · [Промпты](#mcp-промпты) · [Архитектура](#обзор-архитектуры)
 - **Проект:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## Что нового в v0.20.3
+## Что нового в v0.20.4
 
-- **Provider-readiness boundary** — релиз фиксирует post-`v0.20.2`
-  downstream-wait состояние: `run_confidence.no_operator` уже выпущен и
-  задеплоен, а NovaScript acceptance остаётся внешним follow-up.
-- **No-repeat roadmap evidence** — reproduction backlog теперь содержит
-  границу `CR-108`, чтобы broad issues не открывались заново без свежего
-  downstream provider failure evidence.
-- **Обновлённые release notes** — operator-facing notes разделяют shipped
-  provider capability, broader consumer acceptance и full isolation roadmap
-  scope.
+- **Default input monitor evidence** — Runtime-smoke v2 теперь поставляет
+  Windows-адаптер `runtime.input_monitor.check`, основанный на сэмплах
+  `GetLastInputInfo` текущей desktop-session.
+- **Operator-contamination detection** — no-operator runs теперь могут
+  возвращать `CLEAN_PROVEN`, `DIRTY` или fail-closed `BLOCKED`, если monitor
+  window не поддерживается или не доказан.
+- **Review-hardened monitor lifecycle** — baseline ловит ввод до и во время
+  action window, а malformed plan calls отклоняются до чтения Win32 monitor.
 
 ## Основные возможности
 

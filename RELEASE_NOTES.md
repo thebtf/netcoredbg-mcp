@@ -1,44 +1,51 @@
-# netcoredbg-mcp v0.20.3
+# netcoredbg-mcp v0.20.4
 
 Released: 2026-06-22
 
 ## Summary
 
-`v0.20.3` is a PATCH release that publishes the post-`v0.20.2` roadmap
-boundary. The provider-side CAP-UI no-operator confidence layer is released and
-deployed; external NovaScript acceptance remains tracked separately in Engram
-`#331` and is not treated as hidden provider work.
+`v0.20.4` is a PATCH release for the CAP-UI no-operator confidence roadmap.
+Runtime-smoke v2 now ships a default Windows `runtime.input_monitor.check`
+adapter, so plans that request `run_confidence.no_operator` can prove clean
+operator windows on supported desktop sessions instead of stopping at a missing
+adapter boundary.
 
-This release does not add new runtime behavior beyond `v0.20.2`. It refreshes
-the package docs, reproduction backlog, and release notes so consumers and
-future agents do not reopen covered provider slices without concrete downstream
-failure evidence.
+The adapter uses current desktop-session input evidence, catches input before
+and during action windows, and fails closed when the monitor cannot prove a clean
+window.
 
 ## Highlights
 
-- Records `CR-108`, the post-`v0.20.2` downstream-wait boundary.
-- Clarifies that missing NovaScript PASS/FAIL evidence is external acceptance
-  debt, not a provider-readiness blocker.
-- Keeps broad issues `#268`, `#269`, `#270`, `#271`, and `#272` open by design
-  while preventing duplicate provider-code work from broad issue openness alone.
-- Updates README/README.ru release headlines to `v0.20.3` and the current
-  collected-test count.
+- Adds the default `runtime.input_monitor.check` operation adapter for Windows
+  runtime-smoke v2 plans.
+- Reports `CLEAN_PROVEN` for stable no-operator windows backed by
+  `windows.GetLastInputInfo` evidence.
+- Reports `DIRTY` when current desktop-session input advances between or during
+  monitored windows.
+- Reports `BLOCKED` for unsupported platforms, malformed monitor calls, missing
+  baselines, or non-monotonic tick evidence.
+- Updates README/README.ru release headlines to `v0.20.4` and documents the new
+  input-monitor capability.
 
 ## Upgrade Notes
 
-- This is an additive PATCH documentation/readiness release. Existing
-  runtime-smoke v2 behavior is unchanged from `v0.20.2`.
+- This is an additive PATCH runtime-smoke release. Existing plans that do not
+  request `run_confidence.no_operator` keep their existing behavior.
+- `runtime.input_monitor.check` is Windows desktop-session evidence, not full
+  OS input isolation. A dirty operator action is reported as dirty or unproven
+  evidence so the caller can restart the scenario instead of recording a product
+  failure.
 - Upgrade an existing pip or pipx install with one of:
 
   ```powershell
-  python -m pip install --upgrade netcoredbg-mcp==0.20.3
+  python -m pip install --upgrade netcoredbg-mcp==0.20.4
   pipx upgrade netcoredbg-mcp
   ```
 
 - For a new workstation install:
 
   ```powershell
-  pipx install netcoredbg-mcp==0.20.3
+  pipx install netcoredbg-mcp==0.20.4
   netcoredbg-mcp setup
   ```
 
@@ -46,24 +53,33 @@ failure evidence.
 
 - Broad issue-backlog rows `#268`, `#269`, `#270`, `#271`, and `#272` remain
   open by design. This release does not claim full broad FR closure.
-- NovaScript issue `#331` remains the external downstream acceptance follow-up.
-  A concrete provider `FAIL` there should start a new RED-first provider CR;
-  PASS should drive only the justified lifecycle/split/closure update.
-- `run_confidence.no_operator` can classify dirty or unproven execution
-  windows, but it does not itself isolate the operating system keyboard,
-  pointer, foreground window, or desktop session.
+- `runtime.input_monitor.check` does not isolate keyboard, pointer, foreground
+  window, or desktop focus. It proves or disproves clean operator windows using
+  current desktop-session input evidence.
+- Non-Windows or inaccessible desktop sessions remain `BLOCKED`/unproven for
+  this adapter.
 
 ## Release Gates
 
 - Release-git-readiness passed before release-prep: local `main` was clean,
-  synchronized with `origin/main`, and contained one post-`v0.20.2` commit:
-  `0d75612 docs(roadmap): record post-v0.20.2 downstream wait boundary`.
-- Test discovery reports `1812 tests collected`.
+  synchronized with `origin/main`, and contained one post-`v0.20.3` commit:
+  `5b0c111 feat(runtime-smoke): add input monitor adapter`.
+- Test discovery reports `1822 tests collected`.
 - Version parity is expected across `pyproject.toml`,
   `src/netcoredbg_mcp/__init__.py`, `uv.lock`, README release copy, changelog,
-  release notes, and annotated tag `v0.20.3`.
-- Mandatory release gates must pass before this release is marked shipped:
-  critical suite, runtime-smoke docs/schema gate, package build, wheel install
-  smoke, production playbook applicability check, MCP PR review, annotated tag
-  publication, GitHub Release/PyPI publication, and local workstation deploy
-  smoke.
+  release notes, and annotated tag `v0.20.4`.
+- Local release-prep gates passed:
+  - critical suite: `14 passed`;
+  - runtime-smoke docs/schema/v2 critical gate: `44 passed`;
+  - focused input-monitor gate: `10 passed`;
+  - package build: `dist/netcoredbg_mcp-0.20.4.tar.gz` and
+    `dist/netcoredbg_mcp-0.20.4-py3-none-any.whl`;
+  - wheel install smoke: disposable venv CLI reported `netcoredbg-mcp 0.20.4`
+    and imported `RuntimeInputMonitor`;
+  - production playbook applicability: fixture builds passed after the
+    sandbox-only `obj/apphost.exe` access-denied retry, manual smoke inventory
+    listed 53 scenarios, and installed-wheel input monitor live-read evidence
+    reported `windows.GetLastInputInfo` for the current desktop session.
+- Publication gates still required before this release is marked shipped:
+  MCP PR review, merge to `main`, annotated tag publication, GitHub
+  Release/PyPI publication, and local workstation deploy smoke.
