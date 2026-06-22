@@ -93,6 +93,23 @@ broad issue closure evidence for `#268` or `#272`.
 | `#268` | Split; keep broad FR open | CR-104 records the bounded Milestone C runtime slice for named oracle/app_diagnostics pack lifecycle evidence: `oracle_pack` and generated/direct diagnostic pack runs now expose `value.manifest.sources`, bounded `pack_manifest`, and `pack-manifest.json` references through run-plan, run-probe, evidence-bundle, and event-delta facades; cleanup/freshness/redaction rollups stay inside the manifest lifecycle contract. | Do not reopen `CR-100/CR-101/CR-102` replay/ledger work or `CR-092/CR-093` bounded template generation. Remaining broad action/oracle DSL, v3 authoring, generic probe UX, and broad orchestration closure still need split follow-up issue evidence or fresh broad-closure proof. |
 | `#272` | Split; keep broad FR open | CR-104 records the bounded Milestone C runtime slice for named oracle/app_diagnostics pack lifecycle evidence: app diagnostics and oracle pack sources now expose `value.manifest.sources`, bounded `pack_manifest`, and `pack-manifest.json` references through run-plan, run-probe, evidence-bundle, and event-delta facades; cleanup/freshness/redaction rollups stay inside the manifest lifecycle contract. | Do not reopen `CR-100/CR-101/CR-102` replay/ledger work, CR-080/084/085 handoff seams, or CR-086 split/comment lifecycle boundary. Remaining broader app diagnostics lifecycle/orchestration and oracle_pack lifecycle closure still need split follow-up issue evidence or fresh broad-closure proof. |
 
+## CR-106 Post-v0.20.1 Downstream Evidence Request Boundary
+
+CR-106 records the post-`v0.20.1` lifecycle boundary after CR-104 and CR-105.
+The provider package is published and deployed, native post-release scouts found
+no provider-code RED seam, and NovaScript-side verification is requested through
+Engram `#331`. Engram comments `1114` through `1118` preserve that broad
+issues remain open by design while the next provider-code change waits for
+fresh consumer/product evidence.
+
+| Issue | CR-106 decision | Evidence | No-repeat boundary / next gate |
+| --- | --- | --- | --- |
+| `#268` | Keep broad FR open | CR-106 comment `1114` records that CR-104 named pack lifecycle and CR-105 `no_global_input` policy do not prove a v3 DSL need. Engram `#331` requests NovaScript verification after `v0.20.1`. | Do not reopen CR-092/CR-093 generation or CR-100/CR-102 replay work. A provider-code RED seam needs fresh consumer/product evidence or product-case proof that existing v2 templates plus CR-104/CR-105 are insufficient. |
+| `#269` | Keep broad FR open | CR-106 comment `1115` records no fresh missing runtime behavior for the agent-mode/generic-probe tail. Engram `#331` is the downstream evidence dependency after `v0.20.1`. | Do not reopen event-delta/source-cursor repair guidance from broad issue openness alone. A provider-code RED seam needs fresh consumer/product evidence naming concrete generic-probe lifecycle/orchestration behavior. |
+| `#270` | Keep broad FR open | CR-106 comment `1116` records that CR-105 consumed the known `input_policy.no_global_input` seam and `v0.20.1` is deployed. Engram `#331` requests NovaScript verification for CR-105 and prior bounded flows. | Do not reopen TextBox/DataGrid helper or replay seams without a new consumer failure. A provider-code RED seam needs fresh consumer/product evidence beyond CR-105 policy behavior. |
+| `#271` | Keep broad FR open | CR-106 comment `1117` records no fresh diagnostics-orchestration runtime failure. Engram `#331` is the downstream evidence dependency after `v0.20.1`. | Do not repeat cleanup/trace/freshness or PDB-process proof tails. A provider-code RED seam needs fresh consumer/product evidence naming concrete diagnostics-orchestration behavior. |
+| `#272` | Keep broad FR open | CR-106 comment `1118` records no evidence that CR-104 `oracle_pack` / `app_diagnostics` pack lifecycle or CR-105 `no_global_input` integration is insufficient. Engram `#331` requests NovaScript verification after `v0.20.1`. | Do not reopen CR-080/084/085 handoff seams, CR-086 split/comment boundary, or CR-104 pack manifests. A provider-code RED seam needs fresh consumer/product evidence beyond the existing oracle_pack/app_diagnostics lifecycle contract. |
+
 ## Remaining Follow-Up
 
 - `#226`, `#250`, and `#267`: target-side Engram status is `resolved` after

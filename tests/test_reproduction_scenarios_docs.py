@@ -458,6 +458,46 @@ def test_issues_backlog_records_cr104_named_pack_manifest_lifecycle_without_broa
         assert "Source-side owner may close" not in clause
 
 
+def test_issues_backlog_records_cr106_post_v0201_downstream_boundary() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    heading = "## CR-106 Post-v0.20.1 Downstream Evidence Request Boundary"
+
+    assert heading in backlog
+    section = backlog.split(heading, 1)[1].split("\n## ", 1)[0]
+    section_text = " ".join(section.split())
+
+    required_terms = (
+        "v0.20.1",
+        "Engram `#331`",
+        "CR-104",
+        "CR-105",
+        "no_global_input",
+        "provider-code RED seam",
+        "comments `1114` through `1118`",
+        "broad issues remain open by design",
+    )
+    for term in required_terms:
+        assert term in section_text
+
+    expected_markers = {
+        "#268": ("comment `1114`", "v3 DSL", "product-case proof"),
+        "#269": ("comment `1115`", "generic-probe", "lifecycle/orchestration"),
+        "#270": ("comment `1116`", "CR-105", "no_global_input"),
+        "#271": ("comment `1117`", "diagnostics-orchestration", "cleanup/trace/freshness"),
+        "#272": ("comment `1118`", "CR-104", "oracle_pack"),
+    }
+    for issue, markers in expected_markers.items():
+        row = _section_issue_row(backlog, heading, issue)
+        assert "Keep broad FR open" in row
+        assert "Engram `#331`" in row
+        assert "fresh consumer/product evidence" in row
+        for marker in markers:
+            assert marker in row
+
+    assert "close the full FR" not in section
+    assert "Source-side owner may close" not in section
+
+
 def test_issues_backlog_links_novascript_replay_packet() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
 
