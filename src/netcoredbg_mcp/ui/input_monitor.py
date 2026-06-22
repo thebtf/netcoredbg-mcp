@@ -53,6 +53,7 @@ class RuntimeInputMonitor:
     def __init__(self, *, reader: LastInputReader | None = None) -> None:
         self._reader = reader or read_last_input_sample
         self._baselines: dict[tuple[str, str], LastInputSample] = {}
+        self._last_sample: LastInputSample | None = None
 
     def check(self, **kwargs: Any) -> dict[str, Any]:
         window = str(kwargs.get("window") or "unknown")
@@ -65,7 +66,31 @@ class RuntimeInputMonitor:
             return _blocked(f"input monitor read failed: {exc}", window=window)
 
         if window != "after_action":
+            previous = self._last_sample
+            if previous is not None:
+                comparison = _compare_dword_ticks(
+                    previous.last_input_tick_ms,
+                    sample.last_input_tick_ms,
+                )
+                monitor = {
+                    "baseline": _sample_payload(previous),
+                    "current": _sample_payload(sample),
+                }
+                if comparison == "advanced":
+                    return _dirty(
+                        window=window,
+                        summary=(
+                            "Windows last-input tick advanced between monitored windows."
+                        ),
+                        monitor=monitor,
+                    )
+                if comparison == "regressed":
+                    return {
+                        **_blocked("input monitor tick regressed", window=window),
+                        "monitor": monitor,
+                    }
             self._baselines[key] = sample
+            self._last_sample = sample
             return {
                 "status": "PASS",
                 "basis": "windows_last_input_info",
@@ -89,19 +114,17 @@ class RuntimeInputMonitor:
             "current": _sample_payload(sample),
         }
         if comparison == "advanced":
-            return {
-                "status": "DIRTY",
-                "basis": "windows_last_input_info",
-                "source": "global_input",
-                "window": window,
-                "summary": "Windows last-input tick advanced during no-operator window.",
-                "monitor": monitor,
-            }
+            return _dirty(
+                window=window,
+                summary="Windows last-input tick advanced during no-operator window.",
+                monitor=monitor,
+            )
         if comparison == "regressed":
             return {
                 **_blocked("input monitor tick regressed", window=window),
                 "monitor": monitor,
             }
+        self._last_sample = sample
         return {
             "status": "PASS",
             "basis": "windows_last_input_info",
@@ -172,4 +195,15 @@ def _blocked(reason: str, *, window: str) -> dict[str, Any]:
         "reason": reason,
         "basis": "windows_last_input_info",
         "window": window,
+    }
+
+
+def _dirty(*, window: str, summary: str, monitor: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": "DIRTY",
+        "basis": "windows_last_input_info",
+        "source": "global_input",
+        "window": window,
+        "summary": summary,
+        "monitor": monitor,
     }

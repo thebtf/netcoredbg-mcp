@@ -59,6 +59,34 @@ def test_runtime_input_monitor_reports_dirty_when_last_input_tick_advances() -> 
     assert "advanced" in after["summary"]
 
 
+def test_runtime_input_monitor_reports_dirty_between_transition_windows() -> None:
+    samples = iter(
+        [
+            LastInputSample(last_input_tick_ms=100, current_tick_ms=1000),
+            LastInputSample(last_input_tick_ms=100, current_tick_ms=1100),
+            LastInputSample(last_input_tick_ms=180, current_tick_ms=1200),
+        ]
+    )
+    monitor = RuntimeInputMonitor(reader=lambda: next(samples))
+
+    monitor.check(**_kwargs("before_action"))
+    monitor.check(**_kwargs("after_action"))
+    result = monitor.check(
+        **{
+            **_kwargs("before_action"),
+            "transition_id": "transition-2",
+            "transition_index": 1,
+        }
+    )
+
+    assert result["status"] == "DIRTY"
+    assert result["basis"] == "windows_last_input_info"
+    assert result["window"] == "before_action"
+    assert "between monitored windows" in result["summary"]
+    assert result["monitor"]["baseline"]["last_input_tick_ms"] == 100
+    assert result["monitor"]["current"]["last_input_tick_ms"] == 180
+
+
 def test_runtime_input_monitor_blocks_when_backend_is_unavailable() -> None:
     monitor = RuntimeInputMonitor(
         reader=lambda: (_ for _ in ()).throw(
