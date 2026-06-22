@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Runtime-smoke v2 now ships a default `runtime.input_monitor.check` adapter on
+  Windows, backed by current desktop-session `GetLastInputInfo` evidence for
+  `run_confidence.no_operator` runs.
+
+### Changed
+- Missing input-monitor adapter evidence no longer blocks ordinary
+  `runtime_smoke_run_plan` no-operator plans on supported Windows desktop
+  sessions; clean windows report `CLEAN_PROVEN`, while detected input or
+  unsupported environments still fail closed as dirty or unproven.
+
 ## [0.20.3] - 2026-06-22
 
 ### Changed

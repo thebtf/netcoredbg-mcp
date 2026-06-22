@@ -1048,6 +1048,10 @@ def ui_operation_adapters(
 
 
 def _session_operation_adapters(session: Any) -> OperationAdapterMap:
+    from ..ui.input_monitor import create_default_runtime_input_monitor
+
+    input_monitor = create_default_runtime_input_monitor()
+
     async def launch(**args: Any) -> dict[str, Any]:
         launch_service = getattr(session, "launch", None)
         if launch_service is None:
@@ -1189,6 +1193,9 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
             "char_count": len(content),
             "byte_count": len(content.encode("utf-8")),
         }
+
+    async def runtime_input_monitor_check(**args: Any) -> dict[str, Any]:
+        return input_monitor.check(**args)
 
     async def debug_hygiene_preflight(**args: Any) -> dict[str, Any]:
         from .hygiene import RuntimeHygieneService
@@ -1351,6 +1358,7 @@ def _session_operation_adapters(session: Any) -> OperationAdapterMap:
         "debug.stop": debug_stop,
         "process.registry.count": process_registry_count,
         "fixture.restore": fixture_restore,
+        "runtime.input_monitor.check": runtime_input_monitor_check,
     }
 
 
