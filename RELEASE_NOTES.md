@@ -1,4 +1,17 @@
-# netcoredbg-mcp v0.20.1
+# netcoredbg-mcp Release Notes
+
+## Next Release Draft
+
+This draft records unreleased CR-107 behavior for the next PATCH/MINOR release.
+Runtime-smoke v2 can request `run_confidence.no_operator` evidence alongside
+`input_policy.no_global_input`. When the required monitor reports clean evidence,
+normal product `PASS` / `FAIL` verdicts are allowed; when operator input is dirty
+or the monitor is unavailable, the run returns terminal `BLOCKED` with
+`DIRTY_UNPROVEN` or `UNPROVEN` evidence and restart guidance.
+
+This is a confidence layer, not a full isolated desktop or VM/background runner.
+
+## netcoredbg-mcp v0.20.1
 
 Released: 2026-06-22
 
