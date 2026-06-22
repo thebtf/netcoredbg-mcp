@@ -14,7 +14,7 @@
 вычислять выражения, читать вывод отладки и управлять поверхностями Windows UI
 Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 
-**131 MCP-инструмент · 8 промптов · 4 ресурса · 1792 собранных теста · релиз v0.20.0**
+**131 MCP-инструмент · 8 промптов · 4 ресурса · 1800 собранных тестов · релиз v0.20.1**
 
 ## Быстрые ссылки
 
@@ -23,18 +23,16 @@ Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 - **Справочник:** [Доступные инструменты](#доступные-инструменты) · [Ресурсы](#mcp-ресурсы) · [Промпты](#mcp-промпты) · [Архитектура](#обзор-архитектуры)
 - **Проект:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## Что нового в v0.20.0
+## Что нового в v0.20.1
 
-- **Named pack manifests** — запуски `oracle_pack` и `app_diagnostics` теперь
-  отдают bounded `pack_manifest` descriptors и refs на `pack-manifest.json`
-  через run-plan, run-probe, evidence-bundle и event-delta facades.
-- **Source classifications and rollups** — named packs записывают
-  per-source classifications, cleanup/freshness/redaction/limits rollups и
-  безопасные evidence refs, чтобы агент мог аудировать oracle evidence без
-  восстановления transient state.
-- **NovaScript replay ledger closure** — bounded action-oracle
-  app-diagnostics replay записан как downstream `PASS`, а broad tails
-  `#268..#272` остаются явно open для non-duplicate follow-up work.
+- **No-global-input runtime-smoke policy** — v2 plans теперь могут объявлять
+  `input_policy.no_global_input`, чтобы запросить operator-isolated execution.
+- **Action input classification** — runtime-smoke v2 записывает, является ли
+  action `BACKGROUND_SAFE`, `APP_DISPATCH_SAFE`, `REQUIRES_GLOBAL_INPUT` или
+  `UNSUPPORTED_BY_PROVIDER`.
+- **Fail-closed physical fallback** — actions, которым нужны foreground,
+  cursor, mouse, keyboard или physical fallback, теперь возвращают `BLOCKED`
+  до мутации, если активен `no_global_input`.
 
 ## Основные возможности
 

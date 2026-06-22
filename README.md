@@ -14,7 +14,7 @@ set breakpoints, step through code, inspect variables, evaluate expressions, rea
 debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
 and Avalonia windows without opening an IDE.
 
-**131 MCP tools · 8 prompts · 4 resources · 1792 collected tests · release v0.20.0**
+**131 MCP tools · 8 prompts · 4 resources · 1800 collected tests · release v0.20.1**
 
 ## Quick Links
 
@@ -23,18 +23,16 @@ and Avalonia windows without opening an IDE.
 - **Reference:** [Available Tools](#available-tools) · [Resources](#mcp-resources) · [Prompts](#mcp-prompts) · [Architecture](#architecture-overview)
 - **Project:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## What's New in v0.20.0
+## What's New in v0.20.1
 
-- **Named pack manifests** — `oracle_pack` and `app_diagnostics` runs now expose
-  bounded `pack_manifest` descriptors and `pack-manifest.json` refs through
-  run-plan, run-probe, evidence-bundle, and event-delta facades.
-- **Source classifications and rollups** — named packs record per-source
-  classifications plus cleanup, freshness, redaction, and limits rollups so
-  agents can audit oracle evidence without reconstructing transient state.
-- **NovaScript replay ledger closure** — the bounded action-oracle
-  app-diagnostics replay is tracked as downstream `PASS`, while broad
-  `#268..#272` issue tails stay explicitly open for non-duplicate follow-up
-  work.
+- **No-global-input runtime-smoke policy** — v2 plans can declare
+  `input_policy.no_global_input` to request operator-isolated execution.
+- **Action input classification** — runtime-smoke v2 records whether an action
+  is `BACKGROUND_SAFE`, `APP_DISPATCH_SAFE`, `REQUIRES_GLOBAL_INPUT`, or
+  `UNSUPPORTED_BY_PROVIDER`.
+- **Fail-closed physical fallback** — actions that require foreground, cursor,
+  mouse, keyboard, or physical fallback now return `BLOCKED` before mutation
+  when `no_global_input` is active.
 
 ## Highlights
 
