@@ -13,6 +13,7 @@ import pytest
 from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeSession
 from netcoredbg_mcp.session.state import DebugState
 from netcoredbg_mcp.tools.runtime_smoke import register_runtime_smoke_tools
+from netcoredbg_mcp.ui.input_monitor import LastInputSample, RuntimeInputMonitor
 
 
 class RunPlanFacadeSession:
@@ -415,6 +416,55 @@ async def test_runtime_smoke_run_plan_starts_durable_run_after_validation(
     assert session.runtime_smoke.lifecycle_runs.active_run_ids() == [data["run_id"]]
     assert session.launch_calls == 0
     assert len(access_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_run_plan_default_adapter_proves_clean_no_operator(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    samples = iter(
+        [
+            LastInputSample(last_input_tick_ms=100, current_tick_ms=1000),
+            LastInputSample(last_input_tick_ms=100, current_tick_ms=1100),
+        ]
+    )
+    monitor = RuntimeInputMonitor(reader=lambda: next(samples))
+    monkeypatch.setattr(
+        "netcoredbg_mcp.ui.input_monitor.create_default_runtime_input_monitor",
+        lambda: monitor,
+    )
+    session = RunPlanFacadeSession()
+    _register(capturing_mcp, session)
+
+    response = await capturing_mcp.tools["runtime_smoke_run_plan"](
+        ctx=None,
+        plan={
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "input_policy": {"no_global_input": True},
+            "run_confidence": {"no_operator": True},
+            "cases": [
+                {
+                    "id": "no-operator-facade",
+                    "transitions": [
+                        {
+                            "id": "noop-transition",
+                            "action": {"kind": "noop"},
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    final = await _wait_for_final_bundle(capturing_mcp, response["data"]["run_id"])
+
+    assert final["status"] == "PASS"
+    result = final["result"]
+    assert result["status"] == "PASS"
+    assert result["compact"]["run_confidence"]["classification"] == "CLEAN_PROVEN"
+    assert result["compact"]["run_confidence"]["basis"] == "windows_last_input_info"
 
 
 @pytest.mark.asyncio
