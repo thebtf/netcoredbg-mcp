@@ -694,6 +694,8 @@ def test_novascript_action_oracle_app_diagnostics_example_is_consumer_ready() ->
 
     assert "v0.20.4" in plan["name"]
     assert "netcoredbg-mcp 0.20.4" in plan["description"]
+    assert "v0.20.0" not in plan["name"]
+    assert "v0.20.0" not in plan["description"]
     assert "0.19.0" not in plan["name"]
     assert "0.19.0" not in plan["description"]
     assert validate_plan(plan) == []
