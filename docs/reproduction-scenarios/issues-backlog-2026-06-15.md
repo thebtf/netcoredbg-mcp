@@ -110,6 +110,29 @@ fresh consumer/product evidence.
 | `#271` | Keep broad FR open | CR-106 comment `1117` records no fresh diagnostics-orchestration runtime failure. Engram `#331` is the downstream evidence dependency after `v0.20.1`. | Do not repeat cleanup/trace/freshness or PDB-process proof tails. A provider-code RED seam needs fresh consumer/product evidence naming concrete diagnostics-orchestration behavior. |
 | `#272` | Keep broad FR open | CR-106 comment `1118` records no evidence that CR-104 `oracle_pack` / `app_diagnostics` pack lifecycle or CR-105 `no_global_input` integration is insufficient. Engram `#331` requests NovaScript verification after `v0.20.1`. | Do not reopen CR-080/084/085 handoff seams, CR-086 split/comment boundary, or CR-104 pack manifests. A provider-code RED seam needs fresh consumer/product evidence beyond the existing oracle_pack/app_diagnostics lifecycle contract. |
 
+## CR-107 Operator Input Contamination Confidence
+
+CR-107 records the first bounded CAP-UI-002 provider slice after the operator
+interview on 2026-06-22. Runtime-smoke v2 plans can now request
+`run_confidence.no_operator` alongside `input_policy.no_global_input`.
+When requested, the runner calls the testable `runtime.input_monitor.check`
+adapter before product verdicts. Clean monitor evidence produces bounded
+`run_confidence.classification == "CLEAN_PROVEN"` and allows ordinary product
+`PASS` / `FAIL`. Dirty external operator input returns terminal `BLOCKED` with
+`DIRTY_UNPROVEN`, contamination source/window evidence, and restart guidance.
+Missing or unavailable monitor evidence returns terminal `BLOCKED` with
+`UNPROVEN` and guidance to connect `runtime.input_monitor.check`.
+
+This is not a full isolated desktop, VM runner, or background Win32 hook
+implementation. It is a fail-closed confidence layer so operator keyboard/mouse
+interference is not recorded as product `FAIL`.
+
+| Issue | CR-107 decision | Evidence | No-repeat boundary / next gate |
+| --- | --- | --- | --- |
+| `#268` | Keep broad FR open | Bounded run-confidence evidence helps action/oracle scenario runs distinguish clean product verdicts from dirty/unproven operator-contaminated evidence. | Do not claim v3 DSL, broad action/oracle orchestration, or full issue closure from CR-107. Remaining broad closure still needs split follow-up issue evidence or fresh broad-closure proof. |
+| `#270` | Keep broad FR open | Bounded UI scenario runner confidence prevents operator keyboard/mouse interference from being misread as DataGrid/TextBox helper failure. | Do not reopen already-covered TextBox/DataGrid helper/replay slices from broad issue openness alone; fresh consumer failure evidence is still required for helper work. |
+| `#272` | Keep broad FR open | Bounded dirty/unproven evidence protects app-diagnostics/oracle_pack scenario verdicts from contaminated no-operator windows. | Do not claim app-diagnostics/oracle_pack lifecycle closure or full background isolation from CR-107; remaining lifecycle/orchestration work still needs split follow-up issue evidence or fresh broad-closure proof. |
+
 ## Remaining Follow-Up
 
 - `#226`, `#250`, and `#267`: target-side Engram status is `resolved` after

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Runtime-smoke v2 plans can request `run_confidence.no_operator` evidence for
+  no-operator runs, backed by the testable `runtime.input_monitor.check`
+  adapter contract.
+
+### Changed
+- No-operator runtime-smoke runs now distinguish clean product verdicts from
+  dirty or unproven operator-contaminated windows with bounded
+  `run_confidence` evidence.
+
+### Fixed
+- Dirty or unproven no-operator scenario evidence now returns terminal
+  `BLOCKED` with restart guidance instead of being recorded as product `FAIL`.
+- Unknown non-`PASS` confidence statuses fail closed as `BLOCKED` instead of
+  falling through to `PASS`.
+
 ## [0.20.1] - 2026-06-22
 
 ### Added

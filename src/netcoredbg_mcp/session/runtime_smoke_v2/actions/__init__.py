@@ -66,6 +66,7 @@ class ActionContext:
     diagnostic_launch: dict[str, Any] | None = None
     case_id: str | None = None
     input_policy: dict[str, Any] | None = None
+    run_confidence: dict[str, Any] | None = None
     transition_index: int | None = None
     app_diagnostics_progress_notifier: Callable[[dict[str, Any]], Any] | None = None
 

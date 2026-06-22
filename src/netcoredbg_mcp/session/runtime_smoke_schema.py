@@ -84,10 +84,12 @@ V2_ONLY_TOP_LEVEL_KEYS = (
     "diagnostics",
     "metrics_thresholds",
     "input_policy",
+    "run_confidence",
 )
 ACCEPTED_TOP_LEVEL_KEYS_V2 = ACCEPTED_TOP_LEVEL_KEYS + V2_ONLY_TOP_LEVEL_KEYS
 V1_EXECUTION_KEYS = ("steps", "actions", "assertions", "evidence")
 INPUT_POLICY_KEYS = ("no_global_input",)
+RUN_CONFIDENCE_KEYS = ("no_operator",)
 
 
 @dataclass(frozen=True)
@@ -908,6 +910,7 @@ def validate_plan(plan: Any) -> list[str]:
     _validate_step_collections(plan, errors)
     _validate_restore_configs(plan, errors)
     _validate_input_policy(plan, errors)
+    _validate_run_confidence(plan, errors)
     return errors
 
 
@@ -956,6 +959,12 @@ def normalize_input_policy(payload: Any) -> dict[str, bool]:
     return {"no_global_input": payload.get("no_global_input") is True}
 
 
+def normalize_run_confidence(payload: Any) -> dict[str, bool]:
+    if not isinstance(payload, dict):
+        return {"no_operator": False}
+    return {"no_operator": payload.get("no_operator") is True}
+
+
 def validate_input_policy_payload(prefix: str, payload: Any, errors: list[str]) -> None:
     if not isinstance(payload, dict):
         errors.append(f"{prefix} must be an object")
@@ -969,12 +978,35 @@ def validate_input_policy_payload(prefix: str, payload: Any, errors: list[str]) 
         errors.append(f"{prefix}.no_global_input must be a boolean")
 
 
+def validate_run_confidence_payload(prefix: str, payload: Any, errors: list[str]) -> None:
+    if not isinstance(payload, dict):
+        errors.append(f"{prefix} must be an object")
+        return
+    accepted_keys = set(RUN_CONFIDENCE_KEYS)
+    for key in payload:
+        if key not in accepted_keys:
+            expected = ", ".join(sorted(accepted_keys))
+            errors.append(f"{prefix}.{key} is not accepted; expected one of: {expected}")
+    if "no_operator" in payload and not isinstance(payload["no_operator"], bool):
+        errors.append(f"{prefix}.no_operator must be a boolean")
+
+
 def _validate_input_policy(plan: dict[str, Any], errors: list[str]) -> None:
     if "input_policy" not in plan:
         return
     validate_input_policy_payload(
         "input_policy",
         plan["input_policy"],
+        errors,
+    )
+
+
+def _validate_run_confidence(plan: dict[str, Any], errors: list[str]) -> None:
+    if "run_confidence" not in plan:
+        return
+    validate_run_confidence_payload(
+        "run_confidence",
+        plan["run_confidence"],
         errors,
     )
 

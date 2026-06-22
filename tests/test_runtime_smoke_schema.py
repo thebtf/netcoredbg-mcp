@@ -205,6 +205,58 @@ def test_validate_v2_plan_accepts_no_global_input_policy() -> None:
     assert validate_plan(plan) == []
 
 
+def test_validate_v2_plan_accepts_run_confidence_policy() -> None:
+    plan = {
+        "schema": "netcoredbg.runtime_smoke.v2",
+        "input_policy": {"no_global_input": True},
+        "run_confidence": {"no_operator": True},
+        "cases": [
+            {
+                "id": "isolated_noop",
+                "transitions": [{"action": {"kind": "noop"}, "probes": []}],
+            }
+        ],
+    }
+
+    assert validate_plan(plan) == []
+
+
+def test_validate_v2_plan_rejects_malformed_run_confidence_policy() -> None:
+    errors = validate_plan(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "run_confidence": {"no_operator": "yes"},
+            "cases": [
+                {
+                    "id": "isolated_noop",
+                    "transitions": [{"action": {"kind": "noop"}, "probes": []}],
+                }
+            ],
+        }
+    )
+
+    assert errors == ["run_confidence.no_operator must be a boolean"]
+
+
+def test_validate_v2_plan_rejects_unknown_run_confidence_key() -> None:
+    errors = validate_plan(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "run_confidence": {"no_operator": True, "foreground_free": True},
+            "cases": [
+                {
+                    "id": "isolated_noop",
+                    "transitions": [{"action": {"kind": "noop"}, "probes": []}],
+                }
+            ],
+        }
+    )
+
+    assert errors == [
+        "run_confidence.foreground_free is not accepted; expected one of: no_operator"
+    ]
+
+
 def test_validate_v2_plan_rejects_malformed_no_global_input_policy() -> None:
     errors = validate_plan(
         {

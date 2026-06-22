@@ -6,6 +6,7 @@ from typing import Any
 from .actions import ActionContext
 from .cleanup import cleanup_steps_from_case, run_cleanup
 from .metrics import evaluate_metric_thresholds, merge_case_metrics
+from .run_confidence import aggregate_transition_confidence
 from .transition_executor import execute_transition
 
 
@@ -99,6 +100,12 @@ async def execute_case(
         "failed_assertions": failed_assertions,
         "cleanup": cleanup,
     }
+    run_confidence = aggregate_transition_confidence(
+        transitions,
+        policy=context.run_confidence,
+    )
+    if run_confidence is not None:
+        result["run_confidence"] = run_confidence
     if "rendered_from" in case:
         result["rendered_from"] = dict(case["rendered_from"])
     if blocked is not None:

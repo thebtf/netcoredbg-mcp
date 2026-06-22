@@ -498,6 +498,40 @@ def test_issues_backlog_records_cr106_post_v0201_downstream_boundary() -> None:
     assert "Source-side owner may close" not in section
 
 
+def test_issues_backlog_records_cr107_operator_input_confidence_boundary() -> None:
+    backlog = _read(BACKLOG_SCENARIOS)
+    heading = "## CR-107 Operator Input Contamination Confidence"
+
+    assert heading in backlog
+    section = backlog.split(heading, 1)[1].split("\n## ", 1)[0]
+    section_text = " ".join(section.split())
+
+    required_terms = (
+        "CAP-UI-002",
+        "run_confidence.no_operator",
+        "input_policy.no_global_input",
+        "runtime.input_monitor.check",
+        "CLEAN_PROVEN",
+        "DIRTY_UNPROVEN",
+        "UNPROVEN",
+        "terminal `BLOCKED`",
+        "not recorded as product `FAIL`",
+        "not a full isolated desktop",
+    )
+    for term in required_terms:
+        assert term in section_text
+
+    for issue in ("#268", "#270", "#272"):
+        row = _section_issue_row(backlog, heading, issue)
+        assert "Keep broad FR open" in row
+        assert "bounded" in row.lower()
+        assert "fresh" in row.lower() or "split follow-up issue evidence" in row
+
+    assert "`#269`" not in section
+    assert "`#271`" not in section
+    assert "Source-side owner may close" not in section
+
+
 def test_issues_backlog_links_novascript_replay_packet() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
 

@@ -12,6 +12,7 @@ from ..runtime_smoke_schema import (
     ACCEPTED_TOP_LEVEL_KEYS_V2,
     normalize_app_diagnostics_launch_contract,
     normalize_input_policy,
+    normalize_run_confidence,
     validate_diagnostic_schema_example,
     validate_input_policy_payload,
 )
@@ -29,6 +30,7 @@ from .generate import expand_generated_cases
 from .probe_dispatcher import accepted_probe_phases, probe_path, probe_runs_in_phase
 from .probes import accepted_probe_kinds
 from .result_envelope import compact_value, finalize_result
+from .run_confidence import aggregate_case_confidence
 
 
 def compact_v2_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -46,6 +48,8 @@ def compact_v2_result(result: dict[str, Any]) -> dict[str, Any]:
         compact["exception"] = compact_value(result["exception"])
     if isinstance(result.get("input_policy"), dict):
         compact["input_policy"] = compact_value(result["input_policy"])
+    if isinstance(result.get("run_confidence"), dict):
+        compact["run_confidence"] = compact_value(result["run_confidence"])
     if "operator_isolated" in result:
         compact["operator_isolated"] = result["operator_isolated"]
     return compact
@@ -95,6 +99,7 @@ class RuntimeStateOracleRunner:
         self._diagnostic_launch: dict[str, Any] | None = None
         self._case_progress_notifier = case_progress_notifier
         self._input_policy = normalize_input_policy(None)
+        self._run_confidence = normalize_run_confidence(None)
         self._app_diagnostics_progress_notifier = app_diagnostics_progress_notifier
 
     async def run(self, plan: dict[str, Any]) -> dict[str, Any]:
@@ -150,6 +155,7 @@ class RuntimeStateOracleRunner:
             session=self._session,
             diagnostic_launch=self._diagnostic_launch,
             input_policy=self._input_policy,
+            run_confidence=self._run_confidence,
             app_diagnostics_progress_notifier=self._app_diagnostics_progress_notifier,
         )
         try:
@@ -206,6 +212,7 @@ class RuntimeStateOracleRunner:
                 session=self._session,
                 diagnostic_launch=self._diagnostic_launch,
                 input_policy=self._input_policy,
+                run_confidence=self._run_confidence,
                 app_diagnostics_progress_notifier=self._app_diagnostics_progress_notifier,
             )
 
@@ -289,6 +296,17 @@ class RuntimeStateOracleRunner:
 
         plan_cleanup = await run_cleanup(cleanup_steps_from_plan(plan), context)
         cleanup = merge_cleanup_results(plan_cleanup, case_cleanups)
+        result_extra: dict[str, Any] = {}
+        if blocked_payload:
+            result_extra["blocked"] = blocked_payload
+        run_confidence = aggregate_case_confidence(
+            case_results,
+            policy=self._run_confidence,
+        )
+        if run_confidence is not None:
+            result_extra["run_confidence"] = run_confidence
+            if run_confidence.get("product_verdict_allowed") is False:
+                result_extra["operator_isolated"] = False
 
         return self._finalize(
             status=terminal_status,
@@ -300,7 +318,7 @@ class RuntimeStateOracleRunner:
             metrics_thresholds=metrics_thresholds,
             baseline=baseline_result,
             cleanup=cleanup,
-            extra={"blocked": blocked_payload} if blocked_payload else None,
+            extra=result_extra or None,
         )
 
     def capture_plan_metadata(self, plan: dict[str, Any]) -> None:
@@ -310,6 +328,7 @@ class RuntimeStateOracleRunner:
         """
         self._diagnostic_launch = _diagnostic_launch_from_plan(plan)
         self._input_policy = normalize_input_policy(plan.get("input_policy"))
+        self._run_confidence = normalize_run_confidence(plan.get("run_confidence"))
 
     def _finalize(
         self,
