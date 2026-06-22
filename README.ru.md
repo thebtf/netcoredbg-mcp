@@ -25,13 +25,13 @@ Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 
 ## Что нового в v0.20.5
 
-- **Package documentation refresh** — PyPI README, русский README, release
+- **Обновление документации пакета** — PyPI README, русский README, release
   notes, production playbook и NovaScript example теперь соответствуют
   shipped-поведению `v0.20.4` для no-operator input monitor.
-- **Operator-contamination wording** — no-operator guidance теперь различает
+- **Формулировки про operator contamination** — no-operator guidance теперь различает
   adapter-level `DIRTY` evidence и возвращаемый результат
   `run_confidence.classification == "DIRTY_UNPROVEN"`.
-- **Consumer-facing examples** — NovaScript action-oracle app-diagnostics
+- **Примеры для потребителей** — NovaScript action-oracle app-diagnostics
   example и docs regression oracle теперь указывают на текущий package release.
 
 ## Основные возможности
