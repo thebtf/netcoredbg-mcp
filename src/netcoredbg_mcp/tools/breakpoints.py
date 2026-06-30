@@ -118,7 +118,8 @@ def register_breakpoint_tools(
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
     )
     async def list_breakpoints(ctx: Context, file: str | None = None) -> dict:
-        """List all breakpoints or breakpoints in a specific file.
+        """
+        List breakpoints (line + function). Per-file filter scopes only line bps.
 
         Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
         """
@@ -135,23 +136,37 @@ def register_breakpoint_tools(
                     "hit_count": hit_count,
                 }
 
+            def _fbp_dict(fbp) -> dict:
+                return {
+                    "function": fbp.name,
+                    "condition": fbp.condition,
+                    "hit_condition": fbp.hit_condition,
+                    "verified": fbp.verified,
+                }
+
             if file:
                 # Resolve project root from MCP context
                 await resolve_project_root(ctx, session)
                 # Validate file path if provided
                 validated_file = session.validate_path(file)
                 bps = session.breakpoints.get_for_file(validated_file)
-                result = {validated_file: [_bp_dict(validated_file, bp) for bp in bps]}
+                result: dict = {validated_file: [_bp_dict(validated_file, bp) for bp in bps]}
             else:
                 all_bps = session.breakpoints.get_all()
                 result = {f: [_bp_dict(f, bp) for bp in bps] for f, bps in all_bps.items()}
+                fbps = session.breakpoints.get_function_breakpoints()
+                if fbps:
+                    result["__function_breakpoints__"] = [_fbp_dict(fbp) for fbp in fbps]
             return build_response(data=result, state=session.state.state)
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
     @mcp.tool(annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
     async def clear_breakpoints(ctx: Context, file: str | None = None) -> dict:
-        """Clear breakpoints from a file or all files.
+        """
+        Clear breakpoints. With file: that file's line bps.
+        Without file: all line AND function bps.
+        For one function bp use remove_function_breakpoint.
 
         Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
         """
@@ -189,6 +204,9 @@ def register_breakpoint_tools(
 
         Escape hatch: see the dap-escape-hatch prompt for unwrapped DAP requests.
 
+        Persists across restart cycles. Remove via remove_function_breakpoint
+        or clear via clear_breakpoints (no file arg).
+
         Args:
             function_name: Full or partial function name to break on
             condition: Optional condition expression
@@ -203,6 +221,28 @@ def register_breakpoint_tools(
             await notify_breakpoints_changed(ctx)
             return build_response(
                 data={"function": bp.name, "condition": bp.condition, "verified": bp.verified},
+                state=session.state.state,
+            )
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(idempotentHint=True, openWorldHint=False))
+    async def remove_function_breakpoint(ctx: Context, function_name: str) -> dict:
+        """
+        Remove function breakpoint by name (exact match used at add time).
+
+        Args:
+            function_name: Name passed to add_function_breakpoint.
+        """
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            removed = await session.remove_function_breakpoint(function_name)
+            await notify_breakpoints_changed(ctx)
+            return build_response(
+                data={"removed": removed, "function": function_name},
                 state=session.state.state,
             )
         except Exception as e:

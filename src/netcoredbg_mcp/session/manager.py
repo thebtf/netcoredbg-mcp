@@ -1491,7 +1491,7 @@ class SessionManager:
         return removed
 
     async def clear_breakpoints(self, file: str | None = None) -> int:
-        """Clear breakpoints."""
+        """Clear breakpoints. Without file, also clears function breakpoints."""
         if file:
             files = [file]
         else:
@@ -1502,6 +1502,14 @@ class SessionManager:
         if self.is_active:
             for f in files:
                 await self._client.set_breakpoints(f, [])
+
+        # Without file filter, also drop function breakpoints — they're not
+        # file-scoped and otherwise persist invisibly across restart cycles.
+        if not file:
+            fbp_count = self._breakpoints.clear_function_breakpoints()
+            count += fbp_count
+            if self.is_active and fbp_count > 0:
+                await self._sync_function_breakpoints()
 
         return count
 
