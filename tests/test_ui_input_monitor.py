@@ -59,6 +59,40 @@ def test_runtime_input_monitor_reports_dirty_when_last_input_tick_advances() -> 
     assert "advanced" in after["summary"]
 
 
+def test_runtime_input_monitor_does_not_treat_runner_emulated_input_as_operator_dirty() -> (
+    None
+):
+    samples = iter(
+        [
+            LastInputSample(last_input_tick_ms=100, current_tick_ms=1000),
+            LastInputSample(last_input_tick_ms=220, current_tick_ms=1100),
+        ]
+    )
+    monitor = RuntimeInputMonitor(reader=lambda: next(samples))
+
+    monitor.check(**_kwargs("before_action"))
+    after = monitor.check(
+        **{
+            **_kwargs("after_action"),
+            "action": {"kind": "ui.drag"},
+            "runner_input": {
+                "kind": "ui.drag",
+                "source": "runner_emulated_input",
+                "window": "action",
+            },
+        }
+    )
+
+    assert after["status"] == "RUNNER_GLOBAL_INPUT_AMBIGUOUS"
+    assert after["basis"] == "windows_last_input_info"
+    assert after["source"] == "runner_emulated_input"
+    assert after["window"] == "after_action"
+    assert after["action"]["kind"] == "ui.drag"
+    assert after["summary"] == (
+        "Windows last-input tick advanced during runner-emulated global input."
+    )
+
+
 def test_runtime_input_monitor_reports_dirty_between_transition_windows() -> None:
     samples = iter(
         [
@@ -124,7 +158,9 @@ def test_runtime_input_monitor_blocks_missing_case_identity_before_reading() -> 
     assert result["reason"] == "input monitor missing case identity"
 
 
-def test_runtime_input_monitor_blocks_missing_transition_identity_before_reading() -> None:
+def test_runtime_input_monitor_blocks_missing_transition_identity_before_reading() -> (
+    None
+):
     monitor = RuntimeInputMonitor(
         reader=lambda: (_ for _ in ()).throw(AssertionError("reader should not run"))
     )

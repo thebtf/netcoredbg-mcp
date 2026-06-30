@@ -14,9 +14,14 @@ from netcoredbg_mcp.session.runtime_smoke_schema import (
     validate_plan,
 )
 from netcoredbg_mcp.session.runtime_smoke_v2.generate import expand_generated_cases
+from netcoredbg_mcp.session.runtime_smoke_v2.run_confidence import (
+    REASON_RUNNER_INPUT_AMBIGUOUS,
+)
 
 EXAMPLE_PATH = Path("docs/examples/runtime-smoke-v2-drag-drop-grid.json")
-SELECTOR_SAFETY_EXAMPLE_PATH = Path("docs/examples/runtime-smoke-v2-selector-safety.json")
+SELECTOR_SAFETY_EXAMPLE_PATH = Path(
+    "docs/examples/runtime-smoke-v2-selector-safety.json"
+)
 NOVASCRIPT_ACTION_ORACLE_APP_DIAGNOSTICS_EXAMPLE_PATH = Path(
     "docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json"
 )
@@ -27,6 +32,7 @@ APP_DIAGNOSTICS_POLL_EXAMPLE_PATH = Path(
     "docs/examples/runtime-smoke-app-diagnostics-poll.json"
 )
 README_PATH = Path("README.md")
+README_RU_PATH = Path("README.ru.md")
 PLAYBOOK_PATH = Path("docs/PRODUCTION-TESTING-PLAYBOOK.md")
 
 
@@ -49,10 +55,24 @@ class DocsExampleSmokeSession:
                             {"relative_to": "viewport", "x": 0.5, "y": 0.98},
                         ],
                         "hold_points": [
-                            {"relative_to": "viewport", "x": 0.5, "y": 0.92, "hold_ms": 750},
-                            {"relative_to": "viewport", "x": 0.5, "y": 0.98, "hold_ms": 1000},
+                            {
+                                "relative_to": "viewport",
+                                "x": 0.5,
+                                "y": 0.92,
+                                "hold_ms": 750,
+                            },
+                            {
+                                "relative_to": "viewport",
+                                "x": 0.5,
+                                "y": 0.98,
+                                "hold_ms": 1000,
+                            },
                         ],
-                        "final_pointer": {"relative_to": "viewport", "x": 0.5, "y": 0.82},
+                        "final_pointer": {
+                            "relative_to": "viewport",
+                            "x": 0.5,
+                            "y": 0.82,
+                        },
                     },
                     "selected_payload": {
                         "before": ["ROW-010", "ROW-011"],
@@ -67,7 +87,11 @@ class DocsExampleSmokeSession:
                             {"relative_to": "source", "x": 0.5, "y": 0.5},
                             {"relative_to": "viewport", "x": 0.98, "y": 0.5},
                         ],
-                        "final_pointer": {"relative_to": "viewport", "x": 0.98, "y": 0.5},
+                        "final_pointer": {
+                            "relative_to": "viewport",
+                            "x": 0.98,
+                            "y": 0.5,
+                        },
                     },
                     "no_op": {"expected": True, "reason": "outside_drop_zone"},
                     "cleanup": {
@@ -92,7 +116,12 @@ class DocsExampleSmokeSession:
                             {"relative_to": "viewport", "x": 0.5, "y": 0.9},
                         ],
                         "hold_points": [
-                            {"relative_to": "viewport", "x": 0.5, "y": 0.9, "hold_ms": 750},
+                            {
+                                "relative_to": "viewport",
+                                "x": 0.5,
+                                "y": 0.9,
+                                "hold_ms": 750,
+                            },
                         ],
                         "final_pointer": {
                             "relative_to": "row",
@@ -231,7 +260,9 @@ def _load_selector_safety_example() -> dict[str, Any]:
 
 def _load_novascript_action_oracle_app_diagnostics_example() -> dict[str, Any]:
     return json.loads(
-        NOVASCRIPT_ACTION_ORACLE_APP_DIAGNOSTICS_EXAMPLE_PATH.read_text(encoding="utf-8")
+        NOVASCRIPT_ACTION_ORACLE_APP_DIAGNOSTICS_EXAMPLE_PATH.read_text(
+            encoding="utf-8"
+        )
     )
 
 
@@ -294,7 +325,8 @@ def assert_drag_drop_docs_contract(plan: dict[str, Any]) -> None:
     first_row_drag_index, first_row_drag = next(
         (index, action)
         for index, action in enumerate(actions)
-        if action.get("kind") == "ui.drag" and action.get("source", {}).get("row_identity")
+        if action.get("kind") == "ui.drag"
+        and action.get("source", {}).get("row_identity")
     )
     first_drag_selector = first_row_drag.get("source", {}).get("selector")
     first_drag_identity = first_row_drag.get("source", {}).get("row_identity")
@@ -316,7 +348,8 @@ def assert_drag_drop_docs_contract(plan: dict[str, Any]) -> None:
     )
     assert any(action.get("expect", {}).get("no_op") is True for action in drag_actions)
     assert any(
-        waypoint.get("relative_to") == "viewport" and int(waypoint.get("hold_ms", 0)) > 0
+        waypoint.get("relative_to") == "viewport"
+        and int(waypoint.get("hold_ms", 0)) > 0
         for action in drag_actions
         for waypoint in action.get("path", [])
         if isinstance(waypoint, dict)
@@ -332,7 +365,9 @@ def assert_drag_drop_docs_contract(plan: dict[str, Any]) -> None:
         drop = action["drop"]
         assert drop.get("selector") == action["source"]["selector"]
         assert drop.get("row_identity")
-        assert drop.get("identity", {}).get("column") == action.get("identity", {}).get("column")
+        assert drop.get("identity", {}).get("column") == action.get("identity", {}).get(
+            "column"
+        )
         assert drop.get("rows", {}).get("visible_only") is True
         assert drop.get("rows", {}).get("max") == action.get("rows", {}).get("max")
         assert drop.get("columns") == action.get("columns")
@@ -341,7 +376,9 @@ def assert_drag_drop_docs_contract(plan: dict[str, Any]) -> None:
         assert isinstance(drop.get("scroll_settle_ms"), int)
         assert drop["scroll_settle_ms"] > 0
 
-    viewport_probes = [probe for probe in _probes(plan) if probe.get("kind") == "ui.grid.viewport"]
+    viewport_probes = [
+        probe for probe in _probes(plan) if probe.get("kind") == "ui.grid.viewport"
+    ]
     assert viewport_probes
     assert any(probe.get("phase") == "both" for probe in viewport_probes)
     assert all(probe.get("identity") for probe in viewport_probes)
@@ -355,9 +392,7 @@ def assert_drag_drop_docs_contract(plan: dict[str, Any]) -> None:
     )
 
     notes = " ".join(
-        str(note)
-        for case in plan.get("cases", [])
-        for note in case.get("notes", [])
+        str(note) for case in plan.get("cases", []) for note in case.get("notes", [])
     )
     assert "BLOCKED" in notes
     assert "route_evidence" in notes
@@ -400,16 +435,16 @@ def test_selector_safety_example_declares_blocked_no_mutation_contract() -> None
     assert probes[0]["expected"] == "Selector side effects: 0"
 
     notes = " ".join(
-        str(note)
-        for case in plan.get("cases", [])
-        for note in case.get("notes", [])
+        str(note) for case in plan.get("cases", []) for note in case.get("notes", [])
     )
     assert "BLOCKED" in notes
     assert "No-mutation proof" in notes
 
 
 @pytest.mark.asyncio
-async def test_selector_safety_example_runs_through_v2_parser_with_blocked_evidence() -> None:
+async def test_selector_safety_example_runs_through_v2_parser_with_blocked_evidence() -> (
+    None
+):
     session = SelectorSafetySmokeSession()
 
     result = await RuntimeSmokeRunner(
@@ -430,8 +465,14 @@ async def test_selector_safety_example_runs_through_v2_parser_with_blocked_evide
     assert result["cleanup"]["status"] == "PASS"
     assert result["cleanup"]["process_registry_after"] == 0
     transition = result["cases"][0]["transitions"][0]
-    assert transition["before"]["ui.property.selector_sentinel_after"] == "Selector side effects: 0"
-    assert transition["after"]["ui.property.selector_sentinel_after"] == "Selector side effects: 0"
+    assert (
+        transition["before"]["ui.property.selector_sentinel_after"]
+        == "Selector side effects: 0"
+    )
+    assert (
+        transition["after"]["ui.property.selector_sentinel_after"]
+        == "Selector side effects: 0"
+    )
     assert "ui.property.selector_sentinel_after" not in transition["diff"]
     assert session.launch_requests
     assert len(session.property_requests) == 2
@@ -461,7 +502,9 @@ def test_drag_drop_grid_example_rejects_missing_row_identity_checks() -> None:
         assert_drag_drop_docs_contract(plan)
 
 
-def test_drag_drop_grid_example_rejects_missing_inline_ensure_visible_preflight() -> None:
+def test_drag_drop_grid_example_rejects_missing_inline_ensure_visible_preflight() -> (
+    None
+):
     plan = copy.deepcopy(_load_example())
     first_action = plan["cases"][0]["transitions"][0]["action"]
     first_action.pop("ensure_visible", None)
@@ -485,7 +528,9 @@ def test_drag_drop_grid_example_rejects_missing_offscreen_drop_note() -> None:
         assert_drag_drop_docs_contract(plan)
 
 
-def test_drag_drop_grid_example_rejects_missing_offscreen_row_target_drop_contract() -> None:
+def test_drag_drop_grid_example_rejects_missing_offscreen_row_target_drop_contract() -> (
+    None
+):
     plan = copy.deepcopy(_load_example())
     for action in _actions(plan):
         drop = action.get("drop")
@@ -499,7 +544,9 @@ def test_drag_drop_grid_example_rejects_missing_offscreen_row_target_drop_contra
 
 
 @pytest.mark.asyncio
-async def test_drag_drop_grid_example_runs_through_v2_parser_with_fake_ui_evidence() -> None:
+async def test_drag_drop_grid_example_runs_through_v2_parser_with_fake_ui_evidence() -> (
+    None
+):
     session = DocsExampleSmokeSession()
 
     result = await RuntimeSmokeRunner(
@@ -519,20 +566,26 @@ async def test_drag_drop_grid_example_runs_through_v2_parser_with_fake_ui_eviden
     assert len(session.ensure_visible_requests) == 2
     assert len(session.drag_requests) == 3
     assert len(session.viewport_requests) == 6
-    assert session.operation_order.index("ui.grid.ensure_visible") < session.operation_order.index(
-        "ui.drag"
-    )
+    assert session.operation_order.index(
+        "ui.grid.ensure_visible"
+    ) < session.operation_order.index("ui.drag")
     assert session.ensure_visible_requests[0]["selector"] == {
         "automation_id": "DataGridUnderTest",
         "control_type": "DataGrid",
     }
     assert session.ensure_visible_requests[0]["row"] == {"identity": "ROW-010"}
     assert session.ensure_visible_requests[0]["identity"] == {"column": "StableRowId"}
-    assert session.ensure_visible_requests[0]["rows"] == {"visible_only": True, "max": 20}
+    assert session.ensure_visible_requests[0]["rows"] == {
+        "visible_only": True,
+        "max": 20,
+    }
     assert session.ensure_visible_requests[0]["columns"] == ["StableRowId"]
     assert session.ensure_visible_requests[1]["row"] == {"identity": "ROW-010"}
     assert session.ensure_visible_requests[1]["identity"] == {"column": "StableRowId"}
-    assert session.ensure_visible_requests[1]["rows"] == {"visible_only": True, "max": 20}
+    assert session.ensure_visible_requests[1]["rows"] == {
+        "visible_only": True,
+        "max": 20,
+    }
     assert session.ensure_visible_requests[1]["columns"] == ["StableRowId"]
     assert session.drag_requests[0]["source"]["row_identity"] == "ROW-010"
     assert session.drag_requests[0]["path"] != session.drag_requests[1]["path"]
@@ -586,7 +639,31 @@ def test_readme_and_playbook_document_customer_mode_drag_drop_gate() -> None:
     assert "row-based" in playbook
     assert "bounded CR-075 customer-mode proof contract" in playbook
     assert "#270" in playbook
-    assert "fail closed before side effects if target-side realization hides the drag" in playbook
+    assert (
+        "fail closed before side effects if target-side realization hides the drag"
+        in playbook
+    )
+
+
+def test_readme_documents_runner_controlled_input_ambiguity() -> None:
+    readme = README_PATH.read_text(encoding="utf-8")
+    readme_ru = README_RU_PATH.read_text(encoding="utf-8")
+    english = _collapsed(readme)
+    russian = _collapsed(readme_ru)
+
+    for document in (english, russian):
+        for term in (
+            "runner_emulated_input",
+            "ui.drag",
+            "RUNNER_GLOBAL_INPUT_AMBIGUOUS",
+            REASON_RUNNER_INPUT_AMBIGUOUS,
+        ):
+            assert term in document
+
+    assert "product verdict blocked" in english
+    assert "product verdict блокируется" in russian
+    assert "full isolation is proven" not in english
+    assert "полная изоляция доказана" not in russian
 
 
 def test_readme_and_playbook_document_diagnostic_schema_gate() -> None:
@@ -641,15 +718,19 @@ def test_readme_and_playbook_document_diagnostic_schema_gate() -> None:
         for term in required_terms:
             assert term in document
     collapsed_playbook = _collapsed(playbook)
-    assert collapsed_playbook.index(_collapsed(winforms_boundary)) < collapsed_playbook.index(
-        "### 8. Runtime-Smoke Diagnostic Schema Gate"
-    )
+    assert collapsed_playbook.index(
+        _collapsed(winforms_boundary)
+    ) < collapsed_playbook.index("### 8. Runtime-Smoke Diagnostic Schema Gate")
 
 
-def test_readme_and_playbook_document_novascript_action_oracle_app_diagnostics_gate() -> None:
+def test_readme_and_playbook_document_novascript_action_oracle_app_diagnostics_gate() -> (
+    None
+):
     readme = README_PATH.read_text(encoding="utf-8")
     playbook = PLAYBOOK_PATH.read_text(encoding="utf-8")
-    example_path = "docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json"
+    example_path = (
+        "docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json"
+    )
     replay_packet_path = (
         "docs/reproduction-scenarios/"
         "novascript-action-oracle-app-diagnostics-replay-2026-06-21.md"
@@ -686,7 +767,9 @@ def test_readme_and_playbook_document_novascript_action_oracle_app_diagnostics_g
     )
     for term in required_terms:
         assert term in playbook
-    assert "does not replace the CR-003 DataGrid drag/drop replay gate" in _collapsed(playbook)
+    assert "does not replace the CR-003 DataGrid drag/drop replay gate" in _collapsed(
+        playbook
+    )
 
 
 def test_novascript_action_oracle_app_diagnostics_example_is_consumer_ready() -> None:
@@ -752,7 +835,9 @@ def test_runtime_smoke_examples_remain_schema_compatible() -> None:
         Path("docs/examples/runtime-smoke-v2-handwritten.json"),
         Path("docs/examples/runtime-smoke-v2-matrix-toggle.json"),
         Path("docs/examples/runtime-smoke-v2-state-only-file-json-matrix.json"),
-        Path("docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json"),
+        Path(
+            "docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json"
+        ),
         Path("docs/examples/runtime-smoke-wpf-workflow-plan.json"),
     ]
 
@@ -766,7 +851,9 @@ def test_diagnostic_examples_remain_schema_compatible() -> None:
         "oracle_pack": Path("docs/examples/runtime-smoke-oracle-pack.json"),
         "app_diagnostics": Path("docs/examples/runtime-smoke-app-diagnostics.json"),
         "semantic_probe": Path("docs/examples/runtime-smoke-semantic-probe.json"),
-        "tracepoint_guardrail": Path("docs/examples/runtime-smoke-tracepoint-guardrail.json"),
+        "tracepoint_guardrail": Path(
+            "docs/examples/runtime-smoke-tracepoint-guardrail.json"
+        ),
     }
     payloads: dict[str, dict[str, Any]] = {}
 
@@ -794,7 +881,9 @@ def test_diagnostic_examples_remain_schema_compatible() -> None:
 
 
 def test_app_diagnostics_wait_json_example_remains_schema_compatible() -> None:
-    payload = json.loads(APP_DIAGNOSTICS_WAIT_JSON_EXAMPLE_PATH.read_text(encoding="utf-8"))
+    payload = json.loads(
+        APP_DIAGNOSTICS_WAIT_JSON_EXAMPLE_PATH.read_text(encoding="utf-8")
+    )
 
     assert validate_diagnostic_schema_example(payload, kind="app_diagnostics") == []
     assert payload["wait_json"]["path"] == ".agent/runtime-smoke/app-diagnostics.json"

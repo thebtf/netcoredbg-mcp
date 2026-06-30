@@ -3,8 +3,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-REPLAY_PACKET = Path("docs/reproduction-scenarios/novascript-cr003-replay-2026-06-15.md")
-REPLAY_PACKET_JSON = Path("docs/reproduction-scenarios/novascript-cr003-replay-2026-06-15.json")
+from netcoredbg_mcp.session.runtime_smoke_v2.run_confidence import (
+    REASON_RUNNER_INPUT_AMBIGUOUS,
+)
+
+REPLAY_PACKET = Path(
+    "docs/reproduction-scenarios/novascript-cr003-replay-2026-06-15.md"
+)
+REPLAY_PACKET_JSON = Path(
+    "docs/reproduction-scenarios/novascript-cr003-replay-2026-06-15.json"
+)
 ACTION_ORACLE_REPLAY_PACKET = Path(
     "docs/reproduction-scenarios/"
     "novascript-action-oracle-app-diagnostics-replay-2026-06-21.md"
@@ -126,7 +134,10 @@ def test_novascript_cr003_replay_packet_json_is_machine_readable() -> None:
     assert payload["schema"] == "netcoredbg.downstream_replay_packet.v1"
     assert payload["issue"] == "#226"
     assert payload["status"] == "DOWNSTREAM_REPLAY_PASS"
-    assert payload["provider_baseline"]["commit"] == "12287e55ac8ea7415a3717f4a248d08723b93cfd"
+    assert (
+        payload["provider_baseline"]["commit"]
+        == "12287e55ac8ea7415a3717f4a248d08723b93cfd"
+    )
     assert payload["provider_baseline"]["version"] == "0.17.2"
     assert payload["downstream"]["expected_local_path"] == "<NOVASCRIPT_REPO>"
     assert (
@@ -151,7 +162,9 @@ def test_novascript_cr003_replay_packet_json_is_machine_readable() -> None:
         "multi_row_drag",
         "invalid_drop_noop_or_cancel",
     }
-    assert "PARTIAL_PASS_INVALID_FOR_GATE" in " ".join(payload["known_invalid_evidence"])
+    assert "PARTIAL_PASS_INVALID_FOR_GATE" in " ".join(
+        payload["known_invalid_evidence"]
+    )
     assert payload["latest_replay"]["status"] == "PASS"
     assert payload["latest_replay"]["runtime_smoke"]["baseline_status"] == "PASS"
     assert payload["latest_replay"]["runtime_smoke"]["status"] == "PASS"
@@ -231,7 +244,9 @@ def test_novascript_action_oracle_app_diagnostics_replay_packet_is_actionable() 
     for term in required_terms:
         assert term in packet
     assert "Downstream Result" in packet
-    assert "live NovaScript product behavior proof for the bounded CR-100 replay" in packet
+    assert (
+        "live NovaScript product behavior proof for the bounded CR-100 replay" in packet
+    )
     assert "does not replace the CR-003 DataGrid drag/drop replay gate" in packet
     assert "Do not close" in packet
 
@@ -244,7 +259,10 @@ def test_action_oracle_replay_packet_json_records_downstream_pass() -> None:
     assert payload["issue"] == "#268"
     assert payload["issues"] == ["#268", "#272"]
     assert payload["status"] == "DOWNSTREAM_REPLAY_PASS"
-    assert payload["provider_baseline"]["commit"] == "6d777dae788d4b6008fa36f1dc2172fd7e4df208"
+    assert (
+        payload["provider_baseline"]["commit"]
+        == "6d777dae788d4b6008fa36f1dc2172fd7e4df208"
+    )
     assert payload["provider_baseline"]["version"] == "0.19.0"
     assert payload["downstream"]["repo_name"] == "NovaScript"
     assert (
@@ -260,7 +278,9 @@ def test_action_oracle_replay_packet_json_records_downstream_pass() -> None:
         == "docs/PRODUCTION-TESTING-PLAYBOOK.md"
         "#9-novascript-action-oracle-app-diagnostics-consumer-gate"
     )
-    assert payload["source_contract"]["generated_case_id"] == "action_oracle_diagnostics"
+    assert (
+        payload["source_contract"]["generated_case_id"] == "action_oracle_diagnostics"
+    )
     assert payload["source_contract"]["generated_probe_kind"] == "app_diagnostics"
     assert payload["required_verdicts"] == ["PASS", "BLOCKED", "FAIL"]
     assert (
@@ -301,8 +321,9 @@ def test_action_oracle_replay_packet_json_records_downstream_pass() -> None:
         adapted_plan_record["base_example_path"]
         == "docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json"
     )
-    assert "do not replay the base provider example verbatim" in (
-        adapted_plan_record["replay_instruction"]
+    assert (
+        "do not replay the base provider example verbatim"
+        in (adapted_plan_record["replay_instruction"])
     )
     assert adapted_plan_record["source_example_action"] == {
         "kind": "ui.invoke",
@@ -411,7 +432,9 @@ def test_issues_backlog_records_cr103_post_cr102_lifecycle_decision() -> None:
         assert term in section
 
 
-def test_issues_backlog_records_cr104_named_pack_manifest_lifecycle_without_broad_closure() -> None:
+def test_issues_backlog_records_cr104_named_pack_manifest_lifecycle_without_broad_closure() -> (
+    None
+):
     backlog = _read(BACKLOG_SCENARIOS)
     heading = "## CR-104 Named Oracle/App Diagnostics Pack Manifest Lifecycle"
 
@@ -439,7 +462,9 @@ def test_issues_backlog_records_cr104_named_pack_manifest_lifecycle_without_broa
             issue,
         )
         cr104_row = _section_issue_row(backlog, heading, issue)
-        guard_text = " ".join((status, evidence, remaining_action, lifecycle_row, cr104_row))
+        guard_text = " ".join(
+            (status, evidence, remaining_action, lifecycle_row, cr104_row)
+        )
 
         assert "broader FR remains open" in status
         assert "CR-104" in cr104_row
@@ -484,7 +509,11 @@ def test_issues_backlog_records_cr106_post_v0201_downstream_boundary() -> None:
         "#268": ("comment `1114`", "v3 DSL", "product-case proof"),
         "#269": ("comment `1115`", "generic-probe", "lifecycle/orchestration"),
         "#270": ("comment `1116`", "CR-105", "no_global_input"),
-        "#271": ("comment `1117`", "diagnostics-orchestration", "cleanup/trace/freshness"),
+        "#271": (
+            "comment `1117`",
+            "diagnostics-orchestration",
+            "cleanup/trace/freshness",
+        ),
         "#272": ("comment `1118`", "CR-104", "oracle_pack"),
     }
     for issue, markers in expected_markers.items():
@@ -562,13 +591,58 @@ def test_issues_backlog_records_cr108_post_v0202_downstream_wait_boundary() -> N
 
     assert "Source-side owner may close" not in section
     assert "Release-prep PR must still pass MCP PR review" not in release_notes
-    assert "must still be verified before the release is called shipped" not in release_notes
+    assert (
+        "must still be verified before the release is called shipped"
+        not in release_notes
+    )
+
+
+def test_issues_backlog_records_cr108_runner_controlled_input_confidence_follow_up() -> (
+    None
+):
+    backlog = _read(BACKLOG_SCENARIOS)
+    heading = "## CR-108 Runner-Controlled Global-Input Confidence Semantics"
+
+    assert heading in backlog
+    section = backlog.split(heading, 1)[1].split("\n## ", 1)[0]
+    section_text = " ".join(section.split())
+
+    required_terms = (
+        "issue `#351`",
+        "run_confidence.no_operator",
+        "input_policy.no_global_input=false",
+        "runtime.input_monitor.check",
+        "runner_emulated_input",
+        "ui.drag",
+        "RUNNER_GLOBAL_INPUT_AMBIGUOUS",
+        REASON_RUNNER_INPUT_AMBIGUOUS,
+        "product verdicts stay blocked",
+    )
+    for term in required_terms:
+        assert term in section_text
+
+    for issue in ("#268", "#270", "#271", "#272"):
+        row = _section_issue_row(backlog, heading, issue)
+        assert "Keep broad FR open" in row
+        assert "bounded issue `#351` follow-up" in row
+        assert "fresh broad-closure proof" in row
+
+    forbidden_terms = (
+        "operator input contaminated the scenario",
+        "Source-side owner may close",
+        "full isolated desktop",
+        "CLEAN_PROVEN",
+    )
+    for term in forbidden_terms:
+        assert term not in section
 
 
 def test_issues_backlog_links_novascript_replay_packet() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
 
-    assert "docs/reproduction-scenarios/novascript-cr003-replay-2026-06-15.md" in backlog
+    assert (
+        "docs/reproduction-scenarios/novascript-cr003-replay-2026-06-15.md" in backlog
+    )
     assert "target-side v0.17.2 evidence alone was not enough" in backlog.lower()
     assert "DOWNSTREAM_REPLAY_PASS" in backlog
 
@@ -608,7 +682,8 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
         assert (
             "Target slice merged" in row
             or "Target screenshot-orientation slice covered" in row
-            or "Target focused-element query and screenshot-orientation slices covered" in row
+            or "Target focused-element query and screenshot-orientation slices covered"
+            in row
         )
         assert "broader" in row
         assert "None in netcoredbg-mcp." not in row
@@ -616,8 +691,7 @@ def test_issues_backlog_current_status_is_not_stale_red_queue() -> None:
     row_269 = _issue_row(backlog, "#269")
     assert (
         "Target metrics/profile-defaults/probe-validation/source-aware run-probe "
-        "guidance and split/comment remaining-scope evidence slices covered"
-        in row_269
+        "guidance and split/comment remaining-scope evidence slices covered" in row_269
     )
     assert "broader FR remains open" in row_269
     assert "CR-039" in row_269
@@ -1107,9 +1181,13 @@ def test_issues_backlog_has_cr022_lifecycle_refresh_for_open_broad_rows() -> Non
     }
 
     for issue, terms in expected_decisions.items():
-        decision_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", issue)
+        decision_row = _section_issue_row(
+            backlog, "## CR-022 Issue Lifecycle Refresh", issue
+        )
         for term in terms:
-            assert term in decision_row, f"term {term!r} missing from {issue} CR-022 row"
+            assert term in decision_row, (
+                f"term {term!r} missing from {issue} CR-022 row"
+            )
 
 
 def test_cr055_lifecycle_reconciliation_records_resolved_target_issues() -> None:
@@ -1174,7 +1252,9 @@ def test_issue_272_records_cr033_launch_orchestration_slice() -> None:
 def test_issue_272_records_cr050_cr051_app_diagnostics_source_slices() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#272")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#272")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#272"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#272")
 
     for text in (row, lifecycle_row):
@@ -1182,7 +1262,10 @@ def test_issue_272_records_cr050_cr051_app_diagnostics_source_slices() -> None:
         assert "CR-051" in text
         assert "evidence-directory" in text
         assert "file-name pattern" in text or "poll pattern" in text
-        assert "matched-candidate revalidation" in text or "matched-file revalidation" in text
+        assert (
+            "matched-candidate revalidation" in text
+            or "matched-file revalidation" in text
+        )
         assert "wait_json.condition" in text
         assert "JSONPath equality" in text or "JSONPath equality waiting" in text
 
@@ -1195,7 +1278,9 @@ def test_issue_272_records_cr050_cr051_app_diagnostics_source_slices() -> None:
 def test_issue_272_records_cr056_app_diagnostics_poll_cursor_slice() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#272")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#272")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#272"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#272")
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
@@ -1217,7 +1302,9 @@ def test_issue_272_records_cr056_app_diagnostics_poll_cursor_slice() -> None:
 def test_issue_272_records_cr067_launch_directory_fallback_slice() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#272")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#272")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#272"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#272")
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
@@ -1239,7 +1326,9 @@ def test_issue_272_records_cr067_launch_directory_fallback_slice() -> None:
 def test_issue_269_records_cr073_app_diagnostics_event_delta_slice() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#269")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#269")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#269"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#269")
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
@@ -1250,21 +1339,24 @@ def test_issue_269_records_cr073_app_diagnostics_event_delta_slice() -> None:
         assert "include_app_diagnostics=True" in text
         assert "source delta" in text
         assert "retained-final-result" in text or "retained final result" in text
-        assert "live diagnostics history" in text or "live diagnostics streaming" in text
+        assert (
+            "live diagnostics history" in text or "live diagnostics streaming" in text
+        )
 
     assert "retained-final-result app diagnostics" not in remaining
     assert "retained-final-result app diagnostics" not in lifecycle_remaining
     assert "agent-mode/generic-probe lifecycle/orchestration tail" in remaining
     assert (
-        "agent-mode/generic-probe lifecycle/orchestration tail"
-        in lifecycle_remaining
+        "agent-mode/generic-probe lifecycle/orchestration tail" in lifecycle_remaining
     )
 
 
 def test_issue_272_records_cr073_app_diagnostics_event_delta_slice() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#272")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#272")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#272"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#272")
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
@@ -1284,7 +1376,9 @@ def test_issue_272_records_cr073_app_diagnostics_event_delta_slice() -> None:
 def test_issue_272_records_cr078_live_app_diagnostics_history_slice() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#272")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#272")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#272"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#272")
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
@@ -1308,7 +1402,9 @@ def test_issue_272_records_cr078_live_app_diagnostics_history_slice() -> None:
 def test_issue_272_records_cr079_intracase_app_diagnostics_progress_slice() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#272")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#272")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#272"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#272")
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
@@ -1358,19 +1454,29 @@ def test_issue_269_272_record_cr080_active_wait_evidence_delta_guidance_slice() 
         cell.strip() for cell in lifecycle_row_272.strip().strip("|").split("|")
     )
 
-    assert "active app-diagnostics wait/evidence source-cursor guidance" not in remaining_269
+    assert (
+        "active app-diagnostics wait/evidence source-cursor guidance"
+        not in remaining_269
+    )
     assert "remaining multi-source event deltas" not in remaining_269
     assert "agent-mode/generic-probe lifecycle/orchestration tail" in remaining_269
     assert "split/comment closure territory" in remaining_269
-    assert "active app-diagnostics wait/evidence source-cursor guidance" not in remaining_272
+    assert (
+        "active app-diagnostics wait/evidence source-cursor guidance"
+        not in remaining_272
+    )
     assert "broader app diagnostics lifecycle/orchestration" in remaining_272
     assert "broader app diagnostics lifecycle/orchestration" in lifecycle_remaining_272
 
 
-def test_issue_269_records_cr082_quiet_active_delta_wait_guidance_without_broad_closure() -> None:
+def test_issue_269_records_cr082_quiet_active_delta_wait_guidance_without_broad_closure() -> (
+    None
+):
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#269")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#269")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#269"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#269")
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
@@ -1385,7 +1491,9 @@ def test_issue_269_records_cr082_quiet_active_delta_wait_guidance_without_broad_
 
     assert "broader FR remains open" in row
     assert "keep open" in lifecycle_row
-    assert "quiet active app-diagnostics delta wait-continuation guidance" not in remaining
+    assert (
+        "quiet active app-diagnostics delta wait-continuation guidance" not in remaining
+    )
     assert (
         "quiet active app-diagnostics delta wait-continuation guidance"
         not in lifecycle_remaining
@@ -1393,14 +1501,18 @@ def test_issue_269_records_cr082_quiet_active_delta_wait_guidance_without_broad_
     assert "remaining multi-source event deltas" not in remaining
     assert "agent-mode/generic-probe lifecycle/orchestration tail" in remaining
     assert "split/comment closure territory" in remaining
-    assert "agent-mode/generic-probe lifecycle/orchestration tail" in lifecycle_remaining
+    assert (
+        "agent-mode/generic-probe lifecycle/orchestration tail" in lifecycle_remaining
+    )
     assert "split/comment closure territory" in lifecycle_remaining
 
 
 def test_issue_269_records_cr083_run_probe_follow_up_without_broad_closure() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#269")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#269")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#269"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#269")
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
@@ -1425,13 +1537,19 @@ def test_issue_269_records_cr083_run_probe_follow_up_without_broad_closure() -> 
     assert "generic probe UX" not in remaining
     assert "generic probe UX" not in lifecycle_remaining
     assert "agent-mode/generic-probe lifecycle/orchestration tail" in remaining
-    assert "agent-mode/generic-probe lifecycle/orchestration tail" in lifecycle_remaining
+    assert (
+        "agent-mode/generic-probe lifecycle/orchestration tail" in lifecycle_remaining
+    )
 
 
-def test_issue_269_records_cr087_mixed_source_event_delta_guidance_without_broad_closure() -> None:
+def test_issue_269_records_cr087_mixed_source_event_delta_guidance_without_broad_closure() -> (
+    None
+):
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#269")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#269")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#269"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#269")
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
@@ -1478,13 +1596,19 @@ def test_issue_269_records_cr087_mixed_source_event_delta_guidance_without_broad
         not in lifecycle_remaining
     )
     assert "agent-mode/generic-probe lifecycle/orchestration tail" in remaining
-    assert "agent-mode/generic-probe lifecycle/orchestration tail" in lifecycle_remaining
+    assert (
+        "agent-mode/generic-probe lifecycle/orchestration tail" in lifecycle_remaining
+    )
 
 
-def test_issue_269_records_cr088_split_remaining_agent_mode_scope_without_broad_closure() -> None:
+def test_issue_269_records_cr088_split_remaining_agent_mode_scope_without_broad_closure() -> (
+    None
+):
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#269")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#269")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#269"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#269")
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
@@ -1525,7 +1649,9 @@ def test_issue_269_records_cr088_split_remaining_agent_mode_scope_without_broad_
 def test_issue_272_records_cr084_mark_cursor_entrypoint_without_broad_closure() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#272")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#272")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#272"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#272")
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
@@ -1533,7 +1659,9 @@ def test_issue_272_records_cr084_mark_cursor_entrypoint_without_broad_closure() 
 
     for text in (row, lifecycle_row):
         assert "CR-084" in text
-        assert "active app-diagnostics mark-cursor agent-mode entrypoint guidance" in text
+        assert (
+            "active app-diagnostics mark-cursor agent-mode entrypoint guidance" in text
+        )
         assert "runtime_smoke_mark_event_cursor(agent_mode=True)" in text
         assert "runtime_smoke_get_event_delta" in text
         assert "active app-diagnostics entrypoint" in text
@@ -1552,7 +1680,10 @@ def test_issue_272_records_cr084_mark_cursor_entrypoint_without_broad_closure() 
 
     assert "broader FR remains open" in row
     assert "keep open" in lifecycle_row
-    assert "active app-diagnostics mark-cursor agent-mode entrypoint guidance" not in remaining
+    assert (
+        "active app-diagnostics mark-cursor agent-mode entrypoint guidance"
+        not in remaining
+    )
     assert (
         "active app-diagnostics mark-cursor agent-mode entrypoint guidance"
         not in lifecycle_remaining
@@ -1561,10 +1692,14 @@ def test_issue_272_records_cr084_mark_cursor_entrypoint_without_broad_closure() 
     assert "broader app diagnostics lifecycle/orchestration" in lifecycle_remaining
 
 
-def test_issue_272_records_cr085_run_probe_appdiag_follow_up_without_broad_closure() -> None:
+def test_issue_272_records_cr085_run_probe_appdiag_follow_up_without_broad_closure() -> (
+    None
+):
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#272")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#272")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#272"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#272")
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
@@ -1572,7 +1707,10 @@ def test_issue_272_records_cr085_run_probe_appdiag_follow_up_without_broad_closu
 
     for text in (row, lifecycle_row):
         assert "CR-085" in text
-        assert "active app-diagnostics run-probe first-follow-up source cursor guidance" in text
+        assert (
+            "active app-diagnostics run-probe first-follow-up source cursor guidance"
+            in text
+        )
         assert "runtime_smoke_run_probe(agent_mode=True)" in text
         assert "runtime_smoke_get_event_delta" in text
         assert "active `app_diagnostics` probe" in text
@@ -1603,10 +1741,14 @@ def test_issue_272_records_cr085_run_probe_appdiag_follow_up_without_broad_closu
     assert "broader app diagnostics lifecycle/orchestration" in lifecycle_remaining
 
 
-def test_issue_272_records_cr086_split_remaining_lifecycle_scope_without_broad_closure() -> None:
+def test_issue_272_records_cr086_split_remaining_lifecycle_scope_without_broad_closure() -> (
+    None
+):
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#272")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#272")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#272"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#272")
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
@@ -1644,7 +1786,9 @@ def test_issue_272_records_cr086_split_remaining_lifecycle_scope_without_broad_c
 def test_issue_270_records_cr070_ensure_visible_viewport_delta_slice() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#270")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#270")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#270"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#270")
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
@@ -1668,7 +1812,9 @@ def test_issue_270_records_cr070_ensure_visible_viewport_delta_slice() -> None:
 def test_issue_270_records_cr071_assert_range_slice_without_broad_closure() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#270")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#270")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#270"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#270")
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
@@ -1688,10 +1834,14 @@ def test_issue_270_records_cr071_assert_range_slice_without_broad_closure() -> N
     assert "split/comment closure territory" in lifecycle_remaining
 
 
-def test_issue_270_records_cr072_drag_ensure_visible_slice_without_broad_closure() -> None:
+def test_issue_270_records_cr072_drag_ensure_visible_slice_without_broad_closure() -> (
+    None
+):
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#270")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#270")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#270"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#270")
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
@@ -1713,10 +1863,14 @@ def test_issue_270_records_cr072_drag_ensure_visible_slice_without_broad_closure
     assert "split/comment closure territory" in lifecycle_remaining
 
 
-def test_issue_270_records_cr074_target_drop_ensure_visible_slice_without_broad_closure() -> None:
+def test_issue_270_records_cr074_target_drop_ensure_visible_slice_without_broad_closure() -> (
+    None
+):
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#270")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#270")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#270"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#270")
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
@@ -1730,7 +1884,10 @@ def test_issue_270_records_cr074_target_drop_ensure_visible_slice_without_broad_
         assert "drop.ensure_visible=true" in text
         assert "raw viewport guessing" in text
 
-    assert "target-side offscreen row-target drag ensure-visible semantics" not in remaining
+    assert (
+        "target-side offscreen row-target drag ensure-visible semantics"
+        not in remaining
+    )
     assert (
         "target-side offscreen row-target drag ensure-visible semantics"
         not in lifecycle_remaining
@@ -1741,10 +1898,14 @@ def test_issue_270_records_cr074_target_drop_ensure_visible_slice_without_broad_
     assert "split/comment closure territory" in lifecycle_remaining
 
 
-def test_issue_270_records_cr075_docs_evidence_replay_proof_without_broad_closure() -> None:
+def test_issue_270_records_cr075_docs_evidence_replay_proof_without_broad_closure() -> (
+    None
+):
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#270")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#270")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#270"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#270")
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
@@ -1752,7 +1913,10 @@ def test_issue_270_records_cr075_docs_evidence_replay_proof_without_broad_closur
 
     for text in (row, lifecycle_row):
         assert "CR-075" in text
-        assert "bounded broad-#270 replay-proof plus fail-closed source-anchor guard slice" in text
+        assert (
+            "bounded broad-#270 replay-proof plus fail-closed source-anchor guard slice"
+            in text
+        )
         assert (
             "docs/examples/runtime-smoke-v2-drag-drop-grid.json" in text
             or "public example" in text
@@ -1778,7 +1942,10 @@ def test_issue_270_records_cr075_docs_evidence_replay_proof_without_broad_closur
     expected_remaining = "helper/downstream replay lifecycle tail"
     assert expected_remaining in remaining
     assert expected_remaining in lifecycle_remaining
-    assert "live downstream replay tails beyond the CR-075/CR-076/CR-077 replay" not in remaining
+    assert (
+        "live downstream replay tails beyond the CR-075/CR-076/CR-077 replay"
+        not in remaining
+    )
     assert (
         "live downstream replay tails beyond the CR-075/CR-076/CR-077 replay"
         not in lifecycle_remaining
@@ -1787,10 +1954,14 @@ def test_issue_270_records_cr075_docs_evidence_replay_proof_without_broad_closur
     assert "split/comment closure territory" in lifecycle_remaining
 
 
-def test_issue_270_records_cr076_cr077_replay_reconciliation_without_broad_closure() -> None:
+def test_issue_270_records_cr076_cr077_replay_reconciliation_without_broad_closure() -> (
+    None
+):
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#270")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#270")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#270"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#270")
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
@@ -1811,7 +1982,10 @@ def test_issue_270_records_cr076_cr077_replay_reconciliation_without_broad_closu
     expected_remaining = "helper/downstream replay lifecycle tail"
     assert expected_remaining in remaining
     assert expected_remaining in lifecycle_remaining
-    assert "live downstream replay tails beyond the CR-075/CR-076/CR-077 replay" not in remaining
+    assert (
+        "live downstream replay tails beyond the CR-075/CR-076/CR-077 replay"
+        not in remaining
+    )
     assert (
         "live downstream replay tails beyond the CR-075/CR-076/CR-077 replay"
         not in lifecycle_remaining
@@ -1820,10 +1994,14 @@ def test_issue_270_records_cr076_cr077_replay_reconciliation_without_broad_closu
     assert "before closing" in lifecycle_remaining
 
 
-def test_issue_270_records_cr089_split_remaining_scope_after_replay_stabilization() -> None:
+def test_issue_270_records_cr089_split_remaining_scope_after_replay_stabilization() -> (
+    None
+):
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#270")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#270")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#270"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#270")
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
@@ -1856,8 +2034,13 @@ def test_issue_270_records_cr089_split_remaining_scope_after_replay_stabilizatio
         assert "drop_origin_target" not in tail
         assert "drop_bounds_target" not in tail
         assert "assert-range parity" not in tail
-        assert "target-side offscreen row-target drag ensure-visible semantics" not in tail
-        assert "live downstream replay tails beyond the CR-075/CR-076/CR-077 replay" not in tail
+        assert (
+            "target-side offscreen row-target drag ensure-visible semantics" not in tail
+        )
+        assert (
+            "live downstream replay tails beyond the CR-075/CR-076/CR-077 replay"
+            not in tail
+        )
 
 
 def test_issue_271_272_record_cr048_app_diagnostics_freshness_slice() -> None:
@@ -1880,17 +2063,23 @@ def test_issue_271_272_record_cr048_app_diagnostics_freshness_slice() -> None:
     assert "broader app diagnostics lifecycle/orchestration" in remaining_272
 
 
-def test_issue_272_remaining_scope_excludes_covered_launch_contract_and_default() -> None:
+def test_issue_272_remaining_scope_excludes_covered_launch_contract_and_default() -> (
+    None
+):
     backlog = _read(BACKLOG_SCENARIOS)
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#272")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#272")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#272"
+    )
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
     )
 
     assert "diagnostic env/evidence-dir advertisement" not in remaining
     assert "launch env/evidence-dir advertisement" not in remaining
-    assert "app diagnostics orchestration beyond local-file acquisition" not in remaining
+    assert (
+        "app diagnostics orchestration beyond local-file acquisition" not in remaining
+    )
     assert "launch-to-artifact default acquisition" in remaining
     assert "directory poll" in remaining
     assert "poll cursor" in remaining
@@ -1899,7 +2088,10 @@ def test_issue_272_remaining_scope_excludes_covered_launch_contract_and_default(
     assert "broader live app-diagnostics streaming/history" in remaining
     assert "diagnostic env/evidence-dir advertisement" not in lifecycle_remaining
     assert "launch env/evidence-dir advertisement" not in lifecycle_remaining
-    assert "app diagnostics orchestration beyond local-file acquisition" not in lifecycle_remaining
+    assert (
+        "app diagnostics orchestration beyond local-file acquisition"
+        not in lifecycle_remaining
+    )
     assert "launch-to-artifact default acquisition" in lifecycle_remaining
     assert "directory poll" in lifecycle_remaining
     assert "poll cursor" in lifecycle_remaining
@@ -1910,7 +2102,9 @@ def test_issue_272_remaining_scope_excludes_covered_launch_contract_and_default(
 def test_issue_268_records_plan_path_slices() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#268")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#268")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#268"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#268")
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
@@ -2031,10 +2225,14 @@ def test_issue_268_269_record_validate_probe_slice_without_broad_closure() -> No
     assert "source-aware mark-cursor guidance" in lifecycle_row_269
 
 
-def test_issue_268_records_cr090_invalid_probe_authoring_contract_without_broad_closure() -> None:
+def test_issue_268_records_cr090_invalid_probe_authoring_contract_without_broad_closure() -> (
+    None
+):
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#268")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#268")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#268"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#268")
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
@@ -2071,7 +2269,9 @@ def test_issue_268_records_cr090_invalid_probe_authoring_contract_without_broad_
 def test_issue_268_records_cr092_split_remaining_scope_without_broad_closure() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#268")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#268")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#268"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#268")
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
@@ -2079,7 +2279,10 @@ def test_issue_268_records_cr092_split_remaining_scope_without_broad_closure() -
 
     for text in (row, lifecycle_row):
         assert "CR-092" in text
-        assert "split/comment closure evidence" in text or "split or comment evidence" in text
+        assert (
+            "split/comment closure evidence" in text
+            or "split or comment evidence" in text
+        )
         assert "NovaScript-style action/oracle DSL" in text
 
     for clause in (
@@ -2105,10 +2308,14 @@ def test_issue_268_records_cr092_split_remaining_scope_without_broad_closure() -
         assert "read-only probe validation" not in tail
 
 
-def test_issue_268_records_cr092_novascript_action_oracle_template_without_broad_closure() -> None:
+def test_issue_268_records_cr092_novascript_action_oracle_template_without_broad_closure() -> (
+    None
+):
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#268")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#268")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#268"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#268")
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
@@ -2143,10 +2350,14 @@ def test_issue_268_records_cr092_novascript_action_oracle_template_without_broad
         assert "before closing" in tail
 
 
-def test_issue_268_records_cr093_generated_app_diagnostics_template_without_broad_closure() -> None:
+def test_issue_268_records_cr093_generated_app_diagnostics_template_without_broad_closure() -> (
+    None
+):
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#268")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#268")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#268"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#268")
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
@@ -2186,7 +2397,9 @@ def test_issue_268_records_cr093_generated_app_diagnostics_template_without_broa
 def test_issue_271_records_cleanup_and_trace_delta_slices() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#271")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#271")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#271"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#271")
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
@@ -2239,7 +2452,9 @@ def test_issue_271_records_cleanup_and_trace_delta_slices() -> None:
 def test_issue_271_records_cr091_split_remaining_scope_without_broad_closure() -> None:
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#271")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#271")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#271"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#271")
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
@@ -2249,7 +2464,9 @@ def test_issue_271_records_cr091_split_remaining_scope_without_broad_closure() -
         assert "CR-091" in text
         assert "split/comment closure evidence" in text
         assert "already-covered" in text
-        assert "diagnostics-orchestration" in text or "diagnostics orchestration" in text
+        assert (
+            "diagnostics-orchestration" in text or "diagnostics orchestration" in text
+        )
 
     for clause in (
         _clause_containing(row, "CR-091"),
@@ -2277,10 +2494,14 @@ def test_issue_271_records_cr091_split_remaining_scope_without_broad_closure() -
         assert "freshness/PDB-process proof" not in tail
 
 
-def test_issue_268_records_cr094_remaining_scope_split_after_cr093_without_broad_closure() -> None:
+def test_issue_268_records_cr094_remaining_scope_split_after_cr093_without_broad_closure() -> (
+    None
+):
     backlog = _read(BACKLOG_SCENARIOS)
     row = _issue_row(backlog, "#268")
-    lifecycle_row = _section_issue_row(backlog, "## CR-022 Issue Lifecycle Refresh", "#268")
+    lifecycle_row = _section_issue_row(
+        backlog, "## CR-022 Issue Lifecycle Refresh", "#268"
+    )
     _issue, _state, _evidence, remaining = _issue_cells(backlog, "#268")
     _life_issue, _life_state, _life_evidence, lifecycle_remaining = (
         cell.strip() for cell in lifecycle_row.strip().strip("|").split("|")
@@ -2334,7 +2555,10 @@ def test_cr022_broad_issues_require_split_or_comment_evidence_before_closure() -
         else:
             assert "remains open" in status.lower()
             assert "keep" in remaining_action.lower()
-            assert "split" in remaining_action.lower() or "comment" in remaining_action.lower()
+            assert (
+                "split" in remaining_action.lower()
+                or "comment" in remaining_action.lower()
+            )
             assert "before closing" in remaining_action.lower()
 
 
@@ -2347,7 +2571,9 @@ def test_cr022_issue_226_requires_downstream_pass_before_closure() -> None:
 
     if "closed" in status.lower() or "resolved" in status.lower():
         assert packet["latest_replay"]["status"] == "PASS"
-        assert packet["latest_replay"]["issue_226_lifecycle_decision"] == "target_resolved"
+        assert (
+            packet["latest_replay"]["issue_226_lifecycle_decision"] == "target_resolved"
+        )
         assert "downstream replay `pass`" in lifecycle_text
         assert "source-side owner may close" in lifecycle_text
     else:

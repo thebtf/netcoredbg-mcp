@@ -367,6 +367,17 @@ accidental product `FAIL`. This is contamination detection for the current
 desktop session, not full OS keyboard, pointer, foreground-window, or focus
 isolation.
 
+If a plan intentionally permits runner-controlled global input
+(`input_policy.no_global_input=false`), the current covered provenance path is
+bounded to runner-emulated `ui.drag` windows. Those actions add
+`runner_emulated_input` metadata before `runtime.input_monitor.check` evaluates
+the action window. When the only observed input tick is tied to that runner
+window, the run returns `RUNNER_GLOBAL_INPUT_AMBIGUOUS` with reason
+`input monitor evidence is ambiguous after runner-generated global input`; the
+product verdict blocked until a stricter separation monitor or a no-global-input
+route proves the scenario. External dirty input and missing monitor evidence
+still fail closed.
+
 The manual smoke fixtures now cover the baseline console/WinForms app,
 `tests/fixtures/WpfSmokeApp`, and `tests/fixtures/AvaloniaSmokeApp`. Build all
 three fixture projects before claiming full GUI smoke coverage; missing fixture

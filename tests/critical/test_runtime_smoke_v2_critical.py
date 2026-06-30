@@ -6,6 +6,9 @@ from typing import Any
 import pytest
 
 from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner, RuntimeSmokeSession
+from netcoredbg_mcp.session.runtime_smoke_v2.actions.ui_drag import (
+    REASON_NO_ROUTE_EVIDENCE,
+)
 from tests.smoke_test_manual import run_wpf_v2_state_oracle_runtime_smoke
 
 
@@ -148,7 +151,9 @@ async def test_runtime_smoke_v2_critical_happy_path_has_cleanup_proof() -> None:
 
 @pytest.mark.critical
 @pytest.mark.asyncio
-async def test_runtime_smoke_v2_critical_selector_miss_blocks_with_cleanup_proof() -> None:
+async def test_runtime_smoke_v2_critical_selector_miss_blocks_with_cleanup_proof() -> (
+    None
+):
     result = await _runner(CriticalV2Session(selector_missing=True)).run(_plan())
 
     assert result["status"] == "BLOCKED"
@@ -170,14 +175,16 @@ async def test_runtime_smoke_v2_critical_drag_blocks_without_route_evidence() ->
     ).run(_drag_plan())
 
     assert result["status"] == "BLOCKED"
-    assert result["blocked"]["reason"] == "real pointer route evidence unavailable"
+    assert result["blocked"]["reason"] == REASON_NO_ROUTE_EVIDENCE
     assert result["cleanup"]["status"] == "PASS"
     assert result["cleanup"]["process_registry_after"] == 0
 
 
 @pytest.mark.critical
 @pytest.mark.asyncio
-async def test_runtime_smoke_v2_critical_drag_blocks_without_viewport_evidence() -> None:
+async def test_runtime_smoke_v2_critical_drag_blocks_without_viewport_evidence() -> (
+    None
+):
     missing_identity_snapshot = {
         "status": "PASS",
         "snapshot": {

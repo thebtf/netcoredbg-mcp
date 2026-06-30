@@ -8,7 +8,12 @@ from .actions import ActionContext, dispatch_action
 from .diff import compute_diff
 from .evidence import blocked_details_from_record
 from .metrics import capture_metric_snapshot, finish_transition_metrics
-from .probe_dispatcher import ProbeContext, dispatch_probe, probe_path, probe_runs_in_phase
+from .probe_dispatcher import (
+    ProbeContext,
+    dispatch_probe,
+    probe_path,
+    probe_runs_in_phase,
+)
 from .run_confidence import (
     INPUT_MONITOR_ADAPTER,
     blocked_details_for_confidence,
@@ -32,7 +37,9 @@ async def execute_transition(
     probe_context = ProbeContext(action_context=action_context)
     before_probes = _probes_for_phase(probes, "before")
     after_probes = _probes_for_phase(probes, "after")
-    deadline = None if timeout_seconds is None else action_context.clock() + timeout_seconds
+    deadline = (
+        None if timeout_seconds is None else action_context.clock() + timeout_seconds
+    )
     try:
         run_confidence = await _with_remaining_timeout(
             lambda: _collect_run_confidence(
@@ -52,7 +59,9 @@ async def execute_transition(
         ), 0
     try:
         before_results = await _with_remaining_timeout(
-            lambda: _collect_probe_results(before_probes, probe_context, phase="before"),
+            lambda: _collect_probe_results(
+                before_probes, probe_context, phase="before"
+            ),
             deadline=deadline,
             context=action_context,
         )
@@ -64,6 +73,7 @@ async def execute_transition(
     raw_action = transition.get("action")
     action_count = 0
     actions: list[dict[str, Any]] = []
+    action_result: dict[str, Any] | None = None
     if raw_action is not None:
         try:
             action_result = await _with_remaining_timeout(
@@ -90,7 +100,9 @@ async def execute_transition(
             if _action_status_expected(dict(raw_action), status):
                 try:
                     settle = await _with_remaining_timeout(
-                        lambda: _settle(dict(transition.get("settle") or {}), action_context),
+                        lambda: _settle(
+                            dict(transition.get("settle") or {}), action_context
+                        ),
                         deadline=deadline,
                         context=action_context,
                     )
@@ -99,7 +111,9 @@ async def execute_transition(
                         _timeout_transition_result(
                             transition,
                             actions=actions,
-                            metrics=finish_transition_metrics(metrics_started, action_context),
+                            metrics=finish_transition_metrics(
+                                metrics_started, action_context
+                            ),
                             before=before,
                             before_results=before_results,
                             run_confidence=run_confidence,
@@ -109,7 +123,9 @@ async def execute_transition(
                 metrics = finish_transition_metrics(metrics_started, action_context)
                 try:
                     after_results = await _with_remaining_timeout(
-                        lambda: _collect_probe_results(after_probes, probe_context, phase="after"),
+                        lambda: _collect_probe_results(
+                            after_probes, probe_context, phase="after"
+                        ),
                         deadline=deadline,
                         context=action_context,
                     )
@@ -129,11 +145,15 @@ async def execute_transition(
                 after = _probe_value_map(after_probes, after_results)
                 diff = compute_diff(before=before, after=after)
                 try:
-                    run_confidence, confidence_blocked = await _complete_run_confidence_window(
+                    (
+                        run_confidence,
+                        confidence_blocked,
+                    ) = await _complete_run_confidence_window(
                         transition,
                         action_context,
                         run_confidence,
                         deadline=deadline,
+                        action_result=action_result,
                     )
                 except asyncio.TimeoutError:
                     return (
@@ -155,7 +175,9 @@ async def execute_transition(
                 )
                 if evidence_status == "FAIL":
                     status = "FAIL"
-                    reason = _reason_from_records([*after_results, *before_results, settle])
+                    reason = _reason_from_records(
+                        [*after_results, *before_results, settle]
+                    )
                 result = {
                     "id": transition.get("id"),
                     "status": status,
@@ -174,25 +196,33 @@ async def execute_transition(
                     result["run_confidence"] = run_confidence
                 return result, action_count
             try:
-                run_confidence, confidence_blocked = await _complete_run_confidence_window(
+                (
+                    run_confidence,
+                    confidence_blocked,
+                ) = await _complete_run_confidence_window(
                     transition,
                     action_context,
                     run_confidence,
                     deadline=deadline,
+                    action_result=action_result,
                 )
             except asyncio.TimeoutError:
                 return (
                     _timeout_transition_result(
                         transition,
                         actions=actions,
-                        metrics=finish_transition_metrics(metrics_started, action_context),
+                        metrics=finish_transition_metrics(
+                            metrics_started, action_context
+                        ),
                         before=before,
                         before_results=before_results,
                         run_confidence=run_confidence,
                     ),
                     action_count,
                 )
-            if confidence_blocked is not None:
+            if confidence_blocked is not None and not _preserve_action_result(
+                action_result
+            ):
                 return confidence_blocked, action_count
             result = {
                 "id": transition.get("id"),
@@ -239,6 +269,7 @@ async def execute_transition(
                 action_context,
                 run_confidence,
                 deadline=deadline,
+                action_result=action_result,
             )
         except asyncio.TimeoutError:
             return (
@@ -266,7 +297,9 @@ async def execute_transition(
             "after": {},
             "diff": {},
             "probes": {"before": before_results, "after": []},
-            **({"blocked": _blocked_from_record(settle)} if status == "BLOCKED" else {}),
+            **(
+                {"blocked": _blocked_from_record(settle)} if status == "BLOCKED" else {}
+            ),
         }
         if run_confidence is not None:
             result["run_confidence"] = run_confidence
@@ -298,6 +331,7 @@ async def execute_transition(
             action_context,
             run_confidence,
             deadline=deadline,
+            action_result=action_result,
         )
     except asyncio.TimeoutError:
         return (
@@ -319,18 +353,22 @@ async def execute_transition(
     reason = _reason_from_records([*after_results, *before_results, settle])
     blocked_record = _find_blocked_record([*before_results, *after_results])
     result = {
-            "id": transition.get("id"),
-            "status": status,
-            "reason": reason,
-            "actions": actions,
-            "metrics": metrics,
-            "settle": settle,
-            "before": before,
-            "after": after,
-            "diff": diff,
-            "probes": {"before": before_results, "after": after_results},
-            **({"blocked": _blocked_from_record(blocked_record)} if status == "BLOCKED" else {}),
-        }
+        "id": transition.get("id"),
+        "status": status,
+        "reason": reason,
+        "actions": actions,
+        "metrics": metrics,
+        "settle": settle,
+        "before": before,
+        "after": after,
+        "diff": diff,
+        "probes": {"before": before_results, "after": after_results},
+        **(
+            {"blocked": _blocked_from_record(blocked_record)}
+            if status == "BLOCKED"
+            else {}
+        ),
+    }
     if run_confidence is not None:
         result["run_confidence"] = run_confidence
     return result, action_count
@@ -380,18 +418,29 @@ async def _collect_run_confidence(
     context: ActionContext,
     *,
     window: str,
+    action_result: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if not no_operator_confidence_requested(context.run_confidence):
         return None
-    monitor_result = await context.call_adapter(
-        INPUT_MONITOR_ADAPTER,
-        case_id=context.case_id,
-        transition_id=transition.get("id"),
-        transition_index=context.transition_index,
-        window=window,
-        input_policy=dict(context.input_policy or {}),
-        run_confidence=dict(context.run_confidence or {}),
-    )
+    runner_input = _runner_input_metadata(action_result)
+    adapter_kwargs: dict[str, Any] = {
+        "case_id": context.case_id,
+        "transition_id": transition.get("id"),
+        "transition_index": context.transition_index,
+        "window": window,
+        "input_policy": dict(context.input_policy or {}),
+        "run_confidence": dict(context.run_confidence or {}),
+        "action": dict(transition.get("action") or {}),
+    }
+    if runner_input is not None:
+        adapter_kwargs["runner_input"] = runner_input
+    monitor_result = await context.call_adapter(INPUT_MONITOR_ADAPTER, **adapter_kwargs)
+    if runner_input is not None:
+        monitor_result = {
+            **monitor_result,
+            "runner_input": runner_input,
+            "action": adapter_kwargs["action"],
+        }
     return confidence_from_monitor_result(monitor_result, window=window)
 
 
@@ -401,6 +450,7 @@ async def _complete_run_confidence_window(
     run_confidence: dict[str, Any] | None,
     *,
     deadline: float | None,
+    action_result: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     if run_confidence is None:
         return None, None
@@ -409,6 +459,7 @@ async def _complete_run_confidence_window(
             transition,
             context,
             window="after_action",
+            action_result=action_result,
         ),
         deadline=deadline,
         context=context,
@@ -421,6 +472,22 @@ async def _complete_run_confidence_window(
             run_confidence=completed_confidence,
         )
     return completed_confidence, None
+
+
+def _runner_input_metadata(
+    action_result: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(action_result, dict):
+        return None
+    runner_input = action_result.get("runner_input")
+    return dict(runner_input) if isinstance(runner_input, dict) else None
+
+
+def _preserve_action_result(action_result: dict[str, Any] | None) -> bool:
+    return (
+        isinstance(action_result, dict)
+        and str(action_result.get("status") or "").upper() != "PASS"
+    )
 
 
 def _confidence_blocked_transition_result(
@@ -478,7 +545,9 @@ async def _settle(
 ) -> dict[str, Any]:
     tracepoint_id = settle.get("await_tracepoint_id")
     if tracepoint_id:
-        timeout_ms = int(settle.get("tracepoint_timeout_ms", DEFAULT_TRACEPOINT_TIMEOUT_MS))
+        timeout_ms = int(
+            settle.get("tracepoint_timeout_ms", DEFAULT_TRACEPOINT_TIMEOUT_MS)
+        )
         deadline = context.clock() + (timeout_ms / 1000)
         while context.clock() <= deadline:
             result = await context.call_adapter(

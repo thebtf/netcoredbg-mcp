@@ -8,6 +8,10 @@ INPUT_MONITOR_ADAPTER = "runtime.input_monitor.check"
 CLASS_CLEAN_PROVEN = "CLEAN_PROVEN"
 CLASS_DIRTY_UNPROVEN = "DIRTY_UNPROVEN"
 CLASS_UNPROVEN = "UNPROVEN"
+CLASS_RUNNER_GLOBAL_INPUT_AMBIGUOUS = "RUNNER_GLOBAL_INPUT_AMBIGUOUS"
+REASON_RUNNER_INPUT_AMBIGUOUS = (
+    "input monitor evidence is ambiguous after runner-generated global input"
+)
 
 
 def no_operator_confidence_requested(policy: Mapping[str, Any] | None) -> bool:
@@ -33,7 +37,11 @@ def confidence_from_monitor_result(
             "basis": str(monitor_result.get("basis") or "external_input_monitor"),
         }
     if status in {"DIRTY", CLASS_DIRTY_UNPROVEN}:
+        if _has_runner_emulated_input(monitor_result):
+            return _runner_global_input_ambiguous(monitor_result, window=window)
         return _dirty_unproven(monitor_result, window=window)
+    if status == CLASS_RUNNER_GLOBAL_INPUT_AMBIGUOUS:
+        return _runner_global_input_ambiguous(monitor_result, window=window)
     if status == "BLOCKED":
         reason = str(monitor_result.get("reason") or "input monitor blocked")
         basis = (
@@ -57,7 +65,9 @@ def blocked_details_for_confidence(confidence: Mapping[str, Any]) -> dict[str, A
             "classification": classification,
             "product_verdict_allowed": False,
         },
-        "next_step": str(confidence.get("restart_guidance") or _default_restart_guidance()),
+        "next_step": str(
+            confidence.get("restart_guidance") or _default_restart_guidance()
+        ),
     }
 
 
@@ -73,7 +83,11 @@ def aggregate_case_confidence(
         for case in cases
         if isinstance((record := case.get("run_confidence")), dict)
     ]
-    for classification in (CLASS_DIRTY_UNPROVEN, CLASS_UNPROVEN):
+    for classification in (
+        CLASS_DIRTY_UNPROVEN,
+        CLASS_RUNNER_GLOBAL_INPUT_AMBIGUOUS,
+        CLASS_UNPROVEN,
+    ):
         selected = _first_classification(records, classification)
         if selected is not None:
             return dict(selected)
@@ -98,7 +112,11 @@ def aggregate_transition_confidence(
         for transition in transitions
         if isinstance((record := transition.get("run_confidence")), dict)
     ]
-    for classification in (CLASS_DIRTY_UNPROVEN, CLASS_UNPROVEN):
+    for classification in (
+        CLASS_DIRTY_UNPROVEN,
+        CLASS_RUNNER_GLOBAL_INPUT_AMBIGUOUS,
+        CLASS_UNPROVEN,
+    ):
         selected = _first_classification(records, classification)
         if selected is not None:
             return dict(selected)
@@ -133,6 +151,52 @@ def _dirty_unproven(
     }
 
 
+def _has_runner_emulated_input(monitor_result: Mapping[str, Any]) -> bool:
+    runner_input = monitor_result.get("runner_input")
+    return (
+        isinstance(runner_input, Mapping)
+        and str(runner_input.get("source") or "") == "runner_emulated_input"
+        and str(runner_input.get("kind") or "") == "ui.drag"
+        and _monitor_source_allows_runner_ambiguity(monitor_result)
+    )
+
+
+def _monitor_source_allows_runner_ambiguity(
+    monitor_result: Mapping[str, Any],
+) -> bool:
+    source = str(monitor_result.get("source") or "").strip().lower()
+    return source in {"", "global_input", "runner_emulated_input"}
+
+
+def _runner_global_input_ambiguous(
+    monitor_result: Mapping[str, Any],
+    *,
+    window: str,
+) -> dict[str, Any]:
+    action = monitor_result.get("action")
+    runner_input = monitor_result.get("runner_input")
+    ambiguity: dict[str, Any] = {
+        "action": dict(action) if isinstance(action, Mapping) else {},
+        "monitor_source": str(monitor_result.get("source") or "runner_emulated_input"),
+        "window": str(monitor_result.get("window") or window),
+    }
+    if isinstance(runner_input, Mapping):
+        ambiguity["runner_input"] = dict(runner_input)
+    if monitor_result.get("summary"):
+        ambiguity["summary"] = str(monitor_result["summary"])
+    return {
+        "classification": CLASS_RUNNER_GLOBAL_INPUT_AMBIGUOUS,
+        "product_verdict_allowed": False,
+        "basis": str(monitor_result.get("basis") or "runner_input_separation"),
+        "reason": REASON_RUNNER_INPUT_AMBIGUOUS,
+        "ambiguity": ambiguity,
+        "restart_guidance": (
+            "Use input_policy.no_global_input=true or a supported runner-input "
+            "separation monitor before treating the product verdict as no-operator evidence."
+        ),
+    }
+
+
 def _unproven(*, reason: str, basis: str) -> dict[str, Any]:
     return {
         "classification": CLASS_UNPROVEN,
@@ -159,6 +223,8 @@ def _first_classification(
 def _blocked_reason(classification: str) -> str:
     if classification == CLASS_DIRTY_UNPROVEN:
         return "operator input contaminated the scenario"
+    if classification == CLASS_RUNNER_GLOBAL_INPUT_AMBIGUOUS:
+        return REASON_RUNNER_INPUT_AMBIGUOUS
     return "operator-free scenario confidence is unproven"
 
 
