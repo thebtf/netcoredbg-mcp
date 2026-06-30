@@ -5,6 +5,9 @@ from typing import Any
 import pytest
 
 from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner, RuntimeSmokeSession
+from netcoredbg_mcp.session.runtime_smoke_v2.actions.ui_drag import (
+    REASON_NO_ROUTE_EVIDENCE,
+)
 
 
 class ActionSmokeSession:
@@ -93,7 +96,9 @@ class ActionSmokeSession:
         selector: dict[str, Any],
         property_name: str,
     ) -> dict[str, Any]:
-        self.calls.append(("get_property", {"selector": dict(selector), "property": property_name}))
+        self.calls.append(
+            ("get_property", {"selector": dict(selector), "property": property_name})
+        )
         return dict(self.property_result)
 
     async def drag(self, **request: Any) -> dict[str, Any]:
@@ -167,7 +172,11 @@ class ActionSmokeSession:
         self.calls.append(("grid_click_row", request))
         if self.grid_click_row_results:
             return self.grid_click_row_results.pop(0)
-        return {"status": "PASS", "clicked": True, "row": dict(request.get("row") or {})}
+        return {
+            "status": "PASS",
+            "clicked": True,
+            "row": dict(request.get("row") or {}),
+        }
 
     async def grid_right_click_row(self, **request: Any) -> dict[str, Any]:
         self.calls.append(("grid_right_click_row", request))
@@ -353,9 +362,7 @@ async def test_v2_no_global_input_blocks_drag_before_physical_adapter() -> None:
                                     "selector": {"automation_id": "CueGrid"},
                                     "row_index": 1,
                                 },
-                                "path": [
-                                    {"relative_to": "source", "x": 0.5, "y": 0.5}
-                                ],
+                                "path": [{"relative_to": "source", "x": 0.5, "y": 0.5}],
                                 "drop": {
                                     "selector": {"automation_id": "CueGrid"},
                                     "row_index": 2,
@@ -456,7 +463,9 @@ async def test_v2_no_global_input_allows_app_dispatch_click_route() -> None:
 
 
 @pytest.mark.asyncio
-async def test_v2_no_global_input_rejects_malformed_action_policy_before_adapter() -> None:
+async def test_v2_no_global_input_rejects_malformed_action_policy_before_adapter() -> (
+    None
+):
     session = ActionSmokeSession()
 
     result = await _runner(session).run(
@@ -485,8 +494,7 @@ async def test_v2_no_global_input_rejects_malformed_action_policy_before_adapter
     assert result["status"] == "INVALID_SETUP"
     assert result["reason"] == "invalid plan schema"
     assert result["validation_errors"] == [
-        "cases[0].transitions[0].action.input_policy.no_global_input "
-        "must be a boolean"
+        "cases[0].transitions[0].action.input_policy.no_global_input must be a boolean"
     ]
     assert result["action_count"] == 0
     assert session.calls == []
@@ -634,7 +642,9 @@ async def test_v2_ui_input_ensure_target_accepts_backend_camel_case_state() -> N
 
 
 @pytest.mark.asyncio
-async def test_v2_ui_click_verified_clicks_after_target_proof_and_checks_postcondition() -> None:
+async def test_v2_ui_click_verified_clicks_after_target_proof_and_checks_postcondition() -> (
+    None
+):
     session = ActionSmokeSession()
     session.find_result = {
         "status": "PASS",
@@ -645,7 +655,11 @@ async def test_v2_ui_click_verified_clicks_after_target_proof_and_checks_postcon
         "automationId": "ApplyButton",
     }
     session.focus_result = {"status": "PASS", "focused": True, "focus_within": True}
-    session.click_result = {"status": "PASS", "clicked": True, "method": "InvokePattern"}
+    session.click_result = {
+        "status": "PASS",
+        "clicked": True,
+        "method": "InvokePattern",
+    }
     session.property_result = {
         "status": "PASS",
         "property": "IsSelected",
@@ -771,7 +785,9 @@ async def test_v2_ui_right_click_verified_uses_target_proof_and_postcondition() 
 
 
 @pytest.mark.asyncio
-async def test_v2_ui_double_click_verified_uses_target_proof_and_postcondition() -> None:
+async def test_v2_ui_double_click_verified_uses_target_proof_and_postcondition() -> (
+    None
+):
     session = ActionSmokeSession()
     session.find_result = {
         "status": "PASS",
@@ -839,7 +855,9 @@ async def test_v2_ui_double_click_verified_uses_target_proof_and_postcondition()
 
 
 @pytest.mark.asyncio
-async def test_v2_ui_click_verified_blocks_missing_postcondition_before_side_effects() -> None:
+async def test_v2_ui_click_verified_blocks_missing_postcondition_before_side_effects() -> (
+    None
+):
     session = ActionSmokeSession()
 
     result = await _runner(session).run(
@@ -871,7 +889,9 @@ async def test_v2_ui_click_verified_blocks_missing_postcondition_before_side_eff
 
 
 @pytest.mark.asyncio
-async def test_v2_ui_click_verified_blocks_unsupported_postcondition_before_side_effects() -> None:
+async def test_v2_ui_click_verified_blocks_unsupported_postcondition_before_side_effects() -> (
+    None
+):
     session = ActionSmokeSession()
 
     result = await _runner(session).run(
@@ -1039,7 +1059,9 @@ async def test_v2_ui_key_sequence_focuses_before_sending_keys() -> None:
                         {
                             "action": {
                                 "kind": "ui.key_sequence",
-                                "selector": {"automation_id": "checkBoxSpellCheckInput"},
+                                "selector": {
+                                    "automation_id": "checkBoxSpellCheckInput"
+                                },
                                 "keys": "{SPACE}",
                             },
                             "probes": [],
@@ -1111,7 +1133,9 @@ async def test_v2_ui_text_type_replace_selection_focuses_types_and_verifies() ->
 
 
 @pytest.mark.asyncio
-async def test_v2_ui_text_type_replace_selection_accepts_value_field_from_text_read() -> None:
+async def test_v2_ui_text_type_replace_selection_accepts_value_field_from_text_read() -> (
+    None
+):
     session = ActionSmokeSession()
     session.text_read_result = {"status": "PASS", "value": "Replaced text"}
 
@@ -1143,7 +1167,9 @@ async def test_v2_ui_text_type_replace_selection_accepts_value_field_from_text_r
 
 
 @pytest.mark.asyncio
-async def test_v2_ui_text_type_replace_selection_accepts_statusless_backend_success() -> None:
+async def test_v2_ui_text_type_replace_selection_accepts_statusless_backend_success() -> (
+    None
+):
     session = ActionSmokeSession()
     session.find_result = {"found": True, "automationId": "CueTextBox"}
     session.focus_result = {"focused": True, "method": "UIA.Focus"}
@@ -1243,7 +1269,9 @@ async def test_v2_ui_text_type_replace_selection_blocks_on_bad_select_all() -> N
 
 
 @pytest.mark.asyncio
-async def test_v2_ui_text_type_replace_selection_blocks_when_focus_is_not_within_textbox() -> None:
+async def test_v2_ui_text_type_replace_selection_blocks_when_focus_is_not_within_textbox() -> (
+    None
+):
     session = ActionSmokeSession()
     session.text_get_state_result = {
         "status": "PASS",
@@ -1278,7 +1306,10 @@ async def test_v2_ui_text_type_replace_selection_blocks_when_focus_is_not_within
     assert action["status"] == "BLOCKED"
     assert action["reason"] == "select-all precondition failed"
     assert action["precondition"]["selected"] is False
-    assert action["precondition"]["reason"] == "TextBox focus evidence reports focus outside target"
+    assert (
+        action["precondition"]["reason"]
+        == "TextBox focus evidence reports focus outside target"
+    )
     assert action["precondition"]["expected"] == {"focus_within": True}
     assert action["precondition"]["actual"] == {
         "selection_start": 0,
@@ -1346,7 +1377,9 @@ async def test_v2_ui_text_type_replace_selection_blocks_without_text_state() -> 
 
 
 @pytest.mark.asyncio
-async def test_v2_ui_text_type_replace_selection_accepts_float_string_selection_offsets() -> None:
+async def test_v2_ui_text_type_replace_selection_accepts_float_string_selection_offsets() -> (
+    None
+):
     session = ActionSmokeSession()
     session.text_get_state_result = {
         "status": "PASS",
@@ -1432,7 +1465,9 @@ async def test_v2_ui_text_type_replace_selection_uses_utf16_selection_offsets() 
 
 
 @pytest.mark.asyncio
-async def test_v2_ui_text_type_replace_selection_infers_start_from_end_and_length() -> None:
+async def test_v2_ui_text_type_replace_selection_infers_start_from_end_and_length() -> (
+    None
+):
     session = ActionSmokeSession()
     session.text_get_state_result = {
         "status": "PASS",
@@ -1475,7 +1510,9 @@ async def test_v2_ui_text_type_replace_selection_infers_start_from_end_and_lengt
 
 
 @pytest.mark.asyncio
-async def test_v2_ui_text_type_replace_selection_blocks_without_selection_state() -> None:
+async def test_v2_ui_text_type_replace_selection_blocks_without_selection_state() -> (
+    None
+):
     session = ActionSmokeSession()
     session.text_get_state_result = {
         "status": "PASS",
@@ -1608,7 +1645,9 @@ async def test_v2_ui_text_type_replace_selection_normalizes_adapter_failure_stat
 
 
 @pytest.mark.asyncio
-async def test_v2_ui_text_type_replace_selection_blocks_selector_miss_before_typing() -> None:
+async def test_v2_ui_text_type_replace_selection_blocks_selector_miss_before_typing() -> (
+    None
+):
     session = ActionSmokeSession()
     session.find_result = {"status": "PASS", "found": False}
 
@@ -1641,7 +1680,9 @@ async def test_v2_ui_text_type_replace_selection_blocks_selector_miss_before_typ
 
 
 @pytest.mark.asyncio
-async def test_v2_ui_text_type_replace_selection_blocks_missing_selector_before_lookup() -> None:
+async def test_v2_ui_text_type_replace_selection_blocks_missing_selector_before_lookup() -> (
+    None
+):
     session = ActionSmokeSession()
 
     result = await _runner(session).run(
@@ -1749,7 +1790,9 @@ async def test_v2_ui_text_type_replace_selection_escapes_sendkeys_literals() -> 
 
 
 @pytest.mark.asyncio
-async def test_v2_ui_text_type_replace_selection_clears_text_when_replacement_is_empty() -> None:
+async def test_v2_ui_text_type_replace_selection_clears_text_when_replacement_is_empty() -> (
+    None
+):
     session = ActionSmokeSession()
     session.text_read_result = {"status": "PASS", "text": ""}
 
@@ -1799,7 +1842,9 @@ async def test_v2_ui_invoke_route_does_not_focus_before_invoke() -> None:
                         {
                             "action": {
                                 "kind": "ui.invoke",
-                                "selector": {"automation_id": "checkBoxSpellCheckInput"},
+                                "selector": {
+                                    "automation_id": "checkBoxSpellCheckInput"
+                                },
                             },
                             "probes": [],
                         }
@@ -1864,7 +1909,9 @@ async def test_v2_ui_key_sequence_propagates_focus_failure() -> None:
                         {
                             "action": {
                                 "kind": "ui.key_sequence",
-                                "selector": {"automation_id": "checkBoxSpellCheckInput"},
+                                "selector": {
+                                    "automation_id": "checkBoxSpellCheckInput"
+                                },
                                 "keys": "{SPACE}",
                             },
                             "probes": [],
@@ -1900,7 +1947,9 @@ async def test_v2_transition_observes_default_idle_settle() -> None:
                         {
                             "action": {
                                 "kind": "ui.invoke",
-                                "selector": {"automation_id": "checkBoxSpellCheckInput"},
+                                "selector": {
+                                    "automation_id": "checkBoxSpellCheckInput"
+                                },
                             },
                             "probes": [],
                         }
@@ -2041,7 +2090,9 @@ async def test_v2_transition_waits_for_tracepoint_settle() -> None:
                         {
                             "action": {
                                 "kind": "ui.invoke",
-                                "selector": {"automation_id": "checkBoxSpellCheckInput"},
+                                "selector": {
+                                    "automation_id": "checkBoxSpellCheckInput"
+                                },
                             },
                             "settle": {"await_tracepoint_id": "tp-ready"},
                             "probes": [],
@@ -2081,7 +2132,9 @@ async def test_v2_tracepoint_settle_timeout_returns_blocked() -> None:
                         {
                             "action": {
                                 "kind": "ui.invoke",
-                                "selector": {"automation_id": "checkBoxSpellCheckInput"},
+                                "selector": {
+                                    "automation_id": "checkBoxSpellCheckInput"
+                                },
                             },
                             "settle": {"await_tracepoint_id": "never-hit"},
                             "probes": [],
@@ -2123,7 +2176,11 @@ async def test_v2_ui_drag_is_accepted_and_routes_distinct_payloads() -> None:
                                     {"relative_to": "source", "x": 0.5, "y": 0.5},
                                     {"relative_to": "viewport", "x": 0.5, "y": 0.75},
                                 ],
-                                "drop": {"relative_to": "viewport", "x": 0.5, "y": 0.75},
+                                "drop": {
+                                    "relative_to": "viewport",
+                                    "x": 0.5,
+                                    "y": 0.75,
+                                },
                             },
                             "probes": [],
                         },
@@ -2143,7 +2200,11 @@ async def test_v2_ui_drag_is_accepted_and_routes_distinct_payloads() -> None:
                                         "hold_ms": 1200,
                                     },
                                 ],
-                                "drop": {"relative_to": "viewport", "x": 0.5, "y": 0.65},
+                                "drop": {
+                                    "relative_to": "viewport",
+                                    "x": 0.5,
+                                    "y": 0.65,
+                                },
                                 "modifiers": ["ctrl"],
                                 "duration_ms": 500,
                             },
@@ -2313,7 +2374,9 @@ async def test_v2_ui_drag_distinguishes_source_forms_in_request_and_evidence() -
 
 
 @pytest.mark.asyncio
-async def test_v2_ui_drag_with_ensure_visible_calls_grid_preflight_before_drag() -> None:
+async def test_v2_ui_drag_with_ensure_visible_calls_grid_preflight_before_drag() -> (
+    None
+):
     session = ActionSmokeSession()
 
     result = await _runner(session).run(
@@ -2379,7 +2442,9 @@ async def test_v2_ui_drag_with_ensure_visible_calls_grid_preflight_before_drag()
 
 
 @pytest.mark.asyncio
-async def test_v2_ui_drag_without_ensure_visible_keeps_default_no_preflight_behavior() -> None:
+async def test_v2_ui_drag_without_ensure_visible_keeps_default_no_preflight_behavior() -> (
+    None
+):
     session = ActionSmokeSession()
 
     result = await _runner(session).run(
@@ -2488,7 +2553,9 @@ async def test_v2_ui_drag_passes_through_drop_ensure_visible_result() -> None:
 
 
 @pytest.mark.asyncio
-async def test_v2_ui_drag_preserves_row_target_drag_evidence_for_offscreen_target() -> None:
+async def test_v2_ui_drag_preserves_row_target_drag_evidence_for_offscreen_target() -> (
+    None
+):
     session = ActionSmokeSession()
     session.drag_results.append(
         {
@@ -2640,7 +2707,9 @@ async def test_v2_ui_drag_passes_through_drop_ensure_visible_blocked_result() ->
 
 
 @pytest.mark.asyncio
-async def test_v2_ui_drag_ensure_visible_blocks_unsupported_preflight_before_drag() -> None:
+async def test_v2_ui_drag_ensure_visible_blocks_unsupported_preflight_before_drag() -> (
+    None
+):
     session = ActionSmokeSession()
     session.grid_ensure_visible_results = [
         {
@@ -2865,7 +2934,9 @@ async def test_v2_ui_grid_select_routes_non_contiguous_indices() -> None:
     )
 
     action = result["cases"][0]["actions"][0]
-    select_call = next(call for call in session.calls if call[0] == "grid_select_indices")
+    select_call = next(
+        call for call in session.calls if call[0] == "grid_select_indices"
+    )
     assert result["status"] == "PASS"
     assert "ui.grid.select" in result["accepted_action_kinds"]
     assert select_call[1]["selector"] == {"automation_id": "CueDataGrid"}
@@ -2902,7 +2973,9 @@ async def test_v2_ui_grid_select_routes_row_identities_to_adapter() -> None:
     )
 
     action = result["cases"][0]["actions"][0]
-    select_call = next(call for call in session.calls if call[0] == "grid_select_identities")
+    select_call = next(
+        call for call in session.calls if call[0] == "grid_select_identities"
+    )
     assert result["status"] == "PASS"
     assert "ui.grid.select" in result["accepted_action_kinds"]
     assert select_call[1]["selector"] == {"automation_id": "CueDataGrid"}
@@ -3039,12 +3112,16 @@ async def test_v2_ui_grid_ensure_visible_routes_selector_identity_to_adapter() -
                 "before": {
                     "first_visible_index": 18,
                     "last_visible_index": 18,
-                    "visible_rows": [{"index": 0, "row_index": 18, "identity": "Cue 018"}],
+                    "visible_rows": [
+                        {"index": 0, "row_index": 18, "identity": "Cue 018"}
+                    ],
                 },
                 "after": {
                     "first_visible_index": 42,
                     "last_visible_index": 42,
-                    "visible_rows": [{"index": 0, "row_index": 42, "identity": "Cue 042"}],
+                    "visible_rows": [
+                        {"index": 0, "row_index": 42, "identity": "Cue 042"}
+                    ],
                 },
                 "comparison": {
                     "first_visible_index_changed": True,
@@ -3084,7 +3161,9 @@ async def test_v2_ui_grid_ensure_visible_routes_selector_identity_to_adapter() -
     )
 
     action = result["cases"][0]["actions"][0]
-    ensure_call = next(call for call in session.calls if call[0] == "grid_ensure_visible")
+    ensure_call = next(
+        call for call in session.calls if call[0] == "grid_ensure_visible"
+    )
     assert result["status"] == "PASS"
     assert "ui.grid.ensure_visible" in result["accepted_action_kinds"]
     assert action["route"] == "grid_ensure_visible"
@@ -3181,7 +3260,9 @@ async def test_v2_ui_grid_select_row_by_identity_routes_to_adapter() -> None:
 
 
 @pytest.mark.asyncio
-async def test_v2_ui_grid_select_row_with_ensure_visible_calls_ensure_before_select() -> None:
+async def test_v2_ui_grid_select_row_with_ensure_visible_calls_ensure_before_select() -> (
+    None
+):
     session = ActionSmokeSession()
 
     result = await _runner(session).run(
@@ -3214,10 +3295,14 @@ async def test_v2_ui_grid_select_row_with_ensure_visible_calls_ensure_before_sel
 
     action = result["cases"][0]["actions"][0]
     ensure_call_index = next(
-        index for index, call in enumerate(session.calls) if call[0] == "grid_ensure_visible"
+        index
+        for index, call in enumerate(session.calls)
+        if call[0] == "grid_ensure_visible"
     )
     select_call_index = next(
-        index for index, call in enumerate(session.calls) if call[0] == "grid_select_row"
+        index
+        for index, call in enumerate(session.calls)
+        if call[0] == "grid_select_row"
     )
     ensure_call = session.calls[ensure_call_index]
     select_call = session.calls[select_call_index]
@@ -3307,7 +3392,9 @@ async def test_v2_ui_grid_right_click_row_by_index_routes_to_adapter() -> None:
     )
 
     action = result["cases"][0]["actions"][0]
-    click_call = next(call for call in session.calls if call[0] == "grid_right_click_row")
+    click_call = next(
+        call for call in session.calls if call[0] == "grid_right_click_row"
+    )
     assert result["status"] == "PASS"
     assert "ui.grid.right_click_row" in result["accepted_action_kinds"]
     assert action["route"] == "grid_right_click_row"
@@ -3347,7 +3434,9 @@ async def test_v2_ui_grid_double_click_row_by_index_routes_to_adapter() -> None:
     )
 
     action = result["cases"][0]["actions"][0]
-    click_call = next(call for call in session.calls if call[0] == "grid_double_click_row")
+    click_call = next(
+        call for call in session.calls if call[0] == "grid_double_click_row"
+    )
     assert result["status"] == "PASS"
     assert "ui.grid.double_click_row" in result["accepted_action_kinds"]
     assert action["route"] == "grid_double_click_row"
@@ -3360,7 +3449,9 @@ async def test_v2_ui_grid_double_click_row_by_index_routes_to_adapter() -> None:
 
 
 @pytest.mark.asyncio
-async def test_v2_ui_grid_click_row_with_ensure_visible_calls_ensure_before_click() -> None:
+async def test_v2_ui_grid_click_row_with_ensure_visible_calls_ensure_before_click() -> (
+    None
+):
     session = ActionSmokeSession()
 
     result = await _runner(session).run(
@@ -3394,7 +3485,9 @@ async def test_v2_ui_grid_click_row_with_ensure_visible_calls_ensure_before_clic
 
     action = result["cases"][0]["actions"][0]
     ensure_call_index = next(
-        index for index, call in enumerate(session.calls) if call[0] == "grid_ensure_visible"
+        index
+        for index, call in enumerate(session.calls)
+        if call[0] == "grid_ensure_visible"
     )
     click_call_index = next(
         index for index, call in enumerate(session.calls) if call[0] == "grid_click_row"
@@ -3450,7 +3543,11 @@ async def test_v2_ui_grid_row_ensure_visible_blocks_unsupported_preflight(
         "identity": {"column": "PhraseId"},
         "ensure_visible": True,
     }
-    if kind in {"ui.grid.click_row", "ui.grid.right_click_row", "ui.grid.double_click_row"}:
+    if kind in {
+        "ui.grid.click_row",
+        "ui.grid.right_click_row",
+        "ui.grid.double_click_row",
+    }:
         action["column"] = "PhraseId"
 
     result = await _runner(session).run(
@@ -3508,7 +3605,11 @@ async def test_v2_ui_grid_row_action_blocks_non_dict_ensure_visible_result(
         "identity": {"column": "PhraseId"},
         "ensure_visible": True,
     }
-    if kind in {"ui.grid.click_row", "ui.grid.right_click_row", "ui.grid.double_click_row"}:
+    if kind in {
+        "ui.grid.click_row",
+        "ui.grid.right_click_row",
+        "ui.grid.double_click_row",
+    }:
         action["column"] = "PhraseId"
 
     result = await _runner(session).run(
@@ -3528,7 +3629,10 @@ async def test_v2_ui_grid_row_action_blocks_non_dict_ensure_visible_result(
     assert result["status"] == "BLOCKED"
     assert action_result["status"] == "BLOCKED"
     assert action_result["route"] == route
-    assert action_result["result"]["reason"] == "grid ensure-visible returned non-object result"
+    assert (
+        action_result["result"]["reason"]
+        == "grid ensure-visible returned non-object result"
+    )
     assert action_result["result"]["ensure_visible_result"] == "not-a-dict"
     assert action_result["action_skipped"] is True
     assert not any(call[0] == row_call for call in session.calls)
@@ -3603,7 +3707,9 @@ async def test_v2_ui_grid_row_action_blocks_non_dict_adapter_result(
 
 
 @pytest.mark.asyncio
-async def test_v2_ui_grid_row_action_blocks_invalid_row_payload_before_adapter() -> None:
+async def test_v2_ui_grid_row_action_blocks_invalid_row_payload_before_adapter() -> (
+    None
+):
     session = ActionSmokeSession()
 
     result = await _runner(session).run(
@@ -3683,7 +3789,11 @@ async def test_v2_ui_drag_preserves_selected_payload_evidence(
                                     {"relative_to": "source", "x": 0.5, "y": 0.5},
                                     {"relative_to": "viewport", "x": 0.5, "y": 0.75},
                                 ],
-                                "drop": {"relative_to": "viewport", "x": 0.5, "y": 0.75},
+                                "drop": {
+                                    "relative_to": "viewport",
+                                    "x": 0.5,
+                                    "y": 0.75,
+                                },
                                 "identity": {"column": "StableRowId"},
                                 "expect": {
                                     "selected_payload_preserved": True,
@@ -3705,7 +3815,10 @@ async def test_v2_ui_drag_preserves_selected_payload_evidence(
     drag_call = next(call for call in session.calls if call[0] == "drag")
     assert result["status"] == "PASS"
     assert drag_call[1]["identity"] == {"column": "StableRowId"}
-    assert drag_call[1]["expect"]["selected_payload"]["expected_identities"] == selected_identities
+    assert (
+        drag_call[1]["expect"]["selected_payload"]["expected_identities"]
+        == selected_identities
+    )
     assert action["selected_payload"] == {
         "before": selected_identities,
         "after": selected_identities,
@@ -3721,6 +3834,7 @@ async def test_v2_ui_drag_preserves_selected_payload_evidence(
             {
                 "status": "PASS",
                 "backend": "fake",
+                "route_evidence": {"move_points": [{"x": 1, "y": 1}]},
                 "selected_payload": {
                     "before": ["Cue 001", "Cue 002"],
                     "after": ["Cue 001", "Cue 003"],
@@ -3733,6 +3847,7 @@ async def test_v2_ui_drag_preserves_selected_payload_evidence(
             {
                 "status": "PASS",
                 "backend": "fake",
+                "route_evidence": {"move_points": [{"x": 1, "y": 1}]},
                 "selected_payload": {
                     "before": [],
                     "after": [],
@@ -3780,7 +3895,11 @@ async def test_v2_ui_drag_fails_closed_for_selected_payload_expectation(
                                     {"relative_to": "source", "x": 0.5, "y": 0.5},
                                     {"relative_to": "viewport", "x": 0.5, "y": 0.75},
                                 ],
-                                "drop": {"relative_to": "viewport", "x": 0.5, "y": 0.75},
+                                "drop": {
+                                    "relative_to": "viewport",
+                                    "x": 0.5,
+                                    "y": 0.75,
+                                },
                                 "expect": {"selected_payload_preserved": True},
                             },
                             "probes": [],
@@ -3795,6 +3914,8 @@ async def test_v2_ui_drag_fails_closed_for_selected_payload_expectation(
     assert result["status"] == expected_status
     assert action["status"] == expected_status
     assert action["reason"] == expected_reason
+    if adapter_result.get("status") == "PASS" and adapter_result.get("route_evidence"):
+        assert action["runner_input"]["kind"] == "ui.drag"
 
 
 @pytest.mark.asyncio
@@ -4168,7 +4289,7 @@ async def test_v2_ui_drag_blocks_pass_without_route_evidence() -> None:
     action = result["cases"][0]["actions"][0]
     assert result["status"] == "BLOCKED"
     assert action["status"] == "BLOCKED"
-    assert action["reason"] == "real pointer route evidence unavailable"
+    assert action["reason"] == REASON_NO_ROUTE_EVIDENCE
     assert action["requested"] == {
         "adapter_status": "PASS",
         "route_evidence": None,
@@ -4285,7 +4406,11 @@ async def test_v2_ui_drag_propagates_duplicate_row_identity_blocked() -> None:
                                     {"relative_to": "source", "x": 0.5, "y": 0.5},
                                     {"relative_to": "viewport", "x": 0.5, "y": 0.75},
                                 ],
-                                "drop": {"relative_to": "viewport", "x": 0.5, "y": 0.75},
+                                "drop": {
+                                    "relative_to": "viewport",
+                                    "x": 0.5,
+                                    "y": 0.75,
+                                },
                                 "expect": {
                                     "selected_payload_preserved": True,
                                     "no_op": True,
@@ -4305,4 +4430,6 @@ async def test_v2_ui_drag_propagates_duplicate_row_identity_blocked() -> None:
     assert action["reason"] == "duplicate row identity"
     assert action["requested"] == {"row_identity": "Cue 010"}
     assert action["accepted"] == {"row_identity": "unique visible row identity"}
-    assert action["next_step"] == "Disambiguate the row with row_index or cached_element."
+    assert (
+        action["next_step"] == "Disambiguate the row with row_index or cached_element."
+    )

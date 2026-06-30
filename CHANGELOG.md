@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Documented runner-controlled global-input ambiguity for no-operator
+  runtime-smoke plans that intentionally allow covered `ui.drag` input.
+
 ## [0.20.5] - 2026-06-22
 
 ### Changed

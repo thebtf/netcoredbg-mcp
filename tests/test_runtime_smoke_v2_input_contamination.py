@@ -5,6 +5,12 @@ from typing import Any
 import pytest
 
 from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner, RuntimeSmokeSession
+from netcoredbg_mcp.session.runtime_smoke_v2.actions.ui_drag import (
+    REASON_NO_ROUTE_EVIDENCE,
+)
+from netcoredbg_mcp.session.runtime_smoke_v2.run_confidence import (
+    REASON_RUNNER_INPUT_AMBIGUOUS,
+)
 from netcoredbg_mcp.session.runtime_smoke_v2.transition_executor import (
     _status_from_records,
 )
@@ -20,6 +26,14 @@ class ConfidenceSmokeSession:
             {"status": "PASS"} if monitor_result is None else monitor_result
         )
         self.monitor_calls: list[dict[str, Any]] = []
+        self.drag_calls: list[dict[str, Any]] = []
+        self.drag_result: dict[str, Any] = {
+            "status": "PASS",
+            "route_evidence": {
+                "move_points": [{"relative_to": "screen", "x": 10, "y": 20}],
+                "final_pointer": {"relative_to": "screen", "x": 30, "y": 40},
+            },
+        }
 
     def input_monitor_check(self, **kwargs: Any) -> dict[str, Any]:
         self.monitor_calls.append(dict(kwargs))
@@ -28,17 +42,19 @@ class ConfidenceSmokeSession:
             return dict(self.monitor_result[index])
         return dict(self.monitor_result)
 
+    def drag(self, **kwargs: Any) -> dict[str, Any]:
+        self.drag_calls.append(dict(kwargs))
+        return dict(self.drag_result)
+
 
 def _runner(
     session: ConfidenceSmokeSession,
     *,
     include_monitor: bool = True,
 ) -> RuntimeSmokeRunner:
-    adapters = (
-        {"runtime.input_monitor.check": session.input_monitor_check}
-        if include_monitor
-        else {}
-    )
+    adapters = {"ui.drag": session.drag}
+    if include_monitor:
+        adapters["runtime.input_monitor.check"] = session.input_monitor_check
     return RuntimeSmokeRunner(session, service_adapters=adapters)
 
 
@@ -65,10 +81,51 @@ def _no_operator_plan(extra: dict[str, Any] | None = None) -> dict[str, Any]:
     return plan
 
 
+def _no_operator_drag_plan(*, no_global_input: bool) -> dict[str, Any]:
+    return _no_operator_plan(
+        {
+            "input_policy": {"no_global_input": no_global_input},
+            "cases": [
+                {
+                    "id": "drag_case",
+                    "transitions": [
+                        {
+                            "id": "drag_transition",
+                            "action": {
+                                "kind": "ui.drag",
+                                "source": {
+                                    "point": {
+                                        "relative_to": "screen",
+                                        "x": 10,
+                                        "y": 20,
+                                    }
+                                },
+                                "path": [
+                                    {
+                                        "relative_to": "screen",
+                                        "x": 15,
+                                        "y": 25,
+                                    }
+                                ],
+                                "drop": {
+                                    "relative_to": "screen",
+                                    "x": 30,
+                                    "y": 40,
+                                },
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+
 def test_unknown_confidence_statuses_fail_closed_in_transition_aggregation() -> None:
-    assert _status_from_records(
-        [{"status": "PASS"}, {"status": "UNPROVEN"}]
-    ) == "BLOCKED"
+    assert (
+        _status_from_records([{"status": "PASS"}, {"status": "UNPROVEN"}]) == "BLOCKED"
+    )
 
 
 @pytest.mark.asyncio
@@ -126,6 +183,191 @@ async def test_no_operator_dirty_after_action_blocks_product_verdict() -> None:
 
 
 @pytest.mark.asyncio
+async def test_no_operator_dirty_after_runner_global_input_is_ambiguous_unproven() -> (
+    None
+):
+    session = ConfidenceSmokeSession(
+        [
+            {"status": "PASS", "basis": "windows_last_input_info"},
+            {
+                "status": "DIRTY",
+                "basis": "windows_last_input_info",
+                "source": "global_input",
+                "window": "after_action",
+                "summary": "Windows last-input tick advanced during no-operator window.",
+            },
+        ]
+    )
+
+    result = await _runner(session).run(_no_operator_drag_plan(no_global_input=False))
+
+    confidence = result["run_confidence"]
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == REASON_RUNNER_INPUT_AMBIGUOUS
+    assert confidence["classification"] == "RUNNER_GLOBAL_INPUT_AMBIGUOUS"
+    assert confidence["product_verdict_allowed"] is False
+    assert confidence["reason"] == result["reason"]
+    assert confidence["ambiguity"]["action"]["kind"] == "ui.drag"
+    assert confidence["ambiguity"]["monitor_source"] == "global_input"
+    assert "operator input contaminated" not in result["reason"]
+    assert "no_global_input" in confidence["restart_guidance"]
+    assert result["compact"]["run_confidence"]["classification"] == (
+        "RUNNER_GLOBAL_INPUT_AMBIGUOUS"
+    )
+    assert session.drag_calls
+    assert [call["window"] for call in session.monitor_calls] == [
+        "before_action",
+        "after_action",
+    ]
+    assert session.monitor_calls[1]["runner_input"]["kind"] == "ui.drag"
+    assert confidence["ambiguity"]["runner_input"]["source"] == "runner_emulated_input"
+
+
+@pytest.mark.asyncio
+async def test_no_operator_explicit_runner_ambiguity_blocks_product_verdict() -> None:
+    session = ConfidenceSmokeSession(
+        [
+            {"status": "PASS", "basis": "windows_last_input_info"},
+            {
+                "status": "RUNNER_GLOBAL_INPUT_AMBIGUOUS",
+                "basis": "windows_last_input_info",
+                "source": "global_input",
+                "window": "after_action",
+            },
+        ]
+    )
+
+    result = await _runner(session).run(_no_operator_drag_plan(no_global_input=False))
+
+    confidence = result["run_confidence"]
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == REASON_RUNNER_INPUT_AMBIGUOUS
+    assert confidence["classification"] == "RUNNER_GLOBAL_INPUT_AMBIGUOUS"
+    assert confidence["product_verdict_allowed"] is False
+    assert confidence["ambiguity"]["monitor_source"] == "global_input"
+    assert confidence["ambiguity"]["runner_input"]["kind"] == "ui.drag"
+    assert "no_global_input" in confidence["restart_guidance"]
+
+
+@pytest.mark.asyncio
+async def test_no_operator_dirty_after_no_route_drag_remains_dirty_unproven() -> None:
+    session = ConfidenceSmokeSession(
+        [
+            {"status": "PASS", "basis": "windows_last_input_info"},
+            {
+                "status": "DIRTY",
+                "basis": "windows_last_input_info",
+                "source": "global_input",
+                "window": "after_action",
+            },
+        ]
+    )
+    session.drag_result = {"status": "PASS"}
+
+    result = await _runner(session).run(_no_operator_drag_plan(no_global_input=False))
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == REASON_NO_ROUTE_EVIDENCE
+    assert result["run_confidence"]["classification"] == "DIRTY_UNPROVEN"
+    assert "runner_input" not in session.monitor_calls[1]
+    assert result["compact"]["run_confidence"]["classification"] == "DIRTY_UNPROVEN"
+
+
+@pytest.mark.asyncio
+async def test_no_operator_external_dirty_after_successful_drag_stays_dirty() -> None:
+    session = ConfidenceSmokeSession(
+        [
+            {"status": "PASS", "basis": "windows_last_input_info"},
+            {
+                "status": "DIRTY",
+                "basis": "windows_last_input_info",
+                "source": "keyboard",
+                "window": "after_action",
+            },
+        ]
+    )
+
+    result = await _runner(session).run(_no_operator_drag_plan(no_global_input=False))
+
+    confidence = result["run_confidence"]
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "operator input contaminated the scenario"
+    assert confidence["classification"] == "DIRTY_UNPROVEN"
+    assert confidence["contamination"]["source"] == "keyboard"
+    assert session.monitor_calls[1]["runner_input"]["kind"] == "ui.drag"
+    assert result["compact"]["run_confidence"]["classification"] == "DIRTY_UNPROVEN"
+
+
+@pytest.mark.asyncio
+async def test_no_operator_runner_ambiguity_does_not_mask_drag_failure() -> None:
+    session = ConfidenceSmokeSession(
+        [
+            {"status": "PASS", "basis": "windows_last_input_info"},
+            {
+                "status": "DIRTY",
+                "basis": "windows_last_input_info",
+                "source": "global_input",
+                "window": "after_action",
+            },
+        ]
+    )
+    session.drag_result = {
+        "status": "PASS",
+        "route_evidence": {"move_points": [{"x": 1, "y": 1}]},
+        "selected_payload": {"before": ["Cue 001"], "after": ["Cue 002"]},
+    }
+    plan = _no_operator_drag_plan(no_global_input=False)
+    plan["cases"][0]["transitions"][0]["action"]["expect"] = {
+        "selected_payload_preserved": True
+    }
+
+    result = await _runner(session).run(plan)
+
+    assert result["status"] == "FAIL"
+    assert result["reason"] == "selected payload expectation failed"
+    assert result["run_confidence"]["classification"] == (
+        "RUNNER_GLOBAL_INPUT_AMBIGUOUS"
+    )
+    assert session.monitor_calls[1]["runner_input"]["kind"] == "ui.drag"
+
+
+@pytest.mark.asyncio
+async def test_no_operator_drag_still_blocks_when_no_global_input_is_required() -> None:
+    session = ConfidenceSmokeSession({"status": "PASS"})
+
+    result = await _runner(session).run(_no_operator_drag_plan(no_global_input=True))
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "global input prohibited by no_global_input policy"
+    assert result["run_confidence"]["classification"] == "CLEAN_PROVEN"
+    assert result["run_confidence"]["product_verdict_allowed"] is True
+    assert session.drag_calls == []
+
+
+@pytest.mark.asyncio
+async def test_no_operator_dirty_before_runner_global_input_stays_operator_dirty() -> (
+    None
+):
+    session = ConfidenceSmokeSession(
+        {
+            "status": "DIRTY",
+            "basis": "windows_last_input_info",
+            "source": "global_input",
+            "window": "before_action",
+            "summary": "Windows last-input tick advanced before action.",
+        }
+    )
+
+    result = await _runner(session).run(_no_operator_drag_plan(no_global_input=False))
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "operator input contaminated the scenario"
+    assert result["run_confidence"]["classification"] == "DIRTY_UNPROVEN"
+    assert result["run_confidence"]["contamination"]["window"] == "before_action"
+    assert session.drag_calls == []
+
+
+@pytest.mark.asyncio
 async def test_no_operator_missing_monitor_is_blocked_unproven() -> None:
     session = ConfidenceSmokeSession()
 
@@ -153,7 +395,9 @@ async def test_no_operator_malformed_monitor_is_blocked_unproven() -> None:
 
 @pytest.mark.asyncio
 async def test_no_operator_clean_monitor_allows_product_failure() -> None:
-    session = ConfidenceSmokeSession({"status": "PASS", "basis": "external_input_monitor"})
+    session = ConfidenceSmokeSession(
+        {"status": "PASS", "basis": "external_input_monitor"}
+    )
 
     result = await _runner(session).run(
         _no_operator_plan({"metrics_thresholds": {"action_latency_ms": {"max": 1}}})

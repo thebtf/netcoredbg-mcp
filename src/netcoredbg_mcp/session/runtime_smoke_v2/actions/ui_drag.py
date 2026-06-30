@@ -10,6 +10,7 @@ from ..evidence import attach_blocked_details, compact_evidence
 _ACCEPTED_MODIFIERS = frozenset({"alt", "control", "ctrl", "shift", "win", "windows"})
 _INTEGER_TEXT = re.compile(r"-?\d+")
 _SOURCE_KINDS = ("row_index", "row_identity", "cached_element", "point")
+REASON_NO_ROUTE_EVIDENCE = "real pointer route evidence unavailable"
 
 
 async def handle_ui_drag(
@@ -107,7 +108,9 @@ async def handle_ui_drag(
             )
         if not _is_adapter_success(ensure_visible_result):
             result = dict(ensure_visible_result)
-            status = _terminal_failure_status(str(result.get("status", "BLOCKED")).upper())
+            status = _terminal_failure_status(
+                str(result.get("status", "BLOCKED")).upper()
+            )
             result["status"] = status
             result["ensure_visible_result"] = ensure_visible_result
             result["action_skipped"] = True
@@ -159,7 +162,9 @@ async def handle_ui_drag(
     )
 
 
-def _source_from_action(action: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+def _source_from_action(
+    action: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
     source = action.get("source")
     if not isinstance(source, Mapping):
         return {}, _blocked(
@@ -179,7 +184,9 @@ def _source_from_action(action: dict[str, Any]) -> tuple[dict[str, Any], dict[st
     return _normalize_source(dict(source))
 
 
-def _normalize_source(source: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+def _normalize_source(
+    source: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
     selector = source.get("selector")
     if selector is not None and not isinstance(selector, Mapping):
         return {}, _blocked(
@@ -198,7 +205,13 @@ def _normalize_source(source: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
             reason="ambiguous drag source",
             requested={"source": source},
             accepted={
-                "source": ["row_index", "row_identity", "cached_element", "point", "selector"]
+                "source": [
+                    "row_index",
+                    "row_identity",
+                    "cached_element",
+                    "point",
+                    "selector",
+                ]
             },
             next_step="Provide exactly one drag source form.",
         )
@@ -256,7 +269,9 @@ def _normalize_source(source: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
     return {"kind": kind, "cached_element": cached_element}, None
 
 
-def _identity_from_action(action: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+def _identity_from_action(
+    action: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
     raw_identity = action.get("identity")
     if raw_identity is None:
         return {}, None
@@ -323,7 +338,9 @@ def _row_index_from_source(source: dict[str, Any]) -> tuple[int, dict[str, Any] 
         )
     if isinstance(raw_row_index, int):
         row_index = raw_row_index
-    elif isinstance(raw_row_index, str) and _INTEGER_TEXT.fullmatch(raw_row_index.strip()):
+    elif isinstance(raw_row_index, str) and _INTEGER_TEXT.fullmatch(
+        raw_row_index.strip()
+    ):
         row_index = int(raw_row_index)
     else:
         return 0, _blocked(
@@ -342,7 +359,9 @@ def _row_index_from_source(source: dict[str, Any]) -> tuple[int, dict[str, Any] 
     return row_index, None
 
 
-def _path_from_action(action: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+def _path_from_action(
+    action: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     path = action.get("path")
     if not isinstance(path, list) or not path:
         return [], _blocked(
@@ -364,7 +383,9 @@ def _path_from_action(action: dict[str, Any]) -> tuple[list[dict[str, Any]], dic
     return normalized, None
 
 
-def _drop_from_action(action: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+def _drop_from_action(
+    action: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
     drop = action.get("drop")
     if drop is None:
         return {}, None
@@ -378,7 +399,9 @@ def _drop_from_action(action: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
     return dict(drop), None
 
 
-def _modifiers_from_action(action: dict[str, Any]) -> tuple[list[str], dict[str, Any] | None]:
+def _modifiers_from_action(
+    action: dict[str, Any],
+) -> tuple[list[str], dict[str, Any] | None]:
     raw_modifiers = action.get("modifiers") or []
     if not isinstance(raw_modifiers, list):
         return [], _blocked(
@@ -388,7 +411,9 @@ def _modifiers_from_action(action: dict[str, Any]) -> tuple[list[str], dict[str,
             next_step="Provide modifiers as a list of accepted key names.",
         )
     modifiers = [str(modifier).lower() for modifier in raw_modifiers]
-    invalid = [modifier for modifier in modifiers if modifier not in _ACCEPTED_MODIFIERS]
+    invalid = [
+        modifier for modifier in modifiers if modifier not in _ACCEPTED_MODIFIERS
+    ]
     if invalid:
         return [], _blocked(
             reason="invalid drag modifier",
@@ -399,7 +424,9 @@ def _modifiers_from_action(action: dict[str, Any]) -> tuple[list[str], dict[str,
     return modifiers, None
 
 
-def _cancel_from_action(action: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+def _cancel_from_action(
+    action: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
     cancel = action.get("cancel")
     if cancel is None:
         return {}, None
@@ -555,7 +582,9 @@ def _action_result(
     if ensure_visible_result is not None:
         output["ensure_visible_result"] = compact_evidence(ensure_visible_result)
     if drop_ensure_visible_result is not None:
-        output["drop_ensure_visible_result"] = compact_evidence(drop_ensure_visible_result)
+        output["drop_ensure_visible_result"] = compact_evidence(
+            drop_ensure_visible_result
+        )
     if action_skipped:
         output["action_skipped"] = True
     if output["route_evidence"]:
@@ -603,18 +632,14 @@ def _action_result(
             output["next_step"] = (
                 "Use a UI backend that reports cleanup evidence for drag gestures."
             )
-        elif (
-            no_op.get("expected") is not True
-            or (
-                expected_reason is not None
-                and no_op.get("reason") != expected_reason
-            )
+        elif no_op.get("expected") is not True or (
+            expected_reason is not None and no_op.get("reason") != expected_reason
         ):
             output["status"] = "FAIL"
             output["reason"] = "no-op expectation failed"
     if _is_passing(output) and not output["route_evidence"]:
         output["status"] = "BLOCKED"
-        output["reason"] = "real pointer route evidence unavailable"
+        output["reason"] = REASON_NO_ROUTE_EVIDENCE
         output["requested"] = {
             "adapter_status": status,
             "route_evidence": None,
@@ -628,6 +653,13 @@ def _action_result(
         output["next_step"] = (
             "Use a UI backend adapter that reports real pointer route evidence."
         )
+    if status.upper() == "PASS" and output["route_evidence"] and not action_skipped:
+        output["runner_input"] = {
+            "source": "runner_emulated_input",
+            "kind": "ui.drag",
+            "window": "action",
+            "route": "drag",
+        }
     if status != "PASS":
         attach_blocked_details(output, result)
     evidence_ref = result.get("evidence_ref")

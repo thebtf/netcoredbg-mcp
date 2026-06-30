@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -59,10 +59,15 @@ class RuntimeInputMonitor:
     def check(self, **kwargs: Any) -> dict[str, Any]:
         window = str(kwargs.get("window") or "").strip()
         if window not in _VALID_WINDOWS:
-            return _blocked("input monitor unsupported window", window=window or "unknown")
+            return _blocked(
+                "input monitor unsupported window", window=window or "unknown"
+            )
         if not str(kwargs.get("case_id") or "").strip():
             return _blocked("input monitor missing case identity", window=window)
-        if kwargs.get("transition_id") is None and kwargs.get("transition_index") is None:
+        if (
+            kwargs.get("transition_id") is None
+            and kwargs.get("transition_index") is None
+        ):
             return _blocked("input monitor missing transition identity", window=window)
 
         key = _transition_key(kwargs)
@@ -122,6 +127,14 @@ class RuntimeInputMonitor:
             "current": _sample_payload(sample),
         }
         if comparison == "advanced":
+            runner_input = _runner_input_metadata(kwargs)
+            if runner_input is not None:
+                return _runner_global_input_ambiguous(
+                    window=window,
+                    monitor=monitor,
+                    runner_input=runner_input,
+                    action=kwargs.get("action"),
+                )
             return _dirty(
                 window=window,
                 summary="Windows last-input tick advanced during no-operator window.",
@@ -214,4 +227,36 @@ def _dirty(*, window: str, summary: str, monitor: dict[str, Any]) -> dict[str, A
         "window": window,
         "summary": summary,
         "monitor": monitor,
+    }
+
+
+def _runner_input_metadata(kwargs: dict[str, Any]) -> dict[str, Any] | None:
+    runner_input = kwargs.get("runner_input")
+    if not isinstance(runner_input, Mapping):
+        return None
+    if str(runner_input.get("source") or "") != "runner_emulated_input":
+        return None
+    kind = str(runner_input.get("kind") or "")
+    if kind != "ui.drag":
+        return None
+    return dict(runner_input)
+
+
+def _runner_global_input_ambiguous(
+    *,
+    window: str,
+    monitor: dict[str, Any],
+    runner_input: dict[str, Any],
+    action: Any,
+) -> dict[str, Any]:
+    action_payload = dict(action) if isinstance(action, Mapping) else {}
+    return {
+        "status": "RUNNER_GLOBAL_INPUT_AMBIGUOUS",
+        "basis": "windows_last_input_info",
+        "source": "runner_emulated_input",
+        "window": window,
+        "summary": "Windows last-input tick advanced during runner-emulated global input.",
+        "monitor": monitor,
+        "runner_input": runner_input,
+        "action": action_payload,
     }

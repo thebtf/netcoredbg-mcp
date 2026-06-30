@@ -133,6 +133,26 @@ interference is not recorded as product `FAIL`.
 | `#270` | Keep broad FR open | Bounded UI scenario runner confidence prevents operator keyboard/mouse interference from being misread as DataGrid/TextBox helper failure. | Do not reopen already-covered TextBox/DataGrid helper/replay slices from broad issue openness alone; fresh consumer failure evidence is still required for helper work. |
 | `#272` | Keep broad FR open | Bounded dirty/unproven evidence protects app-diagnostics/oracle_pack scenario verdicts from contaminated no-operator windows. | Do not claim app-diagnostics/oracle_pack lifecycle closure or full background isolation from CR-107; remaining lifecycle/orchestration work still needs split follow-up issue evidence or fresh broad-closure proof. |
 
+## CR-108 Runner-Controlled Global-Input Confidence Semantics
+
+CR-108 records the bounded issue `#351` follow-up to CR-107. Runtime-smoke v2
+runs can request `run_confidence.no_operator` while a scenario intentionally
+allows runner-owned global input with `input_policy.no_global_input=false`.
+For the covered `ui.drag` action window, action metadata now carries
+`runner_emulated_input` into `runtime.input_monitor.check`. When Windows
+`LASTINPUTINFO` advances during that runner-owned window, the provider reports
+`RUNNER_GLOBAL_INPUT_AMBIGUOUS` with reason `input monitor evidence is ambiguous
+after runner-generated global input`; product verdicts stay blocked instead of
+being framed as external contamination. True external dirty input and missing
+monitor evidence still fail closed under the CR-107 no-operator contract.
+
+| Issue | CR-108 decision | Evidence | No-repeat boundary / next gate |
+| --- | --- | --- | --- |
+| `#268` | Keep broad FR open | CR-108 is a bounded issue `#351` follow-up for runner-owned global-input confidence in action/oracle-style runs. It prevents a covered `ui.drag` runner action from being mislabeled as external contamination when the monitor can only prove an input tick advanced. | Do not claim broad action/oracle DSL or orchestration closure from this bounded confidence seam. Remaining broad closure still needs split follow-up issue evidence or fresh broad-closure proof. |
+| `#270` | Keep broad FR open | CR-108 is a bounded issue `#351` follow-up for UI helper/replay confidence around runner-owned `ui.drag` input. It records ambiguity honestly when raw Windows input ticks cannot identify the actor by themselves. | Do not reopen covered TextBox/DataGrid/helper slices or claim helper backlog closure from this confidence fix. Remaining broad helper/replay closure still needs split follow-up issue evidence or fresh broad-closure proof. |
+| `#271` | Keep broad FR open | CR-108 is a bounded issue `#351` follow-up for the runtime-smoke diagnostic confidence contract. It keeps unsupported actor attribution non-product instead of guessing source identity from `windows_last_input_info` alone. | Do not claim diagnostics-orchestration, cleanup, trace, freshness, or process/PDB closure from this bounded confidence seam. Remaining broad diagnostics closure still needs split follow-up issue evidence or fresh broad-closure proof. |
+| `#272` | Keep broad FR open | CR-108 is a bounded issue `#351` follow-up for app-diagnostics/oracle_pack scenario confidence when runner-owned global input is expected. It preserves product-verdict blocking for ambiguous input evidence without broad lifecycle closure. | Do not claim app-diagnostics/oracle_pack lifecycle closure from this bounded confidence seam. Remaining broad lifecycle/orchestration closure still needs split follow-up issue evidence or fresh broad-closure proof. |
+
 ## CR-108 Post-v0.20.2 Downstream Wait Boundary
 
 CR-108 records the fresh post-`v0.20.2` reconnaissance boundary. The provider
