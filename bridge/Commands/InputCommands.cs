@@ -141,7 +141,7 @@ public static partial class InputCommands
                     i++;
                     var ctrlTarget = ConsumeNextToken(keys, ref i);
                     KeySequenceCommands.SendSignedKeyDown(VirtualKeyShort.CONTROL);
-                    try { TypeToken(ctrlTarget); }
+                    try { TypeToken(ctrlTarget, preserveModifierShortcut: true); }
                     finally { KeySequenceCommands.SendSignedKeyUp(VirtualKeyShort.CONTROL); }
                     sent.Add($"Ctrl+{ctrlTarget}");
                     break;
@@ -150,7 +150,7 @@ public static partial class InputCommands
                     i++;
                     var altTarget = ConsumeNextToken(keys, ref i);
                     KeySequenceCommands.SendSignedKeyDown(VirtualKeyShort.ALT);
-                    try { TypeToken(altTarget); }
+                    try { TypeToken(altTarget, preserveModifierShortcut: true); }
                     finally { KeySequenceCommands.SendSignedKeyUp(VirtualKeyShort.ALT); }
                     sent.Add($"Alt+{altTarget}");
                     break;
@@ -159,7 +159,7 @@ public static partial class InputCommands
                     i++;
                     var shiftTarget = ConsumeNextToken(keys, ref i);
                     KeySequenceCommands.SendSignedKeyDown(VirtualKeyShort.SHIFT);
-                    try { TypeToken(shiftTarget); }
+                    try { TypeToken(shiftTarget, preserveModifierShortcut: true); }
                     finally { KeySequenceCommands.SendSignedKeyUp(VirtualKeyShort.SHIFT); }
                     sent.Add($"Shift+{shiftTarget}");
                     break;
@@ -322,16 +322,41 @@ public static partial class InputCommands
         return ch;
     }
 
-    private static void TypeToken(string token)
+    private static void TypeToken(string token, bool preserveModifierShortcut = false)
     {
         if (SpecialKeys.TryGetValue(token, out var vk))
         {
             KeySequenceCommands.SendSignedKeyDown(vk);
             KeySequenceCommands.SendSignedKeyUp(vk);
         }
+        else if (preserveModifierShortcut && TryParseLiteralVirtualKey(token, out var literalVk))
+        {
+            KeySequenceCommands.SendSignedKeyDown(literalVk);
+            KeySequenceCommands.SendSignedKeyUp(literalVk);
+        }
         else
         {
             KeySequenceCommands.SendSignedText(token);
         }
+    }
+
+    private static bool TryParseLiteralVirtualKey(string token, out VirtualKeyShort key)
+    {
+        if (token.Length == 1)
+        {
+            var character = token[0];
+            var isAsciiLetter =
+                (character >= 'a' && character <= 'z') ||
+                (character >= 'A' && character <= 'Z');
+            var isAsciiDigit = character >= '0' && character <= '9';
+            if (isAsciiLetter || isAsciiDigit)
+            {
+                key = (VirtualKeyShort)char.ToUpperInvariant(character);
+                return true;
+            }
+        }
+
+        key = default;
+        return false;
     }
     }

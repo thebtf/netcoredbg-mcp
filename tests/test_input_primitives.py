@@ -650,3 +650,15 @@ class TestInputProvenanceSignature:
 
         assert "Keyboard.Type(" not in input_commands
         assert "KeySequenceCommands.SendSignedText(" in input_commands
+
+    def test_bridge_input_commands_preserve_modifier_shortcuts_with_signed_keys(self):
+        input_commands = (
+            PROJECT_ROOT / "bridge" / "Commands" / "InputCommands.cs"
+        ).read_text(encoding="utf-8")
+
+        assert "TypeToken(ctrlTarget, preserveModifierShortcut: true)" in input_commands
+        assert "TypeToken(altTarget, preserveModifierShortcut: true)" in input_commands
+        assert (
+            "TypeToken(shiftTarget, preserveModifierShortcut: true)" in input_commands
+        )
+        assert "TryParseLiteralVirtualKey" in input_commands
