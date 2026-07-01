@@ -1,80 +1,78 @@
-# netcoredbg-mcp v0.20.5
+# netcoredbg-mcp v0.21.0
 
-Released: 2026-06-22
+Released: 2026-07-01
 
 ## Summary
 
-`v0.20.5` is a docs-only PATCH release that republishes the corrected package
-documentation after `v0.20.4`. The runtime behavior is unchanged from
-`v0.20.4`; this release makes the PyPI README, release notes, production
-playbook, and NovaScript consumer example match the shipped no-operator
-input-monitor surface.
-
-Use this version when you want package metadata and install-time documentation
-to describe the current `runtime.input_monitor.check` capability accurately.
+`v0.21.0` is a MINOR feature release that gives runtime-smoke v2 a real
+runner-vs-operator input separation, replacing the earlier `GetLastInputInfo`
+window heuristic. No-operator runs can now prove that the only input during a
+scenario came from the runner itself, instead of guessing "maybe the operator
+touched it". The release also carries the function-breakpoint clear rollback
+fix (#220, restoring #80).
 
 ## Highlights
 
-- Updates README/README.ru release headlines to `v0.20.5`.
-- Publishes the review-hardened no-operator wording to package consumers:
-  adapter-level `DIRTY` evidence is returned as
-  `run_confidence.classification == "DIRTY_UNPROVEN"`.
-- Refreshes the production testing playbook and NovaScript action-oracle
-  app-diagnostics example for the current package release.
-- Keeps the `v0.20.4` runtime feature history intact while moving the docs
-  refresh from `Unreleased` into a published patch release.
+- **Provenance at the source.** A low-level input event recorder captures every
+  keyboard/mouse event with its provenance. Runner injection surfaces (clicks,
+  drags, key sequences, modifier holds, literal and special keys) are stamped
+  with a shared `RunnerInputSignature`, so a signed event is provably the
+  runner's own input.
+- **3-way attribution, no ambiguity.** `run_confidence` classifies each event as
+  runner-injected (`CLEAN_PROVEN`), foreign-injected, or physical
+  (`DIRTY_UNPROVEN`). The previous `RUNNER_GLOBAL_INPUT_AMBIGUOUS` verdict is
+  gone — real external input is now separable from emulated input rather than
+  suppressed or merely flagged as "maybe".
+- **Fail-closed by construction.** An empty-but-present event stream is proven
+  `CLEAN` (the recorder was active and nothing happened). A malformed or absent
+  stream fails closed as `DIRTY_UNPROVEN` / unproven, so a broken monitor never
+  reads as a clean run.
+- **Breakpoint clear rollback.** Clearing function breakpoints now rolls back on
+  a failed `_sync_function_breakpoints` response instead of reporting a false
+  success, restoring the intended error propagation (#220, #80).
 
 ## Upgrade Notes
 
-- This release does not change runtime behavior relative to `v0.20.4`.
-- Existing plans that rely on `runtime.input_monitor.check` keep the same
-  `CLEAN_PROVEN`, `DIRTY_UNPROVEN`, and fail-closed `BLOCKED` semantics.
+- No-operator plans keep the same public verdict vocabulary — `CLEAN_PROVEN`,
+  `DIRTY_UNPROVEN`, and fail-closed `BLOCKED` — but a clean run is now proven by
+  event provenance rather than a last-input timestamp window.
 - Upgrade an existing pip or pipx install with one of:
 
   ```powershell
-  python -m pip install --upgrade netcoredbg-mcp==0.20.5
+  python -m pip install --upgrade netcoredbg-mcp==0.21.0
   pipx upgrade netcoredbg-mcp
   ```
 
 - For a new workstation install:
 
   ```powershell
-  pipx install netcoredbg-mcp==0.20.5
+  pipx install netcoredbg-mcp==0.21.0
   netcoredbg-mcp setup
   ```
 
 ## Known Residual Scope
 
 - Broad issue-backlog rows `#268`, `#269`, `#270`, `#271`, and `#272` remain
-  open by design. This docs-only release does not claim full broad FR closure.
-- `runtime.input_monitor.check` is still desktop-session evidence, not full OS
-  input isolation.
-- Non-Windows or inaccessible desktop sessions remain `BLOCKED`/unproven for
-  this adapter.
+  open by design.
+- Provenance capture is a Windows desktop-session capability; non-Windows or
+  inaccessible desktop sessions remain `BLOCKED`/unproven for this adapter.
 
 ## Release Gates
 
-- Release-git-readiness passed before release-prep: local `main` was clean,
-  synchronized with `origin/main`, and contained the merged docs-redoc PR
-  `#217` at `3c848467fe37ca89efbe497589efac218c05f074`.
-- Version parity was prepared across `pyproject.toml`,
-  `src/netcoredbg_mcp/__init__.py`, `uv.lock`, README release copy, changelog,
-  release notes, and the planned annotated tag `v0.20.5`.
-- Local release-prep gates passed:
-  - runtime-smoke docs/schema/reproduction gate: `94 passed`;
-  - critical suite: `14 passed`;
-  - server smoke: `6 passed`;
-  - Ruff check for the docs oracle: clean;
-  - test discovery: `1822 tests collected`;
-  - package build: `dist/netcoredbg_mcp-0.20.5.tar.gz` and
-    `dist/netcoredbg_mcp-0.20.5-py3-none-any.whl`;
-  - wheel install smoke: disposable venv CLI reported
-    `netcoredbg-mcp 0.20.5`, package import reported `0.20.5`, and installed
-    metadata reported `0.20.5`;
-  - production playbook fixture builds passed for `SmokeTestApp`,
-    `WpfSmokeApp`, and `AvaloniaSmokeApp` after cleaning stale generated
-    `obj` build artifacts; manual smoke inventory listed `53` scenarios.
-- Gate environment note: the live MCP development upstream held
-  `.venv\Scripts\netcoredbg-mcp.exe`, so release-prep tests used the existing
-  `.venv\Scripts\python.exe` with repo-local temp directories, while the package
-  smoke used a fresh disposable wheel environment.
+- Release-git-readiness: local `main` clean, synchronized with `origin/main`,
+  containing merged PRs `#221` (input-provenance separation) and `#220`
+  (breakpoint clear rollback) at `b021037`.
+- Version parity prepared across `pyproject.toml`,
+  `src/netcoredbg_mcp/__init__.py`, README release copy, changelog, and the
+  planned annotated tag `v0.21.0`.
+- CR-109 regression suite: `269 passed`; Ruff on changed files: clean;
+  `git diff --check`: clean; C# bridge Debug build: `0 warnings, 0 errors`.
+- Live smoke gate (`NETCOREDBG_PATH` set, GUI fixtures built): `217 passed,
+  10 failed out of 227 checks`. All 10 failures classified PRE-EXISTING by
+  running the identical suite on baseline `6d07502` (before CR-109), which
+  reproduced the same 10 failures (`216 passed, 10 failed`); zero in-branch
+  regressions from CR-109. The failing checks are platform/backend limitations
+  (UIA `ControlType`/`RangeValuePattern` unsupported, Avalonia DataGrid,
+  virtualized-list realize, console codepage on the emoji clipboard round-trip,
+  drag wall-clock timing under load).
+- Test discovery: `1851 tests collected`.

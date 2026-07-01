@@ -14,7 +14,7 @@ set breakpoints, step through code, inspect variables, evaluate expressions, rea
 debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
 and Avalonia windows without opening an IDE.
 
-**131 MCP tools · 8 prompts · 4 resources · 1822 collected tests · release v0.20.5**
+**131 MCP tools · 8 prompts · 4 resources · 1851 collected tests · release v0.21.0**
 
 ## Quick Links
 
@@ -23,16 +23,20 @@ and Avalonia windows without opening an IDE.
 - **Reference:** [Available Tools](#available-tools) · [Resources](#mcp-resources) · [Prompts](#mcp-prompts) · [Architecture](#architecture-overview)
 - **Project:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## What's New in v0.20.5
+## What's New in v0.21.0
 
-- **Package documentation refresh** — the PyPI README, Russian README, release
-  notes, production playbook, and NovaScript example now match the shipped
-  `v0.20.4` no-operator input-monitor behavior.
-- **Operator-contamination wording** — no-operator guidance now distinguishes
-  adapter-level `DIRTY` evidence from the returned
-  `run_confidence.classification == "DIRTY_UNPROVEN"` result.
-- **Consumer-facing examples** — the NovaScript action-oracle app-diagnostics
-  example and docs regression oracle now point at the current package release.
+- **True runner-vs-operator input separation** — no-operator runtime-smoke runs
+  now distinguish emulated runner input from real external keyboard/mouse at the
+  source. Runner injection is stamped with a `RunnerInputSignature` and captured
+  by a low-level event recorder, replacing the previous `GetLastInputInfo`
+  window heuristic and its single ambiguity verdict.
+- **3-way provenance attribution** — `run_confidence` classifies each event as
+  runner-injected (`CLEAN_PROVEN`), foreign-injected, or physical
+  (`DIRTY_UNPROVEN`). An empty-but-present event stream is proven clean; a
+  malformed or absent stream fails closed.
+- **Breakpoint clear rollback fix** — clearing function breakpoints now rolls
+  back on a failed breakpoint sync instead of reporting a false success
+  (#220, #80).
 
 ## Highlights
 

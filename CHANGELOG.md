@@ -7,9 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-07-01
+
+### Added
+- Runtime-smoke v2 no-operator input monitoring now separates emulated runner
+  input from real external keyboard/mouse input at the source. A dedicated
+  low-level input event recorder captures each event's provenance, and runner
+  injection paths are stamped with a shared `RunnerInputSignature`
+  (`bridge/Commands/InputSignature.cs`) so runner-signed events classify
+  `CLEAN_PROVEN` while foreign-injected and physical events classify
+  `DIRTY_UNPROVEN`.
+
 ### Changed
+- `run_confidence` replaces the previous `windows_last_input_info` window
+  heuristic and the `RUNNER_GLOBAL_INPUT_AMBIGUOUS` verdict with 3-way
+  event-stream attribution (runner-injected / foreign-injected / physical). An
+  empty-but-present event stream is proven `CLEAN`; a malformed or absent stream
+  fails closed as `DIRTY_UNPROVEN` / unproven.
 - Documented runner-controlled global-input ambiguity for no-operator
   runtime-smoke plans that intentionally allow covered `ui.drag` input.
+
+### Fixed
+- Function breakpoint clearing now rolls back on a failed
+  `_sync_function_breakpoints` response instead of silently reporting success,
+  restoring the intended clear/add error propagation (#220, #80).
 
 ## [0.20.5] - 2026-06-22
 
