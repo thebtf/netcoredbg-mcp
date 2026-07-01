@@ -154,13 +154,10 @@ class TestPathValidation:
             with pytest.raises(ValueError, match="outside project scope"):
                 manager.validate_path(str(plan_file))
 
-            assert (
-                manager.validate_path_for_project(
-                    str(plan_file),
-                    str(observer_project),
-                )
-                == str(plan_file.resolve())
-            )
+            assert manager.validate_path_for_project(
+                str(plan_file),
+                str(observer_project),
+            ) == str(plan_file.resolve())
             assert manager.project_path == str(owner_project.resolve())
 
     def test_validate_program_valid(self, tmp_path):
@@ -372,6 +369,66 @@ class TestBreakpointOperations:
             count = await manager.clear_breakpoints()
 
             assert count == 2
+
+    @pytest.mark.asyncio
+    async def test_clear_breakpoints_rolls_back_function_breakpoints_on_unsuccessful_sync_response(
+        self,
+    ):
+        """Test clearing function breakpoints rolls back if DAP returns success=False."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+            manager._state.state = DebugState.STOPPED
+            manager._client.capabilities = {"supportsFunctionBreakpoints": True}
+            manager._client.set_function_breakpoints = AsyncMock(
+                return_value=DAPResponse(
+                    seq=1,
+                    request_seq=1,
+                    success=True,
+                    command="setFunctionBreakpoints",
+                    body={"breakpoints": [{"verified": True, "id": 123}]},
+                )
+            )
+            await manager.add_function_breakpoint("Foo.Bar")
+            manager._client.set_function_breakpoints = AsyncMock(
+                return_value=DAPResponse(
+                    seq=2,
+                    request_seq=2,
+                    success=False,
+                    command="setFunctionBreakpoints",
+                    message="sync failed",
+                )
+            )
+
+            with pytest.raises(RuntimeError, match="sync failed"):
+                await manager.clear_breakpoints()
+
+            function_breakpoints = manager.breakpoints.get_function_breakpoints()
+            assert len(function_breakpoints) == 1
+            assert function_breakpoints[0].name == "Foo.Bar"
+
+    @pytest.mark.asyncio
+    async def test_add_function_breakpoint_rolls_back_on_unsuccessful_sync_response(
+        self,
+    ):
+        """Test adding function breakpoints rolls back if DAP returns success=False."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+            manager._state.state = DebugState.STOPPED
+            manager._client.capabilities = {"supportsFunctionBreakpoints": True}
+            manager._client.set_function_breakpoints = AsyncMock(
+                return_value=DAPResponse(
+                    seq=1,
+                    request_seq=1,
+                    success=False,
+                    command="setFunctionBreakpoints",
+                    message="sync failed",
+                )
+            )
+
+            with pytest.raises(RuntimeError, match="sync failed"):
+                await manager.add_function_breakpoint("Foo.Bar")
+
+            assert manager.breakpoints.get_function_breakpoints() == []
 
 
 class TestEventHandlers:
@@ -608,7 +665,9 @@ class TestExecutionControl:
         with patch("netcoredbg_mcp.session.manager.DAPClient") as mock_client_class:
             mock_client = MagicMock()
             mock_client.continue_execution = AsyncMock(
-                return_value=DAPResponse(seq=1, request_seq=1, success=True, command="continue")
+                return_value=DAPResponse(
+                    seq=1, request_seq=1, success=True, command="continue"
+                )
             )
             mock_client_class.return_value = mock_client
 
@@ -638,7 +697,9 @@ class TestExecutionControl:
         with patch("netcoredbg_mcp.session.manager.DAPClient") as mock_client_class:
             mock_client = MagicMock()
             mock_client.step_over = AsyncMock(
-                return_value=DAPResponse(seq=1, request_seq=1, success=True, command="next")
+                return_value=DAPResponse(
+                    seq=1, request_seq=1, success=True, command="next"
+                )
             )
             mock_client_class.return_value = mock_client
 
@@ -656,7 +717,9 @@ class TestExecutionControl:
         with patch("netcoredbg_mcp.session.manager.DAPClient") as mock_client_class:
             mock_client = MagicMock()
             mock_client.step_in = AsyncMock(
-                return_value=DAPResponse(seq=1, request_seq=1, success=True, command="stepIn")
+                return_value=DAPResponse(
+                    seq=1, request_seq=1, success=True, command="stepIn"
+                )
             )
             mock_client_class.return_value = mock_client
 
@@ -674,7 +737,9 @@ class TestExecutionControl:
         with patch("netcoredbg_mcp.session.manager.DAPClient") as mock_client_class:
             mock_client = MagicMock()
             mock_client.step_out = AsyncMock(
-                return_value=DAPResponse(seq=1, request_seq=1, success=True, command="stepOut")
+                return_value=DAPResponse(
+                    seq=1, request_seq=1, success=True, command="stepOut"
+                )
             )
             mock_client_class.return_value = mock_client
 
@@ -692,7 +757,9 @@ class TestExecutionControl:
         with patch("netcoredbg_mcp.session.manager.DAPClient") as mock_client_class:
             mock_client = MagicMock()
             mock_client.pause = AsyncMock(
-                return_value=DAPResponse(seq=1, request_seq=1, success=True, command="pause")
+                return_value=DAPResponse(
+                    seq=1, request_seq=1, success=True, command="pause"
+                )
             )
             mock_client_class.return_value = mock_client
 
@@ -722,7 +789,9 @@ class FakeLaunchClient:
         self.events.append("set_function_breakpoints")
         return DAPResponse(1, 1, True, "setFunctionBreakpoints")
 
-    async def set_exception_breakpoints(self, filters: list[str] | None = None) -> DAPResponse:
+    async def set_exception_breakpoints(
+        self, filters: list[str] | None = None
+    ) -> DAPResponse:
         self.events.append("set_exception_breakpoints")
         return DAPResponse(1, 1, True, "setExceptionBreakpoints")
 
