@@ -157,7 +157,7 @@ public static partial class GridCommands
 
             ClickCommands.MoveCursor(sourcePoint.X, sourcePoint.Y);
             Thread.Sleep(RowDragThresholdMoveSettleMs);
-            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, InputSignature.RunnerInputSignature);
             mouseButtonDown = true;
             Thread.Sleep(RowDragPointerDownSettleMs);
 
@@ -327,7 +327,7 @@ public static partial class GridCommands
             {
                 try
                 {
-                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, InputSignature.RunnerInputSignature);
                 }
                 catch (Exception ex)
                 {

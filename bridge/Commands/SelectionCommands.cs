@@ -68,7 +68,7 @@ public static class SelectionCommands
 
                 try
                 {
-                    Mouse.Click(center);
+                    ClickCommands.SignedLeftClick(center);
                 }
                 finally
                 {

@@ -359,7 +359,7 @@ public static class KeySequenceCommands
                               (IsExtendedKey(key) ? KEYEVENTF_EXTENDEDKEY : 0) |
                               (keyUp ? KEYEVENTF_KEYUP : 0),
                     time = 0,
-                    dwExtraInfo = IntPtr.Zero
+                    dwExtraInfo = InputSignature.RunnerInputSignatureIntPtr
                 }
             }
         };
