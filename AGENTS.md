@@ -145,6 +145,19 @@ the residue documented in the original checkout.
 - GUI tests require `dotnet build tests/fixtures/SmokeTestApp -c Debug` first
 - When fixing a bug: add smoke test BEFORE the fix, verify it fails, then fix, verify it passes
 
+**Test Scratch Hygiene (NON-NEGOTIABLE — learned 2026-07-01):**
+- Isolated pytest runs that set `UV_PROJECT_ENVIRONMENT=.agent/tmp/uv-<name>`
+  create a full throwaway venv (hundreds of MB each). These are NOT
+  auto-removed. Over a multi-CR marathon they silently accumulated
+  **13.3 GB / ~498k files** in `.agent/tmp` before the first cleanup.
+- Rule: after an isolated `UV_PROJECT_ENVIRONMENT=.agent/tmp/...` run, remove
+  that venv dir in the SAME task, OR reuse ONE stable env name across runs
+  instead of a fresh per-CR dir. Do not leave per-CR venvs behind.
+- `.agent/tmp/` is gitignored scratch: safe to wipe wholesale when idle. On
+  Windows, `robocopy <empty-dir> .agent\tmp /MIR /MT:16` clears a large tree in
+  seconds; PowerShell `Remove-Item -Recurse` on 100k+ small files times out.
+- Periodic check: if `.agent/tmp` exceeds ~1 GB, wipe it during housekeeping.
+
 **Reproduction-First Debugging Protocol:**
 - Behavior bugs MUST be reproduced on a controlled test program, fixture, smoke
   scenario, or regression test before product-code edits.
