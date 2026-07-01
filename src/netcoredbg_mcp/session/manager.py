@@ -1506,10 +1506,18 @@ class SessionManager:
         # Without file filter, also drop function breakpoints — they're not
         # file-scoped and otherwise persist invisibly across restart cycles.
         if not file:
-            fbp_count = self._breakpoints.clear_function_breakpoints()
-            count += fbp_count
-            if self.is_active and fbp_count > 0:
-                await self._sync_function_breakpoints()
+            existing_function_breakpoints = self._breakpoints.get_function_breakpoints()
+            fbp_count = len(existing_function_breakpoints)
+            if fbp_count > 0:
+                self._breakpoints.clear_function_breakpoints()
+                if self.is_active:
+                    try:
+                        await self._sync_function_breakpoints()
+                    except Exception:
+                        for bp in existing_function_breakpoints:
+                            self._breakpoints.add_function_breakpoint(bp)
+                        raise
+                count += fbp_count
 
         return count
 

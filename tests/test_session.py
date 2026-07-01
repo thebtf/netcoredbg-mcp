@@ -373,6 +373,34 @@ class TestBreakpointOperations:
 
             assert count == 2
 
+    @pytest.mark.asyncio
+    async def test_clear_breakpoints_rolls_back_function_breakpoints_on_sync_failure(self):
+        """Test clearing function breakpoints rolls back if DAP sync fails."""
+        with patch("netcoredbg_mcp.session.manager.DAPClient"):
+            manager = SessionManager()
+            manager._state.state = DebugState.STOPPED
+            manager._client.capabilities = {"supportsFunctionBreakpoints": True}
+            manager._client.set_function_breakpoints = AsyncMock(
+                return_value=DAPResponse(
+                    seq=1,
+                    request_seq=1,
+                    success=True,
+                    command="setFunctionBreakpoints",
+                    body={"breakpoints": [{"verified": True, "id": 123}]},
+                )
+            )
+            await manager.add_function_breakpoint("Foo.Bar")
+            manager._client.set_function_breakpoints = AsyncMock(
+                side_effect=RuntimeError("sync failed")
+            )
+
+            with pytest.raises(RuntimeError, match="sync failed"):
+                await manager.clear_breakpoints()
+
+            function_breakpoints = manager.breakpoints.get_function_breakpoints()
+            assert len(function_breakpoints) == 1
+            assert function_breakpoints[0].name == "Foo.Bar"
+
 
 class TestEventHandlers:
     """Tests for DAP event handlers."""
