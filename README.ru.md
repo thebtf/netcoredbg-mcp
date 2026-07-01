@@ -14,7 +14,7 @@
 вычислять выражения, читать вывод отладки и управлять поверхностями Windows UI
 Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 
-**131 MCP-инструмент · 8 промптов · 4 ресурса · 1822 собранных тестов · релиз v0.20.5**
+**131 MCP-инструмент · 8 промптов · 4 ресурса · 1851 собранных тестов · релиз v0.21.0**
 
 ## Быстрые ссылки
 
@@ -23,16 +23,21 @@ Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 - **Справочник:** [Доступные инструменты](#доступные-инструменты) · [Ресурсы](#mcp-ресурсы) · [Промпты](#mcp-промпты) · [Архитектура](#обзор-архитектуры)
 - **Проект:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## Что нового в v0.20.5
+## Что нового в v0.21.0
 
-- **Обновление документации пакета** — PyPI README, русский README, release
-  notes, production playbook и NovaScript example теперь соответствуют
-  shipped-поведению `v0.20.4` для no-operator input monitor.
-- **Формулировки про operator contamination** — no-operator guidance теперь различает
-  adapter-level `DIRTY` evidence и возвращаемый результат
-  `run_confidence.classification == "DIRTY_UNPROVEN"`.
-- **Примеры для потребителей** — NovaScript action-oracle app-diagnostics
-  example и docs regression oracle теперь указывают на текущий package release.
+- **Настоящее разделение runner-vs-operator input** — no-operator runtime-smoke
+  прогоны теперь отличают эмулированный input раннера от реального внешнего
+  keyboard/mouse на уровне источника. Инъекции раннера подписываются
+  `RunnerInputSignature` и захватываются низкоуровневым event recorder, заменяя
+  прежнюю `GetLastInputInfo` window-эвристику и её единственный вердикт
+  неоднозначности.
+- **3-сторонняя атрибуция provenance** — `run_confidence` классифицирует каждое
+  событие как runner-injected (`CLEAN_PROVEN`), foreign-injected или physical
+  (`DIRTY_UNPROVEN`). Пустой-но-присутствующий event stream признаётся clean;
+  malformed или отсутствующий поток fail-closed.
+- **Фикс rollback при очистке breakpoints** — очистка function breakpoints
+  теперь откатывается при неуспешной синхронизации вместо ложного success
+  (#220, #80).
 
 ## Основные возможности
 
