@@ -3,6 +3,7 @@
 .agent-*/
 .codex/
 .claude/
+.omp/
 .serena/
 .zencoder/
 .zenflow/
