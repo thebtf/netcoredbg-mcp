@@ -151,7 +151,7 @@ public static partial class GridCommands
         {
             foreach (var modifier in temporaryModifiers)
             {
-                Keyboard.Press(modifier);
+                KeySequenceCommands.SendSignedKeyDown(modifier);
                 pressedTemporaryModifiers.Add(modifier);
             }
 
@@ -341,7 +341,7 @@ public static partial class GridCommands
             {
                 try
                 {
-                    Keyboard.Release(pressedTemporaryModifiers[index]);
+                    KeySequenceCommands.SendSignedKeyUp(pressedTemporaryModifiers[index]);
                 }
                 catch (Exception ex)
                 {

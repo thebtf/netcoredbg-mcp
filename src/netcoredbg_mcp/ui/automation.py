@@ -35,10 +35,8 @@ _DRAG_MODIFIER_MAP = {
 }
 
 
-def _runner_input_extra_info() -> Any:
-    import ctypes
-
-    return ctypes.pointer(ctypes.c_ulong(RUNNER_INPUT_SIGNATURE))
+def _runner_input_extra_info() -> int:
+    return RUNNER_INPUT_SIGNATURE
 
 
 def _press(vk: int) -> None:
@@ -55,7 +53,7 @@ def _press(vk: int) -> None:
             ("wScan", wintypes.WORD),
             ("dwFlags", wintypes.DWORD),
             ("time", wintypes.DWORD),
-            ("dwExtraInfo", ctypes.POINTER(wintypes.ULONG)),
+            ("dwExtraInfo", ctypes.c_size_t),
         ]
 
     class INPUT(ctypes.Structure):
@@ -90,7 +88,7 @@ def _release(vk: int) -> None:
             ("wScan", wintypes.WORD),
             ("dwFlags", wintypes.DWORD),
             ("time", wintypes.DWORD),
-            ("dwExtraInfo", ctypes.POINTER(wintypes.ULONG)),
+            ("dwExtraInfo", ctypes.c_size_t),
         ]
 
     class INPUT(ctypes.Structure):
@@ -149,7 +147,7 @@ def _send_click(x: int, y: int, button: str = "left") -> None:
             ("mouseData", wintypes.DWORD),
             ("dwFlags", wintypes.DWORD),
             ("time", wintypes.DWORD),
-            ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+            ("dwExtraInfo", ctypes.c_size_t),
         ]
 
     class INPUT(ctypes.Structure):
@@ -264,7 +262,7 @@ def _send_keys_via_input(keys: str) -> None:
             ("wScan", wintypes.WORD),
             ("dwFlags", wintypes.DWORD),
             ("time", wintypes.DWORD),
-            ("dwExtraInfo", ctypes.POINTER(wintypes.ULONG)),
+            ("dwExtraInfo", ctypes.c_size_t),
         ]
 
     class INPUT(ctypes.Structure):

@@ -64,7 +64,7 @@ public static class SelectionCommands
 
                 var useControl = mode == "add" || !isFirst;
                 if (useControl)
-                    Keyboard.Press(VirtualKeyShort.CONTROL);
+                    KeySequenceCommands.SendSignedKeyDown(VirtualKeyShort.CONTROL);
 
                 try
                 {
@@ -73,7 +73,7 @@ public static class SelectionCommands
                 finally
                 {
                     if (useControl)
-                        Keyboard.Release(VirtualKeyShort.CONTROL);
+                        KeySequenceCommands.SendSignedKeyUp(VirtualKeyShort.CONTROL);
                 }
                 usedClickFallback = true;
             }

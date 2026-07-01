@@ -161,8 +161,8 @@ public static class KeySequenceCommands
 
             foreach (var key in parsedKeys)
             {
-                SendKeyDown(key.Key);
-                SendKeyUp(key.Key);
+                SendSignedKeyDown(key.Key);
+                SendSignedKeyUp(key.Key);
                 sent.Add(key.Name);
             }
             if (scopedHeld.Count > 0 && sent.Count > 0)
@@ -319,7 +319,7 @@ public static class KeySequenceCommands
             if (JsonRpcHandler.HeldModifiers.Contains(modifier.Key))
                 return false;
 
-            SendKeyDown(modifier.Key);
+            SendSignedKeyDown(modifier.Key);
             JsonRpcHandler.HeldModifiers.Add(modifier.Key);
             return true;
         }
@@ -329,17 +329,17 @@ public static class KeySequenceCommands
     {
         lock (JsonRpcHandler.HeldModifiersLock)
         {
-            SendKeyUp(key);
+            SendSignedKeyUp(key);
             JsonRpcHandler.HeldModifiers.Remove(key);
         }
     }
 
-    private static void SendKeyDown(VirtualKeyShort key)
+    internal static void SendSignedKeyDown(VirtualKeyShort key)
     {
         SendKey(key, keyUp: false);
     }
 
-    private static void SendKeyUp(VirtualKeyShort key)
+    internal static void SendSignedKeyUp(VirtualKeyShort key)
     {
         SendKey(key, keyUp: true);
     }

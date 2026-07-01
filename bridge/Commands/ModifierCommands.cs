@@ -33,7 +33,7 @@ public static class ModifierCommands
                     continue;
                 }
 
-                Keyboard.Press(modifierKey);
+                KeySequenceCommands.SendSignedKeyDown(modifierKey);
                 JsonRpcHandler.HeldModifiers.Add(modifierKey);
             }
         }
@@ -73,7 +73,7 @@ public static class ModifierCommands
                     continue;
                 }
 
-                Keyboard.Release(modifierKey);
+                KeySequenceCommands.SendSignedKeyUp(modifierKey);
             }
         }
 
@@ -106,7 +106,7 @@ public static class ModifierCommands
         {
             try
             {
-                Keyboard.Release(heldSnapshot[index]);
+                KeySequenceCommands.SendSignedKeyUp(heldSnapshot[index]);
             }
             catch (Exception ex)
             {

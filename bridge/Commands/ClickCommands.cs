@@ -147,7 +147,7 @@ public static class ClickCommands
         {
             foreach (var modifier in temporaryModifiers)
             {
-                Keyboard.Press(modifier);
+                KeySequenceCommands.SendSignedKeyDown(modifier);
                 pressedTemporaryModifiers.Add(modifier);
             }
 
@@ -194,7 +194,7 @@ public static class ClickCommands
             {
                 try
                 {
-                    Keyboard.Release(pressedTemporaryModifiers[i]);
+                    KeySequenceCommands.SendSignedKeyUp(pressedTemporaryModifiers[i]);
                 }
                 catch (Exception ex)
                 {
@@ -271,7 +271,7 @@ public static class ClickCommands
         {
             foreach (var modifier in temporaryModifiers)
             {
-                Keyboard.Press(modifier);
+                KeySequenceCommands.SendSignedKeyDown(modifier);
                 pressedTemporaryModifiers.Add(modifier);
             }
 
@@ -326,7 +326,7 @@ public static class ClickCommands
             {
                 try
                 {
-                    Keyboard.Release(pressedTemporaryModifiers[i]);
+                    KeySequenceCommands.SendSignedKeyUp(pressedTemporaryModifiers[i]);
                 }
                 catch (Exception ex)
                 {
@@ -433,8 +433,8 @@ public static class ClickCommands
 
     private static void SendDragPathCancel(FlaUI.Core.WindowsAPI.VirtualKeyShort cancelKey)
     {
-        Keyboard.Press(cancelKey);
-        Keyboard.Release(cancelKey);
+        KeySequenceCommands.SendSignedKeyDown(cancelKey);
+        KeySequenceCommands.SendSignedKeyUp(cancelKey);
     }
 
     private static (List<DragPathPoint> Points, JsonObject? Blocked) ParseDragPathPoints(

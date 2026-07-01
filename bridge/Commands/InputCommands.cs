@@ -140,27 +140,27 @@ public static partial class InputCommands
                 case '^': // Ctrl modifier
                     i++;
                     var ctrlTarget = ConsumeNextToken(keys, ref i);
-                    Keyboard.Press(VirtualKeyShort.CONTROL);
+                    KeySequenceCommands.SendSignedKeyDown(VirtualKeyShort.CONTROL);
                     try { TypeToken(ctrlTarget); }
-                    finally { Keyboard.Release(VirtualKeyShort.CONTROL); }
+                    finally { KeySequenceCommands.SendSignedKeyUp(VirtualKeyShort.CONTROL); }
                     sent.Add($"Ctrl+{ctrlTarget}");
                     break;
 
                 case '%': // Alt modifier
                     i++;
                     var altTarget = ConsumeNextToken(keys, ref i);
-                    Keyboard.Press(VirtualKeyShort.ALT);
+                    KeySequenceCommands.SendSignedKeyDown(VirtualKeyShort.ALT);
                     try { TypeToken(altTarget); }
-                    finally { Keyboard.Release(VirtualKeyShort.ALT); }
+                    finally { KeySequenceCommands.SendSignedKeyUp(VirtualKeyShort.ALT); }
                     sent.Add($"Alt+{altTarget}");
                     break;
 
                 case '+': // Shift modifier
                     i++;
                     var shiftTarget = ConsumeNextToken(keys, ref i);
-                    Keyboard.Press(VirtualKeyShort.SHIFT);
+                    KeySequenceCommands.SendSignedKeyDown(VirtualKeyShort.SHIFT);
                     try { TypeToken(shiftTarget); }
-                    finally { Keyboard.Release(VirtualKeyShort.SHIFT); }
+                    finally { KeySequenceCommands.SendSignedKeyUp(VirtualKeyShort.SHIFT); }
                     sent.Add($"Shift+{shiftTarget}");
                     break;
 
@@ -186,8 +186,8 @@ public static partial class InputCommands
                     }
                     else if (SpecialKeys.TryGetValue(keyName, out var vk))
                     {
-                        Keyboard.Press(vk);
-                        Keyboard.Release(vk);
+                        KeySequenceCommands.SendSignedKeyDown(vk);
+                        KeySequenceCommands.SendSignedKeyUp(vk);
                         sent.Add($"{{{keyName}}}");
                     }
                     else
@@ -326,8 +326,8 @@ public static partial class InputCommands
     {
         if (SpecialKeys.TryGetValue(token, out var vk))
         {
-            Keyboard.Press(vk);
-            Keyboard.Release(vk);
+            KeySequenceCommands.SendSignedKeyDown(vk);
+            KeySequenceCommands.SendSignedKeyUp(vk);
         }
         else
         {
