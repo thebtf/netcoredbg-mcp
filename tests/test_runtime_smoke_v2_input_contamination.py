@@ -440,6 +440,43 @@ async def test_no_operator_malformed_monitor_is_blocked_unproven() -> None:
 
 
 @pytest.mark.asyncio
+async def test_no_operator_missing_event_stream_stays_unproven() -> None:
+    session = ConfidenceSmokeSession(
+        {
+            "status": "PASS",
+            "window": "after_action",
+            "basis": "input_event_stream",
+            "monitor": {},
+        }
+    )
+
+    result = await _runner(session).run(_no_operator_plan())
+
+    assert result["status"] == "BLOCKED"
+    assert result["run_confidence"]["classification"] == "UNPROVEN"
+    assert result["run_confidence"]["basis"] == "monitor_not_observed"
+    assert result["run_confidence"]["product_verdict_allowed"] is False
+
+
+@pytest.mark.asyncio
+async def test_no_operator_malformed_event_stream_fails_closed() -> None:
+    session = ConfidenceSmokeSession(
+        {
+            "status": "PASS",
+            "basis": "input_event_stream",
+            "monitor": {"events": ["physical"]},
+        }
+    )
+
+    result = await _runner(session).run(_no_operator_plan())
+
+    assert result["status"] == "BLOCKED"
+    assert result["run_confidence"]["classification"] == "DIRTY_UNPROVEN"
+    assert result["run_confidence"]["contamination"]["source"] == "unattributable"
+    assert result["run_confidence"]["product_verdict_allowed"] is False
+
+
+@pytest.mark.asyncio
 async def test_no_operator_clean_monitor_allows_product_failure() -> None:
     session = ConfidenceSmokeSession(
         {"status": "PASS", "basis": "external_input_monitor"}

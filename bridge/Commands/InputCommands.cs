@@ -167,7 +167,7 @@ public static partial class InputCommands
                 case '{': // Special key
                     if (i + 2 < keys.Length && keys[i + 1] == '}' && keys[i + 2] == '}')
                     {
-                        Keyboard.Type("}");
+                        KeySequenceCommands.SendSignedText("}");
                         sent.Add("}");
                         i += 3;
                         break;
@@ -181,7 +181,7 @@ public static partial class InputCommands
 
                     if (LiteralSpecialKeys.TryGetValue(keyName, out var literal))
                     {
-                        Keyboard.Type(literal);
+                        KeySequenceCommands.SendSignedText(literal);
                         sent.Add(literal);
                     }
                     else if (SpecialKeys.TryGetValue(keyName, out var vk))
@@ -197,7 +197,7 @@ public static partial class InputCommands
                     break;
 
                 default: // Regular character
-                    Keyboard.Type(keys[i].ToString());
+                    KeySequenceCommands.SendSignedText(keys[i].ToString());
                     sent.Add(keys[i].ToString());
                     i++;
                     break;
@@ -331,7 +331,7 @@ public static partial class InputCommands
         }
         else
         {
-            Keyboard.Type(token);
+            KeySequenceCommands.SendSignedText(token);
         }
     }
-}
+    }

@@ -566,7 +566,7 @@ class TestInputProvenanceSignature:
         class FakeWindll:
             user32 = FakeUser32()
 
-        monkeypatch.setattr(ctypes, "windll", FakeWindll())
+        monkeypatch.setattr(ctypes, "windll", FakeWindll(), raising=False)
         monkeypatch.setattr(time, "sleep", lambda _seconds: None)
 
         automation._press(automation.VK_SHIFT)
@@ -642,3 +642,11 @@ class TestInputProvenanceSignature:
         assert "SignedDoubleClick(new Point(x, y));" in click_commands
         assert "SignedLeftClick(center);" in click_commands
         assert "ClickCommands.SignedLeftClick(center);" in selection_commands
+
+    def test_bridge_input_commands_sign_literal_text_paths(self):
+        input_commands = (
+            PROJECT_ROOT / "bridge" / "Commands" / "InputCommands.cs"
+        ).read_text(encoding="utf-8")
+
+        assert "Keyboard.Type(" not in input_commands
+        assert "KeySequenceCommands.SendSignedText(" in input_commands

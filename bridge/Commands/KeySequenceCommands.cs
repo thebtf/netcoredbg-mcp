@@ -30,6 +30,7 @@ public static class KeySequenceCommands
     private const uint MAPVK_VK_TO_VSC = 0;
     private const uint KEYEVENTF_EXTENDEDKEY = 0x0001;
     private const uint KEYEVENTF_KEYUP = 0x0002;
+    private const uint KEYEVENTF_UNICODE = 0x0004;
     private const uint KEYEVENTF_SCANCODE = 0x0008;
 
     [StructLayout(LayoutKind.Sequential)]
@@ -342,6 +343,57 @@ public static class KeySequenceCommands
     internal static void SendSignedKeyUp(VirtualKeyShort key)
     {
         SendKey(key, keyUp: true);
+    }
+
+    internal static void SendSignedText(string text)
+    {
+        foreach (var ch in text)
+            SendUnicodeChar(ch);
+    }
+
+    private static void SendUnicodeChar(char ch)
+    {
+        var inputs = new[]
+        {
+            new INPUT
+            {
+                type = INPUT_KEYBOARD,
+                U = new InputUnion
+                {
+                    ki = new KEYBDINPUT
+                    {
+                        wVk = 0,
+                        wScan = ch,
+                        dwFlags = KEYEVENTF_UNICODE,
+                        time = 0,
+                        dwExtraInfo = InputSignature.RunnerInputSignatureIntPtr
+                    }
+                }
+            },
+            new INPUT
+            {
+                type = INPUT_KEYBOARD,
+                U = new InputUnion
+                {
+                    ki = new KEYBDINPUT
+                    {
+                        wVk = 0,
+                        wScan = ch,
+                        dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+                        time = 0,
+                        dwExtraInfo = InputSignature.RunnerInputSignatureIntPtr
+                    }
+                }
+            }
+        };
+
+        var sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>());
+        if (sent != inputs.Length)
+        {
+            var error = Marshal.GetLastWin32Error();
+            throw new InvalidOperationException(
+                $"SendInput failed for character U+{(int)ch:X4}: Win32 error {error}");
+        }
     }
 
     private static void SendKey(VirtualKeyShort key, bool keyUp)

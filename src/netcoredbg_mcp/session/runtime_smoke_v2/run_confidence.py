@@ -12,6 +12,7 @@ CLASS_UNPROVEN = "UNPROVEN"
 SOURCE_RUNNER_INJECTED = "runner_injected"
 SOURCE_FOREIGN_INJECTED = "foreign_injected"
 SOURCE_PHYSICAL = "physical"
+SOURCE_UNATTRIBUTABLE = "unattributable"
 
 
 def no_operator_confidence_requested(policy: Mapping[str, Any] | None) -> bool:
@@ -31,9 +32,8 @@ def confidence_from_monitor_result(
         )
     status = str(raw_status).upper()
     if status in {"PASS", "CLEAN"}:
-        event_confidence = _confidence_from_event_stream(monitor_result, window=window)
-        if event_confidence is not None:
-            return event_confidence
+        if _uses_event_stream(monitor_result):
+            return _confidence_from_event_stream(monitor_result, window=window)
         return _clean_proven(monitor_result)
     if status in {"DIRTY", CLASS_DIRTY_UNPROVEN}:
         return _dirty_unproven(monitor_result, window=window)
@@ -120,10 +120,24 @@ def _confidence_from_event_stream(
     monitor_result: Mapping[str, Any],
     *,
     window: str,
-) -> dict[str, Any] | None:
-    events = _monitor_events(monitor_result)
-    if events is None:
-        return None
+) -> dict[str, Any]:
+    state, events = _monitor_events(monitor_result)
+    if state == "missing":
+        if window != "after_action":
+            return _clean_proven(monitor_result)
+        return _unproven(
+            reason="input event stream returned no events",
+            basis="monitor_not_observed",
+        )
+    if state == "malformed":
+        malformed_result = dict(monitor_result)
+        malformed_result["summary"] = "input event stream contained malformed events"
+        return _dirty_unproven(
+            malformed_result,
+            window=window,
+            source=SOURCE_UNATTRIBUTABLE,
+        )
+    assert events is not None
     for event in events:
         source = _event_source(event)
         if source != SOURCE_RUNNER_INJECTED:
@@ -136,16 +150,27 @@ def _confidence_from_event_stream(
     return _clean_proven(monitor_result)
 
 
+def _uses_event_stream(monitor_result: Mapping[str, Any]) -> bool:
+    if str(monitor_result.get("basis") or "") == "input_event_stream":
+        return True
+    monitor = monitor_result.get("monitor")
+    return isinstance(monitor, Mapping) and "events" in monitor
+
+
 def _monitor_events(
     monitor_result: Mapping[str, Any],
-) -> list[Mapping[str, Any]] | None:
+) -> tuple[str, list[Mapping[str, Any]] | None]:
     monitor = monitor_result.get("monitor")
-    if not isinstance(monitor, Mapping):
-        return None
+    if not isinstance(monitor, Mapping) or "events" not in monitor:
+        return "missing", None
     events = monitor.get("events")
     if not isinstance(events, list):
-        return None
-    return [event for event in events if isinstance(event, Mapping)]
+        return "malformed", None
+    if any(not isinstance(event, Mapping) for event in events):
+        return "malformed", None
+    if not events:
+        return "missing", []
+    return "ok", events
 
 
 def _event_source(event: Mapping[str, Any]) -> str:

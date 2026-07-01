@@ -302,6 +302,60 @@ def test_default_runtime_input_monitor_uses_event_recorder_factory(monkeypatch) 
     assert after["monitor"]["events"][0]["source"] == "runner_injected"
 
 
+def test_event_stream_monitor_keeps_between_transition_guard() -> None:
+    samples = iter(
+        [
+            LastInputSample(last_input_tick_ms=100, current_tick_ms=1000),
+            LastInputSample(last_input_tick_ms=100, current_tick_ms=1100),
+            LastInputSample(last_input_tick_ms=180, current_tick_ms=1200),
+        ]
+    )
+    recorder = FakeProvenanceRecorder([])
+    monitor = RuntimeInputMonitor(reader=lambda: next(samples), event_recorder=recorder)
+
+    monitor.check(**_kwargs("before_action"))
+    monitor.check(**_kwargs("after_action"))
+    result = monitor.check(
+        **{
+            **_kwargs("before_action"),
+            "transition_id": "transition-2",
+            "transition_index": 1,
+        }
+    )
+
+    assert result["status"] == "DIRTY"
+    assert result["basis"] == "windows_last_input_info"
+    assert result["window"] == "before_action"
+    assert "between monitored windows" in result["summary"]
+    assert recorder.calls == [
+        ("start", ("case-1", "transition-1")),
+        ("stop", ("case-1", "transition-1")),
+        ("drain_events", ("case-1", "transition-1")),
+    ]
+
+
+def test_event_stream_monitor_closes_stale_windows_before_restart() -> None:
+    recorder = FakeProvenanceRecorder([])
+    monitor = RuntimeInputMonitor(event_recorder=recorder)
+
+    monitor.check(**_kwargs("before_action"))
+    before_two = monitor.check(
+        **{
+            **_kwargs("before_action"),
+            "transition_id": "transition-2",
+            "transition_index": 1,
+        }
+    )
+
+    assert before_two["status"] == "PASS"
+    assert recorder.calls == [
+        ("start", ("case-1", "transition-1")),
+        ("stop", ("case-1", "transition-1")),
+        ("drain_events", ("case-1", "transition-1")),
+        ("start", ("case-1", "transition-2")),
+    ]
+
+
 def test_composite_input_event_recorder_falls_back_to_low_level_hook() -> None:
     from netcoredbg_mcp.ui.input_event_recorder import Win32CompositeInputEventRecorder
 

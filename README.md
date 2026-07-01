@@ -374,8 +374,8 @@ uses signed runner injection plus OS event attribution. Those actions emit
 observed event in the action window as `runner_injected`, `foreign_injected`,
 or `physical`. The run stays `CLEAN_PROVEN` only when every observed event is
 runner-signed; any physical or foreign-injected event becomes
-`DIRTY_UNPROVEN` and blocks the product verdict. Missing monitor evidence still
-fails closed.
+`DIRTY_UNPROVEN` and blocks the product verdict. Missing or empty monitor
+evidence leaves no-operator confidence `UNPROVEN`.
 
 The manual smoke fixtures now cover the baseline console/WinForms app,
 `tests/fixtures/WpfSmokeApp`, and `tests/fixtures/AvaloniaSmokeApp`. Build all

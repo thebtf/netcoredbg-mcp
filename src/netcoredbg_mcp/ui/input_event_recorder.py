@@ -31,10 +31,11 @@ _LLKHF_INJECTED = 0x00000010
 _INFINITE = -1
 
 _LRESULT = getattr(wintypes, "LRESULT", wintypes.LPARAM)
-_WNDPROC = ctypes.WINFUNCTYPE(
+_WINFUNCTYPE = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)
+_WNDPROC = _WINFUNCTYPE(
     _LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM
 )
-_HOOKPROC = ctypes.WINFUNCTYPE(_LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+_HOOKPROC = _WINFUNCTYPE(_LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
 
 
 class _RAWINPUTHEADER(ctypes.Structure):
@@ -203,8 +204,8 @@ class _ThreadedWin32Recorder:
         self._handles: list[Any] = []
 
     def start(self, key: tuple[str, str]) -> None:
-        self._ensure_thread()
         with self._lock:
+            self._ensure_thread()
             self._events[key] = []
             self._active.add(key)
 
@@ -255,7 +256,7 @@ class _ThreadedWin32Recorder:
         self._ready.set()
 
     def _thread_main(self) -> None:
-        raise NotImplementedError
+        self._fail_startup(f"{type(self).__name__} has no Win32 recorder thread")
 
 
 class RawInputEventRecorder(_ThreadedWin32Recorder):
@@ -376,6 +377,12 @@ class RawInputEventRecorder(_ThreadedWin32Recorder):
             wintypes.UINT,
         ]
         user32.GetRawInputData.restype = wintypes.UINT
+        user32.DefWindowProcW.argtypes = [
+            wintypes.HWND,
+            wintypes.UINT,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+        ]
         user32.DefWindowProcW.restype = _LRESULT
 
     def _record_raw_input(self, user32: Any, raw_input_handle: int) -> None:
@@ -487,6 +494,18 @@ class LowLevelHookInputEventRecorder(_ThreadedWin32Recorder):
         kernel32.GetCurrentThreadId.restype = wintypes.DWORD
         kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
         kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+        user32.SetWindowsHookExW.argtypes = [
+            ctypes.c_int,
+            _HOOKPROC,
+            wintypes.HINSTANCE,
+            wintypes.DWORD,
+        ]
+        user32.CallNextHookEx.argtypes = [
+            wintypes.HHOOK,
+            ctypes.c_int,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+        ]
         user32.SetWindowsHookExW.restype = wintypes.HHOOK
         user32.CallNextHookEx.restype = _LRESULT
         user32.UnhookWindowsHookEx.argtypes = [wintypes.HHOOK]

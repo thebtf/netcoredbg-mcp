@@ -102,6 +102,67 @@ class RuntimeInputMonitor:
 
         if self._event_recorder is not None:
             return self._check_event_stream(key=key, window=window)
+
+        return self._check_last_input(window=window, key=key)
+
+    def _check_event_stream(
+        self, *, key: tuple[str, str], window: str
+    ) -> dict[str, Any]:
+        recorder = self._event_recorder
+        if recorder is None:
+            return _blocked("input event recorder unavailable", window=window)
+        if window != "after_action":
+            sample = self._try_read_sample()
+            between_windows = self._check_between_windows(window=window, sample=sample)
+            if between_windows is not None:
+                return between_windows
+            self._reset_event_windows(recorder)
+            try:
+                recorder.start(key)
+            except InputMonitorUnavailableError as exc:
+                return _blocked(str(exc), window=window, basis="input_event_stream")
+            except Exception as exc:
+                return _blocked(
+                    f"input event recorder start failed: {exc}",
+                    window=window,
+                    basis="input_event_stream",
+                )
+            self._event_windows.add(key)
+            self._remember_last_sample(sample)
+            return {
+                "status": "PASS",
+                "basis": "input_event_stream",
+                "window": window,
+                "monitor": {"events": []},
+            }
+        if key not in self._event_windows:
+            return _blocked(
+                "input event recorder missing active window",
+                window=window,
+                basis="input_event_stream",
+            )
+        try:
+            recorder.stop(key)
+            events = recorder.drain_events(key)
+        except InputMonitorUnavailableError as exc:
+            return _blocked(str(exc), window=window, basis="input_event_stream")
+        except Exception as exc:
+            return _blocked(
+                f"input event recorder stop failed: {exc}",
+                window=window,
+                basis="input_event_stream",
+            )
+        finally:
+            self._event_windows.discard(key)
+        self._remember_last_sample(self._try_read_sample())
+        return {
+            "status": "PASS",
+            "basis": "input_event_stream",
+            "window": window,
+            "monitor": {"events": [_event_payload(event) for event in events]},
+        }
+
+    def _check_last_input(self, *, window: str, key: tuple[str, str]) -> dict[str, Any]:
         try:
             sample = self._reader()
         except InputMonitorUnavailableError as exc:
@@ -176,55 +237,52 @@ class RuntimeInputMonitor:
             "monitor": monitor,
         }
 
-    def _check_event_stream(
-        self, *, key: tuple[str, str], window: str
-    ) -> dict[str, Any]:
-        recorder = self._event_recorder
-        if recorder is None:
-            return _blocked("input event recorder unavailable", window=window)
-        if window != "after_action":
-            try:
-                recorder.start(key)
-            except InputMonitorUnavailableError as exc:
-                return _blocked(str(exc), window=window, basis="input_event_stream")
-            except Exception as exc:
-                return _blocked(
-                    f"input event recorder start failed: {exc}",
-                    window=window,
-                    basis="input_event_stream",
-                )
-            self._event_windows.add(key)
-            return {
-                "status": "PASS",
-                "basis": "input_event_stream",
-                "window": window,
-                "monitor": {"events": []},
-            }
-        if key not in self._event_windows:
-            return _blocked(
-                "input event recorder missing active window",
-                window=window,
-                basis="input_event_stream",
-            )
-        try:
-            recorder.stop(key)
-            events = recorder.drain_events(key)
-        except InputMonitorUnavailableError as exc:
-            return _blocked(str(exc), window=window, basis="input_event_stream")
-        except Exception as exc:
-            return _blocked(
-                f"input event recorder stop failed: {exc}",
-                window=window,
-                basis="input_event_stream",
-            )
-        finally:
-            self._event_windows.discard(key)
-        return {
-            "status": "PASS",
-            "basis": "input_event_stream",
-            "window": window,
-            "monitor": {"events": [_event_payload(event) for event in events]},
+    def _check_between_windows(
+        self, *, window: str, sample: LastInputSample | None
+    ) -> dict[str, Any] | None:
+        previous = self._last_sample
+        if previous is None or sample is None:
+            return None
+        comparison = _compare_dword_ticks(
+            previous.last_input_tick_ms,
+            sample.last_input_tick_ms,
+        )
+        monitor = {
+            "baseline": _sample_payload(previous),
+            "current": _sample_payload(sample),
         }
+        if comparison == "advanced":
+            return _dirty(
+                window=window,
+                summary="Windows last-input tick advanced between monitored windows.",
+                monitor=monitor,
+            )
+        if comparison == "regressed":
+            return {
+                **_blocked("input monitor tick regressed", window=window),
+                "monitor": monitor,
+            }
+        return None
+
+    def _remember_last_sample(self, sample: LastInputSample | None) -> None:
+        if sample is not None:
+            self._last_sample = sample
+
+    def _reset_event_windows(self, recorder: InputEventRecorder) -> None:
+        for stale_key in tuple(self._event_windows):
+            try:
+                recorder.stop(stale_key)
+                recorder.drain_events(stale_key)
+            except Exception:
+                pass
+            finally:
+                self._event_windows.discard(stale_key)
+
+    def _try_read_sample(self) -> LastInputSample | None:
+        try:
+            return self._reader()
+        except Exception:
+            return None
 
 
 def create_default_input_event_recorder() -> InputEventRecorder:

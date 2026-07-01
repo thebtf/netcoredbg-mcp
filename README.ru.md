@@ -381,7 +381,7 @@ foreground window или focus на уровне ОС.
 `runner_injected`, `foreign_injected` или `physical`. Run остаётся
 `CLEAN_PROVEN` только когда все наблюдённые события подписаны runner'ом; любое
 physical или foreign-injected событие становится `DIRTY_UNPROVEN` и блокирует
-product verdict. Отсутствующее monitor evidence по-прежнему fail closed.
+product verdict. Отсутствующее или пустое monitor evidence оставляет no-operator confidence в состоянии `UNPROVEN`.
 
 Manual smoke fixtures теперь покрывают базовое console/WinForms-приложение,
 `tests/fixtures/WpfSmokeApp` и `tests/fixtures/AvaloniaSmokeApp`. Соберите все
