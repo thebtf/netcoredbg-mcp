@@ -4,6 +4,14 @@
 
 Full reports: `.agent/data/mcp-dap-coverage-gaps.md`, `.agent/data/netcoredbg-dap-capabilities.md`
 
+> **Status note (2026-07-01):** All non-BLOCKED items in this section are DONE
+> (shipped through v0.5.x; project is now on v0.21.0). The remaining open rows
+> are `BLOCKED` on upstream netcoredbg capability gaps (logMessage,
+> breakpointLocations, dataBreakpoints, goto/gotoTargets, loadedSources).
+> Current adapter: `netcoredbg 3.1.3-1 (8b8b222)`. These BLOCKED rows must be
+> re-audited against the DAP `initialize` capabilities whenever netcoredbg is
+> upgraded — do not assume they are still blocked on a newer build.
+
 ### HIGH Priority
 
 #### H1: ~~Expose logpoints via add_breakpoint~~ BLOCKED
@@ -48,14 +56,10 @@ Full reports: `.agent/data/mcp-dap-coverage-gaps.md`, `.agent/data/netcoredbg-da
 #### ~~L1: Query adapter capabilities before sending requests~~ DONE v0.4.0
 **Implemented in:** `dap/client.py:capabilities` property, `tools/debug.py:terminate_debug` (capability check)
 
-#### L2: Add stepInTargets
-#### L3: Handle continued event body (allThreadsContinued)
-
 #### ~~L4: Add terminate request (graceful shutdown)~~ DONE v0.4.0
 **Implemented in:** `dap/client.py:terminate()`, `tools/debug.py:terminate_debug`
 
-#### L5: Support variable paging (large collections)
-#### L6: Parse output variablesReference (structured data)
+_(L2 stepInTargets, L3 continued-event, L5 variable-paging, L6 output variablesReference are all DONE v0.5.2 — see the "LOW priority DONE v0.5.2" section below.)_
 
 ### Quick Wins (already researched)
 
