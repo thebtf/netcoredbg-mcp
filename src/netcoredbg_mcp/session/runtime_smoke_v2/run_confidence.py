@@ -169,7 +169,7 @@ def _monitor_events(
     if any(not isinstance(event, Mapping) for event in events):
         return "malformed", None
     if not events:
-        return "missing", []
+        return "ok", []
     return "ok", events
 
 

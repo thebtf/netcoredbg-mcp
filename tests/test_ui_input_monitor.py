@@ -377,3 +377,34 @@ def test_composite_input_event_recorder_falls_back_to_low_level_hook() -> None:
     assert recorder.drain_events(key) == [
         InputProvenanceEvent(kind="mouse", injected=False, extra_info=None)
     ]
+
+
+def test_threaded_recorder_flushes_pending_events_on_stop() -> None:
+    from netcoredbg_mcp.ui.input_event_recorder import _ThreadedWin32Recorder
+
+    class FlushRecorder(_ThreadedWin32Recorder):
+        def _ensure_thread(self) -> None:
+            self._thread_id = 1
+
+        def _flush_pending_events(self) -> None:
+            self._record(
+                InputProvenanceEvent(
+                    kind="keyboard",
+                    injected=True,
+                    extra_info=RUNNER_INPUT_SIGNATURE,
+                )
+            )
+
+    recorder = FlushRecorder()
+    key = ("case-1", "transition-1")
+
+    recorder.start(key)
+    recorder.stop(key)
+
+    assert recorder.drain_events(key) == [
+        InputProvenanceEvent(
+            kind="keyboard",
+            injected=True,
+            extra_info=RUNNER_INPUT_SIGNATURE,
+        )
+    ]

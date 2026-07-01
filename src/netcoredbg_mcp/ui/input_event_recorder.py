@@ -29,6 +29,7 @@ _WH_MOUSE_LL = 14
 _LLMHF_INJECTED = 0x00000001
 _LLKHF_INJECTED = 0x00000010
 _INFINITE = -1
+_WM_APP_FLUSH = 0x8001
 
 _LRESULT = getattr(wintypes, "LRESULT", wintypes.LPARAM)
 _WINFUNCTYPE = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)
@@ -196,7 +197,9 @@ class _ThreadedWin32Recorder:
         self._lock = threading.Lock()
         self._events: dict[tuple[str, str], list[InputProvenanceEvent]] = {}
         self._active: set[tuple[str, str]] = set()
+        self._stopping: set[tuple[str, str]] = set()
         self._ready = threading.Event()
+        self._flush_ready = threading.Event()
         self._thread: threading.Thread | None = None
         self._thread_id = 0
         self._startup_error: str | None = None
@@ -208,9 +211,14 @@ class _ThreadedWin32Recorder:
             self._ensure_thread()
             self._events[key] = []
             self._active.add(key)
+            self._stopping.discard(key)
 
     def stop(self, key: tuple[str, str]) -> None:
         with self._lock:
+            self._stopping.add(key)
+        self._flush_pending_events()
+        with self._lock:
+            self._stopping.discard(key)
             self._active.discard(key)
 
     def drain_events(self, key: tuple[str, str]) -> list[InputProvenanceEvent]:
@@ -248,7 +256,7 @@ class _ThreadedWin32Recorder:
 
     def _record(self, event: InputProvenanceEvent) -> None:
         with self._lock:
-            for key in tuple(self._active):
+            for key in tuple(self._active | self._stopping):
                 self._events.setdefault(key, []).append(event)
 
     def _fail_startup(self, reason: str) -> None:
@@ -257,6 +265,34 @@ class _ThreadedWin32Recorder:
 
     def _thread_main(self) -> None:
         self._fail_startup(f"{type(self).__name__} has no Win32 recorder thread")
+
+    def _flush_pending_events(self) -> None:
+        if self._thread_id == 0 or os.name != "nt":
+            return
+        self._flush_ready.clear()
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.PostThreadMessageW.argtypes = [
+            wintypes.DWORD,
+            wintypes.UINT,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+        ]
+        user32.PostThreadMessageW.restype = wintypes.BOOL
+        if not user32.PostThreadMessageW(self._thread_id, _WM_APP_FLUSH, 0, 0):
+            return
+        self._flush_ready.wait(timeout=0.5)
+
+    def _message_loop(self, user32: Any) -> None:
+        msg = _MSG()
+        while True:
+            ret = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+            if ret <= 0:
+                break
+            if msg.message == _WM_APP_FLUSH:
+                self._flush_ready.set()
+                continue
+            user32.TranslateMessage(ctypes.byref(msg))
+            user32.DispatchMessageW(ctypes.byref(msg))
 
 
 class RawInputEventRecorder(_ThreadedWin32Recorder):
@@ -418,15 +454,6 @@ class RawInputEventRecorder(_ThreadedWin32Recorder):
                 )
             )
 
-    def _message_loop(self, user32: Any) -> None:
-        msg = _MSG()
-        while True:
-            ret = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
-            if ret <= 0:
-                break
-            user32.TranslateMessage(ctypes.byref(msg))
-            user32.DispatchMessageW(ctypes.byref(msg))
-
 
 class LowLevelHookInputEventRecorder(_ThreadedWin32Recorder):
     """Fallback recorder backed by WH_MOUSE_LL/WH_KEYBOARD_LL hooks."""
@@ -510,12 +537,3 @@ class LowLevelHookInputEventRecorder(_ThreadedWin32Recorder):
         user32.CallNextHookEx.restype = _LRESULT
         user32.UnhookWindowsHookEx.argtypes = [wintypes.HHOOK]
         user32.UnhookWindowsHookEx.restype = wintypes.BOOL
-
-    def _message_loop(self, user32: Any) -> None:
-        msg = _MSG()
-        while True:
-            ret = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
-            if ret <= 0:
-                break
-            user32.TranslateMessage(ctypes.byref(msg))
-            user32.DispatchMessageW(ctypes.byref(msg))

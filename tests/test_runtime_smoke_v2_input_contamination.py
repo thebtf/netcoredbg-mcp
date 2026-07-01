@@ -459,6 +459,31 @@ async def test_no_operator_external_dirty_after_successful_drag_stays_dirty() ->
 
 
 @pytest.mark.asyncio
+async def test_no_operator_empty_event_stream_after_action_stays_clean_proven() -> None:
+    session = ConfidenceSmokeSession(
+        [
+            {
+                "status": "PASS",
+                "basis": "input_event_stream",
+                "monitor": {"events": []},
+            },
+            {
+                "status": "PASS",
+                "basis": "input_event_stream",
+                "window": "after_action",
+                "monitor": {"events": []},
+            },
+        ]
+    )
+
+    result = await _runner(session).run(_no_operator_plan())
+
+    assert result["status"] == "PASS"
+    assert result["run_confidence"]["classification"] == "CLEAN_PROVEN"
+    assert result["run_confidence"]["product_verdict_allowed"] is True
+
+
+@pytest.mark.asyncio
 async def test_no_operator_runner_ambiguity_does_not_mask_drag_failure() -> None:
     session = ConfidenceSmokeSession(
         [
