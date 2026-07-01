@@ -24,6 +24,7 @@ class ConfidenceSmokeSession:
             {"status": "PASS"} if monitor_result is None else monitor_result
         )
         self.monitor_calls: list[dict[str, Any]] = []
+        self.calls: list[tuple[str, Any]] = []
         self.drag_calls: list[dict[str, Any]] = []
         self.drag_result: dict[str, Any] = {
             "status": "PASS",
@@ -31,6 +32,20 @@ class ConfidenceSmokeSession:
                 "move_points": [{"relative_to": "screen", "x": 10, "y": 20}],
                 "final_pointer": {"relative_to": "screen", "x": 30, "y": 40},
             },
+        }
+        self.find_result: dict[str, Any] = {"status": "PASS", "found": True}
+        self.focus_result: dict[str, Any] = {"status": "PASS"}
+        self.send_keys_result: dict[str, Any] = {"status": "PASS"}
+        self.text_get_state_result: dict[str, Any] = {
+            "status": "PASS",
+            "text": "Original text",
+            "selection": {"start": 0, "end": 13, "length": 13},
+            "selectionStart": 0,
+            "selectionLength": 13,
+        }
+        self.text_read_result: dict[str, Any] = {
+            "status": "PASS",
+            "text": "Replaced text",
         }
 
     def input_monitor_check(self, **kwargs: Any) -> dict[str, Any]:
@@ -44,13 +59,40 @@ class ConfidenceSmokeSession:
         self.drag_calls.append(dict(kwargs))
         return dict(self.drag_result)
 
+    def find_element(self, selector: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append(("find_element", dict(selector)))
+        return {**self.find_result, "selector": dict(selector)}
+
+    def set_focus(self, selector: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append(("set_focus", dict(selector)))
+        return dict(self.focus_result)
+
+    def send_keys_focused(self, keys: str) -> dict[str, Any]:
+        self.calls.append(("send_keys_focused", keys))
+        return {**self.send_keys_result, "sent": keys}
+
+    def text_get_state(self, selector: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append(("text_get_state", dict(selector)))
+        return dict(self.text_get_state_result)
+
+    def text_read(self, selector: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append(("text_read", dict(selector)))
+        return dict(self.text_read_result)
+
 
 def _runner(
     session: ConfidenceSmokeSession,
     *,
     include_monitor: bool = True,
 ) -> RuntimeSmokeRunner:
-    adapters = {"ui.drag": session.drag}
+    adapters = {
+        "ui.drag": session.drag,
+        "ui.find_element": session.find_element,
+        "ui.set_focus": session.set_focus,
+        "ui.send_keys_focused": session.send_keys_focused,
+        "ui.text.get_state": session.text_get_state,
+        "ui.text.read": session.text_read,
+    }
     if include_monitor:
         adapters["runtime.input_monitor.check"] = session.input_monitor_check
     return RuntimeSmokeRunner(session, service_adapters=adapters)
@@ -110,6 +152,30 @@ def _no_operator_drag_plan(*, no_global_input: bool) -> dict[str, Any]:
                                     "x": 30,
                                     "y": 40,
                                 },
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+
+def _no_operator_text_replace_plan(*, no_global_input: bool) -> dict[str, Any]:
+    return _no_operator_plan(
+        {
+            "input_policy": {"no_global_input": no_global_input},
+            "cases": [
+                {
+                    "id": "replace_text_case",
+                    "transitions": [
+                        {
+                            "id": "replace_text_transition",
+                            "action": {
+                                "kind": "ui.text.type_replace_selection",
+                                "selector": {"automation_id": "CueTextBox"},
+                                "text": "Replaced text",
                             },
                             "probes": [],
                         }
@@ -297,6 +363,51 @@ async def test_no_operator_runner_injected_drag_stays_clean_proven() -> None:
     assert confidence["product_verdict_allowed"] is True
     assert result["compact"]["run_confidence"]["classification"] == "CLEAN_PROVEN"
     assert session.drag_calls
+
+
+@pytest.mark.asyncio
+async def test_no_operator_runner_signed_text_replace_stays_clean_proven() -> None:
+    session = ConfidenceSmokeSession(
+        [
+            {
+                "status": "PASS",
+                "basis": "input_event_stream",
+                "monitor": {"events": []},
+            },
+            {
+                "status": "PASS",
+                "basis": "input_event_stream",
+                "window": "after_action",
+                "monitor": {
+                    "events": [
+                        {
+                            "kind": "keyboard",
+                            "injected": True,
+                            "extra_info": RUNNER_INPUT_SIGNATURE,
+                            "source": "runner_injected",
+                        }
+                    ]
+                },
+            },
+        ]
+    )
+
+    result = await _runner(session).run(
+        _no_operator_text_replace_plan(no_global_input=False)
+    )
+
+    assert result["status"] == "PASS"
+    confidence = result["run_confidence"]
+    assert confidence["classification"] == "CLEAN_PROVEN"
+    assert confidence["product_verdict_allowed"] is True
+    assert session.calls == [
+        ("find_element", {"automation_id": "CueTextBox"}),
+        ("set_focus", {"automation_id": "CueTextBox"}),
+        ("send_keys_focused", "^a"),
+        ("text_get_state", {"automation_id": "CueTextBox"}),
+        ("send_keys_focused", "Replaced text"),
+        ("text_read", {"automation_id": "CueTextBox"}),
+    ]
 
 
 @pytest.mark.asyncio
