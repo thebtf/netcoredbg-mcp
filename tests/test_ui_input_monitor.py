@@ -78,7 +78,7 @@ def test_runtime_input_monitor_reports_dirty_when_last_input_tick_advances() -> 
     assert "advanced" in after["summary"]
 
 
-def test_runtime_input_monitor_does_not_treat_runner_emulated_input_as_operator_dirty() -> (
+def test_runtime_input_monitor_reports_dirty_when_last_input_advances_even_for_drag_action() -> (
     None
 ):
     samples = iter(
@@ -94,22 +94,14 @@ def test_runtime_input_monitor_does_not_treat_runner_emulated_input_as_operator_
         **{
             **_kwargs("after_action"),
             "action": {"kind": "ui.drag"},
-            "runner_input": {
-                "kind": "ui.drag",
-                "source": "runner_emulated_input",
-                "window": "action",
-            },
         }
     )
 
-    assert after["status"] == "RUNNER_GLOBAL_INPUT_AMBIGUOUS"
+    assert after["status"] == "DIRTY"
     assert after["basis"] == "windows_last_input_info"
-    assert after["source"] == "runner_emulated_input"
+    assert after["source"] == "global_input"
     assert after["window"] == "after_action"
-    assert after["action"]["kind"] == "ui.drag"
-    assert after["summary"] == (
-        "Windows last-input tick advanced during runner-emulated global input."
-    )
+    assert "advanced" in after["summary"]
 
 
 def test_runtime_input_monitor_reports_dirty_between_transition_windows() -> None:

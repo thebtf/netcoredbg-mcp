@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -158,14 +158,6 @@ class RuntimeInputMonitor:
             "current": _sample_payload(sample),
         }
         if comparison == "advanced":
-            runner_input = _runner_input_metadata(kwargs)
-            if runner_input is not None:
-                return _runner_global_input_ambiguous(
-                    window=window,
-                    monitor=monitor,
-                    runner_input=runner_input,
-                    action=kwargs.get("action"),
-                )
             return _dirty(
                 window=window,
                 summary="Windows last-input tick advanced during no-operator window.",
@@ -338,36 +330,4 @@ def _dirty(*, window: str, summary: str, monitor: dict[str, Any]) -> dict[str, A
         "window": window,
         "summary": summary,
         "monitor": monitor,
-    }
-
-
-def _runner_input_metadata(kwargs: dict[str, Any]) -> dict[str, Any] | None:
-    runner_input = kwargs.get("runner_input")
-    if not isinstance(runner_input, Mapping):
-        return None
-    if str(runner_input.get("source") or "") != "runner_emulated_input":
-        return None
-    kind = str(runner_input.get("kind") or "")
-    if kind != "ui.drag":
-        return None
-    return dict(runner_input)
-
-
-def _runner_global_input_ambiguous(
-    *,
-    window: str,
-    monitor: dict[str, Any],
-    runner_input: dict[str, Any],
-    action: Any,
-) -> dict[str, Any]:
-    action_payload = dict(action) if isinstance(action, Mapping) else {}
-    return {
-        "status": "RUNNER_GLOBAL_INPUT_AMBIGUOUS",
-        "basis": "windows_last_input_info",
-        "source": "runner_emulated_input",
-        "window": window,
-        "summary": "Windows last-input tick advanced during runner-emulated global input.",
-        "monitor": monitor,
-        "runner_input": runner_input,
-        "action": action_payload,
     }

@@ -3915,7 +3915,7 @@ async def test_v2_ui_drag_fails_closed_for_selected_payload_expectation(
     assert action["status"] == expected_status
     assert action["reason"] == expected_reason
     if adapter_result.get("status") == "PASS" and adapter_result.get("route_evidence"):
-        assert action["runner_input"]["kind"] == "ui.drag"
+        assert "runner_input" not in action
 
 
 @pytest.mark.asyncio

@@ -14,9 +14,6 @@ from netcoredbg_mcp.session.runtime_smoke_schema import (
     validate_plan,
 )
 from netcoredbg_mcp.session.runtime_smoke_v2.generate import expand_generated_cases
-from netcoredbg_mcp.session.runtime_smoke_v2.run_confidence import (
-    REASON_RUNNER_INPUT_AMBIGUOUS,
-)
 
 EXAMPLE_PATH = Path("docs/examples/runtime-smoke-v2-drag-drop-grid.json")
 SELECTOR_SAFETY_EXAMPLE_PATH = Path(
@@ -645,7 +642,7 @@ def test_readme_and_playbook_document_customer_mode_drag_drop_gate() -> None:
     )
 
 
-def test_readme_documents_runner_controlled_input_ambiguity() -> None:
+def test_readme_documents_runner_controlled_input_provenance_model() -> None:
     readme = README_PATH.read_text(encoding="utf-8")
     readme_ru = README_RU_PATH.read_text(encoding="utf-8")
     english = _collapsed(readme)
@@ -653,15 +650,19 @@ def test_readme_documents_runner_controlled_input_ambiguity() -> None:
 
     for document in (english, russian):
         for term in (
-            "runner_emulated_input",
+            "runner_injected",
+            "foreign_injected",
+            "physical",
             "ui.drag",
-            "RUNNER_GLOBAL_INPUT_AMBIGUOUS",
-            REASON_RUNNER_INPUT_AMBIGUOUS,
+            "CLEAN_PROVEN",
+            "DIRTY_UNPROVEN",
         ):
             assert term in document
+        assert "RUNNER_GLOBAL_INPUT_AMBIGUOUS" not in document
+        assert "runner_emulated_input" not in document
 
-    assert "product verdict blocked" in english
-    assert "product verdict блокируется" in russian
+    assert "product verdict" in english
+    assert "product verdict" in russian
     assert "full isolation is proven" not in english
     assert "полная изоляция доказана" not in russian
 

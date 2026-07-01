@@ -368,15 +368,14 @@ desktop session, not full OS keyboard, pointer, foreground-window, or focus
 isolation.
 
 If a plan intentionally permits runner-controlled global input
-(`input_policy.no_global_input=false`), the current covered provenance path is
-bounded to runner-emulated `ui.drag` windows. Those actions add
-`runner_emulated_input` metadata before `runtime.input_monitor.check` evaluates
-the action window. When the only observed input tick is tied to that runner
-window, the run returns `RUNNER_GLOBAL_INPUT_AMBIGUOUS` with reason
-`input monitor evidence is ambiguous after runner-generated global input`; the
-product verdict blocked until a stricter separation monitor or a no-global-input
-route proves the scenario. External dirty input and missing monitor evidence
-still fail closed.
+(`input_policy.no_global_input=false`), the covered `ui.drag` provenance path
+uses signed runner injection plus OS event attribution. Those actions emit
+`runner_injected` metadata, and `runtime.input_monitor.check` records every
+observed event in the action window as `runner_injected`, `foreign_injected`,
+or `physical`. The run stays `CLEAN_PROVEN` only when every observed event is
+runner-signed; any physical or foreign-injected event becomes
+`DIRTY_UNPROVEN` and blocks the product verdict. Missing monitor evidence still
+fails closed.
 
 The manual smoke fixtures now cover the baseline console/WinForms app,
 `tests/fixtures/WpfSmokeApp`, and `tests/fixtures/AvaloniaSmokeApp`. Build all

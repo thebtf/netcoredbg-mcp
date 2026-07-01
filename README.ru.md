@@ -374,15 +374,14 @@ no-operator envelope использует `run_confidence.classification ==
 foreground window или focus на уровне ОС.
 
 Если plan намеренно разрешает runner-controlled global input
-(`input_policy.no_global_input=false`), текущий доказанный provenance path
-ограничен runner-emulated окнами `ui.drag`. Такие actions добавляют
-`runner_emulated_input` metadata до того, как `runtime.input_monitor.check`
-проверит action window. Если единственный замеченный input tick привязан к
-этому runner window, run возвращает `RUNNER_GLOBAL_INPUT_AMBIGUOUS` с reason
-`input monitor evidence is ambiguous after runner-generated global input`;
-product verdict блокируется, пока более строгий separation monitor или маршрут
-без global input не докажет сценарий. Внешний dirty input и отсутствующий
-monitor evidence по-прежнему fail closed.
+(`input_policy.no_global_input=false`), покрытый provenance path для `ui.drag`
+использует подписанную runner-инъекцию и OS event attribution. Такие actions
+передают metadata `runner_injected`, а `runtime.input_monitor.check`
+классифицирует каждое наблюдённое событие в action window как
+`runner_injected`, `foreign_injected` или `physical`. Run остаётся
+`CLEAN_PROVEN` только когда все наблюдённые события подписаны runner'ом; любое
+physical или foreign-injected событие становится `DIRTY_UNPROVEN` и блокирует
+product verdict. Отсутствующее monitor evidence по-прежнему fail closed.
 
 Manual smoke fixtures теперь покрывают базовое console/WinForms-приложение,
 `tests/fixtures/WpfSmokeApp` и `tests/fixtures/AvaloniaSmokeApp`. Соберите все

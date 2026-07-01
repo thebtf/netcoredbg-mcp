@@ -8,10 +8,10 @@ INPUT_MONITOR_ADAPTER = "runtime.input_monitor.check"
 CLASS_CLEAN_PROVEN = "CLEAN_PROVEN"
 CLASS_DIRTY_UNPROVEN = "DIRTY_UNPROVEN"
 CLASS_UNPROVEN = "UNPROVEN"
-CLASS_RUNNER_GLOBAL_INPUT_AMBIGUOUS = "RUNNER_GLOBAL_INPUT_AMBIGUOUS"
-REASON_RUNNER_INPUT_AMBIGUOUS = (
-    "input monitor evidence is ambiguous after runner-generated global input"
-)
+
+SOURCE_RUNNER_INJECTED = "runner_injected"
+SOURCE_FOREIGN_INJECTED = "foreign_injected"
+SOURCE_PHYSICAL = "physical"
 
 
 def no_operator_confidence_requested(policy: Mapping[str, Any] | None) -> bool:
@@ -31,17 +31,12 @@ def confidence_from_monitor_result(
         )
     status = str(raw_status).upper()
     if status in {"PASS", "CLEAN"}:
-        return {
-            "classification": CLASS_CLEAN_PROVEN,
-            "product_verdict_allowed": True,
-            "basis": str(monitor_result.get("basis") or "external_input_monitor"),
-        }
+        event_confidence = _confidence_from_event_stream(monitor_result, window=window)
+        if event_confidence is not None:
+            return event_confidence
+        return _clean_proven(monitor_result)
     if status in {"DIRTY", CLASS_DIRTY_UNPROVEN}:
-        if _has_runner_emulated_input(monitor_result):
-            return _runner_global_input_ambiguous(monitor_result, window=window)
         return _dirty_unproven(monitor_result, window=window)
-    if status == CLASS_RUNNER_GLOBAL_INPUT_AMBIGUOUS:
-        return _runner_global_input_ambiguous(monitor_result, window=window)
     if status == "BLOCKED":
         reason = str(monitor_result.get("reason") or "input monitor blocked")
         basis = (
@@ -83,11 +78,7 @@ def aggregate_case_confidence(
         for case in cases
         if isinstance((record := case.get("run_confidence")), dict)
     ]
-    for classification in (
-        CLASS_DIRTY_UNPROVEN,
-        CLASS_RUNNER_GLOBAL_INPUT_AMBIGUOUS,
-        CLASS_UNPROVEN,
-    ):
+    for classification in (CLASS_DIRTY_UNPROVEN, CLASS_UNPROVEN):
         selected = _first_classification(records, classification)
         if selected is not None:
             return dict(selected)
@@ -112,11 +103,7 @@ def aggregate_transition_confidence(
         for transition in transitions
         if isinstance((record := transition.get("run_confidence")), dict)
     ]
-    for classification in (
-        CLASS_DIRTY_UNPROVEN,
-        CLASS_RUNNER_GLOBAL_INPUT_AMBIGUOUS,
-        CLASS_UNPROVEN,
-    ):
+    for classification in (CLASS_DIRTY_UNPROVEN, CLASS_UNPROVEN):
         selected = _first_classification(records, classification)
         if selected is not None:
             return dict(selected)
@@ -129,15 +116,68 @@ def aggregate_transition_confidence(
     )
 
 
+def _confidence_from_event_stream(
+    monitor_result: Mapping[str, Any],
+    *,
+    window: str,
+) -> dict[str, Any] | None:
+    events = _monitor_events(monitor_result)
+    if events is None:
+        return None
+    for event in events:
+        source = _event_source(event)
+        if source != SOURCE_RUNNER_INJECTED:
+            return _dirty_unproven(
+                monitor_result,
+                window=window,
+                source=source,
+                event=event,
+            )
+    return _clean_proven(monitor_result)
+
+
+def _monitor_events(
+    monitor_result: Mapping[str, Any],
+) -> list[Mapping[str, Any]] | None:
+    monitor = monitor_result.get("monitor")
+    if not isinstance(monitor, Mapping):
+        return None
+    events = monitor.get("events")
+    if not isinstance(events, list):
+        return None
+    return [event for event in events if isinstance(event, Mapping)]
+
+
+def _event_source(event: Mapping[str, Any]) -> str:
+    source = str(event.get("source") or "").strip()
+    if source:
+        return source
+    if event.get("injected") is True:
+        return SOURCE_FOREIGN_INJECTED
+    return SOURCE_PHYSICAL
+
+
+def _clean_proven(monitor_result: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "classification": CLASS_CLEAN_PROVEN,
+        "product_verdict_allowed": True,
+        "basis": str(monitor_result.get("basis") or "external_input_monitor"),
+    }
+
+
 def _dirty_unproven(
     monitor_result: Mapping[str, Any],
     *,
     window: str,
+    source: str | None = None,
+    event: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     contamination = {
-        "source": str(monitor_result.get("source") or "external_input"),
+        "source": source or str(monitor_result.get("source") or "external_input"),
         "window": str(monitor_result.get("window") or window),
     }
+    if event is not None:
+        contamination["event"] = dict(event)
     if monitor_result.get("summary"):
         contamination["summary"] = str(monitor_result["summary"])
     return {
@@ -147,52 +187,6 @@ def _dirty_unproven(
         "contamination": contamination,
         "restart_guidance": (
             "Restart the scenario from the beginning after external operator input stops."
-        ),
-    }
-
-
-def _has_runner_emulated_input(monitor_result: Mapping[str, Any]) -> bool:
-    runner_input = monitor_result.get("runner_input")
-    return (
-        isinstance(runner_input, Mapping)
-        and str(runner_input.get("source") or "") == "runner_emulated_input"
-        and str(runner_input.get("kind") or "") == "ui.drag"
-        and _monitor_source_allows_runner_ambiguity(monitor_result)
-    )
-
-
-def _monitor_source_allows_runner_ambiguity(
-    monitor_result: Mapping[str, Any],
-) -> bool:
-    source = str(monitor_result.get("source") or "").strip().lower()
-    return source in {"", "global_input", "runner_emulated_input"}
-
-
-def _runner_global_input_ambiguous(
-    monitor_result: Mapping[str, Any],
-    *,
-    window: str,
-) -> dict[str, Any]:
-    action = monitor_result.get("action")
-    runner_input = monitor_result.get("runner_input")
-    ambiguity: dict[str, Any] = {
-        "action": dict(action) if isinstance(action, Mapping) else {},
-        "monitor_source": str(monitor_result.get("source") or "runner_emulated_input"),
-        "window": str(monitor_result.get("window") or window),
-    }
-    if isinstance(runner_input, Mapping):
-        ambiguity["runner_input"] = dict(runner_input)
-    if monitor_result.get("summary"):
-        ambiguity["summary"] = str(monitor_result["summary"])
-    return {
-        "classification": CLASS_RUNNER_GLOBAL_INPUT_AMBIGUOUS,
-        "product_verdict_allowed": False,
-        "basis": str(monitor_result.get("basis") or "runner_input_separation"),
-        "reason": REASON_RUNNER_INPUT_AMBIGUOUS,
-        "ambiguity": ambiguity,
-        "restart_guidance": (
-            "Use input_policy.no_global_input=true or a supported runner-input "
-            "separation monitor before treating the product verdict as no-operator evidence."
         ),
     }
 
@@ -223,8 +217,6 @@ def _first_classification(
 def _blocked_reason(classification: str) -> str:
     if classification == CLASS_DIRTY_UNPROVEN:
         return "operator input contaminated the scenario"
-    if classification == CLASS_RUNNER_GLOBAL_INPUT_AMBIGUOUS:
-        return REASON_RUNNER_INPUT_AMBIGUOUS
     return "operator-free scenario confidence is unproven"
 
 

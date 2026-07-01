@@ -8,12 +8,10 @@ from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner, RuntimeSmok
 from netcoredbg_mcp.session.runtime_smoke_v2.actions.ui_drag import (
     REASON_NO_ROUTE_EVIDENCE,
 )
-from netcoredbg_mcp.session.runtime_smoke_v2.run_confidence import (
-    REASON_RUNNER_INPUT_AMBIGUOUS,
-)
 from netcoredbg_mcp.session.runtime_smoke_v2.transition_executor import (
     _status_from_records,
 )
+from netcoredbg_mcp.ui.input_signature import RUNNER_INPUT_SIGNATURE
 
 
 class ConfidenceSmokeSession:
@@ -183,18 +181,25 @@ async def test_no_operator_dirty_after_action_blocks_product_verdict() -> None:
 
 
 @pytest.mark.asyncio
-async def test_no_operator_dirty_after_runner_global_input_is_ambiguous_unproven() -> (
+async def test_no_operator_physical_input_inside_runner_drag_is_dirty_unproven() -> (
     None
 ):
     session = ConfidenceSmokeSession(
         [
-            {"status": "PASS", "basis": "windows_last_input_info"},
             {
-                "status": "DIRTY",
-                "basis": "windows_last_input_info",
-                "source": "global_input",
+                "status": "PASS",
+                "basis": "input_event_stream",
+                "monitor": {"events": []},
+            },
+            {
+                "status": "PASS",
+                "basis": "input_event_stream",
                 "window": "after_action",
-                "summary": "Windows last-input tick advanced during no-operator window.",
+                "monitor": {
+                    "events": [
+                        {"kind": "mouse", "injected": False, "source": "physical"}
+                    ]
+                },
             },
         ]
     )
@@ -203,36 +208,48 @@ async def test_no_operator_dirty_after_runner_global_input_is_ambiguous_unproven
 
     confidence = result["run_confidence"]
     assert result["status"] == "BLOCKED"
-    assert result["reason"] == REASON_RUNNER_INPUT_AMBIGUOUS
-    assert confidence["classification"] == "RUNNER_GLOBAL_INPUT_AMBIGUOUS"
+    assert result["reason"] == "operator input contaminated the scenario"
+    assert confidence["classification"] == "DIRTY_UNPROVEN"
     assert confidence["product_verdict_allowed"] is False
-    assert confidence["reason"] == result["reason"]
-    assert confidence["ambiguity"]["action"]["kind"] == "ui.drag"
-    assert confidence["ambiguity"]["monitor_source"] == "global_input"
-    assert "operator input contaminated" not in result["reason"]
-    assert "no_global_input" in confidence["restart_guidance"]
-    assert result["compact"]["run_confidence"]["classification"] == (
-        "RUNNER_GLOBAL_INPUT_AMBIGUOUS"
-    )
+    assert confidence["contamination"]["source"] == "physical"
+    assert confidence["contamination"]["event"] == {
+        "kind": "mouse",
+        "injected": False,
+        "source": "physical",
+    }
+    assert result["compact"]["run_confidence"]["classification"] == "DIRTY_UNPROVEN"
     assert session.drag_calls
     assert [call["window"] for call in session.monitor_calls] == [
         "before_action",
         "after_action",
     ]
-    assert session.monitor_calls[1]["runner_input"]["kind"] == "ui.drag"
-    assert confidence["ambiguity"]["runner_input"]["source"] == "runner_emulated_input"
 
 
 @pytest.mark.asyncio
-async def test_no_operator_explicit_runner_ambiguity_blocks_product_verdict() -> None:
+async def test_no_operator_foreign_injected_input_inside_runner_drag_is_dirty_unproven() -> (
+    None
+):
     session = ConfidenceSmokeSession(
         [
-            {"status": "PASS", "basis": "windows_last_input_info"},
             {
-                "status": "RUNNER_GLOBAL_INPUT_AMBIGUOUS",
-                "basis": "windows_last_input_info",
-                "source": "global_input",
+                "status": "PASS",
+                "basis": "input_event_stream",
+                "monitor": {"events": []},
+            },
+            {
+                "status": "PASS",
+                "basis": "input_event_stream",
                 "window": "after_action",
+                "monitor": {
+                    "events": [
+                        {
+                            "kind": "mouse",
+                            "injected": True,
+                            "extra_info": 123,
+                            "source": "foreign_injected",
+                        }
+                    ]
+                },
             },
         ]
     )
@@ -241,12 +258,45 @@ async def test_no_operator_explicit_runner_ambiguity_blocks_product_verdict() ->
 
     confidence = result["run_confidence"]
     assert result["status"] == "BLOCKED"
-    assert result["reason"] == REASON_RUNNER_INPUT_AMBIGUOUS
-    assert confidence["classification"] == "RUNNER_GLOBAL_INPUT_AMBIGUOUS"
-    assert confidence["product_verdict_allowed"] is False
-    assert confidence["ambiguity"]["monitor_source"] == "global_input"
-    assert confidence["ambiguity"]["runner_input"]["kind"] == "ui.drag"
-    assert "no_global_input" in confidence["restart_guidance"]
+    assert confidence["classification"] == "DIRTY_UNPROVEN"
+    assert confidence["contamination"]["source"] == "foreign_injected"
+    assert "ambigu" not in str(confidence).lower()
+
+
+@pytest.mark.asyncio
+async def test_no_operator_runner_injected_drag_stays_clean_proven() -> None:
+    session = ConfidenceSmokeSession(
+        [
+            {
+                "status": "PASS",
+                "basis": "input_event_stream",
+                "monitor": {"events": []},
+            },
+            {
+                "status": "PASS",
+                "basis": "input_event_stream",
+                "window": "after_action",
+                "monitor": {
+                    "events": [
+                        {
+                            "kind": "mouse",
+                            "injected": True,
+                            "extra_info": RUNNER_INPUT_SIGNATURE,
+                            "source": "runner_injected",
+                        }
+                    ]
+                },
+            },
+        ]
+    )
+
+    result = await _runner(session).run(_no_operator_drag_plan(no_global_input=False))
+
+    confidence = result["run_confidence"]
+    assert confidence["classification"] == "CLEAN_PROVEN"
+    assert confidence["product_verdict_allowed"] is True
+    assert result["compact"]["run_confidence"]["classification"] == "CLEAN_PROVEN"
+    assert session.drag_calls
 
 
 @pytest.mark.asyncio
@@ -294,7 +344,6 @@ async def test_no_operator_external_dirty_after_successful_drag_stays_dirty() ->
     assert result["reason"] == "operator input contaminated the scenario"
     assert confidence["classification"] == "DIRTY_UNPROVEN"
     assert confidence["contamination"]["source"] == "keyboard"
-    assert session.monitor_calls[1]["runner_input"]["kind"] == "ui.drag"
     assert result["compact"]["run_confidence"]["classification"] == "DIRTY_UNPROVEN"
 
 
@@ -325,10 +374,7 @@ async def test_no_operator_runner_ambiguity_does_not_mask_drag_failure() -> None
 
     assert result["status"] == "FAIL"
     assert result["reason"] == "selected payload expectation failed"
-    assert result["run_confidence"]["classification"] == (
-        "RUNNER_GLOBAL_INPUT_AMBIGUOUS"
-    )
-    assert session.monitor_calls[1]["runner_input"]["kind"] == "ui.drag"
+    assert result["run_confidence"]["classification"] == "DIRTY_UNPROVEN"
 
 
 @pytest.mark.asyncio
