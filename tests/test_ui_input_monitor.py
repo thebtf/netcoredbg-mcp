@@ -4,6 +4,7 @@ from typing import Any
 
 from netcoredbg_mcp.ui.input_monitor import (
     InputMonitorUnavailableError,
+    InputProvenanceEvent,
     LastInputSample,
     RuntimeInputMonitor,
 )
@@ -18,6 +19,22 @@ def _kwargs(window: str) -> dict[str, Any]:
         "input_policy": {"no_global_input": True},
         "run_confidence": {"no_operator": True},
     }
+
+
+class FakeProvenanceRecorder:
+    def __init__(self, events: list[InputProvenanceEvent]) -> None:
+        self.events = list(events)
+        self.calls: list[tuple[str, tuple[str, str]]] = []
+
+    def start(self, key: tuple[str, str]) -> None:
+        self.calls.append(("start", key))
+
+    def stop(self, key: tuple[str, str]) -> None:
+        self.calls.append(("stop", key))
+
+    def drain_events(self, key: tuple[str, str]) -> list[InputProvenanceEvent]:
+        self.calls.append(("drain_events", key))
+        return list(self.events)
 
 
 def test_runtime_input_monitor_reports_clean_when_last_input_tick_is_stable() -> None:
@@ -203,3 +220,28 @@ def test_runtime_input_monitor_blocks_after_action_without_baseline() -> None:
 
     assert result["status"] == "BLOCKED"
     assert result["reason"] == "input monitor missing baseline"
+
+
+def test_runtime_input_monitor_uses_event_recorder_lifecycle_for_capture_window() -> (
+    None
+):
+    recorder = FakeProvenanceRecorder(
+        [InputProvenanceEvent(kind="mouse", injected=True, extra_info=0x4E434442)]
+    )
+    monitor = RuntimeInputMonitor(event_recorder=recorder)
+
+    before = monitor.check(**_kwargs("before_action"))
+    after = monitor.check(**_kwargs("after_action"))
+
+    assert before["status"] == "PASS"
+    assert before["basis"] == "input_event_stream"
+    assert after["status"] == "PASS"
+    assert after["basis"] == "input_event_stream"
+    assert after["monitor"]["events"] == [
+        {"kind": "mouse", "injected": True, "extra_info": 0x4E434442}
+    ]
+    assert recorder.calls == [
+        ("start", ("case-1", "transition-1")),
+        ("stop", ("case-1", "transition-1")),
+        ("drain_events", ("case-1", "transition-1")),
+    ]

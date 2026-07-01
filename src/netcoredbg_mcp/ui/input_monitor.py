@@ -6,7 +6,7 @@ import ctypes
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 _DWORD_MODULUS = 2**32
 _DWORD_HALF_RANGE = 2**31
@@ -30,6 +30,25 @@ class LastInputSample:
 LastInputReader = Callable[[], LastInputSample]
 
 
+@dataclass(frozen=True)
+class InputProvenanceEvent:
+    """Input event captured during a no-operator confidence window."""
+
+    kind: str
+    injected: bool
+    extra_info: int | None = None
+
+
+class InputEventRecorder(Protocol):
+    """Lifecycle seam for recording input events across an action window."""
+
+    def start(self, key: tuple[str, str]) -> None: ...
+
+    def stop(self, key: tuple[str, str]) -> None: ...
+
+    def drain_events(self, key: tuple[str, str]) -> list[InputProvenanceEvent]: ...
+
+
 class _LASTINPUTINFO(ctypes.Structure):
     _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint32)]
 
@@ -51,9 +70,16 @@ else:
 class RuntimeInputMonitor:
     """Stateful monitor backing runtime.input_monitor.check."""
 
-    def __init__(self, *, reader: LastInputReader | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        reader: LastInputReader | None = None,
+        event_recorder: InputEventRecorder | None = None,
+    ) -> None:
         self._reader = reader or read_last_input_sample
+        self._event_recorder = event_recorder
         self._baselines: dict[tuple[str, str], LastInputSample] = {}
+        self._event_windows: set[tuple[str, str]] = set()
         self._last_sample: LastInputSample | None = None
 
     def check(self, **kwargs: Any) -> dict[str, Any]:
@@ -71,6 +97,9 @@ class RuntimeInputMonitor:
             return _blocked("input monitor missing transition identity", window=window)
 
         key = _transition_key(kwargs)
+
+        if self._event_recorder is not None:
+            return self._check_event_stream(key=key, window=window)
         try:
             sample = self._reader()
         except InputMonitorUnavailableError as exc:
@@ -153,6 +182,56 @@ class RuntimeInputMonitor:
             "monitor": monitor,
         }
 
+    def _check_event_stream(
+        self, *, key: tuple[str, str], window: str
+    ) -> dict[str, Any]:
+        recorder = self._event_recorder
+        if recorder is None:
+            return _blocked("input event recorder unavailable", window=window)
+        if window != "after_action":
+            try:
+                recorder.start(key)
+            except InputMonitorUnavailableError as exc:
+                return _blocked(str(exc), window=window, basis="input_event_stream")
+            except Exception as exc:
+                return _blocked(
+                    f"input event recorder start failed: {exc}",
+                    window=window,
+                    basis="input_event_stream",
+                )
+            self._event_windows.add(key)
+            return {
+                "status": "PASS",
+                "basis": "input_event_stream",
+                "window": window,
+                "monitor": {"events": []},
+            }
+        if key not in self._event_windows:
+            return _blocked(
+                "input event recorder missing active window",
+                window=window,
+                basis="input_event_stream",
+            )
+        try:
+            recorder.stop(key)
+            events = recorder.drain_events(key)
+        except InputMonitorUnavailableError as exc:
+            return _blocked(str(exc), window=window, basis="input_event_stream")
+        except Exception as exc:
+            return _blocked(
+                f"input event recorder stop failed: {exc}",
+                window=window,
+                basis="input_event_stream",
+            )
+        finally:
+            self._event_windows.discard(key)
+        return {
+            "status": "PASS",
+            "basis": "input_event_stream",
+            "window": window,
+            "monitor": {"events": [_event_payload(event) for event in events]},
+        }
+
 
 def create_default_runtime_input_monitor() -> RuntimeInputMonitor:
     return RuntimeInputMonitor()
@@ -195,6 +274,16 @@ def _sample_payload(sample: LastInputSample) -> dict[str, Any]:
     }
 
 
+def _event_payload(event: InputProvenanceEvent) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "kind": str(event.kind),
+        "injected": bool(event.injected),
+    }
+    if event.extra_info is not None:
+        payload["extra_info"] = int(event.extra_info)
+    return payload
+
+
 def _compare_dword_ticks(start: int, end: int) -> str:
     # Microsoft documents LASTINPUTINFO.dwTime and GetTickCount as DWORD ticks;
     # compare modulo 2^32 to handle the normal 49.7-day wrap boundary.
@@ -210,11 +299,16 @@ def _dword_delta(start: int, end: int) -> int:
     return (int(end) - int(start)) % _DWORD_MODULUS
 
 
-def _blocked(reason: str, *, window: str) -> dict[str, Any]:
+def _blocked(
+    reason: str,
+    *,
+    window: str,
+    basis: str = "windows_last_input_info",
+) -> dict[str, Any]:
     return {
         "status": "BLOCKED",
         "reason": reason,
-        "basis": "windows_last_input_info",
+        "basis": basis,
         "window": window,
     }
 
