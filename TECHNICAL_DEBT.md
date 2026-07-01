@@ -75,22 +75,11 @@ Reference: `.agent/data/competitor-analysis-detail.md`
 
 ### v0.5.0: Exception Autopsy + Context Tools (HIGH)
 
-#### R1: Exception autopsy tool (`exception_get_context`)
-**What:** Single tool call that returns: exception type, message, isFirstChance, inner exception
-chain (with depth), stack frames with source locations, local variables for N top frames.
-Replaces 3-4 sequential tool calls (get_exception_info + get_call_stack + get_scopes + get_variables).
-**Why:** Agent wastes 4+ tool calls per exception. debug-mcp proved this pattern works.
-**How:** Use DAP `evaluate` with `$exception.GetType().FullName`, `$exception.Message`,
-`$exception.StackTrace`, walk inner chain via `$exception.InnerException.*`.
-Combine with existing get_stack_trace + get_variables for locals.
-**Effort:** M — compose existing DAP calls, new tool + service.
+#### ~~R1: Exception autopsy tool (`get_exception_context`)~~ DONE
+**Implemented in:** `tools/inspection.py:get_exception_context` (inspection.py:465). Single call returns exception type, message, inner chain, stack frames + locals for top N frames.
 
-#### R2: Context autopsy on stop (`get_stop_context`)
-**What:** When stopped at ANY breakpoint (not just exception), one call returns:
-stop reason, stack trace with source context, locals in top frame, hit count,
-recent output (last 10 lines). Replaces the manual inspect-resume cycle.
-**Why:** Agent on screenshot does 5+ tool calls every time it stops. Should be 1.
-**Effort:** M — compose existing calls.
+#### ~~R2: Context autopsy on stop (`get_stop_context`)~~ DONE
+**Implemented in:** `tools/inspection.py:get_stop_context` (inspection.py:503). One call on any stop: reason, stack + source context, top-frame locals, hit count, recent output.
 
 #### R3: Execution flow tracing via tracepoints
 **What:** Set non-stopping breakpoints that log an expression's value.
@@ -121,9 +110,9 @@ Alternative: client-side tracepoints using `quick_evaluate` pattern
 **Implemented in:** 11 tools with `xpath` param, `bridge/Commands/ElementCommands.cs:FindByXPath` with matchCount + warning on multiple matches. `FindElement` delegates to XPath when xpath is the only criterion.
 
 **Remaining from UI expansion (post-merge):**
-- T030: WPF SmokeTestApp with checkbox/invoke button scenarios (needs new WPF project)
-- T031: Smoke test checks for new tools (needs real GUI runtime)
-- T033: Scoped search performance measurement (needs real UI tree with 100+ elements)
+- ~~T030: WPF SmokeTestApp with checkbox/invoke button scenarios~~ DONE — `tests/fixtures/WpfSmokeApp` (+ SmokeTestApp, AvaloniaSmokeApp) exist and build.
+- ~~T031: Smoke test checks for new tools~~ DONE — manual smoke suite covers new UI tools (227 checks as of v0.21.0).
+- T033: Scoped search performance measurement — NON-GOAL. Perf timing on 100+ element trees is low value for an agent-facing debugger; deprioritized unless a concrete latency complaint appears.
 
 ### ~~v0.5.1: Advanced Debugging (from debug-mcp features)~~ DONE
 

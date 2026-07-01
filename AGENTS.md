@@ -119,7 +119,7 @@ the residue documented in the original checkout.
 | What | Where |
 |------|-------|
 | Epic specs | `.agent/epics/EPIC_XX_*.md` |
-| Status | `.agent/status/CURRENT_STATUS.md` |
+| Status | `.agent/CONTINUITY.md` (live session state; `.agent/status/` holds PR-review nitpick JSON only) |
 | Reports | `.agent/reports/` |
 | Lessons | `.agent/LESSONS_LEARNED.md` |
 | Skills | _N/A (no local skills; see `docs/dap-protocol/` for the only project-specific reference)_ |
