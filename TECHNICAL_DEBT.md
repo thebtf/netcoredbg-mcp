@@ -1,5 +1,58 @@
 # Technical Debt — netcoredbg-mcp
 
+## Strategic: Python → C#/.NET platform migration (strangler-fig, deferred)
+
+**Decision (2026-07-01, operator-approved):** the two-language split (Python core
++ C# FlaUI bridge over JSON-RPC) is a standing architectural debt. Long-term
+direction is a single .NET platform. Approach is **strangler-fig, NOT rewrite**:
+gradually "strangle" Python module by module while the product keeps working —
+never a from-scratch rewrite (94k LOC of working, bug-fixed code + 52k LOC tests
+would be thrown away).
+
+**Why it makes sense:** the product debugs .NET and the UI layer is already C#;
+Python exists only because FlaUI needed C#. Removing the split deletes the
+JSON-RPC bridge tax, makes FlaUI native, ships one self-contained `.exe` (no
+pip + dotnet-SDK-for-bridge-build), and matches the .NET audience. Official C#
+MCP SDK is mature (`/modelcontextprotocol/csharp-sdk`, verified 2026-07-01);
+netcoredbg DAP is language-agnostic over stdio; all Python deps have .NET
+equivalents (pywinauto→FlaUI native, Pillow→ImageSharp, jsonpath-ng→Json.NET,
+psutil→System.Diagnostics, pyyaml→YamlDotNet).
+
+**Process-supervision argument (added 2026-07-01, from live incident):** the
+Python packaging forces a wrapper launch chain
+`mcp-mux → uv run → python launcher → python worker (asyncio MCP loop)`. That is
+4 process layers, and it is exactly why mcp-mux went blind during the 2026-07-01
+hang: mux supervises its direct child (the `uv` launcher), but the MCP event
+loop lives in the grandchild; a dead loop left the launcher alive with
+`pending: 0`, so every call timed out for 12–17h while mux reported healthy (see
+mcp-mux issue #355). A native self-contained .NET binary collapses the chain to
+`mcp-mux → netcoredbg-mcp.exe` — one process, and it IS the one holding the MCP
+loop. mux then supervises the right process, `pending` stops lying, reap hits the
+target, and orphan `uv` launchers cannot exist. The two-language split does not
+just cost bridge latency — it inserts an interpreter+wrapper layer that defeats
+process supervision.
+
+**Why NOT now:** v0.21.0 is stable, runtime-smoke v2 (18k LOC `session/`) just
+shipped — rewriting the newest/most-complex code is peak regression risk for
+zero user payoff. Trigger for starting is a concrete pain, not aesthetics:
+JSON-RPC bridge latency becomes a bottleneck, maintaining Python+C# starts
+blocking delivery, users hit friction on the pip+dotnet install path, or the
+wrapper-launch supervision gap keeps causing hung-upstream incidents like
+2026-07-01 (#355). That last one is now a NAMED, observed trigger — not
+hypothetical — which moves this debt from "someday" toward "when the next
+supervision incident lands, start the strangler-fig."
+
+**Migration order when triggered (strangler-fig):**
+1. Stand up a C# MCP host beside the Python server; proxy tool-by-tool into
+   existing Python.
+2. Migrate UI/FlaUI tools first (already C# — bridge tax vanishes immediately =
+   real early payoff).
+3. Migrate `dap/` then `session/` per-module, each under green tests.
+4. Python fades module by module; product works every day.
+
+Sizing (2026-07-01): Python src 41,460 LOC (125 files) — `session/` 18k,
+`tools/` 9.3k, `ui/` 6.9k, `dap/` 955; tests 52,614 LOC; existing C# 8,571 LOC.
+
 ## From DAP Coverage Gap Analysis (2026-04-04)
 
 Full reports: `.agent/data/mcp-dap-coverage-gaps.md`, `.agent/data/netcoredbg-dap-capabilities.md`
