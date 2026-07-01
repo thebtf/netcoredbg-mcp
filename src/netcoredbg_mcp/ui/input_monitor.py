@@ -8,6 +8,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from .input_signature import RUNNER_INPUT_SIGNATURE
+
 _DWORD_MODULUS = 2**32
 _DWORD_HALF_RANGE = 2**31
 _VALID_WINDOWS = frozenset({"before_action", "after_action"})
@@ -233,8 +235,14 @@ class RuntimeInputMonitor:
         }
 
 
+def create_default_input_event_recorder() -> InputEventRecorder:
+    from .input_event_recorder import Win32CompositeInputEventRecorder
+
+    return Win32CompositeInputEventRecorder()
+
+
 def create_default_runtime_input_monitor() -> RuntimeInputMonitor:
-    return RuntimeInputMonitor()
+    return RuntimeInputMonitor(event_recorder=create_default_input_event_recorder())
 
 
 def read_last_input_sample() -> LastInputSample:
@@ -278,10 +286,19 @@ def _event_payload(event: InputProvenanceEvent) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "kind": str(event.kind),
         "injected": bool(event.injected),
+        "source": _event_source(event),
     }
     if event.extra_info is not None:
         payload["extra_info"] = int(event.extra_info)
     return payload
+
+
+def _event_source(event: InputProvenanceEvent) -> str:
+    if not event.injected:
+        return "physical"
+    if event.extra_info == RUNNER_INPUT_SIGNATURE:
+        return "runner_injected"
+    return "foreign_injected"
 
 
 def _compare_dword_ticks(start: int, end: int) -> str:

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
+import netcoredbg_mcp.ui.input_monitor as input_monitor
 from netcoredbg_mcp.ui.input_monitor import (
     InputMonitorUnavailableError,
     InputProvenanceEvent,
     LastInputSample,
     RuntimeInputMonitor,
 )
+from netcoredbg_mcp.ui.input_signature import RUNNER_INPUT_SIGNATURE
 
 
 def _kwargs(window: str) -> dict[str, Any]:
@@ -226,7 +228,11 @@ def test_runtime_input_monitor_uses_event_recorder_lifecycle_for_capture_window(
     None
 ):
     recorder = FakeProvenanceRecorder(
-        [InputProvenanceEvent(kind="mouse", injected=True, extra_info=0x4E434442)]
+        [
+            InputProvenanceEvent(
+                kind="mouse", injected=True, extra_info=RUNNER_INPUT_SIGNATURE
+            )
+        ]
     )
     monitor = RuntimeInputMonitor(event_recorder=recorder)
 
@@ -238,10 +244,90 @@ def test_runtime_input_monitor_uses_event_recorder_lifecycle_for_capture_window(
     assert after["status"] == "PASS"
     assert after["basis"] == "input_event_stream"
     assert after["monitor"]["events"] == [
-        {"kind": "mouse", "injected": True, "extra_info": 0x4E434442}
+        {
+            "kind": "mouse",
+            "injected": True,
+            "extra_info": RUNNER_INPUT_SIGNATURE,
+            "source": "runner_injected",
+        }
     ]
     assert recorder.calls == [
         ("start", ("case-1", "transition-1")),
         ("stop", ("case-1", "transition-1")),
         ("drain_events", ("case-1", "transition-1")),
+    ]
+
+
+def test_runtime_input_monitor_surfaces_distinct_provenance_event_sources() -> None:
+    recorder = FakeProvenanceRecorder(
+        [
+            InputProvenanceEvent(
+                kind="mouse", injected=True, extra_info=RUNNER_INPUT_SIGNATURE
+            ),
+            InputProvenanceEvent(kind="mouse", injected=True, extra_info=123),
+            InputProvenanceEvent(kind="keyboard", injected=False, extra_info=None),
+        ]
+    )
+    monitor = RuntimeInputMonitor(event_recorder=recorder)
+
+    monitor.check(**_kwargs("before_action"))
+    after = monitor.check(**_kwargs("after_action"))
+
+    assert after["monitor"]["events"] == [
+        {
+            "kind": "mouse",
+            "injected": True,
+            "extra_info": RUNNER_INPUT_SIGNATURE,
+            "source": "runner_injected",
+        },
+        {
+            "kind": "mouse",
+            "injected": True,
+            "extra_info": 123,
+            "source": "foreign_injected",
+        },
+        {"kind": "keyboard", "injected": False, "source": "physical"},
+    ]
+
+
+def test_default_runtime_input_monitor_uses_event_recorder_factory(monkeypatch) -> None:
+    recorder = FakeProvenanceRecorder(
+        [
+            InputProvenanceEvent(
+                kind="mouse", injected=True, extra_info=RUNNER_INPUT_SIGNATURE
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        input_monitor, "create_default_input_event_recorder", lambda: recorder
+    )
+
+    monitor = input_monitor.create_default_runtime_input_monitor()
+    before = monitor.check(**_kwargs("before_action"))
+    after = monitor.check(**_kwargs("after_action"))
+
+    assert before["basis"] == "input_event_stream"
+    assert after["monitor"]["events"][0]["source"] == "runner_injected"
+
+
+def test_composite_input_event_recorder_falls_back_to_low_level_hook() -> None:
+    from netcoredbg_mcp.ui.input_event_recorder import Win32CompositeInputEventRecorder
+
+    key = ("case-1", "transition-1")
+    raw = FakeProvenanceRecorder([])
+    hook = FakeProvenanceRecorder(
+        [InputProvenanceEvent(kind="mouse", injected=False, extra_info=None)]
+    )
+
+    def fail_raw_start(_key: tuple[str, str]) -> None:
+        raise InputMonitorUnavailableError("Raw Input unavailable")
+
+    raw.start = fail_raw_start  # type: ignore[method-assign]
+    recorder = Win32CompositeInputEventRecorder(raw_recorder=raw, hook_recorder=hook)
+
+    recorder.start(key)
+    recorder.stop(key)
+
+    assert recorder.drain_events(key) == [
+        InputProvenanceEvent(kind="mouse", injected=False, extra_info=None)
     ]
