@@ -3,10 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from netcoredbg_mcp.session.runtime_smoke_v2.run_confidence import (
-    REASON_RUNNER_INPUT_AMBIGUOUS,
-)
-
 REPLAY_PACKET = Path(
     "docs/reproduction-scenarios/novascript-cr003-replay-2026-06-15.md"
 )
@@ -615,7 +611,7 @@ def test_issues_backlog_records_cr108_runner_controlled_input_confidence_follow_
         "runner_emulated_input",
         "ui.drag",
         "RUNNER_GLOBAL_INPUT_AMBIGUOUS",
-        REASON_RUNNER_INPUT_AMBIGUOUS,
+        "input monitor evidence is ambiguous after runner-generated global input",
         "product verdicts stay blocked",
     )
     for term in required_terms:

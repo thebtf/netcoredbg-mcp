@@ -58,6 +58,8 @@ public static class ClickCommands
     private const uint MOUSEEVENTF_MOVE = 0x0001;
     private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
     private const uint MOUSEEVENTF_LEFTUP = 0x0004;
+    private const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
+    private const uint MOUSEEVENTF_RIGHTUP = 0x0010;
 
     public static JsonNode Click(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
@@ -79,7 +81,7 @@ public static class ClickCommands
             }
 
             EnsureForeground(mainWindow);
-            Mouse.Click(new Point(x.Value, y.Value));
+            SignedLeftClick(new Point(x.Value, y.Value));
             return new JsonObject { ["clicked"] = true, ["x"] = x.Value, ["y"] = y.Value };
         }
 
@@ -91,7 +93,7 @@ public static class ClickCommands
         RejectStealthMouseInput("right_click");
         var (x, y) = GetCoordinates(@params);
         EnsureForeground(mainWindow);
-        Mouse.RightClick(new Point(x, y));
+        SignedRightClick(new Point(x, y));
         return new JsonObject { ["rightClicked"] = true, ["x"] = x, ["y"] = y };
     }
 
@@ -100,7 +102,7 @@ public static class ClickCommands
         RejectStealthMouseInput("double_click");
         var (x, y) = GetCoordinates(@params);
         EnsureForeground(mainWindow);
-        Mouse.DoubleClick(new Point(x, y));
+        SignedDoubleClick(new Point(x, y));
         return new JsonObject { ["doubleClicked"] = true, ["x"] = x, ["y"] = y };
     }
 
@@ -145,13 +147,13 @@ public static class ClickCommands
         {
             foreach (var modifier in temporaryModifiers)
             {
-                Keyboard.Press(modifier);
+                KeySequenceCommands.SendSignedKeyDown(modifier);
                 pressedTemporaryModifiers.Add(modifier);
             }
 
             MoveCursor(x1, y1);
             Thread.Sleep(PointerMoveSettleMs);
-            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, InputSignature.RunnerInputSignature);
             mouseButtonDown = true;
             Thread.Sleep(PointerDownSettleMs);
 
@@ -177,7 +179,7 @@ public static class ClickCommands
             {
                 try
                 {
-                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, InputSignature.RunnerInputSignature);
                 }
                 catch (Exception ex)
                 {
@@ -192,7 +194,7 @@ public static class ClickCommands
             {
                 try
                 {
-                    Keyboard.Release(pressedTemporaryModifiers[i]);
+                    KeySequenceCommands.SendSignedKeyUp(pressedTemporaryModifiers[i]);
                 }
                 catch (Exception ex)
                 {
@@ -269,13 +271,13 @@ public static class ClickCommands
         {
             foreach (var modifier in temporaryModifiers)
             {
-                Keyboard.Press(modifier);
+                KeySequenceCommands.SendSignedKeyDown(modifier);
                 pressedTemporaryModifiers.Add(modifier);
             }
 
             MoveCursor(points[0].X, points[0].Y);
             Thread.Sleep(PointerMoveSettleMs);
-            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, InputSignature.RunnerInputSignature);
             mouseButtonDown = true;
             Thread.Sleep(PointerDownSettleMs);
 
@@ -309,7 +311,7 @@ public static class ClickCommands
             {
                 try
                 {
-                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, InputSignature.RunnerInputSignature);
                 }
                 catch (Exception ex)
                 {
@@ -324,7 +326,7 @@ public static class ClickCommands
             {
                 try
                 {
-                    Keyboard.Release(pressedTemporaryModifiers[i]);
+                    KeySequenceCommands.SendSignedKeyUp(pressedTemporaryModifiers[i]);
                 }
                 catch (Exception ex)
                 {
@@ -371,6 +373,32 @@ public static class ClickCommands
         return output;
     }
 
+    internal static void SignedLeftClick(Point point)
+    {
+        SignedMouseClick(point, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP);
+    }
+
+    internal static void SignedRightClick(Point point)
+    {
+        SignedMouseClick(point, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP);
+    }
+
+    private static void SignedDoubleClick(Point point)
+    {
+        SignedLeftClick(point);
+        Thread.Sleep(PointerMoveSettleMs);
+        SignedLeftClick(point);
+    }
+
+    private static void SignedMouseClick(Point point, uint downFlag, uint upFlag)
+    {
+        MoveCursor(point.X, point.Y);
+        Thread.Sleep(PointerMoveSettleMs);
+        mouse_event(downFlag, 0, 0, 0, InputSignature.RunnerInputSignature);
+        Thread.Sleep(PointerMoveSettleMs);
+        mouse_event(upFlag, 0, 0, 0, InputSignature.RunnerInputSignature);
+    }
+
     internal static void MoveCursor(int x, int y)
     {
         if (!SetCursorPos(x, y))
@@ -379,7 +407,7 @@ public static class ClickCommands
             throw new InvalidOperationException($"SetCursorPos failed with Win32 error {error}");
         }
 
-        mouse_event(MOUSEEVENTF_MOVE, 0, 0, 0, UIntPtr.Zero);
+        mouse_event(MOUSEEVENTF_MOVE, 0, 0, 0, InputSignature.RunnerInputSignature);
     }
 
     private static void PulseHeldDragPoint(DragPathPoint point, int holdMs)
@@ -405,8 +433,8 @@ public static class ClickCommands
 
     private static void SendDragPathCancel(FlaUI.Core.WindowsAPI.VirtualKeyShort cancelKey)
     {
-        Keyboard.Press(cancelKey);
-        Keyboard.Release(cancelKey);
+        KeySequenceCommands.SendSignedKeyDown(cancelKey);
+        KeySequenceCommands.SendSignedKeyUp(cancelKey);
     }
 
     private static (List<DragPathPoint> Points, JsonObject? Blocked) ParseDragPathPoints(
@@ -664,7 +692,7 @@ public static class ClickCommands
             return FlashFocusClick(center.X, center.Y, mainWindow, automationId);
         }
 
-        Mouse.Click(center);
+        SignedLeftClick(center);
 
         return new JsonObject
         {
@@ -700,7 +728,7 @@ public static class ClickCommands
                 throw new InvalidOperationException(
                     "flash-focus click could not activate the debuggee window safely");
             }
-            Mouse.Click(new Point(x, y));
+            SignedLeftClick(new Point(x, y));
         }
         finally
         {

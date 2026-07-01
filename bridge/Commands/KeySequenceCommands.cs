@@ -30,6 +30,7 @@ public static class KeySequenceCommands
     private const uint MAPVK_VK_TO_VSC = 0;
     private const uint KEYEVENTF_EXTENDEDKEY = 0x0001;
     private const uint KEYEVENTF_KEYUP = 0x0002;
+    private const uint KEYEVENTF_UNICODE = 0x0004;
     private const uint KEYEVENTF_SCANCODE = 0x0008;
 
     [StructLayout(LayoutKind.Sequential)]
@@ -161,8 +162,8 @@ public static class KeySequenceCommands
 
             foreach (var key in parsedKeys)
             {
-                SendKeyDown(key.Key);
-                SendKeyUp(key.Key);
+                SendSignedKeyDown(key.Key);
+                SendSignedKeyUp(key.Key);
                 sent.Add(key.Name);
             }
             if (scopedHeld.Count > 0 && sent.Count > 0)
@@ -319,7 +320,7 @@ public static class KeySequenceCommands
             if (JsonRpcHandler.HeldModifiers.Contains(modifier.Key))
                 return false;
 
-            SendKeyDown(modifier.Key);
+            SendSignedKeyDown(modifier.Key);
             JsonRpcHandler.HeldModifiers.Add(modifier.Key);
             return true;
         }
@@ -329,19 +330,70 @@ public static class KeySequenceCommands
     {
         lock (JsonRpcHandler.HeldModifiersLock)
         {
-            SendKeyUp(key);
+            SendSignedKeyUp(key);
             JsonRpcHandler.HeldModifiers.Remove(key);
         }
     }
 
-    private static void SendKeyDown(VirtualKeyShort key)
+    internal static void SendSignedKeyDown(VirtualKeyShort key)
     {
         SendKey(key, keyUp: false);
     }
 
-    private static void SendKeyUp(VirtualKeyShort key)
+    internal static void SendSignedKeyUp(VirtualKeyShort key)
     {
         SendKey(key, keyUp: true);
+    }
+
+    internal static void SendSignedText(string text)
+    {
+        foreach (var ch in text)
+            SendUnicodeChar(ch);
+    }
+
+    private static void SendUnicodeChar(char ch)
+    {
+        var inputs = new[]
+        {
+            new INPUT
+            {
+                type = INPUT_KEYBOARD,
+                U = new InputUnion
+                {
+                    ki = new KEYBDINPUT
+                    {
+                        wVk = 0,
+                        wScan = ch,
+                        dwFlags = KEYEVENTF_UNICODE,
+                        time = 0,
+                        dwExtraInfo = InputSignature.RunnerInputSignatureIntPtr
+                    }
+                }
+            },
+            new INPUT
+            {
+                type = INPUT_KEYBOARD,
+                U = new InputUnion
+                {
+                    ki = new KEYBDINPUT
+                    {
+                        wVk = 0,
+                        wScan = ch,
+                        dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+                        time = 0,
+                        dwExtraInfo = InputSignature.RunnerInputSignatureIntPtr
+                    }
+                }
+            }
+        };
+
+        var sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>());
+        if (sent != inputs.Length)
+        {
+            var error = Marshal.GetLastWin32Error();
+            throw new InvalidOperationException(
+                $"SendInput failed for character U+{(int)ch:X4}: Win32 error {error}");
+        }
     }
 
     private static void SendKey(VirtualKeyShort key, bool keyUp)
@@ -359,7 +411,7 @@ public static class KeySequenceCommands
                               (IsExtendedKey(key) ? KEYEVENTF_EXTENDEDKEY : 0) |
                               (keyUp ? KEYEVENTF_KEYUP : 0),
                     time = 0,
-                    dwExtraInfo = IntPtr.Zero
+                    dwExtraInfo = InputSignature.RunnerInputSignatureIntPtr
                 }
             }
         };

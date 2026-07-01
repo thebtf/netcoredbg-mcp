@@ -15,6 +15,8 @@ Covers the Python-side contract for:
 
 from __future__ import annotations
 
+import ctypes
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -65,7 +67,14 @@ class TestFlaUIDragForwarding:
         assert result["dragged"] is True
         backend._client.call.assert_awaited_once_with(
             "drag",
-            {"x1": 10, "y1": 20, "x2": 100, "y2": 200, "speed_ms": 200, "hold_modifiers": []},
+            {
+                "x1": 10,
+                "y1": 20,
+                "x2": 100,
+                "y2": 200,
+                "speed_ms": 200,
+                "hold_modifiers": [],
+            },
         )
 
     @pytest.mark.asyncio
@@ -83,7 +92,14 @@ class TestFlaUIDragForwarding:
         await backend.drag(0, 0, 50, 50, speed_ms=500, hold_modifiers=["ctrl"])
         backend._client.call.assert_awaited_once_with(
             "drag",
-            {"x1": 0, "y1": 0, "x2": 50, "y2": 50, "speed_ms": 500, "hold_modifiers": ["ctrl"]},
+            {
+                "x1": 0,
+                "y1": 0,
+                "x2": 50,
+                "y2": 50,
+                "speed_ms": 500,
+                "hold_modifiers": ["ctrl"],
+            },
         )
 
     @pytest.mark.asyncio
@@ -331,14 +347,23 @@ class TestPywinautoDrag:
             "netcoredbg_mcp.ui.automation._send_drag",
             send_drag_mock,
         ):
-            result = await backend.drag(10, 20, 100, 200, speed_ms=300, hold_modifiers=["ctrl"])
+            result = await backend.drag(
+                10, 20, 100, 200, speed_ms=300, hold_modifiers=["ctrl"]
+            )
         send_drag_mock.assert_called_once()
         kwargs = send_drag_mock.call_args.kwargs
         args = send_drag_mock.call_args.args
         all_args = {**kwargs}
         if args:
             # Positional form: (from_x, from_y, to_x, to_y, speed_ms, hold_modifiers)
-            positions = ["from_x", "from_y", "to_x", "to_y", "speed_ms", "hold_modifiers"]
+            positions = [
+                "from_x",
+                "from_y",
+                "to_x",
+                "to_y",
+                "speed_ms",
+                "hold_modifiers",
+            ]
             for idx, value in enumerate(args):
                 if idx < len(positions):
                     all_args.setdefault(positions[idx], value)
@@ -392,7 +417,9 @@ class TestDragInputValidation:
             _send_drag(0, 0, 100, 100, speed_ms=200, hold_modifiers=["super"])
 
     def test_bridge_registers_drag_path_command(self):
-        handler = (PROJECT_ROOT / "bridge" / "JsonRpcHandler.cs").read_text(encoding="utf-8")
+        handler = (PROJECT_ROOT / "bridge" / "JsonRpcHandler.cs").read_text(
+            encoding="utf-8"
+        )
 
         assert '["drag_path"] = ClickCommands.DragPath' in handler
 
@@ -409,10 +436,14 @@ class TestDragInputValidation:
         assert "hold_ms must be non-negative" in command
         assert "private const int DragPathHoldPulseMs" in command
         assert "PulseHeldDragPoint(point, point.HoldMs);" in command
-        assert 'TryReadInt(paramObject, "speed_ms", out var requestedSpeedMs)' in command
+        assert (
+            'TryReadInt(paramObject, "speed_ms", out var requestedSpeedMs)' in command
+        )
         assert 'TryReadDragPathCancelKey(@params?["cancel_key"]' in command
         assert "VirtualKeyShort.ESCAPE" in command
-        drag_path_body = _csharp_method_body(command, "public static JsonNode DragPath(")
+        drag_path_body = _csharp_method_body(
+            command, "public static JsonNode DragPath("
+        )
         assert "Thread.Sleep(PointerMoveSettleMs);" in drag_path_body
         assert "Thread.Sleep(Math.Max(FinalDropSettleMs, delayMs));" in drag_path_body
         assert "SendDragPathCancel(cancelKey.Value);" in drag_path_body
@@ -439,10 +470,195 @@ class TestDragInputValidation:
         command = (PROJECT_ROOT / "bridge" / "Commands" / "ClickCommands.cs").read_text(
             encoding="utf-8"
         )
-        drag_path_body = _csharp_method_body(command, "public static JsonNode DragPath(")
+        drag_path_body = _csharp_method_body(
+            command, "public static JsonNode DragPath("
+        )
 
         assert "mouseButtonDown" in drag_path_body
         assert "mouse_event(MOUSEEVENTF_LEFTDOWN" in drag_path_body
         assert "mouse_event(MOUSEEVENTF_LEFTUP" in drag_path_body
-        assert "Keyboard.Release(pressedTemporaryModifiers[i])" in drag_path_body
+        assert (
+            "KeySequenceCommands.SendSignedKeyUp(pressedTemporaryModifiers[i])"
+            in drag_path_body
+        )
         assert "finally" in drag_path_body
+
+
+class TestInputProvenanceSignature:
+    def test_python_input_producers_stamp_runner_signature(self):
+        from netcoredbg_mcp.ui.input_signature import RUNNER_INPUT_SIGNATURE
+
+        assert RUNNER_INPUT_SIGNATURE == 0x4E434442
+        automation = (
+            PROJECT_ROOT / "src" / "netcoredbg_mcp" / "ui" / "automation.py"
+        ).read_text(encoding="utf-8")
+
+        assert "RUNNER_INPUT_SIGNATURE" in automation
+        assert "_runner_input_extra_info()" in automation
+        assert "inp._input.ki.dwExtraInfo = _runner_input_extra_info()" in automation
+        assert (
+            "inputs[0]._input.mi.dwExtraInfo = _runner_input_extra_info()" in automation
+        )
+        assert (
+            "inputs[1]._input.mi.dwExtraInfo = _runner_input_extra_info()" in automation
+        )
+        assert (
+            "mouse_event(mouseeventf_leftdown, 0, 0, 0, RUNNER_INPUT_SIGNATURE)"
+            in automation
+        )
+        assert (
+            "mouse_event(mouseeventf_leftup, 0, 0, 0, RUNNER_INPUT_SIGNATURE)"
+            in automation
+        )
+
+    def test_python_sendinput_producers_emit_signature_value(self, monkeypatch):
+        from ctypes import wintypes
+
+        from netcoredbg_mcp.ui import automation
+        from netcoredbg_mcp.ui.input_signature import RUNNER_INPUT_SIGNATURE
+
+        captured: list[tuple[str, int]] = []
+
+        class MouseInput(ctypes.Structure):
+            _fields_ = [
+                ("dx", ctypes.c_long),
+                ("dy", ctypes.c_long),
+                ("mouseData", wintypes.DWORD),
+                ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD),
+                ("dwExtraInfo", ctypes.c_size_t),
+            ]
+
+        class KeybdInput(ctypes.Structure):
+            _fields_ = [
+                ("wVk", wintypes.WORD),
+                ("wScan", wintypes.WORD),
+                ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD),
+                ("dwExtraInfo", ctypes.c_size_t),
+            ]
+
+        class InputUnion(ctypes.Union):
+            _fields_ = [("mi", MouseInput), ("ki", KeybdInput)]
+
+        class Input(ctypes.Structure):
+            _fields_ = [("type", wintypes.DWORD), ("_input", InputUnion)]
+
+        class FakeUser32:
+            def SetCursorPos(self, _x: int, _y: int) -> bool:  # noqa: N802
+                return True
+
+            def SendInput(self, n_inputs: int, p_inputs: object, _cb_size: int) -> int:  # noqa: N802
+                inputs = ctypes.cast(p_inputs, ctypes.POINTER(Input))
+                for index in range(n_inputs):
+                    item = inputs[index]
+                    if item.type == 1:
+                        captured.append(("keyboard", int(item._input.ki.dwExtraInfo)))
+                    else:
+                        captured.append(("mouse", int(item._input.mi.dwExtraInfo)))
+                return n_inputs
+
+            def mouse_event(
+                self, _flags: int, _dx: int, _dy: int, _data: int, extra_info: int
+            ) -> None:
+                captured.append(("mouse_event", int(extra_info)))
+
+        class FakeWindll:
+            user32 = FakeUser32()
+
+        monkeypatch.setattr(ctypes, "windll", FakeWindll(), raising=False)
+        monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+
+        automation._press(automation.VK_SHIFT)
+        automation._release(automation.VK_SHIFT)
+        automation._send_click(10, 20)
+        automation._send_drag(0, 0, 20, 20, speed_ms=20)
+
+        assert captured
+        assert {value for _kind, value in captured} == {RUNNER_INPUT_SIGNATURE}
+
+    def test_bridge_input_producers_stamp_runner_signature(self):
+        signature = (
+            PROJECT_ROOT / "bridge" / "Commands" / "InputSignature.cs"
+        ).read_text(encoding="utf-8")
+        click_commands = (
+            PROJECT_ROOT / "bridge" / "Commands" / "ClickCommands.cs"
+        ).read_text(encoding="utf-8")
+        grid_commands = (
+            PROJECT_ROOT / "bridge" / "Commands" / "GridCommands.DragRowToRow.cs"
+        ).read_text(encoding="utf-8")
+        selection_commands = (
+            PROJECT_ROOT / "bridge" / "Commands" / "SelectionCommands.cs"
+        ).read_text(encoding="utf-8")
+        key_sequence_commands = (
+            PROJECT_ROOT / "bridge" / "Commands" / "KeySequenceCommands.cs"
+        ).read_text(encoding="utf-8")
+
+        assert "RunnerInputSignature" in signature
+        for body in (
+            _csharp_method_body(click_commands, "public static JsonNode Drag("),
+            _csharp_method_body(click_commands, "public static JsonNode DragPath("),
+            _csharp_method_body(click_commands, "internal static void MoveCursor("),
+            _csharp_method_body(
+                click_commands, "private static void SignedMouseClick("
+            ),
+            _csharp_method_body(grid_commands, "public static JsonNode DragRowToRow("),
+        ):
+            assert "InputSignature.RunnerInputSignature" in body
+            assert "UIntPtr.Zero" not in body
+        key_body = _csharp_method_body(
+            key_sequence_commands, "private static void SendKey("
+        )
+        assert "InputSignature.RunnerInputSignatureIntPtr" in key_body
+        assert "IntPtr.Zero" not in key_body
+        assert "internal static void SendSignedKeyDown" in key_sequence_commands
+        assert "internal static void SendSignedKeyUp" in key_sequence_commands
+        for body in (
+            _csharp_method_body(click_commands, "public static JsonNode Drag("),
+            _csharp_method_body(click_commands, "public static JsonNode DragPath("),
+            _csharp_method_body(
+                click_commands, "private static void SendDragPathCancel("
+            ),
+            _csharp_method_body(grid_commands, "public static JsonNode DragRowToRow("),
+        ):
+            assert "KeySequenceCommands.SendSignedKeyDown" in body
+            assert "KeySequenceCommands.SendSignedKeyUp" in body
+            assert "Keyboard.Press" not in body
+            assert "Keyboard.Release" not in body
+        assert (
+            "KeySequenceCommands.SendSignedKeyDown(VirtualKeyShort.CONTROL);"
+            in selection_commands
+        )
+        assert (
+            "KeySequenceCommands.SendSignedKeyUp(VirtualKeyShort.CONTROL);"
+            in selection_commands
+        )
+        for command_file in (PROJECT_ROOT / "bridge" / "Commands").glob("*.cs"):
+            command_text = command_file.read_text(encoding="utf-8")
+            assert "Keyboard.Press" not in command_text
+            assert "Keyboard.Release" not in command_text
+        assert "SignedLeftClick(new Point(x.Value, y.Value));" in click_commands
+        assert "SignedRightClick(new Point(x, y));" in click_commands
+        assert "SignedDoubleClick(new Point(x, y));" in click_commands
+        assert "SignedLeftClick(center);" in click_commands
+        assert "ClickCommands.SignedLeftClick(center);" in selection_commands
+
+    def test_bridge_input_commands_sign_literal_text_paths(self):
+        input_commands = (
+            PROJECT_ROOT / "bridge" / "Commands" / "InputCommands.cs"
+        ).read_text(encoding="utf-8")
+
+        assert "Keyboard.Type(" not in input_commands
+        assert "KeySequenceCommands.SendSignedText(" in input_commands
+
+    def test_bridge_input_commands_preserve_modifier_shortcuts_with_signed_keys(self):
+        input_commands = (
+            PROJECT_ROOT / "bridge" / "Commands" / "InputCommands.cs"
+        ).read_text(encoding="utf-8")
+
+        assert "TypeToken(ctrlTarget, preserveModifierShortcut: true)" in input_commands
+        assert "TypeToken(altTarget, preserveModifierShortcut: true)" in input_commands
+        assert (
+            "TypeToken(shiftTarget, preserveModifierShortcut: true)" in input_commands
+        )
+        assert "TryParseLiteralVirtualKey" in input_commands

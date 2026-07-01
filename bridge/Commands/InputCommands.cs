@@ -140,34 +140,34 @@ public static partial class InputCommands
                 case '^': // Ctrl modifier
                     i++;
                     var ctrlTarget = ConsumeNextToken(keys, ref i);
-                    Keyboard.Press(VirtualKeyShort.CONTROL);
-                    try { TypeToken(ctrlTarget); }
-                    finally { Keyboard.Release(VirtualKeyShort.CONTROL); }
+                    KeySequenceCommands.SendSignedKeyDown(VirtualKeyShort.CONTROL);
+                    try { TypeToken(ctrlTarget, preserveModifierShortcut: true); }
+                    finally { KeySequenceCommands.SendSignedKeyUp(VirtualKeyShort.CONTROL); }
                     sent.Add($"Ctrl+{ctrlTarget}");
                     break;
 
                 case '%': // Alt modifier
                     i++;
                     var altTarget = ConsumeNextToken(keys, ref i);
-                    Keyboard.Press(VirtualKeyShort.ALT);
-                    try { TypeToken(altTarget); }
-                    finally { Keyboard.Release(VirtualKeyShort.ALT); }
+                    KeySequenceCommands.SendSignedKeyDown(VirtualKeyShort.ALT);
+                    try { TypeToken(altTarget, preserveModifierShortcut: true); }
+                    finally { KeySequenceCommands.SendSignedKeyUp(VirtualKeyShort.ALT); }
                     sent.Add($"Alt+{altTarget}");
                     break;
 
                 case '+': // Shift modifier
                     i++;
                     var shiftTarget = ConsumeNextToken(keys, ref i);
-                    Keyboard.Press(VirtualKeyShort.SHIFT);
-                    try { TypeToken(shiftTarget); }
-                    finally { Keyboard.Release(VirtualKeyShort.SHIFT); }
+                    KeySequenceCommands.SendSignedKeyDown(VirtualKeyShort.SHIFT);
+                    try { TypeToken(shiftTarget, preserveModifierShortcut: true); }
+                    finally { KeySequenceCommands.SendSignedKeyUp(VirtualKeyShort.SHIFT); }
                     sent.Add($"Shift+{shiftTarget}");
                     break;
 
                 case '{': // Special key
                     if (i + 2 < keys.Length && keys[i + 1] == '}' && keys[i + 2] == '}')
                     {
-                        Keyboard.Type("}");
+                        KeySequenceCommands.SendSignedText("}");
                         sent.Add("}");
                         i += 3;
                         break;
@@ -181,13 +181,13 @@ public static partial class InputCommands
 
                     if (LiteralSpecialKeys.TryGetValue(keyName, out var literal))
                     {
-                        Keyboard.Type(literal);
+                        KeySequenceCommands.SendSignedText(literal);
                         sent.Add(literal);
                     }
                     else if (SpecialKeys.TryGetValue(keyName, out var vk))
                     {
-                        Keyboard.Press(vk);
-                        Keyboard.Release(vk);
+                        KeySequenceCommands.SendSignedKeyDown(vk);
+                        KeySequenceCommands.SendSignedKeyUp(vk);
                         sent.Add($"{{{keyName}}}");
                     }
                     else
@@ -197,7 +197,7 @@ public static partial class InputCommands
                     break;
 
                 default: // Regular character
-                    Keyboard.Type(keys[i].ToString());
+                    KeySequenceCommands.SendSignedText(keys[i].ToString());
                     sent.Add(keys[i].ToString());
                     i++;
                     break;
@@ -322,16 +322,41 @@ public static partial class InputCommands
         return ch;
     }
 
-    private static void TypeToken(string token)
+    private static void TypeToken(string token, bool preserveModifierShortcut = false)
     {
         if (SpecialKeys.TryGetValue(token, out var vk))
         {
-            Keyboard.Press(vk);
-            Keyboard.Release(vk);
+            KeySequenceCommands.SendSignedKeyDown(vk);
+            KeySequenceCommands.SendSignedKeyUp(vk);
+        }
+        else if (preserveModifierShortcut && TryParseLiteralVirtualKey(token, out var literalVk))
+        {
+            KeySequenceCommands.SendSignedKeyDown(literalVk);
+            KeySequenceCommands.SendSignedKeyUp(literalVk);
         }
         else
         {
-            Keyboard.Type(token);
+            KeySequenceCommands.SendSignedText(token);
         }
     }
-}
+
+    private static bool TryParseLiteralVirtualKey(string token, out VirtualKeyShort key)
+    {
+        if (token.Length == 1)
+        {
+            var character = token[0];
+            var isAsciiLetter =
+                (character >= 'a' && character <= 'z') ||
+                (character >= 'A' && character <= 'Z');
+            var isAsciiDigit = character >= '0' && character <= '9';
+            if (isAsciiLetter || isAsciiDigit)
+            {
+                key = (VirtualKeyShort)char.ToUpperInvariant(character);
+                return true;
+            }
+        }
+
+        key = default;
+        return false;
+    }
+    }

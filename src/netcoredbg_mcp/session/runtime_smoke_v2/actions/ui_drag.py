@@ -653,9 +653,9 @@ def _action_result(
         output["next_step"] = (
             "Use a UI backend adapter that reports real pointer route evidence."
         )
-    if status.upper() == "PASS" and output["route_evidence"] and not action_skipped:
+    if _is_passing(output) and output["route_evidence"] and not action_skipped:
         output["runner_input"] = {
-            "source": "runner_emulated_input",
+            "source": "runner_injected",
             "kind": "ui.drag",
             "window": "action",
             "route": "drag",

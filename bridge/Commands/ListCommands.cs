@@ -153,7 +153,8 @@ public static class ListCommands
         }
 
         itemElement.Focus();
-        Keyboard.Press(VirtualKeyShort.RETURN);
+        KeySequenceCommands.SendSignedKeyDown(VirtualKeyShort.RETURN);
+        KeySequenceCommands.SendSignedKeyUp(VirtualKeyShort.RETURN);
         return "Keyboard.Enter";
     }
 

@@ -64,16 +64,16 @@ public static class SelectionCommands
 
                 var useControl = mode == "add" || !isFirst;
                 if (useControl)
-                    Keyboard.Press(VirtualKeyShort.CONTROL);
+                    KeySequenceCommands.SendSignedKeyDown(VirtualKeyShort.CONTROL);
 
                 try
                 {
-                    Mouse.Click(center);
+                    ClickCommands.SignedLeftClick(center);
                 }
                 finally
                 {
                     if (useControl)
-                        Keyboard.Release(VirtualKeyShort.CONTROL);
+                        KeySequenceCommands.SendSignedKeyUp(VirtualKeyShort.CONTROL);
                 }
                 usedClickFallback = true;
             }

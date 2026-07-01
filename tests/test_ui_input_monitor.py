@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
+import netcoredbg_mcp.ui.input_monitor as input_monitor
 from netcoredbg_mcp.ui.input_monitor import (
     InputMonitorUnavailableError,
+    InputProvenanceEvent,
     LastInputSample,
     RuntimeInputMonitor,
 )
+from netcoredbg_mcp.ui.input_signature import RUNNER_INPUT_SIGNATURE
 
 
 def _kwargs(window: str) -> dict[str, Any]:
@@ -18,6 +21,22 @@ def _kwargs(window: str) -> dict[str, Any]:
         "input_policy": {"no_global_input": True},
         "run_confidence": {"no_operator": True},
     }
+
+
+class FakeProvenanceRecorder:
+    def __init__(self, events: list[InputProvenanceEvent]) -> None:
+        self.events = list(events)
+        self.calls: list[tuple[str, tuple[str, str]]] = []
+
+    def start(self, key: tuple[str, str]) -> None:
+        self.calls.append(("start", key))
+
+    def stop(self, key: tuple[str, str]) -> None:
+        self.calls.append(("stop", key))
+
+    def drain_events(self, key: tuple[str, str]) -> list[InputProvenanceEvent]:
+        self.calls.append(("drain_events", key))
+        return list(self.events)
 
 
 def test_runtime_input_monitor_reports_clean_when_last_input_tick_is_stable() -> None:
@@ -59,7 +78,7 @@ def test_runtime_input_monitor_reports_dirty_when_last_input_tick_advances() -> 
     assert "advanced" in after["summary"]
 
 
-def test_runtime_input_monitor_does_not_treat_runner_emulated_input_as_operator_dirty() -> (
+def test_runtime_input_monitor_reports_dirty_when_last_input_advances_even_for_drag_action() -> (
     None
 ):
     samples = iter(
@@ -75,22 +94,14 @@ def test_runtime_input_monitor_does_not_treat_runner_emulated_input_as_operator_
         **{
             **_kwargs("after_action"),
             "action": {"kind": "ui.drag"},
-            "runner_input": {
-                "kind": "ui.drag",
-                "source": "runner_emulated_input",
-                "window": "action",
-            },
         }
     )
 
-    assert after["status"] == "RUNNER_GLOBAL_INPUT_AMBIGUOUS"
+    assert after["status"] == "DIRTY"
     assert after["basis"] == "windows_last_input_info"
-    assert after["source"] == "runner_emulated_input"
+    assert after["source"] == "global_input"
     assert after["window"] == "after_action"
-    assert after["action"]["kind"] == "ui.drag"
-    assert after["summary"] == (
-        "Windows last-input tick advanced during runner-emulated global input."
-    )
+    assert "advanced" in after["summary"]
 
 
 def test_runtime_input_monitor_reports_dirty_between_transition_windows() -> None:
@@ -203,3 +214,197 @@ def test_runtime_input_monitor_blocks_after_action_without_baseline() -> None:
 
     assert result["status"] == "BLOCKED"
     assert result["reason"] == "input monitor missing baseline"
+
+
+def test_runtime_input_monitor_uses_event_recorder_lifecycle_for_capture_window() -> (
+    None
+):
+    recorder = FakeProvenanceRecorder(
+        [
+            InputProvenanceEvent(
+                kind="mouse", injected=True, extra_info=RUNNER_INPUT_SIGNATURE
+            )
+        ]
+    )
+    monitor = RuntimeInputMonitor(event_recorder=recorder)
+
+    before = monitor.check(**_kwargs("before_action"))
+    after = monitor.check(**_kwargs("after_action"))
+
+    assert before["status"] == "PASS"
+    assert before["basis"] == "input_event_stream"
+    assert after["status"] == "PASS"
+    assert after["basis"] == "input_event_stream"
+    assert after["monitor"]["events"] == [
+        {
+            "kind": "mouse",
+            "injected": True,
+            "extra_info": RUNNER_INPUT_SIGNATURE,
+            "source": "runner_injected",
+        }
+    ]
+    assert recorder.calls == [
+        ("start", ("case-1", "transition-1")),
+        ("stop", ("case-1", "transition-1")),
+        ("drain_events", ("case-1", "transition-1")),
+    ]
+
+
+def test_runtime_input_monitor_surfaces_distinct_provenance_event_sources() -> None:
+    recorder = FakeProvenanceRecorder(
+        [
+            InputProvenanceEvent(
+                kind="mouse", injected=True, extra_info=RUNNER_INPUT_SIGNATURE
+            ),
+            InputProvenanceEvent(kind="mouse", injected=True, extra_info=123),
+            InputProvenanceEvent(kind="keyboard", injected=False, extra_info=None),
+        ]
+    )
+    monitor = RuntimeInputMonitor(event_recorder=recorder)
+
+    monitor.check(**_kwargs("before_action"))
+    after = monitor.check(**_kwargs("after_action"))
+
+    assert after["monitor"]["events"] == [
+        {
+            "kind": "mouse",
+            "injected": True,
+            "extra_info": RUNNER_INPUT_SIGNATURE,
+            "source": "runner_injected",
+        },
+        {
+            "kind": "mouse",
+            "injected": True,
+            "extra_info": 123,
+            "source": "foreign_injected",
+        },
+        {"kind": "keyboard", "injected": False, "source": "physical"},
+    ]
+
+
+def test_default_runtime_input_monitor_uses_event_recorder_factory(monkeypatch) -> None:
+    recorder = FakeProvenanceRecorder(
+        [
+            InputProvenanceEvent(
+                kind="mouse", injected=True, extra_info=RUNNER_INPUT_SIGNATURE
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        input_monitor, "create_default_input_event_recorder", lambda: recorder
+    )
+
+    monitor = input_monitor.create_default_runtime_input_monitor()
+    before = monitor.check(**_kwargs("before_action"))
+    after = monitor.check(**_kwargs("after_action"))
+
+    assert before["basis"] == "input_event_stream"
+    assert after["monitor"]["events"][0]["source"] == "runner_injected"
+
+
+def test_event_stream_monitor_keeps_between_transition_guard() -> None:
+    samples = iter(
+        [
+            LastInputSample(last_input_tick_ms=100, current_tick_ms=1000),
+            LastInputSample(last_input_tick_ms=100, current_tick_ms=1100),
+            LastInputSample(last_input_tick_ms=180, current_tick_ms=1200),
+        ]
+    )
+    recorder = FakeProvenanceRecorder([])
+    monitor = RuntimeInputMonitor(reader=lambda: next(samples), event_recorder=recorder)
+
+    monitor.check(**_kwargs("before_action"))
+    monitor.check(**_kwargs("after_action"))
+    result = monitor.check(
+        **{
+            **_kwargs("before_action"),
+            "transition_id": "transition-2",
+            "transition_index": 1,
+        }
+    )
+
+    assert result["status"] == "DIRTY"
+    assert result["basis"] == "windows_last_input_info"
+    assert result["window"] == "before_action"
+    assert "between monitored windows" in result["summary"]
+    assert recorder.calls == [
+        ("start", ("case-1", "transition-1")),
+        ("stop", ("case-1", "transition-1")),
+        ("drain_events", ("case-1", "transition-1")),
+    ]
+
+
+def test_event_stream_monitor_closes_stale_windows_before_restart() -> None:
+    recorder = FakeProvenanceRecorder([])
+    monitor = RuntimeInputMonitor(event_recorder=recorder)
+
+    monitor.check(**_kwargs("before_action"))
+    before_two = monitor.check(
+        **{
+            **_kwargs("before_action"),
+            "transition_id": "transition-2",
+            "transition_index": 1,
+        }
+    )
+
+    assert before_two["status"] == "PASS"
+    assert recorder.calls == [
+        ("start", ("case-1", "transition-1")),
+        ("stop", ("case-1", "transition-1")),
+        ("drain_events", ("case-1", "transition-1")),
+        ("start", ("case-1", "transition-2")),
+    ]
+
+
+def test_composite_input_event_recorder_falls_back_to_low_level_hook() -> None:
+    from netcoredbg_mcp.ui.input_event_recorder import Win32CompositeInputEventRecorder
+
+    key = ("case-1", "transition-1")
+    raw = FakeProvenanceRecorder([])
+    hook = FakeProvenanceRecorder(
+        [InputProvenanceEvent(kind="mouse", injected=False, extra_info=None)]
+    )
+
+    def fail_raw_start(_key: tuple[str, str]) -> None:
+        raise InputMonitorUnavailableError("Raw Input unavailable")
+
+    raw.start = fail_raw_start  # type: ignore[method-assign]
+    recorder = Win32CompositeInputEventRecorder(raw_recorder=raw, hook_recorder=hook)
+
+    recorder.start(key)
+    recorder.stop(key)
+
+    assert recorder.drain_events(key) == [
+        InputProvenanceEvent(kind="mouse", injected=False, extra_info=None)
+    ]
+
+
+def test_threaded_recorder_flushes_pending_events_on_stop() -> None:
+    from netcoredbg_mcp.ui.input_event_recorder import _ThreadedWin32Recorder
+
+    class FlushRecorder(_ThreadedWin32Recorder):
+        def _ensure_thread(self) -> None:
+            self._thread_id = 1
+
+        def _flush_pending_events(self) -> None:
+            self._record(
+                InputProvenanceEvent(
+                    kind="keyboard",
+                    injected=True,
+                    extra_info=RUNNER_INPUT_SIGNATURE,
+                )
+            )
+
+    recorder = FlushRecorder()
+    key = ("case-1", "transition-1")
+
+    recorder.start(key)
+    recorder.stop(key)
+
+    assert recorder.drain_events(key) == [
+        InputProvenanceEvent(
+            kind="keyboard",
+            injected=True,
+            extra_info=RUNNER_INPUT_SIGNATURE,
+        )
+    ]

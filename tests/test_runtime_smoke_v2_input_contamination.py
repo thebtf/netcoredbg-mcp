@@ -8,12 +8,10 @@ from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner, RuntimeSmok
 from netcoredbg_mcp.session.runtime_smoke_v2.actions.ui_drag import (
     REASON_NO_ROUTE_EVIDENCE,
 )
-from netcoredbg_mcp.session.runtime_smoke_v2.run_confidence import (
-    REASON_RUNNER_INPUT_AMBIGUOUS,
-)
 from netcoredbg_mcp.session.runtime_smoke_v2.transition_executor import (
     _status_from_records,
 )
+from netcoredbg_mcp.ui.input_signature import RUNNER_INPUT_SIGNATURE
 
 
 class ConfidenceSmokeSession:
@@ -26,6 +24,7 @@ class ConfidenceSmokeSession:
             {"status": "PASS"} if monitor_result is None else monitor_result
         )
         self.monitor_calls: list[dict[str, Any]] = []
+        self.calls: list[tuple[str, Any]] = []
         self.drag_calls: list[dict[str, Any]] = []
         self.drag_result: dict[str, Any] = {
             "status": "PASS",
@@ -33,6 +32,20 @@ class ConfidenceSmokeSession:
                 "move_points": [{"relative_to": "screen", "x": 10, "y": 20}],
                 "final_pointer": {"relative_to": "screen", "x": 30, "y": 40},
             },
+        }
+        self.find_result: dict[str, Any] = {"status": "PASS", "found": True}
+        self.focus_result: dict[str, Any] = {"status": "PASS"}
+        self.send_keys_result: dict[str, Any] = {"status": "PASS"}
+        self.text_get_state_result: dict[str, Any] = {
+            "status": "PASS",
+            "text": "Original text",
+            "selection": {"start": 0, "end": 13, "length": 13},
+            "selectionStart": 0,
+            "selectionLength": 13,
+        }
+        self.text_read_result: dict[str, Any] = {
+            "status": "PASS",
+            "text": "Replaced text",
         }
 
     def input_monitor_check(self, **kwargs: Any) -> dict[str, Any]:
@@ -46,13 +59,40 @@ class ConfidenceSmokeSession:
         self.drag_calls.append(dict(kwargs))
         return dict(self.drag_result)
 
+    def find_element(self, selector: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append(("find_element", dict(selector)))
+        return {**self.find_result, "selector": dict(selector)}
+
+    def set_focus(self, selector: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append(("set_focus", dict(selector)))
+        return dict(self.focus_result)
+
+    def send_keys_focused(self, keys: str) -> dict[str, Any]:
+        self.calls.append(("send_keys_focused", keys))
+        return {**self.send_keys_result, "sent": keys}
+
+    def text_get_state(self, selector: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append(("text_get_state", dict(selector)))
+        return dict(self.text_get_state_result)
+
+    def text_read(self, selector: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append(("text_read", dict(selector)))
+        return dict(self.text_read_result)
+
 
 def _runner(
     session: ConfidenceSmokeSession,
     *,
     include_monitor: bool = True,
 ) -> RuntimeSmokeRunner:
-    adapters = {"ui.drag": session.drag}
+    adapters = {
+        "ui.drag": session.drag,
+        "ui.find_element": session.find_element,
+        "ui.set_focus": session.set_focus,
+        "ui.send_keys_focused": session.send_keys_focused,
+        "ui.text.get_state": session.text_get_state,
+        "ui.text.read": session.text_read,
+    }
     if include_monitor:
         adapters["runtime.input_monitor.check"] = session.input_monitor_check
     return RuntimeSmokeRunner(session, service_adapters=adapters)
@@ -112,6 +152,30 @@ def _no_operator_drag_plan(*, no_global_input: bool) -> dict[str, Any]:
                                     "x": 30,
                                     "y": 40,
                                 },
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+
+def _no_operator_text_replace_plan(*, no_global_input: bool) -> dict[str, Any]:
+    return _no_operator_plan(
+        {
+            "input_policy": {"no_global_input": no_global_input},
+            "cases": [
+                {
+                    "id": "replace_text_case",
+                    "transitions": [
+                        {
+                            "id": "replace_text_transition",
+                            "action": {
+                                "kind": "ui.text.type_replace_selection",
+                                "selector": {"automation_id": "CueTextBox"},
+                                "text": "Replaced text",
                             },
                             "probes": [],
                         }
@@ -183,18 +247,25 @@ async def test_no_operator_dirty_after_action_blocks_product_verdict() -> None:
 
 
 @pytest.mark.asyncio
-async def test_no_operator_dirty_after_runner_global_input_is_ambiguous_unproven() -> (
+async def test_no_operator_physical_input_inside_runner_drag_is_dirty_unproven() -> (
     None
 ):
     session = ConfidenceSmokeSession(
         [
-            {"status": "PASS", "basis": "windows_last_input_info"},
             {
-                "status": "DIRTY",
-                "basis": "windows_last_input_info",
-                "source": "global_input",
+                "status": "PASS",
+                "basis": "input_event_stream",
+                "monitor": {"events": []},
+            },
+            {
+                "status": "PASS",
+                "basis": "input_event_stream",
                 "window": "after_action",
-                "summary": "Windows last-input tick advanced during no-operator window.",
+                "monitor": {
+                    "events": [
+                        {"kind": "mouse", "injected": False, "source": "physical"}
+                    ]
+                },
             },
         ]
     )
@@ -203,36 +274,48 @@ async def test_no_operator_dirty_after_runner_global_input_is_ambiguous_unproven
 
     confidence = result["run_confidence"]
     assert result["status"] == "BLOCKED"
-    assert result["reason"] == REASON_RUNNER_INPUT_AMBIGUOUS
-    assert confidence["classification"] == "RUNNER_GLOBAL_INPUT_AMBIGUOUS"
+    assert result["reason"] == "operator input contaminated the scenario"
+    assert confidence["classification"] == "DIRTY_UNPROVEN"
     assert confidence["product_verdict_allowed"] is False
-    assert confidence["reason"] == result["reason"]
-    assert confidence["ambiguity"]["action"]["kind"] == "ui.drag"
-    assert confidence["ambiguity"]["monitor_source"] == "global_input"
-    assert "operator input contaminated" not in result["reason"]
-    assert "no_global_input" in confidence["restart_guidance"]
-    assert result["compact"]["run_confidence"]["classification"] == (
-        "RUNNER_GLOBAL_INPUT_AMBIGUOUS"
-    )
+    assert confidence["contamination"]["source"] == "physical"
+    assert confidence["contamination"]["event"] == {
+        "kind": "mouse",
+        "injected": False,
+        "source": "physical",
+    }
+    assert result["compact"]["run_confidence"]["classification"] == "DIRTY_UNPROVEN"
     assert session.drag_calls
     assert [call["window"] for call in session.monitor_calls] == [
         "before_action",
         "after_action",
     ]
-    assert session.monitor_calls[1]["runner_input"]["kind"] == "ui.drag"
-    assert confidence["ambiguity"]["runner_input"]["source"] == "runner_emulated_input"
 
 
 @pytest.mark.asyncio
-async def test_no_operator_explicit_runner_ambiguity_blocks_product_verdict() -> None:
+async def test_no_operator_foreign_injected_input_inside_runner_drag_is_dirty_unproven() -> (
+    None
+):
     session = ConfidenceSmokeSession(
         [
-            {"status": "PASS", "basis": "windows_last_input_info"},
             {
-                "status": "RUNNER_GLOBAL_INPUT_AMBIGUOUS",
-                "basis": "windows_last_input_info",
-                "source": "global_input",
+                "status": "PASS",
+                "basis": "input_event_stream",
+                "monitor": {"events": []},
+            },
+            {
+                "status": "PASS",
+                "basis": "input_event_stream",
                 "window": "after_action",
+                "monitor": {
+                    "events": [
+                        {
+                            "kind": "mouse",
+                            "injected": True,
+                            "extra_info": 123,
+                            "source": "foreign_injected",
+                        }
+                    ]
+                },
             },
         ]
     )
@@ -241,12 +324,90 @@ async def test_no_operator_explicit_runner_ambiguity_blocks_product_verdict() ->
 
     confidence = result["run_confidence"]
     assert result["status"] == "BLOCKED"
-    assert result["reason"] == REASON_RUNNER_INPUT_AMBIGUOUS
-    assert confidence["classification"] == "RUNNER_GLOBAL_INPUT_AMBIGUOUS"
-    assert confidence["product_verdict_allowed"] is False
-    assert confidence["ambiguity"]["monitor_source"] == "global_input"
-    assert confidence["ambiguity"]["runner_input"]["kind"] == "ui.drag"
-    assert "no_global_input" in confidence["restart_guidance"]
+    assert confidence["classification"] == "DIRTY_UNPROVEN"
+    assert confidence["contamination"]["source"] == "foreign_injected"
+    assert "ambigu" not in str(confidence).lower()
+
+
+@pytest.mark.asyncio
+async def test_no_operator_runner_injected_drag_stays_clean_proven() -> None:
+    session = ConfidenceSmokeSession(
+        [
+            {
+                "status": "PASS",
+                "basis": "input_event_stream",
+                "monitor": {"events": []},
+            },
+            {
+                "status": "PASS",
+                "basis": "input_event_stream",
+                "window": "after_action",
+                "monitor": {
+                    "events": [
+                        {
+                            "kind": "mouse",
+                            "injected": True,
+                            "extra_info": RUNNER_INPUT_SIGNATURE,
+                            "source": "runner_injected",
+                        }
+                    ]
+                },
+            },
+        ]
+    )
+
+    result = await _runner(session).run(_no_operator_drag_plan(no_global_input=False))
+
+    confidence = result["run_confidence"]
+    assert confidence["classification"] == "CLEAN_PROVEN"
+    assert confidence["product_verdict_allowed"] is True
+    assert result["compact"]["run_confidence"]["classification"] == "CLEAN_PROVEN"
+    assert session.drag_calls
+
+
+@pytest.mark.asyncio
+async def test_no_operator_runner_signed_text_replace_stays_clean_proven() -> None:
+    session = ConfidenceSmokeSession(
+        [
+            {
+                "status": "PASS",
+                "basis": "input_event_stream",
+                "monitor": {"events": []},
+            },
+            {
+                "status": "PASS",
+                "basis": "input_event_stream",
+                "window": "after_action",
+                "monitor": {
+                    "events": [
+                        {
+                            "kind": "keyboard",
+                            "injected": True,
+                            "extra_info": RUNNER_INPUT_SIGNATURE,
+                            "source": "runner_injected",
+                        }
+                    ]
+                },
+            },
+        ]
+    )
+
+    result = await _runner(session).run(
+        _no_operator_text_replace_plan(no_global_input=False)
+    )
+
+    assert result["status"] == "PASS"
+    confidence = result["run_confidence"]
+    assert confidence["classification"] == "CLEAN_PROVEN"
+    assert confidence["product_verdict_allowed"] is True
+    assert session.calls == [
+        ("find_element", {"automation_id": "CueTextBox"}),
+        ("set_focus", {"automation_id": "CueTextBox"}),
+        ("send_keys_focused", "^a"),
+        ("text_get_state", {"automation_id": "CueTextBox"}),
+        ("send_keys_focused", "Replaced text"),
+        ("text_read", {"automation_id": "CueTextBox"}),
+    ]
 
 
 @pytest.mark.asyncio
@@ -294,8 +455,32 @@ async def test_no_operator_external_dirty_after_successful_drag_stays_dirty() ->
     assert result["reason"] == "operator input contaminated the scenario"
     assert confidence["classification"] == "DIRTY_UNPROVEN"
     assert confidence["contamination"]["source"] == "keyboard"
-    assert session.monitor_calls[1]["runner_input"]["kind"] == "ui.drag"
     assert result["compact"]["run_confidence"]["classification"] == "DIRTY_UNPROVEN"
+
+
+@pytest.mark.asyncio
+async def test_no_operator_empty_event_stream_after_action_stays_clean_proven() -> None:
+    session = ConfidenceSmokeSession(
+        [
+            {
+                "status": "PASS",
+                "basis": "input_event_stream",
+                "monitor": {"events": []},
+            },
+            {
+                "status": "PASS",
+                "basis": "input_event_stream",
+                "window": "after_action",
+                "monitor": {"events": []},
+            },
+        ]
+    )
+
+    result = await _runner(session).run(_no_operator_plan())
+
+    assert result["status"] == "PASS"
+    assert result["run_confidence"]["classification"] == "CLEAN_PROVEN"
+    assert result["run_confidence"]["product_verdict_allowed"] is True
 
 
 @pytest.mark.asyncio
@@ -325,10 +510,7 @@ async def test_no_operator_runner_ambiguity_does_not_mask_drag_failure() -> None
 
     assert result["status"] == "FAIL"
     assert result["reason"] == "selected payload expectation failed"
-    assert result["run_confidence"]["classification"] == (
-        "RUNNER_GLOBAL_INPUT_AMBIGUOUS"
-    )
-    assert session.monitor_calls[1]["runner_input"]["kind"] == "ui.drag"
+    assert result["run_confidence"]["classification"] == "DIRTY_UNPROVEN"
 
 
 @pytest.mark.asyncio
@@ -390,6 +572,43 @@ async def test_no_operator_malformed_monitor_is_blocked_unproven() -> None:
     assert result["status"] == "BLOCKED"
     assert result["run_confidence"]["classification"] == "UNPROVEN"
     assert result["run_confidence"]["basis"] == "monitor_malformed_result"
+    assert result["run_confidence"]["product_verdict_allowed"] is False
+
+
+@pytest.mark.asyncio
+async def test_no_operator_missing_event_stream_stays_unproven() -> None:
+    session = ConfidenceSmokeSession(
+        {
+            "status": "PASS",
+            "window": "after_action",
+            "basis": "input_event_stream",
+            "monitor": {},
+        }
+    )
+
+    result = await _runner(session).run(_no_operator_plan())
+
+    assert result["status"] == "BLOCKED"
+    assert result["run_confidence"]["classification"] == "UNPROVEN"
+    assert result["run_confidence"]["basis"] == "monitor_not_observed"
+    assert result["run_confidence"]["product_verdict_allowed"] is False
+
+
+@pytest.mark.asyncio
+async def test_no_operator_malformed_event_stream_fails_closed() -> None:
+    session = ConfidenceSmokeSession(
+        {
+            "status": "PASS",
+            "basis": "input_event_stream",
+            "monitor": {"events": ["physical"]},
+        }
+    )
+
+    result = await _runner(session).run(_no_operator_plan())
+
+    assert result["status"] == "BLOCKED"
+    assert result["run_confidence"]["classification"] == "DIRTY_UNPROVEN"
+    assert result["run_confidence"]["contamination"]["source"] == "unattributable"
     assert result["run_confidence"]["product_verdict_allowed"] is False
 
 
