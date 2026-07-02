@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-07-03
+
+### Added
+- Adapter-native debuggee liveness telemetry on `get_debug_state` (Engram FR
+  #356, Tier 1 of 3). New additive fields let an agent tell running vs
+  stopped-at-breakpoint vs stopped-at-exception vs terminated through adapter
+  calls only, without falling back to Win32 `Get-Process`/`Process.Responding`
+  (which reports a live debuggee as "not responding" when it is under the
+  debugger, running automated input replay, windowless, or in a nested modal
+  loop):
+  - `execState` — a single fused field derived from the debug state plus stop
+    reason (`running`, `stopped-at-breakpoint`, `stopped-at-exception`,
+    `stepping`, `stopped-at-pause`, `stopped-other`, `terminated`, and the
+    lifecycle states passed through).
+  - `lastResumeAt` / `lastStopAt` — monotonic transition timestamps stamped in
+    the existing continued/stopped event handlers.
+  - `threadCount`, `debuggeeAlive` (the adapter's own view, not `Get-Process`),
+    and `debuggeePid` (from the tracked DAP process event).
+  All fields are additive; no new DAP requests or netcoredbg capabilities are
+  required. `execState: running` holds even when Win32 `Responding` is `False`,
+  and a debuggee parked at a breakpoint reports `stopped-at-breakpoint` with the
+  reason and location instead of looking hung.
+
 ## [0.21.0] - 2026-07-01
 
 ### Added
