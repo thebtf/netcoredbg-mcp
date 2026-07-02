@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import traceback
+from types import SimpleNamespace
 from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -125,6 +126,33 @@ async def new_session() -> SessionManager:
     return SessionManager()
 
 
+async def _get_debug_state_via_tool(session: SessionManager) -> dict[str, Any]:
+    from netcoredbg_mcp.tools.debug import register_debug_tools
+
+    mcp = _CapturingMCP()
+
+    async def notify_state_changed(_ctx: Any) -> None:
+        return None
+
+    async def execute_and_wait(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def resolve_project_root(_ctx: Any, _session: SessionManager) -> None:
+        return None
+
+    register_debug_tools(
+        mcp=mcp,
+        session=session,
+        ownership=SimpleNamespace(release=lambda *_args, **_kwargs: None),
+        notify_state_changed=notify_state_changed,
+        check_session_access=lambda _ctx: None,
+        execute_and_wait=execute_and_wait,
+        resolve_project_root=resolve_project_root,
+    )
+
+    return await mcp.tools["get_debug_state"]()
+
+
 # ─────────────────────────────────────────────────────────────
 # Scenario 1: Hit counting + breakpoint fundamentals
 # ─────────────────────────────────────────────────────────────
@@ -137,6 +165,13 @@ async def test_hit_counting():
         await m.launch(program=DLL, args=["hitcount"])
         snapshot = await m.wait_for_stopped(timeout=10)
         await asyncio.sleep(0.3)
+
+        debug_state = await _get_debug_state_via_tool(m)
+        check(
+            "get_debug_state shows stopped-at-breakpoint",
+            debug_state.get("data", {}).get("execState") == "stopped-at-breakpoint",
+            f"execState={debug_state.get('data', {}).get('execState')}",
+        )
 
         norm = m.breakpoints._normalize_path(SOURCE)
 
@@ -561,6 +596,13 @@ async def test_threads_and_pause():
         await asyncio.sleep(1.5)  # Wait for program to be running
 
         check("Program is running", m.state.state == DebugState.RUNNING)
+
+        debug_state = await _get_debug_state_via_tool(m)
+        check(
+            "get_debug_state shows running",
+            debug_state.get("data", {}).get("execState") == "running",
+            f"execState={debug_state.get('data', {}).get('execState')}",
+        )
 
         # Get threads
         threads = await m.get_threads()

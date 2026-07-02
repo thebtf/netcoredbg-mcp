@@ -576,6 +576,7 @@ class SessionManager:
     def _on_stopped(self, event: DAPEvent) -> None:
         """Handle stopped event."""
         body = StoppedEventBody.from_dict(event.body)
+        self._state.last_stop_at = time.monotonic()
         self._state.current_thread_id = body.thread_id
         self._state.stop_reason = body.reason.value
         self._state.stop_description = body.description
@@ -727,6 +728,7 @@ class SessionManager:
     def _on_continued(self, event: DAPEvent) -> None:
         """Handle continued event."""
         body = ContinuedEventBody.from_dict(event.body)
+        self._state.last_resume_at = time.monotonic()
         self._set_state(DebugState.RUNNING)
         if body.all_threads_continued:
             # All threads resumed — clear all stop-state
