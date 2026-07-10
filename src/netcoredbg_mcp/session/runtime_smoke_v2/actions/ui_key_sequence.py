@@ -47,19 +47,14 @@ async def handle_ui_key_sequence(
     keys = _keys_as_string(action.get("keys"))
     find_result = await _find_with_realization_retry(context, selector)
     if find_result.get("found") is False:
-        blocked = build_blocked(
-            reason="selector not found",
-            requested={"selector": selector},
-            accepted=selector_guidance(),
-            next_step="Run ui_get_window_tree or ui_find_element with name/control_type.",
-        )
-        return {
-            "status": "BLOCKED",
-            **blocked,
-            "duration_ms": context.elapsed_ms(started),
-            "route": "key_sequence",
-        }
-    if not _is_success(find_result):
+        # The adapter-side find searches without foregrounding the window;
+        # lazy WPF subtrees may only realize once ui.set_focus (which
+        # foregrounds first, with its own bounded retry) touches them.
+        # Verified live 2026-07-11: the same automation_id missed here and
+        # resolved in set_focus seconds later. Fall through and let set_focus
+        # be the authoritative resolver instead of blocking on the pre-find.
+        pass
+    elif not _is_success(find_result):
         return _adapter_failure_result(
             find_result,
             selector=selector,
@@ -70,6 +65,19 @@ async def handle_ui_key_sequence(
 
     focus_result = await context.call_adapter("ui.set_focus", selector=selector)
     if not _is_success(focus_result):
+        if find_result.get("found") is False:
+            blocked = build_blocked(
+                reason="selector not found",
+                requested={"selector": selector},
+                accepted=selector_guidance(),
+                next_step="Run ui_get_window_tree or ui_find_element with name/control_type.",
+            )
+            return {
+                "status": "BLOCKED",
+                **blocked,
+                "duration_ms": context.elapsed_ms(started),
+                "route": "key_sequence",
+            }
         return _adapter_failure_result(
             focus_result,
             selector=selector,

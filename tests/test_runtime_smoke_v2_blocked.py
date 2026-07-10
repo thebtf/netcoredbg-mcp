@@ -38,11 +38,65 @@ def _runner(session: BlockedSmokeSession) -> RuntimeSmokeRunner:
 
 
 @pytest.mark.asyncio
-async def test_v2_ui_key_sequence_selector_miss_returns_actionable_blocked() -> None:
+async def test_v2_ui_key_sequence_find_miss_falls_through_to_set_focus() -> None:
+    """A found=false pre-find no longer blocks by itself: set_focus (which
+    foregrounds the window first and has its own bounded retry) is the
+    authoritative resolver for lazily-realized WPF subtrees. When it succeeds,
+    the action proceeds."""
     session = BlockedSmokeSession()
-    selector = {"automation_id": "missingCheckBox"}
+    selector = {"automation_id": "lazyCheckBox"}
 
     result = await _runner(session).run(
+        {
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "lazy realization",
+            "cases": [
+                {
+                    "id": "lazy_control",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.key_sequence",
+                                "selector": selector,
+                                "keys": "{SPACE}",
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert result["status"] == "PASS"
+    assert session.calls == [
+        ("find_element", selector),
+        ("find_element", selector),
+        ("find_element", selector),
+        ("set_focus", selector),
+        ("send_keys_focused", "{SPACE}"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_v2_ui_key_sequence_selector_miss_returns_actionable_blocked() -> None:
+    session = BlockedSmokeSession()
+
+    async def failing_set_focus(selector: dict[str, Any]) -> dict[str, Any]:
+        session.calls.append(("set_focus", dict(selector)))
+        return {"status": "FAIL", "reason": "Element not found"}
+
+    selector = {"automation_id": "missingCheckBox"}
+    runner = RuntimeSmokeRunner(
+        session,
+        service_adapters={
+            "ui.find_element": session.find_element,
+            "ui.set_focus": failing_set_focus,
+            "ui.send_keys_focused": session.send_keys_focused,
+        },
+    )
+
+    result = await runner.run(
         {
             "schema": "netcoredbg.runtime_smoke.v2",
             "name": "selector miss",
@@ -71,11 +125,13 @@ async def test_v2_ui_key_sequence_selector_miss_returns_actionable_blocked() -> 
     assert {"automation_id", "name"}.issubset(set(result["blocked"]["accepted"]["selector_keys"]))
     assert result["blocked"]["next_step"]
     # Clean found=false misses are retried (bounded realization retry for
-    # lazily-built UIA subtrees) before the BLOCKED verdict is emitted.
+    # lazily-built UIA subtrees), then set_focus gets the final word; only
+    # when BOTH miss is the BLOCKED verdict emitted.
     assert session.calls == [
         ("find_element", selector),
         ("find_element", selector),
         ("find_element", selector),
+        ("set_focus", selector),
     ]
 
 
