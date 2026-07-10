@@ -35,19 +35,12 @@ public static class FocusCommands
         var automationId = @params?["automationId"]?.GetValue<string>();
         var name = @params?["name"]?.GetValue<string>();
 
-        AutomationElement? element = null;
         var cf = new ConditionFactory(automation.PropertyLibrary);
 
-        if (automationId is not null)
-        {
-            element = mainWindow.FindFirstDescendant(cf.ByAutomationId(automationId));
-        }
-        else if (name is not null)
-        {
-            element = mainWindow.FindFirstDescendant(cf.ByName(name));
-        }
-
-        // Step 1: Bring window to foreground via Win32 unless stealth mode keeps the user's window active.
+        // Step 1: Bring window to foreground FIRST (unless stealth). Lazy WPF
+        // subtrees (settings panels, virtualized regions) may only realize their
+        // UIA peers once the window is restored/foreground — searching before
+        // foregrounding made set_focus fail on elements find_element could see.
         if (JsonRpcHandler.Stealth)
         {
             Program.Log("stealth: skipping foreground");
@@ -62,7 +55,24 @@ public static class FocusCommands
             }
         }
 
-        // Step 2: Set UIA focus on the target element (or window if no element specified)
+        // Step 2: Locate the target with a bounded realization retry — a single
+        // FindFirstDescendant intermittently misses peers that a retried lookup
+        // resolves (same class of miss the runner's ensure_target retry fixed).
+        AutomationElement? element = null;
+        if (automationId is not null || name is not null)
+        {
+            var condition = automationId is not null
+                ? cf.ByAutomationId(automationId)
+                : cf.ByName(name!);
+            for (var attempt = 0; attempt < 3 && element is null; attempt++)
+            {
+                if (attempt > 0)
+                    Thread.Sleep(400);
+                element = mainWindow.FindFirstDescendant(condition);
+            }
+        }
+
+        // Step 3: Set UIA focus on the target element (or window if no element specified)
         if (element is not null)
         {
             element.Focus();
