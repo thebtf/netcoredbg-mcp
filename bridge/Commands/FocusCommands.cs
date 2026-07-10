@@ -58,16 +58,19 @@ public static class FocusCommands
         // Step 2: Locate the target with a bounded realization retry — a single
         // FindFirstDescendant intermittently misses peers that a retried lookup
         // resolves (same class of miss the runner's ensure_target retry fixed).
+        // Live measurement 2026-07-11: textBoxCue realized ~2s after foreground,
+        // so the budget is 5x600ms with an initial settle sleep.
         AutomationElement? element = null;
         if (automationId is not null || name is not null)
         {
             var condition = automationId is not null
                 ? cf.ByAutomationId(automationId)
                 : cf.ByName(name!);
-            for (var attempt = 0; attempt < 3 && element is null; attempt++)
+            Thread.Sleep(250);
+            for (var attempt = 0; attempt < 5 && element is null; attempt++)
             {
                 if (attempt > 0)
-                    Thread.Sleep(400);
+                    Thread.Sleep(600);
                 element = mainWindow.FindFirstDescendant(condition);
             }
         }
