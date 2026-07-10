@@ -6,6 +6,35 @@ from typing import Any
 
 from ._common import attach_expected_and_status, blocked_probe, probe_name
 
+_LATEST_ALIAS = "diagnostic-latest.json"
+
+
+def _resolve_latest_alias(path: Path) -> Path:
+    """Resolve the documented "diagnostic-latest.json" alias to the newest
+    diagnostic-*.json snapshot in the same directory.
+
+    The UI-replay compiler emits this alias for probes that must read whichever
+    diagnostic snapshot the product wrote last; the product itself writes
+    stage-named files (diagnostic-startup.json, diagnostic-cue-change.json, ...)
+    and never a literal diagnostic-latest.json. A literal file with the alias
+    name, if present, still wins.
+    """
+    if path.name != _LATEST_ALIAS or path.exists():
+        return path
+    directory = path.parent
+    if not directory.is_dir():
+        return path
+    newest: Path | None = None
+    newest_key: tuple[int, str] | None = None
+    for candidate in directory.glob("diagnostic-*.json"):
+        if not candidate.is_file() or candidate.name == _LATEST_ALIAS:
+            continue
+        key = (candidate.stat().st_mtime_ns, candidate.name)
+        if newest_key is None or key > newest_key:
+            newest_key = key
+            newest = candidate
+    return newest if newest is not None else path
+
 
 async def handle_file_json(
     probe: dict[str, Any],
@@ -55,6 +84,7 @@ async def handle_file_json(
         ) | {"validation_error": str(exc)}
 
     path = Path(resolved_path)
+    path = _resolve_latest_alias(path)
     if not path.exists():
         return {
             "name": probe_name(probe, kind),
