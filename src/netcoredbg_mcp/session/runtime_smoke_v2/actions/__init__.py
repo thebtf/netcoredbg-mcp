@@ -1180,15 +1180,17 @@ async def _find_element_with_realization_retry(
     selector: dict[str, Any],
     context: ActionContext,
     *,
-    attempts: int = 3,
+    attempts: int = 5,
     retry_delay_ms: int = 1200,
 ) -> dict[str, Any]:
     """find_element with bounded retry for lazily-realized UIA subtrees.
 
     WPF realizes parts of the automation tree lazily (virtualized panels,
     settings panes); a selector that resolves manually can miss on the first
-    walk right after launch. Retry only the clean found=false miss — adapter
-    failures propagate immediately.
+    walk right after launch — and, measured live 2026-07-11, intermittently
+    mid-run right after key input (the miss moves between elements run to
+    run). Retry only the clean found=false miss — adapter failures propagate
+    immediately.
     """
     find_result: dict[str, Any] = {}
     for attempt in range(max(1, attempts)):
