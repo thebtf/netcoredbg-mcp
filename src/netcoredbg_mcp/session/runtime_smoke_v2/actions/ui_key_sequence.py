@@ -4,6 +4,24 @@ from collections.abc import Mapping
 from typing import Any
 
 from ..blocked import build_blocked, selector_guidance
+from ..timing import sleep_ms
+
+
+async def _find_with_realization_retry(
+    context: Any,
+    selector: dict[str, Any],
+    *,
+    attempts: int = 3,
+    retry_delay_ms: int = 1200,
+) -> dict[str, Any]:
+    find_result: dict[str, Any] = {}
+    for attempt in range(max(1, attempts)):
+        if attempt > 0:
+            await sleep_ms(context.clock, retry_delay_ms)
+        find_result = await context.call_adapter("ui.find_element", selector=selector)
+        if find_result.get("found") is not False:
+            return find_result
+    return find_result
 
 
 def _keys_as_string(raw_keys: Any) -> str:
@@ -27,7 +45,7 @@ async def handle_ui_key_sequence(
             "route": "key_sequence",
         }
     keys = _keys_as_string(action.get("keys"))
-    find_result = await context.call_adapter("ui.find_element", selector=selector)
+    find_result = await _find_with_realization_retry(context, selector)
     if find_result.get("found") is False:
         blocked = build_blocked(
             reason="selector not found",
@@ -41,7 +59,7 @@ async def handle_ui_key_sequence(
             "duration_ms": context.elapsed_ms(started),
             "route": "key_sequence",
         }
-    if find_result.get("status") != "PASS":
+    if not _is_success(find_result):
         return _adapter_failure_result(
             find_result,
             selector=selector,
@@ -51,7 +69,7 @@ async def handle_ui_key_sequence(
         )
 
     focus_result = await context.call_adapter("ui.set_focus", selector=selector)
-    if focus_result.get("status") != "PASS":
+    if not _is_success(focus_result):
         return _adapter_failure_result(
             focus_result,
             selector=selector,
@@ -61,7 +79,7 @@ async def handle_ui_key_sequence(
         )
 
     send_result = await context.call_adapter("ui.send_keys_focused", keys=keys)
-    if send_result.get("status") != "PASS":
+    if not _is_success(send_result):
         failed = _adapter_failure_result(
             send_result,
             selector=selector,
@@ -78,6 +96,13 @@ async def handle_ui_key_sequence(
         "keys": keys,
         "duration_ms": context.elapsed_ms(started),
     }
+
+
+def _is_success(result: dict[str, Any]) -> bool:
+    # Bridge adapters (e.g. FlaUI find_element) return evidence dicts without a
+    # "status" field; absence of status means success, mirroring
+    # _is_adapter_success in the ensure_target path.
+    return str(result.get("status", "PASS")).upper() in {"PASS", "OK", "SUCCESS"}
 
 
 def _selector_from_action(

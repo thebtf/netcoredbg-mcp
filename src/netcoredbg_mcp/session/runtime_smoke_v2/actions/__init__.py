@@ -1176,6 +1176,30 @@ async def _handle_noop(action: dict[str, Any], context: ActionContext) -> dict[s
     }
 
 
+async def _find_element_with_realization_retry(
+    selector: dict[str, Any],
+    context: ActionContext,
+    *,
+    attempts: int = 3,
+    retry_delay_ms: int = 1200,
+) -> dict[str, Any]:
+    """find_element with bounded retry for lazily-realized UIA subtrees.
+
+    WPF realizes parts of the automation tree lazily (virtualized panels,
+    settings panes); a selector that resolves manually can miss on the first
+    walk right after launch. Retry only the clean found=false miss — adapter
+    failures propagate immediately.
+    """
+    find_result: dict[str, Any] = {}
+    for attempt in range(max(1, attempts)):
+        if attempt > 0:
+            await _sleep_ms(context, retry_delay_ms)
+        find_result = await context.call_adapter("ui.find_element", selector=selector)
+        if find_result.get("found") is not False:
+            return find_result
+    return find_result
+
+
 async def _ensure_input_target(
     selector: dict[str, Any],
     *,
@@ -1184,7 +1208,7 @@ async def _ensure_input_target(
     started: float,
     route: str,
 ) -> dict[str, Any]:
-    find_result = await context.call_adapter("ui.find_element", selector=selector)
+    find_result = await _find_element_with_realization_retry(selector, context)
     if find_result.get("found") is False:
         blocked = build_blocked(
             reason="selector not found",
@@ -1198,6 +1222,7 @@ async def _ensure_input_target(
             "route": route,
             "selector": selector,
             "duration_ms": context.elapsed_ms(started),
+            "find_result": _bounded_result(find_result),
         }
     if not _is_adapter_success(find_result):
         failed = _adapter_failure_result(

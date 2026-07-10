@@ -70,7 +70,13 @@ async def test_v2_ui_key_sequence_selector_miss_returns_actionable_blocked() -> 
     assert result["blocked"]["requested"]["selector"] == selector
     assert {"automation_id", "name"}.issubset(set(result["blocked"]["accepted"]["selector_keys"]))
     assert result["blocked"]["next_step"]
-    assert session.calls == [("find_element", selector)]
+    # Clean found=false misses are retried (bounded realization retry for
+    # lazily-built UIA subtrees) before the BLOCKED verdict is emitted.
+    assert session.calls == [
+        ("find_element", selector),
+        ("find_element", selector),
+        ("find_element", selector),
+    ]
 
 
 @pytest.mark.asyncio

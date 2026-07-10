@@ -154,7 +154,15 @@ class _KBDLLHOOKSTRUCT(ctypes.Structure):
 
 
 class Win32CompositeInputEventRecorder:
-    """Raw Input primary recorder with low-level-hook fallback."""
+    """Low-level-hook primary recorder with Raw Input fallback.
+
+    The hook path is preferred because KBDLLHOOKSTRUCT/MSLLHOOKSTRUCT preserve
+    SendInput's dwExtraInfo for BOTH keyboard and mouse events. Raw Input's
+    RAWKEYBOARD.ExtraInformation is NOT reliably populated for injected
+    keyboard events on Windows (observed live 2026-07-10: bridge-signed SPACE
+    arrived with ExtraInformation=0), which misclassifies the runner's own
+    keystrokes as foreign_injected and poisons run confidence.
+    """
 
     def __init__(
         self,
@@ -168,12 +176,12 @@ class Win32CompositeInputEventRecorder:
 
     def start(self, key: tuple[str, str]) -> None:
         try:
-            self._raw.start(key)
-        except InputMonitorUnavailableError:
             self._hook.start(key)
-            self._active[key] = self._hook
-        else:
+        except InputMonitorUnavailableError:
+            self._raw.start(key)
             self._active[key] = self._raw
+        else:
+            self._active[key] = self._hook
 
     def stop(self, key: tuple[str, str]) -> None:
         recorder = self._active.get(key)

@@ -143,7 +143,15 @@ public static class ElementCommands
 
         var element = searchRoot.FindFirstDescendant(condition);
         if (element is null)
-            return new JsonObject { ["found"] = false };
+            return new JsonObject
+            {
+                ["found"] = false,
+                ["searchRootName"] = SafeString(() => searchRoot.Name),
+                ["searchRootAutomationId"] = SafeString(() => searchRoot.AutomationId),
+                ["searchRootOffscreen"] = SafeIsOffscreen(searchRoot),
+                ["processId"] = JsonRpcHandler.ProcessId,
+                ["topLevelWindowCount"] = GetProcessTopLevelWindows(mainWindow, automation).Count,
+            };
 
         return BuildElementInfo(element);
     }
