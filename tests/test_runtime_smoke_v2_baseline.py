@@ -219,3 +219,50 @@ async def test_v2_baseline_success_records_ordered_step_outcomes() -> None:
         "PASS",
     ]
     assert result["cases"][0]["id"] == "spellcheck_case"
+
+
+@pytest.mark.asyncio
+async def test_v2_baseline_launch_anchors_default_output_checkpoint() -> None:
+    """A successful isolated_profile.launch must anchor the implicit "default"
+    output checkpoint so later output.since probes (which omit "checkpoint")
+    do not fail with "output checkpoint not found"."""
+    from collections import deque
+    from types import SimpleNamespace
+
+    from netcoredbg_mcp.session.state import DebugState
+
+    session = BaselineSmokeSession()
+    session.state = SimpleNamespace(
+        state=DebugState.RUNNING,
+        output_buffer=deque(),
+        output_sequence=0,
+        output_trimmed_before=0,
+    )
+
+    result = await _runner(session).run(_baseline_plan())
+
+    assert result["status"] == "PASS"
+    assert "default" in session.runtime_smoke.output_checkpoints
+
+
+@pytest.mark.asyncio
+async def test_v2_baseline_launch_does_not_overwrite_existing_default_checkpoint() -> None:
+    from collections import deque
+    from types import SimpleNamespace
+
+    from netcoredbg_mcp.session.state import DebugState
+
+    session = BaselineSmokeSession()
+    session.state = SimpleNamespace(
+        state=DebugState.RUNNING,
+        output_buffer=deque(),
+        output_sequence=0,
+        output_trimmed_before=0,
+    )
+    sentinel = {"name": "default", "entry_count": 7, "byte_offset": 99}
+    session.runtime_smoke.output_checkpoints["default"] = sentinel
+
+    result = await _runner(session).run(_baseline_plan())
+
+    assert result["status"] == "PASS"
+    assert session.runtime_smoke.output_checkpoints["default"] is sentinel

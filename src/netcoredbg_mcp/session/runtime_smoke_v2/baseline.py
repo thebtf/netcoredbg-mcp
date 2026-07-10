@@ -99,6 +99,8 @@ async def _execute_step(
                 **app_diagnostics_launch_env(effective_diagnostic_launch),
             }
         result = await context.call_adapter("launch", **launch_args)
+        if isinstance(result, dict) and str(result.get("status", "PASS")) == "PASS":
+            _ensure_default_output_checkpoint(context)
         if effective_diagnostic_launch and isinstance(result, dict):
             return {**result, "diagnostic_launch": effective_diagnostic_launch}
         return result
@@ -129,6 +131,26 @@ def _cleanup_step_for(step: dict[str, Any]) -> dict[str, Any] | None:
             "baseline_file": str(step.get("baseline_file") or ""),
         }
     return None
+
+
+def _ensure_default_output_checkpoint(context: ActionContext) -> None:
+    """Anchor the implicit "default" output checkpoint at the post-launch position.
+
+    output.since probes omit "checkpoint" and resolve to "default"; without an
+    anchor every such probe fails with "output checkpoint not found" even when
+    the launch succeeded. The checkpoint is created only when absent so an
+    explicit debug.output_checkpoint step or a prior launch keeps ownership.
+    """
+    session = getattr(context, "session", None)
+    runtime_smoke = getattr(session, "runtime_smoke", None)
+    checkpoints = getattr(runtime_smoke, "output_checkpoints", None)
+    if not isinstance(checkpoints, dict) or "default" in checkpoints:
+        return
+    if getattr(session, "state", None) is None:
+        return
+    from ..output_assertions import OutputAssertionService
+
+    OutputAssertionService(session).create_checkpoint("default")
 
 
 def _diagnostic_launch_for_step(
