@@ -14,7 +14,7 @@
 вычислять выражения, читать вывод отладки и управлять поверхностями Windows UI
 Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 
-**131 MCP-инструмент · 8 промптов · 4 ресурса · 1851 собранных тестов · релиз v0.21.0**
+**132 MCP-инструмента · 8 промптов · 4 ресурса · 1930 собранных тестов · релиз v0.21.0**
 
 ## Быстрые ссылки
 
@@ -76,6 +76,10 @@ Set a breakpoint in Program.cs, run the app, and inspect local variables when it
 > Для отладки .NET Core файл `dbgshim.dll` рядом с `netcoredbg.exe` должен
 > совпадать с major-версией целевого runtime. Setup wizard сканирует
 > установленные runtime и готовит совместимые копии dbgshim.
+> Перед запуском `inspect_debug_launch_compatibility(program)` показывает
+> целевой runtime, активный shim и выбранного кандидата из кэша без сборки,
+> запуска или замены файлов. `blocked_no_matching_shim` — только рекомендация;
+> прежний `start_debug` остаётся fail-open.
 
 > [!IMPORTANT]
 > `start_debug` — long-poll-инструмент. Если debuggee — GUI-приложение,
@@ -487,7 +491,7 @@ Rude edits вроде добавления fields, изменения method sig
 
 | Категория | Количество | Tools |
 |---|---:|---|
-| Debug control | 12 | `start_debug`, `attach_debug`, `stop_debug`, `restart_debug`, `continue_execution`, `pause_execution`, `step_over`, `get_step_in_targets`, `step_into`, `step_out`, `get_debug_state`, `terminate_debug` |
+| Debug control | 13 | `start_debug`, `inspect_debug_launch_compatibility`, `attach_debug`, `stop_debug`, `restart_debug`, `continue_execution`, `pause_execution`, `step_over`, `get_step_in_targets`, `step_into`, `step_out`, `get_debug_state`, `terminate_debug` |
 | Breakpoints and exceptions | 6 | `add_breakpoint`, `remove_breakpoint`, `list_breakpoints`, `clear_breakpoints`, `add_function_breakpoint`, `configure_exceptions` |
 | Inspection and DAP coverage | 15 | `get_threads`, `get_call_stack`, `get_scopes`, `get_variables`, `evaluate_expression`, `set_variable`, `get_exception_info`, `get_modules`, `get_progress`, `get_loaded_sources`, `disassemble`, `get_locations`, `quick_evaluate`, `get_exception_context`, `get_stop_context` |
 | Tracepoints | 4 | `add_tracepoint`, `remove_tracepoint`, `get_trace_log`, `clear_trace_log` |

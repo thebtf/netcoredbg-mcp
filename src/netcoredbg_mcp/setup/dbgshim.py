@@ -11,13 +11,42 @@ import logging
 import os
 import platform
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
+from ..utils.version import (
+    VersionInfo,
+    inspect_active_dbgshim_version,
+    inspect_target_runtime_version,
+)
 from .home import get_home_dir
 
 logger = logging.getLogger(__name__)
 
 _DBGSHIM_FILENAME = "dbgshim.dll" if os.name == "nt" else "libdbgshim.so"
+
+
+@dataclass(frozen=True)
+class DbgshimSelectionDecision:
+    """Read-only result of applying the launch path's cache selection rule."""
+
+    path: Path | None
+    status: str
+    version: str | None = None
+    major: int | None = None
+    _lookup_error: OSError | None = None
+
+    def as_candidate(self) -> dict[str, object]:
+        """Serialize a fixed-shape cached-candidate diagnostic."""
+        selected = self.path is not None
+        return {
+            "version": self.version,
+            "major": self.major,
+            "path": str(self.path) if selected else None,
+            "provenance": "cache_directory_name" if selected else None,
+            "selection": "same_major_highest_numeric_tuple",
+            "status": self.status,
+        }
 
 
 def _get_runtime_scan_paths() -> list[Path]:
@@ -32,11 +61,15 @@ def _get_runtime_scan_paths() -> list[Path]:
     if system == "Windows":
         # Standard install: C:\Program Files\dotnet\...
         program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
-        paths.append(Path(program_files) / "dotnet" / "shared" / "Microsoft.NETCore.App")
+        paths.append(
+            Path(program_files) / "dotnet" / "shared" / "Microsoft.NETCore.App"
+        )
         # x86 on 64-bit Windows
         program_files_x86 = os.environ.get("ProgramFiles(x86)", "")
         if program_files_x86:
-            paths.append(Path(program_files_x86) / "dotnet" / "shared" / "Microsoft.NETCore.App")
+            paths.append(
+                Path(program_files_x86) / "dotnet" / "shared" / "Microsoft.NETCore.App"
+            )
     elif system == "Linux":
         paths.extend(
             [
@@ -145,71 +178,199 @@ def extract_dbgshim_versions(target_dir: Path | None = None) -> list[str]:
     return extracted
 
 
+def select_dbgshim_decision(
+    target_version: str,
+    cache_dir: Path,
+) -> DbgshimSelectionDecision:
+    """Apply the existing same-major/highest-numeric-tuple selector read-only."""
+    try:
+        target_major = int(target_version.split(".")[0])
+    except (ValueError, IndexError):
+        logger.warning("Cannot parse target version: %s", target_version)
+        return DbgshimSelectionDecision(path=None, status="malformed")
+
+    candidates: list[tuple[tuple[int, ...], Path]] = []
+    try:
+        if not cache_dir.exists():
+            return DbgshimSelectionDecision(path=None, status="missing")
+        if not cache_dir.is_dir():
+            return DbgshimSelectionDecision(path=None, status="no_match")
+
+        for entry in cache_dir.iterdir():
+            if not entry.is_dir():
+                continue
+            candidate_path = entry / _DBGSHIM_FILENAME
+            if not candidate_path.is_file():
+                continue
+
+            version_parts = entry.name.split(".")
+            try:
+                major = int(version_parts[0])
+            except (ValueError, IndexError):
+                continue
+            if major != target_major:
+                continue
+
+            version_tuple = tuple(int(part) for part in version_parts if part.isdigit())
+            candidates.append((version_tuple, candidate_path))
+    except OSError as exc:
+        logger.debug("Cannot inspect dbgshim cache %s: %s", cache_dir, exc)
+        return DbgshimSelectionDecision(
+            path=None,
+            status="unreadable",
+            _lookup_error=exc,
+        )
+
+    if not candidates:
+        logger.debug("No cached dbgshim for major version %d", target_major)
+        return DbgshimSelectionDecision(path=None, status="no_match")
+
+    candidates.sort(key=lambda candidate: candidate[0], reverse=True)
+    best = candidates[0][1]
+    parsed_version = VersionInfo.from_string(best.parent.name)
+    logger.info("Selected dbgshim %s for target %s", best.parent.name, target_version)
+    if parsed_version is None:
+        return DbgshimSelectionDecision(path=best, status="malformed")
+    return DbgshimSelectionDecision(
+        path=best,
+        status="known",
+        version=str(parsed_version),
+        major=parsed_version.major,
+    )
+
+
 def select_dbgshim(
     target_version: str,
     cache_dir: Path | None = None,
 ) -> Path | None:
-    """Find the best matching cached dbgshim for a target .NET version.
-
-    Matching strategy: same major version, highest patch number.
-    E.g., target "6.0" matches "6.0.36" over "6.0.20".
-
-    Args:
-        target_version: Target .NET version (e.g. "6.0.36", "6.0", "8")
-        cache_dir: dbgshim cache directory. Defaults to ~/.netcoredbg-mcp/dbgshim/
-
-    Returns:
-        Path to best matching dbgshim file, or None if no match.
-    """
+    """Find the launch path's best matching cached dbgshim, if any."""
     if cache_dir is None:
         cache_dir = get_home_dir() / "dbgshim"
+    decision = select_dbgshim_decision(target_version, cache_dir)
+    if decision._lookup_error is not None:
+        raise decision._lookup_error
+    return decision.path
 
-    if not cache_dir.is_dir():
-        return None
 
-    # Parse target major version
-    parts = target_version.split(".")
-    try:
-        target_major = int(parts[0])
-    except (ValueError, IndexError):
-        logger.warning("Cannot parse target version: %s", target_version)
-        return None
+def build_debug_launch_compatibility(
+    *,
+    program: str,
+    target_runtime: dict[str, object],
+    active_dbgshim: dict[str, object],
+    cached_candidate: dict[str, object],
+) -> dict[str, object]:
+    """Build the bounded public verdict from already-collected read-only evidence."""
+    target_known = target_runtime.get("status") == "known"
+    active_known = active_dbgshim.get("status") == "known"
+    candidate_status = cached_candidate.get("status")
+    selected = cached_candidate.get("path") is not None
+    verdict: str
+    compatible: bool | None
+    will_mutate: bool
+    warning: str | None
 
-    # Find all cached versions with same major
-    candidates: list[tuple[tuple[int, ...], Path]] = []
-    for entry in cache_dir.iterdir():
-        if not entry.is_dir():
-            continue
-        dbgshim = entry / _DBGSHIM_FILENAME
-        if not dbgshim.is_file():
-            continue
+    if not target_known:
+        verdict = "unknown"
+        compatible = None
+        will_mutate = False
+        warning = (
+            "Target runtime version is unavailable; compatibility cannot be determined."
+        )
+    elif selected and candidate_status != "known":
+        verdict = "unknown"
+        compatible = None
+        will_mutate = True
+        warning = (
+            "The selected cached dbgshim version is malformed; "
+            "compatibility cannot be determined."
+        )
+    elif not active_known:
+        verdict = "unknown"
+        compatible = None
+        will_mutate = selected
+        warning = (
+            "Active dbgshim version is unavailable; "
+            "start_debug would select the cached candidate."
+            if selected
+            else (
+                "Active dbgshim version is unavailable; "
+                "compatibility cannot be determined."
+            )
+        )
+    elif target_runtime.get("major") == active_dbgshim.get("major"):
+        verdict = "compatible"
+        compatible = True
+        will_mutate = selected
+        warning = (
+            "A compatible cached dbgshim is available; "
+            "start_debug would replace the shared debugger copy."
+            if selected
+            else None
+        )
+    elif selected:
+        verdict = "compatible_after_swap"
+        compatible = True
+        will_mutate = True
+        warning = (
+            "A compatible cached dbgshim is available; "
+            "start_debug would replace the shared debugger copy."
+        )
+    elif candidate_status == "unreadable":
+        verdict = "unknown"
+        compatible = None
+        will_mutate = False
+        warning = (
+            "The dbgshim cache could not be read; compatibility cannot be determined."
+        )
+    else:
+        verdict = "blocked_no_matching_shim"
+        compatible = False
+        will_mutate = False
+        warning = "No cached dbgshim matches the target runtime; start_debug remains fail-open."
 
-        version_parts = entry.name.split(".")
-        try:
-            major = int(version_parts[0])
-        except (ValueError, IndexError):
-            continue
+    return {
+        "verdict": verdict,
+        "program": program,
+        "targetRuntime": target_runtime,
+        "activeDbgshim": active_dbgshim,
+        "cachedCandidate": cached_candidate,
+        "compatible": compatible,
+        "willMutateSharedDebugger": will_mutate,
+        "mutationPerformed": False,
+        "warning": warning,
+    }
 
-        if major != target_major:
-            continue
 
-        # Parse full version for sorting (higher = better)
-        version_tuple = tuple(int(p) for p in version_parts if p.isdigit())
-        candidates.append((version_tuple, dbgshim))
+def inspect_debug_launch_compatibility(
+    program: str,
+    netcoredbg_path: str,
+    cache_dir: Path,
+) -> dict[str, object]:
+    """Inspect launch compatibility without creating cache state or swapping files."""
+    target_runtime = inspect_target_runtime_version(program)
+    active_dbgshim = inspect_active_dbgshim_version(netcoredbg_path)
+    target_version = target_runtime.get("version")
+    if target_runtime.get("status") == "known" and isinstance(target_version, str):
+        cached_candidate = select_dbgshim_decision(
+            target_version,
+            cache_dir,
+        ).as_candidate()
+    else:
+        cached_candidate = {
+            "version": None,
+            "major": None,
+            "path": None,
+            "provenance": None,
+            "selection": "not_attempted",
+            "status": "not_attempted",
+        }
 
-    if not candidates:
-        logger.debug("No cached dbgshim for major version %d", target_major)
-        return None
-
-    # Return highest patch version
-    candidates.sort(key=lambda c: c[0], reverse=True)
-    best = candidates[0][1]
-    logger.info(
-        "Selected dbgshim %s for target %s",
-        best.parent.name,
-        target_version,
+    return build_debug_launch_compatibility(
+        program=program,
+        target_runtime=target_runtime,
+        active_dbgshim=active_dbgshim,
+        cached_candidate=cached_candidate,
     )
-    return best
 
 
 def swap_dbgshim(netcoredbg_dir: Path, dbgshim_path: Path) -> None:

@@ -49,6 +49,7 @@ class TestServerSmoke:
         # Critical tools must be present
         critical = [
             "start_debug",
+            "inspect_debug_launch_compatibility",
             "stop_debug",
             "continue_execution",
             "step_over",
@@ -67,6 +68,28 @@ class TestServerSmoke:
         ]
         for name in critical:
             assert name in tool_names, f"Critical tool '{name}' missing from server"
+
+    @pytest.mark.asyncio
+    async def test_debug_launch_preflight_schema_and_annotations(self):
+        """The read-only preflight publishes only the required program argument."""
+        from netcoredbg_mcp.server import create_server
+
+        mcp = create_server()
+        tools = {tool.name: tool for tool in await mcp.list_tools()}
+        tool = tools["inspect_debug_launch_compatibility"]
+
+        assert tool.inputSchema == {
+            "properties": {"program": {"title": "Program", "type": "string"}},
+            "required": ["program"],
+            "title": "inspect_debug_launch_compatibilityArguments",
+            "type": "object",
+        }
+        assert tool.annotations is not None
+        assert tool.annotations.model_dump(exclude_none=True) == {
+            "readOnlyHint": True,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        }
 
     @pytest.mark.asyncio
     async def test_prompts_register(self):
