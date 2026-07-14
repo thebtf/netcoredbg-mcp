@@ -51,14 +51,15 @@ It is mandatory when a change affects any of these surfaces:
 | --- | --- | --- | --- |
 | Local release-prep branch and commit | Automatic | Sensitive content, incoherent diff, or unrelated dirty state | Git status, diff, and gate output |
 | Release-prep PR creation | Automatic | Unreviewed broad product change outside release-owned files | PR URL and changed-file list |
-| PR merge | Automatic after MCP PR review and required checks are clean when the user has authorized auto-merge for this session | `fix_now`, unresolved mandatory review threads, failed checks, or high-risk scope expansion | MCP PR summary, GitHub merge state, status checks |
-| PATCH or MINOR tag and remote publication | Automatic when the current user directive explicitly authorizes release/tag/deploy and all gates above pass | MAJOR/breaking change, tag collision, failed release gate, or missing publication evidence | Remote tag, workflow status, release URL, package smoke |
+| PR merge | Automatic after independent MCP PR review and required checks are clean | `fix_now`, unresolved mandatory review threads, failed checks, or high-risk scope expansion | MCP PR summary, GitHub merge state, status checks |
+| PATCH or MINOR tag and remote publication | Automatic after the completed integration scope is on `main`, no dependent slice in the same integration wave remains active, and every gate in this protocol passes | MAJOR/breaking change, tag collision, failed release gate, missing publication evidence, ambiguous scope, or production/customer deployment outside this workstation | Remote tag, workflow status, release URL, package smoke |
 | MAJOR or breaking release | Approval required | Always | Explicit user approval naming the version |
 | Production/customer deployment outside this workstation | Approval required | Always | Named target, deploy plan, health checks |
 
-Project default: `auto_patch_minor_after_explicit_release_directive`. The
-release still stops on any failed evidence gate. Approval is not a substitute
-for green gates.
+Project default: `auto_patch_minor_after_verified_integration`. A separate
+`release`, `go ahead`, or equivalent command is not required once a concrete
+integration scope has reached the automatic trigger above. The release still
+stops on any failed evidence gate; approval is not a substitute for green gates.
 
 ## Version Alignment
 

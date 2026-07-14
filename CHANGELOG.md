@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-07-14
+
 ### Added
 - Selector-scoped pointer hover through the direct `ui_hover` tool and the
   runtime-smoke v2 `ui.hover` action. The Windows FlaUI route requires one
@@ -22,6 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   continued/stopped/step, output, module, and trace deltas with same-epoch and
   cancellation safety. Executed-instruction counts are reported explicitly as
   unavailable rather than estimated or fabricated (Engram #356, CR-111).
+
+### Fixed
+- Runtime-smoke v2 now anchors the implicit `default` output checkpoint at
+  `isolated_profile.launch`, resolves `diagnostic-latest.json` to the newest
+  snapshot, retries target realization, and lets `key_sequence` recover from a
+  pre-find miss through its focus path.
+- FlaUI focus now foregrounds the target before element search and uses bounded
+  realization retries instead of failing immediately on a slow UIA tree.
 
 ## [0.22.0] - 2026-07-03
 

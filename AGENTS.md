@@ -51,23 +51,22 @@ If solution contains "simple", "quick", "temporary", "workaround" — **STOP and
 | Rule | Description |
 |------|-------------|
 | **No direct commits to main** | All changes via feature branch + PR |
-| **No releases without approval** | Wait for explicit user "go ahead" before tagging |
-| **PR review required** | User must review and approve before merge |
-| **Test before release** | Verify functionality works before creating tags |
+| **Routine release autonomy** | PATCH/MINOR release prep, merge, tag, and publication proceed automatically after the concrete integration scope is complete on `main`, independent review and required checks are clean, and `docs/RELEASE-PROTOCOL.md` passes. No separate `release`/`go ahead` command is required. |
+| **Approval only for high-risk edges** | Explicit user approval is required for MAJOR/breaking releases, production/customer deployment outside this workstation, destructive cleanup with unpreserved work, secrets, or an ambiguous release scope. |
+| **Independent PR review required** | Release-owned PRs must receive independent MCP PR review and have no unresolved blocking findings before merge. |
+| **Test before release** | Verify functionality works before creating tags. |
 
 **Release process:**
-1. Create feature branch (e.g., `git checkout -b work/docs-release-workflow`)
-2. Make changes, commit (e.g., `git commit -m "docs(workflow): add release process"`)
-3. Push and create PR
-4. Wait for user review and approval
-5. Merge PR into the `main` branch
-6. Update local `main` branch:
-   - `git checkout main`
-   - `git pull origin main`
-7. Verify functionality on the updated `main` branch (run tests, manual checks as needed)
-8. **Only after user explicitly says "release"** (via direct communication): Create and push an annotated tag (e.g., `git tag -a v1.0.1 -m "Version 1.0.1" && git push origin v1.0.1`)
+1. When a completed integration scope reaches `main`, evaluate whether it contains unreleased user-visible behavior. If it does and no dependent slice in the same integration wave is still active, start release preparation automatically.
+2. Create a release-prep branch (for example, `work/release-v1.0.1-prep`).
+3. Update version, changelog, release notes, and other release-owned surfaces; run every mandatory project release gate.
+4. Commit, push, and create a release PR.
+5. Run independent MCP PR review plus required CI checks; resolve all blocking findings.
+6. Merge the PR automatically when review and checks are clean unless a high-risk approval trigger above applies.
+7. Update local `main` and verify the merged release commit.
+8. For an approved-by-policy PATCH/MINOR scope, create and push the annotated tag and verify GitHub/PyPI publication automatically. Do not wait for a separate user command.
 
-**If issues are found during verification (step 7):** Create a hotfix PR to address them. After the hotfix PR is merged into the main branch, restart the process from step 6.
+**If issues are found during verification:** Create a hotfix PR, pass the same independent review and checks, merge it, restart from step 7, and tag only the corrected `main` commit.
 
 ---
 

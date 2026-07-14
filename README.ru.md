@@ -14,7 +14,7 @@
 вычислять выражения, читать вывод отладки и управлять поверхностями Windows UI
 Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 
-**135 MCP-инструмента · 8 промптов · 4 ресурса · 2026 собранных тестов · релиз v0.21.0**
+**135 MCP-инструмента · 8 промптов · 4 ресурса · 2026 собранных тестов · релиз v0.23.0**
 
 ## Быстрые ссылки
 
@@ -23,21 +23,23 @@ Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 - **Справочник:** [Доступные инструменты](#доступные-инструменты) · [Ресурсы](#mcp-ресурсы) · [Промпты](#mcp-промпты) · [Архитектура](#обзор-архитектуры)
 - **Проект:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## Что нового в v0.21.0
+## Что нового в v0.23.0
 
-- **Настоящее разделение runner-vs-operator input** — no-operator runtime-smoke
-  прогоны теперь отличают эмулированный input раннера от реального внешнего
-  keyboard/mouse на уровне источника. Инъекции раннера подписываются
-  `RunnerInputSignature` и захватываются низкоуровневым event recorder, заменяя
-  прежнюю `GetLastInputInfo` window-эвристику и её единственный вердикт
-  неоднозначности.
-- **3-сторонняя атрибуция provenance** — `run_confidence` классифицирует каждое
-  событие как runner-injected (`CLEAN_PROVEN`), foreign-injected или physical
-  (`DIRTY_UNPROVEN`). Пустой-но-присутствующий event stream признаётся clean;
-  malformed или отсутствующий поток fail-closed.
-- **Фикс rollback при очистке breakpoints** — очистка function breakpoints
-  теперь откатывается при неуспешной синхронизации вместо ложного success
-  (#220, #80).
+- **Read-only preflight совместимости запуска** —
+  `inspect_debug_launch_compatibility(program)` показывает целевой runtime,
+  активный `dbgshim`, same-major кандидата из кэша и ожидаемую замену при запуске
+  без сборки, старта debuggee и изменения общего состояния отладчика.
+- **Наведение реального указателя по точному селектору** — `ui_hover(...)` и
+  runtime-smoke v2 `ui.hover` перемещают указатель только после однозначного
+  разрешения цели в foreground-окне, а затем возвращают evidence о неизменном
+  focus, hit-test, timeout и cleanup без клика или активации другого окна.
+- **Ограниченная activity-телеметрия от адаптера** —
+  `debuggee_activity(window_ms)` учитывает continued/stopped/step, output, module
+  и trace deltas, не приостанавливая debuggee. Счётчик выполненных инструкций
+  явно помечается недоступным, а не вычисляется по косвенным признакам.
+- **Надёжнее runtime smoke** — исправлены привязка output checkpoint,
+  разрешение `diagnostic-latest.json`, повторы target realization и recovery
+  focus для медленно появляющихся UI surfaces.
 
 ## Основные возможности
 
