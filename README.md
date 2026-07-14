@@ -14,7 +14,7 @@ set breakpoints, step through code, inspect variables, evaluate expressions, rea
 debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
 and Avalonia windows without opening an IDE.
 
-**133 MCP tools · 8 prompts · 4 resources · 1930 collected tests · release v0.21.0**
+**133 MCP tools · 8 prompts · 4 resources · 1933 collected tests · release v0.21.0**
 
 ## Quick Links
 
