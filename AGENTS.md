@@ -65,7 +65,7 @@ If solution contains "simple", "quick", "temporary", "workaround" — **STOP and
 6. Merge the PR automatically when review and checks are clean unless a high-risk approval trigger above applies.
 7. Update local `main` and verify the merged release commit. For an approved-by-policy PATCH/MINOR scope, create and push the annotated tag automatically, then run post-publication verification per `docs/RELEASE-PROTOCOL.md`. Do not wait for a separate user command.
 
-**If issues are found during verification:** Create a hotfix PR, pass the same independent review and checks, merge it, restart from step 7, and tag only the corrected `main` commit.
+**Recovery (immutable tags):** A pushed release tag is immutable and collision-safe. If post-publication verification fails but the tagged commit and release artifacts are correct, repair or retry only the failed publication step for the same `vX.Y.Z`, then re-run post-publication verification. If code, metadata, or artifacts must change, create and merge a hotfix PR that bumps to a new patch version, rerun every mandatory pre-publication gate in `docs/RELEASE-PROTOCOL.md`, restart from step 7, and publish a new annotated tag on the corrected `main` commit. Never move, delete, or reuse an already-pushed release tag.
 
 ---
 

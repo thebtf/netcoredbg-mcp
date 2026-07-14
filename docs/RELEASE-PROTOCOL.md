@@ -31,7 +31,8 @@ It is mandatory when a change affects any of these surfaces:
 Pre-publication gates must pass before annotated tag creation and push. Tag
 creation and push depend only on these rows plus a clean tag-collision check;
 they do not wait on remote tag visibility, workflow completion, GitHub Release,
-PyPI publication, or local install evidence.
+PyPI publication, or post-publication local workstation deploy evidence. The
+built-wheel install smoke row remains mandatory before tagging.
 
 Post-publication verification rows confirm publication after the tag is pushed.
 Any failed gate or verification row stops release completion; failed
@@ -58,8 +59,8 @@ pre-publication gates also block tag creation.
 
 | Verification | Command / evidence | Blocks release completion when |
 | --- | --- | --- |
-| Remote tag visibility | Annotated `vX.Y.Z` tag is visible through `git ls-remote --tags origin refs/tags/vX.Y.Z` | Tag is missing, lightweight, or not visible on origin |
-| Tag workflow completion | `gh run view` for the tag publish workflow on `refs/tags/vX.Y.Z` | Workflow fails or cannot be verified |
+| Remote tag visibility | Fetch `refs/tags/vX.Y.Z` into a temporary non-tag ref (for example `git fetch origin refs/tags/vX.Y.Z:refs/tmp/verify-vX.Y.Z`); require `git cat-file -t refs/tmp/verify-vX.Y.Z` to equal `tag`; delete the temporary ref; and confirm `git ls-remote --tags origin refs/tags/vX.Y.Z` is non-empty | Tag is missing, lightweight, or not visible on origin |
+| Tag workflow completion | Locate the exact `.github/workflows/publish.yml` run triggered by `event=push` for tag `vX.Y.Z` whose head SHA matches the annotated tag target; capture that run ID; require `gh run view <run-id>` to report `completed` / `success` | Workflow fails, is ambiguous, or cannot be verified |
 | GitHub Release | `gh release view vX.Y.Z` | Release missing |
 | PyPI publication | PyPI package is visible or propagation delay is explicitly recorded with workflow success evidence | Package missing after normal propagation, or verification cannot be performed |
 | Local deploy smoke | Workstation installation is updated to the released package or released wheel; `netcoredbg-mcp --version` reports `X.Y.Z` | Local executable still reports the prior version |
@@ -116,11 +117,26 @@ as the only release-note source for a milestone release.
 5. After every pre-publication gate passes, create an annotated tag with
    `git tag -a vX.Y.Z -m "Release vX.Y.Z"` and push it with
    `git push origin vX.Y.Z`.
-6. Run post-publication verification: remote tag visibility, tag workflow
-   completion, GitHub Release, and PyPI publication.
+6. Run post-publication verification: remote tag visibility (temporary fetch ref,
+   `git cat-file -t` equals `tag`, delete temporary ref), tag workflow completion
+   (exact `publish.yml` push run for `vX.Y.Z` at the tag-target SHA, then
+   `gh run view <run-id>`), GitHub Release, and PyPI publication.
 7. Deploy to this workstation by installing the released wheel/package, then
    verify `netcoredbg-mcp --version` and a package import smoke.
 8. Update `.agent/CONTINUITY.md` and the live dashboard with the final verdict.
+
+## Recovery After Tag Push
+
+A pushed release tag is immutable. Never move, delete, or reuse it.
+Publication-step repair and re-verification for the same `vX.Y.Z` remain within
+PATCH/MINOR release autonomy when no code, metadata, or artifact change is
+required.
+
+| Situation | Action |
+| --- | --- |
+| Post-publication verification fails; tagged commit and release artifacts are correct | Repair or retry only the failed publication step for the same `vX.Y.Z`, then re-run post-publication verification |
+| Code, metadata, or artifacts must change | Create and merge a hotfix PR that bumps to a new patch version, rerun every mandatory pre-publication gate, publish a new annotated tag on the corrected `main` commit, and run post-publication verification for the new version |
+| Target tag already exists on origin before creation | Stop; do not overwrite or reuse the existing tag |
 
 ## Terminal Verdict
 
