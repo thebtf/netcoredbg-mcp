@@ -159,7 +159,7 @@
                   Grid.RowSpan="4" Panel.ZIndex="20"
                   HorizontalAlignment="Right" VerticalAlignment="Top"
                   Width="260" Height="220" Margin="0,46,10,0"
-                  Header="" Padding="0"
+                  Header="Hover region" Padding="0"
                   Background="#FFF8F8F8"
                   AutomationProperties.Name="Hover region"
                   AutomationProperties.AutomationId="hoverRegion"
@@ -217,17 +217,17 @@
                 <!-- Real UIA peers exercise same-window duplicate root/target preflight. -->
                 <Canvas Grid.Row="3" Width="8" Height="8" Opacity="0.01" IsHitTestVisible="False"
                         HorizontalAlignment="Right" VerticalAlignment="Bottom">
-                    <GroupBox Width="8" Height="8" Header=""
+                    <GroupBox Width="8" Height="8" Header="Duplicate root A"
                               AutomationProperties.AutomationId="hoverDuplicateRoot">
                         <Button Content="Multiplicity target"
                                 AutomationProperties.AutomationId="hoverMultiplicityTarget"/>
                     </GroupBox>
-                    <GroupBox Width="8" Height="8" Header=""
+                    <GroupBox Width="8" Height="8" Header="Duplicate root B"
                               AutomationProperties.AutomationId="hoverDuplicateRoot">
                         <Button Content="Multiplicity target"
                                 AutomationProperties.AutomationId="hoverMultiplicityTarget"/>
                     </GroupBox>
-                    <GroupBox Width="8" Height="8" Header=""
+                    <GroupBox Width="8" Height="8" Header="Multiplicity region"
                               AutomationProperties.AutomationId="hoverMultiplicityRegion">
                         <StackPanel>
                             <Button Content="Duplicate target"
