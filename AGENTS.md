@@ -51,7 +51,7 @@ If solution contains "simple", "quick", "temporary", "workaround" — **STOP and
 | Rule | Description |
 |------|-------------|
 | **No direct commits to main** | All changes via feature branch + PR |
-| **Routine release autonomy** | PATCH/MINOR release prep, merge, tag, and publication proceed automatically after the concrete integration scope is complete on `main`, independent review and required checks are clean, and `docs/RELEASE-PROTOCOL.md` passes. No separate `release`/`go ahead` command is required. |
+| **Routine release autonomy** | PATCH/MINOR release prep, merge, tag, and publication proceed automatically after the concrete integration scope is complete on `main`, independent review and required checks are clean, every mandatory pre-publication gate in `docs/RELEASE-PROTOCOL.md` passes before annotated tag creation and push, and post-publication verification per that protocol gates release completion. No separate `release`/`go ahead` command is required. |
 | **Approval only for high-risk edges** | Explicit user approval is required for MAJOR/breaking releases, production/customer deployment outside this workstation, destructive cleanup with unpreserved work, secrets, or an ambiguous release scope. |
 | **Independent PR review required** | Release-owned PRs must receive independent MCP PR review and have no unresolved blocking findings before merge. |
 | **Test before release** | Verify functionality works before creating tags. |
@@ -59,12 +59,11 @@ If solution contains "simple", "quick", "temporary", "workaround" — **STOP and
 **Release process:**
 1. When a completed integration scope reaches `main`, evaluate whether it contains unreleased user-visible behavior. If it does and no dependent slice in the same integration wave is still active, start release preparation automatically.
 2. Create a release-prep branch (for example, `work/release-v1.0.1-prep`).
-3. Update version, changelog, release notes, and other release-owned surfaces; run every mandatory project release gate.
+3. Update version, changelog, release notes, and other release-owned surfaces; run every mandatory pre-publication gate in `docs/RELEASE-PROTOCOL.md`.
 4. Commit, push, and create a release PR.
 5. Run independent MCP PR review plus required CI checks; resolve all blocking findings.
 6. Merge the PR automatically when review and checks are clean unless a high-risk approval trigger above applies.
-7. Update local `main` and verify the merged release commit.
-8. For an approved-by-policy PATCH/MINOR scope, create and push the annotated tag and verify GitHub/PyPI publication automatically. Do not wait for a separate user command.
+7. Update local `main` and verify the merged release commit. For an approved-by-policy PATCH/MINOR scope, create and push the annotated tag automatically, then run post-publication verification per `docs/RELEASE-PROTOCOL.md`. Do not wait for a separate user command.
 
 **If issues are found during verification:** Create a hotfix PR, pass the same independent review and checks, merge it, restart from step 7, and tag only the corrected `main` commit.
 

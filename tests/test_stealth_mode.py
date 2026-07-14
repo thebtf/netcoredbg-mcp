@@ -146,7 +146,7 @@ def test_bridge_coordinate_mouse_input_verifies_foreground_activation() -> None:
         encoding="utf-8"
     )
 
-    ensure_start = command.index("static void EnsureForeground(")
+    ensure_start = command.index("internal static void EnsureForeground(")
     ensure_body = command[ensure_start:]
 
     assert "AttachThreadInput(currentThread, threadId, true)" in ensure_body

@@ -28,6 +28,17 @@ It is mandatory when a change affects any of these surfaces:
 
 ## Required Gates
 
+Pre-publication gates must pass before annotated tag creation and push. Tag
+creation and push depend only on these rows plus a clean tag-collision check;
+they do not wait on remote tag visibility, workflow completion, GitHub Release,
+PyPI publication, or local install evidence.
+
+Post-publication verification rows confirm publication after the tag is pushed.
+Any failed gate or verification row stops release completion; failed
+pre-publication gates also block tag creation.
+
+### Pre-publication gates
+
 | Gate | Command / evidence | Blocks release when |
 | --- | --- | --- |
 | Release git readiness | `git fetch --prune origin`; release branch clean and equal to `origin/main`; stale worktrees/branches classified and cleaned preserve-first | Any dirty, unique, abandoned, stale, or unsynchronized release state remains |
@@ -41,8 +52,16 @@ It is mandatory when a change affects any of these surfaces:
 | Wheel install smoke | Install the built wheel into a disposable environment and run `netcoredbg-mcp --version` plus an import smoke | Install, import, or CLI version smoke fails |
 | Production playbook | Execute `docs/PRODUCTION-TESTING-PLAYBOOK.md` in customer mode and record a run report | Overall verdict is `BROKEN` or `PARTIALLY_WORKS` for a release that claims those product flows as shipped |
 | MCP PR review | Release-prep PR summary reports zero unresolved blocking findings, and reviewer status is clean enough for merge | Any `fix_now` or unresolved mandatory review thread remains |
-| Tag publication | Annotated `vX.Y.Z` tag pushed to origin and visible through `git ls-remote --tags origin refs/tags/vX.Y.Z` | Tag is missing, lightweight, unpushed, or collides with an existing remote tag |
-| GitHub/PyPI publication | Tag workflow succeeds; GitHub release exists; PyPI package is visible or propagation delay is explicitly recorded with workflow success evidence | Workflow fails, release missing, package missing after normal propagation, or verification cannot be performed |
+| Tag collision check | `git ls-remote --tags origin refs/tags/vX.Y.Z` returns empty before tag creation | Target tag already exists on origin |
+
+### Post-publication verification
+
+| Verification | Command / evidence | Blocks release completion when |
+| --- | --- | --- |
+| Remote tag visibility | Annotated `vX.Y.Z` tag is visible through `git ls-remote --tags origin refs/tags/vX.Y.Z` | Tag is missing, lightweight, or not visible on origin |
+| Tag workflow completion | `gh run view` for the tag publish workflow on `refs/tags/vX.Y.Z` | Workflow fails or cannot be verified |
+| GitHub Release | `gh release view vX.Y.Z` | Release missing |
+| PyPI publication | PyPI package is visible or propagation delay is explicitly recorded with workflow success evidence | Package missing after normal propagation, or verification cannot be performed |
 | Local deploy smoke | Workstation installation is updated to the released package or released wheel; `netcoredbg-mcp --version` reports `X.Y.Z` | Local executable still reports the prior version |
 
 ## Release Autonomy
@@ -52,14 +71,15 @@ It is mandatory when a change affects any of these surfaces:
 | Local release-prep branch and commit | Automatic | Sensitive content, incoherent diff, or unrelated dirty state | Git status, diff, and gate output |
 | Release-prep PR creation | Automatic | Unreviewed broad product change outside release-owned files | PR URL and changed-file list |
 | PR merge | Automatic after independent MCP PR review and required checks are clean | `fix_now`, unresolved mandatory review threads, failed checks, or high-risk scope expansion | MCP PR summary, GitHub merge state, status checks |
-| PATCH or MINOR tag and remote publication | Automatic after the completed integration scope is on `main`, no dependent slice in the same integration wave remains active, and every gate in this protocol passes | MAJOR/breaking change, tag collision, failed release gate, missing publication evidence, ambiguous scope, or production/customer deployment outside this workstation | Remote tag, workflow status, release URL, package smoke |
+| PATCH or MINOR tag and remote publication | Automatic after the completed integration scope is on `main`, no dependent slice in the same integration wave remains active, and every pre-publication gate passes | MAJOR/breaking change, tag collision, failed pre-publication gate, failed post-publication verification, ambiguous scope, or production/customer deployment outside this workstation | Pre-publication gate evidence; post-publication: remote tag, workflow status, release URL, package smoke |
 | MAJOR or breaking release | Approval required | Always | Explicit user approval naming the version |
 | Production/customer deployment outside this workstation | Approval required | Always | Named target, deploy plan, health checks |
 
 Project default: `auto_patch_minor_after_verified_integration`. A separate
 `release`, `go ahead`, or equivalent command is not required once a concrete
 integration scope has reached the automatic trigger above. The release still
-stops on any failed evidence gate; approval is not a substitute for green gates.
+stops on any failed pre-publication gate or post-publication verification row;
+approval is not a substitute for green gates.
 
 ## Version Alignment
 
@@ -93,9 +113,11 @@ as the only release-note source for a milestone release.
 3. Open a PR, run MCP PR review, fix or resolve findings, and merge only after
    review readiness is clean.
 4. Fast-forward local `main` to `origin/main`.
-5. Create an annotated tag with `git tag -a vX.Y.Z -m "Release vX.Y.Z"` and
-   push it with `git push origin vX.Y.Z`.
-6. Verify the tag workflow, GitHub Release, and PyPI publication.
+5. After every pre-publication gate passes, create an annotated tag with
+   `git tag -a vX.Y.Z -m "Release vX.Y.Z"` and push it with
+   `git push origin vX.Y.Z`.
+6. Run post-publication verification: remote tag visibility, tag workflow
+   completion, GitHub Release, and PyPI publication.
 7. Deploy to this workstation by installing the released wheel/package, then
    verify `netcoredbg-mcp --version` and a package import smoke.
 8. Update `.agent/CONTINUITY.md` and the live dashboard with the final verdict.
