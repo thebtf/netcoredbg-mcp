@@ -3,10 +3,13 @@ using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 using Microsoft.Win32;
 
 namespace WpfSmokeApp;
@@ -26,6 +29,15 @@ public partial class MainWindow : Window
     private int _lastEdgeScrollLastVisible = -1;
     private bool _suppressCharacterSelection;
     private bool _suppressSelectionSync;
+    private const int HoverCloseDelayMs = 500;
+    private readonly DispatcherTimer _hoverCloseTimer;
+    private bool _measurementArmed;
+    private bool _hoverSurfaceVisible;
+    private string _hoverState = "closed";
+    private int PreviewMouseLeftButtonDownCount { get; set; }
+    private int PreviewMouseLeftButtonUpCount { get; set; }
+    private int ClickCount { get; set; }
+    private int FocusChangeCount { get; set; }
 
     private sealed class CueDragPayload
     {
@@ -75,6 +87,140 @@ public partial class MainWindow : Window
         InitializeComponent();
         DataContext = _viewModel;
         _mutableFile = Environment.GetEnvironmentVariable("WPF_SMOKE_MUTABLE_FILE");
+        _hoverCloseTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(HoverCloseDelayMs),
+        };
+        _hoverCloseTimer.Tick += HoverCloseTimer_Tick;
+        HoverOverlay.AddHandler(
+            ButtonBase.ClickEvent,
+            new RoutedEventHandler(HoverRegion_Click),
+            handledEventsToo: true);
+        SetHoverState("closed", surfaceVisible: false);
+    }
+
+    private void HoverFocusSentinel_GotKeyboardFocus(
+        object sender,
+        KeyboardFocusChangedEventArgs e)
+    {
+        ResetAndArmHoverMeasurement();
+    }
+
+    private void ResetAndArmHoverMeasurement()
+    {
+        _hoverCloseTimer.Stop();
+        PreviewMouseLeftButtonDownCount = 0;
+        PreviewMouseLeftButtonUpCount = 0;
+        ClickCount = 0;
+        FocusChangeCount = 0;
+        _measurementArmed = true;
+        SetHoverState("closed", surfaceVisible: false);
+    }
+
+    private void HoverTrigger_MouseEnter(object sender, MouseEventArgs e)
+    {
+        _hoverCloseTimer.Stop();
+        SetHoverState("open_trigger", surfaceVisible: true);
+    }
+
+    private void HoverTrigger_MouseLeave(object sender, MouseEventArgs e)
+    {
+        ScheduleHoverClose();
+    }
+
+    private void HoverFlyoutSurface_MouseEnter(object sender, MouseEventArgs e)
+    {
+        _hoverCloseTimer.Stop();
+        SetHoverState("open_flyout", surfaceVisible: true);
+    }
+
+    private void HoverFlyoutSurface_MouseLeave(object sender, MouseEventArgs e)
+    {
+        ScheduleHoverClose();
+    }
+
+    private void HoverOutsideSentinel_MouseEnter(object sender, MouseEventArgs e)
+    {
+        ScheduleHoverClose();
+    }
+
+    private void ScheduleHoverClose()
+    {
+        if (!_hoverSurfaceVisible)
+        {
+            return;
+        }
+
+        _hoverCloseTimer.Stop();
+        SetHoverState("close_pending", surfaceVisible: true);
+        _hoverCloseTimer.Start();
+    }
+
+    private void HoverCloseTimer_Tick(object? sender, EventArgs e)
+    {
+        _hoverCloseTimer.Stop();
+        SetHoverState("closed", surfaceVisible: false);
+    }
+
+    private void HoverRegion_PreviewGotKeyboardFocus(
+        object sender,
+        KeyboardFocusChangedEventArgs e)
+    {
+        if (_measurementArmed)
+        {
+            FocusChangeCount++;
+            UpdateHoverStatus();
+        }
+    }
+
+    private void HoverRegion_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (_measurementArmed)
+        {
+            PreviewMouseLeftButtonDownCount++;
+            UpdateHoverStatus();
+        }
+    }
+
+    private void HoverRegion_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (_measurementArmed)
+        {
+            PreviewMouseLeftButtonUpCount++;
+            UpdateHoverStatus();
+        }
+    }
+
+    private void HoverRegion_Click(object sender, RoutedEventArgs e)
+    {
+        if (_measurementArmed)
+        {
+            ClickCount++;
+            UpdateHoverStatus();
+        }
+    }
+
+    private void SetHoverState(string state, bool surfaceVisible)
+    {
+        _hoverState = state;
+        _hoverSurfaceVisible = surfaceVisible;
+        HoverFlyoutSurface.Visibility = surfaceVisible ? Visibility.Visible : Visibility.Collapsed;
+        UpdateHoverStatus();
+    }
+
+    private void UpdateHoverStatus()
+    {
+        _viewModel.HoverStatusText = JsonSerializer.Serialize(new
+        {
+            state = _hoverState,
+            closeDelayMs = HoverCloseDelayMs,
+            surfaceVisible = _hoverSurfaceVisible,
+            previewMouseLeftButtonDownCount = PreviewMouseLeftButtonDownCount,
+            previewMouseLeftButtonUpCount = PreviewMouseLeftButtonUpCount,
+            clickCount = ClickCount,
+            focusChangeCount = FocusChangeCount,
+            measurementArmed = _measurementArmed,
+        });
     }
 
     private void BtnInvoke_Click(object sender, RoutedEventArgs e)
@@ -694,6 +840,7 @@ public class MainViewModel : INotifyPropertyChanged
     private string _statusText = "Ready";
     private string _genderStatusText = "No gender change";
     private string _selectorSafetyStatusText = "Selector side effects: 0";
+    private string _hoverStatusText = string.Empty;
     private bool _isFeatureEnabled;
     private int _invokeCount;
     private int _selectorSafetyCount;
@@ -732,6 +879,12 @@ public class MainViewModel : INotifyPropertyChanged
     {
         get => _selectorSafetyStatusText;
         set { _selectorSafetyStatusText = value; OnPropertyChanged(); }
+    }
+
+    public string HoverStatusText
+    {
+        get => _hoverStatusText;
+        set { _hoverStatusText = value; OnPropertyChanged(); }
     }
 
     public ObservableCollection<string> Items { get; } = new()

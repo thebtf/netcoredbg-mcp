@@ -1031,6 +1031,45 @@ def register_ui_tools(
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def ui_hover(
+        ctx: Context,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+        timeout_ms: int = 5000,
+    ) -> dict:
+        """Move the real pointer over one uniquely resolved foreground UI element."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            from ..ui.hover import validate_hover_timeout
+
+            timeout_ms = validate_hover_timeout(timeout_ms)
+            ui = await _ensure_ui_connected()
+            result = await ui.hover_element(
+                automation_id=automation_id,
+                name=name,
+                control_type=control_type,
+                root_id=root_id,
+                xpath=xpath,
+                timeout_ms=timeout_ms,
+            )
+            if not isinstance(result, dict):
+                return build_error_response(
+                    f"hover: backend returned non-dict response ({type(result).__name__})",
+                    state=session.state.state,
+                )
+            return build_response(data=result, state=session.state.state)
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def ui_invoke(
         ctx: Context,

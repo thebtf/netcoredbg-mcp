@@ -14,7 +14,7 @@ set breakpoints, step through code, inspect variables, evaluate expressions, rea
 debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
 and Avalonia windows without opening an IDE.
 
-**131 MCP tools · 8 prompts · 4 resources · 1851 collected tests · release v0.21.0**
+**133 MCP tools · 8 prompts · 4 resources · 1933 collected tests · release v0.21.0**
 
 ## Quick Links
 
@@ -45,7 +45,7 @@ and Avalonia windows without opening an IDE.
 | Debug control | Launch, attach, restart, continue, pause, terminate, and step through .NET code |
 | Breakpoints | File, function, conditional, hit-count, exception, and tracepoint workflows |
 | Inspection | Threads, stack frames, scopes, variables, modules, expressions, source, disassembly, memory |
-| GUI automation | Window trees, element search, clicks, keystrokes, screenshots, annotations, clipboard, window management, UI evidence |
+| GUI automation | Window trees, element search, clicks, selector-scoped pointer hover, keystrokes, screenshots, annotations, clipboard, window management, UI evidence |
 | Build integration | Pre-launch `dotnet build`, progress notifications, build diagnostics, cleanup of locked debug processes |
 | Runtime smoke | Hygiene preflight, instrumentation groups, output checkpoints, freshness checks, bounded scenario runner |
 | Multi-agent safety | Session ownership through `mcp-mux`, read-only observers, inactivity release |
@@ -336,6 +336,12 @@ ui_take_annotated_screenshot()
 ui_click_annotated(element_id=3)
 ```
 
+`ui_hover(...)` moves the real pointer over one uniquely resolved element in the
+already-foreground debuggee window. It reports exact-window, unchanged-focus,
+pointer, and hit-test evidence without activating the window or sending a mouse
+button. Runtime-smoke v2 plans can use the equivalent `ui.hover` action; it is
+blocked before pointer movement when `input_policy.no_global_input` is enabled.
+
 ### Runtime Smoke Evidence
 
 For repeatable agent-side verification, use the runtime smoke tools together:
@@ -490,7 +496,7 @@ generics are rejected before runtime application. Use
 | Memory | 2 | `read_memory`, `write_memory` |
 | Output and build diagnostics | 4 | `get_output`, `search_output`, `get_output_tail`, `get_build_diagnostics` |
 | Runtime smoke orchestration | 21 | `debug_hygiene_preflight`, instrumentation groups, output checkpoints/assertions, freshness checks, one-shot plan execution, lifecycle start/tail/wait/result/stop, plan/probe validation, probe execution, evidence bundles, event cursors/deltas, and cleanup contracts |
-| UI automation | 54 | Window tree, element search, focus, keyboard, mouse, screenshots, annotations, selection, clipboard, window management, expand/collapse, value setting, virtualization, grid evidence, UI snapshots, UI events, and semantic monitors |
+| UI automation | 55 | Window tree, element search, focus, keyboard, mouse, selector-scoped pointer hover (`ui_hover`), screenshots, annotations, selection, clipboard, window management, expand/collapse, value setting, virtualization, grid evidence, UI snapshots, UI events, and semantic monitors |
 | Code search | 4 | `find_code_symbol`, `find_code_references`, `get_source_context`, `search_source` |
 | Edit-and-Continue | 1 | `apply_code_change` |
 | Process management | 1 | `cleanup_processes` |

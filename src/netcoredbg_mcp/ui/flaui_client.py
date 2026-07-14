@@ -13,6 +13,8 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from .hover import hover_selector, validate_hover_evidence, validate_hover_timeout
+
 logger = logging.getLogger(__name__)
 
 # Restart limits
@@ -564,6 +566,54 @@ class FlaUIBackend:
         """Find element via FlaUI bridge."""
         params = self._build_search_params(automation_id, name, control_type, root_id, xpath)
         return await self._client.call("find_element", params)
+
+    async def hover_element(
+        self,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+        timeout_ms: int = 5000,
+    ) -> dict[str, Any]:
+        """Move the real pointer over one uniquely resolved foreground element."""
+        timeout_ms = validate_hover_timeout(timeout_ms)
+        params: dict[str, Any] = self._build_search_params(
+            automation_id,
+            name,
+            control_type,
+            root_id,
+            xpath,
+        )
+        params["timeoutMs"] = timeout_ms
+        selector = hover_selector(
+            automation_id=automation_id,
+            name=name,
+            control_type=control_type,
+            root_id=root_id,
+            xpath=xpath,
+        )
+        try:
+            result = await self._client.call(
+                "hover",
+                params,
+                timeout=timeout_ms / 1000,
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            return {
+                "status": "BLOCKED",
+                "reason": "FlaUI bridge hover timed out before acknowledgement",
+                "phase": "bridge_timeout",
+                "timeoutMs": timeout_ms,
+                "pointerMutationState": "unknown",
+                "requested": {"selector": selector, "timeout_ms": timeout_ms},
+                "accepted": {"timeout_ms": "integer from 1 to 30000"},
+                "next_step": (
+                    "Re-establish exact target foreground/focus and retry; the bridge was "
+                    "restarted because pointer mutation could not be acknowledged."
+                ),
+            }
+        return validate_hover_evidence(result)
 
     async def invoke_element(
         self,
