@@ -59,8 +59,7 @@ class LargeFinalResultRegistry:
             "action_count": 9,
             "cleanup": {"status": "PASS", "attempted": [f"cleanup-{i}" for i in range(20)]},
             "evidence_refs": [
-                {"kind": "case", "ref": f"case:{i}", "summary": "x" * 300}
-                for i in range(12)
+                {"kind": "case", "ref": f"case:{i}", "summary": "x" * 300} for i in range(12)
             ],
             "compact": {
                 "status": "PASS",
@@ -333,7 +332,10 @@ def _register(
 
 
 async def _wait_for_final_bundle(capturing_mcp, run_id: str) -> dict[str, Any]:
-    for _ in range(20):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 1.0
+    data: dict[str, Any] = {}
+    while loop.time() < deadline:
         response = await capturing_mcp.tools["runtime_smoke_evidence_bundle"](
             ctx=None,
             run_id=run_id,
@@ -342,7 +344,7 @@ async def _wait_for_final_bundle(capturing_mcp, run_id: str) -> dict[str, Any]:
         if data.get("final"):
             return data
         await asyncio.sleep(0.01)
-    raise AssertionError("runtime smoke run did not finish")
+    raise AssertionError(f"runtime smoke run did not finish: {data!r}")
 
 
 @pytest.mark.asyncio
@@ -599,9 +601,7 @@ async def test_runtime_smoke_run_plan_rejects_unvalidated_plan_path(
 
     assert data["status"] == "INVALID_SETUP"
     assert data["can_run"] is False
-    assert data["validation_errors"] == [
-        "plan_path validation failed: outside project root"
-    ]
+    assert data["validation_errors"] == ["plan_path validation failed: outside project root"]
     assert data["plan_source"] == {
         "kind": "file",
         "path": str(plan_path),
@@ -800,9 +800,7 @@ async def test_runtime_smoke_run_plan_exposes_named_pack_manifest_ref(
                                             "id": "visible-row-count",
                                             "probe": "ui.grid",
                                             "expect": {"min_rows": 1},
-                                            "on_blocked": {
-                                                "next_step": "Run WPF fixture replay."
-                                            },
+                                            "on_blocked": {"next_step": "Run WPF fixture replay."},
                                         }
                                     ],
                                     "limits": {
@@ -836,7 +834,7 @@ async def test_runtime_smoke_run_plan_exposes_named_pack_manifest_ref(
             "phase": "after",
             "probe": "oracle_pack",
             "evidence_ref": "diagnostic:oracle_pack:run-plan-oracle-pack",
-        }
+        },
     ]
     assert bundle["pack_manifest"] == {
         "pack_id": "run-plan-oracle-pack",

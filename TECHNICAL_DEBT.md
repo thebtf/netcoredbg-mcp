@@ -1,6 +1,6 @@
 # Technical Debt — netcoredbg-mcp
 
-## Strategic: Python → C#/.NET platform migration (strangler-fig, deferred)
+## Strategic: Python → C#/.NET platform migration (strangler-fig, in progress)
 
 **Decision (2026-07-01, operator-approved):** the two-language split (Python core
 + C# FlaUI bridge over JSON-RPC) is a standing architectural debt. Long-term
@@ -8,6 +8,13 @@ direction is a single .NET platform. Approach is **strangler-fig, NOT rewrite**:
 gradually "strangle" Python module by module while the product keeps working —
 never a from-scratch rewrite (94k LOC of working, bug-fixed code + 52k LOC tests
 would be thrown away).
+
+**Status (2026-07-14):** migration has started with the first compatibility
+slice. `host/NetCoreDbg.Mcp.Host` is a .NET 8 stdio MCP process that launches
+the unchanged Python server and dynamically proxies its `tools/list` and
+`tools/call` contracts. The Python console entrypoint remains the published
+default; no tool family has moved to native C# yet. The next migration boundary
+is UI/FlaUI after compatibility parity is reviewed and merged.
 
 **Why it makes sense:** the product debugs .NET and the UI layer is already C#;
 Python exists only because FlaUI needed C#. Removing the split deletes the
