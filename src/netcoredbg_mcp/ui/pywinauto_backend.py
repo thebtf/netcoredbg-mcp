@@ -10,6 +10,8 @@ import asyncio
 import logging
 from typing import Any
 
+from .hover import hover_selector, validate_hover_timeout
+
 logger = logging.getLogger(__name__)
 
 # Toggle state enum values from UIA COM
@@ -159,6 +161,39 @@ class PywinautoBackend:
         element = await self._find_element_scoped(automation_id, name, control_type, root_id)
         info = await self._ui.get_element_info(element)
         return info.to_dict()
+
+    async def hover_element(
+        self,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+        timeout_ms: int = 5000,
+    ) -> dict[str, Any]:
+        """Return an explicit bounded block for unsupported physical hover."""
+        timeout_ms = validate_hover_timeout(timeout_ms)
+        return {
+            "status": "BLOCKED",
+            "backend": "pywinauto",
+            "reason": "selector-scoped pointer hover requires the FlaUI bridge backend",
+            "capability": "selector-scoped pointer hover",
+            "requested": {
+                "selector": hover_selector(
+                    automation_id=automation_id,
+                    name=name,
+                    control_type=control_type,
+                    root_id=root_id,
+                    xpath=xpath,
+                ),
+                "timeout_ms": timeout_ms,
+            },
+            "accepted": {
+                "backend": "FlaUI",
+                "capability": "selector-scoped pointer hover",
+            },
+            "next_step": "Install or build FlaUIBridge.exe and retry ui_hover.",
+        }
 
     async def invoke_element(
         self,

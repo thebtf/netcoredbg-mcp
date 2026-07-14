@@ -82,3 +82,52 @@ def test_wpf_fixture_seeds_enough_rows_for_edge_scroll_evidence() -> None:
 
     cue_rows = re.findall(r'new\("00:00:\d{2}\.0"', code)
     assert len(cue_rows) >= 20
+
+
+def test_wpf_fixture_exposes_fixed_in_window_hover_overlay() -> None:
+    xaml = (FIXTURE_ROOT / "MainWindow.xaml").read_text(encoding="utf-8")
+
+    for automation_id in (
+        "hoverRegion",
+        "hoverTrigger",
+        "hoverFlyoutSurface",
+        "hoverOutsideSentinel",
+        "hoverFocusSentinel",
+        "hoverStatus",
+    ):
+        assert f'AutomationProperties.AutomationId="{automation_id}"' in xaml
+
+    assert 'x:Name="HoverOverlay"' in xaml
+    assert 'Width="260"' in xaml
+    assert 'Height="220"' in xaml
+    assert 'MouseEnter="HoverTrigger_MouseEnter"' in xaml
+    assert 'MouseEnter="HoverFlyoutSurface_MouseEnter"' in xaml
+    assert 'MouseEnter="HoverOutsideSentinel_MouseEnter"' in xaml
+    assert '<GroupBox x:Name="HoverOverlay"' in xaml
+    assert '<Button x:Name="HoverTrigger"' in xaml
+    assert '<GroupBox x:Name="HoverFlyoutSurface"' in xaml
+    assert '<Button x:Name="HoverOutsideSentinel"' in xaml
+    assert xaml.count('AutomationProperties.AutomationId="hoverDuplicateRoot"') == 2
+    assert xaml.count('AutomationProperties.AutomationId="hoverDuplicateTarget"') == 2
+    assert '<Canvas Grid.Row="3"' in xaml
+    assert 'HorizontalAlignment="Right" VerticalAlignment="Bottom"' in xaml
+    assert "<Popup" not in xaml
+    assert "<ContextMenu" not in xaml
+    assert "<ToolTip" not in xaml
+
+
+def test_wpf_fixture_hover_status_arms_post_focus_measurement_and_delayed_close() -> None:
+    code = (FIXTURE_ROOT / "MainWindow.xaml.cs").read_text(encoding="utf-8")
+
+    assert "HoverCloseDelayMs = 500" in code
+    assert "HoverFocusSentinel_GotKeyboardFocus" in code
+    assert "ResetAndArmHoverMeasurement" in code
+    assert "measurementArmed" in code
+    assert "PreviewMouseLeftButtonDownCount" in code
+    assert "PreviewMouseLeftButtonUpCount" in code
+    assert "ClickCount" in code
+    assert "FocusChangeCount" in code
+    assert 'SetHoverState("open_trigger", surfaceVisible: true)' in code
+    assert 'SetHoverState("open_flyout", surfaceVisible: true)' in code
+    assert 'SetHoverState("close_pending", surfaceVisible: true)' in code
+    assert 'SetHoverState("closed", surfaceVisible: false)' in code

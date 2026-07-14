@@ -73,6 +73,7 @@ public static class JsonRpcHandler
             ["click"] = ClickCommands.Click,
             ["right_click"] = ClickCommands.RightClick,
             ["double_click"] = ClickCommands.DoubleClick,
+            ["hover"] = HoverCommands.Hover,
             ["drag"] = ClickCommands.Drag,
             ["drag_path"] = ClickCommands.DragPath,
             ["send_system_event"] = SystemEventCommands.SendSystemEvent,
