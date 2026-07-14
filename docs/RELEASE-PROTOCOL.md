@@ -72,7 +72,7 @@ pre-publication gates also block tag creation.
 | Local release-prep branch and commit | Automatic | Sensitive content, incoherent diff, or unrelated dirty state | Git status, diff, and gate output |
 | Release-prep PR creation | Automatic | Unreviewed broad product change outside release-owned files | PR URL and changed-file list |
 | PR merge | Automatic after independent MCP PR review and required checks are clean | `fix_now`, unresolved mandatory review threads, failed checks, or high-risk scope expansion | MCP PR summary, GitHub merge state, status checks |
-| PATCH or MINOR tag and remote publication | Automatic after the completed integration scope is on `main`, no dependent slice in the same integration wave remains active, and every pre-publication gate passes | MAJOR/breaking change, tag collision, failed pre-publication gate, failed post-publication verification, ambiguous scope, or production/customer deployment outside this workstation | Pre-publication gate evidence; post-publication: remote tag, workflow status, release URL, package smoke |
+| PATCH or MINOR tag and remote publication | Automatic after the completed integration scope is on `main`, no dependent slice in the same integration wave remains active, and every pre-publication gate passes | MAJOR/breaking change, tag collision, failed pre-publication gate, ambiguous scope, production/customer deployment outside this workstation, tag move/delete/reuse, or genuinely high-risk/ambiguous/destructive recovery | Pre-publication gate evidence; post-publication: remote tag, workflow status, release URL, package smoke |
 | MAJOR or breaking release | Approval required | Always | Explicit user approval naming the version |
 | Production/customer deployment outside this workstation | Approval required | Always | Named target, deploy plan, health checks |
 
@@ -80,7 +80,11 @@ Project default: `auto_patch_minor_after_verified_integration`. A separate
 `release`, `go ahead`, or equivalent command is not required once a concrete
 integration scope has reached the automatic trigger above. The release still
 stops on any failed pre-publication gate or post-publication verification row;
-approval is not a substitute for green gates.
+a pushed tag enters Recovery After Tag Push. Same-tag publication repair/retry
+there remains automatic when the tagged commit and artifacts are unchanged;
+new-patch correction after a pushed tag also remains automatic when it follows
+Recovery After Tag Push, unless an existing high-risk approval trigger applies.
+Approval is not a substitute for green gates.
 
 ## Version Alignment
 
@@ -128,9 +132,14 @@ as the only release-note source for a milestone release.
 ## Recovery After Tag Push
 
 A pushed release tag is immutable. Never move, delete, or reuse it.
-Publication-step repair and re-verification for the same `vX.Y.Z` remain within
-PATCH/MINOR release autonomy when no code, metadata, or artifact change is
-required.
+
+Same-tag publication repair and re-verification for `vX.Y.Z` remain within
+PATCH/MINOR release autonomy when the tagged commit and release artifacts are
+unchanged. When code, metadata, or artifacts must change, a new-patch correction
+also remains automatic: bump to a new PATCH version, rerun every mandatory
+pre-publication gate, publish a new annotated tag on the corrected `main`
+commit, and run post-publication verification—unless an existing high-risk
+approval trigger applies.
 
 | Situation | Action |
 | --- | --- |
