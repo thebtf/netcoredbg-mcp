@@ -240,6 +240,30 @@ public static class HoverCommands
             return deadlineFailure;
         }
 
+        var foregroundHwndImmediatelyBeforeMove = GetForegroundWindow();
+        if (foregroundHwndImmediatelyBeforeMove != targetRootHwnd)
+        {
+            return NotStartedFailure(
+                "BLOCKED",
+                "exact target-root foreground changed before pointer movement",
+                "foreground_immediately_before_move",
+                timeoutMs,
+                stopwatch,
+                requested: RequestedSelector(@params),
+                accepted: new JsonObject { ["foregroundHwnd"] = targetRootHwnd.ToInt64() },
+                nextStep: "Restore the exact target root to the foreground and retry.",
+                extra: new JsonObject
+                {
+                    ["targetRootHwnd"] = targetRootHwnd.ToInt64(),
+                    ["targetProcessId"] = targetProcessId,
+                    ["foregroundHwndBefore"] = foregroundHwndBefore.ToInt64(),
+                    ["foregroundHwndImmediatelyBeforeMove"] = foregroundHwndImmediatelyBeforeMove.ToInt64(),
+                    ["foregroundVerified"] = false,
+                    ["targetRect"] = RectJson(targetRect),
+                    ["requestedPoint"] = PointJson(requestedPoint),
+                });
+        }
+
         ClickCommands.MoveCursor(requestedPoint.X, requestedPoint.Y);
         pointerMoved = true;
         Thread.Sleep(PointerSettleMs);
@@ -387,6 +411,7 @@ public static class HoverCommands
         var focusUnchanged = SafeCompare(focusBefore, focusAfter, automation);
         var foregroundHwndAfter = GetForegroundWindow();
         var foregroundVerified = foregroundHwndBefore == targetRootHwnd &&
+            foregroundHwndImmediatelyBeforeMove == targetRootHwnd &&
             foregroundHwndAfter == targetRootHwnd;
 
         if (!foregroundVerified || !focusUnchanged)
@@ -432,6 +457,7 @@ public static class HoverCommands
             ["targetRootHwnd"] = targetRootHwnd.ToInt64(),
             ["targetProcessId"] = targetProcessId,
             ["foregroundHwndBefore"] = foregroundHwndBefore.ToInt64(),
+            ["foregroundHwndImmediatelyBeforeMove"] = foregroundHwndImmediatelyBeforeMove.ToInt64(),
             ["foregroundHwndAfter"] = foregroundHwndAfter.ToInt64(),
             ["foregroundVerified"] = true,
             ["focusBefore"] = ElementCommands.BuildElementInfo(focusBefore, includePatterns: false),
@@ -468,9 +494,27 @@ public static class HoverCommands
             return (mainWindow, mainWindow, null);
         }
 
+        var (topLevelWindows, topLevelEnumerationFailure) =
+            GetProcessTopLevelWindowsStrict(mainWindow, automation);
+        if (topLevelEnumerationFailure is not null)
+        {
+            return (
+                null,
+                null,
+                NotStartedFailure(
+                    "BLOCKED",
+                    topLevelEnumerationFailure,
+                    "resolve_root",
+                    timeoutMs,
+                    stopwatch,
+                    requested: new JsonObject { ["rootAutomationId"] = rootId },
+                    accepted: new JsonObject { ["rootEnumeration"] = "all target-process top-level windows readable" },
+                    nextStep: "Reconnect to a responsive target process and retry root uniqueness validation."));
+        }
+
         var rootMatches = new List<(AutomationElement Element, AutomationElement Window)>();
         var condition = new ConditionFactory(automation.PropertyLibrary).ByAutomationId(rootId);
-        foreach (var window in ElementCommands.GetProcessTopLevelWindows(mainWindow, automation))
+        foreach (var window in topLevelWindows!)
         {
             if (MatchesRootIdentity(window, rootId))
             {
@@ -524,6 +568,83 @@ public static class HoverCommands
         }
 
         return (rootMatches[0].Element, rootMatches[0].Window, null);
+    }
+
+    private static (
+        List<AutomationElement>? Windows,
+        string? Failure) GetProcessTopLevelWindowsStrict(
+            AutomationElement mainWindow,
+            UIA3Automation automation)
+    {
+        var processId = JsonRpcHandler.ProcessId;
+        if (processId <= 0)
+        {
+            return (
+                null,
+                "top-level window enumeration is incomplete: attached process id is unavailable");
+        }
+
+        AutomationElement[] siblings;
+        try
+        {
+            var desktop = automation.GetDesktop();
+            var condition = new ConditionFactory(automation.PropertyLibrary).ByProcessId(processId);
+            siblings = desktop.FindAllChildren(condition);
+        }
+        catch (Exception ex)
+        {
+            return (
+                null,
+                $"top-level window enumeration is incomplete: {ex.Message}");
+        }
+
+        if (siblings.Length == 0)
+        {
+            return (
+                null,
+                "top-level window enumeration is incomplete: no attached-process windows were returned");
+        }
+
+        var windows = new List<AutomationElement>(siblings.Length);
+        var seenHandles = new HashSet<IntPtr>();
+        foreach (var sibling in siblings)
+        {
+            IntPtr handle;
+            int siblingProcessId;
+            try
+            {
+                handle = sibling.Properties.NativeWindowHandle.ValueOrDefault;
+                siblingProcessId = sibling.Properties.ProcessId.ValueOrDefault;
+            }
+            catch (Exception ex)
+            {
+                return (
+                    null,
+                    $"top-level window enumeration is incomplete: window identity is unreadable ({ex.Message})");
+            }
+
+            if (handle == IntPtr.Zero || siblingProcessId != processId)
+            {
+                return (
+                    null,
+                    "top-level window enumeration is incomplete: every returned window must expose a non-zero HWND owned by the attached process");
+            }
+
+            if (seenHandles.Add(handle))
+            {
+                windows.Add(sibling);
+            }
+        }
+
+        var mainWindowHandle = SafeWindowHandle(mainWindow);
+        if (mainWindowHandle == IntPtr.Zero || !seenHandles.Contains(mainWindowHandle))
+        {
+            return (
+                null,
+                "top-level window enumeration is incomplete: the connected root window was not present in the process-wide result");
+        }
+
+        return (windows, null);
     }
 
     private static (

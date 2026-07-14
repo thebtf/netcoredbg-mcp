@@ -15,7 +15,7 @@ def test_hover_bridge_command_is_registered_without_changing_shared_resolver() -
 
     assert '["hover"] = HoverCommands.Hover' in handler
     assert "public static JsonNode Hover(" in hover
-    assert "ElementCommands.GetProcessTopLevelWindows" in hover
+    assert "GetProcessTopLevelWindowsStrict" in hover
     assert "FindAllDescendants" in hover
     assert "ResolveHoverRoot" in hover
     assert "ResolveUniqueTarget" in hover
@@ -91,6 +91,21 @@ def test_hover_root_enumeration_failure_blocks_uniqueness_proof() -> None:
     assert "descendants = Array.Empty<AutomationElement>()" not in resolver
 
 
+def test_hover_root_uniqueness_requires_complete_top_level_window_enumeration() -> None:
+    hover = BRIDGE_COMMAND.read_text(encoding="utf-8")
+    resolver = hover.rsplit("ResolveHoverRoot(", 1)[1].split("private static (", 1)[0]
+    strict_enumerator = hover.rsplit("GetProcessTopLevelWindowsStrict(", 1)[1].split(
+        "private static ", 1
+    )[0]
+
+    assert "ElementCommands.GetProcessTopLevelWindows" not in resolver
+    assert "GetProcessTopLevelWindowsStrict" in resolver
+    assert "FindAllChildren" in strict_enumerator
+    assert "NativeWindowHandle" in strict_enumerator
+    assert "top-level window enumeration is incomplete" in strict_enumerator
+    assert "all target-process top-level windows readable" in resolver
+
+
 def test_hover_target_enumeration_failure_blocks_before_pointer_mutation() -> None:
     hover = BRIDGE_COMMAND.read_text(encoding="utf-8")
     resolver = hover.rsplit("ResolveUniqueTarget(", 1)[1].split("private static (", 1)[0]
@@ -134,6 +149,18 @@ def test_hover_bridge_reserves_pointer_settle_before_mutation() -> None:
     assert move_deadline < settle_reserve < pointer_move
     assert deadline_helper != -1
     assert "elapsedMs + requiredRemainingMs < timeoutMs" in hover
+
+
+def test_hover_bridge_rechecks_foreground_immediately_before_pointer_mutation() -> None:
+    hover = BRIDGE_COMMAND.read_text(encoding="utf-8")
+
+    focus_preflight = hover.index("focusBefore = automation.FocusedElement();")
+    pointer_move = hover.index("ClickCommands.MoveCursor")
+    final_foreground_read = hover.rfind("GetForegroundWindow()", focus_preflight, pointer_move)
+
+    assert focus_preflight < final_foreground_read < pointer_move
+    assert '"foreground_immediately_before_move"' in hover[final_foreground_read:pointer_move]
+    assert 'pointerMutationState"] = "not_started"' in hover
 
 
 def test_hover_bridge_blocks_missing_focus_and_hit_evidence() -> None:
