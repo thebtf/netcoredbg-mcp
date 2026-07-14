@@ -14,7 +14,7 @@ set breakpoints, step through code, inspect variables, evaluate expressions, rea
 debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
 and Avalonia windows without opening an IDE.
 
-**135 MCP tools · 8 prompts · 4 resources · 2026 collected tests · release v0.21.0**
+**135 MCP tools · 8 prompts · 4 resources · 2026 collected tests · release v0.23.0**
 
 ## Quick Links
 
@@ -23,20 +23,23 @@ and Avalonia windows without opening an IDE.
 - **Reference:** [Available Tools](#available-tools) · [Resources](#mcp-resources) · [Prompts](#mcp-prompts) · [Architecture](#architecture-overview)
 - **Project:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## What's New in v0.21.0
+## What's New in v0.23.0
 
-- **True runner-vs-operator input separation** — no-operator runtime-smoke runs
-  now distinguish emulated runner input from real external keyboard/mouse at the
-  source. Runner injection is stamped with a `RunnerInputSignature` and captured
-  by a low-level event recorder, replacing the previous `GetLastInputInfo`
-  window heuristic and its single ambiguity verdict.
-- **3-way provenance attribution** — `run_confidence` classifies each event as
-  runner-injected (`CLEAN_PROVEN`), foreign-injected, or physical
-  (`DIRTY_UNPROVEN`). An empty-but-present event stream is proven clean; a
-  malformed or absent stream fails closed.
-- **Breakpoint clear rollback fix** — clearing function breakpoints now rolls
-  back on a failed breakpoint sync instead of reporting a false success
-  (#220, #80).
+- **Read-only launch compatibility preflight** —
+  `inspect_debug_launch_compatibility(program)` reports the target runtime,
+  active `dbgshim`, cached same-major candidate, and predicted launch-time
+  replacement without building, launching, or mutating shared debugger state.
+- **Selector-scoped real pointer hover** — `ui_hover(...)` and runtime-smoke v2
+  `ui.hover` move the pointer only after one exact foreground target is resolved,
+  then return unchanged-focus, hit-test, timeout, and cleanup evidence without
+  clicking or activating another window.
+- **Bounded adapter-owned activity telemetry** —
+  `debuggee_activity(window_ms)` samples continued/stopped/step, output, module,
+  and trace deltas without pausing the debuggee. Instruction counts are reported
+  as unavailable instead of inferred.
+- **More reliable runtime smoke** — output checkpoint anchoring,
+  `diagnostic-latest.json` resolution, target realization retries, and focus
+  recovery now handle slow or newly materialized UI surfaces more consistently.
 
 ## Highlights
 

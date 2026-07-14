@@ -80,7 +80,7 @@ def test_bridge_send_keys_routes_to_flash_focus_only_in_stealth_mode() -> None:
     send_keys_start = command.index("public static JsonNode SendKeys(")
     batch_start = command.index("public static JsonNode SendKeysBatch(")
     send_keys_body = command[send_keys_start:batch_start]
-    batch_body = command[batch_start: command.index("public static JsonNode SetValue(")]
+    batch_body = command[batch_start : command.index("public static JsonNode SetValue(")]
 
     assert "if (JsonRpcHandler.Stealth)" in send_keys_body
     assert "return StealthCommands.FlashFocusSendKeys(@params, automation, mainWindow);" in (
@@ -116,15 +116,13 @@ def test_bridge_click_routes_stealth_to_invoke_or_flash_focus_click() -> None:
     assert "invokePattern.Invoke();" in automation_body
     assert '["method"] = "InvokePattern"' in automation_body
     expected_saved_foreground = (
-        "var savedForeground = JsonRpcHandler.Stealth ? "
-        "GetForegroundWindow() : IntPtr.Zero;"
+        "var savedForeground = JsonRpcHandler.Stealth ? GetForegroundWindow() : IntPtr.Zero;"
     )
     assert expected_saved_foreground in automation_body
     assert "SetForegroundWindow(savedForeground);" in automation_body
     assert "if (JsonRpcHandler.Stealth)" in automation_body
     assert (
-        "return FlashFocusClick(center.X, center.Y, mainWindow, automationId);"
-        in automation_body
+        "return FlashFocusClick(center.X, center.Y, mainWindow, automationId);" in automation_body
     )
     assert "private static JsonObject FlashFocusClick" in command
     assert "GetForegroundWindow() != targetHwnd" in command
@@ -148,7 +146,7 @@ def test_bridge_coordinate_mouse_input_verifies_foreground_activation() -> None:
         encoding="utf-8"
     )
 
-    ensure_start = command.index("private static void EnsureForeground(")
+    ensure_start = command.index("internal static void EnsureForeground(")
     ensure_body = command[ensure_start:]
 
     assert "AttachThreadInput(currentThread, threadId, true)" in ensure_body
@@ -168,9 +166,7 @@ def test_bridge_screenshot_uses_printwindow_in_stealth_mode() -> None:
     assert "PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT)" in command
     assert '["base64"] = base64' in command
     assert "Capture.Rectangle(rect)" in command
-    assert command.index("if (JsonRpcHandler.Stealth)") < command.index(
-        "Capture.Rectangle(rect)"
-    )
+    assert command.index("if (JsonRpcHandler.Stealth)") < command.index("Capture.Rectangle(rect)")
 
 
 def test_bridge_screenshot_falls_back_to_flash_focus_bitblt_when_blank() -> None:
@@ -376,6 +372,7 @@ async def test_session_manager_stealth_launch_defers_foreground_restore_until_ui
     manager._client = FakeLaunchClient()
     manager._state = SimpleNamespace(state=DebugState.IDLE, process_id=None)
     manager._initialized_event = asyncio.Event()
+    manager._execution_event = asyncio.Event()
     manager._initialized_event.set()
     manager._breakpoints = SimpleNamespace(
         function_breakpoints=[],
@@ -496,8 +493,7 @@ async def test_ui_get_window_tree_reconnects_same_pid_after_bridge_disconnect() 
         async def get_window_tree(self, max_depth: int = 3, max_children: int = 50) -> dict:
             if not self.connected:
                 raise RuntimeError(
-                    "FlaUI bridge error: Internal error: Not connected. "
-                    "Call 'connect' first."
+                    "FlaUI bridge error: Internal error: Not connected. Call 'connect' first."
                 )
             return {"windows": [{"automationId": "MainWindow"}], "count": 1}
 
@@ -545,8 +541,7 @@ async def test_ui_get_window_tree_reconnects_same_pid_without_foreground_activat
         async def get_window_tree(self, max_depth: int = 3, max_children: int = 50) -> dict:
             if not self.connected:
                 raise RuntimeError(
-                    "FlaUI bridge error: Internal error: Not connected. "
-                    "Call 'connect' first."
+                    "FlaUI bridge error: Internal error: Not connected. Call 'connect' first."
                 )
             return {"windows": [{"automationId": "MainWindow"}], "count": 1}
 
@@ -592,8 +587,7 @@ async def test_ui_find_element_reconnects_same_pid_after_bridge_stop() -> None:
     async def find_element(**_: Any) -> dict[str, Any]:
         if not backend._client.is_running:
             raise RuntimeError(
-                "FlaUI bridge error: Internal error: Not connected. "
-                "Call 'connect' first."
+                "FlaUI bridge error: Internal error: Not connected. Call 'connect' first."
             )
         return {"automationId": "btnInvoke", "name": "Invoke", "controlType": "Button"}
 

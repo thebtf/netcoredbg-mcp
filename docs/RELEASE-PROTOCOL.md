@@ -28,6 +28,18 @@ It is mandatory when a change affects any of these surfaces:
 
 ## Required Gates
 
+Pre-publication gates must pass before annotated tag creation and push. Tag
+creation and push depend only on these rows plus a clean tag-collision check;
+they do not wait on remote tag visibility, workflow completion, GitHub Release,
+PyPI publication, or post-publication local workstation deploy evidence. The
+built-wheel install smoke row remains mandatory before tagging.
+
+Post-publication verification rows confirm publication after the tag is pushed.
+Any failed gate or verification row stops release completion; failed
+pre-publication gates also block tag creation.
+
+### Pre-publication gates
+
 | Gate | Command / evidence | Blocks release when |
 | --- | --- | --- |
 | Release git readiness | `git fetch --prune origin`; release branch clean and equal to `origin/main`; stale worktrees/branches classified and cleaned preserve-first | Any dirty, unique, abandoned, stale, or unsynchronized release state remains |
@@ -41,8 +53,16 @@ It is mandatory when a change affects any of these surfaces:
 | Wheel install smoke | Install the built wheel into a disposable environment and run `netcoredbg-mcp --version` plus an import smoke | Install, import, or CLI version smoke fails |
 | Production playbook | Execute `docs/PRODUCTION-TESTING-PLAYBOOK.md` in customer mode and record a run report | Overall verdict is `BROKEN` or `PARTIALLY_WORKS` for a release that claims those product flows as shipped |
 | MCP PR review | Release-prep PR summary reports zero unresolved blocking findings, and reviewer status is clean enough for merge | Any `fix_now` or unresolved mandatory review thread remains |
-| Tag publication | Annotated `vX.Y.Z` tag pushed to origin and visible through `git ls-remote --tags origin refs/tags/vX.Y.Z` | Tag is missing, lightweight, unpushed, or collides with an existing remote tag |
-| GitHub/PyPI publication | Tag workflow succeeds; GitHub release exists; PyPI package is visible or propagation delay is explicitly recorded with workflow success evidence | Workflow fails, release missing, package missing after normal propagation, or verification cannot be performed |
+| Tag collision check | `git ls-remote --tags origin refs/tags/vX.Y.Z` returns empty before tag creation | Target tag already exists on origin |
+
+### Post-publication verification
+
+| Verification | Command / evidence | Blocks release completion when |
+| --- | --- | --- |
+| Remote tag visibility | Fetch `refs/tags/vX.Y.Z` into a temporary non-tag ref (for example `git fetch origin refs/tags/vX.Y.Z:refs/tmp/verify-vX.Y.Z`); require `git cat-file -t refs/tmp/verify-vX.Y.Z` to equal `tag`; delete the temporary ref; and confirm `git ls-remote --tags origin refs/tags/vX.Y.Z` is non-empty | Tag is missing, lightweight, or not visible on origin |
+| Tag workflow completion | Locate the exact `.github/workflows/publish.yml` run triggered by `event=push` for tag `vX.Y.Z` whose head SHA matches the annotated tag target; capture that run ID; require `gh run view <run-id>` to report `completed` / `success` | Workflow fails, is ambiguous, or cannot be verified |
+| GitHub Release | `gh release view vX.Y.Z` | Release missing |
+| PyPI publication | PyPI package is visible or propagation delay is explicitly recorded with workflow success evidence | Package missing after normal propagation, or verification cannot be performed |
 | Local deploy smoke | Workstation installation is updated to the released package or released wheel; `netcoredbg-mcp --version` reports `X.Y.Z` | Local executable still reports the prior version |
 
 ## Release Autonomy
@@ -51,14 +71,20 @@ It is mandatory when a change affects any of these surfaces:
 | --- | --- | --- | --- |
 | Local release-prep branch and commit | Automatic | Sensitive content, incoherent diff, or unrelated dirty state | Git status, diff, and gate output |
 | Release-prep PR creation | Automatic | Unreviewed broad product change outside release-owned files | PR URL and changed-file list |
-| PR merge | Automatic after MCP PR review and required checks are clean when the user has authorized auto-merge for this session | `fix_now`, unresolved mandatory review threads, failed checks, or high-risk scope expansion | MCP PR summary, GitHub merge state, status checks |
-| PATCH or MINOR tag and remote publication | Automatic when the current user directive explicitly authorizes release/tag/deploy and all gates above pass | MAJOR/breaking change, tag collision, failed release gate, or missing publication evidence | Remote tag, workflow status, release URL, package smoke |
+| PR merge | Automatic after independent MCP PR review and required checks are clean | `fix_now`, unresolved mandatory review threads, failed checks, or high-risk scope expansion | MCP PR summary, GitHub merge state, status checks |
+| PATCH or MINOR tag and remote publication | Automatic after the completed integration scope is on `main`, no dependent slice in the same integration wave remains active, and every pre-publication gate passes | MAJOR/breaking change, tag collision, failed pre-publication gate, ambiguous scope, production/customer deployment outside this workstation, secrets, or destructive cleanup with unpreserved work | Pre-publication gate evidence; post-publication: remote tag, workflow status, release URL, package smoke |
 | MAJOR or breaking release | Approval required | Always | Explicit user approval naming the version |
 | Production/customer deployment outside this workstation | Approval required | Always | Named target, deploy plan, health checks |
 
-Project default: `auto_patch_minor_after_explicit_release_directive`. The
-release still stops on any failed evidence gate. Approval is not a substitute
-for green gates.
+Project default: `auto_patch_minor_after_verified_integration`. A separate
+`release`, `go ahead`, or equivalent command is not required once a concrete
+integration scope has reached the automatic trigger above. The release still
+stops on any failed pre-publication gate or post-publication verification row;
+a pushed tag enters Recovery After Tag Push. Same-tag publication repair/retry
+there remains automatic when the tagged commit and artifacts are unchanged;
+new-patch correction after a pushed tag also remains automatic when it follows
+Recovery After Tag Push, unless an existing high-risk approval trigger applies.
+Approval is not a substitute for green gates.
 
 ## Version Alignment
 
@@ -92,12 +118,35 @@ as the only release-note source for a milestone release.
 3. Open a PR, run MCP PR review, fix or resolve findings, and merge only after
    review readiness is clean.
 4. Fast-forward local `main` to `origin/main`.
-5. Create an annotated tag with `git tag -a vX.Y.Z -m "Release vX.Y.Z"` and
-   push it with `git push origin vX.Y.Z`.
-6. Verify the tag workflow, GitHub Release, and PyPI publication.
-7. Deploy to this workstation by installing the released wheel/package, then
-   verify `netcoredbg-mcp --version` and a package import smoke.
+5. After every pre-publication gate passes, create an annotated tag with
+   `git tag -a vX.Y.Z -m "Release vX.Y.Z"` and push it with
+   `git push origin vX.Y.Z`.
+6. Run all five post-publication verification rows from Required Gates: remote tag
+   visibility, exact tag workflow completion, GitHub Release, PyPI publication,
+   and Local deploy smoke. Any failed row blocks release completion and the final
+   verdict per Terminal Verdict.
+7. For the required Local deploy smoke row: install the released wheel/package
+   on this workstation, then verify `netcoredbg-mcp --version` reports `X.Y.Z`
+   and a package import smoke.
 8. Update `.agent/CONTINUITY.md` and the live dashboard with the final verdict.
+
+## Recovery After Tag Push
+
+A pushed release tag is immutable. Never move, delete, or reuse it.
+
+Same-tag publication repair and re-verification for `vX.Y.Z` remain within
+PATCH/MINOR release autonomy when the tagged commit and release artifacts are
+unchanged. When code, metadata, or artifacts must change, a new-patch correction
+also remains automatic: bump to a new PATCH version, rerun every mandatory
+pre-publication gate, publish a new annotated tag on the corrected `main`
+commit, and run post-publication verification—unless an existing high-risk
+approval trigger applies.
+
+| Situation | Action |
+| --- | --- |
+| Post-publication verification fails; tagged commit and release artifacts are correct | Repair or retry only the failed publication step for the same `vX.Y.Z`, then re-run post-publication verification |
+| Code, metadata, or artifacts must change | Create and merge a hotfix PR that bumps to a new patch version, rerun every mandatory pre-publication gate, publish a new annotated tag on the corrected `main` commit, and run post-publication verification for the new version |
+| Target tag already exists on origin before creation | Stop; do not overwrite or reuse the existing tag |
 
 ## Terminal Verdict
 
