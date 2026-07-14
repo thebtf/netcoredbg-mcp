@@ -84,6 +84,11 @@ class TracepointManager:
         return dict(self._tracepoints)
 
     @property
+    def append_generation(self) -> int:
+        """Absolute count of trace entries appended during this manager lifetime."""
+        return self._trace_append_generation
+
+    @property
     def is_log_full(self) -> bool:
         """True when the trace buffer has reached its maximum capacity."""
         return len(self._trace_buffer) >= self._trace_buffer.maxlen  # type: ignore[operator]

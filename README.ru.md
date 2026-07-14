@@ -14,7 +14,7 @@
 вычислять выражения, читать вывод отладки и управлять поверхностями Windows UI
 Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 
-**134 MCP-инструмента · 8 промптов · 4 ресурса · 2002 собранных теста · релиз v0.21.0**
+**135 MCP-инструмента · 8 промптов · 4 ресурса · 2026 собранных тестов · релиз v0.21.0**
 
 ## Быстрые ссылки
 
@@ -269,6 +269,16 @@ claude mcp add netcoredbg -- netcoredbg-mcp --project-from-cwd
 `continue_execution`, `step_over`, `step_into` и `step_out` возвращаются, когда
 debuggee останавливается, выходит, завершается или достигает timeout.
 
+### Пассивная проверка активности
+
+Пока debuggee работает в состоянии `RUNNING`,
+`debuggee_activity(window_ms=1000)` учитывает только события, уже полученные
+сессией через DAP: продолжения и остановки, output, module events и trace
+appends. Инструмент не приостанавливает debuggee, не выполняет пошаговые
+команды, не вычисляет выражения и не читает process-health signals. Количество
+выполненных инструкций явно помечается как недоступное; активность не
+интерпретируется как признак исправности или зависания.
+
 ### Типичный workflow
 
 ```text
@@ -497,7 +507,7 @@ Rude edits вроде добавления fields, изменения method sig
 
 | Категория | Количество | Tools |
 |---|---:|---|
-| Debug control | 13 | `start_debug`, `inspect_debug_launch_compatibility`, `attach_debug`, `stop_debug`, `restart_debug`, `continue_execution`, `pause_execution`, `step_over`, `get_step_in_targets`, `step_into`, `step_out`, `get_debug_state`, `terminate_debug` |
+| Debug control | 14 | `start_debug`, `inspect_debug_launch_compatibility`, `attach_debug`, `stop_debug`, `restart_debug`, `continue_execution`, `pause_execution`, `step_over`, `get_step_in_targets`, `step_into`, `step_out`, `get_debug_state`, `debuggee_activity`, `terminate_debug` |
 | Breakpoints and exceptions | 7 | `add_breakpoint`, `remove_breakpoint`, `list_breakpoints`, `clear_breakpoints`, `add_function_breakpoint`, `remove_function_breakpoint`, `configure_exceptions` |
 | Inspection and DAP coverage | 15 | `get_threads`, `get_call_stack`, `get_scopes`, `get_variables`, `evaluate_expression`, `set_variable`, `get_exception_info`, `get_modules`, `get_progress`, `get_loaded_sources`, `disassemble`, `get_locations`, `quick_evaluate`, `get_exception_context`, `get_stop_context` |
 | Tracepoints | 6 | `add_tracepoint`, `remove_tracepoint`, `get_trace_log`, `get_trace_delta`, `mark_trace_cursor`, `clear_trace_log` |

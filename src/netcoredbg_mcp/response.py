@@ -36,6 +36,7 @@ VALID_ACTIONS: dict[str, list[str]] = {
         "get_output_tail",
         "search_output",
         "get_debug_state",
+        "debuggee_activity",
         "get_progress",
         "stop_debug",
         "add_breakpoint",

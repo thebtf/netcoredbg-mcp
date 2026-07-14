@@ -344,7 +344,7 @@ Common: CS1002 (missing semicolon), CS0103 (undefined name), CS0246 (missing usi
 | State | You CAN do |
 |-------|-----------|
 | IDLE | start_debug, attach_debug |
-| RUNNING | pause_execution, get_output*, get_debug_state, add_breakpoint, stop_debug, quick_evaluate |
+| RUNNING | pause_execution, get_output*, get_debug_state, debuggee_activity, add_breakpoint, stop_debug, quick_evaluate |
 | STOPPED | get_call_stack, get_variables, get_scopes, evaluate_expression, step_*, continue_execution, set_variable, ui_*, apply_code_change, stop_debug, add_tracepoint, create_snapshot, analyze_collection, summarize_object, get_step_in_targets |
 | TERMINATED | get_output*, stop_debug, start_debug |
 

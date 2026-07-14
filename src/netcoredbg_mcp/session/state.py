@@ -472,6 +472,26 @@ class StoppedSnapshot:
     text: str | None = None
 
 
+@dataclass(frozen=True)
+class DebuggeeActivitySnapshot:
+    """Bounded O(1) activity counters for one debug-session epoch."""
+
+    epoch: object = field(repr=False, compare=False)
+    captured_at: float
+    state: DebugState
+    exec_state: str
+    stop_reason: str | None
+    debuggee_pid: int | None
+    continued_events: int
+    stopped_events: int
+    step_stops: int
+    output_events: int
+    module_new_events: int
+    module_changed_events: int
+    module_removed_events: int
+    trace_entries: int
+
+
 @dataclass
 class SessionState:
     """Complete debug session state."""
@@ -498,6 +518,18 @@ class SessionState:
     stop_text: str | None = None
     last_invalidation: InvalidatedEventBody | None = None
     last_memory_event: MemoryEventBody | None = None
+    activity_epoch: object = field(
+        default_factory=object,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    continued_events: int = 0
+    stopped_events: int = 0
+    step_stops: int = 0
+    module_new_events: int = 0
+    module_changed_events: int = 0
+    module_removed_events: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
