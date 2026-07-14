@@ -14,7 +14,7 @@ set breakpoints, step through code, inspect variables, evaluate expressions, rea
 debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
 and Avalonia windows without opening an IDE.
 
-**133 MCP tools · 8 prompts · 4 resources · 1933 collected tests · release v0.21.0**
+**134 MCP tools · 8 prompts · 4 resources · 1957 collected tests · release v0.21.0**
 
 ## Quick Links
 
@@ -262,6 +262,15 @@ Execution tools wait for a meaningful debugger event. `start_debug`,
 `continue_execution`, `step_over`, `step_into`, and `step_out` return when the
 debuggee stops, exits, terminates, or times out.
 
+### Passive Activity Probe
+
+While the debuggee is `RUNNING`, `debuggee_activity(window_ms=1000)` samples
+only activity the session already receives from DAP: continue/stop events,
+output, module events, and trace appends. The probe never pauses, steps,
+evaluates, or reads process-health signals. Executed-instruction counts are
+reported as unavailable, and activity is not interpreted as health or hang
+status.
+
 ### Typical Workflow
 
 ```text
@@ -486,7 +495,7 @@ generics are rejected before runtime application. Use
 
 | Category | Count | Tools |
 |---|---:|---|
-| Debug control | 13 | `start_debug`, `inspect_debug_launch_compatibility`, `attach_debug`, `stop_debug`, `restart_debug`, `continue_execution`, `pause_execution`, `step_over`, `get_step_in_targets`, `step_into`, `step_out`, `get_debug_state`, `terminate_debug` |
+| Debug control | 14 | `start_debug`, `inspect_debug_launch_compatibility`, `attach_debug`, `stop_debug`, `restart_debug`, `continue_execution`, `pause_execution`, `step_over`, `get_step_in_targets`, `step_into`, `step_out`, `get_debug_state`, `debuggee_activity`, `terminate_debug` |
 | Breakpoints and exceptions | 7 | `add_breakpoint`, `remove_breakpoint`, `list_breakpoints`, `clear_breakpoints`, `add_function_breakpoint`, `remove_function_breakpoint`, `configure_exceptions` |
 | Inspection and DAP coverage | 15 | `get_threads`, `get_call_stack`, `get_scopes`, `get_variables`, `evaluate_expression`, `set_variable`, `get_exception_info`, `get_modules`, `get_progress`, `get_loaded_sources`, `disassemble`, `get_locations`, `quick_evaluate`, `get_exception_context`, `get_stop_context` |
 | Tracepoints | 6 | `add_tracepoint`, `remove_tracepoint`, `get_trace_log`, `get_trace_delta`, `mark_trace_cursor`, `clear_trace_log` |

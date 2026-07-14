@@ -49,6 +49,7 @@ from .runtime_smoke import RuntimeSmokeSession
 from .state import (
     Breakpoint,
     BreakpointRegistry,
+    DebuggeeActivitySnapshot,
     DebugState,
     FunctionBreakpoint,
     LoadedSource,
@@ -60,6 +61,7 @@ from .state import (
     StoppedSnapshot,
     ThreadInfo,
     Variable,
+    derive_exec_state,
 )
 
 if TYPE_CHECKING:
@@ -89,6 +91,7 @@ class SessionManager:
         self._state_listeners: list[Callable[[DebugState], None]] = []
         self._initialized_event = asyncio.Event()
         self._execution_event = asyncio.Event()  # Signaled on stopped/terminated/exited
+        self._event_handlers_registered = False
         self._project_path = os.path.abspath(project_path) if project_path else None
         self._output_bytes = 0  # Track output buffer size
         self._process_registry = ProcessRegistry()
@@ -178,6 +181,34 @@ class SessionManager:
     def state(self) -> SessionState:
         """Get current session state."""
         return self._state
+
+    def activity_snapshot(self) -> DebuggeeActivitySnapshot:
+        """Capture bounded activity counters without retained payload traversal."""
+        state = self._state
+        tracepoints = self._tracepoint_manager
+        return DebuggeeActivitySnapshot(
+            epoch=state.activity_epoch,
+            captured_at=time.monotonic(),
+            state=state.state,
+            exec_state=derive_exec_state(state.state, state.stop_reason),
+            stop_reason=state.stop_reason,
+            debuggee_pid=state.process_id,
+            continued_events=state.continued_events,
+            stopped_events=state.stopped_events,
+            step_stops=state.step_stops,
+            output_events=state.output_sequence,
+            module_new_events=state.module_new_events,
+            module_changed_events=state.module_changed_events,
+            module_removed_events=state.module_removed_events,
+            trace_entries=tracepoints.append_generation if tracepoints is not None else 0,
+        )
+
+    def _begin_debuggee_epoch(self) -> None:
+        """Replace per-debuggee state before a new launch or attach request."""
+        lifecycle_state = self._state.state
+        self._state = SessionState(state=lifecycle_state)
+        self._output_bytes = 0
+        self._execution_event.clear()
 
     @property
     def client(self) -> DAPClient:
@@ -596,7 +627,10 @@ class SessionManager:
         logger.info("DAP initialized, waiting for initialized event...")
 
     def _register_event_handlers(self) -> None:
-        """Register DAP event handlers."""
+        """Register DAP event handlers once for this manager-owned client."""
+        if self._event_handlers_registered:
+            return
+
         self._client.on_event(Events.INITIALIZED, self._on_initialized)
         self._client.on_event(Events.STOPPED, self._on_stopped)
         self._client.on_event(Events.CONTINUED, self._on_continued)
@@ -614,6 +648,7 @@ class SessionManager:
         self._client.on_event(Events.PROGRESS_UPDATE, self._on_progress_update)
         self._client.on_event(Events.PROGRESS_END, self._on_progress_end)
         self._client.on_event(Events.MEMORY, self._on_memory)
+        self._event_handlers_registered = True
 
     def _on_initialized(self, event: DAPEvent) -> None:
         """Handle initialized event."""
@@ -624,6 +659,9 @@ class SessionManager:
     def _on_stopped(self, event: DAPEvent) -> None:
         """Handle stopped event."""
         body = StoppedEventBody.from_dict(event.body)
+        self._state.stopped_events += 1
+        if body.reason.value == "step":
+            self._state.step_stops += 1
         self._state.last_stop_at = time.monotonic()
         self._state.current_thread_id = body.thread_id
         self._state.stop_reason = body.reason.value
@@ -776,6 +814,7 @@ class SessionManager:
     def _on_continued(self, event: DAPEvent) -> None:
         """Handle continued event."""
         body = ContinuedEventBody.from_dict(event.body)
+        self._state.continued_events += 1
         self._state.last_resume_at = time.monotonic()
         self._set_state(DebugState.RUNNING)
         if body.all_threads_continued:
@@ -1005,6 +1044,12 @@ class SessionManager:
         """Handle module load/change/unload events."""
 
         body = ModuleEventBody.from_dict(event.body)
+        if body.reason == "new":
+            self._state.module_new_events += 1
+        elif body.reason == "changed":
+            self._state.module_changed_events += 1
+        elif body.reason == "removed":
+            self._state.module_removed_events += 1
         logger.debug(f"Module event: reason={body.reason}, name={body.name}")
 
         if body.reason == "new":
@@ -1350,6 +1395,7 @@ class SessionManager:
         await report(80, 100, "Launching program...")
 
         # Launch program with justMyCode=False to show all stack frames
+        self._begin_debuggee_epoch()
         response = await self._client.launch(
             program=program,
             cwd=cwd,
@@ -1413,6 +1459,7 @@ class SessionManager:
         # NOTE: justMyCode is NOT supported in attach mode by netcoredbg (upstream limitation).
         # The parameter is passed for API consistency but will be ignored by the debugger.
         # Stack traces may be incomplete - use start_debug/launch for full functionality.
+        self._begin_debuggee_epoch()
         response = await self._client.attach(process_id, just_my_code=False)
         if not response.success:
             raise RuntimeError(f"Attach failed: {response.message}")

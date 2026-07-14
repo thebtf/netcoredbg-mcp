@@ -4,14 +4,16 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Coroutine
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from mcp.server.fastmcp import Context, FastMCP
+from pydantic import Field
 
 from ..launch_profiles import resolve_launch_environment
 from ..mux import SessionOwnership
 from ..response import build_error_response, build_response
 from ..session import SessionManager
+from ..session.state import DebugState
 from ..utils.app_type import detect_app_type
 
 logger = logging.getLogger(__name__)
@@ -561,6 +563,128 @@ def register_debug_tools(
             )
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            idempotentHint=True,
+            openWorldHint=False,
+        )
+    )
+    async def debuggee_activity(
+        ctx: Context,
+        window_ms: Annotated[
+            Any,
+            Field(
+                json_schema_extra={
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 30000,
+                }
+            ),
+        ] = 1000,
+    ) -> dict:
+        """Observe adapter-owned debuggee activity during one bounded window."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+            if type(window_ms) is not int or not 1 <= window_ms <= 30000:
+                return build_error_response(
+                    "window_ms must be an integer from 1 to 30000",
+                    state=session.state.state,
+                )
+            if session.state.state != DebugState.RUNNING:
+                return build_error_response(
+                    "debuggee_activity requires state RUNNING",
+                    state=session.state.state,
+                )
+
+            before = session.activity_snapshot()
+            await asyncio.sleep(window_ms / 1000)
+            after = session.activity_snapshot()
+
+            if before.epoch is not after.epoch or after.state not in {
+                DebugState.RUNNING,
+                DebugState.STOPPED,
+                DebugState.TERMINATED,
+            }:
+                return build_error_response(
+                    "debug session changed during activity window",
+                    state=after.state,
+                )
+
+            module_new = after.module_new_events - before.module_new_events
+            module_changed = (
+                after.module_changed_events - before.module_changed_events
+            )
+            module_removed = (
+                after.module_removed_events - before.module_removed_events
+            )
+            deltas = {
+                "continuedEvents": after.continued_events - before.continued_events,
+                "stoppedEvents": after.stopped_events - before.stopped_events,
+                "stepStops": after.step_stops - before.step_stops,
+                "outputEvents": after.output_events - before.output_events,
+                "moduleEvents": {
+                    "total": module_new + module_changed + module_removed,
+                    "new": module_new,
+                    "changed": module_changed,
+                    "removed": module_removed,
+                },
+                "traceEntries": after.trace_entries - before.trace_entries,
+            }
+            signals = [
+                name
+                for name, value in (
+                    ("continuedEvents", deltas["continuedEvents"]),
+                    ("stoppedEvents", deltas["stoppedEvents"]),
+                    ("stepStops", deltas["stepStops"]),
+                    ("outputEvents", deltas["outputEvents"]),
+                    ("moduleEvents.new", module_new),
+                    ("moduleEvents.changed", module_changed),
+                    ("moduleEvents.removed", module_removed),
+                    ("traceEntries", deltas["traceEntries"]),
+                )
+                if value > 0
+            ]
+            data = {
+                "windowMs": window_ms,
+                "startedAt": before.captured_at,
+                "endedAt": after.captured_at,
+                "elapsedMs": (after.captured_at - before.captured_at) * 1000,
+                "start": {
+                    "state": before.state.value,
+                    "execState": before.exec_state,
+                    "stopReason": before.stop_reason,
+                    "debuggeePid": before.debuggee_pid,
+                },
+                "end": {
+                    "state": after.state.value,
+                    "execState": after.exec_state,
+                    "stopReason": after.stop_reason,
+                    "debuggeePid": after.debuggee_pid,
+                },
+                "deltas": deltas,
+                "observedActivity": bool(signals),
+                "activitySignals": signals,
+                "instructionsExecuted": {
+                    "available": False,
+                    "reason": (
+                        "The current NetCoreDbg/DAP capability surface exposes no "
+                        "executed-instruction counter."
+                    ),
+                },
+            }
+            return build_response(
+                data=data,
+                state=after.state,
+                next_actions=["get_debug_state", "get_output", "get_output_tail"],
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return build_error_response(str(exc), state=session.state.state)
 
     @mcp.tool(annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
     async def terminate_debug(ctx: Context) -> dict:
