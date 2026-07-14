@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from netcoredbg_mcp.setup.dbgshim import (
     _DBGSHIM_FILENAME,
     _get_runtime_scan_paths,
@@ -192,10 +194,30 @@ class TestSelectDbgshim:
         result = select_dbgshim("6.0.0", tmp_path / "nope")
         assert result is None
 
+    def test_regular_file_cache_preserves_legacy_no_match(self, tmp_path: Path):
+        """Legacy selector treats a non-directory cache path as no match."""
+        cache_file = tmp_path / "cache"
+        cache_file.write_bytes(b"not-a-directory")
+
+        assert select_dbgshim("6.0.0", cache_file) is None
+
     def test_invalid_version_string(self, tmp_path: Path):
         """Returns None for unparseable version."""
         result = select_dbgshim("not-a-version", tmp_path)
         assert result is None
+
+    @pytest.mark.parametrize("probe", ["exists", "is_dir", "iterdir"])
+    def test_unreadable_cache_preserves_legacy_oserror(
+        self,
+        tmp_path: Path,
+        probe: str,
+    ):
+        """Legacy selector callers still receive cache lookup failures."""
+        with (
+            patch.object(Path, probe, side_effect=PermissionError("denied")),
+            pytest.raises(PermissionError, match="denied"),
+        ):
+            select_dbgshim("6.0.0", tmp_path)
 
 
 class TestSwapDbgshim:
@@ -251,7 +273,7 @@ class TestSelectAndSwap:
         netcoredbg.write_bytes(b"")
 
         # Create cached dbgshim
-        cache_dir = tmp_path / "cache" / "6.0.36"
+        cache_dir = tmp_path / "dbgshim" / "6.0.36"
         cache_dir.mkdir(parents=True)
         (cache_dir / _DBGSHIM_FILENAME).write_bytes(b"correct-dbgshim")
 
@@ -268,10 +290,9 @@ class TestSelectAndSwap:
             # Point cache to our test dir
             result = select_and_swap_dbgshim(str(program), str(netcoredbg))
 
-        # Check dbgshim was copied
-        if result:
-            dest = netcoredbg_dir / _DBGSHIM_FILENAME
-            assert dest.is_file()
+        assert result is True
+        dest = netcoredbg_dir / _DBGSHIM_FILENAME
+        assert dest.read_bytes() == b"correct-dbgshim"
 
     def test_no_runtimeconfig(self, tmp_path: Path):
         """Returns False when program has no runtimeconfig."""

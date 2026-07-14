@@ -499,6 +499,54 @@ class SessionManager:
 
         return path
 
+    def validate_program_for_project_root(
+        self,
+        program: str,
+        project_root: str,
+    ) -> str:
+        """Validate an existing launch target inside one exact supplied root."""
+        if not project_root:
+            raise ValueError("Resolved project root is required for launch inspection")
+
+        root_real = os.path.realpath(project_root)
+        if not os.path.isdir(root_real):
+            raise ValueError(f"Resolved project root does not exist: {project_root}")
+
+        candidate = (
+            program if os.path.isabs(program) else os.path.join(root_real, program)
+        )
+        program_real = os.path.realpath(candidate)
+        if not self._is_path_within(program_real, root_real):
+            raise ValueError(f"Program path outside exact project root: {program}")
+        if not os.path.isfile(program_real):
+            raise ValueError(f"Program path does not exist: {program}")
+
+        extension = os.path.splitext(program_real)[1].lower()
+        if extension not in (".dll", ".exe"):
+            raise ValueError(f"Program must be .NET assembly (.dll/.exe): {program}")
+
+        effective_program = program_real
+        if extension == ".exe":
+            base_path = os.path.splitext(program_real)[0]
+            dll_path = f"{base_path}.dll"
+            runtimeconfig_path = f"{base_path}.runtimeconfig.json"
+            if os.path.isfile(dll_path) and os.path.isfile(runtimeconfig_path):
+                effective_program = os.path.realpath(dll_path)
+                if not self._is_path_within(effective_program, root_real):
+                    raise ValueError(
+                        f"Program path outside exact project root: {effective_program}"
+                    )
+
+        runtimeconfig_path = f"{os.path.splitext(effective_program)[0]}.runtimeconfig.json"
+        runtimeconfig_real = os.path.realpath(runtimeconfig_path)
+        if not self._is_path_within(runtimeconfig_real, root_real):
+            raise ValueError(
+                "Runtimeconfig path outside exact project root: "
+                f"{runtimeconfig_path}"
+            )
+
+        return effective_program
+
     def on_state_change(self, listener: Callable[[DebugState], None]) -> None:
         """Register state change listener."""
         self._state_listeners.append(listener)

@@ -8,6 +8,8 @@ If this file fails, the server CANNOT start. Fix before merging.
 """
 
 import os
+import re
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -49,6 +51,7 @@ class TestServerSmoke:
         # Critical tools must be present
         critical = [
             "start_debug",
+            "inspect_debug_launch_compatibility",
             "stop_debug",
             "continue_execution",
             "step_over",
@@ -67,6 +70,49 @@ class TestServerSmoke:
         ]
         for name in critical:
             assert name in tool_names, f"Critical tool '{name}' missing from server"
+
+    @pytest.mark.asyncio
+    async def test_readme_tool_counts_match_registry(self):
+        """Published totals and category sums must match the live registry."""
+        from netcoredbg_mcp.server import create_server
+
+        registered_count = len(await create_server().list_tools())
+        for readme, heading, headline_pattern in (
+            ("README.md", "## Available Tools", r"\*\*(\d+) MCP tools"),
+            ("README.ru.md", "## Доступные инструменты", r"\*\*(\d+) MCP-инструмента"),
+        ):
+            text = Path(readme).read_text(encoding="utf-8")
+            headline = re.search(headline_pattern, text)
+            assert headline is not None, f"Missing MCP tool total in {readme}"
+            table = text.split(heading, 1)[1].split("\n## ", 1)[0]
+            category_counts = [
+                int(match.group(1))
+                for match in re.finditer(r"^\| [^|]+ \| (\d+) \|", table, re.MULTILINE)
+            ]
+            assert int(headline.group(1)) == registered_count
+            assert sum(category_counts) == registered_count
+
+    @pytest.mark.asyncio
+    async def test_debug_launch_preflight_schema_and_annotations(self):
+        """The read-only preflight publishes only the required program argument."""
+        from netcoredbg_mcp.server import create_server
+
+        mcp = create_server()
+        tools = {tool.name: tool for tool in await mcp.list_tools()}
+        tool = tools["inspect_debug_launch_compatibility"]
+
+        assert tool.inputSchema == {
+            "properties": {"program": {"title": "Program", "type": "string"}},
+            "required": ["program"],
+            "title": "inspect_debug_launch_compatibilityArguments",
+            "type": "object",
+        }
+        assert tool.annotations is not None
+        assert tool.annotations.model_dump(exclude_none=True) == {
+            "readOnlyHint": True,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        }
 
     @pytest.mark.asyncio
     async def test_prompts_register(self):

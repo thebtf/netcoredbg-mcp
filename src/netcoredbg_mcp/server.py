@@ -273,6 +273,7 @@ def create_server(project_path: str | None = None) -> FastMCP:
         check_session_access=_check_session_access,
         execute_and_wait=_execute_and_wait,
         resolve_project_root=resolve_project_root,
+        resolve_project_root_readonly=resolve_project_root_readonly,
     )
 
     register_breakpoint_tools(

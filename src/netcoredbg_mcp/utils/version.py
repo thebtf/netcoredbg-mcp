@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import platform
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,98 @@ class VersionInfo:
         return cls(major=major, minor=minor, patch=patch, build=build, raw=version_str)
 
 
+def inspect_target_runtime_version(program_path: str) -> dict[str, object]:
+    """Read target runtime evidence without mutating launch or session state."""
+    runtimeconfig_path = Path(program_path).with_suffix(".runtimeconfig.json")
+    evidence: dict[str, object] = {
+        "version": None,
+        "major": None,
+        "runtimeconfigPath": str(runtimeconfig_path),
+        "source": None,
+        "status": "missing",
+    }
+    try:
+        runtimeconfig_path = runtimeconfig_path.resolve()
+    except OSError:
+        evidence["status"] = "unreadable"
+        return evidence
+    evidence["runtimeconfigPath"] = str(runtimeconfig_path)
+
+    try:
+        with runtimeconfig_path.open(encoding="utf-8") as runtimeconfig_file:
+            config = json.load(runtimeconfig_file)
+    except FileNotFoundError:
+        return evidence
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        evidence["status"] = "malformed"
+        return evidence
+    except OSError:
+        evidence["status"] = "unreadable"
+        return evidence
+
+    if not isinstance(config, dict):
+        evidence["status"] = "malformed"
+        return evidence
+
+    runtime_options = config.get("runtimeOptions")
+    if not isinstance(runtime_options, dict):
+        evidence["status"] = "malformed"
+        return evidence
+
+    source: str | None = None
+    version_value: object = None
+    framework_present = "framework" in runtime_options
+    framework = runtime_options.get("framework")
+    if framework_present and not isinstance(framework, dict):
+        evidence["status"] = "malformed"
+        return evidence
+    if isinstance(framework, dict) and framework.get("version"):
+        source = "runtimeconfig_framework"
+        version_value = framework["version"]
+    else:
+        frameworks_present = "frameworks" in runtime_options
+        frameworks = runtime_options.get("frameworks")
+        if frameworks_present and not isinstance(frameworks, list):
+            evidence["status"] = "malformed"
+            return evidence
+        if isinstance(frameworks, list) and frameworks:
+            selected: dict[str, object] | None = None
+            fallback: dict[str, object] | None = None
+            for item in frameworks:
+                if not isinstance(item, dict):
+                    evidence["status"] = "malformed"
+                    return evidence
+                if fallback is None:
+                    fallback = item
+                if item.get("name") == "Microsoft.NETCore.App":
+                    selected = item
+                    break
+            if selected is None:
+                selected = fallback
+            if selected is None:
+                evidence["status"] = "malformed"
+                return evidence
+            source = "runtimeconfig_frameworks"
+            version_value = selected.get("version")
+
+    if not isinstance(version_value, str):
+        evidence["status"] = "malformed"
+        return evidence
+
+    version = VersionInfo.from_string(version_value)
+    if version is None:
+        evidence["status"] = "malformed"
+        return evidence
+
+    evidence.update(
+        version=str(version),
+        major=version.major,
+        source=source,
+        status="known",
+    )
+    return evidence
+
+
 def get_target_runtime_version(program_path: str) -> VersionInfo | None:
     """Get .NET runtime version from program's runtimeconfig.json.
 
@@ -54,7 +148,6 @@ def get_target_runtime_version(program_path: str) -> VersionInfo | None:
     Returns:
         VersionInfo if detected, None otherwise
     """
-    # Find runtimeconfig.json
     base_path = os.path.splitext(program_path)[0]
     runtimeconfig_path = f"{base_path}.runtimeconfig.json"
 
@@ -66,24 +159,17 @@ def get_target_runtime_version(program_path: str) -> VersionInfo | None:
         with open(runtimeconfig_path, encoding="utf-8") as f:
             config = json.load(f)
 
-        # Extract version from runtimeOptions.framework.version
-        # or from runtimeOptions.frameworks[0].version
         runtime_options = config.get("runtimeOptions", {})
-
-        # Single framework (most common)
         framework = runtime_options.get("framework", {})
         version = framework.get("version")
 
-        # Multiple frameworks (less common)
         if not version:
             frameworks = runtime_options.get("frameworks", [])
             if frameworks:
-                # Use Microsoft.NETCore.App version
                 for fw in frameworks:
                     if fw.get("name") == "Microsoft.NETCore.App":
                         version = fw.get("version")
                         break
-                # Fallback to first framework
                 if not version:
                     version = frameworks[0].get("version")
 
@@ -99,13 +185,18 @@ def get_target_runtime_version(program_path: str) -> VersionInfo | None:
     return None
 
 
-def get_dbgshim_version(netcoredbg_path: str) -> VersionInfo | None:
+def get_dbgshim_version(
+    netcoredbg_path: str,
+    *,
+    allow_path_fallback: bool = True,
+) -> VersionInfo | None:
     """Get version of dbgshim.dll in netcoredbg directory.
 
     Uses Windows API to read file version info.
 
     Args:
         netcoredbg_path: Path to netcoredbg executable
+        allow_path_fallback: Whether a version-like parent directory may be used.
 
     Returns:
         VersionInfo if detected, None otherwise
@@ -175,6 +266,9 @@ def get_dbgshim_version(netcoredbg_path: str) -> VersionInfo | None:
     except (OSError, AttributeError) as e:
         logger.debug(f"Failed to get dbgshim.dll version via Windows API: {e}")
 
+    if not allow_path_fallback:
+        return None
+
     # Fallback: try to extract version from path patterns
     # e.g., C:\Program Files\dotnet\shared\Microsoft.NETCore.App\6.0.36\dbgshim.dll
     try:
@@ -190,6 +284,59 @@ def get_dbgshim_version(netcoredbg_path: str) -> VersionInfo | None:
     return None
 
 
+def inspect_active_dbgshim_version(netcoredbg_path: str) -> dict[str, object]:
+    """Read active dbgshim evidence without falling back on non-Windows hosts."""
+    system = platform.system()
+    filename = "dbgshim.dll" if system == "Windows" else "libdbgshim.so"
+    dbgshim_path = Path(netcoredbg_path).parent / filename
+    if system != "Windows":
+        return {
+            "version": None,
+            "major": None,
+            "path": str(dbgshim_path),
+            "source": "unsupported_platform",
+            "status": "unsupported_platform",
+        }
+
+    try:
+        shim_exists = dbgshim_path.is_file()
+    except OSError:
+        return {
+            "version": None,
+            "major": None,
+            "path": str(dbgshim_path),
+            "source": "windows_file_version",
+            "status": "unreadable",
+        }
+
+    if not shim_exists:
+        return {
+            "version": None,
+            "major": None,
+            "path": str(dbgshim_path),
+            "source": "windows_file_version",
+            "status": "missing",
+        }
+
+    version = get_dbgshim_version(netcoredbg_path, allow_path_fallback=False)
+    if version is None:
+        return {
+            "version": None,
+            "major": None,
+            "path": str(dbgshim_path),
+            "source": "windows_file_version",
+            "status": "unreadable",
+        }
+
+    return {
+        "version": str(version),
+        "major": version.major,
+        "path": str(dbgshim_path),
+        "source": "windows_file_version",
+        "status": "known",
+    }
+
+
 @dataclass
 class VersionCompatibility:
     """Result of version compatibility check."""
@@ -200,7 +347,9 @@ class VersionCompatibility:
     warning: str | None = None
 
 
-def check_version_compatibility(program_path: str, netcoredbg_path: str) -> VersionCompatibility:
+def check_version_compatibility(
+    program_path: str, netcoredbg_path: str
+) -> VersionCompatibility:
     """Check if dbgshim.dll version is compatible with target runtime.
 
     dbgshim.dll must have the same major version as the target runtime

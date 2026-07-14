@@ -14,7 +14,7 @@ set breakpoints, step through code, inspect variables, evaluate expressions, rea
 debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
 and Avalonia windows without opening an IDE.
 
-**133 MCP tools · 8 prompts · 4 resources · 1944 collected tests · release v0.21.0**
+**134 MCP tools · 8 prompts · 4 resources · 2002 collected tests · release v0.21.0**
 
 ## Quick Links
 
@@ -75,6 +75,10 @@ Set a breakpoint in Program.cs, run the app, and inspect local variables when it
 > For .NET Core debugging, the `dbgshim.dll` next to `netcoredbg.exe` must match
 > the target runtime major version. The setup wizard scans installed runtimes and
 > prepares compatible dbgshim copies.
+> Before launch, `inspect_debug_launch_compatibility(program)` can report the
+> target runtime, active shim, and selected cached candidate without building,
+> launching, or replacing files. `blocked_no_matching_shim` is advisory;
+> legacy `start_debug` remains fail-open.
 
 > [!IMPORTANT]
 > `start_debug` is a long-poll tool. If the debuggee is a GUI app, it may return
@@ -488,7 +492,7 @@ generics are rejected before runtime application. Use
 
 | Category | Count | Tools |
 |---|---:|---|
-| Debug control | 12 | `start_debug`, `attach_debug`, `stop_debug`, `restart_debug`, `continue_execution`, `pause_execution`, `step_over`, `get_step_in_targets`, `step_into`, `step_out`, `get_debug_state`, `terminate_debug` |
+| Debug control | 13 | `start_debug`, `inspect_debug_launch_compatibility`, `attach_debug`, `stop_debug`, `restart_debug`, `continue_execution`, `pause_execution`, `step_over`, `get_step_in_targets`, `step_into`, `step_out`, `get_debug_state`, `terminate_debug` |
 | Breakpoints and exceptions | 7 | `add_breakpoint`, `remove_breakpoint`, `list_breakpoints`, `clear_breakpoints`, `add_function_breakpoint`, `remove_function_breakpoint`, `configure_exceptions` |
 | Inspection and DAP coverage | 15 | `get_threads`, `get_call_stack`, `get_scopes`, `get_variables`, `evaluate_expression`, `set_variable`, `get_exception_info`, `get_modules`, `get_progress`, `get_loaded_sources`, `disassemble`, `get_locations`, `quick_evaluate`, `get_exception_context`, `get_stop_context` |
 | Tracepoints | 6 | `add_tracepoint`, `remove_tracepoint`, `get_trace_log`, `get_trace_delta`, `mark_trace_cursor`, `clear_trace_log` |
