@@ -320,6 +320,35 @@ async def test_ui_hover_tool_returns_standard_envelope_and_forwards_exact_reques
     assert response["data"]["button"] == "none"
 
 
+@pytest.mark.asyncio
+async def test_ui_hover_tool_blocks_stealth_mode_before_backend_use(capturing_mcp) -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    backend = SimpleNamespace(process_id=42, hover_element=AsyncMock())
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=True,
+    )
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend) as create_backend:
+        register_ui_tools(capturing_mcp, session, check_session_access=lambda ctx: None)
+        response = await capturing_mcp.tools["ui_hover"](
+            SimpleNamespace(),
+            automation_id="hoverTrigger",
+            timeout_ms=1250,
+        )
+
+    assert response["state"] == DebugState.RUNNING.value
+    assert response["error"] == (
+        "ui_hover is unavailable in stealth mode because it moves the real pointer; "
+        "call ui_bring_to_front to exit stealth mode first"
+    )
+    create_backend.assert_not_called()
+    backend.hover_element.assert_not_awaited()
+
+
 @pytest.mark.parametrize("timeout_ms", [True, 0, 30001, 2.5])
 @pytest.mark.asyncio
 async def test_ui_hover_tool_rejects_invalid_timeout_before_backend_use(
