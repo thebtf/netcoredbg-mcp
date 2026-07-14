@@ -31,48 +31,104 @@ This playbook is the primary release gate, not a supplementary demonstration. Th
 ## Prerequisites
 
 - Python 3.10 or newer.
-- Development dependencies installed through the locked `uv` environment.
-- Commands run from the repository root.
-- `NETCOREDBG_PATH` points at the installed `netcoredbg.exe` for GUI smoke
-  commands.
-- For package installation checks, a local wheel can be built with
-  `uv build`.
-- For full GUI smoke coverage, build all three fixture apps:
-  `tests/fixtures/SmokeTestApp`, `tests/fixtures/WpfSmokeApp`, and
-  `tests/fixtures/AvaloniaSmokeApp`.
+- Development dependencies installed through the locked `uv` environment for supporting repository checks.
+- Release commands run from the repository root.
+- `NETCOREDBG_PATH` points at the installed `netcoredbg.exe` for GUI smoke commands.
+- For full GUI smoke coverage, build all three fixture apps: `tests/fixtures/SmokeTestApp`, `tests/fixtures/WpfSmokeApp`, and `tests/fixtures/AvaloniaSmokeApp`.
 
-## Canonical Flows
+## Release-Candidate Consumer Environment
 
-### 1. CLI Version Smoke
+Before any flow can count as UXDD evidence, build the wheel and install it into a dedicated disposable environment. All primary consumer commands below use `$ConsumerCli` or `$ConsumerPython`; source-tree `uv run` commands are supporting checks only.
+
+```powershell
+uv build
+$wheel = Get-ChildItem -LiteralPath dist -Filter 'netcoredbg_mcp-*.whl' |
+  Sort-Object LastWriteTime -Descending |
+  Select-Object -First 1
+if (-not $wheel) { throw 'Release-candidate wheel was not produced.' }
+$ConsumerRoot = Join-Path $env:TEMP ('netcoredbg-mcp-release-' + [guid]::NewGuid().ToString('N'))
+uv venv --python (Get-Command python).Source $ConsumerRoot
+$ConsumerPython = Join-Path $ConsumerRoot 'Scripts\python.exe'
+$ConsumerCli = Join-Path $ConsumerRoot 'Scripts\netcoredbg-mcp.exe'
+$ConsumerProject = Join-Path $ConsumerRoot 'project'
+New-Item -ItemType Directory -Path $ConsumerProject | Out-Null
+uv pip install --python $ConsumerPython $wheel.FullName
+```
+
+Record the wheel path and disposable environment path in the release report. Remove the environment only after its consumer evidence has been captured.
+
+## Consumer and Supporting Flows
+
+### 1. Installed CLI Consumer Smoke
 
 Command:
 
 ```powershell
-uv run --locked --extra dev python -m netcoredbg_mcp --version
+& $ConsumerCli --version
 ```
 
 Expected result:
 
 - Exit code `0`.
-- Output includes the package version from `src/netcoredbg_mcp/__init__.py`.
+- Output is `netcoredbg-mcp <TARGET_VERSION>`, matching the version named by the release report and the installed wheel filename.
 
-### 2. MCP Surface Registration
+### 2. Installed MCP Client Exchange
 
-Command:
+This is a real consumer round trip through the installed console entry point and the official MCP client SDK bundled by the wheel.
+
+```powershell
+$env:NETCOREDBG_MCP_CONSUMER_CLI = $ConsumerCli
+$env:NETCOREDBG_MCP_CONSUMER_PROJECT = $ConsumerProject
+$script = @'
+import asyncio
+import json
+import os
+
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+REQUIRED_TOOLS = {"start_debug", "add_breakpoint", "get_call_stack", "run_runtime_smoke"}
+
+async def main():
+    params = StdioServerParameters(
+        command=os.environ["NETCOREDBG_MCP_CONSUMER_CLI"],
+        args=["--project-from-cwd"],
+        cwd=os.environ["NETCOREDBG_MCP_CONSUMER_PROJECT"],
+    )
+    async with stdio_client(params) as (read_stream, write_stream):
+        async with ClientSession(read_stream, write_stream) as session:
+            initialized = await session.initialize()
+            tools = await session.list_tools()
+            names = {tool.name for tool in tools.tools}
+            missing = sorted(REQUIRED_TOOLS - names)
+            result = {
+                "x_mux": (initialized.capabilities.experimental or {}).get("x-mux"),
+                "tools_capability": initialized.capabilities.tools is not None,
+                "tool_count": len(names),
+                "missing_tools": missing,
+            }
+            print(json.dumps(result, sort_keys=True))
+            if result["x_mux"] != {"sharing": "isolated"} or not result["tools_capability"] or missing:
+                raise SystemExit(1)
+
+asyncio.run(main())
+'@
+& $ConsumerPython -c $script
+```
+
+Expected result:
+
+- Exit code `0`.
+- The initialized server advertises `x-mux.sharing=isolated` and a tools capability.
+- `missing_tools` is empty and the installed server exposes the consumer-critical debug and runtime-smoke tools.
+
+Supporting contract check; this source-tree test is mandatory but does not produce the UXDD verdict:
 
 ```powershell
 uv run --locked --extra dev pytest tests/critical/test_release_critical.py -m critical
 ```
 
-Expected result:
-
-- The critical suite passes.
-- The MCP server registers core debug tools including `start_debug`,
-  `add_breakpoint`, and `get_call_stack`.
-- The server registers core prompts and resources including `debug://state`,
-  `debug://breakpoints`, and `debug://output`.
-
-### 3. Launch Environment Metadata Safety
+### 3. Supporting Protocol Check — Launch Environment Metadata Safety
 
 Command:
 
@@ -87,7 +143,7 @@ Expected result:
 - User-facing metadata contains variable names and counts only; it does not
   contain inherited, profile, or direct environment values.
 
-### 4. Manual Smoke Surface Inventory
+### 4. Supporting Fixture Inventory
 
 Commands:
 
@@ -110,7 +166,7 @@ Expected result:
   workstation and record whether each scenario returned `PASS`, `BLOCKED`, or
   `FAIL`.
 
-### 5. WPF One-Call Runtime Smoke Workflow
+### 5. Supporting WPF One-Call Fixture Workflow
 
 Command:
 
@@ -128,7 +184,7 @@ Expected result:
   honest `BLOCKED` / `FAIL` result that names the failing operation and cleanup
   state.
 
-### 6. Avalonia UI Fixture Compatibility
+### 6. Supporting Avalonia Fixture Compatibility
 
 Command:
 
@@ -158,16 +214,14 @@ Customer-mode setup:
 2. Configure a WPF DataGrid stand with stable row identity values matching the
    example selectors or adapt the generic `DataGridUnderTest` and `StableRowId`
    names to the product under test.
-3. Run the v2 plan through `run_runtime_smoke` on a Windows GUI workstation with
-   a backend that can produce real pointer route evidence and
-   `ui.grid.viewport` identity evidence.
+3. Start the release-candidate MCP server from `$ConsumerCli`, then run the v2 plan through its public `run_runtime_smoke` tool on a Windows GUI workstation with a backend that can produce real pointer route evidence and `ui.grid.viewport` identity evidence.
 4. Include the offscreen row-target drag/drop case from the example: the target
    row is offscreen, the drop endpoint is expressed as a row-based target with
    `drop.ensure_visible=true`, and the run must either prove the gesture or
    fail closed before side effects if target-side realization hides the drag
    source. This is a bounded CR-075 customer-mode proof contract for broad
    `#270`; it does not close the broad helper family by itself.
-5. Run the fixture-backed WPF v2 drag/drop customer-mode smoke:
+5. Run the supporting fixture-backed WPF v2 drag/drop smoke; this does not substitute for the installed-server customer-mode run above:
 
 ```powershell
 if (-not $env:NETCOREDBG_PATH) { throw "Set NETCOREDBG_PATH to netcoredbg.exe before running GUI smoke." }
@@ -220,12 +274,14 @@ The offscreen row-target function is the minimum proof for the
 release gate because it also exercises visible-row route evidence, edge-scroll,
 multi-row payload identity, and bounded negative no-op handling.
 
-6. Run the release-critical guard:
+6. Run the supporting release-critical guards:
 
 ```powershell
 uv run --locked --extra dev pytest tests/test_runtime_smoke_v2_docs.py
 uv run --locked --extra dev pytest tests/critical/test_runtime_smoke_v2_critical.py -m critical
 ```
+
+The primary UXDD verdict for this flow comes from steps 1-4 against the installed release-candidate server and the configured product stand. Steps 5-6 are mandatory supporting checks only.
 
 Expected result:
 
@@ -252,7 +308,7 @@ Expected result:
 WinForms `dragList` primitive smoke is not a substitute for WPF DataGrid CR-001
 acceptance.
 
-### 8. Runtime-Smoke Diagnostic Schema Gate
+### 8. Supporting Runtime-Smoke Diagnostic Schema Contract
 
 Contract sources:
 
@@ -298,16 +354,14 @@ Contract source:
 Provider version preflight:
 
 ```powershell
-uv run --no-sync --project <NETCOREDBG_MCP_REPO> netcoredbg-mcp --version
+& $ConsumerCli --version
 ```
 
 Expected preflight result:
 
 - Exit code `0`.
-- Output is `netcoredbg-mcp 0.20.5`.
-- If a live MCP mux session holds the development `.venv` executable, use the
-  direct `.venv\Scripts\netcoredbg-mcp.exe --version` route instead of treating
-  the uv sync lock as stale code.
+- Output is `netcoredbg-mcp <TARGET_VERSION>`, matching the release report and wheel filename.
+- The MCP session used below is started from this installed release-candidate entry point, not a source-tree editable environment.
 
 Consumer procedure:
 
@@ -321,8 +375,7 @@ Consumer procedure:
    launched process. EXE launches normally use the NovaScript process name;
    DLL launches through a host process should use that host process name while
    keeping the NovaScript assembly as the expected module.
-3. Run the plan through the active v0.20.5 MCP server with the
-   `run_runtime_smoke` tool from the NovaScript repository root.
+3. Run the plan through the release-candidate MCP server started from `$ConsumerCli`, using the `run_runtime_smoke` tool from the NovaScript repository root.
 4. Record the returned runtime-smoke envelope as the consumer evidence. A
    lifecycle run may use `runtime_smoke_start`, `runtime_smoke_tail_events`,
    `runtime_smoke_get_result`, and `runtime_smoke_stop` when observation or
@@ -345,9 +398,7 @@ Expected result:
   fresh diagnostic artifact; unsafe diagnostic fields leave the runtime-smoke
   boundary; or cleanup leaves NovaScript/netcoredbg processes behind.
 
-This gate is the post-release consumer-readiness slice for the current v0.20.5
-NovaScript-facing action-oracle/app-diagnostics path. It does not replace the
-CR-003 DataGrid drag/drop replay gate above.
+This consumer contract originated with the v0.20.5 NovaScript action-oracle slice, but each new release verdict applies to `<TARGET_VERSION>` from the installed release-candidate wheel. It does not replace the CR-003 DataGrid drag/drop replay gate above.
 
 ## Failure-Mode Catalog
 

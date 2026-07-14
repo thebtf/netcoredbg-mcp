@@ -129,7 +129,7 @@ as the only release-note source for a milestone release.
 ## Publish / Smoke / Handoff
 
 1. Prepare release-owned files on a branch named `work/release-vX.Y.Z-prep`.
-2. Build and install the release candidate; run the primary UXDD consumer-mode gate through the public package/CLI/MCP entry point; then run all remaining mandatory protocol gates and write evidence paths into the progress report.
+2. Build and install the release candidate; run the primary UXDD consumer-mode gate through the public package/CLI/MCP entry point; then run the remaining local pre-PR protocol gates and write evidence paths into the release report. PR review waits for step 3, and post-publication verification waits for step 6.
 3. Open a PR, run MCP PR review, fix or resolve findings, and merge automatically only after the UXDD verdict is `PRODUCT_WORKS` for every claimed journey and all supporting gates are clean.
 4. Fast-forward local `main` to `origin/main`.
 5. After every pre-publication gate passes, create an annotated tag with
