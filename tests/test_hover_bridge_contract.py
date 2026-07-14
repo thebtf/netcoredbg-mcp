@@ -91,6 +91,15 @@ def test_hover_root_enumeration_failure_blocks_uniqueness_proof() -> None:
     assert "descendants = Array.Empty<AutomationElement>()" not in resolver
 
 
+def test_hover_target_enumeration_failure_blocks_before_pointer_mutation() -> None:
+    hover = BRIDGE_COMMAND.read_text(encoding="utf-8")
+    resolver = hover.rsplit("ResolveUniqueTarget(", 1)[1].split("private static (", 1)[0]
+
+    assert resolver.count("hover target enumeration failed") == 2
+    assert '"resolve_target"' in resolver
+    assert '"BLOCKED"' in resolver
+
+
 def test_hover_root_id_matches_automation_id_only() -> None:
     hover = BRIDGE_COMMAND.read_text(encoding="utf-8")
     root_matcher = hover.split("private static bool MatchesRootIdentity", 1)[1].split(

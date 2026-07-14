@@ -551,7 +551,25 @@ public static class HoverCommands
                 ["criterion"] = "automationId",
                 ["automationId"] = automationId,
             };
-            targetMatches = searchRoot.FindAllDescendants(cf.ByAutomationId(automationId)).ToList();
+            try
+            {
+                targetMatches = searchRoot.FindAllDescendants(cf.ByAutomationId(automationId)).ToList();
+            }
+            catch (Exception ex)
+            {
+                return (
+                    null,
+                    null,
+                    NotStartedFailure(
+                        "BLOCKED",
+                        $"hover target enumeration failed: {ex.Message}",
+                        "resolve_target",
+                        timeoutMs,
+                        stopwatch,
+                        requested: RequestedSelector(@params),
+                        accepted: new JsonObject { ["targetEnumeration"] = "scoped descendants readable" },
+                        nextStep: "Reconnect to a responsive target process and retry target uniqueness validation."));
+            }
             if (targetMatches.Count > 0)
             {
                 return UniqueTargetResult(targetMatches, lastSelector, @params, timeoutMs, stopwatch);
@@ -628,7 +646,25 @@ public static class HoverCommands
                 ["name"] = name,
                 ["controlType"] = controlType,
             };
-            targetMatches = searchRoot.FindAllDescendants(condition).ToList();
+            try
+            {
+                targetMatches = searchRoot.FindAllDescendants(condition).ToList();
+            }
+            catch (Exception ex)
+            {
+                return (
+                    null,
+                    null,
+                    NotStartedFailure(
+                        "BLOCKED",
+                        $"hover target enumeration failed: {ex.Message}",
+                        "resolve_target",
+                        timeoutMs,
+                        stopwatch,
+                        requested: RequestedSelector(@params),
+                        accepted: new JsonObject { ["targetEnumeration"] = "scoped descendants readable" },
+                        nextStep: "Reconnect to a responsive target process and retry target uniqueness validation."));
+            }
             if (targetMatches.Count > 0)
             {
                 return UniqueTargetResult(targetMatches, lastSelector, @params, timeoutMs, stopwatch);
