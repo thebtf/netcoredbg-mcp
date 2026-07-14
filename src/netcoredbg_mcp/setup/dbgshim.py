@@ -61,15 +61,11 @@ def _get_runtime_scan_paths() -> list[Path]:
     if system == "Windows":
         # Standard install: C:\Program Files\dotnet\...
         program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
-        paths.append(
-            Path(program_files) / "dotnet" / "shared" / "Microsoft.NETCore.App"
-        )
+        paths.append(Path(program_files) / "dotnet" / "shared" / "Microsoft.NETCore.App")
         # x86 on 64-bit Windows
         program_files_x86 = os.environ.get("ProgramFiles(x86)", "")
         if program_files_x86:
-            paths.append(
-                Path(program_files_x86) / "dotnet" / "shared" / "Microsoft.NETCore.App"
-            )
+            paths.append(Path(program_files_x86) / "dotnet" / "shared" / "Microsoft.NETCore.App")
     elif system == "Linux":
         paths.extend(
             [
@@ -273,31 +269,15 @@ def build_debug_launch_compatibility(
         verdict = "unknown"
         compatible = None
         will_mutate = False
-        warning = (
-            "Target runtime version is unavailable; compatibility cannot be determined."
-        )
+        warning = "Target runtime version is unavailable; compatibility cannot be determined."
     elif selected and candidate_status != "known":
         verdict = "unknown"
         compatible = None
         will_mutate = True
         warning = (
-            "The selected cached dbgshim version is malformed; "
-            "compatibility cannot be determined."
+            "The selected cached dbgshim version is malformed; compatibility cannot be determined."
         )
-    elif not active_known:
-        verdict = "unknown"
-        compatible = None
-        will_mutate = selected
-        warning = (
-            "Active dbgshim version is unavailable; "
-            "start_debug would select the cached candidate."
-            if selected
-            else (
-                "Active dbgshim version is unavailable; "
-                "compatibility cannot be determined."
-            )
-        )
-    elif target_runtime.get("major") == active_dbgshim.get("major"):
+    elif active_known and target_runtime.get("major") == active_dbgshim.get("major"):
         verdict = "compatible"
         compatible = True
         will_mutate = selected
@@ -315,13 +295,16 @@ def build_debug_launch_compatibility(
             "A compatible cached dbgshim is available; "
             "start_debug would replace the shared debugger copy."
         )
+    elif not active_known:
+        verdict = "unknown"
+        compatible = None
+        will_mutate = False
+        warning = "Active dbgshim version is unavailable; compatibility cannot be determined."
     elif candidate_status == "unreadable":
         verdict = "unknown"
         compatible = None
         will_mutate = False
-        warning = (
-            "The dbgshim cache could not be read; compatibility cannot be determined."
-        )
+        warning = "The dbgshim cache could not be read; compatibility cannot be determined."
     else:
         verdict = "blocked_no_matching_shim"
         compatible = False

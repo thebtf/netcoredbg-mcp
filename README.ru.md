@@ -14,7 +14,7 @@
 вычислять выражения, читать вывод отладки и управлять поверхностями Windows UI
 Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 
-**132 MCP-инструмента · 8 промптов · 4 ресурса · 1930 собранных тестов · релиз v0.21.0**
+**133 MCP-инструмента · 8 промптов · 4 ресурса · 1930 собранных тестов · релиз v0.21.0**
 
 ## Быстрые ссылки
 
@@ -492,9 +492,9 @@ Rude edits вроде добавления fields, изменения method sig
 | Категория | Количество | Tools |
 |---|---:|---|
 | Debug control | 13 | `start_debug`, `inspect_debug_launch_compatibility`, `attach_debug`, `stop_debug`, `restart_debug`, `continue_execution`, `pause_execution`, `step_over`, `get_step_in_targets`, `step_into`, `step_out`, `get_debug_state`, `terminate_debug` |
-| Breakpoints and exceptions | 6 | `add_breakpoint`, `remove_breakpoint`, `list_breakpoints`, `clear_breakpoints`, `add_function_breakpoint`, `configure_exceptions` |
+| Breakpoints and exceptions | 7 | `add_breakpoint`, `remove_breakpoint`, `list_breakpoints`, `clear_breakpoints`, `add_function_breakpoint`, `remove_function_breakpoint`, `configure_exceptions` |
 | Inspection and DAP coverage | 15 | `get_threads`, `get_call_stack`, `get_scopes`, `get_variables`, `evaluate_expression`, `set_variable`, `get_exception_info`, `get_modules`, `get_progress`, `get_loaded_sources`, `disassemble`, `get_locations`, `quick_evaluate`, `get_exception_context`, `get_stop_context` |
-| Tracepoints | 4 | `add_tracepoint`, `remove_tracepoint`, `get_trace_log`, `clear_trace_log` |
+| Tracepoints | 6 | `add_tracepoint`, `remove_tracepoint`, `get_trace_log`, `get_trace_delta`, `mark_trace_cursor`, `clear_trace_log` |
 | Snapshots and object analysis | 5 | `create_snapshot`, `diff_snapshots`, `list_snapshots`, `analyze_collection`, `summarize_object` |
 | Memory | 2 | `read_memory`, `write_memory` |
 | Output and build diagnostics | 4 | `get_output`, `search_output`, `get_output_tail`, `get_build_diagnostics` |

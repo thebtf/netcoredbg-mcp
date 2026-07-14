@@ -8,6 +8,8 @@ If this file fails, the server CANNOT start. Fix before merging.
 """
 
 import os
+import re
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -68,6 +70,27 @@ class TestServerSmoke:
         ]
         for name in critical:
             assert name in tool_names, f"Critical tool '{name}' missing from server"
+
+    @pytest.mark.asyncio
+    async def test_readme_tool_counts_match_registry(self):
+        """Published totals and category sums must match the live registry."""
+        from netcoredbg_mcp.server import create_server
+
+        registered_count = len(await create_server().list_tools())
+        for readme, heading, headline_pattern in (
+            ("README.md", "## Available Tools", r"\*\*(\d+) MCP tools"),
+            ("README.ru.md", "## Доступные инструменты", r"\*\*(\d+) MCP-инструмента"),
+        ):
+            text = Path(readme).read_text(encoding="utf-8")
+            headline = re.search(headline_pattern, text)
+            assert headline is not None, f"Missing MCP tool total in {readme}"
+            table = text.split(heading, 1)[1].split("\n## ", 1)[0]
+            category_counts = [
+                int(match.group(1))
+                for match in re.finditer(r"^\| [^|]+ \| (\d+) \|", table, re.MULTILINE)
+            ]
+            assert int(headline.group(1)) == registered_count
+            assert sum(category_counts) == registered_count
 
     @pytest.mark.asyncio
     async def test_debug_launch_preflight_schema_and_annotations(self):

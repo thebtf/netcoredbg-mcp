@@ -22,25 +22,20 @@ UNKNOWN_TARGET_WARNING = (
     "Target runtime version is unavailable; compatibility cannot be determined."
 )
 UNKNOWN_ACTIVE_SWAP_WARNING = (
-    "Active dbgshim version is unavailable; "
-    "start_debug would select the cached candidate."
+    "Active dbgshim version is unavailable; start_debug would select the cached candidate."
 )
 UNKNOWN_ACTIVE_WARNING = (
     "Active dbgshim version is unavailable; compatibility cannot be determined."
 )
 SWAP_WARNING = (
-    "A compatible cached dbgshim is available; "
-    "start_debug would replace the shared debugger copy."
+    "A compatible cached dbgshim is available; start_debug would replace the shared debugger copy."
 )
-BLOCKED_WARNING = (
-    "No cached dbgshim matches the target runtime; start_debug remains fail-open."
-)
+BLOCKED_WARNING = "No cached dbgshim matches the target runtime; start_debug remains fail-open."
 CACHE_UNREADABLE_WARNING = (
     "The dbgshim cache could not be read; compatibility cannot be determined."
 )
 CANDIDATE_MALFORMED_WARNING = (
-    "The selected cached dbgshim version is malformed; "
-    "compatibility cannot be determined."
+    "The selected cached dbgshim version is malformed; compatibility cannot be determined."
 )
 
 
@@ -71,11 +66,7 @@ def _target(status: str = "known", major: int = 10) -> dict[str, object]:
 
 def _active(status: str = "known", major: int = 6) -> dict[str, object]:
     known = status == "known"
-    source = (
-        "unsupported_platform"
-        if status == "unsupported_platform"
-        else "windows_file_version"
-    )
+    source = "unsupported_platform" if status == "unsupported_platform" else "windows_file_version"
     return {
         "version": f"{major}.0.2" if known else None,
         "major": major if known else None,
@@ -130,10 +121,19 @@ def _candidate(status: str = "known", major: int = 10) -> dict[str, object]:
             _target("known", 10),
             _active("unsupported_platform"),
             _candidate("known", 10),
-            "unknown",
-            None,
+            "compatible_after_swap",
             True,
-            UNKNOWN_ACTIVE_SWAP_WARNING,
+            True,
+            SWAP_WARNING,
+        ),
+        (
+            _target("known", 10),
+            _active("missing"),
+            _candidate("known", 10),
+            "compatible_after_swap",
+            True,
+            True,
+            SWAP_WARNING,
         ),
         (
             _target("known", 10),
@@ -563,9 +563,7 @@ def test_active_dbgshim_evidence_reports_unreadable_metadata_probe(
     }
 
 
-def _manager(
-    project_path: Path | None, netcoredbg_path: Path | None = None
-) -> SessionManager:
+def _manager(project_path: Path | None, netcoredbg_path: Path | None = None) -> SessionManager:
     client = SimpleNamespace(
         netcoredbg_path=str(netcoredbg_path or Path("netcoredbg.exe")),
         is_running=False,
@@ -677,9 +675,7 @@ def test_validate_program_for_project_root_ignores_worktrees_and_allowlist(
     manager = _manager(project)
 
     with (
-        patch.object(
-            manager, "_get_worktree_paths", return_value=[str(outside)]
-        ) as worktrees,
+        patch.object(manager, "_get_worktree_paths", return_value=[str(outside)]) as worktrees,
         patch.dict(os.environ, {"NETCOREDBG_ALLOWED_PATHS": str(outside)}),
         pytest.raises(ValueError, match="outside exact project root"),
     ):
@@ -718,9 +714,7 @@ def test_validate_program_for_project_root_rejects_runtimeconfig_symlink_escape(
     program.with_suffix(".runtimeconfig.json").symlink_to(outside_runtimeconfig)
     manager = _manager(project)
 
-    with pytest.raises(
-        ValueError, match="[Rr]untimeconfig.*outside exact project root"
-    ):
+    with pytest.raises(ValueError, match="[Rr]untimeconfig.*outside exact project root"):
         manager.validate_program_for_project_root(str(program), str(project))
 
 
@@ -753,9 +747,7 @@ def _register_preflight(
 ):
     registry = ToolRegistry()
     mutable_resolver = AsyncMock(side_effect=AssertionError("mutable resolver called"))
-    access_check = MagicMock(
-        side_effect=AssertionError("ownership/access check called")
-    )
+    access_check = MagicMock(side_effect=AssertionError("ownership/access check called"))
     notify = AsyncMock(side_effect=AssertionError("notification sent"))
     execute = AsyncMock(side_effect=AssertionError("debug control executed"))
     register_debug_tools(
@@ -1038,16 +1030,12 @@ async def test_start_debug_keeps_mutable_resolver_and_ignores_readonly_resolver(
     session = SimpleNamespace(
         project_path=str(tmp_path),
         state=SimpleNamespace(state="idle"),
-        validate_program=MagicMock(
-            side_effect=lambda program, must_exist=True: program
-        ),
+        validate_program=MagicMock(side_effect=lambda program, must_exist=True: program),
         validate_path=MagicMock(side_effect=lambda path, must_exist=True: path),
         launch=AsyncMock(return_value={"success": True, "program": "App.dll"}),
     )
     mutable_resolver = AsyncMock()
-    readonly_resolver = AsyncMock(
-        side_effect=AssertionError("readonly resolver called")
-    )
+    readonly_resolver = AsyncMock(side_effect=AssertionError("readonly resolver called"))
 
     register_debug_tools(
         registry,
