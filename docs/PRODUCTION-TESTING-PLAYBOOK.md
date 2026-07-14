@@ -18,6 +18,16 @@ those flows are covered by the manual smoke suite and can be run when a full
 Windows debug stand is available. Avalonia is a first-class GUI fixture target
 because it is a future migration path for the UI automation surface.
 
+## UXDD Release Criterion
+
+This playbook is the primary release gate, not a supplementary demonstration. The release report must enumerate the user journeys it claims as shipped and exercise each one through the same built-wheel installation and public CLI/MCP entry point a consumer receives.
+
+- `PRODUCT_WORKS` is required for every claimed journey.
+- `PARTIALLY_WORKS` and `BROKEN` both mean `BLOCK_RELEASE` for a claimed journey.
+- Private test helpers, direct internal calls, and unit-test-only proof are not consumer evidence.
+- Unit, integration, critical, runtime-smoke, build, and packaging protocols remain mandatory supporting evidence, but their success cannot override a failed or partial consumer journey.
+- An optional flow may be omitted only when the governing spec, PRD, ADR, or active run contract does not claim it as shipped and the release does not change its consumer boundary.
+
 ## Prerequisites
 
 - Python 3.10 or newer.
@@ -374,4 +384,6 @@ CR-003 DataGrid drag/drop replay gate above.
 
 Overall verdict: `PRODUCT_WORKS` / `PARTIALLY_WORKS` / `BROKEN`
 
-Gate decision: `PASS` / `BLOCK_RELEASE`
+Gate decision: `PASS` only when every user journey claimed by the release is
+`PRODUCT_WORKS`; otherwise `BLOCK_RELEASE`. Green unit or integration tests do
+not override this UXDD verdict.
