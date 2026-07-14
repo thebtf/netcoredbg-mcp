@@ -16,6 +16,14 @@ the unchanged Python server and dynamically proxies its `tools/list` and
 default; no tool family has moved to native C# yet. The next migration boundary
 is UI/FlaUI after compatibility parity is reviewed and merged.
 
+**Compatibility boundary:** this first host slice proxies only `tools/list` and
+`tools/call`; it does not relay downstream MCP roots or other client callbacks
+to Python. Until a later reviewed CR adds roots parity, launch the host with an
+explicit `--project`, set `NETCOREDBG_PROJECT_ROOT`, or use
+`--project-from-cwd` from the intended project directory. Published-entrypoint
+cutover is blocked on that parity decision, so the current Python entrypoint
+retains its direct client-roots behavior.
+
 **Why it makes sense:** the product debugs .NET and the UI layer is already C#;
 Python exists only because FlaUI needed C#. Removing the split deletes the
 JSON-RPC bridge tax, makes FlaUI native, ships one self-contained `.exe` (no
@@ -39,23 +47,23 @@ target, and orphan `uv` launchers cannot exist. The two-language split does not
 just cost bridge latency — it inserts an interpreter+wrapper layer that defeats
 process supervision.
 
-**Why NOT now:** v0.21.0 is stable, runtime-smoke v2 (18k LOC `session/`) just
-shipped — rewriting the newest/most-complex code is peak regression risk for
-zero user payoff. Trigger for starting is a concrete pain, not aesthetics:
-JSON-RPC bridge latency becomes a bottleneck, maintaining Python+C# starts
-blocking delivery, users hit friction on the pip+dotnet install path, or the
-wrapper-launch supervision gap keeps causing hung-upstream incidents like
-2026-07-01 (#355). That last one is now a NAMED, observed trigger — not
-hypothetical — which moves this debt from "someday" toward "when the next
-supervision incident lands, start the strangler-fig."
+**Why migration remains incremental:** the observed supervision failure (#355)
+was enough to start the strangler host, but it does not justify rewriting the
+newest and most complex Python code. Each boundary must provide concrete user or
+operational value and retain green parity evidence; working modules move only
+when their owning CR is reviewed.
 
-**Migration order when triggered (strangler-fig):**
-1. Stand up a C# MCP host beside the Python server; proxy tool-by-tool into
-   existing Python.
-2. Migrate UI/FlaUI tools first (already C# — bridge tax vanishes immediately =
-   real early payoff).
-3. Migrate `dap/` then `session/` per-module, each under green tests.
-4. Python fades module by module; product works every day.
+**Current migration order (strangler-fig):**
+1. **In review:** add the C# compatibility host and proxy the existing Python
+   tool catalog/calls; keep the Python console entrypoint published.
+2. Decide and prove the remaining front-door parity needed before any entrypoint
+   cutover, starting with downstream MCP roots and then resources/prompts if
+   they remain consumer-visible.
+3. Migrate UI/FlaUI tools first (already C# — removing the bridge tax provides
+   the earliest native payoff).
+4. Migrate `dap/` then `session/` per module, each behind green parity tests.
+5. Retire Python only after every public family has moved and the packaged
+   entrypoint has passed a separate release gate.
 
 Sizing (2026-07-01): Python src 41,460 LOC (125 files) — `session/` 18k,
 `tools/` 9.3k, `ui/` 6.9k, `dap/` 955; tests 52,614 LOC; existing C# 8,571 LOC.

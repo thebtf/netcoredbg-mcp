@@ -45,12 +45,14 @@ public static class Program
             return 1;
         }
 
+        var exitCode = 0;
         using (pythonProcess)
         {
             // Preserve the child diagnostics byte-for-byte while keeping stdout
             // exclusively available for the downstream MCP JSON-RPC transport.
             var stderrPump = pythonProcess.StandardError.BaseStream.CopyToAsync(
                 Console.OpenStandardError());
+            var processStopped = false;
 
             try
             {
@@ -60,20 +62,44 @@ public static class Program
 
                 await using var upstream = await McpClient.CreateAsync(upstreamTransport);
                 await RunProxyAsync(upstream);
-                return 0;
             }
             catch (Exception ex)
             {
                 Console.Error.WriteLine(
                     $"[{HostServerName}] Python backend or MCP proxy failed: {ex}");
-                return 1;
+                exitCode = 1;
             }
             finally
             {
-                await StopPythonProcessAsync(pythonProcess);
-                await stderrPump;
+                try
+                {
+                    await StopPythonProcessAsync(pythonProcess);
+                    processStopped = true;
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine(
+                        $"[{HostServerName}] Failed to stop the Python backend: {ex}");
+                    exitCode = 1;
+                }
+
+                if (processStopped)
+                {
+                    try
+                    {
+                        await stderrPump;
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine(
+                            $"[{HostServerName}] Failed to forward Python stderr: {ex}");
+                        exitCode = 1;
+                    }
+                }
             }
         }
+
+        return exitCode;
     }
 
     private static async Task RunProxyAsync(McpClient upstream)
