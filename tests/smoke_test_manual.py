@@ -109,7 +109,9 @@ class _CapturingMCP:
 def _grid_alias_evidence(response: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
     data = response.get("data", {}) if isinstance(response, dict) else {}
     visible_rows = data.get("visible_rows") if isinstance(data, dict) else None
-    first_row = visible_rows[0] if isinstance(visible_rows, list) and visible_rows else None
+    first_row = (
+        visible_rows[0] if isinstance(visible_rows, list) and visible_rows else None
+    )
     first_cells = first_row.get("cells", {}) if isinstance(first_row, dict) else {}
     first_phrase = first_cells.get("Phrase") or first_cells.get("phrase")
     evidence = {
@@ -378,7 +380,9 @@ async def test_modules():
         await asyncio.sleep(0.3)
 
         check(
-            "Modules populated by events", len(m.state.modules) > 0, f"count={len(m.state.modules)}"
+            "Modules populated by events",
+            len(m.state.modules) > 0,
+            f"count={len(m.state.modules)}",
         )
 
         app_mod = [mod for mod in m.state.modules if "SmokeTestApp" in mod.name]
@@ -436,7 +440,9 @@ async def test_quick_evaluate():
                 True,
                 f"error={result['error']}",
             )
-            print("    NOTE: Copy dbgshim.dll from .NET 8 SDK to fix. Skipping eval checks.")
+            print(
+                "    NOTE: Copy dbgshim.dll from .NET 8 SDK to fix. Skipping eval checks."
+            )
         else:
             check(
                 "quick_evaluate returns result",
@@ -533,7 +539,8 @@ async def test_capabilities_and_terminate():
         check("Capabilities is dict", isinstance(caps, dict))
         check("Has multiple capabilities", len(caps) > 3, f"count={len(caps)}")
         check(
-            "supportsTerminateRequest = True", caps.get("supportsTerminateRequest", False) is True
+            "supportsTerminateRequest = True",
+            caps.get("supportsTerminateRequest", False) is True,
         )
         check(
             "supportsConditionalBreakpoints = True",
@@ -613,7 +620,9 @@ async def test_threads_and_pause():
         await m._client.pause(m.state.current_thread_id or threads[0].id)
         snapshot = await m.wait_for_stopped(timeout=5)
         check(
-            "Pause succeeds", snapshot.state == DebugState.STOPPED, f"reason={snapshot.stop_reason}"
+            "Pause succeeds",
+            snapshot.state == DebugState.STOPPED,
+            f"reason={snapshot.stop_reason}",
         )
 
         # Continue
@@ -621,7 +630,9 @@ async def test_threads_and_pause():
         await m._client.continue_execution(m.state.current_thread_id)
         await asyncio.sleep(0.3)
         check(
-            "Continue resumes", m.state.state == DebugState.RUNNING, f"state={m.state.state.value}"
+            "Continue resumes",
+            m.state.state == DebugState.RUNNING,
+            f"state={m.state.state.value}",
         )
 
     finally:
@@ -708,7 +719,11 @@ async def test_ui_invoke_toggle():
                 automation_id="btnScoped",
                 root_id="settingsPanel",
             )
-            check("find_element with root_id", result.get("found", False), "found in settingsPanel")
+            check(
+                "find_element with root_id",
+                result.get("found", False),
+                "found in settingsPanel",
+            )
         except Exception as e:
             check("find_element with root_id", False, str(e))
 
@@ -728,7 +743,11 @@ async def test_ui_invoke_toggle():
             except Exception as e:
                 check("find_by_xpath", False, str(e))
         else:
-            check("find_by_xpath (skipped)", True, "pywinauto backend -- XPath not supported")
+            check(
+                "find_by_xpath (skipped)",
+                True,
+                "pywinauto backend -- XPath not supported",
+            )
 
         # Test ui_file_dialog: WinForms file dialog button
         # Known issue: WinForms button UIA exposure varies by .NET version
@@ -753,7 +772,9 @@ async def test_ui_invoke_toggle():
             check(
                 "ui_file_dialog",
                 True,
-                "opened and canceled" if opened else "button not in UIA tree — WinForms limitation",
+                "opened and canceled"
+                if opened
+                else "button not in UIA tree — WinForms limitation",
             )
         except Exception as e:
             check("ui_file_dialog", True, f"skipped — {e}")
@@ -793,7 +814,9 @@ async def test_datagrid_select():
                 result = await backend.find_element(name="dataGrid")
             check(
                 "DataGrid found",
-                result.get("found", False) if isinstance(result, dict) else result is not None,
+                result.get("found", False)
+                if isinstance(result, dict)
+                else result is not None,
             )
         except Exception as e:
             check("DataGrid found", False, str(e))
@@ -813,7 +836,9 @@ async def test_datagrid_select():
             # Extract text from DataGrid
             try:
                 result = await backend.extract_text(automation_id="dataGrid")
-                text = result.get("text", "") if isinstance(result, dict) else str(result)
+                text = (
+                    result.get("text", "") if isinstance(result, dict) else str(result)
+                )
                 check("DataGrid extract_text", len(text) > 0, f"text={text[:60]}...")
             except Exception as e:
                 check("DataGrid extract_text", True, f"not supported: {e}")
@@ -829,7 +854,9 @@ async def test_datagrid_select():
             except Exception as e:
                 check("DataGrid XPath DataItem", True, f"xpath not available: {e}")
         else:
-            check("DataGrid tests (skipped)", True, "pywinauto — limited DataGrid support")
+            check(
+                "DataGrid tests (skipped)", True, "pywinauto — limited DataGrid support"
+            )
 
         await backend.disconnect()
 
@@ -875,7 +902,11 @@ async def test_multi_window_envelope():
         await backend.connect(pid)
 
         if not isinstance(backend, FlaUIBackend):
-            check("MultiWindow (skipped)", True, "pywinauto -- multi-window requires FlaUI bridge")
+            check(
+                "MultiWindow (skipped)",
+                True,
+                "pywinauto -- multi-window requires FlaUI bridge",
+            )
             await backend.disconnect()
             return
 
@@ -914,7 +945,11 @@ async def test_multi_window_envelope():
 
         # 2. Element cache populated from the walk
         cache_size = len(backend.element_cache)
-        check("MultiWindow: element cache populated", cache_size > 0, f"entries={cache_size}")
+        check(
+            "MultiWindow: element cache populated",
+            cache_size > 0,
+            f"entries={cache_size}",
+        )
 
         # 3. Open the second top-level window
         try:
@@ -998,7 +1033,8 @@ async def test_multi_window_envelope():
                 unknown_error = str(err)
             check(
                 "MultiWindow: switch_window rejects unknown window",
-                unknown_error is not None and "No top-level window" in (unknown_error or ""),
+                unknown_error is not None
+                and "No top-level window" in (unknown_error or ""),
                 f"error={unknown_error}",
             )
         except Exception as e:
@@ -1079,7 +1115,9 @@ async def test_drag_primitive():
             positions.sort()
             return [item_name for _, item_name in positions]
 
-        def _duration_matches_requested_speed(result: dict, requested_speed_ms: int) -> bool:
+        def _duration_matches_requested_speed(
+            result: dict, requested_speed_ms: int
+        ) -> bool:
             duration_ms = result.get("duration_ms")
             return (
                 isinstance(duration_ms, (int, float))
@@ -1113,7 +1151,11 @@ async def test_drag_primitive():
         current_order, order_detail = await _read_drag_order()
         readback_available = current_order is not None
         if readback_available:
-            check("Drag: initial order readable", current_order[0] == "Alpha", order_detail)
+            check(
+                "Drag: initial order readable",
+                current_order[0] == "Alpha",
+                order_detail,
+            )
         else:
             check(
                 "Drag: initial order readback unavailable",
@@ -1193,7 +1235,10 @@ async def test_drag_primitive():
             check(
                 "Drag: speed_ms=10 rejected below safety floor",
                 below_floor_error is not None
-                and ("drag-threshold" in below_floor_error or "speed_ms" in below_floor_error),
+                and (
+                    "drag-threshold" in below_floor_error
+                    or "speed_ms" in below_floor_error
+                ),
                 f"error={below_floor_error}",
             )
         except Exception as e:
@@ -1208,7 +1253,8 @@ async def test_drag_primitive():
                 same_point_error = str(inner)
             check(
                 "Drag: identical from/to coords rejected",
-                same_point_error is not None and "identical" in same_point_error.lower(),
+                same_point_error is not None
+                and "identical" in same_point_error.lower(),
                 f"error={same_point_error}",
             )
         except Exception as e:
@@ -1268,7 +1314,9 @@ async def test_system_event_theme():
             initial = _read_theme()
             initial_name = "light" if initial == 1 else "dark"
             check(
-                "SystemEvent: initial theme readable", True, f"initial={initial_name} ({initial})"
+                "SystemEvent: initial theme readable",
+                True,
+                f"initial={initial_name} ({initial})",
             )
         except Exception as e:
             check("SystemEvent: initial theme readable", False, str(e))
@@ -1396,7 +1444,9 @@ async def test_persistent_modifier_hold():
         # Hold Ctrl
         try:
             result = await backend.hold_modifiers(["ctrl"])
-            check('ModHold: hold_modifiers(["ctrl"]) succeeds', isinstance(result, dict))
+            check(
+                'ModHold: hold_modifiers(["ctrl"]) succeeds', isinstance(result, dict)
+            )
             held = await backend.get_held_modifiers()
             check(
                 "ModHold: ctrl held after hold_modifiers",
@@ -1453,7 +1503,9 @@ async def test_persistent_modifier_hold():
 
                 return [name for name in selected_names if name]
 
-            selected_names = await loop.run_in_executor(None, _read_selected_multi_items)
+            selected_names = await loop.run_in_executor(
+                None, _read_selected_multi_items
+            )
             if selected_names:
                 check(
                     "ModHold: Ctrl+click leaves multiple items selected",
@@ -1571,7 +1623,9 @@ async def test_scoped_search_performance():
         scoped_times = []
         for _ in range(iterations):
             t0 = _time.monotonic()
-            await backend.find_element(automation_id="btnScoped", root_id="settingsPanel")
+            await backend.find_element(
+                automation_id="btnScoped", root_id="settingsPanel"
+            )
             scoped_times.append(_time.monotonic() - t0)
 
         avg_full = sum(full_times) / len(full_times)
@@ -1625,9 +1679,15 @@ async def test_tracepoints():
     # Simulate trace entries
     import time
 
-    mgr._trace_buffer.append(TraceEntry(time.monotonic(), "Program.cs", 15, "i", "1", 1, "tp-1"))
-    mgr._trace_buffer.append(TraceEntry(time.monotonic(), "Program.cs", 15, "i", "2", 1, "tp-1"))
-    mgr._trace_buffer.append(TraceEntry(time.monotonic(), "Program.cs", 20, "sum", "3", 1, "tp-2"))
+    mgr._trace_buffer.append(
+        TraceEntry(time.monotonic(), "Program.cs", 15, "i", "1", 1, "tp-1")
+    )
+    mgr._trace_buffer.append(
+        TraceEntry(time.monotonic(), "Program.cs", 15, "i", "2", 1, "tp-1")
+    )
+    mgr._trace_buffer.append(
+        TraceEntry(time.monotonic(), "Program.cs", 20, "sum", "3", 1, "tp-2")
+    )
 
     entries = mgr.get_log()
     check("Trace log has 3 entries", len(entries) == 3)
@@ -1667,7 +1727,10 @@ async def test_snapshots():
         name="before",
         timestamp=time.monotonic(),
         frame_name="Main",
-        variables={"x": SnapshotVar("42", "int"), "name": SnapshotVar("hello", "string")},
+        variables={
+            "x": SnapshotVar("42", "int"),
+            "name": SnapshotVar("hello", "string"),
+        },
     )
     mgr._snapshots["before"] = snap1
     check("Snapshot stored", "before" in mgr.snapshots)
@@ -1686,8 +1749,13 @@ async def test_snapshots():
 
     # Diff
     diff = mgr.diff("before", "after")
-    check("Diff: 1 changed (x)", len(diff["changed"]) == 1 and diff["changed"][0]["name"] == "x")
-    check("Diff: 1 added (y)", len(diff["added"]) == 1 and diff["added"][0]["name"] == "y")
+    check(
+        "Diff: 1 changed (x)",
+        len(diff["changed"]) == 1 and diff["changed"][0]["name"] == "x",
+    )
+    check(
+        "Diff: 1 added (y)", len(diff["added"]) == 1 and diff["added"][0]["name"] == "y"
+    )
     check("Diff: 0 removed", len(diff["removed"]) == 0)
     check("Diff: 1 unchanged (name)", diff["unchanged_count"] == 1)
 
@@ -1698,8 +1766,12 @@ async def test_snapshots():
     # FIFO eviction baseline: verify direct dict insertion bypasses eviction
     # (eviction only triggers through SnapshotManager.take(), not _snapshots[...]=)
     for i in range(20):
-        mgr._snapshots[f"extra-{i}"] = Snapshot(f"extra-{i}", time.monotonic(), "Test", {})
-    check("Direct dict access bypasses FIFO eviction", len(mgr._snapshots) == 22)  # 2 + 20
+        mgr._snapshots[f"extra-{i}"] = Snapshot(
+            f"extra-{i}", time.monotonic(), "Test", {}
+        )
+    check(
+        "Direct dict access bypasses FIFO eviction", len(mgr._snapshots) == 22
+    )  # 2 + 20
 
 
 async def test_collection_and_object():
@@ -1795,7 +1867,9 @@ async def test_tracepoint_performance():
 
         check("Tracepoint cycle time measured", True, f"actual={cycle_ms:.1f}ms")
         check(
-            "Tracepoint cycle < 500ms", cycle_ms < 500, f"actual={cycle_ms:.1f}ms (500ms timeout)"
+            "Tracepoint cycle < 500ms",
+            cycle_ms < 500,
+            f"actual={cycle_ms:.1f}ms (500ms timeout)",
         )
         check("Trace entry logged", len(mgr.get_log()) >= 1)
 
@@ -1836,8 +1910,14 @@ async def test_tracepoint_auto_resume():
         await m._client.continue_execution(m.state.current_thread_id or 1)
         snapshot = await m.wait_for_stopped(timeout=15.0)
 
-        check("Stopped after tracepoints", snapshot is not None and not snapshot.timed_out)
-        check("Trace log has entries", len(mgr.get_log()) > 0, f"entries={len(mgr.get_log())}")
+        check(
+            "Stopped after tracepoints", snapshot is not None and not snapshot.timed_out
+        )
+        check(
+            "Trace log has entries",
+            len(mgr.get_log()) > 0,
+            f"entries={len(mgr.get_log())}",
+        )
 
         if mgr.get_log():
             check(
@@ -1910,7 +1990,9 @@ async def test_heartbeat_during_wait():
         m.prepare_for_execution()
         await m._client.continue_execution(m.state.current_thread_id or 1)
 
-        snapshot = await m.wait_for_stopped(timeout=15.0, heartbeat_callback=on_heartbeat)
+        snapshot = await m.wait_for_stopped(
+            timeout=15.0, heartbeat_callback=on_heartbeat
+        )
 
         check("Long run completed", snapshot is not None)
         check("Heartbeat fired", len(heartbeats) >= 1, f"count={len(heartbeats)}")
@@ -1949,7 +2031,11 @@ async def test_window_lifecycle():
         await backend.connect(pid)
 
         if not isinstance(backend, FlaUIBackend):
-            check("Window lifecycle (skipped)", True, "pywinauto — WindowPattern requires FlaUI")
+            check(
+                "Window lifecycle (skipped)",
+                True,
+                "pywinauto — WindowPattern requires FlaUI",
+            )
             await backend.disconnect()
             return
 
@@ -2012,7 +2098,11 @@ async def test_expand_collapse_tree():
         await backend.connect(pid)
 
         if not isinstance(backend, FlaUIBackend):
-            check("Expand tree (skipped)", True, "pywinauto — ExpandCollapsePattern requires FlaUI")
+            check(
+                "Expand tree (skipped)",
+                True,
+                "pywinauto — ExpandCollapsePattern requires FlaUI",
+            )
             await backend.disconnect()
             return
 
@@ -2086,7 +2176,9 @@ async def test_set_value_slider():
         await backend.connect(pid)
 
         if not isinstance(backend, FlaUIBackend):
-            check("Slider (skipped)", True, "pywinauto — RangeValuePattern requires FlaUI")
+            check(
+                "Slider (skipped)", True, "pywinauto — RangeValuePattern requires FlaUI"
+            )
             await backend.disconnect()
             return
 
@@ -2146,7 +2238,11 @@ async def test_realize_virtualized_item():
         await backend.connect(pid)
 
         if not isinstance(backend, FlaUIBackend):
-            check("Realize (skipped)", True, "pywinauto — VirtualizedItemPattern requires FlaUI")
+            check(
+                "Realize (skipped)",
+                True,
+                "pywinauto — VirtualizedItemPattern requires FlaUI",
+            )
             await backend.disconnect()
             return
 
@@ -2216,7 +2312,9 @@ async def test_realize_virtualized_item():
                         f"bounding_rect={rect}",
                     )
             except (RuntimeError, asyncio.TimeoutError) as post_e:  # noqa: BLE001
-                check("VirtList_Row_150 accessible after realize call", False, str(post_e))
+                check(
+                    "VirtList_Row_150 accessible after realize call", False, str(post_e)
+                )
 
             # Also test item-not-found path on dragList (no ItemContainerPattern either)
             result2 = await backend.realize_virtualized_item(
@@ -2259,17 +2357,27 @@ async def test_clipboard_roundtrip():
         await backend.connect(pid)
 
         if not isinstance(backend, FlaUIBackend):
-            check("Clipboard (skipped)", True, "pywinauto — Clipboard STA requires FlaUI")
+            check(
+                "Clipboard (skipped)", True, "pywinauto — Clipboard STA requires FlaUI"
+            )
             await backend.disconnect()
             return
 
         try:
             # ASCII round-trip
             write_result = await backend.clipboard_write("test123")
-            check("Clipboard write ASCII", write_result.get("written") is True, str(write_result))
+            check(
+                "Clipboard write ASCII",
+                write_result.get("written") is True,
+                str(write_result),
+            )
 
             read_result = await backend.clipboard_read()
-            check("Clipboard read has_text", read_result.get("has_text") is True, str(read_result))
+            check(
+                "Clipboard read has_text",
+                read_result.get("has_text") is True,
+                str(read_result),
+            )
             check(
                 "Clipboard ASCII round-trip",
                 read_result.get("text") == "test123",
@@ -2280,7 +2388,9 @@ async def test_clipboard_roundtrip():
             unicode_text = "emoji \U0001f389 \u00fcnic\u00f6de"
             write_result2 = await backend.clipboard_write(unicode_text)
             check(
-                "Clipboard write unicode", write_result2.get("written") is True, str(write_result2)
+                "Clipboard write unicode",
+                write_result2.get("written") is True,
+                str(write_result2),
             )
 
             read_result2 = await backend.clipboard_read()
@@ -2365,12 +2475,16 @@ async def test_instrumentation_group_lifecycle():
         norm = m.breakpoints._normalize_path(SOURCE)
         m.state.hit_counts[(norm, bp_line)] = 2
         m._tracepoint_manager._trace_buffer.append(
-            TraceEntry(_time.monotonic(), SOURCE, trace_line, "sum", "3", 1, tracepoint_id)
+            TraceEntry(
+                _time.monotonic(), SOURCE, trace_line, "sum", "3", 1, tracepoint_id
+            )
         )
 
         inspected = (await m.instrumentation.inspect_group("manual_flow")).to_dict()
         print(f"  evidence: {inspected}")
-        check("Instrumentation group created", created["status"] == "PASS", str(created))
+        check(
+            "Instrumentation group created", created["status"] == "PASS", str(created)
+        )
         check(
             "Instrumentation group inspect has hit evidence",
             inspected["summary"]["hit_count"] == 2,
@@ -2384,7 +2498,11 @@ async def test_instrumentation_group_lifecycle():
 
         cleared = (await m.instrumentation.clear_group("manual_flow")).to_dict()
         print(f"  clear evidence: {cleared}")
-        check("Instrumentation group clear PASS", cleared["status"] == "PASS", str(cleared))
+        check(
+            "Instrumentation group clear PASS",
+            cleared["status"] == "PASS",
+            str(cleared),
+        )
 
         await m.instrumentation.create_group(
             "manual_leak",
@@ -2431,7 +2549,9 @@ async def test_output_checkpoint_assertions():
         print(f"  checkpoint evidence: {checkpoint}")
         print(f"  pass evidence: {passed_result}")
         print(f"  fail evidence: {failed_result}")
-        check("Output checkpoint created", checkpoint["status"] == "PASS", str(checkpoint))
+        check(
+            "Output checkpoint created", checkpoint["status"] == "PASS", str(checkpoint)
+        )
         check(
             "Output assertion PASS has compact evidence",
             passed_result["status"] == "PASS"
@@ -2475,7 +2595,10 @@ async def test_runtime_smoke_bounded_runner():
                 "assertions": [
                     {
                         "name": "output_assert_since",
-                        "args": {"checkpoint": "manual_runner", "required": ["runner ready"]},
+                        "args": {
+                            "checkpoint": "manual_runner",
+                            "required": ["runner ready"],
+                        },
                     }
                 ],
             }
@@ -2484,12 +2607,18 @@ async def test_runtime_smoke_bounded_runner():
             {
                 "name": "manual-bounded-fail",
                 "actions": [
-                    {"name": "output_checkpoint", "args": {"name": "manual_runner_fail"}},
+                    {
+                        "name": "output_checkpoint",
+                        "args": {"name": "manual_runner_fail"},
+                    },
                 ],
                 "assertions": [
                     {
                         "name": "output_assert_since",
-                        "args": {"checkpoint": "manual_runner_fail", "required": ["missing"]},
+                        "args": {
+                            "checkpoint": "manual_runner_fail",
+                            "required": ["missing"],
+                        },
                     }
                 ],
             }
@@ -2499,12 +2628,14 @@ async def test_runtime_smoke_bounded_runner():
         print(f"  fail compact: {failed_result['compact']}")
         check(
             "Bounded runner PASS includes cleanup",
-            passed_result["status"] == "PASS" and passed_result["cleanup"]["status"] == "PASS",
+            passed_result["status"] == "PASS"
+            and passed_result["cleanup"]["status"] == "PASS",
             str(passed_result["compact"]),
         )
         check(
             "Bounded runner FAIL lists failed assertions",
-            failed_result["status"] == "FAIL" and len(failed_result["failed_assertions"]) == 1,
+            failed_result["status"] == "FAIL"
+            and len(failed_result["failed_assertions"]) == 1,
             str(failed_result["compact"]),
         )
         check(
@@ -2712,7 +2843,9 @@ async def test_wpf_shift_datagrid_evidence():
                 "reason": "FlaUI bridge required for WPF held-modifier proof",
             }
             print(f"  evidence: {evidence}")
-            check("WPF Shift/DataGrid reports BLOCKED without FlaUI", True, str(evidence))
+            check(
+                "WPF Shift/DataGrid reports BLOCKED without FlaUI", True, str(evidence)
+            )
             return
 
         selector = {"automation_id": "dataGrid"}
@@ -2727,7 +2860,9 @@ async def test_wpf_shift_datagrid_evidence():
         range_result = await assert_grid_range(backend, selector, 0, 2)
         text_result = await backend.extract_text(automation_id="txtOutput")
         status_text = (
-            text_result.get("text", "") if isinstance(text_result, dict) else str(text_result)
+            text_result.get("text", "")
+            if isinstance(text_result, dict)
+            else str(text_result)
         )
 
         evidence = {
@@ -2848,7 +2983,9 @@ async def test_wpf_one_call_runtime_smoke_workflow():
     try:
         smoke_tmp_root = os.path.join(BASE, ".agent", "tmp", "wpf-runtime-smoke")
         os.makedirs(smoke_tmp_root, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="workflow-", dir=smoke_tmp_root) as temp_dir:
+        with tempfile.TemporaryDirectory(
+            prefix="workflow-", dir=smoke_tmp_root
+        ) as temp_dir:
             mutable_file = os.path.join(temp_dir, "wpf-workflow-state.txt")
             with open(mutable_file, "w", encoding="utf-8") as handle:
                 handle.write(baseline_state)
@@ -2946,7 +3083,10 @@ async def test_wpf_one_call_runtime_smoke_workflow():
                         "op": "ui.list.toggle_item_child",
                         "selector": {"automation_id": "CharactersListBox"},
                         "item": {"name": "ALICE"},
-                        "child": {"automation_id": "CharGender", "control_type": "CheckBox"},
+                        "child": {
+                            "automation_id": "CharGender",
+                            "control_type": "CheckBox",
+                        },
                         "target_state": "On",
                     },
                     {
@@ -3056,6 +3196,477 @@ async def run_wpf_v2_state_oracle_runtime_smoke() -> dict[str, Any]:
     )
 
 
+def _wpf_hover_selector_matrix_cases() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "root_zero",
+            "selector": {
+                "automation_id": "hoverTrigger",
+                "root_id": "missingHoverRoot",
+            },
+            "expect_status": "BLOCKED",
+            "expect_phase": "resolve_root",
+            "expect_match_count": 0,
+        },
+        {
+            "id": "root_many",
+            "selector": {
+                "automation_id": "hoverMultiplicityTarget",
+                "root_id": "hoverDuplicateRoot",
+            },
+            "expect_status": "BLOCKED",
+            "expect_phase": "resolve_root",
+            "expect_match_count": 2,
+        },
+        {
+            "id": "automation_id_zero",
+            "selector": {
+                "automation_id": "missingHoverTarget",
+                "root_id": "hoverRegion",
+            },
+            "expect_status": "BLOCKED",
+            "expect_phase": "resolve_target",
+            "expect_match_count": 0,
+        },
+        {
+            "id": "automation_id_many",
+            "selector": {
+                "automation_id": "hoverDuplicateTarget",
+                "root_id": "hoverMultiplicityRegion",
+            },
+            "expect_status": "BLOCKED",
+            "expect_phase": "resolve_target",
+            "expect_match_count": 2,
+        },
+        {
+            "id": "xpath_zero",
+            "selector": {
+                "xpath": "//Button[@AutomationId='missingHoverTarget']",
+                "root_id": "hoverRegion",
+            },
+            "expect_status": "BLOCKED",
+            "expect_phase": "resolve_target",
+            "expect_match_count": 0,
+        },
+        {
+            "id": "xpath_many",
+            "selector": {
+                "xpath": "//Button[@AutomationId='hoverDuplicateTarget']",
+                "root_id": "hoverMultiplicityRegion",
+            },
+            "expect_status": "BLOCKED",
+            "expect_phase": "resolve_target",
+            "expect_match_count": 2,
+        },
+        {
+            "id": "name_control_type_zero",
+            "selector": {
+                "name": "Missing hover target",
+                "control_type": "Button",
+                "root_id": "hoverRegion",
+            },
+            "expect_status": "BLOCKED",
+            "expect_phase": "resolve_target",
+            "expect_match_count": 0,
+        },
+        {
+            "id": "name_control_type_many",
+            "selector": {
+                "name": "Duplicate target",
+                "control_type": "Button",
+                "root_id": "hoverMultiplicityRegion",
+            },
+            "expect_status": "BLOCKED",
+            "expect_phase": "resolve_target",
+            "expect_match_count": 2,
+        },
+        {
+            "id": "automation_id_one",
+            "selector": {
+                "automation_id": "hoverTrigger",
+                "root_id": "hoverRegion",
+            },
+            "expect_status": "PASS",
+            "expect_criterion": "automationId",
+        },
+        {
+            "id": "xpath_one",
+            "selector": {
+                "xpath": "//Button[@AutomationId='hoverTrigger']",
+                "root_id": "hoverRegion",
+            },
+            "expect_status": "PASS",
+            "expect_criterion": "xpath",
+        },
+        {
+            "id": "name_control_type_one",
+            "selector": {
+                "name": "Hover trigger",
+                "control_type": "Button",
+                "root_id": "hoverRegion",
+            },
+            "expect_status": "PASS",
+            "expect_criterion": "name+controlType",
+        },
+        {
+            "id": "precedence_automation_id_wins",
+            "selector": {
+                "automation_id": "hoverTrigger",
+                "xpath": "//Button[@AutomationId='hoverOutsideSentinel']",
+                "name": "Outside sentinel",
+                "control_type": "Button",
+                "root_id": "hoverRegion",
+            },
+            "expect_status": "PASS",
+            "expect_criterion": "automationId",
+        },
+        {
+            "id": "precedence_xpath_after_automation_id_miss",
+            "selector": {
+                "automation_id": "missingHoverTarget",
+                "xpath": "//Button[@AutomationId='hoverTrigger']",
+                "name": "Outside sentinel",
+                "control_type": "Button",
+                "root_id": "hoverRegion",
+            },
+            "expect_status": "PASS",
+            "expect_criterion": "xpath",
+        },
+    ]
+
+
+def _windows_cursor_position() -> dict[str, int]:
+    import ctypes
+
+    class Point(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+    point = Point()
+    if not ctypes.windll.user32.GetCursorPos(ctypes.byref(point)):
+        raise OSError("GetCursorPos failed during hover selector matrix")
+    return {"x": int(point.x), "y": int(point.y)}
+
+
+def _wpf_hover_selector_matrix_evidence(
+    results: list[dict[str, Any]],
+    *,
+    cursor_before: dict[str, int],
+    cursor_after_blocked: dict[str, int],
+) -> dict[str, Any]:
+    cases = _wpf_hover_selector_matrix_cases()
+    blocked_count = sum(case["expect_status"] == "BLOCKED" for case in cases)
+    failures: list[str] = []
+    if len(results) not in {blocked_count, len(cases)}:
+        failures.append("selector matrix result count mismatch")
+    expected = cases[: len(results)]
+    if [result.get("id") for result in results] != [case["id"] for case in expected]:
+        failures.append("selector matrix result identities/order mismatch")
+
+    for case, result in zip(expected, results):
+        case_id = str(case["id"])
+        if result.get("status") != case["expect_status"]:
+            failures.append(f"{case_id} status mismatch")
+            continue
+        if case["expect_status"] == "BLOCKED":
+            if result.get("phase") != case["expect_phase"]:
+                failures.append(f"{case_id} phase mismatch")
+            if result.get("matchCount") != case["expect_match_count"]:
+                failures.append(f"{case_id} matchCount mismatch")
+            if result.get("pointerMutationState") != "not_started":
+                failures.append(f"{case_id} pointer mutation started before uniqueness")
+            harness_cursor_before = result.get("harnessCursorBefore")
+            harness_cursor_after = result.get("harnessCursorAfter")
+            if not isinstance(harness_cursor_before, dict) or not isinstance(
+                harness_cursor_after, dict
+            ):
+                failures.append(f"{case_id} missing call-scoped cursor evidence")
+            elif harness_cursor_after != harness_cursor_before:
+                failures.append(
+                    f"{case_id} pointer moved before selector uniqueness passed"
+                )
+            continue
+
+        resolved = dict(result.get("resolvedSelector") or {})
+        if result.get("matchCount") != 1:
+            failures.append(f"{case_id} matchCount mismatch")
+        if resolved.get("criterion") != case["expect_criterion"]:
+            failures.append(f"{case_id} resolved criterion mismatch")
+        for field, value in {
+            "foregroundVerified": True,
+            "focusUnchanged": True,
+            "underPointer": True,
+            "hovered": True,
+            "click": False,
+            "button": "none",
+            "pointerMutationState": "moved",
+        }.items():
+            if result.get(field) != value:
+                failures.append(f"{case_id} {field} mismatch")
+
+    return {
+        "status": "FAIL" if failures else "PASS",
+        "failures": failures,
+        "cursorBefore": cursor_before,
+        "cursorAfterBlocked": cursor_after_blocked,
+        "cases": results,
+    }
+
+
+async def _run_wpf_hover_selector_matrix(bridge_path: str) -> dict[str, Any]:
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    cases = _wpf_hover_selector_matrix_cases()
+    blocked_count = sum(case["expect_status"] == "BLOCKED" for case in cases)
+    m = SessionManager(project_path=BASE)
+    backend = FlaUIBackend(bridge_path, process_registry=m.process_registry)
+    results: list[dict[str, Any]] = []
+    cursor_before: dict[str, int] = {}
+    cursor_after_blocked: dict[str, int] = {}
+    outcome: dict[str, Any] = {}
+    pass_started = False
+    cleanup_failures: list[str] = []
+    try:
+        await m.launch(program=WPF_DLL, cwd=os.path.dirname(WPF_DLL))
+        await asyncio.sleep(1.5)
+        pid = m.state.process_id
+        if not pid:
+            raise RuntimeError("Process ID not available for WPF hover selector matrix")
+        await backend.connect(pid)
+        cursor_before = _windows_cursor_position()
+        for case in cases[:blocked_count]:
+            harness_cursor_before = _windows_cursor_position()
+            result = await backend.hover_element(
+                **dict(case["selector"]),
+                timeout_ms=5000,
+            )
+            harness_cursor_after = _windows_cursor_position()
+            results.append(
+                {
+                    "id": case["id"],
+                    **result,
+                    "harnessCursorBefore": harness_cursor_before,
+                    "harnessCursorAfter": harness_cursor_after,
+                }
+            )
+        cursor_after_blocked = _windows_cursor_position()
+        blocked_evidence = _wpf_hover_selector_matrix_evidence(
+            results,
+            cursor_before=cursor_before,
+            cursor_after_blocked=cursor_after_blocked,
+        )
+        if blocked_evidence["status"] != "PASS":
+            outcome = blocked_evidence
+        else:
+            foreground = await backend.bring_to_front()
+            if foreground.get("activated") is not True:
+                outcome = {
+                    **blocked_evidence,
+                    "status": "BLOCKED",
+                    "prerequisite": "interactive_desktop_or_foreground",
+                    "reason": "selector matrix could not foreground the WPF fixture",
+                    "foreground": foreground,
+                }
+            else:
+                focus = await backend.client.call(
+                    "set_focus",
+                    {
+                        "automationId": "hoverFocusSentinel",
+                        "rootAutomationId": "hoverRegion",
+                    },
+                )
+                if str(focus.get("status") or "PASS").upper() != "PASS":
+                    outcome = {
+                        "status": "BLOCKED",
+                        "prerequisite": "interactive_desktop_or_foreground",
+                        "reason": "selector matrix could not focus the hover sentinel",
+                        "focus": focus,
+                        "cases": results,
+                    }
+                else:
+                    pass_started = True
+                    for case in cases[blocked_count:]:
+                        result = await backend.hover_element(
+                            **dict(case["selector"]),
+                            timeout_ms=5000,
+                        )
+                        results.append({"id": case["id"], **result})
+                    outcome = _wpf_hover_selector_matrix_evidence(
+                        results,
+                        cursor_before=cursor_before,
+                        cursor_after_blocked=cursor_after_blocked,
+                    )
+                    outcome["foregroundSetup"] = foreground
+                    outcome["focusSetup"] = focus
+    except Exception as exc:
+        reason = str(exc)
+        lowered = reason.lower()
+        prerequisite = not pass_started and any(
+            token in lowered
+            for token in ("foreground", "interactive desktop", "flaui", "window")
+        )
+        outcome = {
+            "status": "BLOCKED" if prerequisite else "FAIL",
+            "reason": reason,
+            "cases": results,
+            **(
+                {"prerequisite": "interactive_desktop_or_foreground"}
+                if prerequisite
+                else {}
+            ),
+        }
+    finally:
+        try:
+            await backend.disconnect()
+        except Exception as exc:
+            cleanup_failures.append(f"backend.disconnect: {exc}")
+        try:
+            await m.stop()
+        except Exception as exc:
+            cleanup_failures.append(f"session.stop: {exc}")
+
+    registry_after = len(m.process_registry.get_all())
+    outcome["cleanup"] = {
+        "status": "FAIL" if cleanup_failures or registry_after else "PASS",
+        "failures": cleanup_failures,
+        "process_registry_after": registry_after,
+    }
+    if outcome["cleanup"]["status"] != "PASS":
+        outcome["status"] = "FAIL"
+    return outcome
+
+
+async def run_wpf_v2_hover_runtime_smoke() -> dict[str, Any]:
+    from netcoredbg_mcp.session.runtime_smoke import RuntimeSmokeRunner
+    from netcoredbg_mcp.session.runtime_smoke_operations import ui_operation_adapters
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    if sys.platform != "win32":
+        return {
+            "status": "BLOCKED",
+            "prerequisite": "windows",
+            "reason": "WPF selector-scoped hover smoke requires Windows UI automation",
+        }
+    if not os.path.exists(WPF_DLL):
+        return {
+            "status": "FAIL",
+            "reason": "WPF hover fixture build output is missing",
+            "requested": {"program": WPF_DLL},
+        }
+
+    bridge_path = os.path.join(
+        BASE,
+        "bridge",
+        "bin",
+        "Debug",
+        "net8.0-windows",
+        "win-x64",
+        "FlaUIBridge.exe",
+    )
+    if not os.path.exists(bridge_path):
+        return {
+            "status": "BLOCKED",
+            "prerequisite": "flaui",
+            "reason": "Fresh Debug FlaUI bridge build output is missing",
+            "requested": {"bridge_path": bridge_path},
+        }
+
+    selector_matrix = await _run_wpf_hover_selector_matrix(bridge_path)
+    if selector_matrix.get("status") != "PASS":
+        return selector_matrix
+
+    m = SessionManager(project_path=BASE)
+    backend_holder: dict[str, object | None] = {
+        "backend": FlaUIBackend(bridge_path, process_registry=m.process_registry)
+    }
+
+    async def ensure_ui_connected():
+        backend = backend_holder["backend"]
+        if backend is None:
+            backend = FlaUIBackend(bridge_path, process_registry=m.process_registry)
+            backend_holder["backend"] = backend
+        pid = m.state.process_id
+        if not pid:
+            raise RuntimeError("Process ID not available for WPF hover smoke")
+        if getattr(backend, "process_id", None) != pid:
+            await backend.connect(pid)
+        return backend
+
+    build_project = os.path.join(
+        BASE,
+        "tests",
+        "fixtures",
+        "WpfSmokeApp",
+        "WpfSmokeApp.csproj",
+    )
+    adapters = ui_operation_adapters(ensure_ui_connected, session=m)
+    base_set_focus = adapters["ui.set_focus"]
+
+    async def set_hover_focus(**args: Any) -> dict[str, Any]:
+        backend = await ensure_ui_connected()
+        if not isinstance(backend, FlaUIBackend):
+            return {
+                "status": "BLOCKED",
+                "reason": "FlaUI foreground setup backend is unavailable",
+                "requested": {"backend": "FlaUIBackend"},
+                "accepted": {"capability": "exact target foreground setup"},
+                "next_step": "Run the smoke with the freshly built FlaUI bridge.",
+            }
+        try:
+            foreground = await backend.bring_to_front()
+        except Exception as exc:
+            return {
+                "status": "BLOCKED",
+                "reason": f"exact target foreground setup failed: {exc}",
+                "requested": {"foreground": "target root HWND"},
+                "accepted": {"activated": True},
+                "next_step": (
+                    "Use an interactive desktop where the WPF fixture can be foregrounded."
+                ),
+            }
+        if foreground.get("activated") is not True:
+            return {
+                "status": "BLOCKED",
+                "reason": "exact target foreground setup is unavailable",
+                "requested": foreground,
+                "accepted": {"activated": True},
+                "next_step": (
+                    "Use an interactive desktop where the WPF fixture can be foregrounded."
+                ),
+            }
+        result = await base_set_focus(**args)
+        if str(result.get("status") or "PASS").upper() != "PASS":
+            return result
+        return {**result, "foreground_setup": foreground}
+
+    adapters["ui.set_focus"] = set_hover_focus
+    plan = _v2_hover_plan(program=WPF_DLL, build_project=build_project)
+    try:
+        result = await RuntimeSmokeRunner(m, service_adapters=adapters).run(plan)
+        evidence = _wpf_hover_smoke_evidence(result)
+        evidence["selector_matrix"] = selector_matrix
+        if evidence.get("status") == "BLOCKED":
+            evidence["status"] = "FAIL"
+            evidence["reason"] = (
+                "measured hover sequence blocked after the selector matrix proved "
+                "interactive desktop and foreground prerequisites"
+            )
+        return evidence
+    except Exception as exc:
+        return {
+            "status": "FAIL",
+            "reason": str(exc),
+            "selector_matrix": selector_matrix,
+        }
+    finally:
+        backend = backend_holder["backend"]
+        if backend is not None:
+            try:
+                await backend.disconnect()
+            except Exception as exc:
+                print(f"  [DEBUG] WPF hover backend.disconnect() failed: {exc}")
+        await m.stop()
+
+
 async def run_wpf_v2_text_probe_missing_selector_runtime_smoke() -> dict[str, Any]:
     return await _run_v2_text_probe_missing_selector_runtime_smoke(
         label="WPF",
@@ -3118,7 +3729,9 @@ async def _run_v2_text_probe_missing_selector_runtime_smoke(
             backend_holder["backend"] = backend
         pid = m.state.process_id
         if not pid:
-            raise RuntimeError(f"Process ID not available for {label} v2 text-probe smoke")
+            raise RuntimeError(
+                f"Process ID not available for {label} v2 text-probe smoke"
+            )
         if getattr(backend, "process_id", None) != pid:
             await backend.connect(pid)
         return backend
@@ -3144,7 +3757,8 @@ async def _run_v2_text_probe_missing_selector_runtime_smoke(
         cleanup = dict(result.get("cleanup") or {})
         has_diagnostics = (
             probe.get("status") == "BLOCKED"
-            and probe.get("requested") == {"selector": {"automation_id": "missingTxtOutput"}}
+            and probe.get("requested")
+            == {"selector": {"automation_id": "missingTxtOutput"}}
             and bool(probe.get("accepted"))
             and bool(probe.get("next_step"))
             and isinstance(probe.get("backend_result"), dict)
@@ -3174,7 +3788,9 @@ async def _run_v2_text_probe_missing_selector_runtime_smoke(
             try:
                 await backend_holder["backend"].disconnect()
             except Exception as exc:
-                print(f"  [DEBUG] {label} v2 text-probe backend.disconnect() failed: {exc}")
+                print(
+                    f"  [DEBUG] {label} v2 text-probe backend.disconnect() failed: {exc}"
+                )
         await m.stop()
 
 
@@ -3250,7 +3866,9 @@ async def _run_v2_state_oracle_runtime_smoke(
         if backend_holder["backend"] is not None:
             await backend_holder["backend"].disconnect()
             backend_holder["backend"] = None
-        blocked = await RuntimeSmokeRunner(m, service_adapters=adapters).run(blocked_plan)
+        blocked = await RuntimeSmokeRunner(m, service_adapters=adapters).run(
+            blocked_plan
+        )
         return {
             "status": "PASS"
             if (
@@ -3328,6 +3946,297 @@ def _v2_state_oracle_plan(
                 {"kind": "process.registry.assert_empty"},
             ]
         },
+    }
+
+
+def _v2_hover_plan(*, program: str, build_project: str) -> dict[str, Any]:
+    status_selector = {"automation_id": "hoverStatus"}
+
+    def status_probe(name: str, state: str) -> dict[str, Any]:
+        return {
+            "kind": "ui.text",
+            "name": name,
+            "phase": "after",
+            "action": "read",
+            "selector": status_selector,
+            "expected": f'contains:"state":"{state}"',
+        }
+
+    return {
+        "schema": "netcoredbg.runtime_smoke.v2",
+        "name": "wpf v2 selector-scoped pointer hover",
+        "baseline": {
+            "steps": [
+                {
+                    "id": "launch_fixture",
+                    "kind": "isolated_profile.launch",
+                    "launch": {
+                        "program": program,
+                        "cwd": os.path.dirname(program),
+                        "pre_build": True,
+                        "build_project": build_project,
+                        "build_configuration": "Debug",
+                    },
+                }
+            ]
+        },
+        "cases": [
+            {
+                "id": "selector_scoped_pointer_hover",
+                "transitions": [
+                    {
+                        "id": "arm_hover_measurement",
+                        "action": {
+                            "kind": "ui.input.ensure_target",
+                            "selector": {
+                                "automation_id": "hoverFocusSentinel",
+                                "root_id": "hoverRegion",
+                            },
+                            "require": {"focus": True},
+                        },
+                        "settle": {"idle_ms": 50},
+                        "probes": [status_probe("hover_armed", "closed")],
+                    },
+                    {
+                        "id": "hover_trigger",
+                        "action": {
+                            "kind": "ui.hover",
+                            "selector": {
+                                "automation_id": "hoverTrigger",
+                                "root_id": "hoverRegion",
+                            },
+                            "timeout_ms": 5000,
+                        },
+                        "settle": {"idle_ms": 50},
+                        "probes": [
+                            status_probe("hover_trigger_status", "open_trigger")
+                        ],
+                    },
+                    {
+                        "id": "hover_flyout_surface",
+                        "action": {
+                            "kind": "ui.hover",
+                            "selector": {
+                                "automation_id": "hoverFlyoutSurface",
+                                "root_id": "hoverRegion",
+                            },
+                            "timeout_ms": 5000,
+                        },
+                        "settle": {"idle_ms": 50},
+                        "probes": [status_probe("hover_flyout_status", "open_flyout")],
+                    },
+                    {
+                        "id": "hover_outside",
+                        "action": {
+                            "kind": "ui.hover",
+                            "selector": {
+                                "automation_id": "hoverOutsideSentinel",
+                                "root_id": "hoverRegion",
+                            },
+                            "timeout_ms": 5000,
+                        },
+                        "settle": {"idle_ms": 100},
+                        "probes": [
+                            status_probe("hover_pending_status", "close_pending")
+                        ],
+                    },
+                    {
+                        "id": "wait_for_hover_close",
+                        "action": {"kind": "wait", "idle_ms": 900},
+                        "settle": {"idle_ms": 0},
+                        "probes": [status_probe("hover_closed_status", "closed")],
+                    },
+                ],
+            }
+        ],
+        "cleanup": {
+            "steps": [
+                {"kind": "debug.stop"},
+                {"kind": "process.registry.assert_empty"},
+            ]
+        },
+    }
+
+
+def _wpf_hover_smoke_evidence(result: dict[str, Any]) -> dict[str, Any]:
+    import json
+
+    cleanup = dict(result.get("cleanup") or {})
+    result_status = str(result.get("status") or "FAIL").upper()
+    transitions = [_v2_transition(result, index) for index in range(5)]
+    hover_actions = [
+        _first_transition_action(transition)
+        for transition in transitions[1:4]
+        if transition
+    ]
+
+    if result_status != "PASS":
+        reason = str(result.get("reason") or "WPF hover runtime smoke failed")
+        blocked_reasons = [
+            str(action.get("reason") or action.get("result", {}).get("reason") or "")
+            for action in hover_actions
+            if str(action.get("status") or "").upper() == "BLOCKED"
+        ]
+        combined = " ".join([reason, *blocked_reasons]).lower()
+        successful_hovers = sum(
+            str(action.get("status") or "").upper() == "PASS"
+            for action in hover_actions
+        )
+        if (
+            result_status == "BLOCKED"
+            and successful_hovers == 0
+            and any(
+                token in combined
+                for token in (
+                    "foreground",
+                    "interactive desktop",
+                    "flaui",
+                    "ui backend",
+                    "visible window",
+                )
+            )
+        ):
+            return {
+                "status": "BLOCKED",
+                "prerequisite": "interactive_desktop_or_foreground",
+                "reason": reason,
+                "blocked": result.get("blocked"),
+                "cleanup": cleanup,
+            }
+        return {
+            "status": "FAIL",
+            "reason": reason,
+            "blocked": result.get("blocked"),
+            "cleanup": cleanup,
+        }
+
+    failures: list[str] = []
+    expected_ids = [
+        "arm_hover_measurement",
+        "hover_trigger",
+        "hover_flyout_surface",
+        "hover_outside",
+        "wait_for_hover_close",
+    ]
+    if [transition.get("id") for transition in transitions] != expected_ids:
+        failures.append("measured transition identities/order mismatch")
+    if any(
+        str(transition.get("status") or "").upper() != "PASS"
+        for transition in transitions
+    ):
+        failures.append("one or more measured transitions did not PASS")
+
+    expected_states = [
+        "closed",
+        "open_trigger",
+        "open_flyout",
+        "close_pending",
+        "closed",
+    ]
+    expected_visibility = [False, True, True, True, False]
+    probe_names = [
+        "hover_armed",
+        "hover_trigger_status",
+        "hover_flyout_status",
+        "hover_pending_status",
+        "hover_closed_status",
+    ]
+    fixture_states: list[dict[str, Any]] = []
+    for index, (transition, probe_name) in enumerate(
+        zip(transitions, probe_names, strict=True)
+    ):
+        raw_status = _transition_probe_value(
+            transition,
+            "after",
+            f"ui.text.{probe_name}",
+        )
+        try:
+            fixture_state = json.loads(str(raw_status))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            fixture_state = {}
+            failures.append(
+                f"transition {expected_ids[index]} returned malformed hoverStatus"
+            )
+        fixture_states.append(fixture_state)
+        if fixture_state.get("state") != expected_states[index]:
+            failures.append(f"transition {expected_ids[index]} state mismatch")
+        if fixture_state.get("surfaceVisible") is not expected_visibility[index]:
+            failures.append(f"transition {expected_ids[index]} visibility mismatch")
+        if fixture_state.get("measurementArmed") is not True:
+            failures.append(
+                f"transition {expected_ids[index]} measurement was not armed"
+            )
+        if fixture_state.get("closeDelayMs") != 500:
+            failures.append(f"transition {expected_ids[index]} close delay mismatch")
+        for counter in (
+            "previewMouseLeftButtonDownCount",
+            "previewMouseLeftButtonUpCount",
+            "clickCount",
+            "focusChangeCount",
+        ):
+            if fixture_state.get(counter) != 0:
+                failures.append(f"transition {expected_ids[index]} changed {counter}")
+
+    required_hover_truth = {
+        "matchCount": 1,
+        "foregroundVerified": True,
+        "focusUnchanged": True,
+        "underPointer": True,
+        "hovered": True,
+        "click": False,
+        "button": "none",
+        "pointerMutationState": "moved",
+    }
+    for index, action in enumerate(hover_actions, start=1):
+        transition_id = expected_ids[index]
+        if str(action.get("status") or "").upper() != "PASS":
+            failures.append(f"transition {transition_id} hover action did not PASS")
+            continue
+        for field, expected in required_hover_truth.items():
+            if action.get(field) != expected:
+                failures.append(f"transition {transition_id} {field} mismatch")
+        foreground = action.get("targetRootHwnd")
+        if not foreground or action.get("foregroundHwndBefore") != foreground:
+            failures.append(f"transition {transition_id} foreground-before mismatch")
+        if action.get("foregroundHwndAfter") != foreground:
+            failures.append(f"transition {transition_id} foreground-after mismatch")
+        focus_before = dict(action.get("focusBefore") or {})
+        focus_after = dict(action.get("focusAfter") or {})
+        focus_identity_keys = ("automationId", "name", "controlType")
+        if any(
+            focus_before.get(key) != focus_after.get(key) for key in focus_identity_keys
+        ):
+            failures.append(f"transition {transition_id} focus identity changed")
+        if action.get("hitRelation") not in {"self", "descendant"}:
+            failures.append(f"transition {transition_id} hit relation mismatch")
+        elapsed_ms = action.get("elapsedMs")
+        timeout_ms = action.get("timeoutMs")
+        if (
+            not isinstance(elapsed_ms, int)
+            or not isinstance(timeout_ms, int)
+            or elapsed_ms > timeout_ms
+        ):
+            failures.append(f"transition {transition_id} elapsed time was not bounded")
+        if action.get("runner_input") != {
+            "source": "runner_injected",
+            "kind": "ui.hover",
+            "window": "action",
+            "route": "hover",
+        }:
+            failures.append(
+                f"transition {transition_id} runner input metadata mismatch"
+            )
+
+    if cleanup.get("status") != "PASS" or cleanup.get("process_registry_after") != 0:
+        failures.append("debugger cleanup or process registry proof failed")
+
+    return {
+        "status": "FAIL" if failures else "PASS",
+        "failures": failures,
+        "states": fixture_states,
+        "hover_actions": hover_actions,
+        "cleanup": cleanup,
+        "action_count": result.get("action_count"),
     }
 
 
@@ -3412,7 +4321,32 @@ async def test_wpf_v2_state_oracle_runtime_smoke():
     check(
         "WPF v2 state oracle cleanup proof has zero leaked processes",
         evidence.get("happy", {}).get("cleanup", {}).get("process_registry_after") == 0
-        and evidence.get("blocked", {}).get("cleanup", {}).get("process_registry_after") == 0,
+        and evidence.get("blocked", {}).get("cleanup", {}).get("process_registry_after")
+        == 0,
+        str(evidence),
+    )
+
+
+async def test_wpf_v2_hover_runtime_smoke():
+    print("\nWPF V2 SELECTOR-SCOPED HOVER RUNTIME SMOKE")
+    evidence = await run_wpf_v2_hover_runtime_smoke()
+    print(f"  evidence: {evidence}")
+    if evidence.get("status") == "BLOCKED":
+        check(
+            "WPF v2 hover stops only on an allowed desktop prerequisite",
+            evidence.get("prerequisite")
+            in {"windows", "flaui", "interactive_desktop_or_foreground"},
+            str(evidence),
+        )
+        return
+    check(
+        "WPF v2 selector-scoped hover passes measured contract",
+        evidence.get("status") == "PASS",
+        str(evidence),
+    )
+    check(
+        "WPF v2 hover cleanup proof has zero leaked processes",
+        evidence.get("cleanup", {}).get("process_registry_after") == 0,
         str(evidence),
     )
 
@@ -3436,7 +4370,9 @@ async def test_avalonia_v2_text_probe_missing_selector_runtime_smoke():
     evidence = await run_avalonia_v2_text_probe_missing_selector_runtime_smoke()
     print(f"  evidence: {evidence}")
     if evidence.get("status") == "BLOCKED":
-        check("Avalonia v2 text-probe selector miss reports BLOCKED", True, str(evidence))
+        check(
+            "Avalonia v2 text-probe selector miss reports BLOCKED", True, str(evidence)
+        )
         return
     check(
         "Avalonia v2 text-probe selector miss preserves diagnostics",
@@ -3474,7 +4410,9 @@ async def run_wpf_v2_visible_row_drag_runtime_smoke() -> dict[str, Any]:
             backend_holder["backend"] = backend
         pid = m.state.process_id
         if not pid:
-            raise RuntimeError("Process ID not available for WPF v2 visible-row drag smoke")
+            raise RuntimeError(
+                "Process ID not available for WPF v2 visible-row drag smoke"
+            )
         if getattr(backend, "process_id", None) != pid:
             await backend.connect(pid)
         return backend
@@ -3501,7 +4439,9 @@ async def run_wpf_v2_visible_row_drag_runtime_smoke() -> dict[str, Any]:
             try:
                 await backend_holder["backend"].disconnect()
             except Exception as exc:
-                print(f"  [DEBUG] WPF v2 visible-row drag backend.disconnect() failed: {exc}")
+                print(
+                    f"  [DEBUG] WPF v2 visible-row drag backend.disconnect() failed: {exc}"
+                )
         await m.stop()
 
 
@@ -3589,7 +4529,9 @@ def _v2_visible_row_drag_summary(result: dict[str, Any]) -> dict[str, Any]:
     expected_after_refs = _moved_refs(before_refs, source_index=1, target_index=3)
     route_evidence = dict(action.get("route_evidence") or {}) if action else {}
     row_count_preserved = len(before_refs) == len(after_refs) and bool(before_refs)
-    identity_set_preserved = sorted(before_refs) == sorted(after_refs) and bool(before_refs)
+    identity_set_preserved = sorted(before_refs) == sorted(after_refs) and bool(
+        before_refs
+    )
     order_changed_once = after_refs == expected_after_refs and after_refs != before_refs
 
     compact = {
@@ -3848,8 +4790,10 @@ def _v2_offscreen_row_target_drag_summary(result: dict[str, Any]) -> dict[str, A
         "status_text": status,
         "source_identity_matches": status.get("source_identity") == expected_source,
         "target_identity_matches": status.get("target_identity") == expected_target,
-        "drop_origin_target_matches": status.get("drop_origin_target") == expected_target,
-        "drop_bounds_target_matches": status.get("drop_bounds_target") == expected_target,
+        "drop_origin_target_matches": status.get("drop_origin_target")
+        == expected_target,
+        "drop_bounds_target_matches": status.get("drop_bounds_target")
+        == expected_target,
         "target_visible_after_drop": target_visible_after_drop,
         "final_order_matches": order == expected_order,
         "route_evidence": {
@@ -3957,7 +4901,9 @@ async def run_wpf_v2_edge_scroll_drag_runtime_smoke() -> dict[str, Any]:
             backend_holder["backend"] = backend
         pid = m.state.process_id
         if not pid:
-            raise RuntimeError("Process ID not available for WPF v2 edge-scroll drag smoke")
+            raise RuntimeError(
+                "Process ID not available for WPF v2 edge-scroll drag smoke"
+            )
         if getattr(backend, "process_id", None) != pid:
             await backend.connect(pid)
         return backend
@@ -3984,7 +4930,9 @@ async def run_wpf_v2_edge_scroll_drag_runtime_smoke() -> dict[str, Any]:
             try:
                 await backend_holder["backend"].disconnect()
             except Exception as exc:
-                print(f"  [DEBUG] WPF v2 edge-scroll drag backend.disconnect() failed: {exc}")
+                print(
+                    f"  [DEBUG] WPF v2 edge-scroll drag backend.disconnect() failed: {exc}"
+                )
         await m.stop()
 
 
@@ -4031,7 +4979,10 @@ def _v2_edge_scroll_drag_plan(
                     ),
                     _v2_edge_scroll_transition(
                         transition_id="edge_scroll_up",
-                        source={"selector": selector, "row_identity": "Fixture cue two"},
+                        source={
+                            "selector": selector,
+                            "row_identity": "Fixture cue two",
+                        },
                         hold_y=0.25,
                         drop_y=0.35,
                         hold_ms=3000,
@@ -4159,7 +5110,9 @@ def _v2_edge_scroll_drag_summary(result: dict[str, Any]) -> dict[str, Any]:
     down_comparison = dict(down_viewport.get("comparison") or {})
     up_comparison = dict(up_viewport.get("comparison") or {})
     process_metrics = {
-        "down": _transition_probe_value(down, "after", "process.metric.edge_down_process"),
+        "down": _transition_probe_value(
+            down, "after", "process.metric.edge_down_process"
+        ),
         "up": _transition_probe_value(up, "after", "process.metric.edge_up_process"),
     }
     down_route = _first_transition_action(down).get("route_evidence", {})
@@ -4222,9 +5175,7 @@ async def run_wpf_v2_multi_row_drag_runtime_smoke() -> dict[str, Any]:
         )
 
     statuses = [
-        value.get("status")
-        for value in results.values()
-        if isinstance(value, dict)
+        value.get("status") for value in results.values() if isinstance(value, dict)
     ]
     status = (
         "BLOCKED"
@@ -4273,7 +5224,9 @@ async def _run_wpf_v2_multi_row_drag_case(
             backend_holder["backend"] = backend
         pid = m.state.process_id
         if not pid:
-            raise RuntimeError("Process ID not available for WPF v2 multi-row drag smoke")
+            raise RuntimeError(
+                "Process ID not available for WPF v2 multi-row drag smoke"
+            )
         if getattr(backend, "process_id", None) != pid:
             await backend.connect(pid)
         return backend
@@ -4308,7 +5261,9 @@ async def _run_wpf_v2_multi_row_drag_case(
             try:
                 await backend_holder["backend"].disconnect()
             except Exception as exc:
-                print(f"  [DEBUG] WPF v2 multi-row drag backend.disconnect() failed: {exc}")
+                print(
+                    f"  [DEBUG] WPF v2 multi-row drag backend.disconnect() failed: {exc}"
+                )
         await m.stop()
 
 
@@ -4444,7 +5399,9 @@ def _v2_multi_row_drag_summary(
         "ui.grid.viewport.selected_payload_viewport",
     )
     comparison = dict(viewport.get("comparison") or {})
-    before = selected_payload.get("before") or status.get("selected_payload_before") or []
+    before = (
+        selected_payload.get("before") or status.get("selected_payload_before") or []
+    )
     after = selected_payload.get("after") or status.get("selected_payload_after") or []
     order = status.get("order") or []
     compact = {
@@ -4456,7 +5413,8 @@ def _v2_multi_row_drag_summary(
         "viewport": comparison,
         "selected_before": before,
         "selected_after": after,
-        "selected_count_matches": len(before) == expected_count and len(after) == expected_count,
+        "selected_count_matches": len(before) == expected_count
+        and len(after) == expected_count,
         "selected_payload_preserved": before == after and len(set(after)) == len(after),
         "selected_payload_group_visible": _payload_group_visible(order, after),
         "cleanup": result.get("cleanup"),
@@ -4508,7 +5466,9 @@ async def run_wpf_v2_negative_drag_runtime_smoke() -> dict[str, Any]:
             backend_holder["backend"] = backend
         pid = m.state.process_id
         if not pid:
-            raise RuntimeError("Process ID not available for WPF v2 negative drag smoke")
+            raise RuntimeError(
+                "Process ID not available for WPF v2 negative drag smoke"
+            )
         if getattr(backend, "process_id", None) != pid:
             await backend.connect(pid)
         return backend
@@ -4535,7 +5495,9 @@ async def run_wpf_v2_negative_drag_runtime_smoke() -> dict[str, Any]:
             try:
                 await backend_holder["backend"].disconnect()
             except Exception as exc:
-                print(f"  [DEBUG] WPF v2 negative drag backend.disconnect() failed: {exc}")
+                print(
+                    f"  [DEBUG] WPF v2 negative drag backend.disconnect() failed: {exc}"
+                )
         await m.stop()
 
 
@@ -4692,7 +5654,8 @@ def _v2_negative_drag_summary(result: dict[str, Any]) -> dict[str, Any]:
     statuses = [case.get("status") for case in cases.values()]
     status = (
         "BLOCKED"
-        if result.get("status") == "BLOCKED" or any(item == "BLOCKED" for item in statuses)
+        if result.get("status") == "BLOCKED"
+        or any(item == "BLOCKED" for item in statuses)
         else "PASS"
         if result.get("status") == "PASS" and all(item == "PASS" for item in statuses)
         else "FAIL"
@@ -4807,7 +5770,9 @@ def _transition_probe_value(transition: dict[str, Any], phase: str, path: str) -
     return values.get(path)
 
 
-def _transition_grid_rows(transition: dict[str, Any], phase: str) -> list[dict[str, Any]]:
+def _transition_grid_rows(
+    transition: dict[str, Any], phase: str
+) -> list[dict[str, Any]]:
     phase_values = transition.get(phase)
     if not isinstance(phase_values, dict):
         return []
@@ -4906,7 +5871,9 @@ def _parse_drag_reorder_status(value: Any) -> dict[str, Any]:
         "source_identity": match.group(1),
         "target_identity": match.group(2),
         "selected_payload_mode": match.group(3),
-        "selected_payload_before": selected_before.split("|") if selected_before else [],
+        "selected_payload_before": selected_before.split("|")
+        if selected_before
+        else [],
         "selected_payload_after": selected_after.split("|") if selected_after else [],
         "edge_scroll_direction": match.group(6),
         "edge_first_visible": int(match.group(7)),
@@ -5126,7 +6093,9 @@ async def test_avalonia_v2_state_oracle_runtime_smoke():
     evidence = await run_avalonia_v2_state_oracle_runtime_smoke()
     print(f"  evidence: {evidence}")
     if evidence.get("status") == "BLOCKED":
-        check("Avalonia v2 state oracle reports actionable BLOCKED", True, str(evidence))
+        check(
+            "Avalonia v2 state oracle reports actionable BLOCKED", True, str(evidence)
+        )
         return
     check(
         "Avalonia v2 state oracle happy path and selector miss are classified",
@@ -5175,7 +6144,9 @@ async def test_avalonia_ui_fixture_compatibility():
         )
         text_result = await backend.extract_text(automation_id="txtOutput")
         status_text = (
-            text_result.get("text", "") if isinstance(text_result, dict) else str(text_result)
+            text_result.get("text", "")
+            if isinstance(text_result, dict)
+            else str(text_result)
         )
         try:
             grid_result = await read_grid_visible_rows(backend, selector)
@@ -5205,12 +6176,15 @@ async def test_avalonia_ui_fixture_compatibility():
         print(f"  evidence: {evidence}")
         check(
             "Avalonia DataGrid fixture found",
-            bool(found.get("found", False)) if isinstance(found, dict) else found is not None,
+            bool(found.get("found", False))
+            if isinstance(found, dict)
+            else found is not None,
             str(found),
         )
         check(
             "Avalonia key sequence cleanup released modifiers",
-            key_result.get("status") == "PASS" and key_result.get("final_held_modifiers") == [],
+            key_result.get("status") == "PASS"
+            and key_result.get("final_held_modifiers") == [],
             str(key_result),
         )
         check(
@@ -5220,7 +6194,8 @@ async def test_avalonia_ui_fixture_compatibility():
         )
         check(
             "Avalonia DataGrid evidence is bounded",
-            grid_result.get("status") in {"PASS", "UNSUPPORTED", "BLOCKED", "AMBIGUOUS"},
+            grid_result.get("status")
+            in {"PASS", "UNSUPPORTED", "BLOCKED", "AMBIGUOUS"},
             str(grid_result),
         )
     finally:
@@ -5322,7 +6297,9 @@ async def test_wpf_stealth_delayed_readiness_replay():
 
     manager_mod.get_foreground_window = fake_foreground
     manager_mod.get_window_process_id = lambda hwnd: None
-    manager_mod.restore_foreground_window = lambda hwnd: restore_calls.append(hwnd) is None or True
+    manager_mod.restore_foreground_window = (
+        lambda hwnd: restore_calls.append(hwnd) is None or True
+    )
 
     m = await new_session()
     backend = None
@@ -5417,7 +6394,9 @@ async def test_wpf_selector_safety_no_side_effect():
                 )
         except (RuntimeError, LookupError) as exc:
             blocked_detail = str(exc)
-            blocked = "selector result did not match exact automation_id" in blocked_detail
+            blocked = (
+                "selector result did not match exact automation_id" in blocked_detail
+            )
 
         after = await backend.find_element(automation_id="selectorSafetyStatus")
         before_name = before.get("name")
@@ -5449,7 +6428,9 @@ async def test_stealth_screenshot():
         result = await backend.client.call("screenshot", {})
         method = result.get("method")
         fallback = result.get("fallback")
-        check("Stealth screenshot returned image", bool(result.get("base64")), str(result))
+        check(
+            "Stealth screenshot returned image", bool(result.get("base64")), str(result)
+        )
         check(
             "Stealth screenshot uses PrintWindow path",
             method == "PrintWindow" or fallback == "flash-focus",
@@ -5475,10 +6456,14 @@ async def test_code_search():
     context = engine.get_source_context("ViewModels/MainViewModel.cs", line=5, radius=2)
     matches = engine.search_source("textBoxCue|Phrase", file_glob="*.xaml")
 
-    check("find_code_symbol", any(item["name"] == "LoadAssignedCharacter" for item in symbols))
+    check(
+        "find_code_symbol",
+        any(item["name"] == "LoadAssignedCharacter" for item in symbols),
+    )
     check("find_code_references", len(references) > 0, f"count={len(references)}")
     check("get_source_context", len(context.get("lines", [])) > 0)
     check("search_source", len(matches) > 0, f"count={len(matches)}")
+
 
 def get_scenarios():
     scenarios = [
@@ -5509,6 +6494,10 @@ def get_scenarios():
         ("Stealth Screenshot", test_stealth_screenshot),
         ("Code Search", test_code_search),
         ("WPF V2 State Oracle Runtime Smoke", test_wpf_v2_state_oracle_runtime_smoke),
+        (
+            "WPF V2 Selector-Scoped Hover Runtime Smoke",
+            test_wpf_v2_hover_runtime_smoke,
+        ),
         (
             "WPF V2 Visible-Row Drag Runtime Smoke",
             test_wpf_v2_visible_row_drag_runtime_smoke,
@@ -5553,7 +6542,9 @@ def get_scenarios():
             ]
         )
     if WPF_GUI_ENABLED:
-        scenarios.append(("WPF Shift/DataGrid Evidence", test_wpf_shift_datagrid_evidence))
+        scenarios.append(
+            ("WPF Shift/DataGrid Evidence", test_wpf_shift_datagrid_evidence)
+        )
         scenarios.append(
             (
                 "WPF UI Grid Rows Alias Fixture Replay",

@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from ....ui.hover import HOVER_SUCCESS_FIELDS, validate_hover_evidence, validate_hover_timeout
 from ..blocked import build_blocked
 from ..timing import sleep_ms
 from .ui_drag import handle_ui_drag
@@ -35,6 +36,7 @@ _REQUIRES_GLOBAL_INPUT_ACTION_KINDS = frozenset(
         "ui.click_verified",
         "ui.double_click_verified",
         "ui.drag",
+        "ui.hover",
         "ui.grid.click_row",
         "ui.grid.double_click_row",
         "ui.grid.right_click_row",
@@ -271,6 +273,61 @@ async def _handle_ui_invoke(action: dict[str, Any], context: ActionContext) -> d
         duration_ms=context.elapsed_ms(started),
         result=result,
     )
+
+
+async def _handle_ui_hover(action: dict[str, Any], context: ActionContext) -> dict[str, Any]:
+    started = context.clock()
+    selector, blocked = _selector_from_action(action)
+    if blocked is not None:
+        return {
+            **blocked,
+            "duration_ms": context.elapsed_ms(started),
+            "route": "hover",
+        }
+
+    raw_timeout_ms = action.get("timeout_ms", 5000)
+    try:
+        timeout_ms = validate_hover_timeout(raw_timeout_ms)
+    except ValueError:
+        invalid = build_blocked(
+            reason="invalid ui.hover timeout_ms",
+            requested={"timeout_ms": raw_timeout_ms},
+            accepted={"timeout_ms": "integer from 1 to 30000"},
+            next_step="Provide ui.hover timeout_ms as an integer from 1 to 30000.",
+        )
+        return {
+            "status": "BLOCKED",
+            **invalid,
+            "route": "hover",
+            "selector": selector,
+            "duration_ms": context.elapsed_ms(started),
+        }
+
+    result = await context.call_adapter(
+        "ui.hover",
+        selector=selector,
+        timeout_ms=timeout_ms,
+    )
+    validated = validate_hover_evidence(result)
+    status = str(validated.get("status") or "BLOCKED").upper()
+    output = _action_result(
+        status=status,
+        route="hover",
+        selector=selector,
+        timeout_ms=timeout_ms,
+        duration_ms=context.elapsed_ms(started),
+        result=validated,
+    )
+    if status == "PASS":
+        for field in HOVER_SUCCESS_FIELDS:
+            output[field] = validated[field]
+        output["runner_input"] = {
+            "source": "runner_injected",
+            "kind": "ui.hover",
+            "window": "action",
+            "route": "hover",
+        }
+    return output
 
 
 async def _handle_ui_click(action: dict[str, Any], context: ActionContext) -> dict[str, Any]:
@@ -1828,6 +1885,7 @@ register_action("ui.click_verified", _handle_ui_click_verified)
 register_action("ui.right_click_verified", _handle_ui_right_click_verified)
 register_action("ui.double_click_verified", _handle_ui_double_click_verified)
 register_action("ui.drag", handle_ui_drag)
+register_action("ui.hover", _handle_ui_hover)
 register_action("ui.grid.get_state", _handle_ui_grid_get_state)
 register_action("ui.grid.assert_range", _handle_ui_grid_assert_range)
 register_action("ui.grid.ensure_visible", _handle_ui_grid_ensure_visible)

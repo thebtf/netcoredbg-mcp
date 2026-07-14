@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Selector-scoped pointer hover through the direct `ui_hover` tool and the
+  runtime-smoke v2 `ui.hover` action. The Windows FlaUI route requires one
+  uniquely resolved foreground target and returns exact-window, unchanged-focus,
+  pointer, hit-test, timeout, and mutation-state evidence without activating the
+  window or sending button input. `no_global_input` blocks before pointer
+  movement, and unsupported pywinauto use returns bounded evidence.
 - Read-only `inspect_debug_launch_compatibility(program)` diagnostics for the
   target runtime, active `dbgshim`, cached same-major candidate, and predicted
   launch-time replacement without building, launching, claiming ownership, or

@@ -208,9 +208,7 @@ def register_ui_tools(
     def _element_identity_payload(result: Any) -> dict[str, Any] | None:
         if isinstance(result, dict):
             automation_id = (
-                result["automationId"]
-                if "automationId" in result
-                else result.get("automation_id")
+                result["automationId"] if "automationId" in result else result.get("automation_id")
             )
             return {
                 "automationId": automation_id,
@@ -522,8 +520,7 @@ def register_ui_tools(
             result = await bring_to_front()
             if not isinstance(result, dict):
                 return build_error_response(
-                    "bring_to_front: backend returned non-dict response "
-                    f"({type(result).__name__})",
+                    f"bring_to_front: backend returned non-dict response ({type(result).__name__})",
                     state=session.state.state,
                 )
 
@@ -1028,6 +1025,50 @@ def register_ui_tools(
                             state=session.state.state,
                         )
                 raise  # re-raise if no fallback possible
+        except Exception as e:
+            return build_error_response(str(e), state=session.state.state)
+
+    @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
+    async def ui_hover(
+        ctx: Context,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+        timeout_ms: int = 5000,
+    ) -> dict:
+        """Move the real pointer over one uniquely resolved foreground UI element."""
+        try:
+            access_error = check_session_access(ctx)
+            if access_error:
+                return build_error_response(access_error, state=session.state.state)
+
+            if getattr(session, "stealth_mode", False):
+                return build_error_response(
+                    "ui_hover is unavailable in stealth mode because it moves the real "
+                    "pointer; call ui_bring_to_front to exit stealth mode first",
+                    state=session.state.state,
+                )
+
+            from ..ui.hover import validate_hover_timeout
+
+            timeout_ms = validate_hover_timeout(timeout_ms)
+            ui = await _ensure_ui_connected()
+            result = await ui.hover_element(
+                automation_id=automation_id,
+                name=name,
+                control_type=control_type,
+                root_id=root_id,
+                xpath=xpath,
+                timeout_ms=timeout_ms,
+            )
+            if not isinstance(result, dict):
+                return build_error_response(
+                    f"hover: backend returned non-dict response ({type(result).__name__})",
+                    state=session.state.state,
+                )
+            return build_response(data=result, state=session.state.state)
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
@@ -1954,6 +1995,7 @@ def register_ui_tools(
                 cy = int(rect.get("y", 0) + rect.get("height", 0) / 2)
                 await ui.right_click_at(cx, cy)
             else:
+
                 def _right_click() -> None:
                     element.click_input(button="right")
 
@@ -2043,6 +2085,7 @@ def register_ui_tools(
                 cy = int(rect.get("y", 0) + rect.get("height", 0) / 2)
                 await ui.double_click_at(cx, cy)
             else:
+
                 def _double_click() -> None:
                     element.double_click_input()
 

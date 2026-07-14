@@ -14,7 +14,7 @@
 вычислять выражения, читать вывод отладки и управлять поверхностями Windows UI
 Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 
-**134 MCP-инструмента · 8 промптов · 4 ресурса · 1957 собранных тестов · релиз v0.21.0**
+**135 MCP-инструмента · 8 промптов · 4 ресурса · 2026 собранных тестов · релиз v0.21.0**
 
 ## Быстрые ссылки
 
@@ -46,7 +46,7 @@ Automation, включая окна WPF, WinForms и Avalonia, без IDE.
 | Управление отладкой | Запускать, подключаться, перезапускать, продолжать, приостанавливать, завершать и пошагово выполнять .NET-код |
 | Точки останова | Работать с file, function, conditional, hit-count, exception и tracepoint-сценариями |
 | Инспекция | Смотреть threads, stack frames, scopes, variables, modules, expressions, source, disassembly и memory |
-| GUI-автоматизация | Читать дерево окон, искать элементы, кликать, вводить текст, делать screenshots и annotations, работать с clipboard, окнами и UI evidence |
+| GUI-автоматизация | Читать дерево окон, искать элементы, кликать, наводить указатель по точному селектору, вводить текст, делать screenshots и annotations, работать с clipboard, окнами и UI evidence |
 | Интеграция сборки | Запускать pre-launch `dotnet build`, получать progress notifications и build diagnostics, чистить заблокированные debug-процессы |
 | Runtime smoke | Предзапусковая очистка, instrumentation groups, output checkpoints, freshness checks и bounded scenario runner |
 | Безопасность multi-agent | Владение сессией через `mcp-mux`, read-only-наблюдатели, освобождение владения после inactivity timeout |
@@ -357,6 +357,12 @@ ui_take_annotated_screenshot()
 ui_click_annotated(element_id=3)
 ```
 
+`ui_hover(...)` перемещает реальный указатель на единственный элемент, найденный
+по селектору в уже активном окне debuggee. Инструмент возвращает evidence о точном
+окне, неизменном focus, указателе и hit-test, не активируя окно и не отправляя
+события кнопок мыши. В runtime-smoke v2 доступно такое же действие `ui.hover`;
+при `input_policy.no_global_input` оно блокируется до перемещения указателя.
+
 ### Доказательства runtime smoke
 
 Для повторяемой проверки агентом используйте runtime smoke-инструменты вместе:
@@ -509,7 +515,7 @@ Rude edits вроде добавления fields, изменения method sig
 | Memory | 2 | `read_memory`, `write_memory` |
 | Output and build diagnostics | 4 | `get_output`, `search_output`, `get_output_tail`, `get_build_diagnostics` |
 | Runtime smoke orchestration | 21 | `debug_hygiene_preflight`, instrumentation groups, output checkpoints/assertions, freshness checks, one-shot plan execution, lifecycle start/tail/wait/result/stop, plan/probe validation, probe execution, evidence bundles, event cursors/deltas и cleanup contracts |
-| UI automation | 54 | Дерево окон, поиск элементов, focus, keyboard, mouse, screenshots, annotations, selection, clipboard, управление окнами, expand/collapse, value setting, virtualization, grid evidence, UI snapshots, UI events и semantic monitors |
+| UI automation | 55 | Дерево окон, поиск элементов, focus, keyboard, mouse, наведение указателя по точному селектору (`ui_hover`), screenshots, annotations, selection, clipboard, управление окнами, expand/collapse, value setting, virtualization, grid evidence, UI snapshots, UI events и semantic monitors |
 | Code search | 4 | `find_code_symbol`, `find_code_references`, `get_source_context`, `search_source` |
 | Edit-and-Continue | 1 | `apply_code_change` |
 | Process management | 1 | `cleanup_processes` |

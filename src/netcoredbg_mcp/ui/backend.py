@@ -43,6 +43,18 @@ class UIBackend(Protocol):
         """
         ...
 
+    async def hover_element(
+        self,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+        timeout_ms: int = 5000,
+    ) -> dict[str, Any]:
+        """Move the real pointer over one uniquely resolved foreground element."""
+        ...
+
     async def invoke_element(
         self,
         automation_id: str | None = None,

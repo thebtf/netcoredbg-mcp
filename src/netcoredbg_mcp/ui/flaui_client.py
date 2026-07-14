@@ -13,6 +13,8 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from .hover import hover_selector, validate_hover_evidence, validate_hover_timeout
+
 logger = logging.getLogger(__name__)
 
 # Restart limits
@@ -23,6 +25,7 @@ CONNECT_CALL_TIMEOUT_SECONDS = 30.0
 CONNECT_RETRY_INTERVAL_SECONDS = 0.2
 WINDOW_NOT_READY_ERROR = "No window found for process"
 BRIDGE_DEFAULT_CALL_TIMEOUT_SECONDS = 10.0
+HOVER_TRANSPORT_TIMEOUT_MARGIN_SECONDS = 1.0
 DRAG_PATH_POINTER_DOWN_SETTLE_MS = 100
 DRAG_PATH_FINAL_DROP_SETTLE_MS = 180
 DRAG_PATH_TIMEOUT_MARGIN_SECONDS = 3.0
@@ -40,6 +43,13 @@ GRID_DRAG_ROW_TO_ROW_TIMEOUT_MARGIN_SECONDS = 3.0
 
 def _is_window_not_ready(exc: RuntimeError) -> bool:
     return WINDOW_NOT_READY_ERROR in str(exc)
+
+
+def _hover_transport_timeout_seconds(timeout_ms: int) -> float:
+    return max(
+        BRIDGE_DEFAULT_CALL_TIMEOUT_SECONDS,
+        (timeout_ms / 1000) + HOVER_TRANSPORT_TIMEOUT_MARGIN_SECONDS,
+    )
 
 
 def _drag_path_timeout_seconds(points: list[dict[str, Any]], speed_ms: int) -> float:
@@ -102,9 +112,7 @@ def _grid_ensure_visible_timeout_seconds(
     per_scroll_seconds = (
         bounded_settle_ms / 1000.0 + GRID_ENSURE_VISIBLE_SCROLL_UIA_OVERHEAD_SECONDS
     )
-    estimated_seconds = (
-        GRID_ENSURE_VISIBLE_SCAN_PASSES * bounded_scrolls * per_scroll_seconds
-    )
+    estimated_seconds = GRID_ENSURE_VISIBLE_SCAN_PASSES * bounded_scrolls * per_scroll_seconds
     return max(
         BRIDGE_DEFAULT_CALL_TIMEOUT_SECONDS,
         estimated_seconds + GRID_ENSURE_VISIBLE_TIMEOUT_MARGIN_SECONDS,
@@ -564,6 +572,54 @@ class FlaUIBackend:
         """Find element via FlaUI bridge."""
         params = self._build_search_params(automation_id, name, control_type, root_id, xpath)
         return await self._client.call("find_element", params)
+
+    async def hover_element(
+        self,
+        automation_id: str | None = None,
+        name: str | None = None,
+        control_type: str | None = None,
+        root_id: str | None = None,
+        xpath: str | None = None,
+        timeout_ms: int = 5000,
+    ) -> dict[str, Any]:
+        """Move the real pointer over one uniquely resolved foreground element."""
+        timeout_ms = validate_hover_timeout(timeout_ms)
+        params: dict[str, Any] = self._build_search_params(
+            automation_id,
+            name,
+            control_type,
+            root_id,
+            xpath,
+        )
+        params["timeoutMs"] = timeout_ms
+        selector = hover_selector(
+            automation_id=automation_id,
+            name=name,
+            control_type=control_type,
+            root_id=root_id,
+            xpath=xpath,
+        )
+        try:
+            result = await self._client.call(
+                "hover",
+                params,
+                timeout=_hover_transport_timeout_seconds(timeout_ms),
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            return {
+                "status": "BLOCKED",
+                "reason": "FlaUI bridge hover timed out before acknowledgement",
+                "phase": "bridge_timeout",
+                "timeoutMs": timeout_ms,
+                "pointerMutationState": "unknown",
+                "requested": {"selector": selector, "timeout_ms": timeout_ms},
+                "accepted": {"timeout_ms": "integer from 1 to 30000"},
+                "next_step": (
+                    "Re-establish exact target foreground/focus and retry; the bridge was "
+                    "restarted because pointer mutation could not be acknowledged."
+                ),
+            }
+        return validate_hover_evidence(result)
 
     async def invoke_element(
         self,

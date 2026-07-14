@@ -153,5 +153,93 @@
                         Click="BtnOpenFile_Click"/>
             </StackPanel>
         </Grid>
+
+        <!-- Fixed in-window hover fixture. It overlays the existing layout and never opens a Popup. -->
+        <GroupBox x:Name="HoverOverlay"
+                  Grid.RowSpan="4" Panel.ZIndex="20"
+                  HorizontalAlignment="Right" VerticalAlignment="Top"
+                  Width="260" Height="220" Margin="0,46,10,0"
+                  Header="Hover region" Padding="0"
+                  Background="#FFF8F8F8"
+                  AutomationProperties.Name="Hover region"
+                  AutomationProperties.AutomationId="hoverRegion"
+                  PreviewGotKeyboardFocus="HoverRegion_PreviewGotKeyboardFocus"
+                  PreviewMouseLeftButtonDown="HoverRegion_PreviewMouseLeftButtonDown"
+                  PreviewMouseLeftButtonUp="HoverRegion_PreviewMouseLeftButtonUp">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="32"/>
+                    <RowDefinition Height="80"/>
+                    <RowDefinition Height="40"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <Button x:Name="HoverTrigger" Grid.Row="0" Margin="4"
+                        Content="Hover trigger" Focusable="False" IsTabStop="False"
+                        Background="#FFD9EAF7" BorderBrush="#FF4A6B82" BorderThickness="1"
+                        AutomationProperties.Name="Hover trigger"
+                        AutomationProperties.AutomationId="hoverTrigger"
+                        MouseEnter="HoverTrigger_MouseEnter"
+                        MouseLeave="HoverTrigger_MouseLeave"/>
+
+                <GroupBox x:Name="HoverFlyoutSurface" Grid.Row="1" Margin="4"
+                          Header="" Padding="0" Focusable="False" IsTabStop="False"
+                          Background="#FFF4E2B8" BorderBrush="#FF846B2E" BorderThickness="1"
+                          Visibility="Collapsed"
+                          AutomationProperties.Name="Hover flyout surface"
+                          AutomationProperties.AutomationId="hoverFlyoutSurface"
+                          MouseEnter="HoverFlyoutSurface_MouseEnter"
+                          MouseLeave="HoverFlyoutSurface_MouseLeave">
+                    <TextBlock Text="In-window hover surface" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </GroupBox>
+
+                <Button x:Name="HoverOutsideSentinel" Grid.Row="2" Margin="4"
+                        Content="Outside sentinel" Focusable="False" IsTabStop="False"
+                        Background="#FFE8E8E8" BorderBrush="#FF777777" BorderThickness="1"
+                        AutomationProperties.Name="Outside sentinel"
+                        AutomationProperties.AutomationId="hoverOutsideSentinel"
+                        MouseEnter="HoverOutsideSentinel_MouseEnter"/>
+
+                <Grid Grid.Row="3" Margin="4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="62"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Button x:Name="HoverFocusSentinel" Grid.Column="0" Content="Arm"
+                            AutomationProperties.AutomationId="hoverFocusSentinel"
+                            GotKeyboardFocus="HoverFocusSentinel_GotKeyboardFocus"/>
+                    <TextBlock Grid.Column="1" Margin="6,0,0,0" FontSize="9" TextWrapping="Wrap"
+                               Text="{Binding HoverStatusText}"
+                               AutomationProperties.Name="{Binding HoverStatusText}"
+                               AutomationProperties.AutomationId="hoverStatus"/>
+                </Grid>
+
+                <!-- Real UIA peers exercise same-window duplicate root/target preflight. -->
+                <Canvas Grid.Row="3" Width="8" Height="8" Opacity="0.01" IsHitTestVisible="False"
+                        HorizontalAlignment="Right" VerticalAlignment="Bottom">
+                    <GroupBox Width="8" Height="8" Header="Duplicate root A"
+                              AutomationProperties.AutomationId="hoverDuplicateRoot">
+                        <Button Content="Multiplicity target"
+                                AutomationProperties.AutomationId="hoverMultiplicityTarget"/>
+                    </GroupBox>
+                    <GroupBox Width="8" Height="8" Header="Duplicate root B"
+                              AutomationProperties.AutomationId="hoverDuplicateRoot">
+                        <Button Content="Multiplicity target"
+                                AutomationProperties.AutomationId="hoverMultiplicityTarget"/>
+                    </GroupBox>
+                    <GroupBox Width="8" Height="8" Header="Multiplicity region"
+                              AutomationProperties.AutomationId="hoverMultiplicityRegion">
+                        <StackPanel>
+                            <Button Content="Duplicate target"
+                                    AutomationProperties.Name="Duplicate target"
+                                    AutomationProperties.AutomationId="hoverDuplicateTarget"/>
+                            <Button Content="Duplicate target"
+                                    AutomationProperties.Name="Duplicate target"
+                                    AutomationProperties.AutomationId="hoverDuplicateTarget"/>
+                        </StackPanel>
+                    </GroupBox>
+                </Canvas>
+            </Grid>
+        </GroupBox>
     </Grid>
 </Window>

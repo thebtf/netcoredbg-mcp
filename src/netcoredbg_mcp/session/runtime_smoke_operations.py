@@ -632,6 +632,31 @@ def ui_operation_adapters(
         except Exception as exc:
             return _adapter_blocked("ui.find_element", str(exc))
 
+    async def hover(**args: Any) -> dict[str, Any]:
+        backend = await _backend_or_blocked(ensure_ui_connected)
+        if isinstance(backend, dict):
+            return backend
+        selector = _selector(args)
+        hover_element = getattr(backend, "hover_element", None)
+        if not callable(hover_element):
+            return {
+                "status": "BLOCKED",
+                "reason": "selector-scoped pointer hover backend capability unavailable",
+                "requested": {"adapter": "ui.hover", "selector": selector},
+                "accepted": {"backend": "FlaUI hover_element"},
+                "next_step": "Use a FlaUI backend that implements selector-scoped pointer hover.",
+            }
+        try:
+            result = await hover_element(
+                **_selector_kwargs(selector),
+                timeout_ms=args.get("timeout_ms", 5000),
+            )
+        except Exception as exc:
+            return _adapter_blocked("ui.hover", str(exc))
+        if not isinstance(result, dict):
+            return _adapter_blocked("ui.hover", "hover backend returned non-object result")
+        return result
+
     async def set_focus(**args: Any) -> dict[str, Any]:
         backend = await _backend_or_blocked(ensure_ui_connected)
         if isinstance(backend, dict):
@@ -1037,6 +1062,7 @@ def ui_operation_adapters(
         "ui.right_click": right_click,
         "ui.double_click": double_click,
         "ui.find_element": find_element,
+        "ui.hover": hover,
         "ui.set_focus": set_focus,
         "ui.send_keys_focused": send_keys_focused,
         "ui.invoke": invoke,
