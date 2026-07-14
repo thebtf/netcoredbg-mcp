@@ -14,15 +14,15 @@ slice. `host/NetCoreDbg.Mcp.Host` is a .NET 8 stdio MCP process that launches
 the unchanged Python server and dynamically proxies its `tools/list` and
 `tools/call` contracts. The Python console entrypoint remains the published
 default; no tool family has moved to native C# yet. The next migration boundary
-is UI/FlaUI after compatibility parity is reviewed and merged.
+is front-door roots parity (Engram #385) before native UI/FlaUI migration.
 
 **Compatibility boundary:** this first host slice proxies only `tools/list` and
 `tools/call`; it does not relay downstream MCP roots or other client callbacks
 to Python. Until a later reviewed CR adds roots parity, launch the host with an
 explicit `--project`, set `NETCOREDBG_PROJECT_ROOT`, or use
 `--project-from-cwd` from the intended project directory. Published-entrypoint
-cutover is blocked on that parity decision, so the current Python entrypoint
-retains its direct client-roots behavior.
+cutover is blocked on that parity decision (tracked as Engram #385), so the
+current Python entrypoint retains its direct client-roots behavior.
 
 **Why it makes sense:** the product debugs .NET and the UI layer is already C#;
 Python exists only because FlaUI needed C#. Removing the split deletes the

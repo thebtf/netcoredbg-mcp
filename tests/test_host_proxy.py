@@ -261,9 +261,10 @@ async def test_host_proxies_initialize_tools_list_and_validate_plan(
     # A clean multi-round-trip exchange over the client's line-oriented
     # JSON-RPC stdout reader is itself proof stdout carried protocol frames
     # only -- any stray non-JSON-RPC line would have broken parsing above.
-    # Diagnostics (host + forwarded Python logs) landed on stderr instead.
-    assert host_errlog_path.read_text(encoding="utf-8").strip(), (
-        "expected host/Python diagnostics on stderr"
+    # A backend-only marker proves Python stderr crossed the .NET proxy boundary.
+    stderr_text = host_errlog_path.read_text(encoding="utf-8")
+    assert "[DIAGNOSTIC] Startup CWD:" in stderr_text, (
+        f"expected forwarded Python diagnostics on stderr, got:\n{stderr_text}"
     )
 
     # Full-schema parity: names alone don't prove schemas/annotations survive

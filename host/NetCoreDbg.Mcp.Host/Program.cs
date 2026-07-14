@@ -143,9 +143,13 @@ public static class Program
         var firstCompleted = await Task.WhenAny(hostRunTask, upstream.Completion);
         if (firstCompleted == upstream.Completion)
         {
-            // The Python backend ended before the downstream session closed; stop
-            // serving rather than keep advertising a now-dead tool catalog.
+            // The Python backend ended before the downstream session closed. Stop
+            // serving, propagate any transport fault, and treat a clean early EOF as
+            // a failure rather than advertising a successful proxy shutdown.
             await host.StopAsync();
+            await upstream.Completion;
+            throw new InvalidOperationException(
+                "The Python backend ended before the downstream MCP session closed.");
         }
 
         await hostRunTask;

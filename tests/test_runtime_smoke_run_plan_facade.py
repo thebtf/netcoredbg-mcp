@@ -331,20 +331,55 @@ def _register(
     return access_calls
 
 
-async def _wait_for_final_bundle(capturing_mcp, run_id: str) -> dict[str, Any]:
+async def _wait_for_final_bundle(
+    capturing_mcp,
+    run_id: str,
+    *,
+    timeout_seconds: float = 1.0,
+) -> dict[str, Any]:
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + 1.0
+    deadline = loop.time() + timeout_seconds
     data: dict[str, Any] = {}
-    while loop.time() < deadline:
-        response = await capturing_mcp.tools["runtime_smoke_evidence_bundle"](
-            ctx=None,
-            run_id=run_id,
-        )
+    while (remaining := deadline - loop.time()) > 0:
+        try:
+            response = await asyncio.wait_for(
+                capturing_mcp.tools["runtime_smoke_evidence_bundle"](
+                    ctx=None,
+                    run_id=run_id,
+                ),
+                timeout=remaining,
+            )
+        except asyncio.TimeoutError:
+            break
         data = response["data"]
         if data.get("final"):
             return data
-        await asyncio.sleep(0.01)
+        remaining = deadline - loop.time()
+        if remaining > 0:
+            await asyncio.sleep(min(0.01, remaining))
     raise AssertionError(f"runtime smoke run did not finish: {data!r}")
+
+
+@pytest.mark.asyncio
+async def test_wait_for_final_bundle_times_out_with_latest_payload(capturing_mcp) -> None:
+    latest_data = {"status": "RUNNING", "final": False, "run_id": "slow-run"}
+    calls = 0
+
+    async def evidence_bundle(*, ctx: Any, run_id: str) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {"data": latest_data}
+        await asyncio.sleep(10)
+        raise AssertionError("bounded evidence wait did not cancel the stalled call")
+
+    capturing_mcp.tools["runtime_smoke_evidence_bundle"] = evidence_bundle
+
+    with pytest.raises(AssertionError) as exc_info:
+        await _wait_for_final_bundle(capturing_mcp, "slow-run", timeout_seconds=0.03)
+
+    assert repr(latest_data) in str(exc_info.value)
+    assert calls == 2
 
 
 @pytest.mark.asyncio
