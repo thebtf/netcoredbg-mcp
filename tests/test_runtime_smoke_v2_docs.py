@@ -31,6 +31,8 @@ APP_DIAGNOSTICS_POLL_EXAMPLE_PATH = Path(
 README_PATH = Path("README.md")
 README_RU_PATH = Path("README.ru.md")
 PLAYBOOK_PATH = Path("docs/PRODUCTION-TESTING-PLAYBOOK.md")
+RELEASE_PROTOCOL_PATH = Path("docs/RELEASE-PROTOCOL.md")
+AGENTS_PATH = Path("AGENTS.md")
 
 
 class DocsExampleSmokeSession:
@@ -647,6 +649,25 @@ def test_readme_and_playbook_document_customer_mode_drag_drop_gate() -> None:
         "fail closed before side effects if target-side realization hides the drag"
         in playbook
     )
+
+
+def test_release_policy_uses_one_consumer_first_autonomy_contract() -> None:
+    agents = AGENTS_PATH.read_text(encoding="utf-8")
+    protocol = RELEASE_PROTOCOL_PATH.read_text(encoding="utf-8")
+    canonical_gate = "primary UXDD consumer-mode release gate"
+
+    assert canonical_gate.lower() in agents.lower()
+    assert protocol.lower().count(canonical_gate.lower()) >= 5
+    assert "Missing release intent, MAJOR/breaking change" not in protocol
+
+    dependent_slice_gate = "no dependent slice in the same integration wave remains active"
+    assert dependent_slice_gate in agents
+    assert dependent_slice_gate in protocol
+
+    release_steps = _collapsed(agents).lower()
+    assert release_steps.index(
+        "run the primary uxdd consumer-mode release gate"
+    ) < release_steps.index("run the remaining local pre-pr protocol gates")
 
 
 def test_readme_documents_runner_controlled_input_provenance_model() -> None:

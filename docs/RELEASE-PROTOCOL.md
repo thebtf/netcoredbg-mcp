@@ -18,7 +18,7 @@ It is mandatory when a change affects any of these surfaces:
 
 Release decisions use this order; later evidence cannot overrule an earlier failed gate:
 
-1. **Primary — UXDD consumer outcome.** Build and install the release candidate, then exercise every user journey claimed by the release through the same public CLI/MCP entry point and packaging shape a consumer receives. Every claimed journey must reach `PRODUCT_WORKS`.
+1. **Primary UXDD consumer-mode release gate.** Build and install the release candidate, then exercise every user journey claimed by the release through the same public CLI/MCP entry point and packaging shape a consumer receives. Every claimed journey must reach `PRODUCT_WORKS`.
 2. **Supporting — test protocols.** Run the required unit, integration, critical, runtime-smoke, build, and packaging checks. They are mandatory evidence, but green tests cannot turn `PARTIALLY_WORKS` or `BROKEN` consumer behavior into a releasable product.
 3. **Supporting — independent review and release mechanics.** Resolve blocking review findings, prove version parity, and complete git, tag, publication, and post-publication checks.
 
@@ -60,8 +60,8 @@ pre-publication gates also block tag creation.
 | Critical suite | `uv run --locked --extra dev pytest tests/critical -m critical` | Any `@critical` test fails or the suite cannot run |
 | Runtime-smoke docs/examples | `uv run --locked --extra dev pytest tests/test_runtime_smoke_v2_docs.py tests/test_runtime_smoke_diagnostics_schema.py tests/critical/test_runtime_smoke_v2_critical.py` or a narrower documented equivalent | Docs examples, diagnostic schemas, or v2 critical guards fail |
 | Package build | `uv build` | Wheel or sdist build fails |
-| Wheel install smoke | Install the built wheel into a disposable environment and run `netcoredbg-mcp --version` plus an import smoke | Install, import, or CLI version smoke fails |
-| UXDD consumer-mode release gate | Build and install the release candidate; execute `docs/PRODUCTION-TESTING-PLAYBOOK.md` through the public package/CLI/MCP surface; enumerate every user journey claimed by the release | Any claimed journey is not `PRODUCT_WORKS`; `PARTIALLY_WORKS`, `BROKEN`, private-helper-only proof, or unit-test-only proof blocks release |
+| Wheel install smoke | Reuse the disposable release-candidate environment created for the primary UXDD consumer-mode release gate; run `netcoredbg-mcp --version` plus an import smoke | Install, import, or CLI version smoke fails |
+| Primary UXDD consumer-mode release gate | Build and install the release candidate; execute `docs/PRODUCTION-TESTING-PLAYBOOK.md` through the public package/CLI/MCP surface; enumerate every user journey claimed by the release | Any claimed journey is not `PRODUCT_WORKS`; `PARTIALLY_WORKS`, `BROKEN`, private-helper-only proof, or unit-test-only proof blocks release |
 | MCP PR review | Release-prep PR summary reports zero unresolved blocking findings, and reviewer status is clean enough for merge | Any `fix_now` or unresolved mandatory review thread remains |
 | Tag collision check | `git ls-remote --tags origin refs/tags/vX.Y.Z` returns empty before tag creation | Target tag already exists on origin |
 
@@ -81,8 +81,8 @@ pre-publication gates also block tag creation.
 | --- | --- | --- | --- |
 | Local release-prep branch and commit | Automatic | Sensitive content, incoherent diff, or unrelated dirty state | Git status, diff, and gate output |
 | Release-prep PR creation | Automatic | Unreviewed broad product change outside release-owned files | PR URL and changed-file list |
-| PR merge | Automatic after the primary UXDD consumer gate, independent MCP PR review, and required checks are clean | `PARTIALLY_WORKS`, `BROKEN`, `fix_now`, unresolved mandatory review threads, failed checks, or high-risk scope expansion | UXDD run report, MCP PR summary, GitHub merge state, status checks |
-| Planned PATCH or MINOR tag and remote publication | Automatic when the release belongs to a legitimate run, its completed integration scope is on `main`, no dependent slice in the same integration wave remains active, every claimed consumer journey is `PRODUCT_WORKS`, and every pre-publication gate passes | Missing release intent, MAJOR/breaking change, tag collision, failed gate, ambiguous scope, production/customer deployment outside this workstation, secrets, or destructive cleanup with unpreserved work | Governing run artifact, UXDD consumer evidence, pre-publication gate evidence; post-publication remote tag, workflow status, release URL, and package smoke |
+| PR merge | Automatic after the primary UXDD consumer-mode release gate, independent MCP PR review, and required checks are clean | `PARTIALLY_WORKS`, `BROKEN`, `fix_now`, unresolved mandatory review threads, failed checks, or high-risk scope expansion | UXDD run report, MCP PR summary, GitHub merge state, status checks |
+| Planned PATCH or MINOR tag and remote publication | Automatic when the release belongs to a legitimate run, its completed integration scope is on `main`, no dependent slice in the same integration wave remains active, every claimed consumer journey is `PRODUCT_WORKS`, and every pre-publication gate passes | MAJOR/breaking change, tag collision, failed gate, ambiguous scope, production/customer deployment outside this workstation, secrets, or destructive cleanup with unpreserved work | Governing run artifact, UXDD consumer evidence, pre-publication gate evidence; post-publication remote tag, workflow status, release URL, and package smoke |
 | MAJOR or breaking release | Approval required | Always | Explicit user approval naming the version |
 | Production/customer deployment outside this workstation | Approval required | Always | Named target, deploy plan, health checks |
 
@@ -129,8 +129,8 @@ as the only release-note source for a milestone release.
 ## Publish / Smoke / Handoff
 
 1. Prepare release-owned files on a branch named `work/release-vX.Y.Z-prep`.
-2. Build and install the release candidate; run the primary UXDD consumer-mode gate through the public package/CLI/MCP entry point; then run the remaining local pre-PR protocol gates and write evidence paths into the release report. PR review waits for step 3, and post-publication verification waits for step 6.
-3. Open a PR, run MCP PR review, fix or resolve findings, and merge automatically only after the UXDD verdict is `PRODUCT_WORKS` for every claimed journey and all supporting gates are clean.
+2. Build and install the release candidate; run the primary UXDD consumer-mode release gate through the public package/CLI/MCP entry point; then run the remaining local pre-PR protocol gates and write evidence paths into the release report. PR review waits for step 3, and post-publication verification waits for step 6.
+3. Open a PR, run MCP PR review, fix or resolve findings, and merge automatically only after the primary UXDD consumer-mode release gate reports `PRODUCT_WORKS` for every claimed journey and all supporting gates are clean.
 4. Fast-forward local `main` to `origin/main`.
 5. After every pre-publication gate passes, create an annotated tag with
    `git tag -a vX.Y.Z -m "Release vX.Y.Z"` and push it with
@@ -164,8 +164,8 @@ approval trigger applies.
 
 ## Terminal Verdict
 
-- `PROJECT_RELEASE_PROTOCOL_PASS`: the primary UXDD gate reports
-  `PRODUCT_WORKS` for every claimed journey and all supporting mandatory rows
+- `PROJECT_RELEASE_PROTOCOL_PASS`: the primary UXDD consumer-mode release gate
+  reports `PRODUCT_WORKS` for every claimed journey and all supporting mandatory rows
   have current passing evidence.
 - `PROJECT_RELEASE_PROTOCOL_BLOCKED`: a claimed journey is `PARTIALLY_WORKS` or
   `BROKEN`, or at least one supporting mandatory row is missing, stale, failed,

@@ -55,17 +55,17 @@ If solution contains "simple", "quick", "temporary", "workaround" — **STOP and
 | **No routine user gate** | User review, approval, and a separate `release` / `go ahead` command are not required for a planned release inside a legitimate run. |
 | **Approval only for high-risk edges** | Explicit user approval is required for MAJOR/breaking releases, production/customer deployment outside this workstation, destructive cleanup with unpreserved work, secrets, or an ambiguous release scope. |
 | **Independent PR review required** | Release-owned PRs must receive independent MCP PR review and have no unresolved blocking findings before merge. |
-| **UXDD is the primary release criterion** | Run the release candidate through the public installed surface exactly as a consumer would and prove every claimed user journey works end to end. A failed or partial consumer journey blocks release. |
-| **Test protocols are supporting gates** | Required unit, integration, critical, runtime-smoke, build, and packaging protocols must still pass, but green tests cannot override a failed UXDD consumer gate. |
+| **Primary UXDD consumer-mode release gate** | Run the release candidate through the public installed surface exactly as a consumer would and prove every claimed user journey works end to end. A failed or partial consumer journey blocks release. |
+| **Test protocols are supporting gates** | Required unit, integration, critical, runtime-smoke, build, and packaging protocols must still pass, but green tests cannot override a failed primary UXDD consumer-mode release gate. |
 
 **Release process:**
-1. When a bounded spec, PRD, ADR, or active run contract explicitly includes a planned release and its integration scope reaches `main`, start release preparation automatically. If release intent is absent or explicitly out of scope, do not expand the run into a release.
+1. When a bounded spec, PRD, ADR, or active run contract explicitly includes a planned release, its integration scope reaches `main`, and no dependent slice in the same integration wave remains active, start release preparation automatically. If release intent is absent or explicitly out of scope, do not expand the run into a release.
 2. Create a release-prep branch (for example, `work/release-v1.0.1-prep`).
-3. Update version, changelog, release notes, and other release-owned surfaces; run every mandatory protocol gate in `docs/RELEASE-PROTOCOL.md`.
-4. Build and install the release candidate, then execute the primary UXDD consumer-mode gate through the public CLI/MCP entry point. Every user journey claimed by the release must reach `PRODUCT_WORKS`; `PARTIALLY_WORKS` and `BROKEN` block release regardless of unit-test status.
+3. Update version, changelog, release notes, and other release-owned surfaces; build and install the release candidate; then run the primary UXDD consumer-mode release gate through the public CLI/MCP entry point. Every user journey claimed by the release must reach `PRODUCT_WORKS`; `PARTIALLY_WORKS` and `BROKEN` block release regardless of unit-test status.
+4. Run the remaining local pre-PR protocol gates in `docs/RELEASE-PROTOCOL.md` and record their evidence in the release report.
 5. Commit, push, and create a release PR.
 6. Run independent MCP PR review plus required CI and test-protocol checks; resolve all blocking findings.
-7. Merge the PR automatically when the UXDD gate, review, and required checks are clean unless a high-risk approval trigger above applies.
+7. Merge the PR automatically when the primary UXDD consumer-mode release gate, review, and required checks are clean unless a high-risk approval trigger above applies.
 8. Update local `main`, verify the merged release commit, create and push the annotated PATCH/MINOR tag automatically, then run post-publication verification per `docs/RELEASE-PROTOCOL.md`. Do not wait for a separate user command.
 
 **Recovery (immutable tags):** A pushed release tag is immutable and collision-safe. If post-publication verification fails but the tagged commit and release artifacts are correct, repair or retry only the failed publication step for the same `vX.Y.Z`, then re-run post-publication verification. If code, metadata, or artifacts must change, create and merge a hotfix PR that bumps to a new patch version, rerun every mandatory pre-publication gate in `docs/RELEASE-PROTOCOL.md`, restart from step 8, and publish a new annotated tag on the corrected `main` commit. Never move, delete, or reuse an already-pushed release tag.
