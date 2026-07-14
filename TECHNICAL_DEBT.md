@@ -14,15 +14,17 @@ slice. `host/NetCoreDbg.Mcp.Host` is a .NET 8 stdio MCP process that launches
 the unchanged Python server and dynamically proxies its `tools/list` and
 `tools/call` contracts. The Python console entrypoint remains the published
 default; no tool family has moved to native C# yet. The next migration boundary
-is front-door roots parity (Engram #385) before native UI/FlaUI migration.
+is front-door parity: downstream roots (Engram #385) and upstream progress/log
+notifications (Engram #386) before native UI/FlaUI migration.
 
 **Compatibility boundary:** this first host slice proxies only `tools/list` and
-`tools/call`; it does not relay downstream MCP roots or other client callbacks
-to Python. Until a later reviewed CR adds roots parity, launch the host with an
-explicit `--project`, set `NETCOREDBG_PROJECT_ROOT`, or use
-`--project-from-cwd` from the intended project directory. Published-entrypoint
-cutover is blocked on that parity decision (tracked as Engram #385), so the
-current Python entrypoint retains its direct client-roots behavior.
+`tools/call`; it does not relay downstream MCP roots, progress/log
+notifications, or other client callbacks. Until later reviewed CRs add that
+front-door parity, launch the host with an explicit `--project`, set
+`NETCOREDBG_PROJECT_ROOT`, or use `--project-from-cwd` from the intended project
+directory. Published-entrypoint cutover is blocked on roots (#385),
+notifications (#386), and any still-consumer-visible resources/prompts, so the
+current Python entrypoint retains its direct client-context behavior.
 
 **Why it makes sense:** the product debugs .NET and the UI layer is already C#;
 Python exists only because FlaUI needed C#. Removing the split deletes the
@@ -57,8 +59,8 @@ when their owning CR is reviewed.
 1. **In review:** add the C# compatibility host and proxy the existing Python
    tool catalog/calls; keep the Python console entrypoint published.
 2. Decide and prove the remaining front-door parity needed before any entrypoint
-   cutover, starting with downstream MCP roots and then resources/prompts if
-   they remain consumer-visible.
+   cutover: downstream MCP roots (#385), upstream progress/log notifications
+   (#386), then resources/prompts if they remain consumer-visible.
 3. Migrate UI/FlaUI tools first (already C# — removing the bridge tax provides
    the earliest native payoff).
 4. Migrate `dap/` then `session/` per module, each behind green parity tests.
