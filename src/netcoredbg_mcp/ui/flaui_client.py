@@ -45,6 +45,13 @@ def _is_window_not_ready(exc: RuntimeError) -> bool:
     return WINDOW_NOT_READY_ERROR in str(exc)
 
 
+def _hover_transport_timeout_seconds(timeout_ms: int) -> float:
+    return max(
+        BRIDGE_DEFAULT_CALL_TIMEOUT_SECONDS,
+        (timeout_ms / 1000) + HOVER_TRANSPORT_TIMEOUT_MARGIN_SECONDS,
+    )
+
+
 def _drag_path_timeout_seconds(points: list[dict[str, Any]], speed_ms: int) -> float:
     segment_count = max(1, len(points) - 1)
     delay_ms = max(1, round(speed_ms / segment_count))
@@ -596,7 +603,7 @@ class FlaUIBackend:
             result = await self._client.call(
                 "hover",
                 params,
-                timeout=(timeout_ms / 1000) + HOVER_TRANSPORT_TIMEOUT_MARGIN_SECONDS,
+                timeout=_hover_transport_timeout_seconds(timeout_ms),
             )
         except (asyncio.TimeoutError, TimeoutError):
             return {

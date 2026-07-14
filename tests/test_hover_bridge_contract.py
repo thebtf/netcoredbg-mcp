@@ -114,6 +114,19 @@ def test_hover_bridge_rechecks_deadline_after_postcondition_reads() -> None:
     assert final_deadline != -1
 
 
+def test_hover_bridge_reserves_pointer_settle_before_mutation() -> None:
+    hover = BRIDGE_COMMAND.read_text(encoding="utf-8")
+
+    move_deadline = hover.index('"move_pointer",')
+    settle_reserve = hover.index("PointerSettleMs", move_deadline)
+    pointer_move = hover.index("ClickCommands.MoveCursor")
+    deadline_helper = hover.index("int requiredRemainingMs = 0")
+
+    assert move_deadline < settle_reserve < pointer_move
+    assert deadline_helper != -1
+    assert "elapsedMs + requiredRemainingMs < timeoutMs" in hover
+
+
 def test_hover_bridge_blocks_missing_focus_and_hit_evidence() -> None:
     hover = BRIDGE_COMMAND.read_text(encoding="utf-8")
 

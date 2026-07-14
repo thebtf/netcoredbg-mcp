@@ -229,7 +229,12 @@ public static class HoverCommands
                 nextStep: "Establish keyboard focus inside the target window and retry.");
         }
 
-        deadlineFailure = CheckDeadline(stopwatch, timeoutMs, "move_pointer", pointerMoved);
+        deadlineFailure = CheckDeadline(
+            stopwatch,
+            timeoutMs,
+            "move_pointer",
+            pointerMoved,
+            PointerSettleMs);
         if (deadlineFailure is not null)
         {
             return deadlineFailure;
@@ -693,9 +698,11 @@ public static class HoverCommands
         Stopwatch stopwatch,
         int timeoutMs,
         string phase,
-        bool pointerMoved)
+        bool pointerMoved,
+        int requiredRemainingMs = 0)
     {
-        if (stopwatch.ElapsedMilliseconds <= timeoutMs)
+        var elapsedMs = stopwatch.ElapsedMilliseconds;
+        if (elapsedMs + requiredRemainingMs < timeoutMs)
         {
             return null;
         }
@@ -703,12 +710,19 @@ public static class HoverCommands
         var result = new JsonObject
         {
             ["status"] = "BLOCKED",
-            ["reason"] = "hover deadline exceeded",
+            ["reason"] = requiredRemainingMs > 0
+                ? "hover deadline cannot accommodate required pre-mutation work"
+                : "hover deadline exceeded",
             ["phase"] = phase,
             ["timeoutMs"] = timeoutMs,
-            ["elapsedMs"] = stopwatch.ElapsedMilliseconds,
+            ["elapsedMs"] = elapsedMs,
+            ["requiredRemainingMs"] = requiredRemainingMs,
+            ["remainingMs"] = Math.Max(0, timeoutMs - elapsedMs),
             ["requested"] = new JsonObject { ["timeoutMs"] = timeoutMs },
-            ["accepted"] = new JsonObject { ["elapsedMs"] = $"not greater than {timeoutMs}" },
+            ["accepted"] = new JsonObject
+            {
+                ["deadline"] = $"elapsedMs + requiredRemainingMs must be less than {timeoutMs}",
+            },
             ["next_step"] = "Use a responsive foreground target or increase timeout_ms within 1..30000.",
         };
         MarkMutationState(result, pointerMoved);

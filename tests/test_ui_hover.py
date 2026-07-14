@@ -85,7 +85,7 @@ async def test_flaui_hover_forwards_exact_operation_timeout_with_transport_slack
             "xpath": "//Custom[@AutomationId='hoverTrigger']",
             "timeoutMs": 1250,
         },
-        timeout=2.25,
+        timeout=10.0,
     )
     assert result["status"] == "PASS"
     assert result["hovered"] is True
