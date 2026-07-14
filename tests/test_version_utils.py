@@ -11,6 +11,7 @@ from netcoredbg_mcp.utils.version import (
     check_version_compatibility,
     get_dbgshim_version,
     get_target_runtime_version,
+    inspect_target_runtime_version,
 )
 
 
@@ -110,6 +111,42 @@ class TestGetTargetRuntimeVersion:
         version = get_target_runtime_version(str(program))
         assert version is not None
         assert version.major == 8
+
+
+    def test_frameworks_netcore_without_version_falls_back_to_first(self, tmp_path):
+        """Preserve the legacy fallback while inspection stays conservative."""
+        program = tmp_path / "App.dll"
+        program.touch()
+        runtimeconfig = tmp_path / "App.runtimeconfig.json"
+        runtimeconfig.write_text(
+            json.dumps(
+                {
+                    "runtimeOptions": {
+                        "frameworks": [
+                            {
+                                "name": "Microsoft.WindowsDesktop.App",
+                                "version": "8.0.11",
+                            },
+                            {"name": "Microsoft.NETCore.App"},
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        legacy_version = get_target_runtime_version(str(program))
+        evidence = inspect_target_runtime_version(str(program))
+
+        assert legacy_version is not None
+        assert str(legacy_version) == "8.0.11"
+        assert evidence == {
+            "version": None,
+            "major": None,
+            "runtimeconfigPath": str(runtimeconfig.resolve()),
+            "source": None,
+            "status": "malformed",
+        }
 
     def test_no_runtimeconfig(self, tmp_path):
         """Returns None if no runtimeconfig.json."""

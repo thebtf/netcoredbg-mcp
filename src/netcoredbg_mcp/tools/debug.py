@@ -2,7 +2,8 @@
 
 import asyncio
 import logging
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -40,9 +41,46 @@ def register_debug_tools(
     check_session_access: Callable[[Any], str | None],
     execute_and_wait: Callable[..., Coroutine],
     resolve_project_root: Callable[..., Coroutine],
+    resolve_project_root_readonly: Callable[..., Awaitable[Any]] | None = None,
 ) -> None:
     """Register debug session control tools on the MCP server."""
     from mcp.types import ToolAnnotations
+
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            idempotentHint=True,
+            openWorldHint=False,
+        )
+    )
+    async def inspect_debug_launch_compatibility(
+        ctx: Context,
+        program: str,
+    ) -> dict:
+        """Inspect target/dbgshim compatibility without building or launching."""
+        try:
+            if resolve_project_root_readonly is None:
+                project_root = session.project_path
+            else:
+                project_root = await resolve_project_root_readonly(ctx, session)
+            if project_root is None:
+                raise ValueError("Resolved project root is required for launch inspection")
+
+            validated_program = session.validate_program_for_project_root(
+                program,
+                str(project_root),
+            )
+            cache_dir = Path.home() / ".netcoredbg-mcp" / "dbgshim"
+            from ..setup.dbgshim import inspect_debug_launch_compatibility as inspect
+
+            data = inspect(
+                validated_program,
+                session.netcoredbg_path,
+                cache_dir,
+            )
+            return build_response(data=data, state=session.state.state)
+        except Exception as exc:
+            return build_error_response(str(exc), state=session.state.state)
 
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
     async def start_debug(

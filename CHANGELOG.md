@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Read-only `inspect_debug_launch_compatibility(program)` diagnostics for the
+  target runtime, active `dbgshim`, cached same-major candidate, and predicted
+  launch-time replacement without building, launching, claiming ownership, or
+  mutating the shared debugger directory (Engram #380, CR-113).
+
 ## [0.22.0] - 2026-07-03
 
 ### Added
