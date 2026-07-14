@@ -69,7 +69,7 @@ def inspect_target_runtime_version(program_path: str) -> dict[str, object]:
             config = json.load(runtimeconfig_file)
     except FileNotFoundError:
         return evidence
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         evidence["status"] = "malformed"
         return evidence
     except OSError:

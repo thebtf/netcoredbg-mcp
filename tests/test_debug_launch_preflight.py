@@ -121,19 +121,19 @@ def _candidate(status: str = "known", major: int = 10) -> dict[str, object]:
             _target("known", 10),
             _active("unsupported_platform"),
             _candidate("known", 10),
-            "compatible_after_swap",
+            "unknown",
+            None,
             True,
-            True,
-            SWAP_WARNING,
+            UNKNOWN_ACTIVE_SWAP_WARNING,
         ),
         (
             _target("known", 10),
             _active("missing"),
             _candidate("known", 10),
-            "compatible_after_swap",
+            "unknown",
+            None,
             True,
-            True,
-            SWAP_WARNING,
+            UNKNOWN_ACTIVE_SWAP_WARNING,
         ),
         (
             _target("known", 10),
@@ -458,6 +458,25 @@ def test_target_runtime_evidence_reports_missing_and_malformed(
     assert evidence["status"] == expected_status
 
 
+def test_target_runtime_evidence_classifies_invalid_utf8_as_malformed(
+    tmp_path: Path,
+) -> None:
+    program = tmp_path / "App.dll"
+    program.write_bytes(b"")
+    runtimeconfig = program.with_suffix(".runtimeconfig.json")
+    runtimeconfig.write_bytes(b"\xff\xfe\x00")
+
+    evidence = version_utils.inspect_target_runtime_version(str(program))
+
+    assert evidence == {
+        "version": None,
+        "major": None,
+        "runtimeconfigPath": str(runtimeconfig),
+        "source": None,
+        "status": "malformed",
+    }
+
+
 def test_target_runtime_evidence_reports_unreadable(tmp_path: Path) -> None:
     program = tmp_path / "App.dll"
     program.write_bytes(b"")
@@ -693,7 +712,10 @@ def test_validate_program_for_project_root_rejects_program_symlink_escape(
     outside.mkdir()
     outside_program = _write_program(outside)
     linked_program = project / "Linked.dll"
-    linked_program.symlink_to(outside_program)
+    try:
+        linked_program.symlink_to(outside_program)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"file symlinks are unavailable in this environment: {exc}")
     manager = _manager(project)
 
     with pytest.raises(ValueError, match="outside exact project root"):
@@ -711,7 +733,11 @@ def test_validate_program_for_project_root_rejects_runtimeconfig_symlink_escape(
     program.write_bytes(b"program")
     outside_runtimeconfig = outside / "App.runtimeconfig.json"
     outside_runtimeconfig.write_text("{}", encoding="utf-8")
-    program.with_suffix(".runtimeconfig.json").symlink_to(outside_runtimeconfig)
+    runtimeconfig_link = program.with_suffix(".runtimeconfig.json")
+    try:
+        runtimeconfig_link.symlink_to(outside_runtimeconfig)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"file symlinks are unavailable in this environment: {exc}")
     manager = _manager(project)
 
     with pytest.raises(ValueError, match="[Rr]untimeconfig.*outside exact project root"):

@@ -277,7 +277,16 @@ def build_debug_launch_compatibility(
         warning = (
             "The selected cached dbgshim version is malformed; compatibility cannot be determined."
         )
-    elif active_known and target_runtime.get("major") == active_dbgshim.get("major"):
+    elif not active_known:
+        verdict = "unknown"
+        compatible = None
+        will_mutate = selected
+        warning = (
+            "Active dbgshim version is unavailable; start_debug would select the cached candidate."
+            if selected
+            else "Active dbgshim version is unavailable; compatibility cannot be determined."
+        )
+    elif target_runtime.get("major") == active_dbgshim.get("major"):
         verdict = "compatible"
         compatible = True
         will_mutate = selected
@@ -295,11 +304,6 @@ def build_debug_launch_compatibility(
             "A compatible cached dbgshim is available; "
             "start_debug would replace the shared debugger copy."
         )
-    elif not active_known:
-        verdict = "unknown"
-        compatible = None
-        will_mutate = False
-        warning = "Active dbgshim version is unavailable; compatibility cannot be determined."
     elif candidate_status == "unreadable":
         verdict = "unknown"
         compatible = None
