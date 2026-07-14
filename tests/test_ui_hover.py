@@ -57,7 +57,7 @@ def _valid_hover_evidence() -> dict[str, object]:
 
 
 @pytest.mark.asyncio
-async def test_flaui_hover_forwards_selector_and_exact_timeout_to_bridge() -> None:
+async def test_flaui_hover_forwards_exact_operation_timeout_with_transport_slack() -> None:
     from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
 
     backend = FlaUIBackend.__new__(FlaUIBackend)
@@ -85,7 +85,7 @@ async def test_flaui_hover_forwards_selector_and_exact_timeout_to_bridge() -> No
             "xpath": "//Custom[@AutomationId='hoverTrigger']",
             "timeoutMs": 1250,
         },
-        timeout=1.25,
+        timeout=2.25,
     )
     assert result["status"] == "PASS"
     assert result["hovered"] is True
@@ -161,6 +161,20 @@ async def test_flaui_hover_blocks_malformed_success_evidence() -> None:
     assert "hitRelation" in result["missing"]
     assert "pointerMutationState" in result["missing"]
     assert "full_tree" not in repr(result)
+
+
+@pytest.mark.parametrize("field", ["focusBefore", "focusAfter", "hitElement"])
+def test_hover_validation_rejects_null_required_element_evidence(field: str) -> None:
+    from netcoredbg_mcp.ui.hover import validate_hover_evidence
+
+    evidence = _valid_hover_evidence()
+    evidence[field] = None
+
+    result = validate_hover_evidence(evidence)
+
+    assert result["status"] == "BLOCKED"
+    assert result["reason"] == "hover backend returned malformed success evidence"
+    assert field in result["malformed"]
 
 
 def test_hover_validation_preserves_bounded_evidence_across_layers() -> None:
@@ -395,6 +409,4 @@ async def test_ui_set_focus_operation_adapter_uses_flat_bridge_selector() -> Non
     )
 
     assert result["status"] == "PASS"
-    assert backend.client.calls == [
-        ("set_focus", {"automationId": "hoverFocusSentinel"})
-    ]
+    assert backend.client.calls == [("set_focus", {"automationId": "hoverFocusSentinel"})]

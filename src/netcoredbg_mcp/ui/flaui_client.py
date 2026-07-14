@@ -25,6 +25,7 @@ CONNECT_CALL_TIMEOUT_SECONDS = 30.0
 CONNECT_RETRY_INTERVAL_SECONDS = 0.2
 WINDOW_NOT_READY_ERROR = "No window found for process"
 BRIDGE_DEFAULT_CALL_TIMEOUT_SECONDS = 10.0
+HOVER_TRANSPORT_TIMEOUT_MARGIN_SECONDS = 1.0
 DRAG_PATH_POINTER_DOWN_SETTLE_MS = 100
 DRAG_PATH_FINAL_DROP_SETTLE_MS = 180
 DRAG_PATH_TIMEOUT_MARGIN_SECONDS = 3.0
@@ -104,9 +105,7 @@ def _grid_ensure_visible_timeout_seconds(
     per_scroll_seconds = (
         bounded_settle_ms / 1000.0 + GRID_ENSURE_VISIBLE_SCROLL_UIA_OVERHEAD_SECONDS
     )
-    estimated_seconds = (
-        GRID_ENSURE_VISIBLE_SCAN_PASSES * bounded_scrolls * per_scroll_seconds
-    )
+    estimated_seconds = GRID_ENSURE_VISIBLE_SCAN_PASSES * bounded_scrolls * per_scroll_seconds
     return max(
         BRIDGE_DEFAULT_CALL_TIMEOUT_SECONDS,
         estimated_seconds + GRID_ENSURE_VISIBLE_TIMEOUT_MARGIN_SECONDS,
@@ -597,7 +596,7 @@ class FlaUIBackend:
             result = await self._client.call(
                 "hover",
                 params,
-                timeout=timeout_ms / 1000,
+                timeout=(timeout_ms / 1000) + HOVER_TRANSPORT_TIMEOUT_MARGIN_SECONDS,
             )
         except (asyncio.TimeoutError, TimeoutError):
             return {

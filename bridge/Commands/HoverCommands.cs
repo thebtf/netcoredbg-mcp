@@ -152,20 +152,23 @@ public static class HoverCommands
                 nextStep: "Ensure the target is realized, visible, and inside the virtual desktop.");
         }
 
+        var requestedPoint = new Point(
+            targetRect.Left + (targetRect.Width / 2),
+            targetRect.Top + (targetRect.Height / 2));
         var virtualScreen = VirtualScreenBounds();
         if (targetRect.Width <= 0 || targetRect.Height <= 0 || isOffscreen ||
             virtualScreen.Width <= 0 || virtualScreen.Height <= 0 ||
-            !virtualScreen.Contains(targetRect))
+            !virtualScreen.Contains(requestedPoint))
         {
             return NotStartedFailure(
                 "BLOCKED",
-                "hover target is off-screen or outside actionable virtual-screen bounds",
+                "hover target is off-screen or its actionable point is outside virtual-screen bounds",
                 "validate_target",
                 timeoutMs,
                 stopwatch,
                 requested: RequestedSelector(@params),
-                accepted: new JsonObject { ["targetRect"] = "positive rectangle fully inside virtual screen" },
-                nextStep: "Scroll or move the target fully on-screen before hovering.",
+                accepted: new JsonObject { ["targetRect"] = "positive rectangle with an actionable point inside the virtual screen" },
+                nextStep: "Scroll or move the target so its center point is on-screen before hovering.",
                 extra: new JsonObject
                 {
                     ["targetRect"] = RectJson(targetRect),
@@ -173,10 +176,6 @@ public static class HoverCommands
                     ["isOffscreen"] = isOffscreen,
                 });
         }
-
-        var requestedPoint = new Point(
-            targetRect.Left + (targetRect.Width / 2),
-            targetRect.Top + (targetRect.Height / 2));
         var foregroundHwndBefore = GetForegroundWindow();
         if (foregroundHwndBefore != targetRootHwnd)
         {
@@ -204,6 +203,18 @@ public static class HoverCommands
         try
         {
             focusBefore = automation.FocusedElement();
+            if (focusBefore is null)
+            {
+                return NotStartedFailure(
+                    "BLOCKED",
+                    "focused-element evidence is unavailable before hover",
+                    "focus_before",
+                    timeoutMs,
+                    stopwatch,
+                    requested: RequestedSelector(@params),
+                    accepted: new JsonObject { ["focusBefore"] = "non-null focused AutomationElement" },
+                    nextStep: "Establish keyboard focus inside the target window and retry.");
+            }
         }
         catch (Exception ex)
         {
@@ -266,11 +277,26 @@ public static class HoverCommands
                 actualPointer);
         }
 
-        AutomationElement hitElement;
+        AutomationElement? hitElement;
         string? hitRelation;
         try
         {
             hitElement = automation.FromPoint(actualPointer);
+            if (hitElement is null)
+            {
+                return MovedFailure(
+                    "FAIL",
+                    "UIA hit-test returned no element after pointer movement",
+                    "hit_test",
+                    timeoutMs,
+                    stopwatch,
+                    targetRootHwnd,
+                    targetProcessId,
+                    foregroundHwndBefore,
+                    targetRect,
+                    requestedPoint,
+                    actualPointer);
+            }
             hitRelation = HitRelation(target!, hitElement, automation);
         }
         catch (Exception ex)
@@ -321,6 +347,21 @@ public static class HoverCommands
         try
         {
             focusAfter = automation.FocusedElement();
+            if (focusAfter is null)
+            {
+                return MovedFailure(
+                    "FAIL",
+                    "focused-element evidence is unavailable after hover",
+                    "focus_after",
+                    timeoutMs,
+                    stopwatch,
+                    targetRootHwnd,
+                    targetProcessId,
+                    foregroundHwndBefore,
+                    targetRect,
+                    requestedPoint,
+                    actualPointer);
+            }
         }
         catch (Exception ex)
         {
@@ -436,9 +477,20 @@ public static class HoverCommands
             {
                 descendants = window.FindAllDescendants(condition);
             }
-            catch
+            catch (Exception ex)
             {
-                descendants = Array.Empty<AutomationElement>();
+                return (
+                    null,
+                    null,
+                    NotStartedFailure(
+                        "BLOCKED",
+                        $"hover root enumeration failed: {ex.Message}",
+                        "resolve_root",
+                        timeoutMs,
+                        stopwatch,
+                        requested: new JsonObject { ["rootAutomationId"] = rootId },
+                        accepted: new JsonObject { ["rootEnumeration"] = "all target-process top-level windows readable" },
+                        nextStep: "Reconnect to a responsive target process and retry root uniqueness validation."));
             }
 
             foreach (var descendant in descendants)
@@ -542,7 +594,25 @@ public static class HoverCommands
             }
             if (!string.IsNullOrWhiteSpace(controlType))
             {
-                conditions.Add(cf.ByControlType(ParseControlType(controlType)));
+                try
+                {
+                    conditions.Add(cf.ByControlType(ParseControlType(controlType)));
+                }
+                catch (ArgumentException ex)
+                {
+                    return (
+                        null,
+                        null,
+                        NotStartedFailure(
+                            "BLOCKED",
+                            ex.Message,
+                            "resolve_target",
+                            timeoutMs,
+                            stopwatch,
+                            requested: RequestedSelector(@params),
+                            accepted: new JsonObject { ["controlType"] = "valid FlaUI ControlType" },
+                            nextStep: "Provide a valid controlType."));
+                }
             }
             var condition = conditions.Count == 1
                 ? conditions[0]

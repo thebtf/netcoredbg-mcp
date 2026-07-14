@@ -83,6 +83,14 @@ def test_hover_bridge_checks_uniqueness_and_deadline_before_pointer_mutation() -
     assert hover.index("ResolveUniqueTarget") < hover.index("ClickCommands.MoveCursor")
 
 
+def test_hover_root_enumeration_failure_blocks_uniqueness_proof() -> None:
+    hover = BRIDGE_COMMAND.read_text(encoding="utf-8")
+    resolver = hover.rsplit("ResolveHoverRoot(", 1)[1].split("private static (", 1)[0]
+
+    assert "hover root enumeration failed" in resolver
+    assert "descendants = Array.Empty<AutomationElement>()" not in resolver
+
+
 def test_hover_root_id_matches_automation_id_only() -> None:
     hover = BRIDGE_COMMAND.read_text(encoding="utf-8")
     root_matcher = hover.split("private static bool MatchesRootIdentity", 1)[1].split(
@@ -104,3 +112,35 @@ def test_hover_bridge_rechecks_deadline_after_postcondition_reads() -> None:
     )
 
     assert final_deadline != -1
+
+
+def test_hover_bridge_blocks_missing_focus_and_hit_evidence() -> None:
+    hover = BRIDGE_COMMAND.read_text(encoding="utf-8")
+
+    focus_before_read = hover.index("focusBefore = automation.FocusedElement();")
+    focus_before_guard = hover.index("if (focusBefore is null)", focus_before_read)
+    pointer_move = hover.index("ClickCommands.MoveCursor")
+    assert focus_before_read < focus_before_guard < pointer_move
+
+    hit_read = hover.index("hitElement = automation.FromPoint(actualPointer);")
+    hit_guard = hover.index("if (hitElement is null)", hit_read)
+    hit_relation = hover.index("hitRelation = HitRelation", hit_read)
+    assert hit_read < hit_guard < hit_relation
+
+    focus_after_read = hover.index("focusAfter = automation.FocusedElement();")
+    focus_after_guard = hover.index("if (focusAfter is null)", focus_after_read)
+    focus_compare = hover.index("var focusUnchanged = SafeCompare", focus_after_read)
+    assert focus_after_read < focus_after_guard < focus_compare
+
+
+def test_hover_bridge_validates_control_type_and_actionable_point() -> None:
+    hover = BRIDGE_COMMAND.read_text(encoding="utf-8")
+    resolver = hover.rsplit("ResolveUniqueTarget(", 1)[1].split("private static (", 1)[0]
+
+    assert "catch (ArgumentException ex)" in resolver
+    assert "Provide a valid controlType." in resolver
+    requested_point = hover.index("var requestedPoint")
+    point_bounds = hover.index("!virtualScreen.Contains(requestedPoint)")
+    pointer_move = hover.index("ClickCommands.MoveCursor")
+    assert requested_point < point_bounds < pointer_move
+    assert "!virtualScreen.Contains(targetRect)" not in hover
