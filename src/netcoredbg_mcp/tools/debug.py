@@ -161,9 +161,7 @@ def register_debug_tools(
             # Validate program path (security: prevent arbitrary execution)
             # If pre_build=True, don't require file to exist yet (build will create it)
             logger.debug(f"[start_debug] validating program: {program}")
-            validated_program = session.validate_program(
-                program, must_exist=not pre_build
-            )
+            validated_program = session.validate_program(program, must_exist=not pre_build)
             logger.debug(f"[start_debug] program validated: {validated_program}")
 
             # Validate cwd if provided (for pre_build, cwd may not exist yet either)
@@ -177,17 +175,11 @@ def register_debug_tools(
             validated_build_project = None
             if build_project:
                 logger.debug(f"[start_debug] validating build_project: {build_project}")
-                validated_build_project = session.validate_path(
-                    build_project, must_exist=True
-                )
-                logger.debug(
-                    f"[start_debug] build_project validated: {validated_build_project}"
-                )
+                validated_build_project = session.validate_path(build_project, must_exist=True)
+                logger.debug(f"[start_debug] build_project validated: {validated_build_project}")
 
             # Progress callback to report to MCP client (timeout-protected)
-            async def report_progress(
-                progress: float, total: float, message: str
-            ) -> None:
+            async def report_progress(progress: float, total: float, message: str) -> None:
                 logger.info(f"[start_debug] progress {progress}/{total}: {message}")
                 await _safe_notify(
                     ctx.report_progress(progress=progress, total=total, message=message)
@@ -221,9 +213,7 @@ def register_debug_tools(
                     if not ok:
                         _notify_failed = True
 
-            logger.info(
-                f"[start_debug] launching: program={program}, pre_build={pre_build}"
-            )
+            logger.info(f"[start_debug] launching: program={program}, pre_build={pre_build}")
 
             # No blanket timeout here — each phase has its own:
             # - Build: 300s (BuildSession._run_command)
@@ -339,20 +329,14 @@ def register_debug_tools(
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
 
-            msg = (
-                "Rebuilding and restarting..."
-                if rebuild
-                else "Restarting without rebuild..."
-            )
+            msg = "Rebuilding and restarting..." if rebuild else "Restarting without rebuild..."
             await _safe_notify(ctx.report_progress(progress=0, total=100, message=msg))
 
             # Per-phase timeouts handle each step internally
             result = await session.restart(rebuild=rebuild)
 
             await _safe_notify(
-                ctx.report_progress(
-                    progress=100, total=100, message="Debug session restarted"
-                )
+                ctx.report_progress(progress=100, total=100, message="Debug session restarted")
             )
 
             await notify_state_changed(ctx)
@@ -363,9 +347,7 @@ def register_debug_tools(
 
             message = "Debug session restarted."
             if app_type == "gui":
-                message += (
-                    " GUI app detected — wait for window before setting breakpoints."
-                )
+                message += " GUI app detected — wait for window before setting breakpoints."
 
             return build_response(
                 data={**result, "app_type": app_type},
@@ -589,7 +571,11 @@ def register_debug_tools(
             access_error = check_session_access(ctx)
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
-            if type(window_ms) is not int or not 1 <= window_ms <= 30000:
+            if (
+                not isinstance(window_ms, int)
+                or isinstance(window_ms, bool)
+                or not 1 <= window_ms <= 30000
+            ):
                 return build_error_response(
                     "window_ms must be an integer from 1 to 30000",
                     state=session.state.state,
@@ -615,12 +601,8 @@ def register_debug_tools(
                 )
 
             module_new = after.module_new_events - before.module_new_events
-            module_changed = (
-                after.module_changed_events - before.module_changed_events
-            )
-            module_removed = (
-                after.module_removed_events - before.module_removed_events
-            )
+            module_changed = after.module_changed_events - before.module_changed_events
+            module_removed = after.module_removed_events - before.module_removed_events
             deltas = {
                 "continuedEvents": after.continued_events - before.continued_events,
                 "stoppedEvents": after.stopped_events - before.stopped_events,
