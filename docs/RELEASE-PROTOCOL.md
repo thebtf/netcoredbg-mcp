@@ -121,12 +121,13 @@ as the only release-note source for a milestone release.
 5. After every pre-publication gate passes, create an annotated tag with
    `git tag -a vX.Y.Z -m "Release vX.Y.Z"` and push it with
    `git push origin vX.Y.Z`.
-6. Run post-publication verification: remote tag visibility (temporary fetch ref,
-   `git cat-file -t` equals `tag`, delete temporary ref), tag workflow completion
-   (exact `publish.yml` push run for `vX.Y.Z` at the tag-target SHA, then
-   `gh run view <run-id>`), GitHub Release, and PyPI publication.
-7. Deploy to this workstation by installing the released wheel/package, then
-   verify `netcoredbg-mcp --version` and a package import smoke.
+6. Run all five post-publication verification rows from Required Gates: remote tag
+   visibility, exact tag workflow completion, GitHub Release, PyPI publication,
+   and Local deploy smoke. Any failed row blocks release completion and the final
+   verdict per Terminal Verdict.
+7. For the required Local deploy smoke row: install the released wheel/package
+   on this workstation, then verify `netcoredbg-mcp --version` reports `X.Y.Z`
+   and a package import smoke.
 8. Update `.agent/CONTINUITY.md` and the live dashboard with the final verdict.
 
 ## Recovery After Tag Push
