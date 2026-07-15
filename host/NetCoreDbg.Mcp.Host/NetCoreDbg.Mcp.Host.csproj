@@ -14,4 +14,8 @@
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.7" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="NetCoreDbg.Mcp.Host.Tests" />
+  </ItemGroup>
+
 </Project>
