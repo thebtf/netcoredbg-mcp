@@ -59,6 +59,17 @@ async def test_host_proxy_critical_initialize_list_call(
                     "host must advertise a tools capability"
                 )
 
+                # Real server identity from the actual .NET host process,
+                # not a stub -- and the mcp-mux session-isolation capability
+                # it mirrors from the Python server (see Program.cs).
+                assert init_result.serverInfo.name == "netcoredbg-mcp-host", (
+                    f"unexpected serverInfo.name: {init_result.serverInfo.name!r}"
+                )
+                experimental = init_result.capabilities.experimental or {}
+                assert experimental.get("x-mux") == {"sharing": "isolated"}, (
+                    f"host must advertise x-mux.sharing=isolated: {experimental}"
+                )
+
                 # tools/list forwards at least one authoritative tool unchanged.
                 tools_result = await session.list_tools()
                 proxied_names = {tool.name for tool in tools_result.tools}
