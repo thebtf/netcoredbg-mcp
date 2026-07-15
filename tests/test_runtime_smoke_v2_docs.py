@@ -964,3 +964,114 @@ def test_app_diagnostics_poll_example_remains_schema_compatible() -> None:
     assert payload["poll"]["poll_interval_ms"] == 100
     assert "wait_json" not in payload
     assert payload["observations"] == []
+
+
+def test_playbook_documents_dotnet_compatibility_host_candidate_journey_as_real_process() -> (
+    None
+):
+    playbook = PLAYBOOK_PATH.read_text(encoding="utf-8")
+    collapsed = _collapsed(playbook)
+
+    assert "### 10. .NET Compatibility-Host Candidate Consumer Journey" in playbook
+    assert "#### 10.1 Candidate Release Build/Publish" in playbook
+    assert "#### 10.2 Configuration" in playbook
+    assert "#### 10.3 Real External MCP Client Exchange" in playbook
+    assert "#### 10.4 Evidence Capture" in playbook
+    assert "#### 10.5 Rollback to the Python Console Entrypoint" in playbook
+    assert (
+        "#### 10.6 `PRODUCT_WORKS` / `PARTIALLY_WORKS` / `BROKEN` Semantics "
+        "(for PKG-001 reuse)" in playbook
+    )
+
+    # Real build/publish evidence: a genuine self-contained artifact, not a
+    # framework-dependent `dotnet run` pointed at the source tree.
+    assert (
+        "dotnet publish host/NetCoreDbg.Mcp.Host -c Release -r win-x64 "
+        "--self-contained true -p:PublishSingleFile=true" in playbook
+    )
+    assert "host/NetCoreDbg.Mcp.Host" in playbook
+
+    # Real external-process client evidence: a separate OS process launched by
+    # the official MCP client SDK, never a direct in-process call.
+    assert "StdioServerParameters" in playbook
+    assert "stdio_client" in playbook
+    assert "get_default_environment" in playbook
+    assert "NETCOREDBG_MCP_PYTHON_EXECUTABLE" in playbook
+    assert "runtime_smoke_validate_plan" in playbook
+    assert (
+        "never a" in collapsed
+        and "direct in-process call to `create_server()` or `RunProxyAsync`" in collapsed
+    )
+    assert "call_is_error" in playbook
+
+    # Evidence capture and rollback must be concrete, not hand-waved.
+    assert "$ConsumerNetHost` full path plus file size" in playbook
+    assert "no uninstall and no data migration" in playbook
+    assert "$ConsumerCli --version` still succeeds" in playbook
+
+    # Unambiguous, PKG-001-reusable verdict semantics.
+    assert "`PRODUCT_WORKS`: `dotnet publish` succeeds" in playbook
+    assert "`PARTIALLY_WORKS`: the publish step succeeds and the host starts" in playbook
+    assert "`BROKEN`: the publish step fails" in playbook
+    assert "PKG-001" in playbook
+
+
+def test_playbook_dotnet_candidate_journey_does_not_erode_python_default_boundary() -> (
+    None
+):
+    playbook = PLAYBOOK_PATH.read_text(encoding="utf-8")
+    collapsed = _collapsed(playbook)
+
+    # The Python-wheel journey (flows 1-2) must still be present and must
+    # precede the candidate .NET journey — additive, never a replacement.
+    assert "Installed CLI Consumer Smoke" in playbook
+    assert "Installed MCP Client Exchange" in playbook
+    assert "$ConsumerCli" in playbook
+    assert "$ConsumerPython" in playbook
+    assert playbook.index("### 1. Installed CLI Consumer Smoke") < playbook.index(
+        "### 10. .NET Compatibility-Host Candidate Consumer Journey"
+    )
+    assert playbook.index("### 2. Installed MCP Client Exchange") < playbook.index(
+        "### 10. .NET Compatibility-Host Candidate Consumer Journey"
+    )
+
+    # Explicit, load-bearing non-cutover disclaimer.
+    not_yet_published = (
+        "This is a **candidate**, not-yet-published journey: `netcoredbg-mcp` "
+        "still ships only the Python wheel and console entry point documented "
+        "in flows 1-9 above."
+    )
+    no_cutover_claim = (
+        "This journey does not publish `netcoredbg-mcp` as a .NET package, "
+        "does not complete packaging, and does not cut the default entry "
+        "point over from Python; `netcoredbg-mcp --project-from-cwd` "
+        "(flows 1-9) remains the product's only published, installed entry "
+        "point until PKG-001 ships and passes its own installed-consumer gate."
+    )
+    assert _collapsed(not_yet_published) in collapsed
+    assert _collapsed(no_cutover_claim) in collapsed
+    assert (
+        "it does not itself gate the current wave's release, and it does not "
+        "claim publication, packaging completion, or entry-point cutover"
+        in collapsed
+    )
+
+    # Never let this flow claim it is now the default/published entry point.
+    forbidden_claims = (
+        "the .NET compatibility host is now the default entry point",
+        "the .NET host replaces netcoredbg-mcp",
+        "published to pypi as a .net package",
+        "entrypoint cutover is complete",
+    )
+    lowered = collapsed.lower()
+    for claim in forbidden_claims:
+        assert claim not in lowered
+
+    # The candidate journey's own failure modes and verdict row must be
+    # present so the route cannot silently regress to fake/unit-only proof.
+    assert (
+        "uses a direct in-process call instead of a real external "
+        "`$ConsumerNetHost` process" in collapsed
+    )
+    assert ".NET compatibility-host candidate journey" in playbook
+    assert "rollback to `$ConsumerCli` still works" in playbook

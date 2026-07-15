@@ -10,6 +10,9 @@ on after installing the package:
 - Launch environment profile handling and secret-safe metadata.
 - Runtime smoke orchestration and GUI fixture availability.
 - WPF DataGrid drag/drop and edge-scroll runtime-smoke v2 proof.
+- A candidate, not-yet-published .NET compatibility-host consumer journey (flow
+  10) that proxies to this same installed Python backend; PKG-001 owns final
+  installed-package cutover evidence.
 
 The playbook is intentionally executable on a release workstation without a
 private downstream application. GUI debugging against WPF, WinForms, and
@@ -35,6 +38,9 @@ This playbook is the primary release gate, not a supplementary demonstration. Th
 - Release commands run from the repository root.
 - `NETCOREDBG_PATH` points at the installed `netcoredbg.exe` for GUI smoke commands.
 - For full GUI smoke coverage, build all three fixture apps: `tests/fixtures/SmokeTestApp`, `tests/fixtures/WpfSmokeApp`, and `tests/fixtures/AvaloniaSmokeApp`.
+- For flow 10 (the .NET compatibility-host candidate journey): the .NET 8 SDK,
+  and a runtime identifier compatible with `dotnet publish -r <RID>
+  --self-contained true` on the target OS (this playbook uses `win-x64`).
 
 ## Release-Candidate Consumer Environment
 
@@ -400,6 +406,189 @@ Expected result:
 
 This consumer contract originated with the v0.20.5 NovaScript action-oracle slice, but each new release verdict applies to `<TARGET_VERSION>` from the installed release-candidate wheel. It does not replace the CR-003 DataGrid drag/drop replay gate above.
 
+### 10. .NET Compatibility-Host Candidate Consumer Journey
+
+This is a **candidate**, not-yet-published journey: `netcoredbg-mcp` still ships
+only the Python wheel and console entry point documented in flows 1-9 above.
+This section proves a second, additive way to reach the identical tool
+surface — a self-contained .NET 8 compatibility host that proxies to the same
+installed Python backend — so PKG-001 can reuse this evidence when it decides
+whether to publish and cut over. This journey does not publish `netcoredbg-mcp`
+as a .NET package, does not complete packaging, and does not cut the default
+entry point over from Python; `netcoredbg-mcp --project-from-cwd` (flows 1-9)
+remains the product's only published, installed entry point until PKG-001
+ships and passes its own installed-consumer gate.
+
+#### 10.1 Candidate Release Build/Publish
+
+Build the self-contained single-file host from the same source checkout as the
+release candidate:
+
+```powershell
+$ConsumerNetHostDir = Join-Path $ConsumerRoot 'net-host'
+dotnet publish host/NetCoreDbg.Mcp.Host -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o $ConsumerNetHostDir
+$ConsumerNetHost = Join-Path $ConsumerNetHostDir 'NetCoreDbg.Mcp.Host.exe'
+```
+
+Expected result:
+
+- Exit code `0`; `dotnet publish` reports `NetCoreDbg.Mcp.Host -> $ConsumerNetHostDir`.
+- `$ConsumerNetHost` is one self-contained executable — no separately published
+  `.dll` or shared .NET runtime install is required on the target machine to
+  launch it.
+- The build comes from `host/NetCoreDbg.Mcp.Host`, the same source tree gated
+  by Q0's real-host critical coverage, not a private test harness; it does not
+  edit `NetCoreDbg.Mcp.Host.csproj` or publish any other project.
+
+#### 10.2 Configuration — Python Backend Dependency Truth
+
+The candidate host is a compatibility proxy, not a Python-free
+reimplementation: every tool call still executes inside the same installed
+`netcoredbg-mcp` Python package. Point it at the release-candidate backend
+explicitly, so the journey proves the installed wheel from "Release-Candidate
+Consumer Environment" above, not an ambient source checkout:
+
+```powershell
+$env:NETCOREDBG_MCP_PYTHON_EXECUTABLE = $ConsumerPython
+```
+
+Expected result:
+
+- `$ConsumerNetHost` launches `$ConsumerPython -m netcoredbg_mcp <args>` as a
+  direct child process (`UseShellExecute=false`, argument-list forwarding); it
+  does not fall back to a bare `python` on `PATH` once this variable is set.
+- The child inherits the host's own working directory, so `--project-from-cwd`
+  resolves exactly like the Python journey in flow 2.
+- Omitting `NETCOREDBG_MCP_PYTHON_EXECUTABLE` on a machine without a `python`
+  on `PATH`, or pointing it at an interpreter without the installed wheel, is
+  an explicit, named prerequisite gap — never a silent `PRODUCT_WORKS`.
+
+#### 10.3 Real External MCP Client Exchange — initialize / list / call
+
+This is a real consumer round trip: a separate OS process (`$ConsumerNetHost`)
+launched by a real external MCP client (the official Python SDK), never a
+direct in-process call to `create_server()` or `RunProxyAsync`. The MCP
+client SDK only forwards a safe default environment subset to a spawned
+server process, so the script below builds on that default and adds only the
+one variable the candidate host needs:
+
+```powershell
+$env:NETCOREDBG_MCP_CONSUMER_NET_HOST = $ConsumerNetHost
+$env:NETCOREDBG_MCP_CONSUMER_PROJECT = $ConsumerProject
+$env:NETCOREDBG_MCP_CONSUMER_PYTHON = $ConsumerPython
+$script = @'
+import asyncio
+import json
+import os
+
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import get_default_environment, stdio_client
+
+REQUIRED_TOOLS = {"start_debug", "add_breakpoint", "get_call_stack", "run_runtime_smoke"}
+
+async def main():
+    env = get_default_environment()
+    env["NETCOREDBG_MCP_PYTHON_EXECUTABLE"] = os.environ["NETCOREDBG_MCP_CONSUMER_PYTHON"]
+    params = StdioServerParameters(
+        command=os.environ["NETCOREDBG_MCP_CONSUMER_NET_HOST"],
+        args=["--project-from-cwd"],
+        cwd=os.environ["NETCOREDBG_MCP_CONSUMER_PROJECT"],
+        env=env,
+    )
+    async with stdio_client(params) as (read_stream, write_stream):
+        async with ClientSession(read_stream, write_stream) as session:
+            initialized = await session.initialize()
+            tools = await session.list_tools()
+            names = {tool.name for tool in tools.tools}
+            missing = sorted(REQUIRED_TOOLS - names)
+            call = await session.call_tool(
+                "runtime_smoke_validate_plan",
+                {"plan": {"schema": "netcoredbg.runtime_smoke.v2", "operations": []}},
+            )
+            payload = json.loads(call.content[0].text)
+            result = {
+                "server_name": initialized.serverInfo.name,
+                "x_mux": (initialized.capabilities.experimental or {}).get("x-mux"),
+                "tools_capability": initialized.capabilities.tools is not None,
+                "tool_count": len(names),
+                "missing_tools": missing,
+                "call_is_error": call.isError,
+                "call_status": (payload.get("data") or {}).get("status"),
+            }
+            print(json.dumps(result, sort_keys=True))
+            if (
+                result["x_mux"] != {"sharing": "isolated"}
+                or not result["tools_capability"]
+                or missing
+                or result["call_is_error"]
+            ):
+                raise SystemExit(1)
+
+asyncio.run(main())
+'@
+& $ConsumerPython -c $script
+```
+
+Expected result:
+
+- Exit code `0`.
+- `server_name` is `netcoredbg-mcp-host` — the candidate host's own MCP
+  identity, distinct from the Python server process it proxies.
+- The initialized server advertises `x-mux.sharing=isolated` and a tools
+  capability; `missing_tools` is empty and `tool_count` matches the tool count
+  the Python journey observes in flow 2, because both journeys expose the
+  identical Python-registered tool catalog.
+- `call_is_error` is `false`: the forwarded `tools/call` for
+  `runtime_smoke_validate_plan` completes and returns a structured
+  `PASS`/`BLOCKED`/`FAIL`/`INVALID_SETUP` decision, not a protocol fault.
+
+#### 10.4 Evidence Capture
+
+Record in the release report:
+
+- The exact `dotnet publish` command and its reported output path.
+- `$ConsumerNetHost` full path plus file size (proves a genuine self-contained
+  artifact rather than a framework-dependent build missing its runtime).
+- The resolved `NETCOREDBG_MCP_PYTHON_EXECUTABLE` value and its own
+  `--version` output, proving which installed backend answered the exchange.
+- The full JSON line printed by the client script above.
+
+#### 10.5 Rollback to the Python Console Entrypoint
+
+The candidate host never becomes the registered, default, or published entry
+point; rolling back requires no uninstall and no data migration:
+
+1. Stop pointing any MCP client configuration at `$ConsumerNetHost`.
+2. Resume launching `$ConsumerCli --project-from-cwd` (flows 1-2 above) — the
+   same installed wheel the candidate host was proxying to.
+3. Confirm `$ConsumerCli --version` still succeeds; the wheel install is
+   untouched by anything the candidate host did, because the host only reads
+   the child's stdout/stdin/stderr streams and never writes to the Python
+   installation.
+
+#### 10.6 `PRODUCT_WORKS` / `PARTIALLY_WORKS` / `BROKEN` Semantics (for PKG-001 reuse)
+
+- `PRODUCT_WORKS`: `dotnet publish` succeeds; the real external client observes
+  `x-mux.sharing=isolated`, a tools capability, the same tool count and zero
+  missing tools as the installed Python journey, and at least one real
+  `tools/call` completes with `call_is_error=false` and a structured
+  runtime-smoke decision; rollback to `$ConsumerCli` still succeeds afterward.
+- `PARTIALLY_WORKS`: the publish step succeeds and the host starts, but a named
+  workstation prerequisite blocks one step — for example no compatible
+  `-r <RID>` runtime pack, or no python interpreter reachable through
+  `NETCOREDBG_MCP_PYTHON_EXECUTABLE`/`PATH` with the wheel installed — and the
+  gap is recorded as a concrete `next_step` rather than silently skipped.
+- `BROKEN`: the publish step fails; the host process fails to start or does not
+  reach `initialize`; the tool catalog, `x-mux` capability, or a real
+  `tools/call` diverges from the installed Python journey; or `$ConsumerCli`
+  stops working after the candidate host is exercised.
+- This verdict is evidence for **this** candidate journey only; it does not
+  itself gate the current wave's release, and it does not claim publication,
+  packaging completion, or entry-point cutover. Final installed-package
+  acceptance remains PKG-001's gate, which reuses this same
+  build/configure/exchange/evidence/rollback contract against the packaged
+  artifact instead of a source-tree publish.
+
 ## Failure-Mode Catalog
 
 - CLI exits non-zero or fails to import the package.
@@ -419,6 +608,15 @@ This consumer contract originated with the v0.20.5 NovaScript action-oracle slic
   CR-001 acceptance.
 - NovaScript action-oracle verification uses `file.json` only, omits a generated
   `app_diagnostics` probe, or accepts stale app-diagnostics evidence.
+- The .NET compatibility-host candidate journey (flow 10) uses a direct
+  in-process call instead of a real external `$ConsumerNetHost` process, or
+  omits the real MCP client's `initialize`/`tools/list`/`tools/call` exchange.
+- The candidate host's tool catalog, `x-mux` capability, or a real `tools/call`
+  result diverges from the installed Python journey (flow 2) without an
+  honest `PARTIALLY_WORKS`/`BROKEN` verdict naming the divergence.
+- The candidate host's documentation claims publication, packaging
+  completion, or that it replaces `netcoredbg-mcp --project-from-cwd` as the
+  default entry point.
 
 ## Verdict Template
 
@@ -432,6 +630,7 @@ This consumer contract originated with the v0.20.5 NovaScript action-oracle slic
 | Avalonia fixture compatibility | Fixture found; key cleanup succeeds; UIA gaps are bounded UNSUPPORTED/BLOCKED evidence |  |  |
 | WPF DataGrid drag/drop customer-mode gate | `docs/examples/runtime-smoke-v2-drag-drop-grid.json` returns PASS or an honest BLOCKED with route, viewport, selected-payload, negative no-op, and offscreen row-target `drop.ensure_visible=true` evidence requirements named |  |  |
 | NovaScript action-oracle app diagnostics | `docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json` expands to `app_diagnostics` and returns PASS or an honest BLOCKED with freshness and cleanup evidence |  |  |
+| .NET compatibility-host candidate journey | `$ConsumerNetHost` real external client exchange returns the same tool count/capabilities as the Python journey and PASS on a real `tools/call`, or an honest BLOCKED/FAIL naming the missing prerequisite; rollback to `$ConsumerCli` still works |  |  |
 
 Overall verdict: `PRODUCT_WORKS` / `PARTIALLY_WORKS` / `BROKEN`
 
