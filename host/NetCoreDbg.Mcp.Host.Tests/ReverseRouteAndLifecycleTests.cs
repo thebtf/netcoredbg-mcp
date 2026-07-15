@@ -33,6 +33,11 @@ public sealed class ReverseRouteAndLifecycleTests
             {
                 handlers.RootsHandler = async (typedParams, cancellationToken) =>
                 {
+                    // Mirror RelaySession's documented reverse-route contract: Python must
+                    // never reach the downstream client before it has actually completed
+                    // notifications/initialized, so the test-only handler awaits the same
+                    // readiness signal a real FD-001 module would.
+                    await session!.DownstreamReady.WaitAsync(cancellationToken).ConfigureAwait(false);
                     var forwarded = new JsonRpcRequest
                     {
                         Method = RequestMethods.RootsList,
