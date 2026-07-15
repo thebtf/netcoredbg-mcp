@@ -1009,11 +1009,33 @@ def test_playbook_documents_dotnet_compatibility_host_candidate_journey_as_real_
     assert "no uninstall and no data migration" in playbook
     assert "$ConsumerCli --version` still succeeds" in playbook
 
-    # Unambiguous, PKG-001-reusable verdict semantics.
+    # Unambiguous, PKG-001-reusable verdict semantics: PASS is required, not
+    # merely the absence of a protocol-level error.
     assert "`PRODUCT_WORKS`: `dotnet publish` succeeds" in playbook
     assert "`PARTIALLY_WORKS`: the publish step succeeds and the host starts" in playbook
     assert "`BROKEN`: the publish step fails" in playbook
     assert "PKG-001" in playbook
+
+    # The route must call a repository-proven minimal plan and demand a real
+    # PASS -- not an empty/invalid inline plan that only proves the proxy
+    # forwards a protocol-shaped response.
+    real_plan_payload = (
+        '{"plan": {"name": "netcoredbg-mcp-host-proxy-check", '
+        '"actions": [{"name": "output_checkpoint", "args": {"name": "start"}}]}}'
+    )
+    assert real_plan_payload in playbook
+    assert "tests/test_host_proxy.py::MINIMAL_PLAN" in playbook
+    assert 'or result["call_status"] != "PASS"' in playbook
+    assert _collapsed(
+        "`call_status=PASS` (not merely `call_is_error=false`)"
+    ) in collapsed
+
+    # A revert to the old invalid empty-operations plan (which only ever
+    # produces INVALID_SETUP, never PASS) must fail this test.
+    invalid_empty_operations_payload = (
+        '{"schema": "netcoredbg.runtime_smoke.v2", "operations": []}'
+    )
+    assert invalid_empty_operations_payload not in playbook
 
 
 def test_playbook_dotnet_candidate_journey_does_not_erode_python_default_boundary() -> (
@@ -1075,3 +1097,11 @@ def test_playbook_dotnet_candidate_journey_does_not_erode_python_default_boundar
     )
     assert ".NET compatibility-host candidate journey" in playbook
     assert "rollback to `$ConsumerCli` still works" in playbook
+
+    # BROKEN must explicitly name a non-PASS `tools/call` result (including a
+    # silently-accepted INVALID_SETUP) as a verdict failure, not just a
+    # protocol-level fault -- this is the erosion this journey must resist.
+    assert _collapsed(
+        "returns anything other than `call_status=PASS` (including a "
+        "silently-accepted `INVALID_SETUP`)"
+    ) in collapsed

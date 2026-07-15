@@ -503,7 +503,7 @@ async def main():
             missing = sorted(REQUIRED_TOOLS - names)
             call = await session.call_tool(
                 "runtime_smoke_validate_plan",
-                {"plan": {"schema": "netcoredbg.runtime_smoke.v2", "operations": []}},
+                {"plan": {"name": "netcoredbg-mcp-host-proxy-check", "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}]}},
             )
             payload = json.loads(call.content[0].text)
             result = {
@@ -521,6 +521,7 @@ async def main():
                 or not result["tools_capability"]
                 or missing
                 or result["call_is_error"]
+                or result["call_status"] != "PASS"
             ):
                 raise SystemExit(1)
 
@@ -538,9 +539,11 @@ Expected result:
   capability; `missing_tools` is empty and `tool_count` matches the tool count
   the Python journey observes in flow 2, because both journeys expose the
   identical Python-registered tool catalog.
-- `call_is_error` is `false`: the forwarded `tools/call` for
-  `runtime_smoke_validate_plan` completes and returns a structured
-  `PASS`/`BLOCKED`/`FAIL`/`INVALID_SETUP` decision, not a protocol fault.
+- `call_is_error` is `false` and `call_status` is `PASS`: the forwarded
+  `tools/call` for `runtime_smoke_validate_plan` against the
+  repository-proven minimal plan (`tests/test_host_proxy.py::MINIMAL_PLAN`)
+  completes and returns Python's own real `PASS` decision — not a protocol
+  fault, and not a silently-accepted `INVALID_SETUP`/`BLOCKED`/`FAIL`.
 
 #### 10.4 Evidence Capture
 
@@ -570,18 +573,22 @@ point; rolling back requires no uninstall and no data migration:
 
 - `PRODUCT_WORKS`: `dotnet publish` succeeds; the real external client observes
   `x-mux.sharing=isolated`, a tools capability, the same tool count and zero
-  missing tools as the installed Python journey, and at least one real
-  `tools/call` completes with `call_is_error=false` and a structured
-  runtime-smoke decision; rollback to `$ConsumerCli` still succeeds afterward.
+  missing tools as the installed Python journey, and a real
+  `tools/call` for the repository-proven minimal plan
+  (`tests/test_host_proxy.py::MINIMAL_PLAN`) returns `call_status=PASS` (not
+  merely `call_is_error=false`); rollback to `$ConsumerCli` still succeeds
+  afterward.
 - `PARTIALLY_WORKS`: the publish step succeeds and the host starts, but a named
   workstation prerequisite blocks one step — for example no compatible
   `-r <RID>` runtime pack, or no python interpreter reachable through
   `NETCOREDBG_MCP_PYTHON_EXECUTABLE`/`PATH` with the wheel installed — and the
   gap is recorded as a concrete `next_step` rather than silently skipped.
 - `BROKEN`: the publish step fails; the host process fails to start or does not
-  reach `initialize`; the tool catalog, `x-mux` capability, or a real
-  `tools/call` diverges from the installed Python journey; or `$ConsumerCli`
-  stops working after the candidate host is exercised.
+  reach `initialize`; the tool catalog or `x-mux` capability diverges from the
+  installed Python journey; the real `tools/call` for the minimal plan returns
+  anything other than `call_status=PASS` (including a silently-accepted
+  `INVALID_SETUP`); or `$ConsumerCli` stops working after the candidate host
+  is exercised.
 - This verdict is evidence for **this** candidate journey only; it does not
   itself gate the current wave's release, and it does not claim publication,
   packaging completion, or entry-point cutover. Final installed-package
