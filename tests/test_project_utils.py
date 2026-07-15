@@ -217,9 +217,9 @@ class TestGetProjectRoot:
         """Test returns None when no sources available."""
         configure_project_root()  # Reset config
 
-        # Mock context that returns empty roots
+        # Mock context whose session reports an empty roots list
         ctx = MagicMock()
-        ctx.list_roots = AsyncMock(return_value=[])
+        ctx.session.list_roots = AsyncMock(return_value=MagicMock(roots=[]))
 
         result = await get_project_root(ctx)
         assert result is None
@@ -234,7 +234,7 @@ class TestGetProjectRoot:
         mock_root.uri = f"file:///{tmp_path.as_posix()}"
 
         ctx = MagicMock()
-        ctx.list_roots = AsyncMock(return_value=[mock_root])
+        ctx.session.list_roots = AsyncMock(return_value=MagicMock(roots=[mock_root]))
 
         result = await get_project_root(ctx)
         # Result should be the path from MCP root
@@ -250,9 +250,9 @@ class TestGetProjectRoot:
 
         configure_project_root()
 
-        # Mock context that raises exception
+        # Mock context whose session raises when asked for roots
         ctx = MagicMock()
-        ctx.list_roots = AsyncMock(side_effect=Exception("Not supported"))
+        ctx.session.list_roots = AsyncMock(side_effect=Exception("Not supported"))
 
         result = await get_project_root(ctx)
         assert result == env_path
@@ -267,9 +267,9 @@ class TestGetProjectRoot:
             startup_cwd=str(tmp_path),
         )
 
-        # Mock context with empty roots
+        # Mock context whose session reports an empty roots list
         ctx = MagicMock()
-        ctx.list_roots = AsyncMock(return_value=[])
+        ctx.session.list_roots = AsyncMock(return_value=MagicMock(roots=[]))
 
         result = await get_project_root(ctx)
         assert result == tmp_path

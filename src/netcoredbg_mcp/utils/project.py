@@ -1,7 +1,7 @@
 """Project root detection utilities.
 
 Provides utilities for determining the project root directory from multiple sources:
-1. MCP Roots from client (via Context.list_roots())
+1. MCP Roots from client (via Context.session.list_roots())
 2. Environment variables (NETCOREDBG_PROJECT_ROOT, MCP_PROJECT_ROOT)
 3. Startup CWD (when --project-from-cwd is used)
 
@@ -184,7 +184,7 @@ async def get_project_root(ctx: Context | None = None) -> Path | None:
     """Determine the project root directory from available sources.
 
     Priority order:
-    1. MCP Roots from client (via ctx.list_roots()) - if client supports it
+    1. MCP Roots from client (via ctx.session.list_roots()) - if client supports it
     2. Environment variable (NETCOREDBG_PROJECT_ROOT or MCP_PROJECT_ROOT)
     3. Explicit --project path (if configured)
     4. Startup CWD with .NET marker search (if --project-from-cwd)
@@ -211,8 +211,8 @@ async def get_project_root(ctx: Context | None = None) -> Path | None:
     # 1. Try MCP Roots from client (highest priority - client knows best)
     if ctx is not None:
         try:
-            list_roots = getattr(ctx, "list_roots", None)
-            roots = await list_roots() if list_roots is not None else None
+            list_roots_result = await ctx.session.list_roots()
+            roots = list_roots_result.roots
             logger.info(f"MCP list_roots() returned {len(roots) if roots else 0} roots")
             if roots:
                 # Use the first root
