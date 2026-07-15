@@ -543,7 +543,8 @@ async def main():
             }
             print(json.dumps(result, sort_keys=True))
             if (
-                result["x_mux"] != {"sharing": "isolated"}
+                result["server_name"] != "netcoredbg-mcp-host"
+                or result["x_mux"] != {"sharing": "isolated"}
                 or not result["tools_capability"]
                 or missing
                 or not result["catalog_match"]
@@ -610,13 +611,14 @@ point; rolling back requires no uninstall and no data migration:
 #### 10.6 `PRODUCT_WORKS` / `PARTIALLY_WORKS` / `BROKEN` Semantics (for PKG-001 reuse)
 
 - `PRODUCT_WORKS`: `dotnet publish` succeeds; the real external client observes
-  `x-mux.sharing=isolated`, a tools capability, zero missing named tools, and
-  `catalog_match=true` (the complete host tool-name set exactly equals the
-  complete direct-Python tool-name set fetched live in the same run); and a
-  real `tools/call` for the repository-proven minimal plan
-  (`tests/test_host_proxy.py::MINIMAL_PLAN`) returns `call_status=PASS` (not
-  merely `call_is_error=false`); rollback to `$ConsumerCli` still succeeds
-  afterward.
+  `server_name` exactly equal to `netcoredbg-mcp-host` (never the Python
+  server's own identity or any other value), `x-mux.sharing=isolated`, a
+  tools capability, zero missing named tools, and `catalog_match=true` (the
+  complete host tool-name set exactly equals the complete direct-Python
+  tool-name set fetched live in the same run); and a real `tools/call` for
+  the repository-proven minimal plan (`tests/test_host_proxy.py::MINIMAL_PLAN`)
+  returns `call_status=PASS` (not merely `call_is_error=false`); rollback to
+  `$ConsumerCli` still succeeds afterward.
 - `PARTIALLY_WORKS`: a named pre-host-start workstation prerequisite blocks
   `dotnet publish` itself, before any process can even attempt to start —
   for example no compatible `-r <RID>` runtime pack for this workstation's
@@ -627,11 +629,14 @@ point; rolling back requires no uninstall and no data migration:
   start prerequisite; the host process fails to start or does not reach
   `initialize`, including because no python interpreter is reachable through
   `NETCOREDBG_MCP_PYTHON_EXECUTABLE`/`PATH` or the resolved interpreter lacks
-  the installed wheel; `catalog_match` is `false` or the `x-mux` capability
-  diverges from the installed Python journey; the real `tools/call` for the
-  minimal plan returns anything other than `call_status=PASS` (including a
-  silently-accepted `INVALID_SETUP`); or `$ConsumerCli` stops working after
-  the candidate host is exercised.
+  the installed wheel; `server_name` is anything other than
+  `netcoredbg-mcp-host` (for example the proxied Python server's own name,
+  meaning the client bypassed the candidate host entirely); `catalog_match`
+  is `false` or the `x-mux` capability diverges from the installed Python
+  journey; the real `tools/call` for the minimal plan returns anything
+  other than `call_status=PASS` (including a silently-accepted
+  `INVALID_SETUP`); or `$ConsumerCli` stops working after the candidate
+  host is exercised.
 - This verdict is evidence for **this** candidate journey only; it does not
   itself gate the current wave's release, and it does not claim publication,
   packaging completion, or entry-point cutover. Final installed-package

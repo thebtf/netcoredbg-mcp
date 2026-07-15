@@ -1017,6 +1017,21 @@ def test_playbook_documents_dotnet_compatibility_host_candidate_journey_as_real_
     assert "`BROKEN`: the publish step fails" in playbook
     assert "PKG-001" in playbook
 
+    # server_name identity must be a hard PRODUCT_WORKS/BROKEN gate, not
+    # just documented prose -- the script must fail closed on wrong identity
+    # (e.g. the proxied Python server's own name, proving the client
+    # bypassed the candidate host entirely rather than exercising it).
+    assert 'result["server_name"] != "netcoredbg-mcp-host"' in playbook
+    assert _collapsed(
+        "`server_name` exactly equal to `netcoredbg-mcp-host` (never the "
+        "Python server's own identity or any other value)"
+    ) in collapsed
+    assert _collapsed(
+        "`server_name` is anything other than `netcoredbg-mcp-host` (for "
+        "example the proxied Python server's own name, meaning the client "
+        "bypassed the candidate host entirely)"
+    ) in collapsed
+
     # Do not hardcode a specific tool count -- prove catalog parity live
     # against a same-run direct-Python baseline instead.
     assert "135" not in playbook
