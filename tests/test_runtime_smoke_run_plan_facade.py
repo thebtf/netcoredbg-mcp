@@ -59,8 +59,7 @@ class LargeFinalResultRegistry:
             "action_count": 9,
             "cleanup": {"status": "PASS", "attempted": [f"cleanup-{i}" for i in range(20)]},
             "evidence_refs": [
-                {"kind": "case", "ref": f"case:{i}", "summary": "x" * 300}
-                for i in range(12)
+                {"kind": "case", "ref": f"case:{i}", "summary": "x" * 300} for i in range(12)
             ],
             "compact": {
                 "status": "PASS",
@@ -332,17 +331,55 @@ def _register(
     return access_calls
 
 
-async def _wait_for_final_bundle(capturing_mcp, run_id: str) -> dict[str, Any]:
-    for _ in range(20):
-        response = await capturing_mcp.tools["runtime_smoke_evidence_bundle"](
-            ctx=None,
-            run_id=run_id,
-        )
+async def _wait_for_final_bundle(
+    capturing_mcp,
+    run_id: str,
+    *,
+    timeout_seconds: float = 1.0,
+) -> dict[str, Any]:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    data: dict[str, Any] = {}
+    while (remaining := deadline - loop.time()) > 0:
+        try:
+            response = await asyncio.wait_for(
+                capturing_mcp.tools["runtime_smoke_evidence_bundle"](
+                    ctx=None,
+                    run_id=run_id,
+                ),
+                timeout=remaining,
+            )
+        except asyncio.TimeoutError:
+            break
         data = response["data"]
         if data.get("final"):
             return data
-        await asyncio.sleep(0.01)
-    raise AssertionError("runtime smoke run did not finish")
+        remaining = deadline - loop.time()
+        if remaining > 0:
+            await asyncio.sleep(min(0.01, remaining))
+    raise AssertionError(f"runtime smoke run did not finish: {data!r}")
+
+
+@pytest.mark.asyncio
+async def test_wait_for_final_bundle_times_out_with_latest_payload(capturing_mcp) -> None:
+    latest_data = {"status": "RUNNING", "final": False, "run_id": "slow-run"}
+    calls = 0
+
+    async def evidence_bundle(*, ctx: Any, run_id: str) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {"data": latest_data}
+        await asyncio.sleep(10)
+        raise AssertionError("bounded evidence wait did not cancel the stalled call")
+
+    capturing_mcp.tools["runtime_smoke_evidence_bundle"] = evidence_bundle
+
+    with pytest.raises(AssertionError) as exc_info:
+        await _wait_for_final_bundle(capturing_mcp, "slow-run", timeout_seconds=0.03)
+
+    assert repr(latest_data) in str(exc_info.value)
+    assert calls == 2
 
 
 @pytest.mark.asyncio
@@ -599,9 +636,7 @@ async def test_runtime_smoke_run_plan_rejects_unvalidated_plan_path(
 
     assert data["status"] == "INVALID_SETUP"
     assert data["can_run"] is False
-    assert data["validation_errors"] == [
-        "plan_path validation failed: outside project root"
-    ]
+    assert data["validation_errors"] == ["plan_path validation failed: outside project root"]
     assert data["plan_source"] == {
         "kind": "file",
         "path": str(plan_path),
@@ -800,9 +835,7 @@ async def test_runtime_smoke_run_plan_exposes_named_pack_manifest_ref(
                                             "id": "visible-row-count",
                                             "probe": "ui.grid",
                                             "expect": {"min_rows": 1},
-                                            "on_blocked": {
-                                                "next_step": "Run WPF fixture replay."
-                                            },
+                                            "on_blocked": {"next_step": "Run WPF fixture replay."},
                                         }
                                     ],
                                     "limits": {
@@ -836,7 +869,7 @@ async def test_runtime_smoke_run_plan_exposes_named_pack_manifest_ref(
             "phase": "after",
             "probe": "oracle_pack",
             "evidence_ref": "diagnostic:oracle_pack:run-plan-oracle-pack",
-        }
+        },
     ]
     assert bundle["pack_manifest"] == {
         "pack_id": "run-plan-oracle-pack",

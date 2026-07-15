@@ -378,6 +378,13 @@ durable lifecycle surface: `runtime_smoke_start` возвращает `run_id`,
 `runtime_smoke_get_result` возвращает финальный scenario envelope, а
 `runtime_smoke_stop` идемпотентно останавливает активный run с cleanup evidence.
 
+Lifecycle `runtime_smoke_*` — стабильный agent-facing API для UI replay. Перед
+запуском используйте `runtime_smoke_validate_plan`, для одиночного проверенного
+прогона — `runtime_smoke_run_plan`, а для durable orchestration —
+`runtime_smoke_start` вместе с wait/event/result-инструментами; завершайте через
+`runtime_smoke_stop` и `runtime_smoke_cleanup_contract`. Агенты должны
+использовать это семейство напрямую, без второго replay alias или action DSL.
+
 No-operator plans в runtime-smoke могут запросить confidence evidence, когда
 агенту нужно доказать, что сценарий не загрязнён вводом оператора. Совмещайте
 `input_policy.no_global_input` с `run_confidence.no_operator`:
