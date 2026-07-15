@@ -40,6 +40,7 @@ from pathlib import Path
 import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import get_default_environment, stdio_client
+from mcp.shared.exceptions import McpError
 from mcp.types import CallToolResult, TextContent, Tool
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -78,6 +79,10 @@ REPLAY_TOOL_FAMILY = frozenset(
 # (structural dict equality) against a direct (non-proxied) Python session,
 # not just checked by name.
 PARITY_TOOL_NAME = "runtime_smoke_validate_plan"
+
+# JSON-RPC 2.0 "Method not found" - the standard code direct Python itself returns for
+# logging/setLevel and every other MCP method it does not implement.
+METHOD_NOT_FOUND_ERROR_CODE = -32601
 
 # Known-valid minimal runtime-smoke plan shape (mirrors the fixture already
 # proven by tests/test_runtime_smoke_run_plan_facade.py).
@@ -214,6 +219,27 @@ async def test_host_proxies_initialize_tools_list_and_validate_plan(
                 assert init_result.capabilities.tools is not None, (
                     "host must advertise a tools capability"
                 )
+                assert init_result.capabilities.logging is None, (
+                    "host must not advertise a logging capability until FD-002 implements "
+                    "it for real - SDK 1.4.1 forces this capability on by default unless "
+                    "RelayRouteCatalog.SuppressUnregisteredLogging's outgoing filter strips "
+                    f"it; got: {init_result.capabilities.logging}"
+                )
+
+                # ping is answered by the SDK itself, never by a relay route: proves the
+                # downstream session is alive independent of any tools/list or tools/call
+                # forwarding path.
+                await session.send_ping()
+
+                # Capability-behavior parity, not just the advertised flag: Python itself
+                # rejects logging/setLevel with "Method not found", and so must the host,
+                # until FD-002 registers a real, negotiated logging route.
+                with pytest.raises(McpError) as logging_error:
+                    await session.set_logging_level("info")
+                assert logging_error.value.error.code == METHOD_NOT_FOUND_ERROR_CODE, (
+                    "host logging/setLevel must reject like direct Python; got: "
+                    f"{logging_error.value.error}"
+                )
 
                 tools_result = await session.list_tools()
                 proxied_names = {tool.name for tool in tools_result.tools}
@@ -278,6 +304,29 @@ async def test_host_proxies_initialize_tools_list_and_validate_plan(
         "host tools/list must preserve the Python tool schema/annotations unchanged:\n"
         f"proxied: {proxied_schema}\ndirect:  {direct_schema}"
     )
+
+
+@pytest.mark.asyncio
+async def test_direct_python_has_no_logging_capability(tmp_path: Path) -> None:
+    """Ground truth for the host's logging-suppression parity claim above: direct Python
+    (no .NET host involved) advertises no logging capability and rejects logging/setLevel
+    with "Method not found" on its own. If Python ever grew real logging support, this
+    would fail first and point straight at RelayRouteCatalog.SuppressUnregisteredLogging
+    needing to become a real FD-002 route instead of a suppression."""
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "netcoredbg_mcp", "--project-from-cwd"],
+        env=_backend_env(),
+        cwd=str(tmp_path),
+    )
+    async with stdio_client(params) as (read_stream, write_stream):
+        async with ClientSession(read_stream, write_stream) as session:
+            init_result = await session.initialize()
+            assert init_result.capabilities.logging is None
+
+            with pytest.raises(McpError) as logging_error:
+                await session.set_logging_level("info")
+            assert logging_error.value.error.code == METHOD_NOT_FOUND_ERROR_CODE
 
 
 def test_host_fails_before_serving_when_python_executable_is_missing(
