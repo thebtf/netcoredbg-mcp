@@ -127,6 +127,47 @@ netcoredbg-mcp --project-from-cwd
 Use a manual install when you pin a locally managed `netcoredbg` build or when a
 corporate environment blocks automatic downloads.
 
+### Running from a Source Checkout
+
+The installed CLI above remains the recommended MCP entrypoint. For a developer
+checkout, synchronize its environment once before registering a long-running
+server:
+
+```powershell
+cd D:\Dev\netcoredbg-mcp
+uv sync --locked
+# Use `uv sync --locked --extra dev` instead when you also need test tooling.
+uv run --no-sync --project D:\Dev\netcoredbg-mcp netcoredbg-mcp --project-from-cwd
+```
+
+Plain `uv run` may synchronize the project environment before execution.
+`--no-sync` prevents supervised MCP restarts from replacing files in the shared
+`.venv`. Run the explicit sync command again after dependency or lockfile
+changes.
+
+Use the same non-mutating command shape in a source-checkout MCP configuration,
+replacing the path with the actual checkout:
+
+```jsonc
+{
+  "mcpServers": {
+    "netcoredbg-source": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--no-sync",
+        "--project",
+        "D:\\Dev\\netcoredbg-mcp",
+        "netcoredbg-mcp",
+        "--project-from-cwd"
+      ]
+    }
+  }
+}
+```
+
+Keep machine-local `.mcp.json` paths outside git.
+
 ### Upgrading
 
 ```powershell

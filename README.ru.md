@@ -130,6 +130,47 @@ netcoredbg-mcp --project-from-cwd
 Ручная установка нужна, если вы закрепляете локально управляемую сборку
 `netcoredbg` или корпоративная среда блокирует автоматические загрузки.
 
+### Запуск из исходного checkout
+
+Установленный CLI выше остаётся рекомендуемым MCP entrypoint. Для developer
+checkout сначала один раз синхронизируйте окружение, а затем регистрируйте
+долгоживущий сервер:
+
+```powershell
+cd D:\Dev\netcoredbg-mcp
+uv sync --locked
+# Если нужны тестовые инструменты: `uv sync --locked --extra dev`.
+uv run --no-sync --project D:\Dev\netcoredbg-mcp netcoredbg-mcp --project-from-cwd
+```
+
+Обычный `uv run` перед запуском может синхронизировать project environment.
+Флаг `--no-sync` не даёт перезапускам MCP-сервера заменять файлы в общей
+`.venv`. После изменения зависимостей или lockfile снова выполните явную
+синхронизацию.
+
+Используйте ту же non-mutating command shape в MCP-конфигурации для исходного
+checkout, заменив путь на фактический:
+
+```jsonc
+{
+  "mcpServers": {
+    "netcoredbg-source": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--no-sync",
+        "--project",
+        "D:\\Dev\\netcoredbg-mcp",
+        "netcoredbg-mcp",
+        "--project-from-cwd"
+      ]
+    }
+  }
+}
+```
+
+Не коммитьте machine-local пути из `.mcp.json`.
+
 ### Обновление
 
 ```powershell

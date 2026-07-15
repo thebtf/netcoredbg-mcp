@@ -651,6 +651,18 @@ def test_readme_and_playbook_document_customer_mode_drag_drop_gate() -> None:
     )
 
 
+def test_readmes_document_non_mutating_source_checkout_mcp_launch() -> None:
+    readme = README_PATH.read_text(encoding="utf-8")
+    readme_ru = README_RU_PATH.read_text(encoding="utf-8")
+
+    for document in (readme, readme_ru):
+        assert "\nnetcoredbg-mcp --project-from-cwd\n" in document
+        assert "uv sync --locked" in document
+        assert "uv run --no-sync --project" in document
+        assert '"--no-sync"' in document
+        assert "uv run --project" not in document
+
+
 def test_release_policy_uses_one_consumer_first_autonomy_contract() -> None:
     agents = AGENTS_PATH.read_text(encoding="utf-8")
     protocol = RELEASE_PROTOCOL_PATH.read_text(encoding="utf-8")
