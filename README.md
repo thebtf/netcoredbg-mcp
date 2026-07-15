@@ -130,15 +130,20 @@ corporate environment blocks automatic downloads.
 ### Running from a Source Checkout
 
 The installed CLI above remains the recommended MCP entrypoint. For a developer
-checkout, synchronize its environment once before registering a long-running
-server:
+checkout, synchronize the provider environment once, then launch the server from
+the .NET workspace you want to debug:
 
 ```powershell
-cd D:\Dev\netcoredbg-mcp
-uv sync --locked
-# Use `uv sync --locked --extra dev` instead when you also need test tooling.
+uv sync --locked --project D:\Dev\netcoredbg-mcp
+# Add `--extra dev` to the sync command when you also need test tooling.
+cd D:\Dev\my-dotnet-project
 uv run --no-sync --project D:\Dev\netcoredbg-mcp netcoredbg-mcp --project-from-cwd
 ```
+
+`--project` selects the source checkout's Python environment but preserves the
+caller's working directory. `--project-from-cwd` therefore makes the current
+.NET workspace the debug project root. Do not use the `netcoredbg-mcp` source
+checkout as the server working directory.
 
 Plain `uv run` may synchronize the project environment before execution.
 `--no-sync` prevents supervised MCP restarts from replacing files in the shared

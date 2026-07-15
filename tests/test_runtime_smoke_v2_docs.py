@@ -658,11 +658,13 @@ def test_readmes_document_non_mutating_source_checkout_mcp_launch() -> None:
 
     for document in (readme, readme_ru):
         assert "\nnetcoredbg-mcp --project-from-cwd\n" in document
-        assert "uv sync --locked" in document
         assert re.search(
+            r"uv\s+sync\s+--locked\s+--project\s+\S+.*?"
+            r"cd\s+\S*my-dotnet-project\s+"
             r"uv\s+run\s+--no-sync\s+--project\s+\S+\s+"
             r"netcoredbg-mcp\s+--project-from-cwd",
             document,
+            re.DOTALL,
         )
         assert re.search(
             r'"run",\s*"--no-sync",\s*"--project",\s*"[^"]+",\s*'
