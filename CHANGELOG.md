@@ -11,10 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - A source/developer preview .NET 8 compatibility host
-  (`host/NetCoreDbg.Mcp.Host`) that proxies real MCP `initialize`,
-  `tools/list`, and `tools/call` exchanges to the unchanged, still-published
-  Python server. It builds from the git checkout only, ships in neither the
-  published wheel nor as a published entrypoint, and does not yet relay
+  (`host/NetCoreDbg.Mcp.Host`) that creates its own upstream Python MCP
+  client session, handles the downstream `initialize` handshake locally, and
+  then proxies real `tools/list` and `tools/call` exchanges to that same
+  upstream session. It builds from the git checkout only, ships in neither
+  the published wheel nor as a published entrypoint, and does not yet relay
   client roots, progress/log notifications, resources, prompts, or other
   callbacks (Engram #384, PR #227).
 

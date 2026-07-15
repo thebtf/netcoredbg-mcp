@@ -28,11 +28,12 @@ runtime behavior change.
 ## Highlights
 
 - **Source/developer .NET compatibility host preview.**
-  `host/NetCoreDbg.Mcp.Host` (.NET 8, stdio transport) proxies real MCP
-  `initialize`, `tools/list`, and `tools/call` exchanges to the same,
-  unmodified Python server. It builds only from a source checkout
-  (`dotnet build host/NetCoreDbg.Mcp.Host`); it ships in neither the published
-  wheel nor as a published entrypoint.
+  `host/NetCoreDbg.Mcp.Host` (.NET 8, stdio transport) creates its own
+  upstream Python MCP client session, handles the downstream `initialize`
+  handshake locally, and then proxies real `tools/list` and `tools/call`
+  exchanges to that same upstream session. It builds only from a source
+  checkout (`dotnet build host/NetCoreDbg.Mcp.Host`); it ships in neither the
+  published wheel nor as a published entrypoint.
 - **Non-mutating source-checkout launches.** Source-checkout MCP guidance now
   documents a one-time preparation `uv sync --locked --project <checkout>`
   step, followed by repeated supervised `uv run --no-sync --project <checkout>
@@ -48,13 +49,15 @@ runtime behavior change.
 
 ## Compatibility Boundary
 
-> This host slice proxies only `tools/list` and `tools/call`; it does not
-> relay downstream MCP roots, progress/log notifications, or other client
-> callbacks. Until later reviewed changes add that front-door parity, launch
-> the host with an explicit `--project`, set `NETCOREDBG_PROJECT_ROOT`, or use
+> The host handles the downstream `initialize` handshake locally rather than
+> forwarding it upstream, then proxies only `tools/list` and `tools/call` to
+> its own upstream Python MCP client session. It does not relay downstream
+> MCP roots, progress/log notifications, or other client callbacks. Until
+> later reviewed changes add that front-door parity, launch the host with an
+> explicit `--project`, set `NETCOREDBG_PROJECT_ROOT`, or use
 > `--project-from-cwd` from the intended project directory. The published
-> Python entrypoint retains its direct client-context behavior and remains the
-> only supported production/consumer path.
+> Python entrypoint retains its direct client-context behavior and remains
+> the only supported production/consumer path.
 
 ## Explicit No-Cutover Statement
 

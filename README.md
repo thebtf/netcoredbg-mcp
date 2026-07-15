@@ -26,11 +26,13 @@ and Avalonia windows without opening an IDE.
 ## What's New in v0.23.1
 
 - **Source/developer .NET compatibility host preview** — a new .NET 8 stdio
-  process at `host/NetCoreDbg.Mcp.Host` proxies real MCP `initialize`,
-  `tools/list`, and `tools/call` exchanges to this unchanged, still-authoritative
-  Python server. It builds only from a source checkout — it ships in neither
-  the PyPI wheel nor as a published entrypoint — and does not yet relay client
-  roots, progress/log notifications, resources, prompts, or other callbacks.
+  process at `host/NetCoreDbg.Mcp.Host` creates its own upstream Python MCP
+  client session, handles the downstream `initialize` handshake locally, and
+  then proxies real `tools/list` and `tools/call` exchanges to that same
+  upstream session. It builds only from a source checkout — it ships in
+  neither the PyPI wheel nor as a published entrypoint — and does not yet
+  relay client roots, progress/log notifications, resources, prompts, or
+  other callbacks.
 - **Hardened source-checkout launches** — "Running from a Source Checkout"
   below now documents a one-time preparation `uv sync --locked` step, followed
   by repeated supervised `uv run --no-sync --project ...` restarts that never
