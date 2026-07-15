@@ -1,47 +1,79 @@
-# netcoredbg-mcp v0.23.0
+# netcoredbg-mcp v0.23.1
 
-Released: 2026-07-14
+Released: 2026-07-15
 
 ## Summary
 
-`v0.23.0` is a MINOR feature release focused on safe observation before action.
-Agents can inspect launch compatibility without mutating the shared debugger,
-move the real pointer over one exact UI target without clicking, and sample
-adapter-owned debuggee activity without pausing or probing the OS process.
-Runtime-smoke focus, target-realization, diagnostic-alias, and output-checkpoint
-paths are also more reliable on slowly materializing Windows UI surfaces.
+`v0.23.1` is a PATCH release. It ships a source/developer preview of a .NET 8
+MCP compatibility host that proxies the unchanged, still-authoritative Python
+server, hardens non-mutating source-checkout launch guidance, and formalizes
+release-process governance. It performs no .NET published-entrypoint cutover,
+no roots/notification/resources/prompts parity implementation, and no Python
+runtime behavior change.
+
+## Consumer Claims
+
+1. The published Python package and `netcoredbg-mcp` console entrypoint remain
+   authoritative and backward compatible.
+2. An installed wheel starts through the public CLI, initializes over MCP, and
+   exposes the consumer-critical tools.
+3. A supervised source-checkout launch can select the provider environment
+   without mutating it on every restart and without replacing the target
+   workspace CWD.
+4. The .NET compatibility host remains a source/developer preview facade for
+   real `initialize`/`list`/`call` exchange; it is not the published
+   entrypoint and does not claim roots, progress/logging, resources, prompts,
+   callbacks, or native tool-family parity.
 
 ## Highlights
 
-- **Read-only launch compatibility preflight.**
-  `inspect_debug_launch_compatibility(program)` reports the target runtime,
-  active `dbgshim`, cached same-major candidate, compatibility verdict, and
-  predicted launch-time mutation. It does not build, launch, claim session
-  ownership, create cache state, or replace files. Existing `start_debug`
-  behavior remains fail-open when no matching cached shim is available.
-- **Selector-scoped pointer hover.** `ui_hover(...)` and runtime-smoke v2
-  `ui.hover` require exactly one resolved target in the existing foreground
-  debuggee window. Success evidence covers pointer position, hit testing,
-  unchanged focus, timeout, and cleanup; zero/multiple matches and
-  `no_global_input` fail before pointer mutation.
-- **Bounded debuggee activity telemetry.** `debuggee_activity(window_ms)` samples
-  continued/stopped/step, output, module, and trace deltas already owned by the
-  adapter. It never pauses, steps, evaluates, or falls back to Win32
-  `Process.Responding`. Executed-instruction counts are explicitly unavailable
-  because the current NetCoreDbg/DAP contract exposes no such counter.
-- **Runtime-smoke reliability.** The implicit `default` output checkpoint is
-  anchored at `isolated_profile.launch`; `diagnostic-latest.json` resolves to the
-  newest snapshot; target realization receives bounded retries; and
-  `key_sequence` can recover from a pre-find miss through its focus path.
+- **Source/developer .NET compatibility host preview.**
+  `host/NetCoreDbg.Mcp.Host` (.NET 8, stdio transport) proxies real MCP
+  `initialize`, `tools/list`, and `tools/call` exchanges to the same,
+  unmodified Python server. It builds only from a source checkout
+  (`dotnet build host/NetCoreDbg.Mcp.Host`); it ships in neither the published
+  wheel nor as a published entrypoint.
+- **Non-mutating source-checkout launches.** Source-checkout MCP guidance now
+  documents a one-time preparation `uv sync --locked --project <checkout>`
+  step, followed by repeated supervised `uv run --no-sync --project <checkout>
+  netcoredbg-mcp --project-from-cwd` restarts that never mutate the shared
+  `.venv`, so the calling .NET workspace — not the `netcoredbg-mcp` checkout
+  itself — keeps its role as the debug project root across restarts.
+- **Release-process governance.** `docs/RELEASE-PROTOCOL.md` now documents
+  planned PATCH/MINOR release autonomy behind the primary installed-consumer
+  UXDD release gate, and `TECHNICAL_DEBT.md` converts the Python-to-.NET
+  migration notes into an executable roadmap with parity, ownership, rollback,
+  and cutover gates. Both are planning/process documents only; neither changes
+  any published runtime behavior.
+
+## Compatibility Boundary
+
+> This host slice proxies only `tools/list` and `tools/call`; it does not
+> relay downstream MCP roots, progress/log notifications, or other client
+> callbacks. Until later reviewed changes add that front-door parity, launch
+> the host with an explicit `--project`, set `NETCOREDBG_PROJECT_ROOT`, or use
+> `--project-from-cwd` from the intended project directory. The published
+> Python entrypoint retains its direct client-context behavior and remains the
+> only supported production/consumer path.
+
+## Explicit No-Cutover Statement
+
+`v0.23.1` performs no .NET published-entrypoint cutover. The Python package
+and `netcoredbg-mcp` console entrypoint remain authoritative, backward
+compatible, and the only distribution channel. The .NET host is a
+build-from-source preview facade for developers only; it is not installed by
+`pip`/`pipx`, is not registered as a console script, and does not claim
+production readiness.
 
 ## Upgrade Notes
 
-All new APIs are additive; there is no intentional breaking change.
+All changes are additive documentation, process, and source-preview changes;
+there is no intentional breaking change to the published Python entrypoint.
 
 Upgrade an existing installation:
 
 ```powershell
-python -m pip install --upgrade netcoredbg-mcp==0.23.0
+python -m pip install --upgrade netcoredbg-mcp==0.23.1
 # or
 pipx upgrade netcoredbg-mcp
 ```
@@ -49,41 +81,61 @@ pipx upgrade netcoredbg-mcp
 Install on a new workstation:
 
 ```powershell
-pipx install netcoredbg-mcp==0.23.0
+pipx install netcoredbg-mcp==0.23.1
 netcoredbg-mcp setup
 ```
 
 ## Known Residual Scope
 
-- Engram #356 remains open for downstream Tier-3 / CR-112 liveness
-  classification. This release ships Tier-2 adapter-owned activity evidence;
-  it does not fabricate an executed-instruction counter.
-- Real pointer hover requires Windows, the FlaUI bridge, an interactive desktop,
-  and one already-foreground exact target. Unsupported backends and ambiguous
-  selectors return bounded `BLOCKED` evidence.
-- The full pytest run emits one existing `RuntimeWarning` from
-  `tests/test_build_cleanup.py` about a mocked `create_subprocess_exec`
-  coroutine; it does not fail the suite or affect the released runtime path.
+- Engram #385 (downstream MCP roots relay) and Engram #386 (upstream
+  progress/log notification relay) remain open; the .NET host proxies
+  neither.
+- A remaining protocol-surface audit (resource templates/subscriptions,
+  prompts, `completion/complete`, sampling, elicitation, and other negotiated
+  callbacks) is still open per `TECHNICAL_DEBT.md`; any consumer-visible gap
+  it finds becomes its own required parity slice before entrypoint cutover.
+- No .NET published-entrypoint cutover, FD-001/FD-002/FD-003 parity
+  implementation, or Python route retirement is in scope for this release.
 
 ## Release Gates
 
-- Integration base: merged PRs `#223`, `#224`, and `#225` on
-  `main@a1994d6`.
-- Full suite: `2023 passed, 3 skipped`.
-- Critical suite: `14 passed`.
-- Runtime-smoke docs/schema/critical suite: `45 passed` when run serially; GUI
-  suites are intentionally not run concurrently because they share one desktop,
-  foreground window, and pointer.
-- Ruff: all checks passed.
-- FlaUI bridge: Debug and Release builds passed.
-- Package build: `netcoredbg_mcp-0.23.0.tar.gz` and
-  `netcoredbg_mcp-0.23.0-py3-none-any.whl` built successfully.
+- Integration base: merged PRs `#227`, `#228`, `#229`, and `#230` on
+  `main@50a985e57be38e991bbed2f2dda82a82ed6553a4` (Engram `#384`, `#387`).
+- Version parity: `pyproject.toml`, `src/netcoredbg_mcp/__init__.py`,
+  `uv.lock`, `README.md`, `README.ru.md`, `CHANGELOG.md`, and
+  `RELEASE_NOTES.md` all report `0.23.1`/`v0.23.1`.
+- Full suite: `uv run --locked --extra dev pytest` — 2032 collected, 2029
+  passed, 3 skipped (Unix-only process-cleanup tests on Windows), and one
+  known `RuntimeWarning` from a mocked `create_subprocess_exec` coroutine in
+  `tests/test_build_cleanup.py`.
+- Ruff: `uv run --locked --extra dev ruff check .` — all checks passed.
+- Critical suite: `uv run --locked --extra dev pytest tests/critical -m
+  critical` — 14 passed.
+- Runtime-smoke docs/schema/critical suite: `uv run --locked --extra dev
+  pytest tests/test_runtime_smoke_v2_docs.py
+  tests/test_runtime_smoke_diagnostics_schema.py
+  tests/critical/test_runtime_smoke_v2_critical.py` — 47 passed.
+- Debug fixture builds: `dotnet build tests/fixtures/SmokeTestApp -c Debug`,
+  `dotnet build tests/fixtures/WpfSmokeApp -c Debug`, and `dotnet build
+  tests/fixtures/AvaloniaSmokeApp -c Debug` — each 0 warnings, 0 errors.
+- Release host build: `dotnet build
+  host/NetCoreDbg.Mcp.Host/NetCoreDbg.Mcp.Host.csproj -c Release` — 0
+  warnings, 0 errors; `uv run --locked --extra dev pytest
+  tests/test_host_proxy.py -q` — 3 passed.
+- Package build: `uv build` produced `netcoredbg_mcp-0.23.1.tar.gz` and
+  `netcoredbg_mcp-0.23.1-py3-none-any.whl`.
 - Disposable wheel install: both `netcoredbg-mcp --version` and
-  `python -m netcoredbg_mcp --version` reported `0.23.0`.
-- Merged-source live capability evidence:
-  - launch preflight returned `verdict=compatible` and
-    `mutationPerformed=false`;
-  - WPF/FlaUI hover resolved one exact target with unchanged focus, no click,
-    and zero cleanup residue;
-  - a 1000 ms activity sample observed adapter output/module deltas while
-    reporting instruction counts unavailable.
+  `python -m netcoredbg_mcp --version` reported `0.23.1`.
+- Installed-consumer MCP exchange: an official MCP client initialized the
+  installed console script from an external temporary .NET project
+  (`x-mux` sharing isolated); it listed 135 tools with none missing, and
+  `runtime_smoke_validate_plan` returned `PASS`, with `find_code_symbol`
+  resolving `Program.cs` under the exact external project root.
+- Concurrent source-checkout exchange: two concurrent `uv run --no-sync
+  --project ...` sessions each initialized, listed 135 tools, and validated a
+  relative plan from the caller project; the provider console-script
+  fingerprint stayed unchanged across both sessions.
+
+PR review, tag creation, publication, and post-publication verification are
+not claimed by these local gates and remain required before release
+completion.

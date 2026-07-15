@@ -14,7 +14,7 @@ set breakpoints, step through code, inspect variables, evaluate expressions, rea
 debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
 and Avalonia windows without opening an IDE.
 
-**135 MCP tools · 8 prompts · 4 resources · 2026 collected tests · release v0.23.0**
+**135 MCP tools · 8 prompts · 4 resources · 2032 collected tests · release v0.23.1**
 
 ## Quick Links
 
@@ -23,23 +23,19 @@ and Avalonia windows without opening an IDE.
 - **Reference:** [Available Tools](#available-tools) · [Resources](#mcp-resources) · [Prompts](#mcp-prompts) · [Architecture](#architecture-overview)
 - **Project:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## What's New in v0.23.0
+## What's New in v0.23.1
 
-- **Read-only launch compatibility preflight** —
-  `inspect_debug_launch_compatibility(program)` reports the target runtime,
-  active `dbgshim`, cached same-major candidate, and predicted launch-time
-  replacement without building, launching, or mutating shared debugger state.
-- **Selector-scoped real pointer hover** — `ui_hover(...)` and runtime-smoke v2
-  `ui.hover` move the pointer only after one exact foreground target is resolved,
-  then return unchanged-focus, hit-test, timeout, and cleanup evidence without
-  clicking or activating another window.
-- **Bounded adapter-owned activity telemetry** —
-  `debuggee_activity(window_ms)` samples continued/stopped/step, output, module,
-  and trace deltas without pausing the debuggee. Instruction counts are reported
-  as unavailable instead of inferred.
-- **More reliable runtime smoke** — output checkpoint anchoring,
-  `diagnostic-latest.json` resolution, target realization retries, and focus
-  recovery now handle slow or newly materialized UI surfaces more consistently.
+- **Source/developer .NET compatibility host preview** — a new .NET 8 stdio
+  process at `host/NetCoreDbg.Mcp.Host` proxies real MCP `initialize`,
+  `tools/list`, and `tools/call` exchanges to this unchanged, still-authoritative
+  Python server. It builds only from a source checkout — it ships in neither
+  the PyPI wheel nor as a published entrypoint — and does not yet relay client
+  roots, progress/log notifications, resources, prompts, or other callbacks.
+- **Hardened source-checkout launches** — "Running from a Source Checkout"
+  below now documents a one-time preparation `uv sync --locked` step, followed
+  by repeated supervised `uv run --no-sync --project ...` restarts that never
+  mutate the shared `.venv`, so the calling .NET workspace keeps its role as
+  the debug project root across restarts.
 
 ## Highlights
 
