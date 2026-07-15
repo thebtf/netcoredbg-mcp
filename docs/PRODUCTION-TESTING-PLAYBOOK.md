@@ -591,8 +591,10 @@ Record in the release report:
 - The exact `dotnet publish` command and its reported output path.
 - `$ConsumerNetHost` full path plus file size (proves a genuine self-contained
   artifact rather than a framework-dependent build missing its runtime).
-- The resolved `NETCOREDBG_MCP_PYTHON_EXECUTABLE` value and its own
-  `--version` output, proving which installed backend answered the exchange.
+- The resolved `NETCOREDBG_MCP_PYTHON_EXECUTABLE` value and the installed
+  backend package version from `& $ConsumerPython -m netcoredbg_mcp
+  --version` — plain interpreter `--version` only proves which Python ran,
+  not that the `netcoredbg-mcp` package is even installed there.
 - The full JSON line printed by the client script above.
 
 #### 10.5 Rollback to the Python Console Entrypoint

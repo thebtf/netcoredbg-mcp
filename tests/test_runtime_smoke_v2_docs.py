@@ -1008,6 +1008,21 @@ def test_playbook_documents_dotnet_compatibility_host_candidate_journey_as_real_
     # Evidence capture and rollback must be concrete, not hand-waved.
     assert "$ConsumerNetHost` full path plus file size" in playbook
     assert "no uninstall and no data migration" in playbook
+
+    # Backend evidence must prove the installed netcoredbg-mcp package, not
+    # just which Python interpreter answered -- a bare interpreter --version
+    # says nothing about whether the package is even installed there.
+    assert _collapsed(
+        "the installed backend package version from `& $ConsumerPython -m "
+        "netcoredbg_mcp --version`"
+    ) in collapsed
+    assert _collapsed(
+        "not that the `netcoredbg-mcp` package is even installed there"
+    ) in collapsed
+    assert _collapsed(
+        "its own `--version` output, proving which installed backend "
+        "answered the exchange"
+    ) not in collapsed
     assert "$ConsumerCli --version` still succeeds" in playbook
 
     # Unambiguous, PKG-001-reusable verdict semantics: PASS is required, not
