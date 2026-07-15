@@ -30,6 +30,26 @@ internal static partial class NativePrompts
         handlers.GetPromptHandler = (context, _) => ValueTask.FromResult(GetPrompt(context.Params));
     }
 
+    /// <summary>
+    /// Normalizes a source-owned raw string literal's embedded line terminators to LF,
+    /// matching direct Python's own triple-quoted prompt/playbook content (always LF,
+    /// regardless of how the Python source file itself is checked out). C# raw string
+    /// literals preserve the PHYSICAL line-ending bytes of the .cs source file verbatim;
+    /// a plain Windows checkout with core.autocrlf=true (this repo has no .gitattributes
+    /// override) materializes these files as CRLF, which would otherwise leak into every
+    /// rendered static prompt and exception playbook as "\r\n" instead of Python's "\n" -
+    /// breaking wire-level parity on every checkout/worktree/cherry-pick whose working
+    /// tree ends up CRLF, independent of what this worktree's own files happened to be.
+    ///
+    /// This is applied ONLY to the fixed template constants in
+    /// <c>NativePromptsContent.cs</c> and <c>NativePromptsPlaybooks.cs</c> - never to
+    /// caller-supplied argument values (symptom/problem/app_type/file_hint) flowing
+    /// through <see cref="BuildInvestigationPlan"/>/<see cref="BuildScenarioPlan"/>, which
+    /// are opaque user data Python does not touch either.
+    /// </summary>
+    private static string NormalizeSourceOwnedText(string rawSourceLiteral) =>
+        rawSourceLiteral.Replace("\r\n", "\n");
+
     // ── Catalog ──────────────────────────────────────────────────────────
     //
     // Order matches src/netcoredbg_mcp/prompts.py's register_prompts() declaration order

@@ -17,7 +17,7 @@ internal static partial class NativePrompts
 {
     // ── Main debugging guide ────────────────────────────────────────────
 
-    internal const string DebugGuideText = """
+    internal static readonly string DebugGuideText = NormalizeSourceOwnedText("""
 # .NET Debugger Guide
 
 You control the debugger. The user cannot see debug output, cannot interact
@@ -247,11 +247,11 @@ Subscribe to these for real-time updates (no polling needed):
 - debug://output — program stdout/stderr (text)
 - debug://threads — active threads (JSON, updates when stopped)
 
-""";
+""");
 
     // -- DAP escape hatch -------------------------------------------------
 
-    internal const string DapEscapeHatchText = """
+    internal static readonly string DapEscapeHatchText = NormalizeSourceOwnedText("""
 # DAP Escape Hatch
 
 Most debugger workflows should use the typed MCP tools first. When DAP exposes
@@ -289,11 +289,11 @@ arguments from the DAP spec.
 Prefer adding a typed MCP wrapper when a command becomes common in agent
 workflows. The escape hatch is for rare or adapter-version-specific operations.
 
-""";
+""");
 
     // ── GUI app debugging ───────────────────────────────────────────────
 
-    internal const string DebugGuiText = """
+    internal static readonly string DebugGuiText = NormalizeSourceOwnedText("""
 # Debugging WPF / Avalonia / WinForms Apps
 
 GUI apps have a critical difference from console apps: the UI thread.
@@ -512,11 +512,11 @@ RIGHT: `"%z"`
    pause_execution() → get_call_stack() for all threads → look for async deadlock.
 3. Still unclear? ui_take_screenshot() — see what the user sees.
 
-""";
+""");
 
     // ── Exception investigation ─────────────────────────────────────────
 
-    internal const string DebugExceptionText = """
+    internal static readonly string DebugExceptionText = NormalizeSourceOwnedText("""
 ## Exception Investigation Protocol
 
 ### Quick Path: One Call (preferred)
@@ -585,11 +585,11 @@ This enables breaking on ALL exceptions, including caught ones. Reproduce the cr
 | ObjectDisposedException | Using disposed resource | Call stack — trace the object's lifetime |
 | TaskCanceledException | Timeout or cancellation | Check CancellationToken state, timeout values |
 
-""";
+""");
 
     // ── Visual UI inspection ────────────────────────────────────────────
 
-    internal const string DebugVisualText = """
+    internal static readonly string DebugVisualText = NormalizeSourceOwnedText("""
 # Visual UI Inspection
 
 Sometimes the automation tree isn't enough. You need to SEE the UI.
@@ -670,11 +670,11 @@ ui_select_items(automation_id="dataGrid", indices=[4,5,6,7,8], mode="replace")
 ```
 This uses SelectionItemPattern — works even for off-screen rows, no scrolling needed.
 
-""";
+""");
 
     // ── Anti-patterns reference ─────────────────────────────────────────
 
-    internal const string DebugMistakesText = """
+    internal static readonly string DebugMistakesText = NormalizeSourceOwnedText("""
 # Debugging Anti-Patterns
 
 ## 1. Setting breakpoints before GUI window loads
@@ -831,5 +831,5 @@ continue_execution()     # resume app
 
 Always check state before ANY request for user interaction with the app.
 
-""";
+""");
 }

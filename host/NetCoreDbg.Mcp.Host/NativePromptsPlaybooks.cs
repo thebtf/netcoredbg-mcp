@@ -9,7 +9,7 @@ namespace NetCoreDbg.Mcp.Host;
 /// </summary>
 internal static partial class NativePrompts
 {
-    private const string NullReferenceExceptionPlaybook = """
+    private static readonly string NullReferenceExceptionPlaybook = NormalizeSourceOwnedText("""
 ## NullReferenceException Investigation
 
 This is the #1 .NET exception. Something is null that shouldn't be.
@@ -51,9 +51,9 @@ continue_execution()
 # If it works → confirms the null was the issue
 ```
 
-""";
+""");
 
-    private const string InvalidOperationExceptionPlaybook = """
+    private static readonly string InvalidOperationExceptionPlaybook = NormalizeSourceOwnedText("""
 ## InvalidOperationException Investigation
 
 Something was called at the wrong time or in the wrong state.
@@ -83,9 +83,9 @@ get_variables(ref=...)
 - "disposed object" → using a resource after its scope ended. Check using/IDisposable.
 - "not on UI thread" → cross-thread UI access. Use Dispatcher.Invoke.
 
-""";
+""");
 
-    private const string TaskCanceledExceptionPlaybook = """
+    private static readonly string TaskCanceledExceptionPlaybook = NormalizeSourceOwnedText("""
 ## TaskCanceledException / OperationCanceledException Investigation
 
 An async operation was cancelled — usually a timeout or explicit cancellation.
@@ -113,9 +113,9 @@ get_variables(ref=...)
 - Task.WhenAny with timeout task winning — operation took too long
 - Disposed HttpClient or DbContext cancelling pending operations
 
-""";
+""");
 
-    private const string ObjectDisposedExceptionPlaybook = """
+    private static readonly string ObjectDisposedExceptionPlaybook = NormalizeSourceOwnedText("""
 ## ObjectDisposedException Investigation
 
 Using a resource after it was disposed.
@@ -141,9 +141,9 @@ restart_debug(rebuild=False)
 - Timer callback accessing disposed resources
 - WPF binding accessing disposed ViewModel
 
-""";
+""");
 
-    private const string DeadlockPlaybook = """
+    private static readonly string DeadlockPlaybook = NormalizeSourceOwnedText("""
 ## Deadlock Investigation
 
 App stops responding. No exception. UI frozen. No crash.
@@ -177,9 +177,9 @@ restart_debug()
 # If app responds now → deadlock was the issue
 ```
 
-""";
+""");
 
-    private const string CrashPlaybook = """
+    private static readonly string CrashPlaybook = NormalizeSourceOwnedText("""
 ## App Crash Investigation
 
 App terminates unexpectedly.
@@ -214,9 +214,9 @@ get_output()  # check for native crash messages
 # Look for: "Stack overflow" in output
 ```
 
-""";
+""");
 
-    private const string PerformancePlaybook = """
+    private static readonly string PerformancePlaybook = NormalizeSourceOwnedText("""
 ## Performance Issue Investigation
 
 App is slow, laggy, or uses too much CPU/memory.
@@ -249,7 +249,7 @@ evaluate_expression("query.ToQueryString()")  # N+1 query?
 - Large collection iteration without pagination
 - Unnecessary re-rendering in MVVM (property changed spam)
 
-""";
+""");
 
     /// <summary>
     /// Playbook key -> playbook text. Lookup only (never enumerated for ordering), so a plain
