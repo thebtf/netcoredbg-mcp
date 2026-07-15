@@ -15,6 +15,7 @@ from netcoredbg_mcp.session.runtime_smoke_schema import (
     validate_plan,
 )
 from netcoredbg_mcp.session.runtime_smoke_v2.generate import expand_generated_cases
+from tests.test_host_proxy import MINIMAL_PLAN
 
 EXAMPLE_PATH = Path("docs/examples/runtime-smoke-v2-drag-drop-grid.json")
 SELECTOR_SAFETY_EXAMPLE_PATH = Path(
@@ -1019,10 +1020,7 @@ def test_playbook_documents_dotnet_compatibility_host_candidate_journey_as_real_
     # The route must call a repository-proven minimal plan and demand a real
     # PASS -- not an empty/invalid inline plan that only proves the proxy
     # forwards a protocol-shaped response.
-    real_plan_payload = (
-        '{"plan": {"name": "netcoredbg-mcp-host-proxy-check", '
-        '"actions": [{"name": "output_checkpoint", "args": {"name": "start"}}]}}'
-    )
+    real_plan_payload = json.dumps({"plan": MINIMAL_PLAN})
     assert real_plan_payload in playbook
     assert "tests/test_host_proxy.py::MINIMAL_PLAN" in playbook
     assert 'or result["call_status"] != "PASS"' in playbook
@@ -1036,6 +1034,17 @@ def test_playbook_documents_dotnet_compatibility_host_candidate_journey_as_real_
         '{"schema": "netcoredbg.runtime_smoke.v2", "operations": []}'
     )
     assert invalid_empty_operations_payload not in playbook
+
+    # Supporting protocol check must point at the real host-proxy critical
+    # gate, matching the flow 2 "Supporting contract check" convention.
+    assert _collapsed(
+        "Supporting protocol check; this source-tree test is mandatory but "
+        "does not produce the UXDD verdict"
+    ) in collapsed
+    assert (
+        "uv run --locked --extra dev pytest "
+        "tests/critical/test_host_proxy_critical.py -m critical" in playbook
+    )
 
 
 def test_playbook_dotnet_candidate_journey_does_not_erode_python_default_boundary() -> (

@@ -545,6 +545,13 @@ Expected result:
   completes and returns Python's own real `PASS` decision — not a protocol
   fault, and not a silently-accepted `INVALID_SETUP`/`BLOCKED`/`FAIL`.
 
+Supporting protocol check; this source-tree test is mandatory but does not
+produce the UXDD verdict:
+
+```powershell
+uv run --locked --extra dev pytest tests/critical/test_host_proxy_critical.py -m critical
+```
+
 #### 10.4 Evidence Capture
 
 Record in the release report:
