@@ -117,4 +117,86 @@ public sealed class ProductionCompositionTests
         await host.StopAsync();
         await session.DisposeAsync();
     }
+
+    [Fact]
+    public async Task ForwardRequestAsync_NormalizesRemoteErrorToOneHopCleanMessageAndCode()
+    {
+        // FD-004/FD-005 proved McpSession.SendRequestAsync itself already wraps a remote
+        // JSON-RPC error as "Request failed (remote): <message>", and a downstream typed
+        // handler that rethrows a forwarded failure gets wrapped again by the SDK for its
+        // own caller - doubling the prefix across a multi-hop relay. This proves the shared
+        // primitive itself stays one-hop-clean: a real McpServer with no prompts handler at
+        // all produces a genuine SDK remote error, and ForwardRequestAsync's result must
+        // carry the prefix exactly once, with the original ErrorCode preserved and the raw
+        // SDK exception kept as InnerException.
+        var channel = new DuplexChannel();
+        var server = McpServer.Create(
+            channel.CreateServerTransport("no-handlers"),
+            new McpServerOptions { ServerInfo = new Implementation { Name = "no-handlers", Version = "1.0.0" } });
+        _ = server.RunAsync();
+
+        await using var client = await McpClient.CreateAsync(channel.CreateClientTransport());
+
+        var request = new JsonRpcRequest { Method = RequestMethods.PromptsList };
+        var error = await Assert.ThrowsAsync<McpProtocolException>(
+            () => RelaySession.ForwardRequestAsync(client, request, CancellationToken.None));
+
+        Assert.DoesNotContain("Request failed (remote): Request failed (remote):", error.Message);
+        Assert.False(error.Message.StartsWith("Request failed (remote): ", StringComparison.Ordinal), error.Message);
+        var inner = Assert.IsType<McpProtocolException>(error.InnerException);
+        Assert.StartsWith("Request failed (remote): ", inner.Message, StringComparison.Ordinal);
+        Assert.Equal(inner.ErrorCode, error.ErrorCode);
+
+        await server.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task ForwardRequestAsync_PreservesPrimitiveAndNestedDataEntriesAcrossNormalization()
+    {
+        // McpSessionHandler.ProcessMessagesCoreAsync only calls ConvertExceptionData in the
+        // McpProtocolException branch (a plain McpException or CLR exception is sanitized to
+        // a bare InternalError with no data) - so the target must throw McpProtocolException
+        // with Data populated to produce a genuine wire-level error.data payload. The
+        // upstream client's own CreateRemoteProtocolException repopulates Exception.Data
+        // from that payload; ForwardRequestAsync must carry every entry onto the normalized
+        // exception it throws, not just the inner exception, since downstream dispatch
+        // reserializes Data directly.
+        var channel = new DuplexChannel();
+        var server = McpServer.Create(
+            channel.CreateServerTransport("throws-with-data"),
+            new McpServerOptions
+            {
+                ServerInfo = new Implementation { Name = "throws-with-data", Version = "1.0.0" },
+                Capabilities = new ServerCapabilities { Tools = new ToolsCapability() },
+                Handlers = new McpServerHandlers
+                {
+                    ListToolsHandler = (context, cancellationToken) =>
+                    {
+                        var ex = new McpProtocolException("boom", McpErrorCode.InvalidParams);
+                        ex.Data["reason"] = "bad";
+                        ex.Data["count"] = 3d;
+                        ex.Data["nested"] = System.Text.Json.JsonDocument.Parse("{\"a\":[1,true]}").RootElement.Clone();
+                        throw ex;
+                    },
+                    CallToolHandler = (context, cancellationToken) => ValueTask.FromResult(new CallToolResult()),
+                },
+            });
+        _ = server.RunAsync();
+
+        await using var client = await McpClient.CreateAsync(channel.CreateClientTransport());
+
+        var request = new JsonRpcRequest { Method = RequestMethods.ToolsList };
+        var error = await Assert.ThrowsAsync<McpProtocolException>(
+            () => RelaySession.ForwardRequestAsync(client, request, CancellationToken.None));
+
+        Assert.Equal("boom", error.Message);
+        Assert.Equal(McpErrorCode.InvalidParams, error.ErrorCode);
+        Assert.Equal("bad", Assert.IsType<string>(error.Data["reason"]));
+        Assert.Equal(3d, Assert.IsType<double>(error.Data["count"]));
+        var nested = Assert.IsType<System.Text.Json.JsonElement>(error.Data["nested"]);
+        Assert.Equal(System.Text.Json.JsonValueKind.Object, nested.ValueKind);
+        Assert.Equal("{\"a\":[1,true]}", nested.GetRawText());
+
+        await server.DisposeAsync();
+    }
 }

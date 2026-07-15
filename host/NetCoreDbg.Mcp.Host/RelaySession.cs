@@ -205,6 +205,18 @@ internal sealed class RelaySession : IAsyncDisposable
         };
 
     /// <summary>
+    /// The exact prefix <c>McpSessionHandler.SendRequestAsync</c> adds when the target leg
+    /// returns a JSON-RPC error (observed directly against SDK 1.4.1: e.g.
+    /// <c>"Request failed (remote): Method not found"</c>). A relayed request's error
+    /// therefore already carries this prefix once by the time it reaches a downstream
+    /// typed handler that itself wraps a thrown exception into another SDK-generated
+    /// remote-error response for its own caller, doubling the prefix. Stripped here, once,
+    /// so every leg of a multi-hop relay stays one-hop-clean regardless of how many
+    /// forwarding calls the error passes through.
+    /// </summary>
+    private const string RemoteErrorMessagePrefix = "Request failed (remote): ";
+
+    /// <summary>
     /// Raw, direction-agnostic forward: creates a fresh request on <paramref name="target"/>
     /// preserving method and params (including <c>_meta</c> and any progress token) exactly,
     /// and returns the target's raw response without host-defined DTO conversion. The SDK
@@ -212,9 +224,31 @@ internal sealed class RelaySession : IAsyncDisposable
     /// ID is left unset; the target's own cancellation semantics (its own
     /// <c>notifications/cancelled</c>) apply to the new leg independently of the source.
     /// </summary>
-    public static Task<JsonRpcResponse> ForwardRequestAsync(
-        McpSession target, JsonRpcRequest source, CancellationToken cancellationToken) =>
-        target.SendRequestAsync(new JsonRpcRequest { Method = source.Method, Params = source.Params }, cancellationToken);
+    public static async Task<JsonRpcResponse> ForwardRequestAsync(
+        McpSession target, JsonRpcRequest source, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await target
+                .SendRequestAsync(new JsonRpcRequest { Method = source.Method, Params = source.Params }, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (McpProtocolException ex) when (ex.Message.StartsWith(RemoteErrorMessagePrefix, StringComparison.Ordinal))
+        {
+            var normalized = new McpProtocolException(ex.Message[RemoteErrorMessagePrefix.Length..], ex, ex.ErrorCode);
+
+            // CreateRemoteProtocolException stores the JSON-RPC error's "data" entries on
+            // ex.Data; downstream dispatch reserializes that dictionary directly, not
+            // InnerException.Data, so every entry must be copied onto the normalized
+            // exception explicitly or wire-level error data silently disappears.
+            foreach (System.Collections.DictionaryEntry entry in ex.Data)
+            {
+                normalized.Data[entry.Key] = entry.Value;
+            }
+
+            throw normalized;
+        }
+    }
 
     /// <summary>
     /// Raw, direction-agnostic one-way forward: preserves method and params exactly and
