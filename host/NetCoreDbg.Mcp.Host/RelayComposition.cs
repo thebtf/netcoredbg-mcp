@@ -1,4 +1,3 @@
-using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -20,13 +19,11 @@ internal static class RelayComposition
     private const string HostServerName = "netcoredbg-mcp-host";
     private const string HostServerVersion = "1.0.0";
 
-    private static readonly JsonElement IsolatedMuxSharing =
-        JsonDocument.Parse("""{"sharing":"isolated"}""").RootElement;
 
     /// <summary>
     /// Bootstrap-time validation that Python's advertised capabilities cover every
-    /// downstream route this build advertises: only the tools route for FD-000. FD-001/
-    /// FD-002 add their own checks here alongside their module registration, once accepted.
+    /// downstream route this build always advertises. Conditionally projected resources and
+    /// experimental capabilities are removed downstream when Python does not advertise them.
     /// </summary>
     public static readonly IReadOnlyList<Func<ServerCapabilities?, string?>> RequiredUpstreamCapabilityChecks =
         new Func<ServerCapabilities?, string?>[]
@@ -42,9 +39,11 @@ internal static class RelayComposition
     /// whether this was a clean downstream disconnect or an unrecoverable Python/bootstrap
     /// failure that must stop serving and propagate a non-zero exit.
     /// </summary>
-    public static async Task RunAsync(RelaySession session)
+    public static async Task RunAsync(
+        RelaySession session,
+        Func<ClientCapabilities?, ClientCapabilities> projectReverseRouteCapabilities)
     {
-        using var host = Build(session, static builder => builder.WithStdioServerTransport(), static _ => new ClientCapabilities());
+        using var host = Build(session, static builder => builder.WithStdioServerTransport(), projectReverseRouteCapabilities);
 
         var hostRunTask = host.RunAsync();
         var sessionEndedTask = session.RunUntilSessionEndedAsync(CancellationToken.None);
@@ -91,20 +90,21 @@ internal static class RelayComposition
             options.ServerInfo = new Implementation { Name = HostServerName, Version = HostServerVersion };
             options.Capabilities = new ServerCapabilities
             {
-                // Mirrors the Python server's own x-mux.sharing=isolated capability so
-                // mcp-mux gives this compatibility process its own isolated session.
-                Experimental = new Dictionary<string, object> { ["x-mux"] = IsolatedMuxSharing },
                 Tools = new ToolsCapability(),
                 Prompts = new PromptsCapability { ListChanged = false },
             };
 
             NativePrompts.Register(options.Handlers);
+            ResourcesRelay.ConfigureCapabilityProjection(options.Capabilities, options.Filters, session);
+            MuxCapabilityRelay.RegisterCapabilityProjectionFilter(options.Filters, session);
 
             RelayRouteCatalog.SuppressUnregisteredLogging(options.Filters);
             options.Filters.Message.IncomingFilters.Add(session.CreateBootstrapFilter(projectReverseRouteCapabilities));
         });
 
         ToolsRelay.Register(mcpBuilder, catalog, session);
+        RootsRelay.Register(mcpBuilder, catalog, session);
+        ResourcesRelay.Register(mcpBuilder, catalog, session);
         configureTransport(mcpBuilder);
 
         return builder.Build();

@@ -1,3 +1,5 @@
+using ModelContextProtocol.Protocol;
+
 namespace NetCoreDbg.Mcp.Host;
 
 /// <summary>
@@ -10,7 +12,7 @@ namespace NetCoreDbg.Mcp.Host;
 /// This file owns only top-level composition and exit-code reporting; every other concern
 /// - process lifecycle, paired-session bootstrap, route registration, and handler wiring -
 /// lives in <see cref="PythonBackendProcess"/>, <see cref="RelaySession"/>,
-/// <see cref="RelayRouteCatalog"/>, <see cref="RelayComposition"/>, and <see cref="ToolsRelay"/>.
+/// <see cref="RelayRouteCatalog"/>, <see cref="RelayComposition"/>, and the accepted relay modules.
 /// </summary>
 public static class Program
 {
@@ -37,12 +39,19 @@ public static class Program
 
             try
             {
-                var relaySession = new RelaySession(
+                var rootsRelay = new RootsRelay();
+                RelaySession relaySession = null!;
+                relaySession = new RelaySession(
                     pythonBackend.CreateUpstreamTransport,
-                    RelayComposition.RequiredUpstreamCapabilityChecks);
+                    RelayComposition.RequiredUpstreamCapabilityChecks,
+                    handlers => rootsRelay.ConfigureUpstreamHandlers(handlers, relaySession));
                 await using (relaySession)
                 {
-                    await RelayComposition.RunAsync(relaySession);
+                    await RelayComposition.RunAsync(
+                        relaySession,
+                        downstreamCapabilities => rootsRelay.ProjectCapabilities(
+                            downstreamCapabilities,
+                            new ClientCapabilities()));
                 }
             }
             catch (Exception ex)
