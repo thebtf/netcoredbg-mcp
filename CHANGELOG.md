@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Source-checkout MCP guidance now performs an explicit `uv sync --locked` and
+  uses `uv run --no-sync --project ...` for supervised server launches, while
+  keeping the installed `netcoredbg-mcp --project-from-cwd` command as the
+  consumer default (Engram #387).
+
 ## [0.23.0] - 2026-07-14
 
 ### Added

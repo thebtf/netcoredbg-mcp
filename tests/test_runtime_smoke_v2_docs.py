@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from collections import deque
 from pathlib import Path
 from typing import Any
@@ -649,6 +650,29 @@ def test_readme_and_playbook_document_customer_mode_drag_drop_gate() -> None:
         "fail closed before side effects if target-side realization hides the drag"
         in playbook
     )
+
+
+def test_readmes_document_non_mutating_source_checkout_mcp_launch() -> None:
+    readme = README_PATH.read_text(encoding="utf-8")
+    readme_ru = README_RU_PATH.read_text(encoding="utf-8")
+
+    for document in (readme, readme_ru):
+        assert "\nnetcoredbg-mcp --project-from-cwd\n" in document
+        assert re.search(
+            r"uv\s+sync\s+--locked\s+--project\s+\S+.*?"
+            r"cd\s+\S*my-dotnet-project\s+"
+            r"uv\s+run\s+--no-sync\s+--project\s+\S+\s+"
+            r"netcoredbg-mcp\s+--project-from-cwd",
+            document,
+            re.DOTALL,
+        )
+        assert re.search(
+            r'"run",\s*"--no-sync",\s*"--project",\s*"[^"]+",\s*'
+            r'"netcoredbg-mcp",\s*"--project-from-cwd"',
+            document,
+            re.DOTALL,
+        )
+        assert not re.search(r"\buv\s+run\s+--project\b", document)
 
 
 def test_release_policy_uses_one_consumer_first_autonomy_contract() -> None:
