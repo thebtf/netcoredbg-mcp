@@ -7,11 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.1] - 2026-07-15
+
+### Added
+- A source/developer preview .NET 8 compatibility host
+  (`host/NetCoreDbg.Mcp.Host`) that creates its own upstream Python MCP
+  client session, handles the downstream `initialize` handshake locally, and
+  then proxies real `tools/list` and `tools/call` exchanges to that same
+  upstream session. It builds from the git checkout only, ships in neither
+  the published wheel nor as a published entrypoint, and does not yet relay
+  client roots, progress/log notifications, resources, prompts, or other
+  callbacks (Engram #384, PR #227).
+
 ### Changed
 - Source-checkout MCP guidance now performs an explicit `uv sync --locked` and
   uses `uv run --no-sync --project ...` for supervised server launches, while
   keeping the installed `netcoredbg-mcp --project-from-cwd` command as the
-  consumer default (Engram #387).
+  consumer default (Engram #387, PR #230).
+- Formalized planned PATCH/MINOR release autonomy behind the primary
+  installed-consumer UXDD release gate in `docs/RELEASE-PROTOCOL.md`, keeping
+  unit, integration, critical, and review gates as mandatory supporting
+  evidence; documentation and process only, no runtime behavior change
+  (PR #228).
+- Converted the Python-to-.NET migration notes in `TECHNICAL_DEBT.md` into an
+  executable roadmap with explicit parity, ownership, rollback, and cutover
+  gates; planning artifact only, no source changes (PR #229).
 
 ## [0.23.0] - 2026-07-14
 
