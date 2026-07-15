@@ -31,6 +31,8 @@ APP_DIAGNOSTICS_POLL_EXAMPLE_PATH = Path(
 README_PATH = Path("README.md")
 README_RU_PATH = Path("README.ru.md")
 PLAYBOOK_PATH = Path("docs/PRODUCTION-TESTING-PLAYBOOK.md")
+RELEASE_PROTOCOL_PATH = Path("docs/RELEASE-PROTOCOL.md")
+AGENTS_PATH = Path("AGENTS.md")
 
 
 class DocsExampleSmokeSession:
@@ -636,10 +638,36 @@ def test_readme_and_playbook_document_customer_mode_drag_drop_gate() -> None:
     assert "row-based" in playbook
     assert "bounded CR-075 customer-mode proof contract" in playbook
     assert "#270" in playbook
+    assert "Release-Candidate Consumer Environment" in playbook
+    assert "uv venv --python" in playbook
+    assert "uv pip install --python $ConsumerPython" in playbook
+    assert "source-tree `uv run` commands are supporting checks only" in playbook
+    assert "Installed CLI Consumer Smoke" in playbook
+    assert "Installed MCP Client Exchange" in playbook
+    assert "installed release-candidate server" in playbook
     assert (
         "fail closed before side effects if target-side realization hides the drag"
         in playbook
     )
+
+
+def test_release_policy_uses_one_consumer_first_autonomy_contract() -> None:
+    agents = AGENTS_PATH.read_text(encoding="utf-8")
+    protocol = RELEASE_PROTOCOL_PATH.read_text(encoding="utf-8")
+    canonical_gate = "primary UXDD consumer-mode release gate"
+
+    assert canonical_gate.lower() in agents.lower()
+    assert protocol.lower().count(canonical_gate.lower()) >= 5
+    assert "Missing release intent, MAJOR/breaking change" not in protocol
+
+    dependent_slice_gate = "no dependent slice in the same integration wave remains active"
+    assert dependent_slice_gate in agents
+    assert dependent_slice_gate in protocol
+
+    release_steps = _collapsed(agents).lower()
+    assert release_steps.index(
+        "run the primary uxdd consumer-mode release gate"
+    ) < release_steps.index("run the remaining local pre-pr protocol gates")
 
 
 def test_readme_documents_runner_controlled_input_provenance_model() -> None:
@@ -721,7 +749,7 @@ def test_readme_and_playbook_document_diagnostic_schema_gate() -> None:
     collapsed_playbook = _collapsed(playbook)
     assert collapsed_playbook.index(
         _collapsed(winforms_boundary)
-    ) < collapsed_playbook.index("### 8. Runtime-Smoke Diagnostic Schema Gate")
+    ) < collapsed_playbook.index("### 8. Supporting Runtime-Smoke Diagnostic Schema Contract")
 
 
 def test_readme_and_playbook_document_novascript_action_oracle_app_diagnostics_gate() -> (
@@ -739,8 +767,9 @@ def test_readme_and_playbook_document_novascript_action_oracle_app_diagnostics_g
     required_terms = {
         "NovaScript Action-Oracle App-Diagnostics Consumer Gate",
         replay_packet_path,
-        "uv run --no-sync --project <NETCOREDBG_MCP_REPO> netcoredbg-mcp --version",
-        "netcoredbg-mcp 0.20.5",
+        "& $ConsumerCli --version",
+        "netcoredbg-mcp <TARGET_VERSION>",
+        "installed release-candidate entry point",
         "0.20.5",
         "<NOVASCRIPT_PROCESS_NAME>",
         "<NOVASCRIPT_PRIMARY_MODULE>",
