@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from collections import deque
 from pathlib import Path
 from typing import Any
@@ -658,9 +659,18 @@ def test_readmes_document_non_mutating_source_checkout_mcp_launch() -> None:
     for document in (readme, readme_ru):
         assert "\nnetcoredbg-mcp --project-from-cwd\n" in document
         assert "uv sync --locked" in document
-        assert "uv run --no-sync --project" in document
-        assert '"--no-sync"' in document
-        assert "uv run --project" not in document
+        assert re.search(
+            r"uv\s+run\s+--no-sync\s+--project\s+\S+\s+"
+            r"netcoredbg-mcp\s+--project-from-cwd",
+            document,
+        )
+        assert re.search(
+            r'"run",\s*"--no-sync",\s*"--project",\s*"[^"]+",\s*'
+            r'"netcoredbg-mcp",\s*"--project-from-cwd"',
+            document,
+            re.DOTALL,
+        )
+        assert not re.search(r"\buv\s+run\s+--project\b", document)
 
 
 def test_release_policy_uses_one_consumer_first_autonomy_contract() -> None:
