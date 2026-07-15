@@ -460,8 +460,9 @@ Expected result:
 - The child inherits the host's own working directory, so `--project-from-cwd`
   resolves exactly like the Python journey in flow 2.
 - Omitting `NETCOREDBG_MCP_PYTHON_EXECUTABLE` on a machine without a `python`
-  on `PATH`, or pointing it at an interpreter without the installed wheel, is
-  an explicit, named prerequisite gap — never a silent `PRODUCT_WORKS`.
+  on `PATH`, or pointing it at an interpreter without the installed wheel,
+  stops the exchange from ever reaching `initialize` — this is `BROKEN`,
+  never `PARTIALLY_WORKS` and never a silent `PRODUCT_WORKS`.
 
 #### 10.3 Real External MCP Client Exchange — initialize / list / call
 
@@ -486,21 +487,42 @@ from mcp.client.stdio import get_default_environment, stdio_client
 
 REQUIRED_TOOLS = {"start_debug", "add_breakpoint", "get_call_stack", "run_runtime_smoke"}
 
+
+async def _list_tool_names(command, args, cwd, env):
+    params = StdioServerParameters(command=command, args=args, cwd=cwd, env=env)
+    async with stdio_client(params) as (read_stream, write_stream):
+        async with ClientSession(read_stream, write_stream) as session:
+            await session.initialize()
+            tools = await session.list_tools()
+            return {tool.name for tool in tools.tools}
+
+
 async def main():
-    env = get_default_environment()
-    env["NETCOREDBG_MCP_PYTHON_EXECUTABLE"] = os.environ["NETCOREDBG_MCP_CONSUMER_PYTHON"]
+    python_exe = os.environ["NETCOREDBG_MCP_CONSUMER_PYTHON"]
+    net_host = os.environ["NETCOREDBG_MCP_CONSUMER_NET_HOST"]
+    project = os.environ["NETCOREDBG_MCP_CONSUMER_PROJECT"]
+    safe_env = get_default_environment()
+
+    # Direct-Python baseline: the same installed backend, no .NET proxy.
+    direct_names = await _list_tool_names(
+        python_exe, ["-m", "netcoredbg_mcp", "--project-from-cwd"], project, safe_env
+    )
+
+    # Through the candidate .NET host.
+    host_env = dict(safe_env)
+    host_env["NETCOREDBG_MCP_PYTHON_EXECUTABLE"] = python_exe
     params = StdioServerParameters(
-        command=os.environ["NETCOREDBG_MCP_CONSUMER_NET_HOST"],
+        command=net_host,
         args=["--project-from-cwd"],
-        cwd=os.environ["NETCOREDBG_MCP_CONSUMER_PROJECT"],
-        env=env,
+        cwd=project,
+        env=host_env,
     )
     async with stdio_client(params) as (read_stream, write_stream):
         async with ClientSession(read_stream, write_stream) as session:
             initialized = await session.initialize()
             tools = await session.list_tools()
-            names = {tool.name for tool in tools.tools}
-            missing = sorted(REQUIRED_TOOLS - names)
+            host_names = {tool.name for tool in tools.tools}
+            missing = sorted(REQUIRED_TOOLS - host_names)
             call = await session.call_tool(
                 "runtime_smoke_validate_plan",
                 {"plan": {"name": "netcoredbg-mcp-host-proxy-check", "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}]}},
@@ -510,8 +532,12 @@ async def main():
                 "server_name": initialized.serverInfo.name,
                 "x_mux": (initialized.capabilities.experimental or {}).get("x-mux"),
                 "tools_capability": initialized.capabilities.tools is not None,
-                "tool_count": len(names),
+                "direct_tool_count": len(direct_names),
+                "host_tool_count": len(host_names),
                 "missing_tools": missing,
+                "missing_from_host": sorted(direct_names - host_names),
+                "extra_in_host": sorted(host_names - direct_names),
+                "catalog_match": host_names == direct_names,
                 "call_is_error": call.isError,
                 "call_status": (payload.get("data") or {}).get("status"),
             }
@@ -520,6 +546,7 @@ async def main():
                 result["x_mux"] != {"sharing": "isolated"}
                 or not result["tools_capability"]
                 or missing
+                or not result["catalog_match"]
                 or result["call_is_error"]
                 or result["call_status"] != "PASS"
             ):
@@ -536,9 +563,13 @@ Expected result:
 - `server_name` is `netcoredbg-mcp-host` — the candidate host's own MCP
   identity, distinct from the Python server process it proxies.
 - The initialized server advertises `x-mux.sharing=isolated` and a tools
-  capability; `missing_tools` is empty and `tool_count` matches the tool count
-  the Python journey observes in flow 2, because both journeys expose the
-  identical Python-registered tool catalog.
+  capability; `missing_tools` is empty, so every named consumer-critical
+  debug and runtime-smoke tool is present.
+- `catalog_match` is `true`: the complete host tool-name set fetched through
+  `$ConsumerNetHost` exactly equals the complete tool-name set fetched in the
+  same run directly from `$ConsumerPython`, with `missing_from_host` and
+  `extra_in_host` both empty. This is a live parity proof against the same
+  installed backend, not an assumed match with flow 2's own separate run.
 - `call_is_error` is `false` and `call_status` is `PASS`: the forwarded
   `tools/call` for `runtime_smoke_validate_plan` against the
   repository-proven minimal plan (`tests/test_host_proxy.py::MINIMAL_PLAN`)
@@ -579,23 +610,28 @@ point; rolling back requires no uninstall and no data migration:
 #### 10.6 `PRODUCT_WORKS` / `PARTIALLY_WORKS` / `BROKEN` Semantics (for PKG-001 reuse)
 
 - `PRODUCT_WORKS`: `dotnet publish` succeeds; the real external client observes
-  `x-mux.sharing=isolated`, a tools capability, the same tool count and zero
-  missing tools as the installed Python journey, and a real
-  `tools/call` for the repository-proven minimal plan
+  `x-mux.sharing=isolated`, a tools capability, zero missing named tools, and
+  `catalog_match=true` (the complete host tool-name set exactly equals the
+  complete direct-Python tool-name set fetched live in the same run); and a
+  real `tools/call` for the repository-proven minimal plan
   (`tests/test_host_proxy.py::MINIMAL_PLAN`) returns `call_status=PASS` (not
   merely `call_is_error=false`); rollback to `$ConsumerCli` still succeeds
   afterward.
-- `PARTIALLY_WORKS`: the publish step succeeds and the host starts, but a named
-  workstation prerequisite blocks one step — for example no compatible
-  `-r <RID>` runtime pack, or no python interpreter reachable through
-  `NETCOREDBG_MCP_PYTHON_EXECUTABLE`/`PATH` with the wheel installed — and the
-  gap is recorded as a concrete `next_step` rather than silently skipped.
-- `BROKEN`: the publish step fails; the host process fails to start or does not
-  reach `initialize`; the tool catalog or `x-mux` capability diverges from the
-  installed Python journey; the real `tools/call` for the minimal plan returns
-  anything other than `call_status=PASS` (including a silently-accepted
-  `INVALID_SETUP`); or `$ConsumerCli` stops working after the candidate host
-  is exercised.
+- `PARTIALLY_WORKS`: a named pre-host-start workstation prerequisite blocks
+  `dotnet publish` itself, before any process can even attempt to start —
+  for example no compatible `-r <RID>` runtime pack for this workstation's
+  platform — and the gap is recorded as a concrete `next_step` rather than
+  silently skipped. Once the host process has started, no further failure is
+  `PARTIALLY_WORKS`.
+- `BROKEN`: the publish step fails for a reason other than a named pre-host-
+  start prerequisite; the host process fails to start or does not reach
+  `initialize`, including because no python interpreter is reachable through
+  `NETCOREDBG_MCP_PYTHON_EXECUTABLE`/`PATH` or the resolved interpreter lacks
+  the installed wheel; `catalog_match` is `false` or the `x-mux` capability
+  diverges from the installed Python journey; the real `tools/call` for the
+  minimal plan returns anything other than `call_status=PASS` (including a
+  silently-accepted `INVALID_SETUP`); or `$ConsumerCli` stops working after
+  the candidate host is exercised.
 - This verdict is evidence for **this** candidate journey only; it does not
   itself gate the current wave's release, and it does not claim publication,
   packaging completion, or entry-point cutover. Final installed-package
@@ -625,9 +661,10 @@ point; rolling back requires no uninstall and no data migration:
 - The .NET compatibility-host candidate journey (flow 10) uses a direct
   in-process call instead of a real external `$ConsumerNetHost` process, or
   omits the real MCP client's `initialize`/`tools/list`/`tools/call` exchange.
-- The candidate host's tool catalog, `x-mux` capability, or a real `tools/call`
-  result diverges from the installed Python journey (flow 2) without an
-  honest `PARTIALLY_WORKS`/`BROKEN` verdict naming the divergence.
+- The candidate host's tool catalog (a non-empty `missing_from_host` or
+  `extra_in_host`, i.e. `catalog_match=false`), `x-mux` capability, or a real
+  `tools/call` result diverges from the direct-Python journey without an
+  honest `BROKEN` verdict naming the divergence.
 - The candidate host's documentation claims publication, packaging
   completion, or that it replaces `netcoredbg-mcp --project-from-cwd` as the
   default entry point.
@@ -644,7 +681,7 @@ point; rolling back requires no uninstall and no data migration:
 | Avalonia fixture compatibility | Fixture found; key cleanup succeeds; UIA gaps are bounded UNSUPPORTED/BLOCKED evidence |  |  |
 | WPF DataGrid drag/drop customer-mode gate | `docs/examples/runtime-smoke-v2-drag-drop-grid.json` returns PASS or an honest BLOCKED with route, viewport, selected-payload, negative no-op, and offscreen row-target `drop.ensure_visible=true` evidence requirements named |  |  |
 | NovaScript action-oracle app diagnostics | `docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json` expands to `app_diagnostics` and returns PASS or an honest BLOCKED with freshness and cleanup evidence |  |  |
-| .NET compatibility-host candidate journey | `$ConsumerNetHost` real external client exchange returns the same tool count/capabilities as the Python journey and PASS on a real `tools/call`, or an honest BLOCKED/FAIL naming the missing prerequisite; rollback to `$ConsumerCli` still works |  |  |
+| .NET compatibility-host candidate journey | `$ConsumerNetHost` real external client exchange returns `catalog_match=true` against the same-run direct-Python tool list, matching capabilities, and PASS on a real `tools/call`, or an honest BLOCKED/FAIL naming the missing prerequisite; rollback to `$ConsumerCli` still works |  |  |
 
 Overall verdict: `PRODUCT_WORKS` / `PARTIALLY_WORKS` / `BROKEN`
 

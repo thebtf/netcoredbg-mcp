@@ -1013,9 +1013,66 @@ def test_playbook_documents_dotnet_compatibility_host_candidate_journey_as_real_
     # Unambiguous, PKG-001-reusable verdict semantics: PASS is required, not
     # merely the absence of a protocol-level error.
     assert "`PRODUCT_WORKS`: `dotnet publish` succeeds" in playbook
-    assert "`PARTIALLY_WORKS`: the publish step succeeds and the host starts" in playbook
+    assert "`PARTIALLY_WORKS`: a named pre-host-start workstation prerequisite" in playbook
     assert "`BROKEN`: the publish step fails" in playbook
     assert "PKG-001" in playbook
+
+    # Do not hardcode a specific tool count -- prove catalog parity live
+    # against a same-run direct-Python baseline instead.
+    assert "135" not in playbook
+    assert '["-m", "netcoredbg_mcp", "--project-from-cwd"]' in playbook
+    assert "_list_tool_names" in playbook
+    assert "direct_tool_count" in playbook
+    assert "host_tool_count" in playbook
+    assert "missing_from_host" in playbook
+    assert "extra_in_host" in playbook
+    assert "catalog_match" in playbook
+    assert 'or not result["catalog_match"]' in playbook
+    assert _collapsed(
+        "`catalog_match` is `true`: the complete host tool-name set fetched "
+        "through `$ConsumerNetHost` exactly equals the complete tool-name set "
+        "fetched in the same run directly from `$ConsumerPython`"
+    ) in collapsed
+    assert _collapsed(
+        "`catalog_match=true` (the complete host tool-name set exactly "
+        "equals the complete direct-Python tool-name set fetched live in "
+        "the same run)"
+    ) in collapsed
+
+    # An unavailable Python interpreter or missing installed wheel can never
+    # reach `initialize`, so it must be BROKEN, never PARTIALLY_WORKS.
+    assert _collapsed(
+        "stops the exchange from ever reaching `initialize` -- this is "
+        "`BROKEN`, never `PARTIALLY_WORKS` and never a silent `PRODUCT_WORKS`"
+    ) in collapsed.replace("\u2014", "--")
+    assert _collapsed(
+        "Once the host process has started, no further failure is "
+        "`PARTIALLY_WORKS`"
+    ) in collapsed
+    assert _collapsed(
+        "including because no python interpreter is reachable through "
+        "`NETCOREDBG_MCP_PYTHON_EXECUTABLE`/`PATH` or the resolved "
+        "interpreter lacks the installed wheel"
+    ) in collapsed
+
+    # A revert that puts the python/wheel prerequisite gap back into
+    # PARTIALLY_WORKS (conflating a build-time gap with a runtime one that
+    # never reaches `initialize`) must fail this test.
+    old_conflated_partially_works = _collapsed(
+        "the publish step succeeds and the host starts, but a named "
+        "workstation prerequisite blocks one step -- for example no "
+        "compatible `-r <RID>` runtime pack, or no python interpreter "
+        "reachable through `NETCOREDBG_MCP_PYTHON_EXECUTABLE`/`PATH` with "
+        "the wheel installed"
+    )
+    assert old_conflated_partially_works.replace("--", "\u2014") not in collapsed
+
+    # The stale "same tool count as flow 2" claim must not silently come back
+    # once live catalog parity is the real proof.
+    assert (
+        "tool_count` matches the tool count\n  the Python journey observes "
+        "in flow 2" not in playbook
+    )
 
     # The route must call a repository-proven minimal plan and demand a real
     # PASS -- not an empty/invalid inline plan that only proves the proxy
@@ -1114,3 +1171,18 @@ def test_playbook_dotnet_candidate_journey_does_not_erode_python_default_boundar
         "returns anything other than `call_status=PASS` (including a "
         "silently-accepted `INVALID_SETUP`)"
     ) in collapsed
+
+    # The failure-mode catalog must name catalog_match=false as a BROKEN
+    # divergence, not a PARTIALLY_WORKS one -- the old wording allowed either.
+    assert _collapsed(
+        "a non-empty `missing_from_host` or `extra_in_host`, i.e. "
+        "`catalog_match=false`"
+    ) in collapsed
+    assert _collapsed(
+        "diverges from the direct-Python journey without an honest "
+        "`BROKEN` verdict naming the divergence"
+    ) in collapsed
+    assert (
+        "without an honest `PARTIALLY_WORKS`/`BROKEN` verdict" not in playbook
+    )
+    assert "`catalog_match=true`" in playbook
