@@ -15,6 +15,7 @@ from netcoredbg_mcp.session.runtime_smoke_schema import (
     validate_plan,
 )
 from netcoredbg_mcp.session.runtime_smoke_v2.generate import expand_generated_cases
+from tests.test_host_proxy import MINIMAL_PLAN
 
 EXAMPLE_PATH = Path("docs/examples/runtime-smoke-v2-drag-drop-grid.json")
 SELECTOR_SAFETY_EXAMPLE_PATH = Path(
@@ -964,3 +965,254 @@ def test_app_diagnostics_poll_example_remains_schema_compatible() -> None:
     assert payload["poll"]["poll_interval_ms"] == 100
     assert "wait_json" not in payload
     assert payload["observations"] == []
+
+
+def test_playbook_documents_dotnet_compatibility_host_candidate_journey_as_real_process() -> (
+    None
+):
+    playbook = PLAYBOOK_PATH.read_text(encoding="utf-8")
+    collapsed = _collapsed(playbook)
+
+    assert "### 10. .NET Compatibility-Host Candidate Consumer Journey" in playbook
+    assert "#### 10.1 Candidate Release Build/Publish" in playbook
+    assert "#### 10.2 Configuration" in playbook
+    assert "#### 10.3 Real External MCP Client Exchange" in playbook
+    assert "#### 10.4 Evidence Capture" in playbook
+    assert "#### 10.5 Rollback to the Python Console Entrypoint" in playbook
+    assert (
+        "#### 10.6 `PRODUCT_WORKS` / `PARTIALLY_WORKS` / `BROKEN` Semantics "
+        "(for PKG-001 reuse)" in playbook
+    )
+
+    # Real build/publish evidence: a genuine self-contained artifact, not a
+    # framework-dependent `dotnet run` pointed at the source tree.
+    assert (
+        "dotnet publish host/NetCoreDbg.Mcp.Host -c Release -r win-x64 "
+        "--self-contained true -p:PublishSingleFile=true" in playbook
+    )
+    assert "host/NetCoreDbg.Mcp.Host" in playbook
+
+    # Real external-process client evidence: a separate OS process launched by
+    # the official MCP client SDK, never a direct in-process call.
+    assert "StdioServerParameters" in playbook
+    assert "stdio_client" in playbook
+    assert "get_default_environment" in playbook
+    assert "NETCOREDBG_MCP_PYTHON_EXECUTABLE" in playbook
+    assert "runtime_smoke_validate_plan" in playbook
+    assert (
+        "never a" in collapsed
+        and "direct in-process call to `create_server()` or `RunProxyAsync`" in collapsed
+    )
+    assert "call_is_error" in playbook
+
+    # Evidence capture and rollback must be concrete, not hand-waved.
+    assert "$ConsumerNetHost` full path plus file size" in playbook
+    assert "no uninstall and no data migration" in playbook
+
+    # Backend evidence must prove the installed netcoredbg-mcp package, not
+    # just which Python interpreter answered -- a bare interpreter --version
+    # says nothing about whether the package is even installed there.
+    assert _collapsed(
+        "the installed backend package version from `& $ConsumerPython -m "
+        "netcoredbg_mcp --version`"
+    ) in collapsed
+    assert _collapsed(
+        "not that the `netcoredbg-mcp` package is even installed there"
+    ) in collapsed
+    assert _collapsed(
+        "its own `--version` output, proving which installed backend "
+        "answered the exchange"
+    ) not in collapsed
+    assert "$ConsumerCli --version` still succeeds" in playbook
+
+    # Unambiguous, PKG-001-reusable verdict semantics: PASS is required, not
+    # merely the absence of a protocol-level error.
+    assert "`PRODUCT_WORKS`: `dotnet publish` succeeds" in playbook
+    assert "`PARTIALLY_WORKS`: a named pre-host-start workstation prerequisite" in playbook
+    assert "`BROKEN`: the publish step fails" in playbook
+    assert "PKG-001" in playbook
+
+    # server_name identity must be a hard PRODUCT_WORKS/BROKEN gate, not
+    # just documented prose -- the script must fail closed on wrong identity
+    # (e.g. the proxied Python server's own name, proving the client
+    # bypassed the candidate host entirely rather than exercising it).
+    assert 'result["server_name"] != "netcoredbg-mcp-host"' in playbook
+    assert _collapsed(
+        "`server_name` exactly equal to `netcoredbg-mcp-host` (never the "
+        "Python server's own identity or any other value)"
+    ) in collapsed
+    assert _collapsed(
+        "`server_name` is anything other than `netcoredbg-mcp-host` (for "
+        "example the proxied Python server's own name, meaning the client "
+        "bypassed the candidate host entirely)"
+    ) in collapsed
+
+    # Do not hardcode a specific tool count -- prove catalog parity live
+    # against a same-run direct-Python baseline instead.
+    assert "135" not in playbook
+    assert '["-m", "netcoredbg_mcp", "--project-from-cwd"]' in playbook
+    assert "_list_tool_names" in playbook
+    assert "direct_tool_count" in playbook
+    assert "host_tool_count" in playbook
+    assert "missing_from_host" in playbook
+    assert "extra_in_host" in playbook
+    assert "catalog_match" in playbook
+    assert 'or not result["catalog_match"]' in playbook
+    assert _collapsed(
+        "`catalog_match` is `true`: the complete host tool-name set fetched "
+        "through `$ConsumerNetHost` exactly equals the complete tool-name set "
+        "fetched in the same run directly from `$ConsumerPython`"
+    ) in collapsed
+    assert _collapsed(
+        "`catalog_match=true` (the complete host tool-name set exactly "
+        "equals the complete direct-Python tool-name set fetched live in "
+        "the same run)"
+    ) in collapsed
+
+    # An unavailable Python interpreter or missing installed wheel can never
+    # reach `initialize`, so it must be BROKEN, never PARTIALLY_WORKS.
+    assert _collapsed(
+        "stops the exchange from ever reaching `initialize` -- this is "
+        "`BROKEN`, never `PARTIALLY_WORKS` and never a silent `PRODUCT_WORKS`"
+    ) in collapsed.replace("\u2014", "--")
+    assert _collapsed(
+        "Once the host process has started, no further failure is "
+        "`PARTIALLY_WORKS`"
+    ) in collapsed
+    assert _collapsed(
+        "including because no python interpreter is reachable through "
+        "`NETCOREDBG_MCP_PYTHON_EXECUTABLE`/`PATH` or the resolved "
+        "interpreter lacks the installed wheel"
+    ) in collapsed
+
+    # A revert that puts the python/wheel prerequisite gap back into
+    # PARTIALLY_WORKS (conflating a build-time gap with a runtime one that
+    # never reaches `initialize`) must fail this test.
+    old_conflated_partially_works = _collapsed(
+        "the publish step succeeds and the host starts, but a named "
+        "workstation prerequisite blocks one step -- for example no "
+        "compatible `-r <RID>` runtime pack, or no python interpreter "
+        "reachable through `NETCOREDBG_MCP_PYTHON_EXECUTABLE`/`PATH` with "
+        "the wheel installed"
+    )
+    assert old_conflated_partially_works.replace("--", "\u2014") not in collapsed
+
+    # The stale "same tool count as flow 2" claim must not silently come back
+    # once live catalog parity is the real proof.
+    assert (
+        "tool_count` matches the tool count\n  the Python journey observes "
+        "in flow 2" not in playbook
+    )
+
+    # The route must call a repository-proven minimal plan and demand a real
+    # PASS -- not an empty/invalid inline plan that only proves the proxy
+    # forwards a protocol-shaped response.
+    real_plan_payload = json.dumps({"plan": MINIMAL_PLAN})
+    assert real_plan_payload in playbook
+    assert "tests/test_host_proxy.py::MINIMAL_PLAN" in playbook
+    assert 'or result["call_status"] != "PASS"' in playbook
+    assert _collapsed(
+        "`call_status=PASS` (not merely `call_is_error=false`)"
+    ) in collapsed
+
+    # A revert to the old invalid empty-operations plan (which only ever
+    # produces INVALID_SETUP, never PASS) must fail this test.
+    invalid_empty_operations_payload = (
+        '{"schema": "netcoredbg.runtime_smoke.v2", "operations": []}'
+    )
+    assert invalid_empty_operations_payload not in playbook
+
+    # Supporting protocol check must point at the real host-proxy critical
+    # gate, matching the flow 2 "Supporting contract check" convention.
+    assert _collapsed(
+        "Supporting protocol check; this source-tree test is mandatory but "
+        "does not produce the UXDD verdict"
+    ) in collapsed
+    assert (
+        "uv run --locked --extra dev pytest "
+        "tests/critical/test_host_proxy_critical.py -m critical" in playbook
+    )
+
+
+def test_playbook_dotnet_candidate_journey_does_not_erode_python_default_boundary() -> (
+    None
+):
+    playbook = PLAYBOOK_PATH.read_text(encoding="utf-8")
+    collapsed = _collapsed(playbook)
+
+    # The Python-wheel journey (flows 1-2) must still be present and must
+    # precede the candidate .NET journey — additive, never a replacement.
+    assert "Installed CLI Consumer Smoke" in playbook
+    assert "Installed MCP Client Exchange" in playbook
+    assert "$ConsumerCli" in playbook
+    assert "$ConsumerPython" in playbook
+    assert playbook.index("### 1. Installed CLI Consumer Smoke") < playbook.index(
+        "### 10. .NET Compatibility-Host Candidate Consumer Journey"
+    )
+    assert playbook.index("### 2. Installed MCP Client Exchange") < playbook.index(
+        "### 10. .NET Compatibility-Host Candidate Consumer Journey"
+    )
+
+    # Explicit, load-bearing non-cutover disclaimer.
+    not_yet_published = (
+        "This is a **candidate**, not-yet-published journey: `netcoredbg-mcp` "
+        "still ships only the Python wheel and console entry point documented "
+        "in flows 1-9 above."
+    )
+    no_cutover_claim = (
+        "This journey does not publish `netcoredbg-mcp` as a .NET package, "
+        "does not complete packaging, and does not cut the default entry "
+        "point over from Python; `netcoredbg-mcp --project-from-cwd` "
+        "(flows 1-9) remains the product's only published, installed entry "
+        "point until PKG-001 ships and passes its own installed-consumer gate."
+    )
+    assert _collapsed(not_yet_published) in collapsed
+    assert _collapsed(no_cutover_claim) in collapsed
+    assert (
+        "it does not itself gate the current wave's release, and it does not "
+        "claim publication, packaging completion, or entry-point cutover"
+        in collapsed
+    )
+
+    # Never let this flow claim it is now the default/published entry point.
+    forbidden_claims = (
+        "the .NET compatibility host is now the default entry point",
+        "the .NET host replaces netcoredbg-mcp",
+        "published to pypi as a .net package",
+        "entrypoint cutover is complete",
+    )
+    lowered = collapsed.lower()
+    for claim in forbidden_claims:
+        assert claim not in lowered
+
+    # The candidate journey's own failure modes and verdict row must be
+    # present so the route cannot silently regress to fake/unit-only proof.
+    assert (
+        "uses a direct in-process call instead of a real external "
+        "`$ConsumerNetHost` process" in collapsed
+    )
+    assert ".NET compatibility-host candidate journey" in playbook
+    assert "rollback to `$ConsumerCli` still works" in playbook
+
+    # BROKEN must explicitly name a non-PASS `tools/call` result (including a
+    # silently-accepted INVALID_SETUP) as a verdict failure, not just a
+    # protocol-level fault -- this is the erosion this journey must resist.
+    assert _collapsed(
+        "returns anything other than `call_status=PASS` (including a "
+        "silently-accepted `INVALID_SETUP`)"
+    ) in collapsed
+
+    # The failure-mode catalog must name catalog_match=false as a BROKEN
+    # divergence, not a PARTIALLY_WORKS one -- the old wording allowed either.
+    assert _collapsed(
+        "a non-empty `missing_from_host` or `extra_in_host`, i.e. "
+        "`catalog_match=false`"
+    ) in collapsed
+    assert _collapsed(
+        "diverges from the direct-Python journey without an honest "
+        "`BROKEN` verdict naming the divergence"
+    ) in collapsed
+    assert (
+        "without an honest `PARTIALLY_WORKS`/`BROKEN` verdict" not in playbook
+    )
+    assert "`catalog_match=true`" in playbook
