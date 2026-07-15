@@ -11,10 +11,10 @@ namespace NetCoreDbg.Mcp.Host.Tests;
 /// <summary>
 /// Proves RelayComposition's actual production wiring: duplicate route ownership fails
 /// fast, the composed downstream host advertises no test-only reverse-route capability or
-/// forced logging, tools/list and tools/call still forward unchanged, ping is answered by
-/// the SDK itself with zero upstream paired, and a Python backend missing a required
-/// capability fails the bootstrap cleanly instead of serving a partial catalog. Every
-/// fixture here pairs the real <see cref="RelayComposition.Build"/> output against a real
+/// forced logging, native prompts are advertised and served, tools/list and tools/call still
+/// forward unchanged, ping is answered by the SDK itself with zero upstream paired, and a
+/// Python backend missing a required capability fails bootstrap cleanly instead of serving a partial catalog.
+/// Every fixture here pairs the real <see cref="RelayComposition.Build"/> output against a real
 /// McpClient/McpServer over an in-memory <see cref="DuplexChannel"/> - the same production
 /// code path, a different transport.
 /// </summary>
@@ -60,6 +60,29 @@ public sealed class ProductionCompositionTests
         var error = await Assert.ThrowsAsync<McpProtocolException>(
             () => fixture.DownstreamClient.SetLoggingLevelAsync(LoggingLevel.Info));
         Assert.Contains("Method not found", error.Message);
+    }
+
+    [Fact]
+    public async Task ProductionComposition_AdvertisesAndServesNativePrompts()
+    {
+        await using var fixture = await ComposedFixture.StartAsync();
+
+        var promptsCapability = fixture.DownstreamClient.ServerCapabilities.Prompts;
+        Assert.NotNull(promptsCapability);
+        Assert.False(promptsCapability!.ListChanged);
+
+        var prompts = await fixture.DownstreamClient.ListPromptsAsync(new ListPromptsRequestParams());
+        Assert.Equal(
+            new[]
+            {
+                "debug", "debug-gui", "debug-exception", "debug-visual", "debug-mistakes",
+                "investigate", "debug-scenario", "dap-escape-hatch",
+            },
+            prompts.Prompts.Select(prompt => prompt.Name));
+
+        var rendered = await fixture.DownstreamClient.GetPromptAsync("debug");
+        Assert.False(string.IsNullOrWhiteSpace(rendered.Description));
+        Assert.NotEmpty(rendered.Messages);
     }
 
     [Fact]

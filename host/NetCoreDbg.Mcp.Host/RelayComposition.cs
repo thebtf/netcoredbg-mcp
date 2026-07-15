@@ -11,9 +11,9 @@ namespace NetCoreDbg.Mcp.Host;
 /// <summary>
 /// The only integration-owned module list and downstream host construction point. Builds
 /// one explicit <see cref="RelayRouteCatalog"/>, wires the logging-suppression filter pair
-/// and the paired-session bootstrap filter, and calls every accepted relay module's
-/// <c>Register</c> method. Feature makers never edit this file directly for their own
-/// module; the integrator adds an accepted module here after checker PASS.
+/// and the paired-session bootstrap filter, and calls every accepted relay or native
+/// module's <c>Register</c> method. Feature makers never edit this file directly for their
+/// own module; the integrator adds an accepted module here after checker PASS.
 /// </summary>
 internal static class RelayComposition
 {
@@ -95,7 +95,10 @@ internal static class RelayComposition
                 // mcp-mux gives this compatibility process its own isolated session.
                 Experimental = new Dictionary<string, object> { ["x-mux"] = IsolatedMuxSharing },
                 Tools = new ToolsCapability(),
+                Prompts = new PromptsCapability { ListChanged = false },
             };
+
+            NativePrompts.Register(options.Handlers);
 
             RelayRouteCatalog.SuppressUnregisteredLogging(options.Filters);
             options.Filters.Message.IncomingFilters.Add(session.CreateBootstrapFilter(projectReverseRouteCapabilities));
