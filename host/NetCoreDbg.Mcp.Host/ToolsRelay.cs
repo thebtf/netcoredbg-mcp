@@ -19,22 +19,14 @@ namespace NetCoreDbg.Mcp.Host;
 /// checking and wires typed handlers (via the same <c>With...Handler</c> builder surface
 /// the pre-FD-000 composition already used) that reach Python only through
 /// <see cref="RelaySession.UpstreamAsync"/> and <see cref="RelaySession.ForwardRequestAsync"/>.
+/// <see cref="RelaySession.ForwardRequestAsync"/> itself now normalizes a genuine upstream
+/// JSON-RPC protocol error's doubled "Request failed (remote): " prefix and preserves its
+/// <c>Data</c> - a shared fix, not a tools-specific one, so this module needs no local
+/// wrapper around it (see host/NetCoreDbg.Mcp.Host.Tests/ToolsCatalogContractTests.cs for
+/// the tools-family regression proving the observed downstream behavior).
 /// </summary>
 internal static class ToolsRelay
 {
-    /// <summary>
-    /// The prefix SDK 1.4.1's upstream <c>McpSession.SendRequestAsync</c> applies when it
-    /// converts a genuine remote JSON-RPC error into a thrown <see cref="McpProtocolException"/>
-    /// (observed directly against a real, non-mocked upstream server returning a protocol
-    /// error from a <c>tools/call</c> handler). Left alone, this host's own downstream
-    /// dispatch wraps that already-wrapped message a second time when converting the
-    /// propagated exception into the downstream JSON-RPC error response, turning what should
-    /// be Python's own message into a doubled "Request failed (remote): Request failed
-    /// (remote): &lt;message&gt;" - the error code round-trips exactly regardless, only the
-    /// message doubles.
-    /// </summary>
-    private const string UpstreamRemoteErrorPrefix = "Request failed (remote): ";
-
     public static void Register(IMcpServerBuilder builder, RelayRouteCatalog catalog, RelaySession session)
     {
         catalog.Add(new RelayRoute(RequestMethods.ToolsList, RelayDirection.DownstreamToUpstream, RelayRouteKind.Request));
@@ -54,40 +46,14 @@ internal static class ToolsRelay
                     ? new JsonRpcRequest { Method = context.JsonRpcRequest.Method, Params = new JsonObject() }
                     : context.JsonRpcRequest;
 
-                var response = await ForwardAndUnwrapUpstreamErrorAsync(upstream, request, cancellationToken).ConfigureAwait(false);
+                var response = await RelaySession.ForwardRequestAsync(upstream, request, cancellationToken).ConfigureAwait(false);
                 return response.Result.Deserialize<ListToolsResult>(McpJsonUtilities.DefaultOptions)!;
             })
             .WithCallToolHandler(async (context, cancellationToken) =>
             {
                 var upstream = await session.UpstreamAsync(cancellationToken).ConfigureAwait(false);
-                var response = await ForwardAndUnwrapUpstreamErrorAsync(upstream, context.JsonRpcRequest, cancellationToken).ConfigureAwait(false);
+                var response = await RelaySession.ForwardRequestAsync(upstream, context.JsonRpcRequest, cancellationToken).ConfigureAwait(false);
                 return response.Result.Deserialize<CallToolResult>(McpJsonUtilities.DefaultOptions)!;
             });
-    }
-
-    /// <summary>
-    /// Forwards through <see cref="RelaySession.ForwardRequestAsync"/> and, if the upstream
-    /// leg's own <c>SendRequestAsync</c> wrapped a genuine remote JSON-RPC error with
-    /// <see cref="UpstreamRemoteErrorPrefix"/>, strips that one wrap before letting the
-    /// exception propagate to this host's own downstream dispatch. The single wrap that
-    /// dispatch itself then applies when converting the propagated exception into the
-    /// downstream JSON-RPC error is an unavoidable trait of the typed
-    /// <c>With...Handler</c> API surface - the only way any handler here can signal a
-    /// protocol error is a thrown exception, converted by shared dispatch this module
-    /// cannot bypass without a message-level filter that only
-    /// <c>RelayComposition</c>/<c>RelayRouteCatalog</c> may own - so a single wrap remains
-    /// by design; only the doubling is a ToolsRelay-owned defect this corrects.
-    /// </summary>
-    private static async Task<JsonRpcResponse> ForwardAndUnwrapUpstreamErrorAsync(
-        McpSession upstream, JsonRpcRequest request, CancellationToken cancellationToken)
-    {
-        try
-        {
-            return await RelaySession.ForwardRequestAsync(upstream, request, cancellationToken).ConfigureAwait(false);
-        }
-        catch (McpProtocolException ex) when (ex.Message.StartsWith(UpstreamRemoteErrorPrefix, StringComparison.Ordinal))
-        {
-            throw new McpProtocolException(ex.Message[UpstreamRemoteErrorPrefix.Length..], ex, ex.ErrorCode);
-        }
     }
 }

@@ -16,18 +16,22 @@ namespace NetCoreDbg.Mcp.Host.Tests;
 /// <c>listChanged</c> capability, no forwarded list-changed push), cursor/<c>_meta</c>
 /// pass-through on <c>tools/list</c>, forward-direction (downstream <c>tools/call</c>)
 /// cancellation propagating to the upstream leg and leaving the session usable afterward,
-/// and a genuine upstream protocol error surviving the relay with its
-/// <c>McpErrorCode</c>/message intact rather than doubly wrapped. FD-000 only proved
-/// cancellation for the reverse (Python -&gt; downstream) direction; the tools family's own
-/// forward direction is this slice's job. Every fixture here builds the real production
-/// <see cref="RelayComposition.Build"/> output - via <see cref="ToolsRelay.Register"/> -
-/// against a real (not mocked) <see cref="FakePythonServer"/> and real
-/// <see cref="McpClient"/>/<see cref="McpServer"/> endpoints over in-memory
-/// <see cref="DuplexChannel"/>s, exactly like every other FD-000 test in this project. The
-/// full 135-tool catalog/schema equality, request/result <c>_meta</c> functional round trip
-/// (mux session ownership), <c>structuredContent</c>, unknown-tool, and representative
-/// error proofs against the real Python backend live in <c>tests/test_host_proxy.py</c>,
-/// which is the load-bearing installed-consumer proof for this slice.
+/// and - for the tools family specifically - a genuine upstream protocol error surviving
+/// the relay with its <c>McpErrorCode</c>/message/<c>Data</c> intact rather than doubly
+/// wrapped or dropped (the normalization itself lives in the shared
+/// <see cref="RelaySession.ForwardRequestAsync"/> primitive, not a tools-specific
+/// wrapper; see <c>ProductionCompositionTests</c> for the shared-primitive-level proof).
+/// FD-000 only proved cancellation for the reverse (Python -&gt; downstream) direction;
+/// the tools family's own forward direction is this slice's job. Every fixture here
+/// builds the real production <see cref="RelayComposition.Build"/> output - via
+/// <see cref="ToolsRelay.Register"/> - against a real (not mocked)
+/// <see cref="FakePythonServer"/> and real <see cref="McpClient"/>/<see cref="McpServer"/>
+/// endpoints over in-memory <see cref="DuplexChannel"/>s, exactly like every other FD-000
+/// test in this project. The full 135-tool catalog/schema equality, request/result
+/// <c>_meta</c> functional round trip (mux session ownership), <c>structuredContent</c>,
+/// unknown-tool, and representative error proofs against the real Python backend live in
+/// <c>tests/test_host_proxy.py</c>, which is the load-bearing installed-consumer proof for
+/// this slice.
 /// </summary>
 public sealed class ToolsCatalogContractTests
 {
@@ -200,28 +204,54 @@ public sealed class ToolsCatalogContractTests
     }
 
     [Fact]
-    public async Task ToolsCall_UpstreamProtocolError_IsNotDoubleWrapped_CodeAndMessageSurviveExactlyOnce()
+    public async Task ToolsCall_UpstreamProtocolError_IsNotDoubleWrapped_CodeMessageDataSurviveExactlyOnce()
     {
-        // Main/FD005 cross-slice finding, reproduced here against a real (not
-        // mocked) upstream McpServer: McpSession.SendRequestAsync wraps a
-        // genuine remote JSON-RPC error into a thrown McpProtocolException with
-        // a "Request failed (remote): " prefix. RelaySession.ForwardRequestAsync
-        // - the raw, direction-agnostic primitive every relay module calls -
-        // uses exactly that method for its upstream leg, so left uncorrected
-        // this host doubles the prefix: once inside ForwardRequestAsync's own
-        // upstream SendRequestAsync call, and once again when the downstream
-        // client's own SendRequestAsync converts the propagated exception a
-        // second time. The error CODE always already survived exactly regardless
-        // (McpProtocolException.ErrorCode round-trips both hops unchanged); only
-        // the MESSAGE doubled. This is a different, later-in-the-pipeline defect
-        // than the pre-forward malformed-envelope case proven in
+        // Main/FD005 cross-slice finding, reproduced here (independently, before the
+        // shared fix landed) against a real (not mocked) upstream McpServer:
+        // McpSession.SendRequestAsync wraps a genuine remote JSON-RPC error into a
+        // thrown McpProtocolException with a "Request failed (remote): " prefix, and
+        // separately round-trips the remote error's own `data` field through
+        // McpProtocolException.Data on both the throw side and the catch side. A
+        // downstream typed handler that lets a forwarded failure propagate
+        // unmodified gets it wrapped a second time by the SDK for its own caller,
+        // doubling the message prefix across a multi-hop relay (the error code
+        // always already survives exactly regardless).
+        //
+        // The normalization now lives in the shared
+        // RelaySession.ForwardRequestAsync primitive itself (host/NetCoreDbg.Mcp.Host/
+        // RelaySession.cs), not a tools-specific wrapper - every relay module
+        // benefits automatically, matching the FD-005 cross-slice report. This test
+        // owns proving the tools family's own observed contract end to end (the
+        // downstream client genuinely sees exactly one prefix, with code and data
+        // both intact) through both tools/call and tools/list; FD-000's
+        // ProductionCompositionTests.ForwardRequestAsync_NormalizesRemoteErrorToOneHopCleanMessageAndCode
+        // and
+        // ProductionCompositionTests.ForwardRequestAsync_PreservesPrimitiveAndNestedDataEntriesAcrossNormalization
+        // separately own proving the shared primitive itself is one-hop-clean and
+        // Data-preserving in isolation.
+        //
+        // This is a different, later-in-the-pipeline defect than the pre-forward
+        // malformed-envelope case proven in
         // test_host_malformed_tools_call_envelope_is_rejected_and_session_stays_usable
-        // (tests/test_host_proxy.py), where the request never reaches Python at
-        // all - here it genuinely does, and Python's own error genuinely comes
-        // back.
+        // (tests/test_host_proxy.py), where the request never reaches Python at all -
+        // here it genuinely does, and Python's own error genuinely comes back.
         var (session, upstreamChannel, downstreamChannel) = BuildSession();
 
         const string upstreamMessage = "simulated upstream protocol error from fake Python";
+
+        static McpProtocolException MakeUpstreamError()
+        {
+            var ex = new McpProtocolException(upstreamMessage, McpErrorCode.InvalidParams);
+            // A representative error.data payload: primitive plus nested values, not
+            // just a flat string, so the proof cannot be satisfied by a shallow copy.
+            ex.Data["reason"] = "validation_failed";
+            ex.Data["count"] = 3d;
+            ex.Data["details"] = System.Text.Json.JsonDocument
+                .Parse("""{"field":"line","expected":"positive integer"}""")
+                .RootElement.Clone();
+            return ex;
+        }
+
         var fakePython = FakePythonServer.Start(
             upstreamChannel,
             new McpServerOptions
@@ -230,10 +260,8 @@ public sealed class ToolsCatalogContractTests
                 Capabilities = new ServerCapabilities { Tools = new ToolsCapability() },
                 Handlers = new McpServerHandlers
                 {
-                    ListToolsHandler = (context, ct) =>
-                        throw new McpProtocolException(upstreamMessage, McpErrorCode.InvalidParams),
-                    CallToolHandler = (context, ct) =>
-                        throw new McpProtocolException(upstreamMessage, McpErrorCode.InvalidParams),
+                    ListToolsHandler = (context, ct) => throw MakeUpstreamError(),
+                    CallToolHandler = (context, ct) => throw MakeUpstreamError(),
                 },
             });
 
@@ -241,22 +269,34 @@ public sealed class ToolsCatalogContractTests
 
         var callError = await Assert.ThrowsAsync<McpProtocolException>(
             () => downstreamClient.CallToolAsync(new CallToolRequestParams { Name = "anything" }).AsTask());
-        Assert.Equal(McpErrorCode.InvalidParams, callError.ErrorCode);
-        // Exactly one "Request failed (remote): " wrap survives - the downstream
-        // leg's own SendRequestAsync-based conversion applies it once,
-        // unavoidably, when this exception (already cleaned by ToolsRelay of the
-        // upstream leg's own wrap) crosses back to the test's client. A second,
-        // ToolsRelay-caused wrap would double it; that doubling is what this fix
-        // corrects, not the single remaining wrap itself.
-        Assert.Equal($"Request failed (remote): {upstreamMessage}", callError.Message);
+        AssertFaithfulSingleWrap(callError, upstreamMessage);
 
         var listError = await Assert.ThrowsAsync<McpProtocolException>(
             () => downstreamClient.ListToolsAsync(new ListToolsRequestParams()).AsTask());
-        Assert.Equal(McpErrorCode.InvalidParams, listError.ErrorCode);
-        Assert.Equal($"Request failed (remote): {upstreamMessage}", listError.Message);
+        AssertFaithfulSingleWrap(listError, upstreamMessage);
 
         await downstreamClient.DisposeAsync();
         await session.DisposeAsync();
         await fakePython.DisposeAsync();
+    }
+
+    private static void AssertFaithfulSingleWrap(McpProtocolException error, string upstreamMessage)
+    {
+        Assert.Equal(McpErrorCode.InvalidParams, error.ErrorCode);
+        // Exactly one "Request failed (remote): " wrap survives at the downstream
+        // client - the downstream leg's own SendRequestAsync-based conversion
+        // applies it once, unavoidably, when this exception (already normalized by
+        // the shared RelaySession primitive to strip the upstream leg's own wrap)
+        // crosses back to this test's client. A second wrap would double it; that
+        // doubling is exactly what the shared fix corrects, not the single
+        // remaining wrap itself (which is the same convention any C# SDK client
+        // uses to report any remote protocol error, direct or relayed).
+        Assert.Equal($"Request failed (remote): {upstreamMessage}", error.Message);
+
+        Assert.Equal("validation_failed", error.Data["reason"]);
+        Assert.Equal(3d, error.Data["count"]);
+        var details = Assert.IsType<System.Text.Json.JsonElement>(error.Data["details"]);
+        Assert.Equal("line", details.GetProperty("field").GetString());
+        Assert.Equal("positive integer", details.GetProperty("expected").GetString());
     }
 }
