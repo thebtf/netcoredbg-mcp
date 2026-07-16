@@ -34,6 +34,9 @@ async def _safe_notify(coro: Any) -> bool:
     except (asyncio.TimeoutError, Exception):
         return False
 
+async def _noop_resource_notification(_ctx: Any) -> None:
+    return None
+
 
 def register_debug_tools(
     mcp: FastMCP,
@@ -44,9 +47,13 @@ def register_debug_tools(
     execute_and_wait: Callable[..., Coroutine],
     resolve_project_root: Callable[..., Coroutine],
     resolve_project_root_readonly: Callable[..., Awaitable[Any]] | None = None,
+    notify_threads_changed: Callable[[Any], Coroutine] | None = None,
+    notify_output_changed: Callable[[Any], Coroutine] | None = None,
 ) -> None:
     """Register debug session control tools on the MCP server."""
     from mcp.types import ToolAnnotations
+    notify_threads = notify_threads_changed or _noop_resource_notification
+    notify_output = notify_output_changed or _noop_resource_notification
 
     @mcp.tool(
         annotations=ToolAnnotations(
@@ -234,6 +241,8 @@ def register_debug_tools(
                 output_callback=on_build_output,
             )
             await notify_state_changed(ctx)
+            await notify_threads(ctx)
+            await notify_output(ctx)
 
             # Detect application type for agent hints
             app_type = detect_app_type(validated_program)
@@ -282,6 +291,9 @@ def register_debug_tools(
                 return build_error_response(access_error, state=session.state.state)
 
             result = await session.attach(process_id)
+            await notify_state_changed(ctx)
+            await notify_threads(ctx)
+            await notify_output(ctx)
             return build_response(
                 data=result,
                 state=session.state.state,
@@ -308,6 +320,8 @@ def register_debug_tools(
             result = await session.stop()
             ownership.release()
             await notify_state_changed(ctx)
+            await notify_threads(ctx)
+            await notify_output(ctx)
             return build_response(data=result, state=session.state.state)
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
@@ -340,6 +354,8 @@ def register_debug_tools(
             )
 
             await notify_state_changed(ctx)
+            await notify_threads(ctx)
+            await notify_output(ctx)
 
             # Detect app type for hints
             program = result.get("program", "")
@@ -401,6 +417,8 @@ def register_debug_tools(
 
             result = await session.pause(thread_id)
             await notify_state_changed(ctx)
+            await notify_threads(ctx)
+            await notify_output(ctx)
             return build_response(
                 data=result,
                 state=session.state.state,

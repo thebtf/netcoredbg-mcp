@@ -15,17 +15,10 @@ namespace NetCoreDbg.Mcp.Host;
 /// convention as <see cref="ToolsRelay"/> for route/handler wiring.
 ///
 /// Unlike tools (always required - see
-/// <c>RelayComposition.RequiredUpstreamCapabilityChecks</c>), a resources capability is
-/// projected downstream only when Python's own negotiated capabilities actually include it:
-/// architecture.md requires "a capability absent downstream is not advertised upstream; the
-/// relay never substitutes an empty result" for this exact shape of conditional projection.
-/// <see cref="ConfigureCapabilityProjection"/> is the paired entry point that declares the
-/// static <c>subscribe=false</c>/<c>listChanged=false</c> capability this build advertises by
-/// default and removes it from the serialized <c>initialize</c> response whenever Python
-/// lacks a resources capability, mirroring
-/// <c>RelayRouteCatalog.SuppressUnregisteredLogging</c>'s existing outgoing-filter technique
-/// for the same class of "SDK-declared capability vs. actual upstream support" problem.
-/// subscribe/listChanged stay false for every build until FD-006 implements real updates.
+/// <c>RelayComposition.RequiredUpstreamCapabilityChecks</c>), the resources capability is
+/// projected only when Python advertises the FD-006 subscription contract. The catalog is
+/// static, so the host always keeps <c>listChanged=false</c>; <c>subscribe=true</c> is exposed
+/// only when Python advertises the same value and remains the sole subscription authority.
 /// </summary>
 internal static class ResourcesRelay
 {
@@ -82,18 +75,13 @@ internal static class ResourcesRelay
     }
 
     /// <summary>
-    /// Called from within the same <c>AddMcpServer(options =&gt; ...)</c> factory as
-    /// <c>RelayRouteCatalog.SuppressUnregisteredLogging(options.Filters)</c> - this build's
-    /// static resources capability declaration and its one paired outgoing filter both need
-    /// to exist before the downstream <c>initialize</c> response can ever be produced.
-    /// Declares <c>subscribe=false</c>/<c>listChanged=false</c> unconditionally (no update
-    /// support is implemented until FD-006), then registers the outgoing filter that removes
-    /// the "resources" key from the serialized initialize response whenever Python's own
-    /// negotiated capabilities do not include a resources capability.
+    /// Declares the FD-006 downstream resource capability, then removes it from the serialized
+    /// initialize result unless Python advertised <c>resources.subscribe=true</c>. The catalog
+    /// remains static, so <c>listChanged</c> is always false.
     /// </summary>
     public static void ConfigureCapabilityProjection(ServerCapabilities capabilities, McpServerFilters filters, RelaySession session)
     {
-        capabilities.Resources = new ResourcesCapability { Subscribe = false, ListChanged = false };
+        capabilities.Resources = new ResourcesCapability { Subscribe = true, ListChanged = false };
 
         filters.Message.OutgoingFilters.Add(next => async (context, cancellationToken) =>
         {
@@ -108,7 +96,7 @@ internal static class ResourcesRelay
                 // response would exist to intercept here. UpstreamAsync therefore always
                 // completes synchronously in every real execution of this filter.
                 var upstream = await session.UpstreamAsync(cancellationToken).ConfigureAwait(false);
-                if (upstream.ServerCapabilities?.Resources is null)
+                if (upstream.ServerCapabilities?.Resources?.Subscribe is not true)
                 {
                     serializedCapabilities.Remove("resources");
                 }

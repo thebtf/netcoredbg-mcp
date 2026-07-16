@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from ..build import BuildManager, BuildResult
+from ..resource_updates import BREAKPOINTS_URI, OUTPUT_URI, STATE_URI, THREADS_URI
 from ..dap import DAPClient, DAPEvent, DAPResponse
 from ..dap.events import (
     BreakpointEventBody,
@@ -113,6 +114,14 @@ class SessionManager:
         self._tracepoint_manager: TracepointManager | None = None
         self._snapshot_manager: SnapshotManager | None = None
         self._stealth_foreground_restore_task: asyncio.Task[None] | None = None
+        self._resource_update_callback: Callable[[tuple[str, ...]], Awaitable[None]] | None = None
+        self._resource_update_tasks: set[asyncio.Task[None]] = set()
+        self._resource_update_revisions = {
+            STATE_URI: 0,
+            BREAKPOINTS_URI: 0,
+            OUTPUT_URI: 0,
+            THREADS_URI: 0,
+        }
 
     def _restore_foreground_if_safe(self, saved_hwnd: int | None) -> bool:
         """Restore foreground if the debuggee owns it; return whether retries may continue."""
@@ -578,6 +587,60 @@ class SessionManager:
 
         return effective_program
 
+    def set_resource_update_callback(
+        self,
+        callback: Callable[[tuple[str, ...]], Awaitable[None]],
+    ) -> None:
+        """Set the one MCP-session callback used by asynchronous DAP mutations."""
+        self._resource_update_callback = callback
+
+    def resource_update_revision(self, uri: str) -> int:
+        """Return the monotonic mutation revision for one public resource."""
+        return self._resource_update_revisions.get(uri, 0)
+
+    def _publish_resource_updates(self, *uris: str) -> None:
+        ordered_uris = tuple(dict.fromkeys(uris))
+        if not ordered_uris:
+            return
+
+        for uri in ordered_uris:
+            self._resource_update_revisions[uri] = (
+                self._resource_update_revisions.get(uri, 0) + 1
+            )
+
+        callback = self._resource_update_callback
+        if callback is None:
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def deliver() -> None:
+            await callback(ordered_uris)
+
+        task = loop.create_task(deliver())
+        self._resource_update_tasks.add(task)
+        task.add_done_callback(self._finish_resource_update_task)
+
+    def _finish_resource_update_task(self, task: asyncio.Task[None]) -> None:
+        self._resource_update_tasks.discard(task)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.warning("Resource update callback failed: %s", error)
+
+    async def close_resource_update_notifications(self) -> None:
+        """Stop manager-owned update tasks before the MCP transport becomes terminal."""
+        self._resource_update_callback = None
+        tasks = tuple(self._resource_update_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     def on_state_change(self, listener: Callable[[DebugState], None]) -> None:
         """Register state change listener."""
         self._state_listeners.append(listener)
@@ -593,6 +656,7 @@ class SessionManager:
                     listener(new_state)
                 except Exception:
                     logger.exception("State listener error")
+            self._publish_resource_updates(STATE_URI, THREADS_URI)
 
     def begin_applying_changes(self) -> DebugState:
         """Enter EnC apply state and return the previous state."""
@@ -816,6 +880,7 @@ class SessionManager:
         body = ContinuedEventBody.from_dict(event.body)
         self._state.continued_events += 1
         self._state.last_resume_at = time.monotonic()
+        state_was_running = self._state.state == DebugState.RUNNING
         self._set_state(DebugState.RUNNING)
         if body.all_threads_continued:
             # All threads resumed — clear all stop-state
@@ -824,6 +889,8 @@ class SessionManager:
             self._state.stop_reason = None
             self._state.stop_description = None
             self._state.stop_text = None
+        if state_was_running:
+            self._publish_resource_updates(STATE_URI, THREADS_URI)
 
     def _on_terminated(self, event: DAPEvent) -> None:
         """Handle terminated event."""
@@ -840,6 +907,7 @@ class SessionManager:
         body = ExitedEventBody.from_dict(event.body)
         self._state.exit_code = body.exit_code
         self._execution_event.set()
+        self._publish_resource_updates(STATE_URI, THREADS_URI)
         logger.info(f"Process exited with code {self._state.exit_code}")
 
     def _on_output(self, event: DAPEvent) -> None:
@@ -876,6 +944,8 @@ class SessionManager:
             )
             self._output_bytes -= len(removed.text)
 
+        self._publish_resource_updates(OUTPUT_URI)
+
     def _on_thread(self, event: DAPEvent) -> None:
         """Handle thread event."""
         body = ThreadEventBody.from_dict(event.body)
@@ -887,7 +957,8 @@ class SessionManager:
             if self._state.current_thread_id == body.thread_id:
                 self._state.current_thread_id = None
                 self._state.current_frame_id = None
-        # Note: "started" events are handled lazily via get_threads()
+        # Note: "started" events are handled lazily via get_threads().
+        self._publish_resource_updates(THREADS_URI)
 
     def _on_process(self, event: DAPEvent) -> None:
         """Handle process event."""
@@ -897,6 +968,7 @@ class SessionManager:
 
         self._state.process_id = pid
         self._state.process_name = name
+        self._publish_resource_updates(STATE_URI)
 
         if pid is not None:
             logger.info(f"Process started: PID={pid}, name={name or 'unknown'}")
@@ -1007,6 +1079,7 @@ class SessionManager:
                 for bp in bps:
                     if bp.id == body.breakpoint_id:
                         self.breakpoints.remove(file_path, bp.line)
+                        self._publish_resource_updates(BREAKPOINTS_URI)
                         logger.info(
                             f"Breakpoint {body.breakpoint_id} removed by adapter"
                         )
@@ -1016,6 +1089,7 @@ class SessionManager:
             for file_path, bps in self.breakpoints.get_all().items():
                 for bp in bps:
                     if bp.id == body.breakpoint_id:
+                        old_value = (bp.verified, bp.dap_line)
                         bp.verified = body.verified
                         # Mirror BreakpointRegistry.update_from_dap: clear any
                         # stale adjustment when the adapter now reports the
@@ -1028,6 +1102,8 @@ class SessionManager:
                             mgr.set_dap_line_for_breakpoint(
                                 body.breakpoint_id, bp.dap_line
                             )
+                        if old_value != (bp.verified, bp.dap_line):
+                            self._publish_resource_updates(BREAKPOINTS_URI)
                         logger.debug(
                             f"Breakpoint {body.breakpoint_id} updated: "
                             f"verified={body.verified}, requested_line={bp.line}, "

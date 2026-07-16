@@ -85,27 +85,82 @@ def create_server(project_path: str | None = None) -> FastMCP:
     mcp = FastMCP("netcoredbg-mcp")
     session = get_session()
 
-    # Helper to notify resource updates (MCP spec compliance)
-    from pydantic import AnyUrl
+    # Resource subscription tracking + update notifications (FD-006, Engram #393). See
+    # resource_updates.py for why subscribe/unsubscribe requires the low-level Server escape
+    # hatch and why the negotiated capability needs a post-hoc correction in __main__.py.
+    from .resource_updates import (
+        BREAKPOINTS_URI,
+        OUTPUT_URI,
+        STATE_URI,
+        THREADS_URI,
+        ResourceSubscriptions,
+        notify_resource_updated,
+        notify_resources_updated,
+        register_resource_subscription_handlers,
+    )
 
-    async def notify_state_changed(ctx: Context) -> None:
-        """Notify client that debug://state resource has changed."""
-        try:
-            if ctx.session:
-                await ctx.session.send_resource_updated(AnyUrl("debug://state"))
-        except Exception as e:
-            logger.warning(f"Failed to send resource update notification for debug://state: {e}")
-
-    async def notify_breakpoints_changed(ctx: Context) -> None:
-        """Notify client that debug://breakpoints resource has changed."""
-        try:
-            if ctx.session:
-                await ctx.session.send_resource_updated(AnyUrl("debug://breakpoints"))
-        except Exception as e:
-            logger.warning(
-                "Failed to send resource update notification for debug://breakpoints: %s",
-                e,
+    def _resource_update_token(uri: str) -> object:
+        revision = session.resource_update_revision(uri)
+        if uri == STATE_URI:
+            return (revision, json.dumps(session.state.to_dict(), sort_keys=True))
+        if uri == BREAKPOINTS_URI:
+            return (
+                revision,
+                tuple(
+                    (
+                        file_path,
+                        tuple(
+                            (bp.line, bp.dap_line, bp.condition, bp.verified)
+                            for bp in breakpoints
+                        ),
+                    )
+                    for file_path, breakpoints in sorted(session.breakpoints.get_all().items())
+                ),
             )
+        if uri == OUTPUT_URI:
+            return (
+                revision,
+                session.state.output_sequence,
+                session.state.output_trimmed_before,
+                len(session.state.output_buffer),
+            )
+        if uri == THREADS_URI:
+            return (
+                revision,
+                session.state.state.value,
+                session.state.current_thread_id,
+                tuple((thread.id, thread.name) for thread in session.state.threads),
+            )
+        return revision
+
+    _resource_subscriptions = ResourceSubscriptions(_resource_update_token)
+    register_resource_subscription_handlers(mcp, _resource_subscriptions)
+
+    async def _publish_dap_resource_updates(uris: tuple[str, ...]) -> None:
+        await notify_resources_updated(uris, _resource_subscriptions)
+
+    session.set_resource_update_callback(_publish_dap_resource_updates)
+
+    async def notify_state_changed(_ctx: Context) -> None:
+        """Notify subscribed clients that debug://state has changed."""
+        await notify_resource_updated(STATE_URI, _resource_subscriptions)
+
+    async def notify_breakpoints_changed(_ctx: Context) -> None:
+        """Notify subscribed clients that debug://breakpoints has changed."""
+        await notify_resource_updated(BREAKPOINTS_URI, _resource_subscriptions)
+
+    async def notify_threads_changed(_ctx: Context) -> None:
+        """Notify subscribed clients that debug://threads has changed."""
+        await notify_resource_updated(THREADS_URI, _resource_subscriptions)
+
+    async def notify_output_changed(_ctx: Context) -> None:
+        """Notify subscribed clients that debug://output has changed.
+
+        DAP output events publish immediately through SessionManager's asynchronous
+        mutation callback. Tool-settle calls remain as a deterministic fallback and are
+        de-duplicated by the resource token captured after the mutation.
+        """
+        await notify_resource_updated(OUTPUT_URI, _resource_subscriptions)
 
     # ============== Mux Session Ownership ==============
 
@@ -246,6 +301,8 @@ def create_server(project_path: str | None = None) -> FastMCP:
                     logger.debug("Failed to get source context", exc_info=True)
 
             await notify_state_changed(ctx)
+            await notify_threads_changed(ctx)
+            await notify_output_changed(ctx)
             return response
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
@@ -270,6 +327,8 @@ def create_server(project_path: str | None = None) -> FastMCP:
         session=session,
         ownership=_ownership,
         notify_state_changed=notify_state_changed,
+        notify_threads_changed=notify_threads_changed,
+        notify_output_changed=notify_output_changed,
         check_session_access=_check_session_access,
         execute_and_wait=_execute_and_wait,
         resolve_project_root=resolve_project_root,

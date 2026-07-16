@@ -8,18 +8,22 @@ using ModelContextProtocol.Server;
 namespace NetCoreDbg.Mcp.Host.Tests;
 
 /// <summary>
-/// FD-005's own test-only mirror of <c>RelayComposition.Build</c>: tools + the
-/// logging-suppression filter + the bootstrap filter, exactly like production, plus
-/// <see cref="ResourcesRelay"/> registered. <see cref="ResourcesRelay"/> is not yet part of
-/// the production <c>RelayComposition.Build</c> module list - per architecture.md, "the
-/// integrator adds the accepted module to the central list after checker PASS" - so this is
-/// how both <see cref="ResourcesRelayTests"/> (in-memory fake Python) and
-/// <see cref="ResourcesRealPythonTests"/> (real stdio Python) prove the module directly, the
-/// same convention <c>ReverseRouteAndLifecycleTests</c> already uses for FD-000's reverse
-/// route. No line here differs from what the integrator will add to the real file.
+/// Test-only mirror of the accepted resource modules over a caller-selected real transport.
+/// Production integration remains owned by <c>RelayComposition</c>; focused FD-005/FD-006
+/// tests use this fixture to exercise the modules without editing the common module list.
 /// </summary>
 internal static class ResourcesTestComposition
 {
+    public static RelaySession CreateSession(Func<IClientTransport> createUpstreamTransport)
+    {
+        RelaySession? session = null;
+        session = new RelaySession(
+            createUpstreamTransport,
+            RelayComposition.RequiredUpstreamCapabilityChecks,
+            handlers => ResourceUpdatesRelay.ConfigureUpstreamHandlers(handlers, session!));
+        return session;
+    }
+
     public static IHost BuildHost(
         RelaySession session,
         Action<IMcpServerBuilder> configureTransport,
@@ -42,6 +46,7 @@ internal static class ResourcesTestComposition
 
         ToolsRelay.Register(mcpBuilder, catalog, session);
         ResourcesRelay.Register(mcpBuilder, catalog, session);
+        ResourceUpdatesRelay.Register(mcpBuilder, catalog, session);
         configureTransport(mcpBuilder);
 
         return builder.Build();

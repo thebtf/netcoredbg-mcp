@@ -76,7 +76,7 @@ public sealed class ResourcesRealPythonTests
             using var relayedPythonBackend = StartRealPython();
             try
             {
-                var session = new RelaySession(relayedPythonBackend.CreateUpstreamTransport, RelayComposition.RequiredUpstreamCapabilityChecks);
+                var session = ResourcesTestComposition.CreateSession(relayedPythonBackend.CreateUpstreamTransport);
                 await using (session)
                 {
                     var downstreamChannel = new DuplexChannel();

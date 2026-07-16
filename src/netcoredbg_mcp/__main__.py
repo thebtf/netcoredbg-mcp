@@ -183,12 +183,18 @@ async def main() -> None:
         # enabling session ownership tracking for multi-agent environments.
         from mcp.server.stdio import stdio_server
 
+        from .resource_updates import apply_subscribe_capability
+
         async with stdio_server() as (read_stream, write_stream):
             init_options = mcp._mcp_server.create_initialization_options(
                 experimental_capabilities={
                     "x-mux": {"sharing": "isolated"},
                 },
             )
+            # FD-006 (Engram #393): correct the installed SDK's hardcoded
+            # subscribe=False - see resource_updates.py for why this can't be fixed by
+            # registering subscribe_resource()/unsubscribe_resource() handlers alone.
+            apply_subscribe_capability(init_options.capabilities)
             await mcp._mcp_server.run(read_stream, write_stream, init_options)
     except _TRANSPORT_SHUTDOWN_ERRORS as exc:
         # Transport was closed from the client side (Claude Code dropped stdio,
@@ -203,6 +209,7 @@ async def main() -> None:
     finally:
         # Cleanup resources
         session_obj = get_session()
+        await session_obj.close_resource_update_notifications()
         if session_obj.is_active:
             await session_obj.stop()
         # Shutdown process registry (terminate tracked processes, delete pidfile)

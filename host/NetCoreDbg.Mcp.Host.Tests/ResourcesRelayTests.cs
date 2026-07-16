@@ -102,7 +102,7 @@ public sealed class ResourcesRelayTests
     {
         var upstreamChannel = new DuplexChannel();
         var downstreamChannel = new DuplexChannel();
-        var session = new RelaySession(upstreamChannel.CreateClientTransport, RelayComposition.RequiredUpstreamCapabilityChecks);
+        var session = ResourcesTestComposition.CreateSession(upstreamChannel.CreateClientTransport);
 
         var host = ResourcesTestComposition.BuildHost(
             session,
@@ -124,7 +124,7 @@ public sealed class ResourcesRelayTests
             Capabilities = new ServerCapabilities
             {
                 Tools = new ToolsCapability(),
-                Resources = new ResourcesCapability { Subscribe = false, ListChanged = false },
+                Resources = new ResourcesCapability { Subscribe = true, ListChanged = false },
             },
             Handlers = new McpServerHandlers
             {
@@ -152,8 +152,36 @@ public sealed class ResourcesRelayTests
 
         var resources = downstreamClient.ServerCapabilities?.Resources;
         Assert.NotNull(resources);
-        Assert.False(resources!.Subscribe);
+        Assert.True(resources!.Subscribe);
         Assert.False(resources.ListChanged);
+
+        await downstreamClient.DisposeAsync();
+        await session.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task ResourcesCapability_Absent_WhenPythonDoesNotAdvertiseSubscribe()
+    {
+        var (session, upstreamChannel, downstreamChannel) = BuildResourcesSession();
+        await using var fakePython = FakePythonServer.Start(
+            upstreamChannel,
+            new McpServerOptions
+            {
+                ServerInfo = new Implementation { Name = "fake-python-no-subscribe", Version = "1.0.0" },
+                Capabilities = new ServerCapabilities
+                {
+                    Tools = new ToolsCapability(),
+                    Resources = new ResourcesCapability { Subscribe = false, ListChanged = false },
+                },
+                Handlers = new McpServerHandlers
+                {
+                    ListToolsHandler = (context, ct) => ValueTask.FromResult(new ListToolsResult { Tools = [] }),
+                },
+            });
+
+        await using var downstreamClient = await McpClient.CreateAsync(downstreamChannel.CreateClientTransport());
+
+        Assert.Null(downstreamClient.ServerCapabilities?.Resources);
 
         await downstreamClient.DisposeAsync();
         await session.DisposeAsync();

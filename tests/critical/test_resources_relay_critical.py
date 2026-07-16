@@ -26,9 +26,11 @@ import sys
 from pathlib import Path
 
 import pytest
+import mcp.types as types
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import get_default_environment, stdio_client
 from mcp.shared.exceptions import McpError
+from pydantic import AnyUrl
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_DIR = REPO_ROOT / "src"
@@ -74,6 +76,29 @@ async def _wait_until_stopped(session: ClientSession, timeout_seconds: float = 5
         await asyncio.sleep(0.1)
 
 
+def _resource_update_handler(queue: asyncio.Queue[str]):
+    async def handle(message) -> None:
+        if isinstance(message, types.ServerNotification) and isinstance(
+            message.root, types.ResourceUpdatedNotification
+        ):
+            queue.put_nowait(str(message.root.params.uri))
+
+    return handle
+
+
+async def _collect_updates(
+    queue: asyncio.Queue[str], expected: set[str], timeout_seconds: float
+) -> list[str]:
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    seen: list[str] = []
+    while not expected.issubset(seen):
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise AssertionError(f"Missing resource updates: {expected - set(seen)}; seen={seen}")
+        seen.append(await asyncio.wait_for(queue.get(), timeout=remaining))
+    return seen
+
+
 @pytest.mark.critical
 @pytest.mark.asyncio
 async def test_resources_exact_four_uri_contract_and_empty_templates(tmp_path: Path) -> None:
@@ -93,7 +118,7 @@ async def test_resources_exact_four_uri_contract_and_empty_templates(tmp_path: P
 
             resources_capability = init_result.capabilities.resources
             assert resources_capability is not None, "Python must advertise a resources capability"
-            assert resources_capability.subscribe is False
+            assert resources_capability.subscribe is True
             assert resources_capability.listChanged is False
 
             resources_result = await session.list_resources()
@@ -165,6 +190,143 @@ async def test_resources_threads_reads_successfully_during_a_live_debug_session(
             threads = await session.read_resource("debug://threads")  # type: ignore[arg-type]
             assert threads.contents[0].mimeType == "application/json"
             assert "Main Thread" in threads.contents[0].text
+
+            stop_result = await session.call_tool("stop_debug", {})
+            assert not stop_result.isError, stop_result
+
+
+@pytest.mark.critical
+@pytest.mark.asyncio
+async def test_resource_subscriptions_are_idempotent_and_stop_after_unsubscribe(
+    tmp_path: Path,
+) -> None:
+    """Real direct-Python proof for capability, duplicate subscribe, URI error, and unsubscribe."""
+    (tmp_path / "Probe.csproj").write_text(
+        '<Project Sdk="Microsoft.NET.Sdk"></Project>', encoding="utf-8"
+    )
+    source = tmp_path / "Program.cs"
+    source.write_text("class Program { static void Main() {} }\n", encoding="utf-8")
+    updates: asyncio.Queue[str] = asyncio.Queue()
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "netcoredbg_mcp", "--project-from-cwd"],
+        env=_backend_env(),
+        cwd=str(tmp_path),
+    )
+
+    async with stdio_client(params) as (read_stream, write_stream):
+        async with ClientSession(
+            read_stream,
+            write_stream,
+            message_handler=_resource_update_handler(updates),
+        ) as session:
+            initialized = await session.initialize()
+            assert initialized.capabilities.resources is not None
+            assert initialized.capabilities.resources.subscribe is True
+            assert initialized.capabilities.resources.listChanged is False
+
+            with pytest.raises(McpError, match="Unknown resource") as unknown:
+                await session.subscribe_resource(AnyUrl("debug://unknown"))
+            assert unknown.value.error.code == -32602
+
+            await session.subscribe_resource(AnyUrl("debug://breakpoints"))
+            await session.subscribe_resource(AnyUrl("debug://breakpoints"))
+            added = await session.call_tool(
+                "add_breakpoint",
+                {"file": str(source), "line": 1},
+            )
+            assert not added.isError, added
+            assert await asyncio.wait_for(updates.get(), timeout=5) == "debug://breakpoints"
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(updates.get(), timeout=0.3)
+
+            await session.unsubscribe_resource(AnyUrl("debug://breakpoints"))
+            removed = await session.call_tool(
+                "remove_breakpoint",
+                {"file": str(source), "line": 1},
+            )
+            assert not removed.isError, removed
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(updates.get(), timeout=0.3)
+
+
+@pytest.mark.critical
+@pytest.mark.asyncio
+async def test_live_dap_mutations_update_state_output_threads_and_termination() -> None:
+    """Real direct-Python proof for asynchronous DAP resource mutation triggers."""
+    netcoredbg = _resolve_netcoredbg()
+    if netcoredbg is None:
+        pytest.skip("netcoredbg is required for live resource updates")
+    if shutil.which("dotnet") is None:
+        pytest.skip("dotnet CLI is required to build the SmokeTestApp fixture")
+
+    build = subprocess.run(
+        ["dotnet", "build", str(SMOKE_PROJECT), "-c", "Debug"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert build.returncode == 0, build.stderr
+
+    updates: asyncio.Queue[str] = asyncio.Queue()
+    env = _backend_env()
+    env["NETCOREDBG_PATH"] = netcoredbg
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "netcoredbg_mcp", "--project-from-cwd"],
+        env=env,
+        cwd=str(REPO_ROOT),
+    )
+
+    async with stdio_client(params) as (read_stream, write_stream):
+        async with ClientSession(
+            read_stream,
+            write_stream,
+            message_handler=_resource_update_handler(updates),
+        ) as session:
+            await session.initialize()
+            for uri in ("debug://state", "debug://output", "debug://threads"):
+                await session.subscribe_resource(AnyUrl(uri))
+
+            started = await session.call_tool(
+                "start_debug",
+                {
+                    "program": str(SMOKE_DLL),
+                    "args": ["longrun"],
+                    "pre_build": False,
+                    "stop_at_entry": False,
+                },
+            )
+            assert not started.isError, started
+            seen = await _collect_updates(
+                updates,
+                {"debug://state", "debug://output", "debug://threads"},
+                timeout_seconds=10,
+            )
+            assert set(seen) >= {"debug://state", "debug://output", "debug://threads"}
+
+            await session.unsubscribe_resource(AnyUrl("debug://output"))
+            while not updates.empty():
+                updates.get_nowait()
+            deadline = asyncio.get_running_loop().time() + 0.8
+            while asyncio.get_running_loop().time() < deadline:
+                remaining = deadline - asyncio.get_running_loop().time()
+                try:
+                    uri = await asyncio.wait_for(updates.get(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    break
+                assert uri != "debug://output"
+
+            terminal_deadline = asyncio.get_running_loop().time() + 10
+            while True:
+                state = await session.read_resource("debug://state")  # type: ignore[arg-type]
+                payload = json.loads(state.contents[0].text)
+                if payload.get("execState") == "terminated":
+                    break
+                if asyncio.get_running_loop().time() >= terminal_deadline:
+                    raise AssertionError(f"debuggee did not terminate in time: {payload}")
+                await asyncio.sleep(0.1)
 
             stop_result = await session.call_tool("stop_debug", {})
             assert not stop_result.isError, stop_result
