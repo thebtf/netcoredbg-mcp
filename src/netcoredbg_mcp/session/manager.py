@@ -81,6 +81,11 @@ MAX_OUTPUT_ENTRY = int(
 )  # 100KB default
 
 
+BreakpointResourceSnapshot = tuple[
+    tuple[str, int, int | None, str | None, bool], ...
+]
+
+
 class _ResourceOutputBuffer(deque[OutputEntry]):
     """Output deque that reports externally visible clears through its owner."""
 
@@ -627,6 +632,20 @@ class SessionManager:
     def resource_update_revision(self, uri: str) -> int:
         """Return the monotonic mutation revision for one public resource."""
         return self._resource_update_revisions.get(uri, 0)
+
+    def _breakpoint_resource_snapshot(self) -> BreakpointResourceSnapshot:
+        """Capture exactly the fields serialized by debug://breakpoints."""
+        return tuple(
+            (file_path, bp.line, bp.dap_line, bp.condition, bp.verified)
+            for file_path, breakpoints in sorted(self._breakpoints.get_all().items())
+            for bp in breakpoints
+        )
+
+    def _publish_breakpoints_if_changed(
+        self, before: BreakpointResourceSnapshot
+    ) -> None:
+        if before != self._breakpoint_resource_snapshot():
+            self._publish_resource_updates(BREAKPOINTS_URI)
 
     def _publish_resource_updates(self, *uris: str) -> None:
         ordered_uris = tuple(dict.fromkeys(uris))
@@ -1707,10 +1726,14 @@ class SessionManager:
             )
 
     async def _sync_all_breakpoints(self) -> None:
-        """Sync all breakpoints to DAP."""
-        for file_path in self._breakpoints.get_files():
-            await self._sync_file_breakpoints(file_path)
-        await self._sync_function_breakpoints()
+        """Sync all breakpoints to DAP and publish one visible line-breakpoint change."""
+        before = self._breakpoint_resource_snapshot()
+        try:
+            for file_path in self._breakpoints.get_files():
+                await self._sync_file_breakpoints(file_path)
+            await self._sync_function_breakpoints()
+        finally:
+            self._publish_breakpoints_if_changed(before)
 
     async def _sync_function_breakpoints(self) -> DAPResponse | None:
         """Sync function breakpoints to DAP.
@@ -1770,60 +1793,72 @@ class SessionManager:
         hit_condition: str | None = None,
     ) -> Breakpoint:
         """Add a breakpoint."""
-        bp = Breakpoint(
-            file=file,
-            line=line,
-            condition=condition,
-            hit_condition=hit_condition,
-        )
-        self._breakpoints.add(bp)
+        before = self._breakpoint_resource_snapshot()
+        try:
+            bp = Breakpoint(
+                file=file,
+                line=line,
+                condition=condition,
+                hit_condition=hit_condition,
+            )
+            self._breakpoints.add(bp)
 
-        if self.is_active:
-            await self._sync_file_breakpoints(file)
+            if self.is_active:
+                await self._sync_file_breakpoints(file)
 
-        return bp
+            return bp
+        finally:
+            self._publish_breakpoints_if_changed(before)
 
     async def remove_breakpoint(self, file: str, line: int) -> bool:
         """Remove a breakpoint."""
-        removed = self._breakpoints.remove(file, line)
-        if removed and self.is_active:
-            await self._sync_file_breakpoints(file)
-        return removed
+        before = self._breakpoint_resource_snapshot()
+        try:
+            removed = self._breakpoints.remove(file, line)
+            if removed and self.is_active:
+                await self._sync_file_breakpoints(file)
+            return removed
+        finally:
+            self._publish_breakpoints_if_changed(before)
 
     async def clear_breakpoints(self, file: str | None = None) -> int:
         """Clear breakpoints. Without file, also clears function breakpoints."""
-        if file:
-            files = [file]
-        else:
-            files = self._breakpoints.get_files()
+        before = self._breakpoint_resource_snapshot()
+        try:
+            if file:
+                files = [file]
+            else:
+                files = self._breakpoints.get_files()
 
-        count = self._breakpoints.clear(file)
+            count = self._breakpoints.clear(file)
 
-        if self.is_active:
-            for f in files:
-                await self._client.set_breakpoints(f, [])
+            if self.is_active:
+                for f in files:
+                    await self._client.set_breakpoints(f, [])
 
-        # Without file filter, also drop function breakpoints — they're not
-        # file-scoped and otherwise persist invisibly across restart cycles.
-        if not file:
-            existing_function_breakpoints = self._breakpoints.get_function_breakpoints()
-            fbp_count = len(existing_function_breakpoints)
-            if fbp_count > 0:
-                self._breakpoints.clear_function_breakpoints()
-                if self.is_active:
-                    try:
-                        response = await self._sync_function_breakpoints()
-                        if response is not None and not response.success:
-                            raise RuntimeError(
-                                response.message or "setFunctionBreakpoints failed"
-                            )
-                    except Exception:
-                        for bp in existing_function_breakpoints:
-                            self._breakpoints.add_function_breakpoint(bp)
-                        raise
-                count += fbp_count
+            # Without file filter, also drop function breakpoints — they're not
+            # file-scoped and otherwise persist invisibly across restart cycles.
+            if not file:
+                existing_function_breakpoints = self._breakpoints.get_function_breakpoints()
+                fbp_count = len(existing_function_breakpoints)
+                if fbp_count > 0:
+                    self._breakpoints.clear_function_breakpoints()
+                    if self.is_active:
+                        try:
+                            response = await self._sync_function_breakpoints()
+                            if response is not None and not response.success:
+                                raise RuntimeError(
+                                    response.message or "setFunctionBreakpoints failed"
+                                )
+                        except Exception:
+                            for bp in existing_function_breakpoints:
+                                self._breakpoints.add_function_breakpoint(bp)
+                            raise
+                    count += fbp_count
 
-        return count
+            return count
+        finally:
+            self._publish_breakpoints_if_changed(before)
 
     async def add_function_breakpoint(
         self, name: str, condition: str | None = None, hit_condition: str | None = None

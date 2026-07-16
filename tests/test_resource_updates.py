@@ -142,6 +142,136 @@ async def test_session_manager_publishes_async_dap_resource_mutations() -> None:
 
 
 @pytest.mark.asyncio
+async def test_line_breakpoint_mutations_publish_one_final_resource_snapshot() -> None:
+    with patch("netcoredbg_mcp.session.manager.DAPClient"):
+        from netcoredbg_mcp.session import SessionManager
+
+        manager = SessionManager()
+
+    published: list[tuple[str, ...]] = []
+
+    async def record(uris: tuple[str, ...]) -> None:
+        published.append(uris)
+
+    async def sync_file(_file: str, breakpoints: list[dict]) -> SimpleNamespace:
+        return SimpleNamespace(
+            success=True,
+            body={
+                "breakpoints": [
+                    {
+                        "id": index,
+                        "verified": True,
+                        "line": breakpoint["line"] + 2,
+                    }
+                    for index, breakpoint in enumerate(breakpoints, start=1)
+                ]
+            },
+        )
+
+    async def flush_updates() -> None:
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    manager.set_resource_update_callback(record)
+    manager.state.state = DebugState.RUNNING
+    manager._client.set_breakpoints = AsyncMock(side_effect=sync_file)
+
+    await manager.add_breakpoint("test.cs", 10)
+    await flush_updates()
+    assert published == [(BREAKPOINTS_URI,)]
+    breakpoint = manager.breakpoints.get_for_file("test.cs")[0]
+    assert (breakpoint.line, breakpoint.dap_line, breakpoint.condition, breakpoint.verified) == (
+        10,
+        12,
+        None,
+        True,
+    )
+    assert manager.resource_update_revision(BREAKPOINTS_URI) == 1
+
+    published.clear()
+    await manager.add_breakpoint("test.cs", 10)
+    assert await manager.remove_breakpoint("test.cs", 999) is False
+    await flush_updates()
+    assert published == []
+    assert manager.resource_update_revision(BREAKPOINTS_URI) == 1
+
+    await manager.add_breakpoint("test.cs", 10, condition="i > 0")
+    await flush_updates()
+    assert published == [(BREAKPOINTS_URI,)]
+    assert manager.resource_update_revision(BREAKPOINTS_URI) == 2
+
+    published.clear()
+
+    assert await manager.remove_breakpoint("test.cs", 10) is True
+    await flush_updates()
+    assert published == [(BREAKPOINTS_URI,)]
+    assert manager.resource_update_revision(BREAKPOINTS_URI) == 3
+
+    published.clear()
+    await manager.add_breakpoint("test.cs", 10)
+    await manager.add_breakpoint("test.cs", 20, condition="i > 0")
+    await flush_updates()
+    published.clear()
+    assert await manager.clear_breakpoints("test.cs") == 2
+    await flush_updates()
+    assert published == [(BREAKPOINTS_URI,)]
+    assert manager.resource_update_revision(BREAKPOINTS_URI) == 6
+
+
+@pytest.mark.asyncio
+async def test_sync_all_publishes_visible_line_changes_but_not_function_or_id_only_changes() -> None:
+    with patch("netcoredbg_mcp.session.manager.DAPClient"):
+        from netcoredbg_mcp.session import SessionManager
+
+        manager = SessionManager()
+
+    published: list[tuple[str, ...]] = []
+
+    async def record(uris: tuple[str, ...]) -> None:
+        published.append(uris)
+
+    response_id = 42
+
+    async def sync_file(_file: str, _breakpoints: list[dict]) -> SimpleNamespace:
+        return SimpleNamespace(
+            success=True,
+            body={
+                "breakpoints": [
+                    {"id": response_id, "verified": True, "line": 12}
+                ]
+            },
+        )
+
+    async def flush_updates() -> None:
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    manager.set_resource_update_callback(record)
+    manager._client.capabilities = {}
+    manager._client.set_breakpoints = AsyncMock(side_effect=sync_file)
+    manager.breakpoints.add(Breakpoint(file="test.cs", line=10))
+
+    await manager._sync_all_breakpoints()
+    await flush_updates()
+    assert published == [(BREAKPOINTS_URI,)]
+    assert manager.resource_update_revision(BREAKPOINTS_URI) == 1
+
+    published.clear()
+    response_id = 99
+    await manager._sync_all_breakpoints()
+    await flush_updates()
+    assert published == []
+    assert manager.breakpoints.get_for_file("test.cs")[0].id == 99
+    assert manager.resource_update_revision(BREAKPOINTS_URI) == 1
+
+    before = manager._breakpoint_resource_snapshot()
+    await manager.add_function_breakpoint("Program.Main")
+    await flush_updates()
+    assert manager._breakpoint_resource_snapshot() == before
+    assert published == []
+
+
+@pytest.mark.asyncio
 async def test_session_manager_publishes_every_serialized_state_mutation() -> None:
     with patch("netcoredbg_mcp.session.manager.DAPClient"):
         from netcoredbg_mcp.session import SessionManager
