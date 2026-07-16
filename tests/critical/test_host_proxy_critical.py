@@ -87,10 +87,11 @@ def require_section10_progress_prerequisites(
     """Fail closed for mandatory progress coverage when prerequisites are missing.
 
     Section 10 progress is a release-critical proof, not optional soft coverage.
-    Missing NETCOREDBG_PATH, a missing netcoredbg binary, a missing dotnet CLI, or
-    a missing SmokeTestApp DLL must report non-proof rather than silently omit the
-    gate. Callers that build the fixture still assert the build succeeded before
-    invoking progress tools.
+    Environment and tool prerequisites are checked here before any fixture build:
+    missing NETCOREDBG_PATH, a missing netcoredbg binary, or a missing dotnet CLI
+    must report non-proof rather than silently omit the gate. The SmokeTestApp DLL
+    is not required to exist yet; callers that build the fixture enforce it via a
+    hard post-build assertion before invoking progress tools.
     """
     path = netcoredbg_path if netcoredbg_path is not None else os.environ.get("NETCOREDBG_PATH")
     if not path:
