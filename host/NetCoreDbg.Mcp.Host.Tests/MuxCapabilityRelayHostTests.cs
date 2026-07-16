@@ -9,27 +9,18 @@ using Xunit;
 namespace NetCoreDbg.Mcp.Host.Tests;
 
 /// <summary>
-/// FD-007: proves <see cref="MuxCapabilityRelay"/>'s allowlisted projection "through the
-/// host" - a real downstream <see cref="McpClient"/> reading a real
-/// <c>initialize</c> response produced by the genuine SDK/relay machinery, over an
-/// in-memory <see cref="DuplexChannel"/>, paired with a real (not mocked)
-/// <see cref="FakePythonServer"/> whose advertised <c>experimental</c> capability is
-/// toggled per fixture.
+/// FD-007: proves <see cref="MuxCapabilityRelay"/>'s allowlisted projection through the
+/// host via production <see cref="RelayComposition.Build"/> - a real downstream
+/// <see cref="McpClient"/> reading a real <c>initialize</c> response produced by the
+/// genuine SDK/relay machinery, over an in-memory <see cref="DuplexChannel"/>, paired
+/// with a real (not mocked) <see cref="FakePythonServer"/> whose advertised
+/// <c>experimental</c> capability is toggled per fixture.
 ///
 /// <para>
-/// <see cref="RelayComposition.Build"/> itself is integration-owned and still hardcodes the
-/// unconditional <c>x-mux</c> capability (see <c>MuxCapabilityRelay.cs</c>'s remarks for the
-/// exact two-line integration change). Editing that file is out of FD-007's scope, so
-/// <see cref="BuildWithMuxProjection"/> below is a deliberate, narrowly-scoped duplicate of
-/// <c>RelayComposition.Build</c>'s method body: every building block it calls
-/// (<see cref="RelayRouteCatalog"/>, <see cref="ProgressLoggingRelay.ConfigureFilters"/>,
-/// <see cref="RelaySession.CreateBootstrapFilter"/>, <see cref="ToolsRelay.Register"/>) is the
-/// unedited production code; the only difference from <c>RelayComposition.Build</c> is that
-/// the upfront <c>Experimental</c> capability is omitted and
-/// <see cref="MuxCapabilityRelay.RegisterCapabilityProjectionFilter"/> is registered instead -
-/// exactly the integration change this module documents. Once the integrator applies that
-/// change to <c>RelayComposition.Build</c>, this duplicate is deleted and these tests may
-/// call <c>RelayComposition.Build</c> directly.
+/// These tests call <see cref="RelayComposition.Build"/> directly. That production path
+/// already registers <see cref="MuxCapabilityRelay.RegisterCapabilityProjectionFilter"/>
+/// (and omits any hardcoded upfront <c>Experimental</c> value), so no parallel test-only
+/// composition helper is required.
 /// </para>
 /// </summary>
 public sealed class MuxCapabilityRelayHostTests

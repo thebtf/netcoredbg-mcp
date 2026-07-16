@@ -17,30 +17,22 @@ namespace NetCoreDbg.Mcp.Host;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Integration note (parent/integrator-owned; not applied by this module):</b>
-/// <c>RelayComposition.Build</c> currently sets <c>options.Capabilities.Experimental</c>
-/// unconditionally to a fixed <c>{"x-mux":{"sharing":"isolated"}}</c> dictionary, before
-/// Python is ever contacted. Replacing that with this allowlisted, upstream-capability-aware
-/// projection requires exactly two changes inside <c>RelayComposition.Build</c>'s
-/// <c>AddMcpServer</c> options callback:
+/// <b>Production registration:</b> <see cref="RelayComposition.Build"/> registers this
+/// allowlisted projection in its <c>AddMcpServer</c> options callback by calling
+/// <c>MuxCapabilityRelay.RegisterCapabilityProjectionFilter(options.Filters, session)</c>
+/// alongside <see cref="ProgressLoggingRelay.ConfigureFilters"/>. The upfront
+/// <see cref="ServerCapabilities"/> initializer deliberately omits any
+/// <c>Experimental</c> value; the outgoing filter is the sole source of downstream
+/// <c>experimental.x-mux</c> advertising.
 /// </para>
-/// <list type="number">
-/// <item>Delete the <c>Experimental = ...</c> assignment (or simply omit it) from the
-/// <c>options.Capabilities = new ServerCapabilities { ... }</c> initializer, so the SDK's
-/// upfront (pre-handshake) capabilities carry no <c>x-mux</c> value.</item>
-/// <item>Add one call alongside the existing
-/// <c>ProgressLoggingRelay.ConfigureFilters(...)</c> line:
-/// <c>MuxCapabilityRelay.RegisterCapabilityProjectionFilter(options.Filters, session);</c></item>
-/// </list>
 /// <para>
-/// No other production file changes: <c>Program.cs</c>, <c>RelaySession.cs</c>,
-/// <c>RelayRouteCatalog.cs</c>, and <c>ToolsRelay.cs</c> are untouched. The projection must run
-/// as an <em>outgoing</em> filter (not an upfront capability value) because Python's actual
-/// capabilities are only known after the paired-session bootstrap handshake completes, which
-/// happens inside the incoming bootstrap filter <em>before</em> the SDK's own <c>initialize</c>
-/// handler serializes the response this outgoing filter rewrites - the same reason
-/// <see cref="ProgressLoggingRelay.ConfigureFilters"/> also rewrites the serialized
-/// response instead of the upfront <see cref="ServerCapabilities"/> value.
+/// The projection must run as an <em>outgoing</em> filter (not an upfront capability value)
+/// because Python's actual capabilities are only known after the paired-session bootstrap
+/// handshake completes, which happens inside the incoming bootstrap filter <em>before</em>
+/// the SDK's own <c>initialize</c> handler serializes the response this outgoing filter
+/// rewrites - the same reason <see cref="ProgressLoggingRelay.ConfigureFilters"/> also
+/// rewrites the serialized response instead of the upfront <see cref="ServerCapabilities"/>
+/// value.
 /// </para>
 /// </remarks>
 internal static class MuxCapabilityRelay

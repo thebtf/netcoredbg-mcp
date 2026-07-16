@@ -13,8 +13,11 @@ child over stdio through the official ``mcp`` client SDK -- the same technique
 already proven by ``tests/test_host_proxy.py`` -- not direct Python tool
 registration or source-text assertions. Later front-door proxied surfaces
 extend this same file rather than inventing a second release-only smoke path.
-The ``host_dll`` fixture is reused unchanged from ``tests/test_host_proxy.py``
-via ``tests/critical/conftest.py``.
+Non-mandatory host-roundtrip tests reuse the ``host_dll`` fixture from
+``tests/test_host_proxy.py`` via ``tests/critical/conftest.py``. The mandatory
+Section 10 front-door gate validates prerequisites first, then builds the host
+via ``_ensure_release_host_dll`` so a missing ``dotnet`` fails closed instead of
+being skipped at collection time.
 """
 
 from __future__ import annotations
@@ -40,6 +43,8 @@ from tests.test_host_proxy import (
     EXPECTED_TOOL_COUNT,
     FIND_SYMBOL_EXPECTED_RESULT,
     FIND_SYMBOL_NAME,
+    HOST_DLL,
+    HOST_PROJECT,
     MINIMAL_PLAN,
     SEARCH_FIXTURE_ROOT,
     UNKNOWN_TOOL_NAME,
@@ -48,12 +53,62 @@ from tests.test_host_proxy import (
     _tool_payload,
 )
 
-pytestmark = pytest.mark.skipif(
+# No module-wide pytestmark skipif for missing dotnet. Section 10
+# (test_host_proxy_critical_front_door_surfaces) is a mandatory release gate and
+# must execute + fail closed via require_section10_progress_prerequisites when
+# dotnet is absent. Soft collection-time skips are scoped only to non-mandatory
+# host-roundtrip tests that cannot produce that fail-closed proof.
+
+_REQUIRES_DOTNET = pytest.mark.skipif(
     shutil.which("dotnet") is None,
     reason="dotnet CLI is required to build/run the .NET MCP compatibility host",
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _ensure_release_host_dll() -> Path:
+    """Build the Release host after Section 10 prerequisites have already passed.
+
+    Kept as a plain function (not a fixture) so the mandatory front-door gate can
+    validate tools first and only then build - fixture setup would otherwise race
+    ahead of the fail-closed helper when ``dotnet`` is missing.
+    """
+    result = subprocess.run(
+        ["dotnet", "build", str(HOST_PROJECT), "-c", "Release"],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"dotnet build failed for {HOST_PROJECT}:\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert HOST_DLL.exists(), f"dotnet build did not produce {HOST_DLL}"
+    return HOST_DLL
+
+
+def _path_without_dotnet() -> str:
+    """Return a PATH that still runs this Python but cannot resolve ``dotnet``."""
+    kept: list[str] = []
+    python_dir = str(Path(sys.executable).resolve().parent)
+    if python_dir not in kept:
+        kept.append(python_dir)
+    # Preserve essential Windows system dirs so the nested interpreter can start.
+    if os.name == "nt":
+        system_root = os.environ.get("SystemRoot", r"C:\Windows")
+        for entry in (str(Path(system_root) / "System32"), system_root):
+            if entry not in kept:
+                kept.append(entry)
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry or entry in kept:
+            continue
+        dotnet_name = "dotnet.exe" if os.name == "nt" else "dotnet"
+        if (Path(entry) / dotnet_name).is_file():
+            continue
+        kept.append(entry)
+    return os.pathsep.join(kept)
 # Stable, read-only tool used by the original Q0 critical smoke and reused here.
 PARITY_TOOL_NAME = "runtime_smoke_validate_plan"
 EXPECTED_PROMPT_NAMES = [
@@ -145,6 +200,7 @@ def _client_session_supports_list_roots() -> bool:
     return "list_roots_callback" in inspect.signature(ClientSession.__init__).parameters
 
 
+@_REQUIRES_DOTNET
 @pytest.mark.critical
 @pytest.mark.asyncio
 async def test_host_proxy_critical_initialize_list_call(
@@ -200,6 +256,7 @@ async def test_host_proxy_critical_initialize_list_call(
     )
 
 
+@_REQUIRES_DOTNET
 @pytest.mark.critical
 def test_host_proxy_critical_fails_when_python_backend_is_missing(
     tmp_path: Path,
@@ -243,15 +300,115 @@ def test_section10_progress_prerequisites_fail_closed(monkeypatch: pytest.Monkey
 
 
 @pytest.mark.critical
+def test_section10_gate_has_no_module_wide_dotnet_skip() -> None:
+    """@critical category: behavioral - module-wide skipif must not hide Section 10.
+
+    A collection-time ``pytestmark = pytest.mark.skipif(...dotnet...)`` would skip
+    ``test_host_proxy_critical_front_door_surfaces`` (and the fail-closed helper
+    regression) before any body runs, turning missing-dotnet into exit 0. Guard the
+    source shape so that regression cannot re-enter silently.
+    """
+    import ast
+
+    source = Path(__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id == "pytestmark":
+                raise AssertionError(
+                    "tests/critical/test_host_proxy_critical.py must not assign module-wide "
+                    "pytestmark (especially a skipif on missing dotnet): that hides the "
+                    "mandatory Section 10 front-door gate behind a collection-time skip. "
+                    "Scope soft skips to individual non-mandatory host-roundtrip tests only."
+                )
+
+
+@pytest.mark.critical
+def test_section10_front_door_fails_closed_when_dotnet_absent_from_path() -> None:
+    """@critical category: behavioral - bounded PATH probe: missing dotnet is FAILURE.
+
+    Spawns a nested pytest on the mandatory front-door gate with PATH stripped of
+    directories that contain ``dotnet``. The nested run must exit non-zero with a
+    failure (not a skip) and surface the fail-closed prerequisite message. This
+    catches both a reintroduced module-wide skipif and a gate that no longer
+    calls ``require_section10_progress_prerequisites``.
+    """
+    env = os.environ.copy()
+    # Satisfy the NETCOREDBG_PATH file check so the nested gate fails on missing
+    # *dotnet*, not on an unset debugger path.
+    env["NETCOREDBG_PATH"] = str(Path(__file__).resolve())
+    env["PATH"] = _path_without_dotnet()
+    # Drop vars that could short-circuit discovery of a system-wide dotnet.
+    env.pop("DOTNET_ROOT", None)
+    env.pop("DOTNET_HOST_PATH", None)
+    env.pop("DOTNET_MULTILEVEL_LOOKUP", None)
+
+    # Sanity: the constructed PATH must not resolve dotnet for this process either.
+    assert shutil.which("dotnet", path=env["PATH"]) is None, (
+        "PATH scrubber failed to hide dotnet; probe would be invalid"
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            f"{Path(__file__).as_posix()}::test_host_proxy_critical_front_door_surfaces",
+            "-q",
+            "--tb=short",
+            "-p",
+            "no:cacheprovider",
+        ],
+        cwd=str(REPO_ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    combined = f"{result.stdout}\n{result.stderr}"
+    assert result.returncode != 0, (
+        "mandatory Section 10 front-door gate must exit non-zero when dotnet is absent "
+        f"from PATH; got returncode={result.returncode}\n{combined}"
+    )
+    assert "dotnet CLI is required" in combined, (
+        "expected fail-closed prerequisite assertion about missing dotnet CLI, got:\n"
+        f"{combined}"
+    )
+    # Soft-skips report as "1 skipped" and often exit 0; a reintroduced module-wide
+    # skipif must not be mistaken for a failing gate.
+    assert "1 skipped" not in combined, (
+        "missing-dotnet must not soft-skip the mandatory front-door gate:\n"
+        f"{combined}"
+    )
+    assert "1 failed" in combined or "FAILED" in combined, (
+        "expected a hard pytest failure for missing dotnet, got:\n"
+        f"{combined}"
+    )
+
+
+@pytest.mark.critical
 @pytest.mark.asyncio
 async def test_host_proxy_critical_front_door_surfaces(
     tmp_path: Path,
-    host_dll: Path,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
     """@critical category: behavioral - real Release host covers accepted front-door
     surfaces without a parallel smoke path or full per-module matrix.
+
+    Intentionally does not depend on the ``host_dll`` fixture: that fixture builds via
+    ``dotnet`` at setup time, which would error before the fail-closed prerequisite
+    helper could report missing tools as non-proof. Prerequisites are validated first;
+    only then is the host built.
     """
+    # Fail closed up front: progress Section 10 is mandatory, not optional soft coverage.
+    # Must run before any host build so a missing dotnet/NETCOREDBG_PATH is AssertionError
+    # non-proof rather than a fixture/collection skip.
+    netcoredbg, smoke_dll = require_section10_progress_prerequisites()
+    host_dll = _ensure_release_host_dll()
+
     marker_source = tmp_path / "Program.cs"
     marker_source.write_text(
         "class Program { static void Main() { } }\n",
@@ -264,8 +421,6 @@ async def test_host_proxy_critical_front_door_surfaces(
 
     env = _backend_env()
     env["NETCOREDBG_MCP_PYTHON_EXECUTABLE"] = sys.executable
-    # Fail closed up front: progress Section 10 is mandatory, not optional soft coverage.
-    netcoredbg, smoke_dll = require_section10_progress_prerequisites()
     env["NETCOREDBG_PATH"] = netcoredbg
 
     notification_methods: list[str] = []
