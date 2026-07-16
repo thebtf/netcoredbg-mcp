@@ -78,7 +78,6 @@ internal static class ResourceUpdatesRelay
         private readonly Dictionary<string, PendingUri> _pendingByUri =
             new(StringComparer.Ordinal);
         private readonly ConditionalWeakTable<JsonRpcNotification, ReceiveStamp> _receiveStamps = new();
-        private readonly System.Collections.Concurrent.ConcurrentQueue<string> _forwardedMarkers = new();
         private Task _drainTask = Task.CompletedTask;
         private long _nextReceivedSequence;
         private int _forwardAttempts;
@@ -131,9 +130,6 @@ internal static class ResourceUpdatesRelay
 
         /// <summary>How many pending entries the drain has taken for forward (test surface).</summary>
         internal int ForwardAttempts => Volatile.Read(ref _forwardAttempts);
-
-        /// <summary>Markers observed on drain-selected payloads (test surface).</summary>
-        internal System.Collections.Concurrent.ConcurrentQueue<string> ForwardedMarkers => _forwardedMarkers;
 
         public IClientTransport WrapTransport(IClientTransport transport) =>
             new SequencedClientTransport(transport, StampReceivedMessage);
@@ -388,14 +384,6 @@ internal static class ResourceUpdatesRelay
                     {
                         // Current callback cancelled: suppress send, continue to next head.
                         skipCancelled = true;
-                    }
-                    else
-                    {
-                        var marker = pending.Notification.Params?["_meta"]?["marker"]?.GetValue<string>();
-                        if (marker is not null)
-                        {
-                            _forwardedMarkers.Enqueue(marker);
-                        }
                     }
                 }
 

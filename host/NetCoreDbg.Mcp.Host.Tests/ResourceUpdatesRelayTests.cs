@@ -440,9 +440,9 @@ public sealed class ResourceUpdatesRelayTests
         Assert.Equal(3, orderedUpstream.ForwardAttempts);
         Assert.Equal(0, orderedUpstream.RetainedBackpressureObjectCount);
         // Newest same-URI marker must be the one selected for forward (sequence-aware latest).
-        Assert.Contains("1000", orderedUpstream.ForwardedMarkers);
-        Assert.Contains("held", orderedUpstream.ForwardedMarkers);
-        Assert.Contains("bp", orderedUpstream.ForwardedMarkers);
+        Assert.Contains("1000", receivedMarkers);
+        Assert.Contains("held", receivedMarkers);
+        Assert.Contains("bp", receivedMarkers);
         Assert.True(
             orderedUpstream.ForwardAttempts <= 3,
             $"expected coalesced drain forwards, got {orderedUpstream.ForwardAttempts}");
@@ -466,6 +466,9 @@ public sealed class ResourceUpdatesRelayTests
         var (session, upstream, downstream) = BuildSession();
         await using var fakePython = FakePythonServer.Start(upstream, SubscribablePythonOptions());
         var receivedMarkers = new ConcurrentQueue<string>();
+        var expectedMarkers = new HashSet<string>(StringComparer.Ordinal) { "hold", "newest" };
+        var allExpectedReceived = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
 
         await using var client = await McpClient.CreateAsync(
             downstream.CreateClientTransport(),
@@ -481,6 +484,10 @@ public sealed class ResourceUpdatesRelayTests
                             if (marker is not null)
                             {
                                 receivedMarkers.Enqueue(marker);
+                                if (expectedMarkers.IsSubsetOf(receivedMarkers))
+                                {
+                                    allExpectedReceived.TrySetResult();
+                                }
                             }
                             return ValueTask.CompletedTask;
                         }),
@@ -523,15 +530,16 @@ public sealed class ResourceUpdatesRelayTests
         await callback(heldOther, CancellationToken.None);
         await orderedUpstream.WaitForDrainAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
         await WaitForAsync(() => orderedUpstream.ForwardAttempts >= 2, TimeSpan.FromSeconds(10));
+        await allExpectedReceived.Task.WaitAsync(TimeSpan.FromSeconds(10));
 
-        Assert.Contains("hold", orderedUpstream.ForwardedMarkers);
-        Assert.Contains("newest", orderedUpstream.ForwardedMarkers);
-        Assert.DoesNotContain("older", orderedUpstream.ForwardedMarkers);
-        Assert.DoesNotContain("cancelled-late", orderedUpstream.ForwardedMarkers);
+        Assert.Contains("hold", receivedMarkers);
+        Assert.Contains("newest", receivedMarkers);
+        Assert.DoesNotContain("older", receivedMarkers);
+        Assert.DoesNotContain("cancelled-late", receivedMarkers);
         // Only the newest state marker is selected for debug://state.
         Assert.Equal(
             1,
-            orderedUpstream.ForwardedMarkers.Count(m => m is "older" or "newest" or "cancelled-late"));
+            receivedMarkers.Count(m => m is "older" or "newest" or "cancelled-late"));
 
         await client.DisposeAsync();
         await session.DisposeAsync();
@@ -600,6 +608,8 @@ public sealed class ResourceUpdatesRelayTests
         await using var fakePython = FakePythonServer.Start(upstream, SubscribablePythonOptions());
         var received = new ConcurrentQueue<string>();
         var receivedMarkers = new ConcurrentQueue<string>();
+        var allMarkersReceived = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
 
         await using var client = await McpClient.CreateAsync(
             downstream.CreateClientTransport(),
@@ -616,6 +626,10 @@ public sealed class ResourceUpdatesRelayTests
                             if (marker is not null)
                             {
                                 receivedMarkers.Enqueue(marker);
+                                if (receivedMarkers.Count >= ResourceUpdatesRelay.MaxPendingUris)
+                                {
+                                    allMarkersReceived.TrySetResult();
+                                }
                             }
                             return ValueTask.CompletedTask;
                         }),
@@ -664,16 +678,17 @@ public sealed class ResourceUpdatesRelayTests
             () => orderedUpstream.PendingUriCount == 0
                 && orderedUpstream.ForwardAttempts >= ResourceUpdatesRelay.MaxPendingUris,
             TimeSpan.FromSeconds(15));
+        await allMarkersReceived.Task.WaitAsync(TimeSpan.FromSeconds(15));
 
         Assert.Equal(0, orderedUpstream.PendingUriCount);
         Assert.Equal(ResourceUpdatesRelay.MaxPendingUris, orderedUpstream.ForwardAttempts);
-        Assert.Contains("held", orderedUpstream.ForwardedMarkers);
-        Assert.Contains("progress-after-overflow", orderedUpstream.ForwardedMarkers);
-        Assert.DoesNotContain("overflow", orderedUpstream.ForwardedMarkers);
+        Assert.Contains("held", receivedMarkers);
+        Assert.Contains("progress-after-overflow", receivedMarkers);
+        Assert.DoesNotContain("overflow", receivedMarkers);
         // Bound rejection must not strand the full drain (held + MaxPendingUris-1 accepted URIs).
         Assert.Equal(
             ResourceUpdatesRelay.MaxPendingUris,
-            orderedUpstream.ForwardedMarkers.Count);
+            receivedMarkers.Count);
 
         await client.DisposeAsync();
         await session.DisposeAsync();

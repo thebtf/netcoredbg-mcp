@@ -29,6 +29,8 @@ public sealed class ProductionCompositionTests
 
     private sealed class EventLog
     {
+        private readonly object _gate = new();
+        private readonly List<(HashSet<string> Pending, TaskCompletionSource Signal)> _watchers = [];
         private int _sequence;
 
         public ConcurrentQueue<(int Sequence, string Label)> Events { get; } = new();
@@ -37,7 +39,48 @@ public sealed class ProductionCompositionTests
         {
             var sequence = Interlocked.Increment(ref _sequence);
             Events.Enqueue((sequence, label));
+
+            lock (_gate)
+            {
+                for (var i = _watchers.Count - 1; i >= 0; i--)
+                {
+                    var (pending, signal) = _watchers[i];
+                    pending.Remove(label);
+                    if (pending.Count == 0)
+                    {
+                        signal.TrySetResult();
+                        _watchers.RemoveAt(i);
+                    }
+                }
+            }
+
             return sequence;
+        }
+
+        /// <summary>
+        /// Signals once every label in <paramref name="labels"/> has been recorded (including
+        /// labels recorded before this call), so callers can deterministically wait for
+        /// specific downstream-observed events instead of racing the async resource-update
+        /// drain against a bare tool-call response or <c>WaitForDrainAsync</c>.
+        /// </summary>
+        public Task WaitForLabelsAsync(params string[] labels)
+        {
+            lock (_gate)
+            {
+                var pending = new HashSet<string>(labels, StringComparer.Ordinal);
+                pending.ExceptWith(Events.Select(e => e.Label));
+                var signal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                if (pending.Count == 0)
+                {
+                    signal.TrySetResult();
+                }
+                else
+                {
+                    _watchers.Add((pending, signal));
+                }
+
+                return signal.Task;
+            }
         }
     }
 
@@ -662,6 +705,7 @@ public sealed class ProductionCompositionTests
         // Composition must therefore prove both pipelines on one real call without forcing
         // a false cross-pipeline total order that the two independent pumps do not claim.
         var log = new EventLog();
+        var resourcesObserved = log.WaitForLabelsAsync($"resource|{StateUri}", $"resource|{BreakpointsUri}");
         await using var fixture = await ComposedFixture.StartAsync(
             startFakePython: channel => StartFrontDoorFakePython(
                 channel,
@@ -673,6 +717,7 @@ public sealed class ProductionCompositionTests
 
         var result = await fixture.DownstreamClient.CallToolAsync(ProbeCall("token-order"));
         Assert.True(result.IsError is null or false);
+        await resourcesObserved.WaitAsync(TimeSpan.FromSeconds(10));
 
         var labels = log.Events.OrderBy(e => e.Sequence).Select(e => e.Label).ToArray();
         Assert.Contains("request|token-order", labels);
