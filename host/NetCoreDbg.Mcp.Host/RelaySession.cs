@@ -23,6 +23,7 @@ internal sealed class RelaySession : IAsyncDisposable
     private readonly Func<IClientTransport> _createUpstreamTransport;
     private readonly IReadOnlyList<Func<ServerCapabilities?, string?>> _requiredUpstreamCapabilityChecks;
     private readonly Action<McpClientHandlers>? _configureUpstreamHandlers;
+    private readonly Func<ValueTask>? _awaitUpstreamHandlerDrain;
     private readonly CancellationTokenSource _sessionEndingCts = new();
     private readonly TaskCompletionSource<Task<McpClient>> _upstreamStarted =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -51,14 +52,21 @@ internal sealed class RelaySession : IAsyncDisposable
     /// ever reaches production composition. Only test-only fixtures and (later) accepted
     /// FD-001/FD-002 modules supply this.
     /// </param>
+    /// <param name="awaitUpstreamHandlerDrain">
+    /// Optional terminal hook for a reverse-route module that owns asynchronous callback
+    /// work. It runs after SessionEndingToken is cancelled and before the upstream client
+    /// and transport are disposed.
+    /// </param>
     public RelaySession(
         Func<IClientTransport> createUpstreamTransport,
         IReadOnlyList<Func<ServerCapabilities?, string?>> requiredUpstreamCapabilityChecks,
-        Action<McpClientHandlers>? configureUpstreamHandlers = null)
+        Action<McpClientHandlers>? configureUpstreamHandlers = null,
+        Func<ValueTask>? awaitUpstreamHandlerDrain = null)
     {
         _createUpstreamTransport = createUpstreamTransport;
         _requiredUpstreamCapabilityChecks = requiredUpstreamCapabilityChecks;
         _configureUpstreamHandlers = configureUpstreamHandlers;
+        _awaitUpstreamHandlerDrain = awaitUpstreamHandlerDrain;
     }
 
     /// <summary>The downstream server for this session, bound by the bootstrap filter on first message.</summary>
@@ -273,6 +281,10 @@ internal sealed class RelaySession : IAsyncDisposable
         }
 
         _sessionEndingCts.Cancel();
+        if (_awaitUpstreamHandlerDrain is not null)
+        {
+            await _awaitUpstreamHandlerDrain().ConfigureAwait(false);
+        }
         _sessionEndingCts.Dispose();
 
         if (_upstreamInitTask is { } initTask)

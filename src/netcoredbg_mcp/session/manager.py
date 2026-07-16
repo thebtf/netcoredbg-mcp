@@ -8,6 +8,7 @@ import binascii
 import logging
 import os
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
@@ -80,6 +81,20 @@ MAX_OUTPUT_ENTRY = int(
 )  # 100KB default
 
 
+class _ResourceOutputBuffer(deque[OutputEntry]):
+    """Output deque that reports externally visible clears through its owner."""
+
+    def __init__(self, on_clear: Callable[[], None]) -> None:
+        super().__init__()
+        self._on_clear = on_clear
+
+    def clear(self) -> None:
+        if not self:
+            return
+        super().clear()
+        self._on_clear()
+
+
 class SessionManager:
     """Manages debug session lifecycle and state."""
 
@@ -87,7 +102,7 @@ class SessionManager:
         self, netcoredbg_path: str | None = None, project_path: str | None = None
     ):
         self._client = DAPClient(netcoredbg_path)
-        self._state = SessionState()
+        self._state = self._create_session_state()
         self._breakpoints = BreakpointRegistry()
         self._state_listeners: list[Callable[[DebugState], None]] = []
         self._initialized_event = asyncio.Event()
@@ -122,6 +137,20 @@ class SessionManager:
             OUTPUT_URI: 0,
             THREADS_URI: 0,
         }
+
+    def _create_session_state(
+        self, state: DebugState = DebugState.IDLE
+    ) -> SessionState:
+        session_state = SessionState(state=state)
+        session_state.output_buffer = _ResourceOutputBuffer(
+            self._on_output_buffer_cleared
+        )
+        return session_state
+
+    def _on_output_buffer_cleared(self) -> None:
+        self._output_bytes = 0
+        self._publish_resource_updates(OUTPUT_URI)
+
 
     def _restore_foreground_if_safe(self, saved_hwnd: int | None) -> bool:
         """Restore foreground if the debuggee owns it; return whether retries may continue."""
@@ -215,9 +244,10 @@ class SessionManager:
     def _begin_debuggee_epoch(self) -> None:
         """Replace per-debuggee state before a new launch or attach request."""
         lifecycle_state = self._state.state
-        self._state = SessionState(state=lifecycle_state)
+        self._state = self._create_session_state(lifecycle_state)
         self._output_bytes = 0
         self._execution_event.clear()
+        self._publish_resource_updates(STATE_URI, THREADS_URI, OUTPUT_URI)
 
     @property
     def client(self) -> DAPClient:
@@ -958,7 +988,10 @@ class SessionManager:
                 self._state.current_thread_id = None
                 self._state.current_frame_id = None
         # Note: "started" events are handled lazily via get_threads().
-        self._publish_resource_updates(THREADS_URI)
+        if body.reason.value == "exited":
+            self._publish_resource_updates(STATE_URI, THREADS_URI)
+        else:
+            self._publish_resource_updates(THREADS_URI)
 
     def _on_process(self, event: DAPEvent) -> None:
         """Handle process event."""
@@ -995,7 +1028,10 @@ class SessionManager:
     def _on_invalidated(self, event: DAPEvent) -> None:
         """Handle invalidated event."""
         body = InvalidatedEventBody.from_dict(event.body)
+        previous = self._state.last_invalidation
         self._state.last_invalidation = body
+        if previous is None or previous.to_dict() != body.to_dict():
+            self._publish_resource_updates(STATE_URI)
         logger.info(
             "Invalidated: areas=%s threadId=%s stackFrameId=%s",
             body.areas,
@@ -1012,12 +1048,16 @@ class SessionManager:
         if body.reason == "removed":
             if key in self._state.loaded_sources:
                 del self._state.loaded_sources[key]
+                self._publish_resource_updates(STATE_URI)
                 logger.info("Loaded source removed: %s", key)
             else:
                 logger.warning("Loaded source remove for unknown source: %s", key)
             return
 
+        previous = self._state.loaded_sources.get(key)
         self._state.loaded_sources[key] = source
+        if previous is None or previous.to_dict() != source.to_dict():
+            self._publish_resource_updates(STATE_URI)
         logger.info("Loaded source %s: %s", body.reason, key)
 
     def _on_progress_start(self, event: DAPEvent) -> None:
@@ -1030,6 +1070,7 @@ class SessionManager:
             percentage=body.percentage,
             cancellable=body.cancellable,
         )
+        self._publish_resource_updates(STATE_URI)
         logger.info("Progress started: %s %s", body.progress_id, body.title)
 
     def _on_progress_update(self, event: DAPEvent) -> None:
@@ -1041,10 +1082,15 @@ class SessionManager:
                 "Progress update for unknown progressId: %s", body.progress_id
             )
             return
-        if body.message is not None:
+        changed = False
+        if body.message is not None and entry.message != body.message:
             entry.message = body.message
-        if body.percentage is not None:
+            changed = True
+        if body.percentage is not None and entry.percentage != body.percentage:
             entry.percentage = body.percentage
+            changed = True
+        if changed:
+            self._publish_resource_updates(STATE_URI)
         logger.debug("Progress updated: %s %s", body.progress_id, body.percentage)
 
     def _on_progress_end(self, event: DAPEvent) -> None:
@@ -1054,12 +1100,16 @@ class SessionManager:
             logger.warning("Progress end for unknown progressId: %s", body.progress_id)
             return
         del self._state.active_progress[body.progress_id]
+        self._publish_resource_updates(STATE_URI)
         logger.info("Progress ended: %s", body.progress_id)
 
     def _on_memory(self, event: DAPEvent) -> None:
         """Handle memory event."""
         body = MemoryEventBody.from_dict(event.body)
+        previous = self._state.last_memory_event
         self._state.last_memory_event = body
+        if previous is None or previous.to_dict() != body.to_dict():
+            self._publish_resource_updates(STATE_URI)
         logger.info(
             "Memory event: memoryReference=%s offset=%d count=%d",
             body.memory_reference,
@@ -1128,10 +1178,9 @@ class SessionManager:
             self._state.module_removed_events += 1
         logger.debug(f"Module event: reason={body.reason}, name={body.name}")
 
+        changed = False
         if body.reason == "new":
-            # Add new module — avoid duplicates by ID
-            existing_ids = {m.id for m in self._state.modules}
-            if body.module_id not in existing_ids:
+            if all(module.id != body.module_id for module in self._state.modules):
                 self._state.modules.append(
                     ModuleInfo(
                         id=body.module_id,
@@ -1142,22 +1191,45 @@ class SessionManager:
                         symbol_status=body.symbol_status,
                     )
                 )
+                changed = True
                 logger.info(f"Module loaded: {body.name}")
         elif body.reason == "changed":
-            for m in self._state.modules:
-                if m.id == body.module_id:
-                    m.name = body.name
-                    m.path = body.path
-                    m.version = body.version
-                    m.is_optimized = body.is_optimized
-                    m.symbol_status = body.symbol_status
+            for module in self._state.modules:
+                if module.id == body.module_id:
+                    previous = (
+                        module.name,
+                        module.path,
+                        module.version,
+                        module.is_optimized,
+                        module.symbol_status,
+                    )
+                    module.name = body.name
+                    module.path = body.path
+                    module.version = body.version
+                    module.is_optimized = body.is_optimized
+                    module.symbol_status = body.symbol_status
+                    changed = previous != (
+                        module.name,
+                        module.path,
+                        module.version,
+                        module.is_optimized,
+                        module.symbol_status,
+                    )
                     logger.debug(f"Module updated: {body.name}")
                     break
         elif body.reason == "removed":
-            self._state.modules = [
-                m for m in self._state.modules if m.id != body.module_id
+            remaining = [
+                module
+                for module in self._state.modules
+                if module.id != body.module_id
             ]
-            logger.info(f"Module unloaded: {body.name}")
+            changed = len(remaining) != len(self._state.modules)
+            self._state.modules = remaining
+            if changed:
+                logger.info(f"Module unloaded: {body.name}")
+
+        if changed:
+            self._publish_resource_updates(STATE_URI)
 
     @staticmethod
     def _loaded_source_key(source: LoadedSource) -> str:
@@ -1579,8 +1651,9 @@ class SessionManager:
             if isinstance(lifecycle_stop_result, Awaitable):
                 await lifecycle_stop_result
         self._runtime_smoke.reset()
-        self._state = SessionState()
+        self._state = self._create_session_state()
         self._output_bytes = 0  # Reset output tracking for next session
+        self._publish_resource_updates(STATE_URI, THREADS_URI, OUTPUT_URI)
 
         return {"success": True}
 
@@ -1893,7 +1966,9 @@ class SessionManager:
                 ThreadInfo(id=t["id"], name=t.get("name", f"Thread {t['id']}"))
                 for t in response.body.get("threads", [])
             ]
-            self._state.threads = threads
+            if self._state.threads != threads:
+                self._state.threads = threads
+                self._publish_resource_updates(STATE_URI)
             return threads
         return []
 
@@ -1947,8 +2022,9 @@ class SessionManager:
                         column=f.get("column", 0),
                     )
                 )
-            if frames:
+            if frames and self._state.current_frame_id != frames[0].id:
                 self._state.current_frame_id = frames[0].id
+                self._publish_resource_updates(STATE_URI)
             return frames
         else:
             logger.warning(f"stack_trace failed for thread {tid}: {response.message}")
@@ -2012,7 +2088,9 @@ class SessionManager:
             for raw_source in response.body.get("sources", []):
                 source = LoadedSource.from_source(raw_source)
                 loaded_by_key[self._loaded_source_key(source)] = source
-            self._state.loaded_sources = loaded_by_key
+            if self._state.loaded_sources != loaded_by_key:
+                self._state.loaded_sources = loaded_by_key
+                self._publish_resource_updates(STATE_URI)
             return [source.to_dict() for source in loaded_by_key.values()]
         raise RuntimeError(response.message or "Failed to get loaded sources")
 
@@ -2151,7 +2229,9 @@ class SessionManager:
 
         response = await self._client.exception_info(tid)
         if response.success:
-            self._state.exception_info = response.body
+            if self._state.exception_info != response.body:
+                self._state.exception_info = response.body
+                self._publish_resource_updates(STATE_URI)
             return response.body
         return None
 

@@ -113,6 +113,51 @@ public sealed class ResourceUpdatesRealPythonTests
         }
     }
 
+    private static void DrainUpdates(
+        ConcurrentQueue<string> updates,
+        SemaphoreSlim signal)
+    {
+        while (updates.TryDequeue(out _))
+        {
+        }
+        while (signal.Wait(0))
+        {
+        }
+    }
+
+    private static async Task<string> WaitForExecStateUpdateAsync(
+        McpClient client,
+        ConcurrentQueue<string> updates,
+        SemaphoreSlim signal,
+        IReadOnlySet<string> expected,
+        TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (true)
+        {
+            while (updates.TryDequeue(out var uri))
+            {
+                if (uri != StateUri)
+                {
+                    continue;
+                }
+
+                var state = await client.ReadResourceAsync(StateUri);
+                var content = Assert.IsType<TextResourceContents>(state.Contents[0]);
+                using var payload = JsonDocument.Parse(content.Text);
+                var execState = payload.RootElement.GetProperty("execState").GetString()!;
+                if (expected.Contains(execState))
+                {
+                    return execState;
+                }
+            }
+
+            var remaining = deadline - DateTime.UtcNow;
+            Assert.True(remaining > TimeSpan.Zero, "Timed out waiting for a terminal state update.");
+            Assert.True(await signal.WaitAsync(remaining), "Timed out waiting for a terminal state update.");
+        }
+    }
+
     [Fact]
     public async Task RealPython_SubscriptionsAndEveryUriUpdateFlowThroughTheHost()
     {
@@ -232,23 +277,86 @@ public sealed class ResourceUpdatesRealPythonTests
                 await Task.Delay(800);
                 Assert.Equal(outputCount, updates.Count(uri => uri == OutputUri));
 
-                var terminalDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
-                while (true)
-                {
-                    var state = await client.ReadResourceAsync(StateUri);
-                    var content = Assert.IsType<TextResourceContents>(state.Contents[0]);
-                    using var payload = JsonDocument.Parse(content.Text);
-                    if (payload.RootElement.GetProperty("execState").GetString() == "terminated")
-                    {
-                        break;
-                    }
+                DrainUpdates(updates, signal);
+                var terminalState = await WaitForExecStateUpdateAsync(
+                    client,
+                    updates,
+                    signal,
+                    new HashSet<string>(StringComparer.Ordinal) { "terminated" },
+                    TimeSpan.FromSeconds(10));
+                Assert.Equal("terminated", terminalState);
 
-                    Assert.True(DateTime.UtcNow < terminalDeadline, "Debuggee did not terminate in time.");
-                    await Task.Delay(100);
-                }
+                await client.SendRequestAsync(
+                    SubscriptionRequest(RequestMethods.ResourcesSubscribe, OutputUri, "clear-output"),
+                    CancellationToken.None);
+                DrainUpdates(updates, signal);
+                var cleared = await CallToolAsync(
+                    client,
+                    "get_output",
+                    new JsonObject { ["clear"] = true });
+                Assert.False(cleared.IsError == true);
+                await WaitUntilAsync(
+                    () => updates.Contains(OutputUri),
+                    signal,
+                    TimeSpan.FromSeconds(5));
+                var output = await client.ReadResourceAsync(OutputUri);
+                Assert.Equal("", Assert.IsType<TextResourceContents>(output.Contents[0]).Text);
 
                 var stopped = await CallToolAsync(client, "stop_debug", new JsonObject());
                 Assert.False(stopped.IsError == true);
+
+                using var target = Process.Start(new ProcessStartInfo
+                {
+                    FileName = "dotnet",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                    ArgumentList =
+                    {
+                        SmokeDll,
+                        "longrun",
+                    },
+                }) ?? throw new InvalidOperationException("Could not start attach target.");
+                try
+                {
+                    await Task.Delay(200);
+                    DrainUpdates(updates, signal);
+                    var attached = await CallToolAsync(
+                        client,
+                        "attach_debug",
+                        new JsonObject { ["process_id"] = target.Id });
+                    Assert.False(attached.IsError == true);
+                    await WaitUntilAsync(
+                        () =>
+                            updates.Contains(StateUri)
+                            && updates.Contains(OutputUri)
+                            && updates.Contains(ThreadsUri),
+                        signal,
+                        TimeSpan.FromSeconds(10));
+
+                    DrainUpdates(updates, signal);
+                    var terminated = await CallToolAsync(
+                        client,
+                        "terminate_debug",
+                        new JsonObject());
+                    Assert.False(terminated.IsError == true);
+                    var finalState = await WaitForExecStateUpdateAsync(
+                        client,
+                        updates,
+                        signal,
+                        new HashSet<string>(StringComparer.Ordinal) { "idle", "terminated" },
+                        TimeSpan.FromSeconds(10));
+                    Assert.Contains(finalState, new[] { "idle", "terminated" });
+                }
+                finally
+                {
+                    if (!target.HasExited)
+                    {
+                        target.Kill(entireProcessTree: true);
+                    }
+                    await target.WaitForExitAsync();
+                }
             }
         }
         finally

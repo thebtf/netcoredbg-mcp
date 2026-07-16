@@ -16,11 +16,13 @@ internal static class ResourcesTestComposition
 {
     public static RelaySession CreateSession(Func<IClientTransport> createUpstreamTransport)
     {
+        var resourceUpdates = ResourceUpdatesRelay.CreateOrderedUpstream();
         RelaySession? session = null;
         session = new RelaySession(
-            createUpstreamTransport,
+            () => resourceUpdates.WrapTransport(createUpstreamTransport()),
             RelayComposition.RequiredUpstreamCapabilityChecks,
-            handlers => ResourceUpdatesRelay.ConfigureUpstreamHandlers(handlers, session!));
+            handlers => resourceUpdates.ConfigureHandlers(handlers, session!),
+            resourceUpdates.WaitForDrainAsync);
         return session;
     }
 

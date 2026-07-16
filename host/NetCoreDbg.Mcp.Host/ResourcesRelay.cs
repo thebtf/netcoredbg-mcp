@@ -75,9 +75,9 @@ internal static class ResourcesRelay
     }
 
     /// <summary>
-    /// Declares the FD-006 downstream resource capability, then removes it from the serialized
-    /// initialize result unless Python advertised <c>resources.subscribe=true</c>. The catalog
-    /// remains static, so <c>listChanged</c> is always false.
+    /// Declares the downstream resources capability whenever Python advertises resources,
+    /// projects <c>subscribe</c> from Python, and keeps the static catalog's
+    /// <c>listChanged</c> value false.
     /// </summary>
     public static void ConfigureCapabilityProjection(ServerCapabilities capabilities, McpServerFilters filters, RelaySession session)
     {
@@ -96,9 +96,14 @@ internal static class ResourcesRelay
                 // response would exist to intercept here. UpstreamAsync therefore always
                 // completes synchronously in every real execution of this filter.
                 var upstream = await session.UpstreamAsync(cancellationToken).ConfigureAwait(false);
-                if (upstream.ServerCapabilities?.Resources?.Subscribe is not true)
+                if (upstream.ServerCapabilities?.Resources is not { } upstreamResources)
                 {
                     serializedCapabilities.Remove("resources");
+                }
+                else if (serializedCapabilities["resources"] is JsonObject projectedResources)
+                {
+                    projectedResources["subscribe"] = upstreamResources.Subscribe is true;
+                    projectedResources["listChanged"] = false;
                 }
             }
 

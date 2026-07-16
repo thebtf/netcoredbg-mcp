@@ -98,6 +98,27 @@ async def _collect_updates(
         seen.append(await asyncio.wait_for(queue.get(), timeout=remaining))
     return seen
 
+async def _wait_for_state_update(
+    session: ClientSession,
+    queue: asyncio.Queue[str],
+    expected_exec_states: set[str],
+    timeout_seconds: float,
+) -> dict[str, object]:
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while True:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise AssertionError(
+                f"Missing state update for execState in {expected_exec_states}"
+            )
+        uri = await asyncio.wait_for(queue.get(), timeout=remaining)
+        if uri != "debug://state":
+            continue
+        state = await session.read_resource("debug://state")  # type: ignore[arg-type]
+        payload: dict[str, object] = json.loads(state.contents[0].text)
+        if payload.get("execState") in expected_exec_states:
+            return payload
+
 
 @pytest.mark.critical
 @pytest.mark.asyncio
@@ -318,15 +339,70 @@ async def test_live_dap_mutations_update_state_output_threads_and_termination() 
                     break
                 assert uri != "debug://output"
 
-            terminal_deadline = asyncio.get_running_loop().time() + 10
-            while True:
-                state = await session.read_resource("debug://state")  # type: ignore[arg-type]
-                payload = json.loads(state.contents[0].text)
-                if payload.get("execState") == "terminated":
-                    break
-                if asyncio.get_running_loop().time() >= terminal_deadline:
-                    raise AssertionError(f"debuggee did not terminate in time: {payload}")
-                await asyncio.sleep(0.1)
+            while not updates.empty():
+                updates.get_nowait()
+            terminal = await _wait_for_state_update(
+                session,
+                updates,
+                {"terminated"},
+                timeout_seconds=10,
+            )
+            assert terminal["execState"] == "terminated"
+
+            await session.subscribe_resource(AnyUrl("debug://output"))
+            while not updates.empty():
+                updates.get_nowait()
+            cleared = await session.call_tool("get_output", {"clear": True})
+            assert not cleared.isError, cleared
+            assert await asyncio.wait_for(updates.get(), timeout=5) == "debug://output"
+            output = await session.read_resource("debug://output")  # type: ignore[arg-type]
+            assert output.contents[0].text == ""
 
             stop_result = await session.call_tool("stop_debug", {})
             assert not stop_result.isError, stop_result
+
+            target = await asyncio.create_subprocess_exec(
+                "dotnet",
+                str(SMOKE_DLL),
+                "longrun",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            try:
+                await asyncio.sleep(0.2)
+                while not updates.empty():
+                    updates.get_nowait()
+                attached = await session.call_tool(
+                    "attach_debug",
+                    {"process_id": target.pid},
+                )
+                assert not attached.isError, attached
+                attached_updates = await _collect_updates(
+                    updates,
+                    {"debug://state", "debug://output", "debug://threads"},
+                    timeout_seconds=10,
+                )
+                assert set(attached_updates) >= {
+                    "debug://state",
+                    "debug://output",
+                    "debug://threads",
+                }
+
+                while not updates.empty():
+                    updates.get_nowait()
+                terminated = await session.call_tool("terminate_debug", {})
+                assert not terminated.isError, terminated
+                final_state = await _wait_for_state_update(
+                    session,
+                    updates,
+                    {"idle", "terminated"},
+                    timeout_seconds=10,
+                )
+                assert final_state["execState"] in {"idle", "terminated"}
+            finally:
+                if target.returncode is None:
+                    try:
+                        target.kill()
+                    except ProcessLookupError:
+                        pass
+                await target.wait()

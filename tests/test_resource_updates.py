@@ -16,7 +16,7 @@ from netcoredbg_mcp.resource_updates import (
     ResourceSubscriptions,
     apply_subscribe_capability,
 )
-from netcoredbg_mcp.session.state import Breakpoint, DebugState
+from netcoredbg_mcp.session.state import Breakpoint, DebugState, OutputEntry, ThreadInfo
 from netcoredbg_mcp.tools.debug import register_debug_tools
 
 
@@ -140,6 +140,118 @@ async def test_session_manager_publishes_async_dap_resource_mutations() -> None:
     await asyncio.sleep(0)
     assert len(published) == count
 
+
+@pytest.mark.asyncio
+async def test_session_manager_publishes_every_serialized_state_mutation() -> None:
+    with patch("netcoredbg_mcp.session.manager.DAPClient"):
+        from netcoredbg_mcp.session import SessionManager
+
+        manager = SessionManager()
+
+    published: list[tuple[str, ...]] = []
+
+    async def record(uris: tuple[str, ...]) -> None:
+        published.append(uris)
+
+    manager.set_resource_update_callback(record)
+    manager.state.threads = [ThreadInfo(id=7, name="worker")]
+    manager.state.current_thread_id = 7
+    manager.state.current_frame_id = 9
+    manager._on_thread(
+        DAPEvent(seq=1, event="thread", body={"reason": "exited", "threadId": 7})
+    )
+    manager._on_invalidated(
+        DAPEvent(seq=2, event="invalidated", body={"areas": ["variables"]})
+    )
+    manager._on_loaded_source(
+        DAPEvent(
+            seq=3,
+            event="loadedSource",
+            body={"reason": "new", "source": {"path": "generated.cs"}},
+        )
+    )
+    manager._on_progress_start(
+        DAPEvent(
+            seq=4,
+            event="progressStart",
+            body={"progressId": "p1", "title": "Loading"},
+        )
+    )
+    manager._on_progress_update(
+        DAPEvent(
+            seq=5,
+            event="progressUpdate",
+            body={"progressId": "p1", "percentage": 50},
+        )
+    )
+    manager._on_progress_end(
+        DAPEvent(seq=6, event="progressEnd", body={"progressId": "p1"})
+    )
+    manager._on_memory(
+        DAPEvent(
+            seq=7,
+            event="memory",
+            body={"memoryReference": "0x10", "offset": 0, "count": 4},
+        )
+    )
+    manager._on_module(
+        DAPEvent(
+            seq=8,
+            event="module",
+            body={"reason": "new", "module": {"id": 1, "name": "app.dll"}},
+        )
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert sum(STATE_URI in uris for uris in published) == 8
+    assert (STATE_URI, THREADS_URI) in published
+
+    published.clear()
+    manager.state.output_buffer.append(
+        OutputEntry(text="captured", category="stdout", sequence=1)
+    )
+    manager.state.output_buffer.clear()
+    await asyncio.sleep(0)
+    assert published == [(OUTPUT_URI,)]
+
+
+@pytest.mark.asyncio
+async def test_terminate_fallback_notifies_state_threads_and_output_once() -> None:
+    registry = ToolRegistry()
+    session = SimpleNamespace(
+        client=SimpleNamespace(capabilities={}),
+        stop=AsyncMock(return_value={"success": True}),
+        state=SimpleNamespace(state=DebugState.IDLE),
+    )
+    calls: list[str] = []
+
+    async def notify_state(_ctx) -> None:
+        calls.append(STATE_URI)
+
+    async def notify_threads(_ctx) -> None:
+        calls.append(THREADS_URI)
+
+    async def notify_output(_ctx) -> None:
+        calls.append(OUTPUT_URI)
+
+    register_debug_tools(
+        registry,  # type: ignore[arg-type]
+        session,  # type: ignore[arg-type]
+        ownership=SimpleNamespace(release=lambda: None),
+        notify_state_changed=notify_state,
+        notify_threads_changed=notify_threads,
+        notify_output_changed=notify_output,
+        check_session_access=lambda _ctx: None,
+        execute_and_wait=AsyncMock(),
+        resolve_project_root=AsyncMock(),
+    )
+
+    result = await registry.tools["terminate_debug"](ctx=object())  # type: ignore[operator]
+
+    session.stop.assert_awaited_once()
+    assert result["data"]["state"] == DebugState.IDLE.value
+    assert calls == [STATE_URI, THREADS_URI, OUTPUT_URI]
 
 @pytest.mark.asyncio
 async def test_attach_tool_notifies_state_threads_and_output_once() -> None:

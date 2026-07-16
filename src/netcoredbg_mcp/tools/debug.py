@@ -706,6 +706,9 @@ def register_debug_tools(
             caps = session.client.capabilities
             if not caps.get("supportsTerminateRequest", False):
                 await session.stop()
+                await notify_state_changed(ctx)
+                await notify_threads(ctx)
+                await notify_output(ctx)
                 return build_response(
                     data={"state": session.state.state.value},
                     state=session.state.state,
@@ -715,6 +718,9 @@ def register_debug_tools(
             session.prepare_for_execution()
             await session.client.terminate()
             snapshot = await session.wait_for_stopped(timeout=10.0)
+            await notify_state_changed(ctx)
+            await notify_threads(ctx)
+            await notify_output(ctx)
             if snapshot.timed_out:
                 return build_response(
                     data={"state": snapshot.state.value},

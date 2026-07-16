@@ -160,28 +160,27 @@ public sealed class ResourcesRelayTests
     }
 
     [Fact]
-    public async Task ResourcesCapability_Absent_WhenPythonDoesNotAdvertiseSubscribe()
+    public async Task ResourcesCapability_PreservesReads_WhenPythonDoesNotAdvertiseSubscribe()
     {
         var (session, upstreamChannel, downstreamChannel) = BuildResourcesSession();
-        await using var fakePython = FakePythonServer.Start(
-            upstreamChannel,
-            new McpServerOptions
-            {
-                ServerInfo = new Implementation { Name = "fake-python-no-subscribe", Version = "1.0.0" },
-                Capabilities = new ServerCapabilities
-                {
-                    Tools = new ToolsCapability(),
-                    Resources = new ResourcesCapability { Subscribe = false, ListChanged = false },
-                },
-                Handlers = new McpServerHandlers
-                {
-                    ListToolsHandler = (context, ct) => ValueTask.FromResult(new ListToolsResult { Tools = [] }),
-                },
-            });
+        var options = FakePythonWithResourcesOptions();
+        options.ServerInfo = new Implementation
+        {
+            Name = "fake-python-read-only-resources",
+            Version = "1.0.0",
+        };
+        options.Capabilities!.Resources!.Subscribe = false;
+        await using var fakePython = FakePythonServer.Start(upstreamChannel, options);
 
-        await using var downstreamClient = await McpClient.CreateAsync(downstreamChannel.CreateClientTransport());
+        await using var downstreamClient = await McpClient.CreateAsync(
+            downstreamChannel.CreateClientTransport());
 
-        Assert.Null(downstreamClient.ServerCapabilities?.Resources);
+        var resources = downstreamClient.ServerCapabilities?.Resources;
+        Assert.NotNull(resources);
+        Assert.False(resources!.Subscribe);
+        Assert.False(resources.ListChanged);
+        var listed = await downstreamClient.ListResourcesAsync();
+        Assert.Equal(4, listed.Count);
 
         await downstreamClient.DisposeAsync();
         await session.DisposeAsync();
