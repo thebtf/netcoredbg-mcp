@@ -259,7 +259,7 @@ public sealed class ProgressLoggingRelayTests
         {
             // SDK 1.4.1's McpServerImpl.ConfigureLogging unconditionally sets ServerCapabilities.Logging
             // regardless of options.Capabilities (verified directly against the compiled SDK, same as
-            // RelayRouteCatalog.SuppressUnregisteredLogging's own baseline finding for the host itself).
+            // ProgressLoggingRelay.ConfigureFilters capability-absent baseline for the host itself).
             // To make this fake accurately represent "Python has no logging capability" the way real,
             // unmodified netcoredbg_mcp genuinely does not, strip the same JSON key from this fake's own
             // initialize response.
@@ -617,6 +617,146 @@ public sealed class ProgressLoggingRelayTests
         await session.DisposeAsync();
         await fakePython.DisposeAsync();
     }
+
+    [Fact]
+    public async Task SetLoggingLevel_RemoteMessageAlreadyPrefixed_PreservesExactlyOneUnwrapParity()
+    {
+        // RelaySession.ForwardRequestAsync already unwraps the SDK's remote prefix once.
+        // A legitimate remote message that itself begins with "Request failed (remote): "
+        // must not be stripped a second time by the logging handler.
+        const string remoteMessage = "Request failed (remote): nested remote detail from test";
+        var upstreamChannel = new DuplexChannel();
+        var downstreamChannel = new DuplexChannel();
+        var fakePython = StartProbeFakePython(
+            upstreamChannel,
+            advertiseLogging: true,
+            setLoggingLevelHandler: (context, cancellationToken) =>
+                throw new McpProtocolException(remoteMessage, McpErrorCode.InvalidParams));
+        var (session, host) = ProgressLoggingComposition.Build(
+            upstreamChannel.CreateClientTransport,
+            builder => builder.WithStreamServerTransport(downstreamChannel.ServerInputStream, downstreamChannel.ServerOutputStream));
+
+        await using var downstreamClient = await McpClient.CreateAsync(downstreamChannel.CreateClientTransport());
+
+        var error = await Assert.ThrowsAsync<McpProtocolException>(() => downstreamClient.SetLoggingLevelAsync(LoggingLevel.Info));
+
+        Assert.Equal((int)McpErrorCode.InvalidParams, (int)error.ErrorCode);
+        Assert.Equal($"Request failed (remote): {remoteMessage}", error.Message);
+        Assert.DoesNotContain(
+            "Request failed (remote): Request failed (remote): Request failed (remote): ",
+            error.Message);
+
+        await downstreamClient.DisposeAsync();
+        await host.StopAsync();
+        host.Dispose();
+        await session.DisposeAsync();
+        await fakePython.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Cancellation_NumericAndStringRequestIdsAreDistinct_ConcurrentCancelRemovesOnlyMatch()
+    {
+        // JSON-RPC id 1 (number) and "1" (string) must not share a cancellation key.
+        var state = new ProgressLoggingRelay.NotificationState();
+        var numericId = new RequestId(1L);
+        var stringId = new RequestId("1");
+        var numericToken = new ProgressToken("token-numeric-1");
+        var stringToken = new ProgressToken("token-string-1");
+
+        Assert.NotNull(state.Begin(MakeProgressRequest(numericId, numericToken)));
+        Assert.NotNull(state.Begin(MakeProgressRequest(stringId, stringToken)));
+        Assert.True(state.IsActive(numericToken));
+        Assert.True(state.IsActive(stringToken));
+
+        var cancelNumeric = MakeCancelledNotification(numericId);
+        var cancelString = MakeCancelledNotification(stringId);
+
+        // Concurrent cancel of the numeric id must leave the string-id token active.
+        await Task.WhenAll(
+            Task.Run(() => state.Cancel(cancelNumeric)),
+            Task.Run(() =>
+            {
+                // Interleave with a no-op cancel of a third distinct id so the race is real.
+                state.Cancel(MakeCancelledNotification(new RequestId(2L)));
+            }));
+
+        Assert.False(state.IsActive(numericToken));
+        Assert.True(state.IsActive(stringToken));
+
+        state.Cancel(cancelString);
+        Assert.False(state.IsActive(stringToken));
+    }
+
+    [Fact]
+    public async Task Cancellation_ConcurrentDistinctTypedIds_NeverCrossCancel()
+    {
+        var state = new ProgressLoggingRelay.NotificationState();
+        var pairs = Enumerable.Range(0, 64)
+            .Select(i => (
+                NumericId: new RequestId(i),
+                StringId: new RequestId(i.ToString()),
+                NumericToken: new ProgressToken($"n-{i}"),
+                StringToken: new ProgressToken($"s-{i}")))
+            .ToArray();
+
+        foreach (var pair in pairs)
+        {
+            Assert.NotNull(state.Begin(MakeProgressRequest(pair.NumericId, pair.NumericToken)));
+            Assert.NotNull(state.Begin(MakeProgressRequest(pair.StringId, pair.StringToken)));
+        }
+
+        await Task.WhenAll(pairs.Select(pair => Task.Run(() =>
+        {
+            state.Cancel(MakeCancelledNotification(pair.NumericId));
+        })));
+
+        foreach (var pair in pairs)
+        {
+            Assert.False(state.IsActive(pair.NumericToken));
+            Assert.True(state.IsActive(pair.StringToken));
+        }
+
+        await Task.WhenAll(pairs.Select(pair => Task.Run(() =>
+        {
+            state.Cancel(MakeCancelledNotification(pair.StringId));
+        })));
+
+        foreach (var pair in pairs)
+        {
+            Assert.False(state.IsActive(pair.StringToken));
+        }
+    }
+
+    private static JsonRpcRequest MakeProgressRequest(RequestId requestId, ProgressToken progressToken) =>
+        new()
+        {
+            Id = requestId,
+            Method = RequestMethods.ToolsCall,
+            Params = new JsonObject
+            {
+                ["name"] = "probe",
+                ["arguments"] = new JsonObject(),
+                ["_meta"] = new JsonObject
+                {
+                    ["progressToken"] = progressToken.Token switch
+                    {
+                        string s => JsonValue.Create(s),
+                        long l => JsonValue.Create(l),
+                        int i => JsonValue.Create(i),
+                        _ => JsonValue.Create(progressToken.ToString()),
+                    },
+                },
+            },
+        };
+
+    private static JsonRpcNotification MakeCancelledNotification(RequestId requestId) =>
+        new()
+        {
+            Method = NotificationMethods.CancelledNotification,
+            Params = JsonSerializer.SerializeToNode(
+                new CancelledNotificationParams { RequestId = requestId },
+                McpJsonUtilities.DefaultOptions),
+        };
 
     private sealed class RealProbePython : IAsyncDisposable
     {

@@ -17,24 +17,21 @@ namespace NetCoreDbg.Mcp.Host;
 /// already-negotiated upstream capabilities actually advertise logging.
 ///
 /// Follows the <c>ToolsRelay</c> module convention for its downstream half: <see cref="Register"/> is
-/// the one call <c>RelayComposition.Build</c> adds (alongside <c>ToolsRelay.Register</c>) once this
-/// module is accepted, and <see cref="ConfigureFilters"/> is the direct capability-aware replacement
-/// for <c>RelayRouteCatalog.SuppressUnregisteredLogging</c> in that same
-/// <c>AddMcpServer(options =&gt; ...)</c> block (identical <see cref="McpServerFilters"/> parameter
-/// shape). Its upstream half is <see cref="WrapUpstreamTransport"/>, which <c>Program.cs</c> wraps
-/// around <c>PythonBackendProcess.CreateUpstreamTransport</c> before constructing
-/// <see cref="RelaySession"/> - see that method's own doc comment for why progress/logging forwarding
-/// must happen at the transport layer rather than through <see cref="McpClientHandlers.NotificationHandlers"/>.
-/// No route, capability, or handler registered here reaches production composition until an
-/// integrator wires those two call sites in; until then this file compiles and is exercised only by
-/// its own tests.
+/// the one call <c>RelayComposition.Build</c> adds (alongside <c>ToolsRelay.Register</c>), and
+/// <see cref="ConfigureFilters"/> is the production capability-aware logging/progress filter pair
+/// installed in that same <c>AddMcpServer(options =&gt; ...)</c> block. Its upstream half is
+/// <see cref="WrapUpstreamTransport"/>, which <c>Program.cs</c> wraps around
+/// <c>PythonBackendProcess.CreateUpstreamTransport</c> before constructing <see cref="RelaySession"/>
+/// - see that method's own doc comment for why progress/logging forwarding must happen at the
+/// transport layer rather than through <see cref="McpClientHandlers.NotificationHandlers"/>.
 /// </summary>
 internal static class ProgressLoggingRelay
 {
     internal sealed class NotificationState
     {
         private readonly ConcurrentDictionary<ProgressToken, byte> _activeProgressTokens = new();
-        private readonly ConcurrentDictionary<string, ProgressToken> _progressTokensByRequestId = new();
+        // RequestId equality preserves JSON-RPC type: numeric 1 and string "1" are distinct keys.
+        private readonly ConcurrentDictionary<RequestId, ProgressToken> _progressTokensByRequestId = new();
 
         public ProgressToken? Begin(JsonRpcRequest request)
         {
@@ -44,11 +41,11 @@ internal static class ProgressLoggingRelay
             }
 
             _activeProgressTokens[progressToken] = 0;
-            _progressTokensByRequestId[request.Id.ToString()] = progressToken;
+            _progressTokensByRequestId[request.Id] = progressToken;
             return progressToken;
         }
 
-        public void End(string requestId, ProgressToken? progressToken)
+        public void End(RequestId requestId, ProgressToken? progressToken)
         {
             _progressTokensByRequestId.TryRemove(requestId, out _);
             if (progressToken is { } activeProgressToken)
@@ -62,9 +59,9 @@ internal static class ProgressLoggingRelay
             try
             {
                 var requestId = notification.Params?
-                    .Deserialize<CancelledNotificationParams>(McpJsonUtilities.DefaultOptions)?.RequestId.ToString();
-                if (requestId is not null
-                    && _progressTokensByRequestId.TryRemove(requestId, out var progressToken))
+                    .Deserialize<CancelledNotificationParams>(McpJsonUtilities.DefaultOptions)?.RequestId;
+                if (requestId is { } typedRequestId
+                    && _progressTokensByRequestId.TryRemove(typedRequestId, out var progressToken))
                 {
                     _activeProgressTokens.TryRemove(progressToken, out _);
                 }
@@ -131,10 +128,8 @@ internal static class ProgressLoggingRelay
     /// <c>logging/setLevel</c>. A request is forwarded to Python only when Python's already-bootstrapped
     /// upstream capabilities (guaranteed resolved by the time any post-initialize request reaches this
     /// handler, per the FD-000 bootstrap-before-next ordering) advertise logging; otherwise this rejects
-    /// with the exact "Method not found" error direct Python itself returns, matching the prior
-    /// <c>RelayRouteCatalog.SuppressUnregisteredLogging</c> baseline byte-for-byte so a client that never
-    /// advertised or exercised logging observes identical, safe behavior whether or not this module is
-    /// wired in.
+    /// with the exact "Method not found" error direct Python itself returns, so a client that never
+    /// advertised or exercised logging observes identical, safe capability-absent behavior.
     /// </summary>
     public static void Register(IMcpServerBuilder builder, RelayRouteCatalog catalog, RelaySession session)
     {
@@ -150,40 +145,24 @@ internal static class ProgressLoggingRelay
                 throw new McpProtocolException("Method not found", McpErrorCode.MethodNotFound);
             }
 
-            try
-            {
-                var response = await RelaySession.ForwardRequestAsync(upstream, context.JsonRpcRequest, cancellationToken)
-                    .ConfigureAwait(false);
-                return response.Result.Deserialize<EmptyResult>(McpJsonUtilities.DefaultOptions)!;
-            }
-            catch (McpProtocolException error)
-            {
-                const string RemotePrefix = "Request failed (remote): ";
-                var forwarded = new McpProtocolException(
-                    error.Message.StartsWith(RemotePrefix, StringComparison.Ordinal)
-                        ? error.Message[RemotePrefix.Length..]
-                        : error.Message,
-                    error.ErrorCode);
-                foreach (var key in error.Data.Keys)
-                {
-                    forwarded.Data[key] = error.Data[key];
-                }
-
-                throw forwarded;
-            }
+            // ForwardRequestAsync already unwraps the SDK remote prefix exactly once.
+            // Do not strip again: a legitimate remote message that itself begins with
+            // "Request failed (remote): " must survive as remote content.
+            var response = await RelaySession.ForwardRequestAsync(upstream, context.JsonRpcRequest, cancellationToken)
+                .ConfigureAwait(false);
+            return response.Result.Deserialize<EmptyResult>(McpJsonUtilities.DefaultOptions)!;
         });
     }
 
     /// <summary>
-    /// Capability-aware replacement for <c>RelayRouteCatalog.SuppressUnregisteredLogging</c>: same
-    /// <see cref="McpServerFilters"/> call-site shape (plus <paramref name="session"/>), installed from
-    /// the same <c>AddMcpServer(options =&gt; ...)</c> block. Leaves the SDK-forced <c>logging</c>
-    /// initialize-capability key in place only when Python actually advertises it (by the time this
-    /// outgoing filter runs, the downstream <c>initialize</c> response is being sent from strictly
-    /// inside the bootstrap filter's own <c>next()</c> call, which only happens after its upstream
-    /// handshake completed - see <c>RelaySession.CreateBootstrapFilter</c>), stripping it otherwise -
-    /// the same JSON surgery the FD-000 baseline used unconditionally, now driven by the real
-    /// negotiated capability.
+    /// Production capability-aware progress-token tracking plus logging capability projection:
+    /// same <see cref="McpServerFilters"/> call-site shape as other composition filters (plus
+    /// <paramref name="session"/>), installed from the same <c>AddMcpServer(options =&gt; ...)</c>
+    /// block. Leaves the SDK-forced <c>logging</c> initialize-capability key in place only when
+    /// Python actually advertises it (by the time this outgoing filter runs, the downstream
+    /// <c>initialize</c> response is being sent from strictly inside the bootstrap filter's own
+    /// <c>next()</c> call, which only happens after its upstream handshake completed - see
+    /// <c>RelaySession.CreateBootstrapFilter</c>), stripping it otherwise.
     /// </summary>
     public static void ConfigureFilters(
         McpServerFilters filters,
@@ -212,7 +191,7 @@ internal static class ProgressLoggingRelay
                 return;
             }
 
-            var requestId = request.Id.ToString();
+            var requestId = request.Id;
             using var cancellationRegistration = cancellationToken.Register(
                 () => notificationState.End(requestId, progressToken));
             try

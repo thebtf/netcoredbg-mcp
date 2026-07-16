@@ -29,7 +29,7 @@ namespace NetCoreDbg.Mcp.Host;
 /// <c>options.Capabilities = new ServerCapabilities { ... }</c> initializer, so the SDK's
 /// upfront (pre-handshake) capabilities carry no <c>x-mux</c> value.</item>
 /// <item>Add one call alongside the existing
-/// <c>RelayRouteCatalog.SuppressUnregisteredLogging(options.Filters)</c> line:
+/// <c>ProgressLoggingRelay.ConfigureFilters(...)</c> line:
 /// <c>MuxCapabilityRelay.RegisterCapabilityProjectionFilter(options.Filters, session);</c></item>
 /// </list>
 /// <para>
@@ -39,7 +39,7 @@ namespace NetCoreDbg.Mcp.Host;
 /// capabilities are only known after the paired-session bootstrap handshake completes, which
 /// happens inside the incoming bootstrap filter <em>before</em> the SDK's own <c>initialize</c>
 /// handler serializes the response this outgoing filter rewrites - the same reason
-/// <see cref="RelayRouteCatalog.SuppressUnregisteredLogging"/> also rewrites the serialized
+/// <see cref="ProgressLoggingRelay.ConfigureFilters"/> also rewrites the serialized
 /// response instead of the upfront <see cref="ServerCapabilities"/> value.
 /// </para>
 /// </remarks>
@@ -114,8 +114,8 @@ internal static class MuxCapabilityRelay
     /// <c>initialize</c> response's <c>capabilities.experimental</c> field with
     /// <see cref="ProjectExperimentalCapabilities"/>'s allowlisted projection of Python's
     /// already-bootstrapped capabilities (or removes the field entirely when nothing is
-    /// allowlisted). Uses the identical structural match
-    /// <see cref="RelayRouteCatalog.SuppressUnregisteredLogging"/> uses to find the
+    /// allowlisted). Matches the same initialize-response JSON shape
+    /// <see cref="ProgressLoggingRelay.ConfigureFilters"/> uses to find the
     /// <c>initialize</c> response among every outgoing message. Reading
     /// <paramref name="session"/>'s upstream client here is safe: the incoming bootstrap
     /// filter for the same <c>initialize</c> request has already fully awaited the Python

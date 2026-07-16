@@ -15,11 +15,11 @@ namespace NetCoreDbg.Mcp.Host.Tests;
 /// <summary>
 /// Proves RelayComposition's actual production wiring: Program-equivalent upstream chain,
 /// Roots + ResourceUpdates handlers once, ProgressLogging/ResourceUpdates registered once,
-/// SuppressUnregisteredLogging replaced (never stacked) by ProgressLoggingRelay.ConfigureFilters,
-/// interleaved progress/log/resource ordering, capability present/absent truth, duplicate
-/// ownership, cancellation/disconnect, and drain completion. Every fixture pairs the real
-/// <see cref="RelayComposition.Build"/> output against a real McpClient/McpServer over an
-/// in-memory <see cref="DuplexChannel"/>.
+/// ProgressLoggingRelay.ConfigureFilters as the sole logging/progress filter pair, interleaved
+/// progress/log/resource ordering, capability present/absent truth, duplicate ownership,
+/// cancellation/disconnect, terminal host/session race ties, and drain completion. Every
+/// fixture pairs the real <see cref="RelayComposition.Build"/> output against a real
+/// McpClient/McpServer over an in-memory <see cref="DuplexChannel"/>.
 /// </summary>
 public sealed class ProductionCompositionTests
 {
@@ -465,6 +465,96 @@ public sealed class ProductionCompositionTests
         Assert.Contains("do not cover a route", sessionEndedFailure.Message);
 
         await host.StopAsync();
+        await session.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task ObserveTerminalRace_HostWinsWhenAnyButSessionAlreadyFaulted_SurfacesBackendDeath()
+    {
+        // Simultaneous-completion tie forced deterministically: host completes first (WhenAny
+        // selects it), then sessionEndedTask is already faulted when the post-host check runs.
+        // Production must still observe the backend fault (never exit 0).
+        var hostRunTask = Task.CompletedTask;
+        var sessionFault = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        sessionFault.SetException(
+            new InvalidOperationException("The Python backend ended before the downstream MCP session closed."));
+        var sessionEndedTask = sessionFault.Task;
+        // Ensure host is the "first" completed task from WhenAny's perspective by only
+        // attaching the already-faulted session after host is known complete — same terminal
+        // state as a true tie, with deterministic WhenAny selection of hostRunTask.
+        Assert.True(hostRunTask.IsCompletedSuccessfully);
+        Assert.True(sessionEndedTask.IsFaulted);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            RelayComposition.ObserveTerminalRaceAsync(
+                hostRunTask,
+                sessionEndedTask,
+                () => Task.CompletedTask));
+
+        Assert.Contains("Python backend ended", error.Message);
+    }
+
+    [Fact]
+    public async Task ObserveTerminalRace_SessionEndsFirst_StopsHostAndSurfacesBackendDeath()
+    {
+        var hostCompletion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var sessionEndedTask = Task.FromException(
+            new InvalidOperationException("The Python backend ended before the downstream MCP session closed."));
+        var stopHostCalls = 0;
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            RelayComposition.ObserveTerminalRaceAsync(
+                hostCompletion.Task,
+                sessionEndedTask,
+                () =>
+                {
+                    Interlocked.Increment(ref stopHostCalls);
+                    hostCompletion.TrySetResult();
+                    return Task.CompletedTask;
+                }));
+
+        Assert.Contains("Python backend ended", error.Message);
+        Assert.Equal(1, stopHostCalls);
+        Assert.True(hostCompletion.Task.IsCompletedSuccessfully);
+    }
+
+    [Fact]
+    public async Task ObserveTerminalRace_CleanHostCompletionWithoutSessionEnd_Succeeds()
+    {
+        var hostRunTask = Task.CompletedTask;
+        var sessionEndedTask = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously).Task;
+
+        await RelayComposition.ObserveTerminalRaceAsync(
+            hostRunTask,
+            sessionEndedTask,
+            () => Task.FromException(new InvalidOperationException("stop must not run on clean host-first exit")));
+    }
+
+    [Fact]
+    public async Task RunPairedAsync_BackendDeathAfterBootstrap_DoesNotReportCleanExit()
+    {
+        var upstreamChannel = new DuplexChannel();
+        await using var fakePython = FakePythonServer.StartWithEchoTool(upstreamChannel);
+
+        var session = new RelaySession(upstreamChannel.CreateClientTransport, RelayComposition.RequiredUpstreamCapabilityChecks);
+        var downstreamChannel = new DuplexChannel();
+        using var host = RelayComposition.Build(
+            session,
+            builder => builder.WithStreamServerTransport(downstreamChannel.ServerInputStream, downstreamChannel.ServerOutputStream),
+            static _ => new ClientCapabilities());
+
+        // RunPairedAsync owns host.RunAsync — start it before the downstream client connects.
+        var runTask = RelayComposition.RunPairedAsync(host, session);
+        await using var downstreamClient = await McpClient.CreateAsync(downstreamChannel.CreateClientTransport())
+            .WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.NotNull(downstreamClient.ServerCapabilities?.Tools);
+
+        upstreamChannel.SimulateServerExit();
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => runTask)
+            .WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Contains("Python backend ended", error.Message);
+
         await session.DisposeAsync();
     }
 

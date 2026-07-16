@@ -46,20 +46,53 @@ internal static class RelayComposition
         ProgressLoggingRelay.NotificationState? progressNotificationState = null)
     {
         using var host = Build(session, static builder => builder.WithStdioServerTransport(), projectReverseRouteCapabilities, progressNotificationState);
+        await RunPairedAsync(host, session).ConfigureAwait(false);
+    }
 
+    /// <summary>
+    /// Production host/session race used by <see cref="RunAsync"/>. Always observes a
+    /// completed/faulted <paramref name="session"/> terminal task even when the host task
+    /// wins <see cref="Task.WhenAny"/> in a simultaneous-completion tie, so unexpected
+    /// backend death never reports as a clean exit.
+    /// </summary>
+    internal static async Task RunPairedAsync(IHost host, RelaySession session)
+    {
         var hostRunTask = host.RunAsync();
         var sessionEndedTask = session.RunUntilSessionEndedAsync(CancellationToken.None);
+        await ObserveTerminalRaceAsync(
+            hostRunTask,
+            sessionEndedTask,
+            () => host.StopAsync()).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Pure race observation for the host vs session-ended pair. Extracted so production
+    /// composition tests can force a simultaneous-completion tie without depending on
+    /// scheduler ordering of real I/O.
+    /// </summary>
+    internal static async Task ObserveTerminalRaceAsync(
+        Task hostRunTask,
+        Task sessionEndedTask,
+        Func<Task> stopHostAsync)
+    {
         var firstCompleted = await Task.WhenAny(hostRunTask, sessionEndedTask).ConfigureAwait(false);
         if (firstCompleted == sessionEndedTask)
         {
             // The Python backend ended (or the bootstrap/capability validation failed)
             // before the downstream session closed. Stop serving and propagate the failure
             // rather than advertising a successful proxy shutdown.
-            await host.StopAsync().ConfigureAwait(false);
+            await stopHostAsync().ConfigureAwait(false);
             await sessionEndedTask.ConfigureAwait(false);
         }
 
         await hostRunTask.ConfigureAwait(false);
+
+        // Tie / late backend fault: host completion must not hide an already-terminal
+        // sessionEndedTask (WhenAny may have selected hostRunTask first).
+        if (sessionEndedTask.IsCompleted)
+        {
+            await sessionEndedTask.ConfigureAwait(false);
+        }
     }
 
     /// <summary>

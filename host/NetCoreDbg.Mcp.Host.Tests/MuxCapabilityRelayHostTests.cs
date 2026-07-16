@@ -22,7 +22,7 @@ namespace NetCoreDbg.Mcp.Host.Tests;
 /// exact two-line integration change). Editing that file is out of FD-007's scope, so
 /// <see cref="BuildWithMuxProjection"/> below is a deliberate, narrowly-scoped duplicate of
 /// <c>RelayComposition.Build</c>'s method body: every building block it calls
-/// (<see cref="RelayRouteCatalog"/>, <see cref="RelayRouteCatalog.SuppressUnregisteredLogging"/>,
+/// (<see cref="RelayRouteCatalog"/>, <see cref="ProgressLoggingRelay.ConfigureFilters"/>,
 /// <see cref="RelaySession.CreateBootstrapFilter"/>, <see cref="ToolsRelay.Register"/>) is the
 /// unedited production code; the only difference from <c>RelayComposition.Build</c> is that
 /// the upfront <c>Experimental</c> capability is omitted and

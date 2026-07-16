@@ -290,10 +290,10 @@ async def test_host_proxies_initialize_tools_list_and_validate_plan(
                     f"listChanged support; got: {init_result.capabilities.tools}"
                 )
                 assert init_result.capabilities.logging is None, (
-                    "host must not advertise a logging capability until FD-002 implements "
-                    "it for real - SDK 1.4.1 forces this capability on by default unless "
-                    "RelayRouteCatalog.SuppressUnregisteredLogging's outgoing filter strips "
-                    f"it; got: {init_result.capabilities.logging}"
+                    "host must not advertise a logging capability when Python does not - "
+                    "SDK 1.4.1 forces this capability on by default unless "
+                    "ProgressLoggingRelay.ConfigureFilters strips it for capability-absent "
+                    f"Python; got: {init_result.capabilities.logging}"
                 )
 
                 # ping is answered by the SDK itself, never by a relay route: proves the
@@ -692,8 +692,8 @@ async def test_direct_python_has_no_logging_capability(tmp_path: Path) -> None:
     """Ground truth for the host's logging-suppression parity claim above: direct Python
     (no .NET host involved) advertises no logging capability and rejects logging/setLevel
     with "Method not found" on its own. If Python ever grew real logging support, this
-    would fail first and point straight at RelayRouteCatalog.SuppressUnregisteredLogging
-    needing to become a real FD-002 route instead of a suppression."""
+    would fail first and point straight at ProgressLoggingRelay.ConfigureFilters needing
+    to project the real negotiated capability instead of stripping it."""
     params = StdioServerParameters(
         command=sys.executable,
         args=["-m", "netcoredbg_mcp", "--project-from-cwd"],

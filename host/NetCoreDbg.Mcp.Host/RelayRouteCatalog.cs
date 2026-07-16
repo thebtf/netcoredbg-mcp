@@ -1,6 +1,4 @@
-using System.Text.Json.Nodes;
 using ModelContextProtocol.Protocol;
-using ModelContextProtocol.Server;
 
 namespace NetCoreDbg.Mcp.Host;
 
@@ -51,12 +49,6 @@ internal sealed class RelayRouteCatalog
 
     private const string FallbackProtocolVersion = "2025-11-25";
 
-    /// <summary>
-    /// The JSON-RPC error code for "Method not found" (JSON-RPC 2.0 / MCP shared error code
-    /// space), used only by <see cref="SuppressUnregisteredLogging"/>.
-    /// </summary>
-    private const int MethodNotFoundErrorCode = -32601;
-
     private readonly HashSet<(RelayDirection Direction, string Method)> _registered = new();
     private readonly List<RelayRoute> _routes = new();
 
@@ -84,55 +76,4 @@ internal sealed class RelayRouteCatalog
         requestedVersion is not null && Array.IndexOf(SupportedProtocolVersions, requestedVersion) >= 0
             ? requestedVersion
             : FallbackProtocolVersion;
-
-    /// <summary>
-    /// SDK 1.4.1 unconditionally advertises <see cref="ServerCapabilities.Logging"/> and
-    /// answers <c>logging/setLevel</c> regardless of which handlers this build configures -
-    /// verified directly against the compiled SDK: a server built with no logging handler at
-    /// all still reports a non-null <c>Logging</c> capability and completes
-    /// <c>logging/setLevel</c> successfully. Direct Python advertises no logging capability
-    /// and rejects <c>logging/setLevel</c> with "Method not found". Until FD-002 registers a
-    /// real, negotiated logging route, this pair of message filters makes the host match
-    /// Python exactly: the outgoing filter strips the forced capability key from the
-    /// serialized <c>initialize</c> response, and the incoming filter short-circuits
-    /// <c>logging/setLevel</c> with the same error Python itself returns. This targets only
-    /// the one proven SDK-forced anomaly - every other unregistered method (prompts,
-    /// resources, ...) already fails closed correctly with no filter needed, so this is
-    /// intentionally not a generic "unknown method" filter.
-    /// </summary>
-    public static void SuppressUnregisteredLogging(McpServerFilters filters)
-    {
-        filters.Message.IncomingFilters.Add(next => async (context, cancellationToken) =>
-        {
-            if (context.JsonRpcMessage is JsonRpcRequest { Method: RequestMethods.LoggingSetLevel } incoming)
-            {
-                await context.Server.SendMessageAsync(
-                    new JsonRpcError
-                    {
-                        Id = incoming.Id,
-                        Error = new JsonRpcErrorDetail
-                        {
-                            Code = MethodNotFoundErrorCode,
-                            Message = "Method not found",
-                        },
-                    },
-                    cancellationToken).ConfigureAwait(false);
-                return;
-            }
-
-            await next(context, cancellationToken).ConfigureAwait(false);
-        });
-
-        filters.Message.OutgoingFilters.Add(next => async (context, cancellationToken) =>
-        {
-            if (context.JsonRpcMessage is JsonRpcResponse { Result: JsonObject result }
-                && result.TryGetPropertyValue("capabilities", out var capabilitiesNode)
-                && capabilitiesNode is JsonObject capabilities)
-            {
-                capabilities.Remove("logging");
-            }
-
-            await next(context, cancellationToken).ConfigureAwait(false);
-        });
-    }
 }

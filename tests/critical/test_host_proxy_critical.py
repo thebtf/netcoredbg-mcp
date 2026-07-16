@@ -44,6 +44,7 @@ from tests.test_host_proxy import (
     SEARCH_FIXTURE_ROOT,
     UNKNOWN_TOOL_NAME,
     _backend_env,
+    _cached_direct_catalog,
     _tool_payload,
 )
 
@@ -72,6 +73,49 @@ EXPECTED_RESOURCES: dict[str, tuple[str, str]] = {
     "debug://threads": ("debug_threads_resource", "application/json"),
 }
 METHOD_NOT_FOUND_ERROR_CODE = -32601
+
+SMOKE_PROJECT = REPO_ROOT / "tests" / "fixtures" / "SmokeTestApp"
+SMOKE_DLL = SMOKE_PROJECT / "bin" / "Debug" / "net8.0-windows" / "SmokeTestApp.dll"
+
+
+def require_section10_progress_prerequisites(
+    *,
+    netcoredbg_path: str | None = None,
+    smoke_dll: Path = SMOKE_DLL,
+    which=shutil.which,
+) -> tuple[str, Path]:
+    """Fail closed for mandatory progress coverage when prerequisites are missing.
+
+    Section 10 progress is a release-critical proof, not optional soft coverage.
+    Missing NETCOREDBG_PATH, a missing netcoredbg binary, a missing dotnet CLI, or
+    a missing SmokeTestApp DLL must report non-proof rather than silently omit the
+    gate. Callers that build the fixture still assert the build succeeded before
+    invoking progress tools.
+    """
+    path = netcoredbg_path if netcoredbg_path is not None else os.environ.get("NETCOREDBG_PATH")
+    if not path:
+        raise AssertionError(
+            "NETCOREDBG_PATH is required for mandatory Section 10 progress coverage; "
+            "set it to a real netcoredbg executable or treat this gate as non-proof."
+        )
+    resolved = Path(path)
+    if not resolved.is_file():
+        raise AssertionError(
+            "NETCOREDBG_PATH must point to an existing netcoredbg executable for "
+            f"mandatory Section 10 progress coverage; got {path!r}."
+        )
+    if which("dotnet") is None:
+        raise AssertionError(
+            "dotnet CLI is required for mandatory Section 10 progress coverage "
+            "(SmokeTestApp fixture build)."
+        )
+    # The DLL may be produced by a just-in-time build; only require the parent
+    # project tree when the built binary is already expected to exist.
+    if smoke_dll.exists() and not smoke_dll.is_file():
+        raise AssertionError(
+            f"SmokeTestApp path is not a file for Section 10 progress coverage: {smoke_dll}"
+        )
+    return str(resolved), smoke_dll
 
 
 def _combined_message_handler(
@@ -179,10 +223,30 @@ def test_host_proxy_critical_fails_when_python_backend_is_missing(
 
 
 @pytest.mark.critical
+def test_section10_progress_prerequisites_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """@critical category: behavioral - missing progress prerequisites are non-proof."""
+    monkeypatch.delenv("NETCOREDBG_PATH", raising=False)
+    with pytest.raises(AssertionError, match="NETCOREDBG_PATH is required"):
+        require_section10_progress_prerequisites(netcoredbg_path=None)
+
+    with pytest.raises(AssertionError, match="existing netcoredbg executable"):
+        require_section10_progress_prerequisites(
+            netcoredbg_path=str(REPO_ROOT / "does-not-exist-netcoredbg.exe")
+        )
+
+    with pytest.raises(AssertionError, match="dotnet CLI is required"):
+        require_section10_progress_prerequisites(
+            netcoredbg_path=str(Path(__file__).resolve()),
+            which=lambda _name: None,
+        )
+
+
+@pytest.mark.critical
 @pytest.mark.asyncio
 async def test_host_proxy_critical_front_door_surfaces(
     tmp_path: Path,
     host_dll: Path,
+    tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
     """@critical category: behavioral - real Release host covers accepted front-door
     surfaces without a parallel smoke path or full per-module matrix.
@@ -199,9 +263,9 @@ async def test_host_proxy_critical_front_door_surfaces(
 
     env = _backend_env()
     env["NETCOREDBG_MCP_PYTHON_EXECUTABLE"] = sys.executable
-    netcoredbg = os.environ.get("NETCOREDBG_PATH")
-    if netcoredbg:
-        env["NETCOREDBG_PATH"] = netcoredbg
+    # Fail closed up front: progress Section 10 is mandatory, not optional soft coverage.
+    netcoredbg, smoke_dll = require_section10_progress_prerequisites()
+    env["NETCOREDBG_PATH"] = netcoredbg
 
     notification_methods: list[str] = []
     resource_updates: asyncio.Queue[str] = asyncio.Queue()
@@ -212,6 +276,15 @@ async def test_host_proxy_critical_front_door_surfaces(
         progress: float, total: float | None, message: str | None
     ) -> None:
         progress_events.append((progress, total, message))
+
+    # Canonical expected names from the same direct-Python catalog source used by
+    # tests/test_host_proxy.py — not a second hand-maintained list.
+    direct_catalog = await _cached_direct_catalog(tmp_path_factory)
+    expected_tool_names = {tool["name"] for tool in direct_catalog}
+    assert len(expected_tool_names) == EXPECTED_TOOL_COUNT, (
+        f"canonical direct-Python catalog must have exactly {EXPECTED_TOOL_COUNT} "
+        f"names; got {len(expected_tool_names)}"
+    )
 
     # ---- Session 1: tools/prompts/resources/mux/progress/cancel/stdout ----
     # Reuses the accepted --project-from-cwd resource-subscription fixture shape
@@ -248,10 +321,12 @@ async def test_host_proxy_critical_front_door_surfaces(
                 assert logging_error.value.error.code == METHOD_NOT_FOUND_ERROR_CODE
 
                 tools = await session.list_tools()
-                assert len(tools.tools) == EXPECTED_TOOL_COUNT
-                tool_names = {tool.name for tool in tools.tools}
-                assert PARITY_TOOL_NAME in tool_names
-                assert "find_code_symbol" in tool_names
+                host_tool_names = {tool.name for tool in tools.tools}
+                assert host_tool_names == expected_tool_names, (
+                    "host tools/list must match the exact canonical direct-Python catalog "
+                    f"names - missing: {sorted(expected_tool_names - host_tool_names)}, "
+                    f"unexpected: {sorted(host_tool_names - expected_tool_names)}"
+                )
 
                 call_ok = await session.call_tool(
                     PARITY_TOOL_NAME,
@@ -338,62 +413,66 @@ async def test_host_proxy_critical_front_door_surfaces(
     # ---- Session 2: progress + structured-logging capability truth ----
     # Separate session so project scope matches the accepted SmokeTestApp fixture
     # (tmp_path project correctly rejects paths outside its tree).
-    smoke_project = REPO_ROOT / "tests" / "fixtures" / "SmokeTestApp"
-    smoke_dll = (
-        smoke_project / "bin" / "Debug" / "net8.0-windows" / "SmokeTestApp.dll"
+    smoke_project = SMOKE_PROJECT
+    build = subprocess.run(
+        ["dotnet", "build", str(smoke_project), "-c", "Debug"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
     )
-    if netcoredbg and Path(netcoredbg).is_file() and shutil.which("dotnet"):
-        build = subprocess.run(
-            ["dotnet", "build", str(smoke_project), "-c", "Debug"],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-        )
-        if build.returncode == 0 and smoke_dll.is_file():
-            progress_events.clear()
-            logging_messages.clear()
-            progress_params = StdioServerParameters(
-                command="dotnet",
-                args=[str(host_dll), "--project", str(smoke_project)],
-                env=env,
-                cwd=str(tmp_path),
-            )
-            progress_errlog = tmp_path / "host-stderr-progress.log"
-            with open(progress_errlog, "w+", encoding="utf-8") as errlog:
-                async with stdio_client(
-                    progress_params, errlog=errlog
-                ) as (read_stream, write_stream):
-                    async with ClientSession(
-                        read_stream,
-                        write_stream,
-                        message_handler=_combined_message_handler(
-                            notification_methods, resource_updates, logging_messages
-                        ),
-                    ) as session:
-                        init_result = await session.initialize()
-                        assert init_result.capabilities.logging is None
-                        started = await session.call_tool(
-                            "start_debug",
-                            {
-                                "program": str(smoke_dll.resolve()),
-                                "pre_build": False,
-                                "stop_at_entry": True,
-                            },
-                            progress_callback=progress_callback,
-                        )
-                        assert not started.isError, started
-                        started_payload = _tool_payload(started)
-                        assert "error" not in started_payload, started_payload
-                        assert progress_events, (
-                            "start_debug through the host must forward "
-                            "notifications/progress before the final response; "
-                            f"payload={started_payload}"
-                        )
-                        # Capability-absent: ProgressLoggingRelay suppresses
-                        # structured log notifications from non-advertising Python.
-                        assert logging_messages == []
-                        await session.call_tool("stop_debug", {})
+    assert build.returncode == 0, (
+        "SmokeTestApp Debug build is required for mandatory Section 10 progress coverage:\n"
+        f"stdout:\n{build.stdout}\nstderr:\n{build.stderr}"
+    )
+    assert smoke_dll.is_file(), (
+        "SmokeTestApp Debug DLL is required for mandatory Section 10 progress coverage: "
+        f"{smoke_dll}"
+    )
+
+    progress_events.clear()
+    logging_messages.clear()
+    progress_params = StdioServerParameters(
+        command="dotnet",
+        args=[str(host_dll), "--project", str(smoke_project)],
+        env=env,
+        cwd=str(tmp_path),
+    )
+    progress_errlog = tmp_path / "host-stderr-progress.log"
+    with open(progress_errlog, "w+", encoding="utf-8") as errlog:
+        async with stdio_client(
+            progress_params, errlog=errlog
+        ) as (read_stream, write_stream):
+            async with ClientSession(
+                read_stream,
+                write_stream,
+                message_handler=_combined_message_handler(
+                    notification_methods, resource_updates, logging_messages
+                ),
+            ) as session:
+                init_result = await session.initialize()
+                assert init_result.capabilities.logging is None
+                started = await session.call_tool(
+                    "start_debug",
+                    {
+                        "program": str(smoke_dll.resolve()),
+                        "pre_build": False,
+                        "stop_at_entry": True,
+                    },
+                    progress_callback=progress_callback,
+                )
+                assert not started.isError, started
+                started_payload = _tool_payload(started)
+                assert "error" not in started_payload, started_payload
+                assert progress_events, (
+                    "start_debug through the host must forward "
+                    "notifications/progress before the final response; "
+                    f"payload={started_payload}"
+                )
+                # Capability-absent: ProgressLoggingRelay suppresses
+                # structured log notifications from non-advertising Python.
+                assert logging_messages == []
+                await session.call_tool("stop_debug", {})
 
     # ---- Session 3: downstream roots reach find_code_symbol ----
     # Same SearchTestApp fixture RootsRelayRealPythonTests accepts. No --project /

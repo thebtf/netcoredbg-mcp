@@ -63,6 +63,7 @@ public sealed class RootsRelayTests
     private static IHost BuildDownstreamHostWithRootsModule(
         RelaySession session, RootsRelay rootsRelay, Stream downstreamInput, Stream downstreamOutput, RelayRouteCatalog catalog)
     {
+        var notificationState = new ProgressLoggingRelay.NotificationState();
         var builder = global::Microsoft.Extensions.Hosting.Host.CreateApplicationBuilder(Array.Empty<string>());
         builder.Logging.ClearProviders();
         builder.Logging.AddConsole(options => options.LogToStandardErrorThreshold = LogLevel.Trace);
@@ -71,12 +72,14 @@ public sealed class RootsRelayTests
         {
             options.ServerInfo = new Implementation { Name = "roots-relay-test-host", Version = "1.0.0" };
             options.Capabilities = new ServerCapabilities { Tools = new ToolsCapability() };
-            RelayRouteCatalog.SuppressUnregisteredLogging(options.Filters);
+            // Same production filter pair RelayComposition uses — never a retired parallel path.
+            ProgressLoggingRelay.ConfigureFilters(options.Filters, session, notificationState);
             options.Filters.Message.IncomingFilters.Add(
                 session.CreateBootstrapFilter(caps => rootsRelay.ProjectCapabilities(caps, new ClientCapabilities())));
         });
 
         ToolsRelay.Register(mcpBuilder, catalog, session);
+        ProgressLoggingRelay.Register(mcpBuilder, catalog, session);
         RootsRelay.Register(mcpBuilder, catalog, session);
         mcpBuilder.WithStreamServerTransport(downstreamInput, downstreamOutput);
 

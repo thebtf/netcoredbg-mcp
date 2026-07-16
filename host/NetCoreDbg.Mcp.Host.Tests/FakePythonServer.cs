@@ -58,7 +58,7 @@ internal sealed class FakePythonServer : IAsyncDisposable
     /// SDK 1.4.1's <c>McpServerImpl.ConfigureLogging</c> unconditionally sets
     /// <see cref="ServerCapabilities.Logging"/> regardless of <c>options.Capabilities</c>
     /// (verified directly against the compiled SDK, same as
-    /// <c>RelayRouteCatalog.SuppressUnregisteredLogging</c>'s own baseline finding for the
+    /// <see cref="ProgressLoggingRelay.ConfigureFilters"/>'s capability-absent projection for the
     /// host itself). Adds an outgoing filter that strips the same JSON key from this fake's
     /// own initialize response so it accurately represents "Python has no logging
     /// capability" the way real, unmodified netcoredbg_mcp genuinely does not.

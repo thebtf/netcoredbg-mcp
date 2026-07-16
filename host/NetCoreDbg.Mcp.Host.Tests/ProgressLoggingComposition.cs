@@ -8,18 +8,11 @@ using ModelContextProtocol.Server;
 namespace NetCoreDbg.Mcp.Host.Tests;
 
 /// <summary>
-/// Builds a downstream host that wires <see cref="ProgressLoggingRelay"/> in exactly the shape
-/// described by that module's own doc comments as the integration hook: <c>ProgressLoggingRelay
-/// .ConfigureFilters</c> replaces <c>RelayRouteCatalog.SuppressUnregisteredLogging</c> in the
-/// <c>AddMcpServer(options =&gt; ...)</c> block, <c>ProgressLoggingRelay.Register</c> is called
-/// alongside <c>ToolsRelay.Register</c>, and <c>ProgressLoggingRelay.WrapUpstreamTransport</c> wraps
-/// the upstream transport factory passed to <see cref="RelaySession"/>'s constructor.
-///
-/// This mirrors <c>RelayComposition.Build</c>'s structure but is built locally here (not by editing
-/// <c>RelayComposition.cs</c>, which remains integration-owned until this module is accepted) - the
-/// same "expose one clear registration/projection entry and test it directly" pattern
-/// <c>ReverseRouteAndLifecycleTests.BuildReverseRouteSession</c> already uses for FD-000's own
-/// not-yet-wired reverse routes.
+/// Builds a downstream host that wires <see cref="ProgressLoggingRelay"/> with the production
+/// composition shape: <c>ProgressLoggingRelay.ConfigureFilters</c> in the
+/// <c>AddMcpServer(options =&gt; ...)</c> block, <c>ProgressLoggingRelay.Register</c> alongside
+/// <c>ToolsRelay.Register</c>, and <c>ProgressLoggingRelay.WrapUpstreamTransport</c> wrapping the
+/// upstream transport factory passed to <see cref="RelaySession"/>'s constructor.
 /// </summary>
 internal static class ProgressLoggingComposition
 {

@@ -32,6 +32,7 @@ internal static class ResourcesTestComposition
         Func<ClientCapabilities?, ClientCapabilities>? projectReverseRouteCapabilities = null)
     {
         var catalog = new RelayRouteCatalog();
+        var notificationState = new ProgressLoggingRelay.NotificationState();
         var builder = global::Microsoft.Extensions.Hosting.Host.CreateApplicationBuilder(Array.Empty<string>());
         builder.Logging.ClearProviders();
 
@@ -40,13 +41,15 @@ internal static class ResourcesTestComposition
             options.ServerInfo = new Implementation { Name = "fd005-test-host", Version = "1.0.0" };
             options.Capabilities = new ServerCapabilities { Tools = new ToolsCapability() };
 
-            RelayRouteCatalog.SuppressUnregisteredLogging(options.Filters);
+            // Same production filter pair RelayComposition uses — never a retired parallel path.
+            ProgressLoggingRelay.ConfigureFilters(options.Filters, session, notificationState);
             options.Filters.Message.IncomingFilters.Add(
                 session.CreateBootstrapFilter(projectReverseRouteCapabilities ?? (static _ => new ClientCapabilities())));
             ResourcesRelay.ConfigureCapabilityProjection(options.Capabilities, options.Filters, session);
         });
 
         ToolsRelay.Register(mcpBuilder, catalog, session);
+        ProgressLoggingRelay.Register(mcpBuilder, catalog, session);
         ResourcesRelay.Register(mcpBuilder, catalog, session);
         ResourceUpdatesRelay.Register(mcpBuilder, catalog, session);
         configureTransport(mcpBuilder);
