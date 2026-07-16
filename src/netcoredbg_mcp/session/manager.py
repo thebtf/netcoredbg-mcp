@@ -13,7 +13,6 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from ..build import BuildManager, BuildResult
-from ..resource_updates import BREAKPOINTS_URI, OUTPUT_URI, STATE_URI, THREADS_URI
 from ..dap import DAPClient, DAPEvent, DAPResponse
 from ..dap.events import (
     BreakpointEventBody,
@@ -37,6 +36,7 @@ from ..dap.events import (
 from ..dap.protocol import Events
 from ..enc.detect import detect_enc_support
 from ..process_registry import ProcessRegistry
+from ..resource_updates import BREAKPOINTS_URI, OUTPUT_URI, STATE_URI, THREADS_URI
 from ..ui.foreground import (
     get_foreground_window,
     get_window_process_id,
