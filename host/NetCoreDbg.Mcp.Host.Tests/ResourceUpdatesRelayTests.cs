@@ -31,9 +31,38 @@ public sealed class ResourceUpdatesRelayTests
         return (session, upstream, downstream);
     }
 
+    private sealed class ResourceUpdateWriteGate
+    {
+        private readonly TaskCompletionSource _blockedWriteStarted =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void Configure(McpServerOptions options) =>
+            options.Filters.Message.OutgoingFilters.Add(next => async (context, cancellationToken) =>
+            {
+                if (context.JsonRpcMessage is JsonRpcNotification
+                    {
+                        Method: NotificationMethods.ResourceUpdatedNotification,
+                    })
+                {
+                    _blockedWriteStarted.TrySetResult();
+                    await _release.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                await next(context, cancellationToken).ConfigureAwait(false);
+            });
+
+        public void Release() => _release.TrySetResult();
+
+        public Task WaitUntilBlockedAsync(TimeSpan timeout) =>
+            _blockedWriteStarted.Task.WaitAsync(timeout);
+    }
+
     private static McpServerOptions SubscribablePythonOptions(
         McpRequestHandler<SubscribeRequestParams, EmptyResult>? subscribe = null,
-        McpRequestHandler<UnsubscribeRequestParams, EmptyResult>? unsubscribe = null) =>
+        McpRequestHandler<UnsubscribeRequestParams, EmptyResult>? unsubscribe = null,
+        McpRequestHandler<CallToolRequestParams, CallToolResult>? callTool = null) =>
         new()
         {
             ServerInfo = new Implementation { Name = "fake-python-updates", Version = "1.0.0" },
@@ -45,6 +74,7 @@ public sealed class ResourceUpdatesRelayTests
             Handlers = new McpServerHandlers
             {
                 ListToolsHandler = (context, ct) => ValueTask.FromResult(new ListToolsResult { Tools = [] }),
+                CallToolHandler = callTool ?? ((context, ct) => ValueTask.FromResult(new CallToolResult())),
                 SubscribeToResourcesHandler = subscribe ?? ((context, ct) => ValueTask.FromResult(new EmptyResult())),
                 UnsubscribeFromResourcesHandler = unsubscribe ?? ((context, ct) => ValueTask.FromResult(new EmptyResult())),
             },
@@ -224,6 +254,74 @@ public sealed class ResourceUpdatesRelayTests
         Assert.True(JsonNode.DeepEquals(second.Params, receivedSecond.Params));
 
         await session.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task ResourceUpdatedNotification_BlocksFollowingToolResponseUntilUpdateIsDelivered()
+    {
+        var upstream = new DuplexChannel();
+        var downstream = new DuplexChannel();
+        var updateWriteGate = new ResourceUpdateWriteGate();
+        await using var session = ResourcesTestComposition.CreateSession(
+            upstream.CreateClientTransport);
+        using var host = ResourcesTestComposition.BuildHost(
+            session,
+            builder => builder.WithStreamServerTransport(
+                downstream.ServerInputStream,
+                downstream.ServerOutputStream),
+            configureOptions: updateWriteGate.Configure);
+        _ = host.RunAsync();
+
+        FakePythonServer? python = null;
+        var options = SubscribablePythonOptions(callTool: async (context, cancellationToken) =>
+        {
+            await RelaySession.ForwardNotificationAsync(
+                python!.Server,
+                ResourceUpdated(StateUri, marker: "before-response"),
+                cancellationToken);
+            return new CallToolResult
+            {
+                Content = [new TextContentBlock { Text = "mutation-complete" }],
+            };
+        });
+        await using var fakePython = FakePythonServer.Start(upstream, options);
+        python = fakePython;
+        await using var rawDownstream = await ConnectRawDownstreamAsync(downstream);
+
+        var requestId = new RequestId(2);
+        await rawDownstream.SendMessageAsync(
+            new JsonRpcRequest
+            {
+                Id = requestId,
+                Method = RequestMethods.ToolsCall,
+                Params = JsonSerializer.SerializeToNode(
+                    new CallToolRequestParams { Name = "mutate" },
+                    McpJsonUtilities.DefaultOptions),
+            });
+        var firstMessageTask = rawDownstream.MessageReader.ReadAsync().AsTask();
+
+        try
+        {
+            await updateWriteGate.WaitUntilBlockedAsync(TimeSpan.FromSeconds(10));
+            var escaped = await Task.WhenAny(firstMessageTask, Task.Delay(TimeSpan.FromSeconds(1)));
+            Assert.NotSame(
+                firstMessageTask,
+                escaped);
+        }
+        finally
+        {
+            updateWriteGate.Release();
+        }
+
+        var firstMessage = await firstMessageTask.WaitAsync(TimeSpan.FromSeconds(10));
+        var update = Assert.IsType<JsonRpcNotification>(firstMessage);
+        Assert.Equal(NotificationMethods.ResourceUpdatedNotification, update.Method);
+        Assert.Equal(StateUri, update.Params!["uri"]!.GetValue<string>());
+        var response = Assert.IsType<JsonRpcResponse>(
+            await rawDownstream.MessageReader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Equal(requestId, response.Id);
+
+        await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
     }
 
     [Fact]

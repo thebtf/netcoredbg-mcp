@@ -29,7 +29,8 @@ internal static class ResourcesTestComposition
     public static IHost BuildHost(
         RelaySession session,
         Action<IMcpServerBuilder> configureTransport,
-        Func<ClientCapabilities?, ClientCapabilities>? projectReverseRouteCapabilities = null)
+        Func<ClientCapabilities?, ClientCapabilities>? projectReverseRouteCapabilities = null,
+        Action<McpServerOptions>? configureOptions = null)
     {
         var catalog = new RelayRouteCatalog();
         var notificationState = new ProgressLoggingRelay.NotificationState();
@@ -41,11 +42,13 @@ internal static class ResourcesTestComposition
             options.ServerInfo = new Implementation { Name = "fd005-test-host", Version = "1.0.0" };
             options.Capabilities = new ServerCapabilities { Tools = new ToolsCapability() };
 
-            // Same production filter pair RelayComposition uses — never a retired parallel path.
+            // Same production filters RelayComposition uses — never a retired parallel path.
             ProgressLoggingRelay.ConfigureFilters(options.Filters, session, notificationState);
+            ResourceUpdatesRelay.ConfigureFilters(options.Filters, session);
             options.Filters.Message.IncomingFilters.Add(
                 session.CreateBootstrapFilter(projectReverseRouteCapabilities ?? (static _ => new ClientCapabilities())));
             ResourcesRelay.ConfigureCapabilityProjection(options.Capabilities, options.Filters, session);
+            configureOptions?.Invoke(options);
         });
 
         ToolsRelay.Register(mcpBuilder, catalog, session);

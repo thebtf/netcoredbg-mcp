@@ -15,6 +15,7 @@ namespace NetCoreDbg.Mcp.Host;
 /// </summary>
 internal static class ResourceUpdatesRelay
 {
+    private static readonly ConditionalWeakTable<RelaySession, OrderedUpstream> s_orderedBySession = new();
     /// <summary>
     /// Fixed bound on distinct resource URIs retained while a slow downstream subscriber
     /// blocks ordered drain. Notifications coalesce per URI (latest payload only; coalesced
@@ -57,6 +58,25 @@ internal static class ResourceUpdatesRelay
     }
 
     /// <summary>
+    /// Holds downstream responses behind every resource update already admitted from the
+    /// upstream wire. SDK 1.4.1 dispatches adjacent incoming messages concurrently, so the
+    /// notification callback alone cannot preserve notification-before-response order.
+    /// </summary>
+    public static void ConfigureFilters(McpServerFilters filters, RelaySession session)
+    {
+        filters.Message.OutgoingFilters.Add(next => async (context, cancellationToken) =>
+        {
+            if ((context.JsonRpcMessage is JsonRpcResponse or JsonRpcError)
+                && s_orderedBySession.TryGetValue(session, out var ordered))
+            {
+                await ordered.WaitForResponseBarrierAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await next(context, cancellationToken).ConfigureAwait(false);
+        });
+    }
+
+    /// <summary>
     /// Admits and orders resource updates while the SDK consumes its ordered transport reader,
     /// before McpSessionHandler force-yields concurrent callbacks. A weak object-identity
     /// sidecar leaves the notification object graph untouched.
@@ -82,6 +102,7 @@ internal static class ResourceUpdatesRelay
         private long _nextReceivedSequence;
         private int _forwardAttempts;
         private bool _forwarderActive;
+        private PendingUri? _inFlight;
         private bool _terminal;
 
         /// <summary>
@@ -123,7 +144,9 @@ internal static class ResourceUpdatesRelay
             {
                 lock (_gate)
                 {
-                    return _pendingByUri.Count + _pendingByOrder.Count;
+                    return _pendingByUri.Count
+                        + _pendingByOrder.Count
+                        + (_inFlight is null ? 0 : 1);
                 }
             }
         }
@@ -142,6 +165,9 @@ internal static class ResourceUpdatesRelay
                 throw new InvalidOperationException(
                     $"{NotificationMethods.ResourceUpdatedNotification} already has an upstream handler.");
             }
+
+            s_orderedBySession.Remove(session);
+            s_orderedBySession.Add(session, this);
 
             var sessionEndingToken = session.SessionEndingToken;
             sessionEndingToken.Register(MarkTerminal);
@@ -212,10 +238,15 @@ internal static class ResourceUpdatesRelay
                 if (_pendingByUri.TryGetValue(uri, out var existing))
                 {
                     // Keep the first-wire order slot; replace only latest payload/sequence.
+                    // Once a response snapshots this slot, later coalesced payloads must not
+                    // reset its readiness or make that response wait for a later callback.
                     existing.Notification = notification;
                     existing.ContentSequence = sequence;
-                    existing.Ready = false;
-                    existing.CallbackToken = default;
+                    if (existing.ResponseBarrierSequence == 0)
+                    {
+                        existing.Ready = false;
+                        existing.CallbackToken = default;
+                    }
                     _receiveStamps.Add(
                         notification,
                         new ReceiveStamp(sequence, StampDisposition.Accepted, uri));
@@ -282,7 +313,8 @@ internal static class ResourceUpdatesRelay
         /// <summary>
         /// Consumes stamp only: marks the current content ready, records at most one
         /// cancellation token, and starts drain when the smallest order slot is ready.
-        /// Stale callbacks (not matching current ContentSequence) complete without state.
+        /// Stale callbacks complete without state unless a response barrier froze that
+        /// exact earlier sequence before a later same-URI payload coalesced into its slot.
         /// </summary>
         private ValueTask MarkReadyAndMaybeDrainAsync(
             ReceiveStamp stamp,
@@ -311,14 +343,17 @@ internal static class ResourceUpdatesRelay
                     return ValueTask.CompletedTask;
                 }
 
-                if (stamp.Sequence != pending.ContentSequence)
+                if (stamp.Sequence != pending.ContentSequence
+                    && stamp.Sequence != pending.ResponseBarrierSequence)
                 {
                     // Stale callback for a superseded payload — complete immediately.
                     return ValueTask.CompletedTask;
                 }
 
                 pending.Ready = true;
-                pending.CallbackToken = callbackToken;
+                pending.CallbackToken = stamp.Sequence == pending.ContentSequence
+                    ? callbackToken
+                    : default;
 
                 if (!_forwarderActive && IsHeadReadyLocked())
                 {
@@ -378,6 +413,7 @@ internal static class ResourceUpdatesRelay
                     pending = head.Value;
                     _pendingByOrder.Remove(head.Key);
                     _pendingByUri.Remove(pending.Uri);
+                    _inFlight = pending;
                     Interlocked.Increment(ref _forwardAttempts);
 
                     if (pending.CallbackToken.IsCancellationRequested)
@@ -387,25 +423,67 @@ internal static class ResourceUpdatesRelay
                     }
                 }
 
-                if (skipCancelled || pending is null)
-                {
-                    continue;
-                }
-
                 try
                 {
-                    await ForwardUpdateAsync(
-                        session,
-                        sessionEndingToken,
-                        pending.Notification,
-                        pending.CallbackToken).ConfigureAwait(false);
+                    if (!skipCancelled)
+                    {
+                        await ForwardUpdateAsync(
+                            session,
+                            sessionEndingToken,
+                            pending.Notification,
+                            pending.CallbackToken).ConfigureAwait(false);
+                    }
                 }
                 catch (Exception)
                 {
                     // Downstream forward failures must not stall the ordered drain; the
                     // one-way notification is best-effort once accepted into the pipeline.
                 }
+                finally
+                {
+                    lock (_gate)
+                    {
+                        if (ReferenceEquals(_inFlight, pending))
+                        {
+                            _inFlight = null;
+                        }
+                    }
+
+                    pending.DeliveryCompleted.TrySetResult();
+                }
             }
+        }
+
+        internal ValueTask WaitForResponseBarrierAsync(CancellationToken cancellationToken)
+        {
+            Task[] barriers;
+            lock (_gate)
+            {
+                var barrierCount = _pendingByOrder.Count + (_inFlight is null ? 0 : 1);
+                if (barrierCount == 0)
+                {
+                    return ValueTask.CompletedTask;
+                }
+
+                barriers = new Task[barrierCount];
+                var index = 0;
+                if (_inFlight is not null)
+                {
+                    barriers[index++] = _inFlight.DeliveryCompleted.Task;
+                }
+
+                foreach (var pending in _pendingByOrder.Values)
+                {
+                    if (pending.ResponseBarrierSequence == 0)
+                    {
+                        pending.ResponseBarrierSequence = pending.ContentSequence;
+                    }
+
+                    barriers[index++] = pending.DeliveryCompleted.Task;
+                }
+            }
+
+            return new ValueTask(Task.WhenAll(barriers).WaitAsync(cancellationToken));
         }
 
         public ValueTask WaitForDrainAsync()
@@ -421,6 +499,12 @@ internal static class ResourceUpdatesRelay
             lock (_gate)
             {
                 _terminal = true;
+                foreach (var pending in _pendingByOrder.Values)
+                {
+                    pending.DeliveryCompleted.TrySetResult();
+                }
+
+                _inFlight?.DeliveryCompleted.TrySetResult();
                 _pendingByOrder.Clear();
                 _pendingByUri.Clear();
                 _forwarderActive = false;
@@ -451,9 +535,12 @@ internal static class ResourceUpdatesRelay
             public string Uri { get; } = uri;
             public long OrderSequence { get; } = orderSequence;
             public long ContentSequence { get; set; } = orderSequence;
+            public long ResponseBarrierSequence { get; set; }
             public JsonRpcNotification Notification { get; set; } = notification;
             public CancellationToken CallbackToken { get; set; }
             public bool Ready { get; set; }
+            public TaskCompletionSource DeliveryCompleted { get; } =
+                new(TaskCreationOptions.RunContinuationsAsynchronously);
         }
     }
 
