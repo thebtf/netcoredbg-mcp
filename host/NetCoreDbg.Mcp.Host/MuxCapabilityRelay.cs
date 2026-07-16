@@ -70,7 +70,7 @@ internal static class MuxCapabilityRelay
             return null;
         }
 
-        return (JsonObject)JsonNode.Parse(AllowedProjectionJson)!;
+        return JsonNode.Parse(AllowedProjectionJson)!.AsObject();
     }
 
     /// <summary>True only for an object with exactly one property, <c>"sharing": "isolated"</c>.</summary>

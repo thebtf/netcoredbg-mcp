@@ -556,7 +556,7 @@ async def main():
                 "prompt_names": prompt_names,
                 "resource_uris": resource_uris,
                 "resource_template_count": len(templates.resourceTemplates),
-                "state_read_ok": '"execState"' in (state.contents[0].text or ""),
+                "state_read_ok": bool(state.contents and '"execState"' in (state.contents[0].text or "")),
             }
             print(json.dumps(result, sort_keys=True))
             if (
