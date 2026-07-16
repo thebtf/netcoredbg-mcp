@@ -14,15 +14,15 @@ namespace NetCoreDbg.Mcp.Host.Tests;
 /// <see cref="PythonBackendProcess"/> production code uses, never a fake server - so this is
 /// the "real Python scoped tool" proof T-FD001-01 requires: a real downstream client's root,
 /// distinct from this test process's own working directory, reaches Python's real
-/// <c>find_code_symbol</c> tool through this module's composition, and Python's own
-/// pre-existing MCP-roots-first <c>get_project_root()</c> priority
-/// (<c>src/netcoredbg_mcp/utils/project.py</c> - unmodified by this change) resolves it.
+/// <c>find_code_symbol</c> tool through this module's composition. Python's
+/// <c>get_project_root()</c> keeps operator-pinned project authority
+/// (<c>--project</c> / env) over any client root; client MCP roots are a local fallback only
+/// when no operator pin is configured
+/// (<c>src/netcoredbg_mcp/utils/project.py</c>).
 ///
-/// <see cref="RelayComposition.Build"/>/<c>Program.cs</c> are integration-owned and do not
-/// yet call <see cref="RootsRelay"/> (see the integration hook reported with this change),
-/// so this mirrors the real composition plus this module's own registration exactly as
-/// <c>RootsRelayTests</c> already does for its in-memory fake-Python fixtures - the
-/// substitution here is only the transport plus an explicit, temporary
+/// Composition here mirrors production plus this module's own registration exactly as
+/// <c>RootsRelayTests</c> does for its in-memory fake-Python fixtures - the substitution
+/// is only the transport plus an explicit, temporary
 /// <c>NETCOREDBG_MCP_PYTHON_EXECUTABLE</c> pointing at this worktree's own environment, never
 /// a mock of RootsRelay/RelaySession/RelayComposition themselves.
 /// </summary>
@@ -159,9 +159,9 @@ public sealed class RootsRelayRealPythonTests
     public async Task GroundTruth_DirectPythonWithNoRelayAtAll_AlsoPrioritizesRootsOverCwd()
     {
         // No RelaySession/host at all: a real McpClient connects straight to the real
-        // Python backend's own stdio transport, proving get_project_root()'s MCP-roots
-        // priority is direct Python's own pre-existing, unmodified behavior - this module
-        // only makes that priority reachable through the host, it does not create it.
+        // Python backend's own stdio transport. With no operator pin configured, client
+        // MCP roots remain a valid local fallback over process CWD - this module only
+        // makes that fallback reachable through the host, it does not invent it.
         var rootsRoot = Path.Combine(Path.GetTempPath(), "roots-relay-direct-" + Guid.NewGuid().ToString("N"));
         WriteMarkerCSharpFile(rootsRoot);
 
@@ -312,8 +312,8 @@ public sealed class RootsRelayRealPythonTests
         try
         {
             // Declares Roots (so this module correctly wires/advertises it) but returns
-            // zero roots - Python's own `if roots:` truthiness check, unaffected by this
-            // module, must fall through to the explicit --project path unchanged.
+            // zero roots - with operator --project pinned, client roots are not consulted;
+            // empty roots must not displace the explicit project path.
             await using var downstreamClient = await McpClient.CreateAsync(
                 downstreamChannel.CreateClientTransport(),
                 new McpClientOptions
@@ -336,6 +336,54 @@ public sealed class RootsRelayRealPythonTests
         {
             await StopRelayedRealPythonAsync(session, python);
             Directory.Delete(projectRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ExplicitProjectFlag_WinsOverHostileDownstreamRoot_RealPython()
+    {
+        // Operator --project plus a non-empty hostile client root through the real relay:
+        // marker lives only under the pinned path so a roots-first regression would yield
+        // count=0 (or the wrong project_root) instead of a silent false green.
+        var projectRoot = Path.Combine(Path.GetTempPath(), "roots-relay-pinned-" + Guid.NewGuid().ToString("N"));
+        var hostileRoot = Path.Combine(Path.GetTempPath(), "roots-relay-hostile-" + Guid.NewGuid().ToString("N"));
+        WriteMarkerCSharpFile(projectRoot);
+        Directory.CreateDirectory(hostileRoot);
+
+        var (session, python, downstreamChannel) = StartRelayedRealPython(new[] { "--project", projectRoot });
+        try
+        {
+            await using var downstreamClient = await McpClient.CreateAsync(
+                downstreamChannel.CreateClientTransport(),
+                new McpClientOptions
+                {
+                    Capabilities = new ClientCapabilities { Roots = new RootsCapability() },
+                    Handlers = new McpClientHandlers
+                    {
+                        RootsHandler = (requestParams, ct) => ValueTask.FromResult(new ListRootsResult
+                        {
+                            Roots = [new Root { Uri = new Uri(hostileRoot).AbsoluteUri, Name = "hostile" }],
+                        }),
+                    },
+                });
+
+            using var payload = await CallFindMarkerAsync(downstreamClient);
+            var data = payload.RootElement.GetProperty("data");
+            Assert.Equal(1, data.GetProperty("count").GetInt32());
+            Assert.Equal(MarkerSymbol, data.GetProperty("results")[0].GetProperty("name").GetString());
+            AssertSameDirectory(projectRoot, data.GetProperty("project_root").GetString()!);
+            Assert.NotEqual(
+                new DirectoryInfo(hostileRoot).FullName,
+                new DirectoryInfo(data.GetProperty("project_root").GetString()!).FullName,
+                StringComparer.OrdinalIgnoreCase);
+
+            await downstreamClient.DisposeAsync();
+        }
+        finally
+        {
+            await StopRelayedRealPythonAsync(session, python);
+            Directory.Delete(projectRoot, recursive: true);
+            Directory.Delete(hostileRoot, recursive: true);
         }
     }
 }
