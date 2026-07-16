@@ -43,8 +43,9 @@ def get_session() -> SessionManager:
 async def resolve_project_root(ctx: Context, session: SessionManager) -> Path | None:
     """Resolve the current project root, potentially updating session.
 
-    Uses MCP roots from client if available, otherwise falls back to
-    configured project path.
+    Operator-pinned project scope (--project / env / config) is authoritative.
+    Client MCP roots participate only when no operator pin is configured and
+    never authorize UNC/network roots (see ``utils.project.get_project_root``).
 
     Args:
         ctx: MCP Context for accessing client roots
@@ -53,7 +54,6 @@ async def resolve_project_root(ctx: Context, session: SessionManager) -> Path | 
     Returns:
         Current project root path
     """
-    # Try to get project root from MCP context (includes client roots)
     project_root = await get_project_root(ctx)
 
     if project_root:

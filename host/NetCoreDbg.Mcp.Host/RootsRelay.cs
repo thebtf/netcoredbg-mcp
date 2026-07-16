@@ -9,15 +9,14 @@ namespace NetCoreDbg.Mcp.Host;
 
 /// <summary>
 /// Additive downstream-roots relay module (FD-001, Engram #385): capability-gated reverse
-/// <c>roots/list</c> and <c>notifications/roots/list_changed</c> routing so Python's existing
-/// MCP-roots-first project-root resolution (see
-/// <c>src/netcoredbg_mcp/utils/project.py</c>'s <c>get_project_root</c>) reaches the real
-/// downstream client through this host exactly as it already does when a client talks to
-/// Python directly. This module never touches Python's explicit <c>--project</c>,
-/// <c>NETCOREDBG_PROJECT_ROOT</c>, or <c>--project-from-cwd</c> resolution: those remain
-/// Python-owned and byte-for-byte unchanged. Roots capability is projected upstream only when
-/// the real downstream client advertises it, so Python's own capability check - and therefore
-/// its unchanged env/explicit/cwd fallback order - is exactly what runs when it is absent.
+/// <c>roots/list</c> and <c>notifications/roots/list_changed</c> routing so Python's
+/// project-root resolution (see <c>src/netcoredbg_mcp/utils/project.py</c>'s
+/// <c>get_project_root</c>) reaches the real downstream client through this host exactly as
+/// when a client talks to Python directly. Operator-pinned scope
+/// (<c>--project</c> / env / config) remains authoritative in Python; client roots
+/// participate only when no operator pin is configured and never authorize UNC/network
+/// roots. This module never invents roots or overrides that authority. Roots capability is
+/// projected upstream only when the real downstream client advertises it.
 ///
 /// One instance is required per paired <see cref="RelaySession"/> (never a shared/static
 /// instance across sessions): SDK 1.4.1's <c>McpClient</c> derives the effective
@@ -59,8 +58,8 @@ internal sealed class RootsRelay
     /// with the same <see cref="RootsCapability.ListChanged"/> flag, only when the downstream
     /// client actually declared it during its own initialize handshake. A capability absent
     /// downstream is never advertised upstream and this relay never substitutes an empty
-    /// result, so Python's own client-capability check - and therefore its existing
-    /// roots-then-env-then-explicit-then-cwd fallback order - is unaffected when the real
+    /// result, so Python's own client-capability check - and therefore its operator-first
+    /// then client-roots fallback order - is unaffected when the real
     /// client cannot answer <c>roots/list</c>. Mutates and returns
     /// <paramref name="upstreamCapabilities"/> so other reverse-route modules can compose
     /// their own projections onto the same instance. Remembers the decision on this instance

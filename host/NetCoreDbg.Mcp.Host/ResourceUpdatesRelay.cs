@@ -15,6 +15,13 @@ namespace NetCoreDbg.Mcp.Host;
 /// </summary>
 internal static class ResourceUpdatesRelay
 {
+    /// <summary>
+    /// Fixed bound on distinct resource URIs retained while a slow downstream subscriber
+    /// blocks ordered drain. Notifications coalesce per URI (latest payload reuses the
+    /// existing pending slot), so retained work scales with unique URIs rather than
+    /// notification count. Exceeding this bound fails closed instead of growing memory.
+    /// </summary>
+    public const int MaxPendingUris = 64;
 
     public static OrderedUpstream CreateOrderedUpstream() => new();
 
@@ -53,17 +60,55 @@ internal static class ResourceUpdatesRelay
     /// McpSessionHandler force-yields concurrent callbacks. A weak object-identity sidecar
     /// leaves the notification object graph untouched. Callback forwarding then drains
     /// contiguous stamps so callback scheduling cannot invert upstream receive order.
+    /// Pending work is coalesced per URI so a blocked subscriber cannot retain unbounded
+    /// duplicate notifications for the same resource.
     /// </summary>
     internal sealed class OrderedUpstream
     {
         private readonly object _gate = new();
         private readonly SortedDictionary<long, PendingForward> _pending = [];
+        private readonly Dictionary<string, long> _pendingSequenceByUri =
+            new(StringComparer.Ordinal);
+        /// <summary>
+        /// Receive sequences absorbed into an earlier same-URI pending slot. Drain advances
+        /// past these so later different-URI sequences are not stranded by coalesce holes.
+        /// </summary>
+        private readonly HashSet<long> _coalescedSequences = [];
         private readonly ConditionalWeakTable<JsonRpcNotification, ReceiveStamp> _receiveStamps = new();
         private Task _drainTask = Task.CompletedTask;
         private long _nextReceivedSequence;
         private long _nextForwardSequence = 1;
         private bool _forwarderActive;
         private bool _terminal;
+
+        /// <summary>
+        /// Number of distinct URIs currently waiting to be forwarded (test/diagnostic surface).
+        /// </summary>
+        internal int PendingUriCount
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _pendingSequenceByUri.Count;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Total pending forward slots. Equal to <see cref="PendingUriCount"/> because
+        /// duplicates coalesce into one slot per URI.
+        /// </summary>
+        internal int PendingSlotCount
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _pending.Count;
+                }
+            }
+        }
 
         public IClientTransport WrapTransport(IClientTransport transport) =>
             new SequencedClientTransport(transport, StampReceivedMessage);
@@ -134,6 +179,18 @@ internal static class ResourceUpdatesRelay
             return false;
         }
 
+        private static string? TryGetResourceUri(JsonRpcNotification notification)
+        {
+            try
+            {
+                return notification.Params?["uri"]?.GetValue<string>();
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
         private ValueTask ForwardInOrderAsync(
             long sequence,
             RelaySession session,
@@ -158,10 +215,48 @@ internal static class ResourceUpdatesRelay
                         $"Duplicate or stale resource update receive sequence {sequence}.");
                 }
 
-                _pending.Add(
-                    sequence,
-                    new PendingForward(notification, callbackToken, completion));
-                if (!_forwarderActive && _pending.ContainsKey(_nextForwardSequence))
+                var uri = TryGetResourceUri(notification);
+                if (uri is not null
+                    && _pendingSequenceByUri.TryGetValue(uri, out var existingSequence)
+                    && _pending.TryGetValue(existingSequence, out var existing))
+                {
+                    // Coalesce: reuse the existing pending slot for this URI (latest payload).
+                    existing.Notification = notification;
+                    existing.CallbackToken = callbackToken;
+                    existing.Completions.Add(completion);
+                    _coalescedSequences.Add(sequence);
+                    // A coalesce may fill the hole immediately before _nextForwardSequence,
+                    // so ensure drain is running to advance past skipped sequences.
+                    if (!_forwarderActive && CanDrainNextLocked())
+                    {
+                        _forwarderActive = true;
+                        startDrain = new TaskCompletionSource(
+                            TaskCreationOptions.RunContinuationsAsynchronously);
+                        _drainTask = DrainForwardsAsync(
+                            session,
+                            sessionEndingToken,
+                            startDrain.Task);
+                    }
+
+                    startDrain?.TrySetResult();
+                    return new ValueTask(completion.Task);
+                }
+
+                if (uri is not null && _pendingSequenceByUri.Count >= MaxPendingUris)
+                {
+                    throw new InvalidOperationException(
+                        $"Resource update pending-URI bound exceeded ({MaxPendingUris}). "
+                        + "Slow subscribers must not retain unbounded host state.");
+                }
+
+                var pending = new PendingForward(uri, notification, callbackToken, completion);
+                _pending.Add(sequence, pending);
+                if (uri is not null)
+                {
+                    _pendingSequenceByUri[uri] = sequence;
+                }
+
+                if (!_forwarderActive && CanDrainNextLocked())
                 {
                     _forwarderActive = true;
                     startDrain = new TaskCompletionSource(
@@ -177,6 +272,14 @@ internal static class ResourceUpdatesRelay
             return new ValueTask(completion.Task);
         }
 
+        /// <summary>
+        /// True when the next contiguous sequence is either ready to forward or was
+        /// absorbed by same-URI coalesce (and can be skipped).
+        /// </summary>
+        private bool CanDrainNextLocked() =>
+            _pending.ContainsKey(_nextForwardSequence)
+            || _coalescedSequences.Contains(_nextForwardSequence);
+
         private async Task DrainForwardsAsync(
             RelaySession session,
             CancellationToken sessionEndingToken,
@@ -185,14 +288,32 @@ internal static class ResourceUpdatesRelay
             await startSignal.ConfigureAwait(false);
             while (true)
             {
-                PendingForward pending;
+                PendingForward? pending = null;
                 lock (_gate)
                 {
-                    if (_terminal
-                        || !_pending.Remove(_nextForwardSequence, out pending!))
+                    if (_terminal)
                     {
                         _forwarderActive = false;
                         return;
+                    }
+
+                    // Advance past sequences absorbed by same-URI coalesce.
+                    while (_coalescedSequences.Remove(_nextForwardSequence))
+                    {
+                        _nextForwardSequence++;
+                    }
+
+                    if (!_pending.Remove(_nextForwardSequence, out pending))
+                    {
+                        _forwarderActive = false;
+                        return;
+                    }
+
+                    if (pending.Uri is not null
+                        && _pendingSequenceByUri.TryGetValue(pending.Uri, out var mapped)
+                        && mapped == _nextForwardSequence)
+                    {
+                        _pendingSequenceByUri.Remove(pending.Uri);
                     }
 
                     _nextForwardSequence++;
@@ -205,11 +326,11 @@ internal static class ResourceUpdatesRelay
                         sessionEndingToken,
                         pending.Notification,
                         pending.CallbackToken).ConfigureAwait(false);
-                    pending.Completion.TrySetResult();
+                    pending.CompleteAll();
                 }
                 catch (Exception error)
                 {
-                    pending.Completion.TrySetException(error);
+                    pending.CompleteAll(error);
                 }
             }
         }
@@ -230,21 +351,45 @@ internal static class ResourceUpdatesRelay
                 _terminal = true;
                 abandoned = [.. _pending.Values];
                 _pending.Clear();
+                _pendingSequenceByUri.Clear();
+                _coalescedSequences.Clear();
                 _forwarderActive = false;
             }
 
             foreach (var pending in abandoned)
             {
-                pending.Completion.TrySetResult();
+                pending.CompleteAll();
             }
         }
 
         private sealed record ReceiveStamp(long Sequence);
 
-        private sealed record PendingForward(
-            JsonRpcNotification Notification,
-            CancellationToken CallbackToken,
-            TaskCompletionSource Completion);
+        private sealed class PendingForward(
+            string? uri,
+            JsonRpcNotification notification,
+            CancellationToken callbackToken,
+            TaskCompletionSource initialCompletion)
+        {
+            public string? Uri { get; } = uri;
+            public JsonRpcNotification Notification { get; set; } = notification;
+            public CancellationToken CallbackToken { get; set; } = callbackToken;
+            public List<TaskCompletionSource> Completions { get; } = [initialCompletion];
+
+            public void CompleteAll(Exception? error = null)
+            {
+                foreach (var completion in Completions)
+                {
+                    if (error is null)
+                    {
+                        completion.TrySetResult();
+                    }
+                    else
+                    {
+                        completion.TrySetException(error);
+                    }
+                }
+            }
+        }
     }
 
     private sealed class SequencedClientTransport(

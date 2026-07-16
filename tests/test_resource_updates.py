@@ -125,11 +125,11 @@ async def test_session_manager_publishes_async_dap_resource_mutations() -> None:
     await asyncio.sleep(0)
     await asyncio.sleep(0)
 
-    assert (OUTPUT_URI,) in published
-    assert (THREADS_URI,) in published
-    assert (STATE_URI,) in published
-    assert (BREAKPOINTS_URI,) in published
-    assert (STATE_URI, THREADS_URI) in published
+    flat = [uri for batch in published for uri in batch]
+    assert OUTPUT_URI in flat
+    assert THREADS_URI in flat
+    assert STATE_URI in flat
+    assert BREAKPOINTS_URI in flat
     assert manager.state.state == DebugState.TERMINATED
 
     count = len(published)
@@ -139,6 +139,46 @@ async def test_session_manager_publishes_async_dap_resource_mutations() -> None:
     )
     await asyncio.sleep(0)
     assert len(published) == count
+
+
+@pytest.mark.asyncio
+async def test_blocked_subscriber_coalesces_to_one_live_task_per_uri() -> None:
+    """1000 blocked updates must not retain 1000 Python delivery tasks."""
+    with patch("netcoredbg_mcp.session.manager.DAPClient"):
+        from netcoredbg_mcp.session import SessionManager
+
+        manager = SessionManager()
+
+    gate = asyncio.Event()
+    started = asyncio.Event()
+    deliveries = 0
+
+    async def slow(uris: tuple[str, ...]) -> None:
+        nonlocal deliveries
+        deliveries += 1
+        started.set()
+        await gate.wait()
+
+    manager.set_resource_update_callback(slow)
+    manager._publish_resource_updates(STATE_URI)
+    await started.wait()
+    assert manager.resource_update_live_task_count() == 1
+
+    for _ in range(1000):
+        manager._publish_resource_updates(STATE_URI)
+
+    assert manager.resource_update_live_task_count() == 1
+    assert manager.resource_update_revision(STATE_URI) == 1001
+
+    gate.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    # Initial delivery + one coalesced catch-up for the latest revision.
+    assert deliveries == 2
+    assert manager.resource_update_live_task_count() == 0
+
+    await manager.close_resource_update_notifications()
+    assert manager.resource_update_live_task_count() == 0
 
 
 @pytest.mark.asyncio
@@ -335,8 +375,12 @@ async def test_session_manager_publishes_every_serialized_state_mutation() -> No
     await asyncio.sleep(0)
     await asyncio.sleep(0)
 
-    assert sum(STATE_URI in uris for uris in published) == 8
-    assert (STATE_URI, THREADS_URI) in published
+    # Burst mutations coalesce to one live task per URI, but each mutation still
+    # advances the revision so a later delivery observes the latest snapshot.
+    assert manager.resource_update_revision(STATE_URI) >= 8
+    assert any(STATE_URI in uris for uris in published)
+    assert any(THREADS_URI in uris for uris in published)
+    assert manager.resource_update_live_task_count() == 0
 
     published.clear()
     manager.state.output_buffer.append(

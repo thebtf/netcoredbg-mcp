@@ -333,4 +333,87 @@ public sealed class ResourceUpdatesRelayTests
         await callback(missingPredecessor, CancellationToken.None);
         Assert.Equal(2, received.Count);
     }
+
+    [Fact]
+    public async Task BlockedSubscriber_CoalescesPendingUpdatesPerUri_BoundedRetainedWork()
+    {
+        var (session, upstream, downstream) = BuildSession();
+        await using var fakePython = FakePythonServer.Start(upstream, SubscribablePythonOptions());
+        var received = new ConcurrentQueue<string>();
+
+        await using var client = await McpClient.CreateAsync(
+            downstream.CreateClientTransport(),
+            new McpClientOptions
+            {
+                Handlers = new McpClientHandlers
+                {
+                    NotificationHandlers =
+                    [
+                        new(NotificationMethods.ResourceUpdatedNotification, (notification, ct) =>
+                        {
+                            received.Enqueue(notification.Params!["uri"]!.GetValue<string>());
+                            return ValueTask.CompletedTask;
+                        }),
+                    ],
+                },
+            });
+        await session.DownstreamReady;
+
+        var orderedUpstream = ResourceUpdatesRelay.CreateOrderedUpstream();
+        var handlers = new McpClientHandlers();
+        orderedUpstream.ConfigureHandlers(handlers, session);
+        var callback = Assert.Single(handlers.NotificationHandlers!).Value;
+
+        // Hold wire-order sequence 1 so later callbacks remain pending (slow-subscriber gap).
+        var held = ResourceUpdated(StateUri, marker: "held");
+        orderedUpstream.StampReceivedMessage(held);
+
+        var coalescedTasks = new List<Task>(1000);
+        for (var i = 1; i <= 1000; i++)
+        {
+            var notification = ResourceUpdated(StateUri, marker: i.ToString());
+            orderedUpstream.StampReceivedMessage(notification);
+            // Callback runs before sequence 1, so drain cannot forward yet.
+            coalescedTasks.Add(callback(notification, CancellationToken.None).AsTask());
+        }
+
+        // 1000 same-URI updates while the predecessor is missing: one pending slot only.
+        Assert.Equal(1, orderedUpstream.PendingUriCount);
+        Assert.Equal(1, orderedUpstream.PendingSlotCount);
+        Assert.True(orderedUpstream.PendingUriCount <= ResourceUpdatesRelay.MaxPendingUris);
+        Assert.All(coalescedTasks, task => Assert.False(task.IsCompleted));
+
+        var breakpoints = ResourceUpdated(BreakpointsUri, marker: "bp");
+        orderedUpstream.StampReceivedMessage(breakpoints);
+        var breakpointsTask = callback(breakpoints, CancellationToken.None).AsTask();
+        Assert.Equal(2, orderedUpstream.PendingUriCount);
+        Assert.Equal(2, orderedUpstream.PendingSlotCount);
+        Assert.False(breakpointsTask.IsCompleted);
+
+        // Release the held predecessor: ordered drain must complete and clear retained work.
+        var heldTask = callback(held, CancellationToken.None).AsTask();
+        await Task.WhenAll([heldTask, .. coalescedTasks, breakpointsTask])
+            .WaitAsync(TimeSpan.FromSeconds(15));
+
+        Assert.Equal(0, orderedUpstream.PendingUriCount);
+        Assert.Equal(0, orderedUpstream.PendingSlotCount);
+        Assert.Contains(StateUri, received);
+        Assert.Contains(BreakpointsUri, received);
+        // Coalesce means far fewer deliveries than the 1000+ notifications issued.
+        Assert.True(received.Count <= 3, $"expected coalesced deliveries, got {received.Count}");
+
+        await client.DisposeAsync();
+        await session.DisposeAsync();
+    }
+
+    private static JsonRpcNotification ResourceUpdated(string uri, string marker) =>
+        new()
+        {
+            Method = NotificationMethods.ResourceUpdatedNotification,
+            Params = new JsonObject
+            {
+                ["uri"] = uri,
+                ["_meta"] = new JsonObject { ["marker"] = marker },
+            },
+        };
 }

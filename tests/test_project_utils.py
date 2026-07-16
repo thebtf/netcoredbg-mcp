@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from netcoredbg_mcp.server import resolve_project_root
 from netcoredbg_mcp.utils.project import (
     ProjectRootConfig,
     configure_project_root,
@@ -13,6 +14,9 @@ from netcoredbg_mcp.utils.project import (
     get_config,
     get_project_root,
     get_project_root_sync,
+    is_network_file_uri,
+    is_unc_or_network_path,
+    operator_project_scope_configured,
     parse_file_uri,
 )
 
@@ -285,6 +289,155 @@ class TestGetProjectRoot:
 
         result = await get_project_root(None)
         assert result == env_path
+
+    @pytest.mark.asyncio
+    async def test_explicit_project_not_overridden_by_client_windows_root(
+        self, tmp_path, monkeypatch
+    ):
+        """Operator --project wins over a hostile client root like C:/Windows."""
+        monkeypatch.delenv("NETCOREDBG_PROJECT_ROOT", raising=False)
+        monkeypatch.delenv("MCP_PROJECT_ROOT", raising=False)
+        pinned = tmp_path / "operator-project"
+        pinned.mkdir()
+        configure_project_root(explicit_project_path=str(pinned))
+
+        mock_root = MagicMock()
+        if sys.platform == "win32":
+            mock_root.uri = "file:///C:/Windows"
+        else:
+            mock_root.uri = "file:///tmp"
+
+        ctx = MagicMock()
+        ctx.session.list_roots = AsyncMock(return_value=MagicMock(roots=[mock_root]))
+
+        result = await get_project_root(ctx)
+        assert result == pinned
+        assert operator_project_scope_configured() is True
+
+    @pytest.mark.asyncio
+    async def test_env_project_not_overridden_by_client_root(
+        self, tmp_path, monkeypatch
+    ):
+        """Operator env pin wins over client MCP roots."""
+        env_path = tmp_path / "env_project"
+        env_path.mkdir()
+        client_path = tmp_path / "client_project"
+        client_path.mkdir()
+        monkeypatch.setenv("NETCOREDBG_PROJECT_ROOT", str(env_path))
+        configure_project_root()
+
+        mock_root = MagicMock()
+        mock_root.uri = f"file:///{client_path.as_posix()}"
+        ctx = MagicMock()
+        ctx.session.list_roots = AsyncMock(return_value=MagicMock(roots=[mock_root]))
+
+        result = await get_project_root(ctx)
+        assert result == env_path
+
+    @pytest.mark.asyncio
+    async def test_rejects_client_unc_file_authority_root(self, tmp_path, monkeypatch):
+        """Client file://attacker.invalid/share must not become project authority."""
+        monkeypatch.delenv("NETCOREDBG_PROJECT_ROOT", raising=False)
+        monkeypatch.delenv("MCP_PROJECT_ROOT", raising=False)
+        fallback = tmp_path / "local"
+        fallback.mkdir()
+        configure_project_root(startup_cwd=str(fallback))
+
+        mock_root = MagicMock()
+        mock_root.uri = "file://attacker.invalid/share"
+        ctx = MagicMock()
+        ctx.session.list_roots = AsyncMock(return_value=MagicMock(roots=[mock_root]))
+
+        assert is_network_file_uri("file://attacker.invalid/share") is True
+        result = await get_project_root(ctx)
+        assert result == fallback
+        if sys.platform == "win32":
+            unc = parse_file_uri("file://attacker.invalid/share")
+            assert unc is not None
+            assert is_unc_or_network_path(unc) is True
+
+    @pytest.mark.asyncio
+    async def test_ordinary_local_client_root_used_without_operator_pin(
+        self, tmp_path, monkeypatch
+    ):
+        """Without operator scope, ordinary local client roots remain valid fallback."""
+        monkeypatch.delenv("NETCOREDBG_PROJECT_ROOT", raising=False)
+        monkeypatch.delenv("MCP_PROJECT_ROOT", raising=False)
+        client_path = tmp_path / "client_project"
+        client_path.mkdir()
+        configure_project_root()
+
+        mock_root = MagicMock()
+        mock_root.uri = client_path.as_uri()
+        ctx = MagicMock()
+        ctx.session.list_roots = AsyncMock(return_value=MagicMock(roots=[mock_root]))
+
+        result = await get_project_root(ctx)
+        assert result is not None
+        assert result.resolve() == client_path.resolve()
+
+    @pytest.mark.asyncio
+    async def test_roots_list_changed_cannot_replace_operator_pin(
+        self, tmp_path, monkeypatch
+    ):
+        """Subsequent roots/list answers still cannot replace an operator pin."""
+        monkeypatch.delenv("NETCOREDBG_PROJECT_ROOT", raising=False)
+        monkeypatch.delenv("MCP_PROJECT_ROOT", raising=False)
+        pinned = tmp_path / "pinned"
+        pinned.mkdir()
+        other = tmp_path / "other"
+        other.mkdir()
+        configure_project_root(explicit_project_path=str(pinned))
+
+        first = MagicMock()
+        first.uri = other.as_uri()
+        second = MagicMock()
+        if sys.platform == "win32":
+            second.uri = "file:///C:/Windows"
+        else:
+            second.uri = "file:///etc"
+
+        ctx = MagicMock()
+        ctx.session.list_roots = AsyncMock(
+            side_effect=[
+                MagicMock(roots=[first]),
+                MagicMock(roots=[second]),
+            ]
+        )
+
+        assert await get_project_root(ctx) == pinned
+        assert await get_project_root(ctx) == pinned
+
+    @pytest.mark.asyncio
+    async def test_start_debug_scope_keeps_operator_project(
+        self, tmp_path, monkeypatch
+    ):
+        """resolve_project_root (start_debug path) must not widen operator scope."""
+        monkeypatch.delenv("NETCOREDBG_PROJECT_ROOT", raising=False)
+        monkeypatch.delenv("MCP_PROJECT_ROOT", raising=False)
+        pinned = tmp_path / "start-debug-project"
+        pinned.mkdir()
+        configure_project_root(explicit_project_path=str(pinned))
+
+        from netcoredbg_mcp.session import SessionManager
+
+        with patch(
+            "netcoredbg_mcp.dap.client.DAPClient._find_netcoredbg",
+            return_value="netcoredbg",
+        ):
+            session = SessionManager(project_path=str(pinned))
+
+        mock_root = MagicMock()
+        if sys.platform == "win32":
+            mock_root.uri = "file:///C:/Windows"
+        else:
+            mock_root.uri = "file:///tmp"
+        ctx = MagicMock()
+        ctx.session.list_roots = AsyncMock(return_value=MagicMock(roots=[mock_root]))
+
+        resolved = await resolve_project_root(ctx, session)
+        assert resolved == pinned
+        assert session.project_path == str(pinned)
 
 
 class TestSessionManagerIntegration:

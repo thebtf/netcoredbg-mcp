@@ -1,11 +1,19 @@
 """Project root detection utilities.
 
-Provides utilities for determining the project root directory from multiple sources:
-1. MCP Roots from client (via Context.session.list_roots())
-2. Environment variables (NETCOREDBG_PROJECT_ROOT, MCP_PROJECT_ROOT)
-3. Startup CWD (when --project-from-cwd is used)
+Provides utilities for determining the project root directory from multiple sources
+with a strict operator-authority model:
 
-This follows the pattern established by Serena's project-from-cwd implementation.
+1. Operator-pinned scope (authoritative when present):
+   - Environment variables (NETCOREDBG_PROJECT_ROOT, MCP_PROJECT_ROOT)
+   - Explicit --project path
+   Client MCP roots never replace this scope.
+2. Client MCP roots (only when no operator-pinned scope is configured):
+   - Local file roots only; UNC / network file-authority roots are rejected
+3. Startup CWD with .NET marker search (when --project-from-cwd is used)
+4. Startup CWD fallback
+
+This follows the pattern established by Serena's project-from-cwd implementation,
+hardened so relayed/downstream client roots cannot override operator intent.
 """
 
 from __future__ import annotations
@@ -81,6 +89,51 @@ def configure_project_root(
 def get_config() -> ProjectRootConfig:
     """Get current project root configuration."""
     return _config
+
+
+def operator_project_scope_configured(config: ProjectRootConfig | None = None) -> bool:
+    """Return True when the operator pinned project scope via env or --project.
+
+    A configured-but-invalid path still counts as operator scope so client roots
+    cannot silently replace a failed pin.
+    """
+    cfg = config if config is not None else get_config()
+    if cfg.explicit_project_path is not None:
+        return True
+    for env_var in cfg.env_var_names:
+        if os.environ.get(env_var):
+            return True
+    return False
+
+
+def is_unc_or_network_path(path: Path | str) -> bool:
+    """Return True for UNC / network share paths (``\\\\server\\share``)."""
+    text = os.fspath(path)
+    if text.startswith("\\\\") or text.startswith("//"):
+        return True
+    # pathlib may normalize UNC as \\?\UNC\server\share on Windows
+    normalized = text.replace("/", "\\")
+    return normalized.upper().startswith("\\\\?\\UNC\\") or normalized.startswith("\\\\")
+
+
+def is_network_file_uri(uri: str) -> bool:
+    """Return True when a file URI uses a network authority (UNC host).
+
+    ``file:///C:/path`` and ``file:///home/user`` are local.
+    ``file://attacker.invalid/share`` and ``file://server/share`` are network.
+    """
+    try:
+        parsed = urlparse(str(uri))
+    except Exception:
+        return True
+
+    if parsed.scheme != "file":
+        return True
+
+    netloc = (parsed.netloc or "").strip().lower()
+    if not netloc or netloc in {"localhost", "127.0.0.1", "[::1]"}:
+        return False
+    return True
 
 
 def parse_file_uri(uri: str) -> Path | None:
@@ -180,58 +233,8 @@ def find_dotnet_project_root(start_dir: Path | None = None) -> Path:
     return current
 
 
-async def get_project_root(ctx: Context | None = None) -> Path | None:
-    """Determine the project root directory from available sources.
-
-    Priority order:
-    1. MCP Roots from client (via ctx.session.list_roots()) - if client supports it
-    2. Environment variable (NETCOREDBG_PROJECT_ROOT or MCP_PROJECT_ROOT)
-    3. Explicit --project path (if configured)
-    4. Startup CWD with .NET marker search (if --project-from-cwd)
-
-    Args:
-        ctx: MCP Context for accessing client-provided roots.
-             Can be None if called outside of tool context.
-
-    Returns:
-        Path to project root, or None if not determinable
-
-    Example:
-        ```python
-        @mcp.tool()
-        async def my_tool(ctx: Context) -> str:
-            project_root = await get_project_root(ctx)
-            if not project_root:
-                raise ToolError("Cannot determine project root")
-            # Use project_root...
-        ```
-    """
-    config = get_config()
-
-    # 1. Try MCP Roots from client (highest priority - client knows best)
-    if ctx is not None:
-        try:
-            list_roots_result = await ctx.session.list_roots()
-            roots = list_roots_result.roots
-            logger.info(f"MCP list_roots() returned {len(roots) if roots else 0} roots")
-            if roots:
-                # Use the first root
-                uri = str(roots[0].uri)
-                logger.info(f"Got root from client: {uri}")
-
-                path = parse_file_uri(uri)
-                if path and path.exists() and path.is_dir():
-                    logger.info(f"Using project root from MCP client: {path}")
-                    return path
-                else:
-                    logger.warning(f"MCP root path invalid or not accessible: {path}")
-            else:
-                logger.info("MCP client did not provide any roots")
-        except Exception as e:
-            # Client may not support roots - this is fine
-            logger.info(f"Could not get roots from client: {e}")
-
-    # 2. Check environment variables
+def _resolve_operator_project_root(config: ProjectRootConfig) -> Path | None:
+    """Resolve operator-pinned project path (env, then explicit --project)."""
     for env_var in config.env_var_names:
         env_value = os.environ.get(env_var)
         if env_value:
@@ -239,29 +242,110 @@ async def get_project_root(ctx: Context | None = None) -> Path | None:
             if path.exists() and path.is_dir():
                 logger.info(f"Using project root from {env_var}: {path}")
                 return path
-            else:
-                logger.warning(f"{env_var}={env_value} - path does not exist or is not a directory")
+            logger.warning(
+                f"{env_var}={env_value} - path does not exist or is not a directory"
+            )
+            # Env pin is present but unusable: fail closed (no client override).
+            return None
 
-    # 3. Use explicit --project path if configured
-    if config.explicit_project_path:
+    if config.explicit_project_path is not None:
         if config.explicit_project_path.exists() and config.explicit_project_path.is_dir():
             logger.info(f"Using explicit project path: {config.explicit_project_path}")
             return config.explicit_project_path
-        else:
-            logger.warning(f"Explicit project path not valid: {config.explicit_project_path}")
+        logger.warning(f"Explicit project path not valid: {config.explicit_project_path}")
+        return None
 
-    # 4. Use startup CWD with .NET marker search (if --project-from-cwd)
+    return None
+
+
+def _resolve_cwd_project_root(config: ProjectRootConfig) -> Path | None:
+    """Resolve startup-CWD based project root when configured."""
     if config.use_project_from_cwd and config.startup_cwd:
         project_root = find_dotnet_project_root(config.startup_cwd)
         logger.info(f"Using project root from CWD search: {project_root}")
         return project_root
 
-    # 5. Fallback: return startup CWD without marker search if available
     if config.startup_cwd:
         logger.info(f"Using startup CWD as fallback: {config.startup_cwd}")
         return config.startup_cwd
 
-    # Cannot determine project root
+    return None
+
+
+def _client_root_path_from_uri(uri: str) -> Path | None:
+    """Parse and validate a client-provided root URI (local filesystem only)."""
+    if is_network_file_uri(uri):
+        logger.warning(
+            "Rejecting client MCP root with network/UNC file authority: %s",
+            uri,
+        )
+        return None
+
+    path = parse_file_uri(uri)
+    if path is None:
+        return None
+
+    if is_unc_or_network_path(path):
+        logger.warning(
+            "Rejecting client MCP root that resolves to a UNC/network path: %s",
+            path,
+        )
+        return None
+
+    if path.exists() and path.is_dir():
+        return path
+
+    logger.warning(f"MCP root path invalid or not accessible: {path}")
+    return None
+
+
+async def get_project_root(ctx: Context | None = None) -> Path | None:
+    """Determine the project root directory from available sources.
+
+    Priority order:
+    1. Operator-pinned scope (env / --project) — authoritative when configured
+    2. MCP Roots from client — only when no operator pin is configured;
+       UNC/network roots are rejected
+    3. Startup CWD with .NET marker search (if --project-from-cwd)
+    4. Startup CWD fallback
+
+    Args:
+        ctx: MCP Context for accessing client-provided roots.
+             Can be None if called outside of tool context.
+
+    Returns:
+        Path to project root, or None if not determinable
+    """
+    config = get_config()
+
+    # 1. Operator-pinned scope wins over any client root.
+    if operator_project_scope_configured(config):
+        return _resolve_operator_project_root(config)
+
+    # 2. Client MCP roots (fallback only; never UNC/network).
+    if ctx is not None:
+        try:
+            list_roots_result = await ctx.session.list_roots()
+            roots = list_roots_result.roots
+            logger.info(f"MCP list_roots() returned {len(roots) if roots else 0} roots")
+            if roots:
+                uri = str(roots[0].uri)
+                logger.info(f"Got root from client: {uri}")
+                path = _client_root_path_from_uri(uri)
+                if path is not None:
+                    logger.info(f"Using project root from MCP client: {path}")
+                    return path
+            else:
+                logger.info("MCP client did not provide any roots")
+        except Exception as e:
+            # Client may not support roots - this is fine
+            logger.info(f"Could not get roots from client: {e}")
+
+    # 3/4. Startup CWD sources
+    project_root = _resolve_cwd_project_root(config)
+    if project_root is not None:
+        return project_root
+
     logger.warning("Could not determine project root from any source")
     return None
 
@@ -277,25 +361,7 @@ def get_project_root_sync() -> Path | None:
     """
     config = get_config()
 
-    # 1. Check environment variables
-    for env_var in config.env_var_names:
-        env_value = os.environ.get(env_var)
-        if env_value:
-            path = Path(env_value)
-            if path.exists() and path.is_dir():
-                return path
+    if operator_project_scope_configured(config):
+        return _resolve_operator_project_root(config)
 
-    # 2. Use explicit --project path if configured
-    if config.explicit_project_path:
-        if config.explicit_project_path.exists() and config.explicit_project_path.is_dir():
-            return config.explicit_project_path
-
-    # 3. Use startup CWD with .NET marker search (if --project-from-cwd)
-    if config.use_project_from_cwd and config.startup_cwd:
-        return find_dotnet_project_root(config.startup_cwd)
-
-    # 4. Fallback: return startup CWD if available
-    if config.startup_cwd:
-        return config.startup_cwd
-
-    return None
+    return _resolve_cwd_project_root(config)

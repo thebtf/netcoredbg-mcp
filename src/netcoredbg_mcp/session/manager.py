@@ -135,7 +135,9 @@ class SessionManager:
         self._snapshot_manager: SnapshotManager | None = None
         self._stealth_foreground_restore_task: asyncio.Task[None] | None = None
         self._resource_update_callback: Callable[[tuple[str, ...]], Awaitable[None]] | None = None
-        self._resource_update_tasks: set[asyncio.Task[None]] = set()
+        # At most one live delivery task per URI; further revisions coalesce.
+        self._resource_update_tasks: dict[str, asyncio.Task[None]] = {}
+        self._resource_update_coalesce: set[str] = set()
         self._resource_update_revisions = {
             STATE_URI: 0,
             BREAKPOINTS_URI: 0,
@@ -647,6 +649,10 @@ class SessionManager:
         if before != self._breakpoint_resource_snapshot():
             self._publish_resource_updates(BREAKPOINTS_URI)
 
+    def resource_update_live_task_count(self) -> int:
+        """Return the number of in-flight per-URI resource update delivery tasks."""
+        return sum(1 for task in self._resource_update_tasks.values() if not task.done())
+
     def _publish_resource_updates(self, *uris: str) -> None:
         ordered_uris = tuple(dict.fromkeys(uris))
         if not ordered_uris:
@@ -666,15 +672,38 @@ class SessionManager:
         except RuntimeError:
             return
 
-        async def deliver() -> None:
-            await callback(ordered_uris)
+        for uri in ordered_uris:
+            existing = self._resource_update_tasks.get(uri)
+            if existing is not None and not existing.done():
+                # Coalesce: one live task per URI; deliver latest revision when free.
+                self._resource_update_coalesce.add(uri)
+                continue
 
-        task = loop.create_task(deliver())
-        self._resource_update_tasks.add(task)
-        task.add_done_callback(self._finish_resource_update_task)
+            self._resource_update_coalesce.discard(uri)
+            task = loop.create_task(self._deliver_resource_update(uri, callback))
+            self._resource_update_tasks[uri] = task
+            task.add_done_callback(self._finish_resource_update_task)
+
+    async def _deliver_resource_update(
+        self,
+        uri: str,
+        callback: Callable[[tuple[str, ...]], Awaitable[None]],
+    ) -> None:
+        """Deliver one URI, re-running while coalesce marks arrive during a blocked send."""
+        while True:
+            await callback((uri,))
+            if uri not in self._resource_update_coalesce:
+                return
+            self._resource_update_coalesce.discard(uri)
+            if self._resource_update_callback is None:
+                return
 
     def _finish_resource_update_task(self, task: asyncio.Task[None]) -> None:
-        self._resource_update_tasks.discard(task)
+        for uri, tracked in list(self._resource_update_tasks.items()):
+            if tracked is task:
+                if self._resource_update_tasks.get(uri) is task:
+                    del self._resource_update_tasks[uri]
+                break
         if task.cancelled():
             return
         error = task.exception()
@@ -684,11 +713,13 @@ class SessionManager:
     async def close_resource_update_notifications(self) -> None:
         """Stop manager-owned update tasks before the MCP transport becomes terminal."""
         self._resource_update_callback = None
-        tasks = tuple(self._resource_update_tasks)
+        self._resource_update_coalesce.clear()
+        tasks = tuple(self._resource_update_tasks.values())
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        self._resource_update_tasks.clear()
 
     def on_state_change(self, listener: Callable[[DebugState], None]) -> None:
         """Register state change listener."""
