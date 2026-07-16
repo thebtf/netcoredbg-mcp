@@ -29,11 +29,14 @@ internal static class ProgressLoggingComposition
     public static (RelaySession Session, IHost Host) Build(
         Func<IClientTransport> createUpstreamTransport,
         Action<IMcpServerBuilder> configureTransport,
-        IReadOnlyList<Func<ServerCapabilities?, string?>>? requiredUpstreamCapabilityChecks = null)
+        IReadOnlyList<Func<ServerCapabilities?, string?>>? requiredUpstreamCapabilityChecks = null,
+        Action<ProgressLoggingRelay.NotificationState>? observeNotificationState = null)
     {
+        var notificationState = new ProgressLoggingRelay.NotificationState();
+        observeNotificationState?.Invoke(notificationState);
         RelaySession? session = null;
         session = new RelaySession(
-            () => ProgressLoggingRelay.WrapUpstreamTransport(createUpstreamTransport(), session!),
+            () => ProgressLoggingRelay.WrapUpstreamTransport(createUpstreamTransport(), session!, notificationState),
             requiredUpstreamCapabilityChecks ?? RelayComposition.RequiredUpstreamCapabilityChecks);
 
         var catalog = new RelayRouteCatalog();
@@ -46,7 +49,7 @@ internal static class ProgressLoggingComposition
             options.ServerInfo = new Implementation { Name = HostServerName, Version = HostServerVersion };
             options.Capabilities = new ServerCapabilities { Tools = new ToolsCapability() };
 
-            ProgressLoggingRelay.ConfigureFilters(options.Filters, session);
+            ProgressLoggingRelay.ConfigureFilters(options.Filters, session, notificationState);
             options.Filters.Message.IncomingFilters.Add(session.CreateBootstrapFilter(static _ => new ClientCapabilities()));
         });
 

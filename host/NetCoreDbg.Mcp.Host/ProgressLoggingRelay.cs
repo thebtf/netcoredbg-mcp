@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Channels;
@@ -30,6 +31,100 @@ namespace NetCoreDbg.Mcp.Host;
 /// </summary>
 internal static class ProgressLoggingRelay
 {
+    internal sealed class NotificationState
+    {
+        private readonly ConcurrentDictionary<ProgressToken, byte> _activeProgressTokens = new();
+        private readonly ConcurrentDictionary<string, ProgressToken> _progressTokensByRequestId = new();
+
+        public ProgressToken? Begin(JsonRpcRequest request)
+        {
+            if (!TryReadMetaProgressToken(request.Params, out var progressToken))
+            {
+                return null;
+            }
+
+            _activeProgressTokens[progressToken] = 0;
+            _progressTokensByRequestId[request.Id.ToString()] = progressToken;
+            return progressToken;
+        }
+
+        public void End(string requestId, ProgressToken? progressToken)
+        {
+            _progressTokensByRequestId.TryRemove(requestId, out _);
+            if (progressToken is { } activeProgressToken)
+            {
+                _activeProgressTokens.TryRemove(activeProgressToken, out _);
+            }
+        }
+
+        public void Cancel(JsonRpcNotification notification)
+        {
+            try
+            {
+                var requestId = notification.Params?
+                    .Deserialize<CancelledNotificationParams>(McpJsonUtilities.DefaultOptions)?.RequestId.ToString();
+                if (requestId is not null
+                    && _progressTokensByRequestId.TryRemove(requestId, out var progressToken))
+                {
+                    _activeProgressTokens.TryRemove(progressToken, out _);
+                }
+            }
+            catch (JsonException)
+            {
+                // Invalid cancellation notifications are ignored by the MCP protocol.
+            }
+        }
+
+        public bool IsActive(ProgressToken progressToken) => _activeProgressTokens.ContainsKey(progressToken);
+
+        public bool Allows(JsonRpcNotification notification)
+        {
+            if (notification.Method == NotificationMethods.ProgressNotification)
+            {
+                return notification.Params is JsonObject progressParams
+                    && TryReadProgressToken(progressParams["progressToken"], out var progressToken)
+                    && _activeProgressTokens.ContainsKey(progressToken);
+            }
+
+            return !TryReadMetaProgressToken(notification.Params, out var loggingProgressToken)
+                || _activeProgressTokens.ContainsKey(loggingProgressToken);
+        }
+
+        private static bool TryReadMetaProgressToken(JsonNode? parameters, out ProgressToken progressToken)
+        {
+            if (parameters is JsonObject paramsObject
+                && paramsObject["_meta"] is JsonObject meta
+                && TryReadProgressToken(meta["progressToken"], out progressToken))
+            {
+                return true;
+            }
+
+            progressToken = default;
+            return false;
+        }
+
+        private static bool TryReadProgressToken(JsonNode? value, out ProgressToken progressToken)
+        {
+            if (value is JsonValue jsonValue)
+            {
+                if (jsonValue.GetValueKind() == JsonValueKind.String)
+                {
+                    progressToken = new ProgressToken(jsonValue.GetValue<string>());
+                    return true;
+                }
+
+                if (jsonValue.GetValueKind() == JsonValueKind.Number)
+                {
+                    progressToken = new ProgressToken(jsonValue.GetValue<long>());
+                    return true;
+                }
+            }
+
+            progressToken = default;
+            return false;
+        }
+    }
+
     /// <summary>
     /// Downstream route registration, called once from <c>RelayComposition.Build</c> alongside
     /// <c>ToolsRelay.Register</c>: records this module's routes in the shared catalog and answers
@@ -55,9 +150,27 @@ internal static class ProgressLoggingRelay
                 throw new McpProtocolException("Method not found", McpErrorCode.MethodNotFound);
             }
 
-            var response = await RelaySession.ForwardRequestAsync(upstream, context.JsonRpcRequest, cancellationToken)
-                .ConfigureAwait(false);
-            return response.Result.Deserialize<EmptyResult>(McpJsonUtilities.DefaultOptions)!;
+            try
+            {
+                var response = await RelaySession.ForwardRequestAsync(upstream, context.JsonRpcRequest, cancellationToken)
+                    .ConfigureAwait(false);
+                return response.Result.Deserialize<EmptyResult>(McpJsonUtilities.DefaultOptions)!;
+            }
+            catch (McpProtocolException error)
+            {
+                const string RemotePrefix = "Request failed (remote): ";
+                var forwarded = new McpProtocolException(
+                    error.Message.StartsWith(RemotePrefix, StringComparison.Ordinal)
+                        ? error.Message[RemotePrefix.Length..]
+                        : error.Message,
+                    error.ErrorCode);
+                foreach (var key in error.Data.Keys)
+                {
+                    forwarded.Data[key] = error.Data[key];
+                }
+
+                throw forwarded;
+            }
         });
     }
 
@@ -72,8 +185,46 @@ internal static class ProgressLoggingRelay
     /// the same JSON surgery the FD-000 baseline used unconditionally, now driven by the real
     /// negotiated capability.
     /// </summary>
-    public static void ConfigureFilters(McpServerFilters filters, RelaySession session)
+    public static void ConfigureFilters(
+        McpServerFilters filters,
+        RelaySession session,
+        NotificationState notificationState)
     {
+        filters.Message.IncomingFilters.Add(next => async (context, cancellationToken) =>
+        {
+            if (context.JsonRpcMessage is JsonRpcNotification { Method: NotificationMethods.CancelledNotification } cancellation)
+            {
+                notificationState.Cancel(cancellation);
+                await next(context, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            if (context.JsonRpcMessage is not JsonRpcRequest request)
+            {
+                await next(context, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            var progressToken = notificationState.Begin(request);
+            if (progressToken is null)
+            {
+                await next(context, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            var requestId = request.Id.ToString();
+            using var cancellationRegistration = cancellationToken.Register(
+                () => notificationState.End(requestId, progressToken));
+            try
+            {
+                await next(context, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                notificationState.End(requestId, progressToken);
+            }
+        });
+
         filters.Message.OutgoingFilters.Add(next => async (context, cancellationToken) =>
         {
             if (context.JsonRpcMessage is JsonRpcResponse { Result: JsonObject result }
@@ -121,17 +272,23 @@ internal static class ProgressLoggingRelay
     /// unchanged for the SDK's own normal (fire-and-forget) processing; this module claims no route
     /// other than the two it registers in <see cref="Register"/>.
     /// </summary>
-    public static IClientTransport WrapUpstreamTransport(IClientTransport inner, RelaySession session) =>
-        new OrderPreservingUpstreamTransport(inner, session);
+    public static IClientTransport WrapUpstreamTransport(
+        IClientTransport inner,
+        RelaySession session,
+        NotificationState notificationState) =>
+        new OrderPreservingUpstreamTransport(inner, session, notificationState);
 
-    private sealed class OrderPreservingUpstreamTransport(IClientTransport inner, RelaySession session) : IClientTransport
+    private sealed class OrderPreservingUpstreamTransport(
+        IClientTransport inner,
+        RelaySession session,
+        NotificationState notificationState) : IClientTransport
     {
         public string Name => inner.Name;
 
         public async Task<ITransport> ConnectAsync(CancellationToken cancellationToken = default)
         {
             var innerTransport = await inner.ConnectAsync(cancellationToken).ConfigureAwait(false);
-            return new OrderPreservingTransport(innerTransport, session);
+            return new OrderPreservingTransport(innerTransport, session, notificationState);
         }
     }
 
@@ -139,14 +296,16 @@ internal static class ProgressLoggingRelay
     {
         private readonly ITransport _inner;
         private readonly RelaySession _session;
+        private readonly NotificationState _notificationState;
         private readonly Channel<JsonRpcMessage> _passthrough =
             Channel.CreateUnbounded<JsonRpcMessage>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
         private readonly Task _pumpTask;
 
-        public OrderPreservingTransport(ITransport inner, RelaySession session)
+        public OrderPreservingTransport(ITransport inner, RelaySession session, NotificationState notificationState)
         {
             _inner = inner;
             _session = session;
+            _notificationState = notificationState;
             _pumpTask = PumpAsync();
         }
 
@@ -175,6 +334,19 @@ internal static class ProgressLoggingRelay
                             Method: NotificationMethods.ProgressNotification or NotificationMethods.LoggingMessageNotification,
                         } notification)
                     {
+                        if (!_notificationState.Allows(notification))
+                        {
+                            continue;
+                        }
+
+                        if (notification.Method == NotificationMethods.LoggingMessageNotification
+                            && (!_session.DownstreamReady.IsCompletedSuccessfully
+                                || (await _session.UpstreamAsync(CancellationToken.None).ConfigureAwait(false))
+                                    .ServerCapabilities?.Logging is null))
+                        {
+                            continue;
+                        }
+
                         if (_session.Downstream is { } downstream)
                         {
                             try
