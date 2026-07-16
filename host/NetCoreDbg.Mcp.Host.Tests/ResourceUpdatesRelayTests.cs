@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Channels;
@@ -70,6 +71,7 @@ public sealed class ResourceUpdatesRelayTests
         private readonly TaskCompletionSource _releaseTerminal =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int _resourceWriteClaimed;
+        private int _terminalWriteClaimed;
 
         public void Configure(McpServerOptions options) =>
             options.Filters.Message.OutgoingFilters.Add(next => async (context, cancellationToken) =>
@@ -90,7 +92,9 @@ public sealed class ResourceUpdatesRelayTests
                     JsonRpcError error => error.Id,
                     _ => (RequestId?)null,
                 };
-                if (responseId is { } id && id.Equals(terminalId))
+                if (responseId is { } id
+                    && id.Equals(terminalId)
+                    && Interlocked.CompareExchange(ref _terminalWriteClaimed, 1, 0) == 0)
                 {
                     _terminalWriteStarted.TrySetResult();
                     await _releaseTerminal.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -584,6 +588,112 @@ public sealed class ResourceUpdatesRelayTests
     }
 
     [Fact]
+    public async Task DuplicateHistoricalDownstreamId_FailsClosedBeforeLocalHandlerAndWireTail()
+    {
+        var upstream = new DuplexChannel();
+        var downstream = new DuplexChannel();
+        var requestId = new RequestId("duplicate-history");
+        var writeGate = new TerminalWriteGate(requestId);
+        var tailSent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var duplicateHandlerEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var session = ResourcesTestComposition.CreateSession(upstream.CreateClientTransport);
+        using var host = ResourcesTestComposition.BuildHost(
+            session,
+            builder => builder.WithStreamServerTransport(
+                downstream.ServerInputStream,
+                downstream.ServerOutputStream),
+            configureOptions: options =>
+            {
+                writeGate.Configure(options);
+                options.Capabilities!.Prompts = new PromptsCapability { ListChanged = false };
+                options.Handlers.ListPromptsHandler = (_, _) =>
+                {
+                    duplicateHandlerEntered.TrySetResult();
+                    return ValueTask.FromResult(new ListPromptsResult { Prompts = [] });
+                };
+            });
+        _ = host.RunAsync();
+        await using var fakePython = FakePythonServer.Start(
+            upstream,
+            ReadAheadPythonOptions(error: false, tailSent));
+        await using var rawDownstream = await ConnectRawDownstreamAsync(downstream);
+
+        try
+        {
+            await rawDownstream.SendMessageAsync(ToolRequest(requestId, "A"));
+            await tailSent.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await writeGate.WaitUntilResourceBlockedAsync(TimeSpan.FromSeconds(10));
+            writeGate.ReleaseResource();
+
+            var first = Assert.IsType<JsonRpcNotification>(
+                await rawDownstream.MessageReader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.Equal("u1", first.Params?["_meta"]?["marker"]?.GetValue<string>());
+            await writeGate.WaitUntilTerminalBlockedAsync(TimeSpan.FromSeconds(10));
+
+            var sessionEnding = Task.Delay(Timeout.Infinite, session.SessionEndingToken);
+            await rawDownstream.SendMessageAsync(new JsonRpcRequest
+            {
+                Id = requestId,
+                Method = RequestMethods.PromptsList,
+                Params = new JsonObject(),
+            });
+
+            var firstOutcome = await Task.WhenAny(
+                sessionEnding,
+                duplicateHandlerEntered.Task,
+                Task.Delay(TimeSpan.FromSeconds(10)));
+            Assert.Same(sessionEnding, firstOutcome);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => sessionEnding);
+            Assert.False(duplicateHandlerEntered.Task.IsCompleted);
+            Assert.Contains(
+                "Duplicate downstream request ID",
+                Assert.IsType<InvalidOperationException>(session.ForwardingFailure).Message,
+                StringComparison.Ordinal);
+
+            await WaitForAsync(
+                () => session.RetainedDownstreamForwardLegCount == 0
+                    && session.RetainedUpstreamForwardLegCount == 0,
+                TimeSpan.FromSeconds(10));
+
+            writeGate.ReleaseTerminal();
+
+            using var tailProbe = new CancellationTokenSource(TimeSpan.FromMilliseconds(250));
+            var originalTerminalSeen = false;
+            try
+            {
+                while (true)
+                {
+                    var message = await rawDownstream.MessageReader.ReadAsync(tailProbe.Token);
+                    if (message is JsonRpcMessageWithId terminal && terminal.Id.Equals(requestId))
+                    {
+                        Assert.IsType<JsonRpcResponse>(terminal);
+                        Assert.False(originalTerminalSeen, "More than one terminal crossed for the duplicated ID.");
+                        originalTerminalSeen = true;
+                    }
+                    Assert.False(
+                        message is JsonRpcNotification notification
+                            && notification.Params?["_meta"]?["marker"]?.GetValue<string>() == "u2",
+                        "Wire-later U2 crossed after duplicate-ID failure.");
+                }
+            }
+            catch (OperationCanceledException) when (tailProbe.IsCancellationRequested)
+            {
+                // No duplicate terminal or U2 crossed during the bounded fail-closed observation window.
+            }
+            catch (ChannelClosedException)
+            {
+                // Session shutdown closed the wire before a duplicate terminal or U2 could cross.
+            }
+            Assert.False(duplicateHandlerEntered.Task.IsCompleted);
+        }
+        finally
+        {
+            writeGate.ReleaseTerminal();
+            await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        }
+    }
+
+    [Fact]
     public async Task ResourceUpdatedReadAhead_ErrorFenceCompletesOnlyAfterExactErrorSend()
     {
         var upstream = new DuplexChannel();
@@ -856,27 +966,38 @@ public sealed class ResourceUpdatesRelayTests
     }
 
     [Fact]
-    public async Task CancelledLeg_IdReuseRejectsLateOldUpstreamTerminal()
+    public async Task CancelledLeg_StaleSignalsPreserveDistinctSuccessorAndOldIdReuseFailsClosed()
     {
         var upstream = new DuplexChannel();
         var downstream = new DuplexChannel();
         var upstreamRequestIds = new ConcurrentQueue<RequestId>();
         var firstStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var secondStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var successorCancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var thirdStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseSecond = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var invocation = 0;
         var options = SubscribablePythonOptions(callTool: async (context, cancellationToken) =>
         {
-            if (Interlocked.Increment(ref invocation) == 1)
+            switch (Interlocked.Increment(ref invocation))
             {
-                firstStarted.TrySetResult();
-                await Task.Delay(Timeout.Infinite, cancellationToken).ConfigureAwait(false);
-                throw new InvalidOperationException("Unreachable after infinite delay.");
-            }
+                case 1:
+                    firstStarted.TrySetResult();
+                    await Task.Delay(Timeout.Infinite, cancellationToken).ConfigureAwait(false);
+                    throw new InvalidOperationException("Unreachable after infinite delay.");
 
-            secondStarted.TrySetResult();
-            await releaseSecond.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
-            return new CallToolResult { Content = [new TextContentBlock { Text = "new" }] };
+                case 2:
+                    using (cancellationToken.Register(() => successorCancelled.TrySetResult()))
+                    {
+                        secondStarted.TrySetResult();
+                        await releaseSecond.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+                        return new CallToolResult { Content = [new TextContentBlock { Text = "new" }] };
+                    }
+
+                default:
+                    thirdStarted.TrySetResult();
+                    return new CallToolResult { Content = [new TextContentBlock { Text = "third" }] };
+            }
         });
         await using var session = ResourcesTestComposition.CreateSession(
             () => new SendObserverClientTransport(
@@ -896,68 +1017,123 @@ public sealed class ResourceUpdatesRelayTests
         _ = host.RunAsync();
         await using var fakePython = FakePythonServer.Start(upstream, options);
         await using var rawDownstream = await ConnectRawDownstreamAsync(downstream);
-        var reusedDownstreamId = new RequestId("reuse");
+        var oldDownstreamId = new RequestId("cancelled-old");
+        var successorDownstreamId = new RequestId("distinct-successor");
 
-        await rawDownstream.SendMessageAsync(ToolRequest(reusedDownstreamId, "old"));
-        await firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
-        await rawDownstream.SendMessageAsync(new JsonRpcNotification
+        try
         {
-            Method = NotificationMethods.CancelledNotification,
-            Params = JsonSerializer.SerializeToNode(
-                new CancelledNotificationParams { RequestId = reusedDownstreamId },
-                McpJsonUtilities.DefaultOptions),
-        });
-        await WaitForAsync(
-            () => session.RetainedDownstreamForwardLegCount == 0
-                && session.RetainedUpstreamForwardLegCount == 0,
-            TimeSpan.FromSeconds(10));
-
-        await rawDownstream.SendMessageAsync(ToolRequest(reusedDownstreamId, "new"));
-        await secondStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
-        await WaitForAsync(() => upstreamRequestIds.Count == 2, TimeSpan.FromSeconds(10));
-        var assignedIds = upstreamRequestIds.ToArray();
-        Assert.NotEqual(assignedIds[0], assignedIds[1]);
-        Assert.Equal(1, session.RetainedDownstreamForwardLegCount);
-        Assert.Equal(1, session.RetainedUpstreamForwardLegCount);
-
-        await fakePython.Server.SendMessageAsync(new JsonRpcResponse
-        {
-            Id = assignedIds[0],
-            Result = JsonSerializer.SerializeToNode(
-                new CallToolResult { Content = [new TextContentBlock { Text = "stale" }] },
-                McpJsonUtilities.DefaultOptions)!,
-        });
-        await fakePython.Server.SendMessageAsync(ResourceUpdated(StateUri, "after-stale"));
-
-        while (true)
-        {
-            var message = await rawDownstream.MessageReader.ReadAsync().AsTask()
-                .WaitAsync(TimeSpan.FromSeconds(10));
-            if (message is JsonRpcNotification notification
-                && notification.Params?["_meta"]?["marker"]?.GetValue<string>() == "after-stale")
+            await rawDownstream.SendMessageAsync(ToolRequest(oldDownstreamId, "old"));
+            await firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await rawDownstream.SendMessageAsync(new JsonRpcNotification
             {
-                break;
+                Method = NotificationMethods.CancelledNotification,
+                Params = JsonSerializer.SerializeToNode(
+                    new CancelledNotificationParams { RequestId = oldDownstreamId },
+                    McpJsonUtilities.DefaultOptions),
+            });
+            await WaitForAsync(
+                () => session.RetainedDownstreamForwardLegCount == 0
+                    && session.RetainedUpstreamForwardLegCount == 0,
+                TimeSpan.FromSeconds(10));
+
+            await rawDownstream.SendMessageAsync(ToolRequest(successorDownstreamId, "new"));
+            await secondStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await WaitForAsync(() => upstreamRequestIds.Count == 2, TimeSpan.FromSeconds(10));
+            var assignedIds = upstreamRequestIds.ToArray();
+            Assert.NotEqual(assignedIds[0], assignedIds[1]);
+            Assert.Equal(1, session.RetainedDownstreamForwardLegCount);
+            Assert.Equal(1, session.RetainedUpstreamForwardLegCount);
+
+            await rawDownstream.SendMessageAsync(new JsonRpcNotification
+            {
+                Method = NotificationMethods.CancelledNotification,
+                Params = JsonSerializer.SerializeToNode(
+                    new CancelledNotificationParams { RequestId = oldDownstreamId },
+                    McpJsonUtilities.DefaultOptions),
+            });
+            var cancellationBarrierId = new RequestId("stale-cancellation-barrier");
+            await rawDownstream.SendMessageAsync(new JsonRpcRequest
+            {
+                Id = cancellationBarrierId,
+                Method = RequestMethods.PromptsList,
+                Params = new JsonObject(),
+            });
+            while (true)
+            {
+                var message = await rawDownstream.MessageReader.ReadAsync().AsTask()
+                    .WaitAsync(TimeSpan.FromSeconds(10));
+                if (message is JsonRpcMessageWithId withId && withId.Id.Equals(cancellationBarrierId))
+                {
+                    break;
+                }
             }
+
+            Assert.False(successorCancelled.Task.IsCompleted);
+            Assert.Equal(1, session.RetainedDownstreamForwardLegCount);
+            Assert.Equal(1, session.RetainedUpstreamForwardLegCount);
+
+            await fakePython.Server.SendMessageAsync(new JsonRpcResponse
+            {
+                Id = assignedIds[0],
+                Result = JsonSerializer.SerializeToNode(
+                    new CallToolResult { Content = [new TextContentBlock { Text = "stale" }] },
+                    McpJsonUtilities.DefaultOptions)!,
+            });
+            await fakePython.Server.SendMessageAsync(ResourceUpdated(StateUri, "after-stale"));
+
+            while (true)
+            {
+                var message = await rawDownstream.MessageReader.ReadAsync().AsTask()
+                    .WaitAsync(TimeSpan.FromSeconds(10));
+                if (message is JsonRpcNotification notification
+                    && notification.Params?["_meta"]?["marker"]?.GetValue<string>() == "after-stale")
+                {
+                    break;
+                }
+            }
+
+            Assert.False(successorCancelled.Task.IsCompleted);
+            Assert.Equal(1, session.RetainedDownstreamForwardLegCount);
+            Assert.Equal(1, session.RetainedUpstreamForwardLegCount);
+            releaseSecond.TrySetResult();
+
+            JsonRpcResponse successor;
+            do
+            {
+                successor = Assert.IsType<JsonRpcResponse>(
+                    await rawDownstream.MessageReader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+            }
+            while (successor.Result?["content"]?[0]?["text"]?.GetValue<string>() != "new");
+
+            Assert.Equal(successorDownstreamId, successor.Id);
+            await WaitForAsync(
+                () => session.RetainedDownstreamForwardLegCount == 0
+                    && session.RetainedUpstreamForwardLegCount == 0,
+                TimeSpan.FromSeconds(10));
+
+            var sessionEnding = Task.Delay(Timeout.Infinite, session.SessionEndingToken);
+            await rawDownstream.SendMessageAsync(ToolRequest(oldDownstreamId, "third"));
+            var firstOutcome = await Task.WhenAny(
+                sessionEnding,
+                thirdStarted.Task,
+                Task.Delay(TimeSpan.FromSeconds(10)));
+            Assert.Same(sessionEnding, firstOutcome);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => sessionEnding);
+            Assert.False(thirdStarted.Task.IsCompleted);
+            Assert.Contains(
+                "Duplicate downstream request ID",
+                Assert.IsType<InvalidOperationException>(session.ForwardingFailure).Message,
+                StringComparison.Ordinal);
+            await WaitForAsync(
+                () => session.RetainedDownstreamForwardLegCount == 0
+                    && session.RetainedUpstreamForwardLegCount == 0,
+                TimeSpan.FromSeconds(10));
         }
-
-        Assert.Equal(1, session.RetainedDownstreamForwardLegCount);
-        Assert.Equal(1, session.RetainedUpstreamForwardLegCount);
-        releaseSecond.TrySetResult();
-
-        JsonRpcResponse successor;
-        do
+        finally
         {
-            successor = Assert.IsType<JsonRpcResponse>(
-                await rawDownstream.MessageReader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+            releaseSecond.TrySetResult();
+            await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
         }
-        while (successor.Result?["content"]?[0]?["text"]?.GetValue<string>() != "new");
-
-        Assert.Equal(reusedDownstreamId, successor.Id);
-        await WaitForAsync(
-            () => session.RetainedDownstreamForwardLegCount == 0
-                && session.RetainedUpstreamForwardLegCount == 0,
-            TimeSpan.FromSeconds(10));
-        await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
     }
 
     [Fact]
@@ -1164,6 +1340,89 @@ public sealed class ResourceUpdatesRelayTests
         Assert.Equal(0, session.RetainedUpstreamForwardLegCount);
         writeGate.Release();
         await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
+    [Fact]
+    public async Task BeginForwardLeg_DoesNotCreateLegAfterDuplicateIdFailureWhileWaitingForGate()
+    {
+        var upstream = new DuplexChannel();
+        var requestId = new RequestId("duplicate-race");
+        await using var session = ResourcesTestComposition.CreateSession(upstream.CreateClientTransport);
+        session.CheckAddDownstreamRequestId(requestId);
+
+        var forwardLegGate = Assert.IsType<object>(
+            typeof(RelaySession)
+                .GetField("_forwardLegGate", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(session));
+        var beginForwardLeg = Assert.IsAssignableFrom<MethodInfo>(
+            typeof(RelaySession).GetMethod(
+                "BeginForwardLeg",
+                BindingFlags.Instance | BindingFlags.NonPublic));
+        var beginOutcome = new TaskCompletionSource<(object? Leg, Exception? Exception)>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var beginThread = new Thread(() =>
+        {
+            try
+            {
+                var leg = beginForwardLeg.Invoke(
+                    session,
+                    new object?[] { requestId, CancellationToken.None });
+                beginOutcome.TrySetResult((leg, null));
+            }
+            catch (Exception exception)
+            {
+                beginOutcome.TrySetResult((null, exception));
+            }
+        })
+        {
+            IsBackground = true,
+        };
+
+        Exception? duplicateFailure = null;
+        var blockedOnForwardLegGate = false;
+        Monitor.Enter(forwardLegGate);
+        try
+        {
+            beginThread.Start();
+            blockedOnForwardLegGate = SpinWait.SpinUntil(
+                () => (beginThread.ThreadState & ThreadState.WaitSleepJoin) != 0,
+                TimeSpan.FromSeconds(10));
+            if (blockedOnForwardLegGate)
+            {
+                try
+                {
+                    session.CheckAddDownstreamRequestId(requestId);
+                }
+                catch (Exception exception)
+                {
+                    duplicateFailure = exception;
+                }
+            }
+        }
+        finally
+        {
+            Monitor.Exit(forwardLegGate);
+        }
+
+        var (leg, beginException) = await beginOutcome.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        session.CompleteDownstreamRequestHandling(requestId);
+        var retainedDownstream = session.RetainedDownstreamForwardLegCount;
+        var retainedUpstream = session.RetainedUpstreamForwardLegCount;
+        var legCreatedAfterFailure = leg is not null && beginException is null;
+
+        Assert.True(blockedOnForwardLegGate, "BeginForwardLeg did not block on _forwardLegGate.");
+        var duplicate = Assert.IsType<InvalidOperationException>(duplicateFailure);
+        Assert.Same(duplicate, session.ForwardingFailure);
+        Assert.False(
+            legCreatedAfterFailure,
+            $"legCreatedAfterFailure={legCreatedAfterFailure}; retainedDownstream={retainedDownstream}; retainedUpstream={retainedUpstream}");
+        Assert.Null(leg);
+        var invocation = Assert.IsType<TargetInvocationException>(beginException);
+        var terminal = Assert.IsType<InvalidOperationException>(invocation.InnerException);
+        Assert.Equal("Relay forwarding has terminated.", terminal.Message);
+        Assert.Same(duplicate, terminal.InnerException);
+        Assert.Equal(0, retainedDownstream);
+        Assert.Equal(0, retainedUpstream);
     }
 
     [Fact]

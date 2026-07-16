@@ -30,6 +30,8 @@ internal sealed class RelaySession : IAsyncDisposable
     private readonly TaskCompletionSource _downstreamReady =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly object _bootstrapGate = new();
+    private readonly object _downstreamRequestIdGate = new();
+    private readonly HashSet<RequestId> _seenDownstreamRequestIds = [];
     private const string ForwardLegContextItemKey = "NetCoreDbg.Mcp.Host.ForwardLeg";
     private readonly object _forwardLegGate = new();
     private readonly Dictionary<RequestId, ForwardLeg> _forwardLegsByDownstreamId = [];
@@ -117,6 +119,23 @@ internal sealed class RelaySession : IAsyncDisposable
     }
 
     internal Exception? ForwardingFailure => Volatile.Read(ref _forwardingFailure);
+
+    internal void CheckAddDownstreamRequestId(RequestId requestId)
+    {
+        lock (_downstreamRequestIdGate)
+        {
+            if (_seenDownstreamRequestIds.Add(requestId))
+            {
+                return;
+            }
+        }
+
+        var duplicate = new InvalidOperationException(
+            $"Duplicate downstream request ID '{requestId}' was already accepted by this relay session.");
+        FailForwardingAndEndSession(duplicate);
+        throw duplicate;
+    }
+
 
     internal void ThrowIfForwardingFailed()
     {
@@ -370,16 +389,17 @@ internal sealed class RelaySession : IAsyncDisposable
         RequestId downstreamRequestId,
         CancellationToken cancellationToken)
     {
-        ThrowIfForwardingFailed();
-        if (_sessionEndingCts.IsCancellationRequested)
-        {
-            throw new OperationCanceledException(_sessionEndingCts.Token);
-        }
 
         var leg = new ForwardLeg(downstreamRequestId);
         InvalidOperationException? collision = null;
         lock (_forwardLegGate)
         {
+            ThrowIfForwardingFailed();
+            if (_sessionEndingCts.IsCancellationRequested)
+            {
+                throw new OperationCanceledException(_sessionEndingCts.Token);
+            }
+
             if (_forwardLegsByDownstreamId.ContainsKey(downstreamRequestId))
             {
                 collision = new InvalidOperationException(

@@ -318,6 +318,7 @@ internal static class ProgressLoggingRelay
                 return;
             }
 
+            session.CheckAddDownstreamRequestId(request.Id);
             var progressToken = notificationState.Begin(request);
             var requestId = request.Id;
             using var cancellationRegistration = progressToken is null
