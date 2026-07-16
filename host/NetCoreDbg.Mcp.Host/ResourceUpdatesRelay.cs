@@ -57,13 +57,17 @@ internal static class ResourceUpdatesRelay
     }
 
     /// <summary>
-    /// Stamps resource updates while the SDK consumes its ordered transport reader, before
-    /// McpSessionHandler force-yields concurrent callbacks. A weak object-identity sidecar
-    /// leaves the notification object graph untouched. Callback forwarding then drains
-    /// by wire-order of each URI's first pending slot so callback scheduling cannot invert
-    /// upstream receive order across distinct URIs.
-    /// Pending work is coalesced per URI: only the latest payload/token is retained, and
-    /// coalesced duplicate callbacks complete immediately with no per-message waiter.
+    /// Admits and orders resource updates while the SDK consumes its ordered transport reader,
+    /// before McpSessionHandler force-yields concurrent callbacks. A weak object-identity
+    /// sidecar leaves the notification object graph untouched.
+    /// <para>
+    /// Wire order and coalescing are owned at stamp time: each accepted distinct URI gets one
+    /// pending slot keyed by its first wire sequence; later same-URI messages replace only the
+    /// latest payload/sequence and reset readiness. Callbacks only mark the current content
+    /// ready (or complete as stale) and may start drain. Drain walks the smallest pending order
+    /// key and stops on an unready head — no contiguous sequence cursor and no per-message
+    /// accounted/waiter state.
+    /// </para>
     /// </summary>
     internal sealed class OrderedUpstream
     {
@@ -73,17 +77,10 @@ internal static class ResourceUpdatesRelay
         /// <summary>URI → pending entry (at most one per distinct URI).</summary>
         private readonly Dictionary<string, PendingUri> _pendingByUri =
             new(StringComparer.Ordinal);
-        /// <summary>
-        /// Interval-merged set of sequences whose callbacks have finished registration
-        /// (accepted, coalesced, or bound-rejected). Enables ordered drain without an
-        /// O(messages) skip list: same-URI floods collapse to one interval.
-        /// </summary>
-        private readonly AccountedSequenceSet _accounted = new();
         private readonly ConditionalWeakTable<JsonRpcNotification, ReceiveStamp> _receiveStamps = new();
         private readonly System.Collections.Concurrent.ConcurrentQueue<string> _forwardedMarkers = new();
         private Task _drainTask = Task.CompletedTask;
         private long _nextReceivedSequence;
-        private long _nextForwardSequence = 1;
         private int _forwardAttempts;
         private bool _forwarderActive;
         private bool _terminal;
@@ -118,9 +115,8 @@ internal static class ResourceUpdatesRelay
         }
 
         /// <summary>
-        /// Retained backpressure bookkeeping objects: pending URI entries, order index
-        /// entries, and accounted sequence intervals. Must stay O(unique pending URIs /
-        /// gap intervals), never O(notification count).
+        /// Retained backpressure bookkeeping objects: pending URI entries and order index
+        /// entries. Must stay O(unique pending URIs), never O(notification count).
         /// </summary>
         internal int RetainedBackpressureObjectCount
         {
@@ -128,24 +124,7 @@ internal static class ResourceUpdatesRelay
             {
                 lock (_gate)
                 {
-                    return _pendingByUri.Count
-                        + _pendingByOrder.Count
-                        + _accounted.IntervalCount;
-                }
-            }
-        }
-
-        /// <summary>
-        /// Number of interval segments used to track accounted (non-pending) sequences.
-        /// Same-URI coalesced floods must merge into a small interval count.
-        /// </summary>
-        internal int AccountedIntervalCount
-        {
-            get
-            {
-                lock (_gate)
-                {
-                    return _accounted.IntervalCount;
+                    return _pendingByUri.Count + _pendingByOrder.Count;
                 }
             }
         }
@@ -177,29 +156,34 @@ internal static class ResourceUpdatesRelay
                     NotificationMethods.ResourceUpdatedNotification,
                     (notification, cancellationToken) =>
                     {
-                        if (!TryGetReceiveSequence(notification, out var sequence))
+                        if (!TryGetReceiveStamp(notification, out var stamp))
                         {
-                            // Missing/malformed URI is rejected at stamp time without a
-                            // sequence, so it never enters pending or creates a drain hole.
+                            // Missing/malformed URI is never stamped, so it never enters pending.
                             throw new InvalidOperationException(
                                 "Resource update rejected: missing or malformed params.uri, "
                                 + "or reached its callback without an upstream wire-order stamp.");
                         }
 
-                        return ForwardInOrderAsync(
-                            sequence,
+                        if (stamp.Disposition == StampDisposition.BoundRejected)
+                        {
+                            throw new InvalidOperationException(
+                                $"Resource update pending-URI bound exceeded ({MaxPendingUris}). "
+                                + "Slow subscribers must not retain unbounded host state.");
+                        }
+
+                        return MarkReadyAndMaybeDrainAsync(
+                            stamp,
                             session,
                             sessionEndingToken,
-                            notification,
                             cancellationToken);
                     }),
             ];
         }
 
         /// <summary>
-        /// Adds a sidecar receive stamp only to resource-updated notifications that carry a
-        /// valid <c>params.uri</c>. Malformed updates are not stamped and never enter the
-        /// pending pipeline. All other messages pass through as the identical object.
+        /// Validates URI, assigns wire sequence, and under lock records a weak stamp outcome
+        /// plus at most one pending slot per accepted URI. Malformed updates stay unstamped.
+        /// Bound rejection is stamped without creating pending/order state.
         /// </summary>
         internal void StampReceivedMessage(JsonRpcMessage message)
         {
@@ -211,27 +195,65 @@ internal static class ResourceUpdatesRelay
                 return;
             }
 
-            // Validate/extract URI before accepting into the resource-update pipeline.
-            if (TryGetResourceUri(notification) is null)
+            if (TryGetResourceUri(notification) is not { } uri)
             {
                 return;
             }
 
-            var sequence = Interlocked.Increment(ref _nextReceivedSequence);
-            _receiveStamps.Add(notification, new ReceiveStamp(sequence));
+            lock (_gate)
+            {
+                var sequence = ++_nextReceivedSequence;
+
+                if (_terminal)
+                {
+                    // Keep a stamp so the late callback does not throw as malformed; no pending.
+                    _receiveStamps.Add(
+                        notification,
+                        new ReceiveStamp(sequence, StampDisposition.Accepted, uri));
+                    return;
+                }
+
+                if (_pendingByUri.TryGetValue(uri, out var existing))
+                {
+                    // Keep the first-wire order slot; replace only latest payload/sequence.
+                    existing.Notification = notification;
+                    existing.ContentSequence = sequence;
+                    existing.Ready = false;
+                    existing.CallbackToken = default;
+                    _receiveStamps.Add(
+                        notification,
+                        new ReceiveStamp(sequence, StampDisposition.Accepted, uri));
+                    return;
+                }
+
+                if (_pendingByUri.Count >= MaxPendingUris)
+                {
+                    // Bound-rejected stamp only — no pending/order state.
+                    _receiveStamps.Add(
+                        notification,
+                        new ReceiveStamp(sequence, StampDisposition.BoundRejected, uri));
+                    return;
+                }
+
+                var pending = new PendingUri(uri, sequence, notification);
+                _pendingByUri.Add(uri, pending);
+                _pendingByOrder.Add(sequence, pending);
+                _receiveStamps.Add(
+                    notification,
+                    new ReceiveStamp(sequence, StampDisposition.Accepted, uri));
+            }
         }
 
-        private bool TryGetReceiveSequence(
+        private bool TryGetReceiveStamp(
             JsonRpcNotification notification,
-            out long sequence)
+            out ReceiveStamp stamp)
         {
-            if (_receiveStamps.TryGetValue(notification, out var stamp))
+            if (_receiveStamps.TryGetValue(notification, out stamp!))
             {
-                sequence = stamp.Sequence;
                 return true;
             }
 
-            sequence = 0;
+            stamp = null!;
             return false;
         }
 
@@ -261,11 +283,15 @@ internal static class ResourceUpdatesRelay
             }
         }
 
-        private ValueTask ForwardInOrderAsync(
-            long sequence,
+        /// <summary>
+        /// Consumes stamp only: marks the current content ready, records at most one
+        /// cancellation token, and starts drain when the smallest order slot is ready.
+        /// Stale callbacks (not matching current ContentSequence) complete without state.
+        /// </summary>
+        private ValueTask MarkReadyAndMaybeDrainAsync(
+            ReceiveStamp stamp,
             RelaySession session,
             CancellationToken sessionEndingToken,
-            JsonRpcNotification notification,
             CancellationToken callbackToken)
         {
             TaskCompletionSource? startDrain = null;
@@ -277,74 +303,28 @@ internal static class ResourceUpdatesRelay
                     return ValueTask.CompletedTask;
                 }
 
-                var uri = TryGetResourceUri(notification);
-                if (uri is null)
+                if (stamp.Uri is not { } uri)
                 {
-                    // Should not reach here for stamped messages; fail closed without state.
                     throw new InvalidOperationException(
-                        "Resource update rejected: missing or malformed params.uri.");
+                        "Accepted resource update stamp is missing its validated URI.");
                 }
 
-                if (_pendingByUri.TryGetValue(uri, out var existing))
+                if (!_pendingByUri.TryGetValue(uri, out var pending))
                 {
-                    // Sequence-aware coalesce: only a newer sequence may replace payload/token.
-                    // Older/late callbacks (including cancelled ones) cannot overwrite newer state.
-                    if (sequence > existing.ContentSequence)
-                    {
-                        existing.Notification = notification;
-                        existing.CallbackToken = callbackToken;
-                        existing.ContentSequence = sequence;
-                    }
-
-                    _accounted.Add(sequence);
-                    if (!_forwarderActive && CanDrainNextLocked())
-                    {
-                        _forwarderActive = true;
-                        startDrain = new TaskCompletionSource(
-                            TaskCreationOptions.RunContinuationsAsynchronously);
-                        _drainTask = DrainForwardsAsync(
-                            session,
-                            sessionEndingToken,
-                            startDrain.Task);
-                    }
-
-                    startDrain?.TrySetResult();
-                    // Coalesced duplicates complete immediately: no per-message waiter.
+                    // Already drained or never admitted — retain nothing.
                     return ValueTask.CompletedTask;
                 }
 
-                // Bound new distinct URIs, but always admit the current head sequence so a
-                // missing predecessor can unblock drain even when the queue is full. Without
-                // this, a gap at _nextForwardSequence would strand every later update.
-                var admitsHeadGap = sequence == _nextForwardSequence;
-                if (_pendingByUri.Count >= MaxPendingUris && !admitsHeadGap)
+                if (stamp.Sequence != pending.ContentSequence)
                 {
-                    // Account the sequence so bound rejection cannot create a drain hole
-                    // that strands later valid updates.
-                    _accounted.Add(sequence);
-                    if (!_forwarderActive && CanDrainNextLocked())
-                    {
-                        _forwarderActive = true;
-                        startDrain = new TaskCompletionSource(
-                            TaskCreationOptions.RunContinuationsAsynchronously);
-                        _drainTask = DrainForwardsAsync(
-                            session,
-                            sessionEndingToken,
-                            startDrain.Task);
-                    }
-
-                    startDrain?.TrySetResult();
-                    throw new InvalidOperationException(
-                        $"Resource update pending-URI bound exceeded ({MaxPendingUris}). "
-                        + "Slow subscribers must not retain unbounded host state.");
+                    // Stale callback for a superseded payload — complete immediately.
+                    return ValueTask.CompletedTask;
                 }
 
-                var pending = new PendingUri(uri, sequence, notification, callbackToken);
-                _pendingByUri.Add(uri, pending);
-                _pendingByOrder.Add(sequence, pending);
-                _accounted.Add(sequence);
+                pending.Ready = true;
+                pending.CallbackToken = callbackToken;
 
-                if (!_forwarderActive && CanDrainNextLocked())
+                if (!_forwarderActive && IsHeadReadyLocked())
                 {
                     _forwarderActive = true;
                     startDrain = new TaskCompletionSource(
@@ -357,18 +337,14 @@ internal static class ResourceUpdatesRelay
             }
 
             startDrain?.TrySetResult();
-            // Accepted work is retained only as the pending URI slot; the callback itself
-            // does not wait. Drain forwards asynchronously in wire order.
             return ValueTask.CompletedTask;
         }
 
         /// <summary>
-        /// True when the next forward sequence is either a pending URI order slot or an
-        /// accounted coalesce/reject hole that can be skipped.
+        /// True when the smallest accepted order slot exists and is ready.
         /// </summary>
-        private bool CanDrainNextLocked() =>
-            _pendingByOrder.ContainsKey(_nextForwardSequence)
-            || _accounted.Contains(_nextForwardSequence);
+        private bool IsHeadReadyLocked() =>
+            _pendingByOrder.Count > 0 && _pendingByOrder.First().Value.Ready;
 
         private async Task DrainForwardsAsync(
             RelaySession session,
@@ -379,6 +355,7 @@ internal static class ResourceUpdatesRelay
             while (true)
             {
                 PendingUri? pending = null;
+                var skipCancelled = false;
                 lock (_gate)
                 {
                     if (_terminal)
@@ -387,31 +364,44 @@ internal static class ResourceUpdatesRelay
                         return;
                     }
 
-                    // Skip sequences that were coalesced or bound-rejected (accounted but
-                    // not owning a pending order slot).
-                    while (!_pendingByOrder.ContainsKey(_nextForwardSequence)
-                        && _accounted.Contains(_nextForwardSequence))
-                    {
-                        _nextForwardSequence++;
-                    }
-
-                    _accounted.PruneBefore(_nextForwardSequence);
-
-                    if (!_pendingByOrder.Remove(_nextForwardSequence, out pending))
+                    if (_pendingByOrder.Count == 0)
                     {
                         _forwarderActive = false;
                         return;
                     }
 
-                    _pendingByUri.Remove(pending.Uri);
-                    _nextForwardSequence++;
-                    _accounted.PruneBefore(_nextForwardSequence);
-                    Interlocked.Increment(ref _forwardAttempts);
-                    var marker = pending.Notification.Params?["_meta"]?["marker"]?.GetValue<string>();
-                    if (marker is not null)
+                    // SortedDictionary enumerates keys ascending — take the smallest order slot.
+                    var head = _pendingByOrder.First();
+                    if (!head.Value.Ready)
                     {
-                        _forwardedMarkers.Enqueue(marker);
+                        // Unready head stops without removal.
+                        _forwarderActive = false;
+                        return;
                     }
+
+                    pending = head.Value;
+                    _pendingByOrder.Remove(head.Key);
+                    _pendingByUri.Remove(pending.Uri);
+                    Interlocked.Increment(ref _forwardAttempts);
+
+                    if (pending.CallbackToken.IsCancellationRequested)
+                    {
+                        // Current callback cancelled: suppress send, continue to next head.
+                        skipCancelled = true;
+                    }
+                    else
+                    {
+                        var marker = pending.Notification.Params?["_meta"]?["marker"]?.GetValue<string>();
+                        if (marker is not null)
+                        {
+                            _forwardedMarkers.Enqueue(marker);
+                        }
+                    }
+                }
+
+                if (skipCancelled || pending is null)
+                {
+                    continue;
                 }
 
                 try
@@ -445,207 +435,37 @@ internal static class ResourceUpdatesRelay
                 _terminal = true;
                 _pendingByOrder.Clear();
                 _pendingByUri.Clear();
-                _accounted.Clear();
                 _forwarderActive = false;
             }
         }
 
-        private sealed record ReceiveStamp(long Sequence);
+        private enum StampDisposition
+        {
+            Accepted,
+            BoundRejected,
+        }
+
+        private sealed record ReceiveStamp(
+            long Sequence,
+            StampDisposition Disposition,
+            string? Uri);
 
         /// <summary>
-        /// One retained pending URI: order is fixed at first acceptance; payload/token track
-        /// the newest sequence only.
+        /// One retained pending URI: order is fixed at first acceptance; payload tracks the
+        /// newest content sequence; readiness and the sole current cancellation token are set
+        /// only by the matching callback.
         /// </summary>
         private sealed class PendingUri(
             string uri,
             long orderSequence,
-            JsonRpcNotification notification,
-            CancellationToken callbackToken)
+            JsonRpcNotification notification)
         {
             public string Uri { get; } = uri;
             public long OrderSequence { get; } = orderSequence;
             public long ContentSequence { get; set; } = orderSequence;
             public JsonRpcNotification Notification { get; set; } = notification;
-            public CancellationToken CallbackToken { get; set; } = callbackToken;
-        }
-
-        /// <summary>
-        /// Sorted non-overlapping inclusive intervals of accounted sequences. Merges on
-        /// insert so a same-URI flood of N messages becomes one interval, not N entries.
-        /// </summary>
-        private sealed class AccountedSequenceSet
-        {
-            private readonly List<(long Start, long End)> _intervals = [];
-
-            public int IntervalCount => _intervals.Count;
-
-            public void Clear() => _intervals.Clear();
-
-            public bool Contains(long sequence)
-            {
-                var index = FindIntervalIndex(sequence);
-                if (index < 0)
-                {
-                    return false;
-                }
-
-                var (start, end) = _intervals[index];
-                return sequence >= start && sequence <= end;
-            }
-
-            public void Add(long sequence)
-            {
-                if (_intervals.Count == 0)
-                {
-                    _intervals.Add((sequence, sequence));
-                    return;
-                }
-
-                var index = FindInsertionIndex(sequence);
-                // Merge with previous if adjacent/overlapping.
-                if (index > 0)
-                {
-                    var prev = _intervals[index - 1];
-                    if (sequence <= prev.End + 1 && sequence >= prev.Start)
-                    {
-                        // Already covered or extend previous end.
-                        if (sequence > prev.End)
-                        {
-                            prev.End = sequence;
-                            _intervals[index - 1] = prev;
-                            MergeForwardFrom(index - 1);
-                        }
-
-                        return;
-                    }
-                }
-
-                if (index < _intervals.Count)
-                {
-                    var next = _intervals[index];
-                    if (sequence >= next.Start - 1 && sequence <= next.End)
-                    {
-                        // Already covered or extend next start.
-                        if (sequence < next.Start)
-                        {
-                            next.Start = sequence;
-                            _intervals[index] = next;
-                            if (index > 0)
-                            {
-                                MergeForwardFrom(index - 1);
-                            }
-                        }
-
-                        return;
-                    }
-                }
-
-                _intervals.Insert(index, (sequence, sequence));
-                if (index > 0)
-                {
-                    MergeForwardFrom(index - 1);
-                }
-                else
-                {
-                    MergeForwardFrom(0);
-                }
-            }
-
-            public void PruneBefore(long before)
-            {
-                if (before <= long.MinValue + 1 || _intervals.Count == 0)
-                {
-                    return;
-                }
-
-                var keepFrom = 0;
-                while (keepFrom < _intervals.Count && _intervals[keepFrom].End < before)
-                {
-                    keepFrom++;
-                }
-
-                if (keepFrom > 0)
-                {
-                    _intervals.RemoveRange(0, keepFrom);
-                }
-
-                if (_intervals.Count > 0 && _intervals[0].Start < before)
-                {
-                    var first = _intervals[0];
-                    first.Start = before;
-                    if (first.Start > first.End)
-                    {
-                        _intervals.RemoveAt(0);
-                    }
-                    else
-                    {
-                        _intervals[0] = first;
-                    }
-                }
-            }
-
-            private void MergeForwardFrom(int index)
-            {
-                while (index + 1 < _intervals.Count)
-                {
-                    var current = _intervals[index];
-                    var next = _intervals[index + 1];
-                    if (next.Start > current.End + 1)
-                    {
-                        break;
-                    }
-
-                    current.End = Math.Max(current.End, next.End);
-                    current.Start = Math.Min(current.Start, next.Start);
-                    _intervals[index] = current;
-                    _intervals.RemoveAt(index + 1);
-                }
-            }
-
-            private int FindIntervalIndex(long sequence)
-            {
-                var lo = 0;
-                var hi = _intervals.Count - 1;
-                while (lo <= hi)
-                {
-                    var mid = lo + ((hi - lo) / 2);
-                    var (start, end) = _intervals[mid];
-                    if (sequence < start)
-                    {
-                        hi = mid - 1;
-                    }
-                    else if (sequence > end)
-                    {
-                        lo = mid + 1;
-                    }
-                    else
-                    {
-                        return mid;
-                    }
-                }
-
-                return -1;
-            }
-
-            private int FindInsertionIndex(long sequence)
-            {
-                var lo = 0;
-                var hi = _intervals.Count;
-                while (lo < hi)
-                {
-                    var mid = lo + ((hi - lo) / 2);
-                    if (_intervals[mid].Start < sequence)
-                    {
-                        lo = mid + 1;
-                    }
-                    else
-                    {
-                        hi = mid;
-                    }
-                }
-
-                return lo;
-            }
+            public CancellationToken CallbackToken { get; set; }
+            public bool Ready { get; set; }
         }
     }
 

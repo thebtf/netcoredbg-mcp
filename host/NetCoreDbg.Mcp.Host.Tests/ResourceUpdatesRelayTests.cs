@@ -326,9 +326,9 @@ public sealed class ResourceUpdatesRelayTests
         };
         orderedUpstream.StampReceivedMessage(missingPredecessor);
         orderedUpstream.StampReceivedMessage(queuedAtTerminal);
-        // Second of the pair is pending behind the missing predecessor callback.
+        // Both URIs are pending at stamp time; second is ready behind an unready head.
         await callback(queuedAtTerminal, CancellationToken.None);
-        Assert.Equal(1, orderedUpstream.PendingUriCount);
+        Assert.Equal(2, orderedUpstream.PendingUriCount);
 
         await client.DisposeAsync();
         await session.DisposeAsync();
@@ -345,6 +345,9 @@ public sealed class ResourceUpdatesRelayTests
         await using var fakePython = FakePythonServer.Start(upstream, SubscribablePythonOptions());
         var received = new ConcurrentQueue<string>();
         var receivedMarkers = new ConcurrentQueue<string>();
+        var expectedMarkers = new HashSet<string>(StringComparer.Ordinal) { "held", "1000", "bp" };
+        var allExpectedReceived = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
 
         await using var client = await McpClient.CreateAsync(
             downstream.CreateClientTransport(),
@@ -361,6 +364,10 @@ public sealed class ResourceUpdatesRelayTests
                             if (marker is not null)
                             {
                                 receivedMarkers.Enqueue(marker);
+                                if (expectedMarkers.IsSubsetOf(receivedMarkers))
+                                {
+                                    allExpectedReceived.TrySetResult();
+                                }
                             }
                             return ValueTask.CompletedTask;
                         }),
@@ -374,44 +381,56 @@ public sealed class ResourceUpdatesRelayTests
         orderedUpstream.ConfigureHandlers(handlers, session);
         var callback = Assert.Single(handlers.NotificationHandlers!).Value;
 
-        // Hold a distinct head URI at sequence 1 so later same-URI floods stay pending.
-        // (A same-URI head would coalesce into the flood slot and is covered by sequence-aware tests.)
+        // Distinct predecessor stamped first and left unready so same-URI flood cannot drain.
         var held = ResourceUpdated("debug://gate", marker: "held");
         orderedUpstream.StampReceivedMessage(held);
 
-        var coalescedTasks = new List<Task>(1000);
+        var notifications = new List<JsonRpcNotification>(1000);
         for (var i = 1; i <= 1000; i++)
         {
             var notification = ResourceUpdated(StateUri, marker: i.ToString());
             orderedUpstream.StampReceivedMessage(notification);
-            // Callback runs before sequence 1, so drain cannot forward yet.
-            coalescedTasks.Add(callback(notification, CancellationToken.None).AsTask());
+            notifications.Add(notification);
         }
 
-        // Coalesced duplicates complete immediately — no per-message waiters.
-        Assert.All(coalescedTasks, task => Assert.True(task.IsCompletedSuccessfully));
-        // 1000 same-URI updates while the predecessor is missing: one pending slot only.
-        Assert.Equal(1, orderedUpstream.PendingUriCount);
-        Assert.Equal(1, orderedUpstream.PendingSlotCount);
+        // Sparse callback arrival: latest, then even indices, then odds — predecessor last.
+        // Retained bookkeeping must stay O(unique URIs), not O(messages), even when callbacks
+        // arrive as 2,4,6,... before sequence 1.
+        var sparseTasks = new List<Task>(1000);
+        sparseTasks.Add(callback(notifications[^1], CancellationToken.None).AsTask());
+        for (var i = 0; i < notifications.Count - 1; i += 2)
+        {
+            sparseTasks.Add(callback(notifications[i], CancellationToken.None).AsTask());
+        }
+
+        for (var i = 1; i < notifications.Count - 1; i += 2)
+        {
+            sparseTasks.Add(callback(notifications[i], CancellationToken.None).AsTask());
+        }
+
+        Assert.All(sparseTasks, task => Assert.True(task.IsCompletedSuccessfully));
+        // Held + one coalesced StateUri slot only.
+        Assert.Equal(2, orderedUpstream.PendingUriCount);
+        Assert.Equal(2, orderedUpstream.PendingSlotCount);
         Assert.True(orderedUpstream.PendingUriCount <= ResourceUpdatesRelay.MaxPendingUris);
-        // Retained objects stay O(unique URIs / gap intervals), not O(messages).
+        // Retained objects stay a small constant over unique pending URIs, never O(messages).
         Assert.True(
-            orderedUpstream.RetainedBackpressureObjectCount < 16,
+            orderedUpstream.RetainedBackpressureObjectCount <= 8,
             $"retained objects grew with message count: {orderedUpstream.RetainedBackpressureObjectCount}");
-        Assert.True(
-            orderedUpstream.AccountedIntervalCount <= 2,
-            $"accounted intervals not coalesced: {orderedUpstream.AccountedIntervalCount}");
 
         var breakpoints = ResourceUpdated(BreakpointsUri, marker: "bp");
         orderedUpstream.StampReceivedMessage(breakpoints);
         await callback(breakpoints, CancellationToken.None);
-        Assert.Equal(2, orderedUpstream.PendingUriCount);
-        Assert.Equal(2, orderedUpstream.PendingSlotCount);
-        Assert.True(orderedUpstream.RetainedBackpressureObjectCount < 16);
+        Assert.Equal(3, orderedUpstream.PendingUriCount);
+        Assert.Equal(3, orderedUpstream.PendingSlotCount);
+        Assert.True(
+            orderedUpstream.RetainedBackpressureObjectCount <= 8,
+            $"retained objects grew after third URI: {orderedUpstream.RetainedBackpressureObjectCount}");
 
-        // Release the held predecessor: ordered drain must complete and clear retained work.
+        // Release the held predecessor last: ordered drain must forward newest markers only.
         await callback(held, CancellationToken.None);
         await orderedUpstream.WaitForDrainAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(15));
+        await allExpectedReceived.Task.WaitAsync(TimeSpan.FromSeconds(15));
         await WaitForAsync(
             () => orderedUpstream.PendingUriCount == 0 && orderedUpstream.ForwardAttempts >= 3,
             TimeSpan.FromSeconds(10));
@@ -419,20 +438,23 @@ public sealed class ResourceUpdatesRelayTests
         Assert.Equal(0, orderedUpstream.PendingUriCount);
         Assert.Equal(0, orderedUpstream.PendingSlotCount);
         Assert.Equal(3, orderedUpstream.ForwardAttempts);
+        Assert.Equal(0, orderedUpstream.RetainedBackpressureObjectCount);
         // Newest same-URI marker must be the one selected for forward (sequence-aware latest).
         Assert.Contains("1000", orderedUpstream.ForwardedMarkers);
         Assert.Contains("held", orderedUpstream.ForwardedMarkers);
         Assert.Contains("bp", orderedUpstream.ForwardedMarkers);
-        // Coalesce means far fewer drain forwards than the 1000+ notifications issued.
         Assert.True(
             orderedUpstream.ForwardAttempts <= 3,
             $"expected coalesced drain forwards, got {orderedUpstream.ForwardAttempts}");
-        // Downstream delivery is best-effort; when it lands, markers stay consistent.
-        if (!received.IsEmpty)
-        {
-            Assert.Contains(StateUri, received);
-            Assert.Contains("1000", receivedMarkers);
-        }
+        // Downstream completion is deterministic: exact expected URI+marker set.
+        Assert.Equal(3, received.Count);
+        Assert.Equal(3, receivedMarkers.Count);
+        Assert.Contains(StateUri, received);
+        Assert.Contains("debug://gate", received);
+        Assert.Contains(BreakpointsUri, received);
+        Assert.True(expectedMarkers.SetEquals(receivedMarkers));
+        Assert.DoesNotContain("1", receivedMarkers);
+        Assert.DoesNotContain("999", receivedMarkers);
 
         await client.DisposeAsync();
         await session.DisposeAsync();
@@ -472,20 +494,21 @@ public sealed class ResourceUpdatesRelayTests
         orderedUpstream.ConfigureHandlers(handlers, session);
         var callback = Assert.Single(handlers.NotificationHandlers!).Value;
 
-        // Gap at sequence 1 so pending state is retained while late callbacks rearrange.
+        // Distinct predecessor stamped first and left unready so StateUri stays pending.
         var heldOther = ResourceUpdated(BreakpointsUri, marker: "hold");
         orderedUpstream.StampReceivedMessage(heldOther);
 
         var cancelledOlder = ResourceUpdated(StateUri, marker: "cancelled-late");
         var older = ResourceUpdated(StateUri, marker: "older");
         var newer = ResourceUpdated(StateUri, marker: "newest");
-        orderedUpstream.StampReceivedMessage(cancelledOlder); // seq 2
-        orderedUpstream.StampReceivedMessage(older); // seq 3
-        orderedUpstream.StampReceivedMessage(newer); // seq 4
+        orderedUpstream.StampReceivedMessage(cancelledOlder); // first StateUri order slot
+        orderedUpstream.StampReceivedMessage(older); // coalesce latest
+        orderedUpstream.StampReceivedMessage(newer); // coalesce latest
 
-        // Newest registers first; later older/cancelled callbacks arrive out of order.
+        // Newest callback first; later older/cancelled callbacks arrive out of order.
         await callback(newer, CancellationToken.None);
-        Assert.Equal(1, orderedUpstream.PendingUriCount);
+        // held + one coalesced StateUri slot (stamp-time admission).
+        Assert.Equal(2, orderedUpstream.PendingUriCount);
 
         await callback(older, CancellationToken.None);
         using (var cancelled = new CancellationTokenSource())
@@ -494,8 +517,8 @@ public sealed class ResourceUpdatesRelayTests
             await callback(cancelledOlder, cancelled.Token);
         }
 
-        // Still one pending URI; late older/cancelled must not suppress or replace newest.
-        Assert.Equal(1, orderedUpstream.PendingUriCount);
+        // Still two pending URIs; late older/cancelled must not suppress or replace newest.
+        Assert.Equal(2, orderedUpstream.PendingUriCount);
 
         await callback(heldOther, CancellationToken.None);
         await orderedUpstream.WaitForDrainAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
@@ -606,11 +629,11 @@ public sealed class ResourceUpdatesRelayTests
         orderedUpstream.ConfigureHandlers(handlers, session);
         var callback = Assert.Single(handlers.NotificationHandlers!).Value;
 
-        // Stamp head first but leave its callback unregistered so 64 later URIs stay pending.
+        // Stamp head first and leave it unready; fill the remaining bound at stamp time.
         var held = ResourceUpdated("debug://held", marker: "held");
         orderedUpstream.StampReceivedMessage(held);
 
-        for (var i = 0; i < ResourceUpdatesRelay.MaxPendingUris; i++)
+        for (var i = 0; i < ResourceUpdatesRelay.MaxPendingUris - 1; i++)
         {
             var notification = ResourceUpdated($"debug://uri-{i}", marker: $"m{i}");
             orderedUpstream.StampReceivedMessage(notification);
@@ -619,9 +642,10 @@ public sealed class ResourceUpdatesRelayTests
 
         Assert.Equal(ResourceUpdatesRelay.MaxPendingUris, orderedUpstream.PendingUriCount);
 
-        // 65th distinct URI beyond the bound must fail closed without stranding drain.
+        // 65th distinct URI is bound-rejected at stamp (no pending) and throws at callback.
         var overflow = ResourceUpdated("debug://overflow", marker: "overflow");
         orderedUpstream.StampReceivedMessage(overflow);
+        Assert.Equal(ResourceUpdatesRelay.MaxPendingUris, orderedUpstream.PendingUriCount);
         var overflowError = await Assert.ThrowsAsync<InvalidOperationException>(
             async () => await callback(overflow, CancellationToken.None));
         Assert.Contains("pending-URI bound exceeded", overflowError.Message);
@@ -633,22 +657,22 @@ public sealed class ResourceUpdatesRelayTests
         await callback(progress, CancellationToken.None);
         Assert.Equal(ResourceUpdatesRelay.MaxPendingUris, orderedUpstream.PendingUriCount);
 
-        // Head-gap admission unblocks ordered drain even though the queue was at the bound.
+        // Releasing the unready head lets every accepted order slot drain directly.
         await callback(held, CancellationToken.None);
         await orderedUpstream.WaitForDrainAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(20));
         await WaitForAsync(
             () => orderedUpstream.PendingUriCount == 0
-                && orderedUpstream.ForwardAttempts >= ResourceUpdatesRelay.MaxPendingUris + 1,
+                && orderedUpstream.ForwardAttempts >= ResourceUpdatesRelay.MaxPendingUris,
             TimeSpan.FromSeconds(15));
 
         Assert.Equal(0, orderedUpstream.PendingUriCount);
-        Assert.Equal(ResourceUpdatesRelay.MaxPendingUris + 1, orderedUpstream.ForwardAttempts);
+        Assert.Equal(ResourceUpdatesRelay.MaxPendingUris, orderedUpstream.ForwardAttempts);
         Assert.Contains("held", orderedUpstream.ForwardedMarkers);
         Assert.Contains("progress-after-overflow", orderedUpstream.ForwardedMarkers);
         Assert.DoesNotContain("overflow", orderedUpstream.ForwardedMarkers);
-        // Bound rejection must not strand the full drain (head + 64 accepted URIs).
+        // Bound rejection must not strand the full drain (held + MaxPendingUris-1 accepted URIs).
         Assert.Equal(
-            ResourceUpdatesRelay.MaxPendingUris + 1,
+            ResourceUpdatesRelay.MaxPendingUris,
             orderedUpstream.ForwardedMarkers.Count);
 
         await client.DisposeAsync();
