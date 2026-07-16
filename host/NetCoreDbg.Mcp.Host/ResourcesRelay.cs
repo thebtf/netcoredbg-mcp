@@ -45,10 +45,17 @@ internal static class ResourcesRelay
                 // sends it directly, without reconstructing or renaming any field the caller
                 // did supply (mirrors ToolsRelay's WithListToolsHandler).
                 var request = context.JsonRpcRequest.Params is null
-                    ? new JsonRpcRequest { Method = context.JsonRpcRequest.Method, Params = new JsonObject() }
+                    ? new JsonRpcRequest
+                    {
+                        Id = context.JsonRpcRequest.Id,
+                        Method = context.JsonRpcRequest.Method,
+                        Params = new JsonObject(),
+                    }
                     : context.JsonRpcRequest;
 
-                var response = await RelaySession.ForwardRequestAsync(upstream, request, cancellationToken).ConfigureAwait(false);
+                var response = await session
+                    .ForwardApplicationRequestAsync(upstream, request, cancellationToken)
+                    .ConfigureAwait(false);
                 return response.Result.Deserialize<ListResourcesResult>(McpJsonUtilities.DefaultOptions)!;
             })
             .WithListResourceTemplatesHandler(async (context, cancellationToken) =>
@@ -57,10 +64,17 @@ internal static class ResourcesRelay
 
                 // Same cursor-less shape preservation as resources/list above.
                 var request = context.JsonRpcRequest.Params is null
-                    ? new JsonRpcRequest { Method = context.JsonRpcRequest.Method, Params = new JsonObject() }
+                    ? new JsonRpcRequest
+                    {
+                        Id = context.JsonRpcRequest.Id,
+                        Method = context.JsonRpcRequest.Method,
+                        Params = new JsonObject(),
+                    }
                     : context.JsonRpcRequest;
 
-                var response = await RelaySession.ForwardRequestAsync(upstream, request, cancellationToken).ConfigureAwait(false);
+                var response = await session
+                    .ForwardApplicationRequestAsync(upstream, request, cancellationToken)
+                    .ConfigureAwait(false);
                 return response.Result.Deserialize<ListResourceTemplatesResult>(McpJsonUtilities.DefaultOptions)!;
             })
             .WithReadResourceHandler(async (context, cancellationToken) =>
@@ -69,7 +83,9 @@ internal static class ResourcesRelay
                 // tools/call always carries a mandatory `name`: no null-Params handling
                 // needed here, mirroring ToolsRelay's WithCallToolHandler.
                 var upstream = await session.UpstreamAsync(cancellationToken).ConfigureAwait(false);
-                var response = await RelaySession.ForwardRequestAsync(upstream, context.JsonRpcRequest, cancellationToken).ConfigureAwait(false);
+                var response = await session
+                    .ForwardApplicationRequestAsync(upstream, context.JsonRpcRequest, cancellationToken)
+                    .ConfigureAwait(false);
                 return response.Result.Deserialize<ReadResourceResult>(McpJsonUtilities.DefaultOptions)!;
             });
     }

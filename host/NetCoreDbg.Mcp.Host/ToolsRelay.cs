@@ -17,13 +17,12 @@ namespace NetCoreDbg.Mcp.Host;
 /// static <c>Register</c> method, called only from <c>RelayComposition.cs</c>, that records
 /// its method(s) in the shared <see cref="RelayRouteCatalog"/> for duplicate-ownership
 /// checking and wires typed handlers (via the same <c>With...Handler</c> builder surface
-/// the pre-FD-000 composition already used) that reach Python only through
-/// <see cref="RelaySession.UpstreamAsync"/> and <see cref="RelaySession.ForwardRequestAsync"/>.
-/// <see cref="RelaySession.ForwardRequestAsync"/> itself now normalizes a genuine upstream
-/// JSON-RPC protocol error's doubled "Request failed (remote): " prefix and preserves its
-/// <c>Data</c> - a shared fix, not a tools-specific one, so this module needs no local
-/// wrapper around it (see host/NetCoreDbg.Mcp.Host.Tests/ToolsCatalogContractTests.cs for
-/// the tools-family regression proving the observed downstream behavior).
+/// the pre-FD-000 composition already used) through
+/// <see cref="RelaySession.ForwardApplicationRequestAsync"/>. That seam marks the leg before
+/// the SDK allocates its upstream request ID, then normalizes a genuine upstream JSON-RPC
+/// protocol error's doubled "Request failed (remote): " prefix while preserving <c>Data</c>.
+/// The behavior is shared rather than tools-specific; the tools-family regression lives in
+/// host/NetCoreDbg.Mcp.Host.Tests/ToolsCatalogContractTests.cs.
 /// </summary>
 internal static class ToolsRelay
 {
@@ -43,16 +42,25 @@ internal static class ToolsRelay
                 // sends it directly, without reconstructing or renaming any field the caller
                 // did supply.
                 var request = context.JsonRpcRequest.Params is null
-                    ? new JsonRpcRequest { Method = context.JsonRpcRequest.Method, Params = new JsonObject() }
+                    ? new JsonRpcRequest
+                    {
+                        Id = context.JsonRpcRequest.Id,
+                        Method = context.JsonRpcRequest.Method,
+                        Params = new JsonObject(),
+                    }
                     : context.JsonRpcRequest;
 
-                var response = await RelaySession.ForwardRequestAsync(upstream, request, cancellationToken).ConfigureAwait(false);
+                var response = await session
+                    .ForwardApplicationRequestAsync(upstream, request, cancellationToken)
+                    .ConfigureAwait(false);
                 return response.Result.Deserialize<ListToolsResult>(McpJsonUtilities.DefaultOptions)!;
             })
             .WithCallToolHandler(async (context, cancellationToken) =>
             {
                 var upstream = await session.UpstreamAsync(cancellationToken).ConfigureAwait(false);
-                var response = await RelaySession.ForwardRequestAsync(upstream, context.JsonRpcRequest, cancellationToken).ConfigureAwait(false);
+                var response = await session
+                    .ForwardApplicationRequestAsync(upstream, context.JsonRpcRequest, cancellationToken)
+                    .ConfigureAwait(false);
                 return response.Result.Deserialize<CallToolResult>(McpJsonUtilities.DefaultOptions)!;
             });
     }

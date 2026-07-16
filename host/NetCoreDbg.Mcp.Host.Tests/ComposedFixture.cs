@@ -8,11 +8,10 @@ namespace NetCoreDbg.Mcp.Host.Tests;
 /// <summary>
 /// Pairs the real <see cref="RelayComposition.Build"/> output against a real fake-Python
 /// <see cref="FakePythonServer"/> and a real downstream <see cref="McpClient"/>, all over
-/// in-memory <see cref="DuplexChannel"/>s, using the exact Program.cs upstream chain
-/// (ProgressLogging wrap over ResourceUpdates wrap), shared NotificationState, Roots plus
-/// ResourceUpdates handlers configured once, and <see cref="ResourceUpdatesRelay.OrderedUpstream.WaitForDrainAsync"/>
-/// as the RelaySession terminal drain hook. The only substitution is the transport
-/// (in-memory instead of stdio/process) and the "Python" implementation.
+/// in-memory <see cref="DuplexChannel"/>s, using the exact Program.cs upstream chain: one
+/// <see cref="ProgressLoggingRelay.WrapUpstreamTransport"/> reader/drain, shared notification
+/// state, and Roots handlers. The only substitution is the transport (in-memory instead of
+/// stdio/process) and the "Python" implementation.
 /// </summary>
 internal sealed class ComposedFixture : IAsyncDisposable
 {
@@ -21,7 +20,6 @@ internal sealed class ComposedFixture : IAsyncDisposable
         RelaySession session,
         IHost host,
         McpClient downstreamClient,
-        ResourceUpdatesRelay.OrderedUpstream resourceUpdates,
         ProgressLoggingRelay.NotificationState progressNotificationState,
         RootsRelay rootsRelay)
     {
@@ -29,7 +27,6 @@ internal sealed class ComposedFixture : IAsyncDisposable
         Session = session;
         Host = host;
         DownstreamClient = downstreamClient;
-        ResourceUpdates = resourceUpdates;
         ProgressNotificationState = progressNotificationState;
         RootsRelay = rootsRelay;
     }
@@ -42,7 +39,6 @@ internal sealed class ComposedFixture : IAsyncDisposable
 
     public McpClient DownstreamClient { get; }
 
-    public ResourceUpdatesRelay.OrderedUpstream ResourceUpdates { get; }
 
     public ProgressLoggingRelay.NotificationState ProgressNotificationState { get; }
 
@@ -58,22 +54,19 @@ internal sealed class ComposedFixture : IAsyncDisposable
         var fakePython = (startFakePython ?? (channel => FakePythonServer.StartWithEchoTool(channel)))(upstreamChannel);
 
         var rootsRelay = new RootsRelay();
-        var resourceUpdates = ResourceUpdatesRelay.CreateOrderedUpstream();
         var progressNotificationState = new ProgressLoggingRelay.NotificationState();
         RelaySession session = null!;
         session = new RelaySession(
             () => ProgressLoggingRelay.WrapUpstreamTransport(
-                resourceUpdates.WrapTransport(upstreamChannel.CreateClientTransport()),
+                upstreamChannel.CreateClientTransport(),
                 session,
                 progressNotificationState),
             RelayComposition.RequiredUpstreamCapabilityChecks,
             handlers =>
             {
                 rootsRelay.ConfigureUpstreamHandlers(handlers, session);
-                resourceUpdates.ConfigureHandlers(handlers, session);
                 configureUpstreamHandlers?.Invoke(handlers);
-            },
-            resourceUpdates.WaitForDrainAsync);
+            });
 
         var downstreamChannel = new DuplexChannel();
         var host = RelayComposition.Build(
@@ -100,7 +93,6 @@ internal sealed class ComposedFixture : IAsyncDisposable
             session,
             host,
             downstreamClient,
-            resourceUpdates,
             progressNotificationState,
             rootsRelay);
     }

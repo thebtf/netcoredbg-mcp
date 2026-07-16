@@ -59,9 +59,8 @@ public sealed class ProductionCompositionTests
 
         /// <summary>
         /// Signals once every label in <paramref name="labels"/> has been recorded (including
-        /// labels recorded before this call), so callers can deterministically wait for
-        /// specific downstream-observed events instead of racing the async resource-update
-        /// drain against a bare tool-call response or <c>WaitForDrainAsync</c>.
+        /// labels recorded before this call), so callers can deterministically wait for exact
+        /// downstream-observed events from the shared ordered drain.
         /// </summary>
         public Task WaitForLabelsAsync(params string[] labels)
         {
@@ -391,20 +390,6 @@ public sealed class ProductionCompositionTests
         Assert.Contains("Duplicate relay route ownership", resourceDuplicate.Message);
     }
 
-    [Fact]
-    public void ResourceUpdatesHandlers_ConfiguredTwice_ThrowDuplicateOwnership()
-    {
-        var ordered = ResourceUpdatesRelay.CreateOrderedUpstream();
-        var session = new RelaySession(
-            () => throw new InvalidOperationException("not started"),
-            RelayComposition.RequiredUpstreamCapabilityChecks);
-        var handlers = new McpClientHandlers();
-        ordered.ConfigureHandlers(handlers, session);
-
-        var duplicate = Assert.Throws<InvalidOperationException>(() =>
-            ordered.ConfigureHandlers(handlers, session));
-        Assert.Contains(NotificationMethods.ResourceUpdatedNotification, duplicate.Message);
-    }
 
     [Fact]
     public async Task ProductionComposition_AdvertisesNoTestOnlyReverseCapability()
@@ -699,11 +684,9 @@ public sealed class ProductionCompositionTests
     [Fact]
     public async Task InterleavedProgressLogAndResourceUpdates_PreserveProgramChainOrder()
     {
-        // Program chain: ProgressLogging is the outer transport and forwards progress/log
-        // synchronously before reading the next upstream message; ResourceUpdates is the
-        // inner stamp/drain path and preserves resource-update wire order independently.
-        // Composition must therefore prove both pipelines on one real call without forcing
-        // a false cross-pipeline total order that the two independent pumps do not claim.
+        // Program uses one bounded upstream ingress/drain for progress, logging, resource
+        // updates, and ordinary terminals. This real composition probe therefore asserts
+        // the complete causal wire sequence for one forwarded request.
         var log = new EventLog();
         var resourcesObserved = log.WaitForLabelsAsync($"resource|{StateUri}", $"resource|{BreakpointsUri}");
         await using var fixture = await ComposedFixture.StartAsync(
@@ -738,19 +721,13 @@ public sealed class ProductionCompositionTests
         var log2 = log.Events.Single(e => e.Label == "log|fake-python|log-2").Sequence;
         var resource2 = log.Events.Single(e => e.Label == $"resource|{BreakpointsUri}").Sequence;
 
-        // ProgressLogging outer pump: progress/log stay in wire order and never trail the
-        // owning call's terminal result.
         Assert.True(requestSeq < progress1);
         Assert.True(progress1 < log1);
-        Assert.True(log1 < progress2);
+        Assert.True(log1 < resource1);
+        Assert.True(resource1 < progress2);
         Assert.True(progress2 < log2);
-        Assert.True(log2 < responseSeq);
-        Assert.True(progress1 < responseSeq);
-        Assert.True(progress2 < responseSeq);
-
-        // ResourceUpdates inner pipeline: resource updates keep source wire order.
-        Assert.True(requestSeq < resource1);
-        Assert.True(resource1 < resource2);
+        Assert.True(log2 < resource2);
+        Assert.True(resource2 < responseSeq);
     }
 
     [Fact]
@@ -836,7 +813,7 @@ public sealed class ProductionCompositionTests
     }
 
     [Fact]
-    public async Task SessionDispose_CompletesResourceUpdateDrainHook()
+    public async Task SessionDispose_ClearsForwardLegState()
     {
         await using var fixture = await ComposedFixture.StartAsync(
             startFakePython: channel => StartFrontDoorFakePython(
@@ -847,7 +824,8 @@ public sealed class ProductionCompositionTests
 
         await fixture.DownstreamClient.CallToolAsync(ProbeCall("token-drain"));
         await fixture.Session.DisposeAsync();
-        await fixture.ResourceUpdates.WaitForDrainAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(0, fixture.Session.RetainedDownstreamForwardLegCount);
+        Assert.Equal(0, fixture.Session.RetainedUpstreamForwardLegCount);
     }
 
     [Fact]

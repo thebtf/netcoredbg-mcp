@@ -40,21 +40,15 @@ public static class Program
             try
             {
                 var rootsRelay = new RootsRelay();
-                var resourceUpdates = ResourceUpdatesRelay.CreateOrderedUpstream();
                 var progressNotificationState = new ProgressLoggingRelay.NotificationState();
                 RelaySession relaySession = null!;
                 relaySession = new RelaySession(
                     () => ProgressLoggingRelay.WrapUpstreamTransport(
-                        resourceUpdates.WrapTransport(pythonBackend.CreateUpstreamTransport()),
+                        pythonBackend.CreateUpstreamTransport(),
                         relaySession,
                         progressNotificationState),
                     RelayComposition.RequiredUpstreamCapabilityChecks,
-                    handlers =>
-                    {
-                        rootsRelay.ConfigureUpstreamHandlers(handlers, relaySession);
-                        resourceUpdates.ConfigureHandlers(handlers, relaySession);
-                    },
-                    resourceUpdates.WaitForDrainAsync);
+                    handlers => rootsRelay.ConfigureUpstreamHandlers(handlers, relaySession));
                 await using (relaySession)
                 {
                     await RelayComposition.RunAsync(

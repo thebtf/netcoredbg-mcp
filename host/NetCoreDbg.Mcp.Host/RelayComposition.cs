@@ -136,7 +136,6 @@ internal static class RelayComposition
             MuxCapabilityRelay.RegisterCapabilityProjectionFilter(options.Filters, session);
 
             ProgressLoggingRelay.ConfigureFilters(options.Filters, session, notificationState);
-            ResourceUpdatesRelay.ConfigureFilters(options.Filters, session);
             options.Filters.Message.IncomingFilters.Add(session.CreateBootstrapFilter(projectReverseRouteCapabilities));
         });
 

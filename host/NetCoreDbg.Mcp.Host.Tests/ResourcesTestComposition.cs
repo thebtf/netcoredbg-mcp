@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -14,15 +15,20 @@ namespace NetCoreDbg.Mcp.Host.Tests;
 /// </summary>
 internal static class ResourcesTestComposition
 {
+    private static readonly ConditionalWeakTable<RelaySession, ProgressLoggingRelay.NotificationState>
+        s_notificationStates = new();
+
     public static RelaySession CreateSession(Func<IClientTransport> createUpstreamTransport)
     {
-        var resourceUpdates = ResourceUpdatesRelay.CreateOrderedUpstream();
+        var notificationState = new ProgressLoggingRelay.NotificationState();
         RelaySession? session = null;
         session = new RelaySession(
-            () => resourceUpdates.WrapTransport(createUpstreamTransport()),
-            RelayComposition.RequiredUpstreamCapabilityChecks,
-            handlers => resourceUpdates.ConfigureHandlers(handlers, session!),
-            resourceUpdates.WaitForDrainAsync);
+            () => ProgressLoggingRelay.WrapUpstreamTransport(
+                createUpstreamTransport(),
+                session!,
+                notificationState),
+            RelayComposition.RequiredUpstreamCapabilityChecks);
+        s_notificationStates.Add(session, notificationState);
         return session;
     }
 
@@ -33,7 +39,9 @@ internal static class ResourcesTestComposition
         Action<McpServerOptions>? configureOptions = null)
     {
         var catalog = new RelayRouteCatalog();
-        var notificationState = new ProgressLoggingRelay.NotificationState();
+        var notificationState = s_notificationStates.GetValue(
+            session,
+            static _ => new ProgressLoggingRelay.NotificationState());
         var builder = global::Microsoft.Extensions.Hosting.Host.CreateApplicationBuilder(Array.Empty<string>());
         builder.Logging.ClearProviders();
 
@@ -44,7 +52,6 @@ internal static class ResourcesTestComposition
 
             // Same production filters RelayComposition uses — never a retired parallel path.
             ProgressLoggingRelay.ConfigureFilters(options.Filters, session, notificationState);
-            ResourceUpdatesRelay.ConfigureFilters(options.Filters, session);
             options.Filters.Message.IncomingFilters.Add(
                 session.CreateBootstrapFilter(projectReverseRouteCapabilities ?? (static _ => new ClientCapabilities())));
             ResourcesRelay.ConfigureCapabilityProjection(options.Capabilities, options.Filters, session);

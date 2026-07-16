@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading.Channels;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using ModelContextProtocol;
@@ -58,6 +59,146 @@ public sealed class ResourceUpdatesRelayTests
         public Task WaitUntilBlockedAsync(TimeSpan timeout) =>
             _blockedWriteStarted.Task.WaitAsync(timeout);
     }
+    private sealed class TerminalWriteGate(RequestId terminalId)
+    {
+        private readonly TaskCompletionSource _resourceWriteStarted =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _terminalWriteStarted =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _releaseResource =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _releaseTerminal =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _resourceWriteClaimed;
+
+        public void Configure(McpServerOptions options) =>
+            options.Filters.Message.OutgoingFilters.Add(next => async (context, cancellationToken) =>
+            {
+                if (context.JsonRpcMessage is JsonRpcNotification
+                    {
+                        Method: NotificationMethods.ResourceUpdatedNotification,
+                    }
+                    && Interlocked.CompareExchange(ref _resourceWriteClaimed, 1, 0) == 0)
+                {
+                    _resourceWriteStarted.TrySetResult();
+                    await _releaseResource.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                var responseId = context.JsonRpcMessage switch
+                {
+                    JsonRpcResponse response => response.Id,
+                    JsonRpcError error => error.Id,
+                    _ => (RequestId?)null,
+                };
+                if (responseId is { } id && id.Equals(terminalId))
+                {
+                    _terminalWriteStarted.TrySetResult();
+                    await _releaseTerminal.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                await next(context, cancellationToken).ConfigureAwait(false);
+            });
+
+        public Task WaitUntilResourceBlockedAsync(TimeSpan timeout) =>
+            _resourceWriteStarted.Task.WaitAsync(timeout);
+
+        public Task WaitUntilTerminalBlockedAsync(TimeSpan timeout) =>
+            _terminalWriteStarted.Task.WaitAsync(timeout);
+
+        public void ReleaseResource() => _releaseResource.TrySetResult();
+
+        public void ReleaseTerminal() => _releaseTerminal.TrySetResult();
+    }
+
+
+    private sealed class ReadObserverClientTransport(
+        IClientTransport inner,
+        Action<JsonRpcMessage> observe) : IClientTransport
+    {
+        public string Name => inner.Name;
+
+        public async Task<ITransport> ConnectAsync(CancellationToken cancellationToken = default)
+        {
+            var transport = await inner.ConnectAsync(cancellationToken).ConfigureAwait(false);
+            return new ReadObserverTransport(transport, observe);
+        }
+
+        private sealed class ReadObserverTransport : ITransport
+        {
+            private readonly ITransport _inner;
+
+            public ReadObserverTransport(ITransport inner, Action<JsonRpcMessage> observe)
+            {
+                _inner = inner;
+                MessageReader = new ReadObserverChannelReader(inner.MessageReader, observe);
+            }
+
+            public string? SessionId => _inner.SessionId;
+
+            public ChannelReader<JsonRpcMessage> MessageReader { get; }
+
+            public Task SendMessageAsync(
+                JsonRpcMessage message,
+                CancellationToken cancellationToken = default) =>
+                _inner.SendMessageAsync(message, cancellationToken);
+
+            public ValueTask DisposeAsync() => _inner.DisposeAsync();
+        }
+
+        private sealed class ReadObserverChannelReader(
+            ChannelReader<JsonRpcMessage> inner,
+            Action<JsonRpcMessage> observe) : ChannelReader<JsonRpcMessage>
+        {
+            public override Task Completion => inner.Completion;
+
+            public override bool TryRead(out JsonRpcMessage item)
+            {
+                if (!inner.TryRead(out item!))
+                {
+                    return false;
+                }
+
+                observe(item);
+                return true;
+            }
+
+            public override ValueTask<bool> WaitToReadAsync(
+                CancellationToken cancellationToken = default) =>
+                inner.WaitToReadAsync(cancellationToken);
+        }
+    }
+
+    private sealed class SendObserverClientTransport(
+        IClientTransport inner,
+        Action<JsonRpcMessage> observe) : IClientTransport
+    {
+        public string Name => inner.Name;
+
+        public async Task<ITransport> ConnectAsync(CancellationToken cancellationToken = default)
+        {
+            var transport = await inner.ConnectAsync(cancellationToken).ConfigureAwait(false);
+            return new SendObserverTransport(transport, observe);
+        }
+
+        private sealed class SendObserverTransport(
+            ITransport inner,
+            Action<JsonRpcMessage> observe) : ITransport
+        {
+            public string? SessionId => inner.SessionId;
+
+            public ChannelReader<JsonRpcMessage> MessageReader => inner.MessageReader;
+
+            public Task SendMessageAsync(
+                JsonRpcMessage message,
+                CancellationToken cancellationToken = default)
+            {
+                observe(message);
+                return inner.SendMessageAsync(message, cancellationToken);
+            }
+
+            public ValueTask DisposeAsync() => inner.DisposeAsync();
+        }
+    }
 
     private static McpServerOptions SubscribablePythonOptions(
         McpRequestHandler<SubscribeRequestParams, EmptyResult>? subscribe = null,
@@ -79,6 +220,48 @@ public sealed class ResourceUpdatesRelayTests
                 UnsubscribeFromResourcesHandler = unsubscribe ?? ((context, ct) => ValueTask.FromResult(new EmptyResult())),
             },
         };
+    private static McpServerOptions ReadAheadPythonOptions(
+        bool error,
+        TaskCompletionSource tailSent)
+    {
+        var terminalArmed = 0;
+        var options = SubscribablePythonOptions(callTool: async (context, cancellationToken) =>
+        {
+            await context.Server.SendMessageAsync(
+                ResourceUpdated(StateUri, marker: "u1"),
+                cancellationToken).ConfigureAwait(false);
+            Volatile.Write(ref terminalArmed, 1);
+
+            if (error)
+            {
+                throw new McpProtocolException("read-ahead failure", McpErrorCode.InvalidParams);
+            }
+
+            return new CallToolResult
+            {
+                Content = [new TextContentBlock { Text = "mutation-complete" }],
+            };
+        });
+        options.Filters.Message.OutgoingFilters.Add(next => async (context, cancellationToken) =>
+        {
+            var appendTail = Volatile.Read(ref terminalArmed) != 0
+                && context.JsonRpcMessage is JsonRpcResponse or JsonRpcError;
+            if (appendTail)
+            {
+                Interlocked.Exchange(ref terminalArmed, 0);
+            }
+
+            await next(context, cancellationToken).ConfigureAwait(false);
+            if (appendTail)
+            {
+                await context.Server.SendMessageAsync(
+                    ResourceUpdated(StateUri, marker: "u2"),
+                    cancellationToken).ConfigureAwait(false);
+                tailSent.TrySetResult();
+            }
+        });
+        return options;
+    }
 
     private static JsonRpcRequest SubscriptionRequest(string method, string uri, string marker) =>
         new()
@@ -91,7 +274,19 @@ public sealed class ResourceUpdatesRelayTests
             },
         };
 
-    private static async Task<ITransport> ConnectRawDownstreamAsync(DuplexChannel downstream)
+    private static JsonRpcRequest ToolRequest(RequestId requestId, string name = "mutate") =>
+        new()
+        {
+            Id = requestId,
+            Method = RequestMethods.ToolsCall,
+            Params = JsonSerializer.SerializeToNode(
+                new CallToolRequestParams { Name = name },
+                McpJsonUtilities.DefaultOptions),
+        };
+
+    private static async Task<ITransport> ConnectRawDownstreamAsync(
+        DuplexChannel downstream,
+        bool sendInitialized = true)
     {
         var transport = await downstream.CreateClientTransport().ConnectAsync();
         await transport.SendMessageAsync(
@@ -117,11 +312,14 @@ public sealed class ResourceUpdatesRelayTests
             .AsTask()
             .WaitAsync(TimeSpan.FromSeconds(10));
         Assert.IsType<JsonRpcResponse>(initializeResponse);
-        await transport.SendMessageAsync(
-            new JsonRpcNotification
+        if (sendInitialized)
+        {
+            await transport.SendMessageAsync(new JsonRpcNotification
             {
                 Method = NotificationMethods.InitializedNotification,
             });
+        }
+
         return transport;
     }
 
@@ -323,9 +521,447 @@ public sealed class ResourceUpdatesRelayTests
 
         await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
     }
+    [Fact]
+    public async Task ResourceUpdatedReadAhead_ExactTypedResponseFenceIgnoresUnrelatedLocalResponse()
+    {
+        var upstream = new DuplexChannel();
+        var downstream = new DuplexChannel();
+        var requestId = new RequestId(2L);
+        var unrelatedId = new RequestId("2");
+        var writeGate = new TerminalWriteGate(requestId);
+        var tailSent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var session = ResourcesTestComposition.CreateSession(upstream.CreateClientTransport);
+        using var host = ResourcesTestComposition.BuildHost(
+            session,
+            builder => builder.WithStreamServerTransport(
+                downstream.ServerInputStream,
+                downstream.ServerOutputStream),
+            configureOptions: writeGate.Configure);
+        _ = host.RunAsync();
+        await using var fakePython = FakePythonServer.Start(
+            upstream,
+            ReadAheadPythonOptions(error: false, tailSent));
+        await using var rawDownstream = await ConnectRawDownstreamAsync(downstream);
+
+        await rawDownstream.SendMessageAsync(ToolRequest(requestId));
+        await tailSent.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await writeGate.WaitUntilResourceBlockedAsync(TimeSpan.FromSeconds(10));
+        writeGate.ReleaseResource();
+
+        var first = Assert.IsType<JsonRpcNotification>(
+            await rawDownstream.MessageReader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Equal("u1", first.Params?["_meta"]?["marker"]?.GetValue<string>());
+        await writeGate.WaitUntilTerminalBlockedAsync(TimeSpan.FromSeconds(10));
+
+        await rawDownstream.SendMessageAsync(new JsonRpcRequest
+        {
+            Id = unrelatedId,
+            Method = RequestMethods.PromptsList,
+            Params = new JsonObject(),
+        });
+        var unrelated = Assert.IsAssignableFrom<JsonRpcMessageWithId>(
+            await rawDownstream.MessageReader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Equal(unrelatedId, unrelated.Id);
+
+        var terminalRead = rawDownstream.MessageReader.ReadAsync().AsTask();
+        Assert.NotSame(
+            terminalRead,
+            await Task.WhenAny(terminalRead, Task.Delay(TimeSpan.FromMilliseconds(250))));
+        writeGate.ReleaseTerminal();
+
+        var response = Assert.IsType<JsonRpcResponse>(
+            await terminalRead.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Equal(requestId, response.Id);
+        var tail = Assert.IsType<JsonRpcNotification>(
+            await rawDownstream.MessageReader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Equal("u2", tail.Params?["_meta"]?["marker"]?.GetValue<string>());
+
+        await WaitForAsync(
+            () => session.RetainedDownstreamForwardLegCount == 0
+                && session.RetainedUpstreamForwardLegCount == 0,
+            TimeSpan.FromSeconds(10));
+        await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
+    }
 
     [Fact]
-    public async Task OrderedUpstreamTransport_PropagatesCompletionAndDisposesWithoutRetainedWork()
+    public async Task ResourceUpdatedReadAhead_ErrorFenceCompletesOnlyAfterExactErrorSend()
+    {
+        var upstream = new DuplexChannel();
+        var downstream = new DuplexChannel();
+        var requestId = new RequestId("error-request");
+        var writeGate = new TerminalWriteGate(requestId);
+        var tailSent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var session = ResourcesTestComposition.CreateSession(upstream.CreateClientTransport);
+        using var host = ResourcesTestComposition.BuildHost(
+            session,
+            builder => builder.WithStreamServerTransport(
+                downstream.ServerInputStream,
+                downstream.ServerOutputStream),
+            configureOptions: writeGate.Configure);
+        _ = host.RunAsync();
+        await using var fakePython = FakePythonServer.Start(
+            upstream,
+            ReadAheadPythonOptions(error: true, tailSent));
+        await using var rawDownstream = await ConnectRawDownstreamAsync(downstream);
+
+        await rawDownstream.SendMessageAsync(ToolRequest(requestId));
+        await tailSent.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await writeGate.WaitUntilResourceBlockedAsync(TimeSpan.FromSeconds(10));
+        writeGate.ReleaseResource();
+
+        var first = Assert.IsType<JsonRpcNotification>(
+            await rawDownstream.MessageReader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Equal("u1", first.Params?["_meta"]?["marker"]?.GetValue<string>());
+        await writeGate.WaitUntilTerminalBlockedAsync(TimeSpan.FromSeconds(10));
+
+        var terminalRead = rawDownstream.MessageReader.ReadAsync().AsTask();
+        Assert.NotSame(
+            terminalRead,
+            await Task.WhenAny(terminalRead, Task.Delay(TimeSpan.FromMilliseconds(250))));
+        writeGate.ReleaseTerminal();
+
+        var error = Assert.IsType<JsonRpcError>(
+            await terminalRead.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Equal(requestId, error.Id);
+        Assert.Equal((int)McpErrorCode.InvalidParams, error.Error.Code);
+        var tail = Assert.IsType<JsonRpcNotification>(
+            await rawDownstream.MessageReader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Equal("u2", tail.Params?["_meta"]?["marker"]?.GetValue<string>());
+
+        await WaitForAsync(
+            () => session.RetainedDownstreamForwardLegCount == 0
+                && session.RetainedUpstreamForwardLegCount == 0,
+            TimeSpan.FromSeconds(10));
+        await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
+    [Fact]
+    public async Task ResourceUpdatedReadAhead_CancellationAfterUpstreamTerminalDoesNotWaitForPhantomResponse()
+    {
+        var upstream = new DuplexChannel();
+        var downstream = new DuplexChannel();
+        var requestId = new RequestId("cancel-request");
+        var writeGate = new TerminalWriteGate(requestId);
+        var tailSent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var session = ResourcesTestComposition.CreateSession(upstream.CreateClientTransport);
+        using var host = ResourcesTestComposition.BuildHost(
+            session,
+            builder => builder.WithStreamServerTransport(
+                downstream.ServerInputStream,
+                downstream.ServerOutputStream),
+            configureOptions: writeGate.Configure);
+        _ = host.RunAsync();
+        await using var fakePython = FakePythonServer.Start(
+            upstream,
+            ReadAheadPythonOptions(error: false, tailSent));
+        await using var rawDownstream = await ConnectRawDownstreamAsync(downstream);
+
+        await rawDownstream.SendMessageAsync(ToolRequest(requestId));
+        await tailSent.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await writeGate.WaitUntilResourceBlockedAsync(TimeSpan.FromSeconds(10));
+        writeGate.ReleaseResource();
+
+        var first = Assert.IsType<JsonRpcNotification>(
+            await rawDownstream.MessageReader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Equal("u1", first.Params?["_meta"]?["marker"]?.GetValue<string>());
+        await writeGate.WaitUntilTerminalBlockedAsync(TimeSpan.FromSeconds(10));
+        await rawDownstream.SendMessageAsync(new JsonRpcNotification
+        {
+            Method = NotificationMethods.CancelledNotification,
+            Params = JsonSerializer.SerializeToNode(
+                new CancelledNotificationParams { RequestId = requestId },
+                McpJsonUtilities.DefaultOptions),
+        });
+
+        var tail = Assert.IsType<JsonRpcNotification>(
+            await rawDownstream.MessageReader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Equal("u2", tail.Params?["_meta"]?["marker"]?.GetValue<string>());
+        var phantom = rawDownstream.MessageReader.ReadAsync().AsTask();
+        Assert.NotSame(
+            phantom,
+            await Task.WhenAny(phantom, Task.Delay(TimeSpan.FromMilliseconds(250))));
+
+        await WaitForAsync(
+            () => session.RetainedDownstreamForwardLegCount == 0
+                && session.RetainedUpstreamForwardLegCount == 0,
+            TimeSpan.FromSeconds(10));
+        await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
+    [Fact]
+    public async Task CorrelationMarker_BindsAssignedUpstreamIdForNormalAndNullParamsWithoutWireMetadata()
+    {
+        var upstream = new DuplexChannel();
+        var downstream = new DuplexChannel();
+        var sentRequests = new ConcurrentQueue<JsonRpcRequest>();
+        var wireItemCounts = new ConcurrentQueue<int>();
+        var options = SubscribablePythonOptions(callTool: (context, cancellationToken) =>
+        {
+            wireItemCounts.Enqueue(context.JsonRpcRequest.Context?.Items?.Count ?? 0);
+            return ValueTask.FromResult(new CallToolResult
+            {
+                Content = [new TextContentBlock { Text = "ok" }],
+            });
+        });
+        options.Handlers.ListToolsHandler = (context, cancellationToken) =>
+        {
+            wireItemCounts.Enqueue(context.JsonRpcRequest.Context?.Items?.Count ?? 0);
+            return ValueTask.FromResult(new ListToolsResult { Tools = [] });
+        };
+
+        await using var session = ResourcesTestComposition.CreateSession(
+            () => new SendObserverClientTransport(
+                upstream.CreateClientTransport(),
+                message =>
+                {
+                    if (message is JsonRpcRequest
+                        {
+                            Method: RequestMethods.ToolsList or RequestMethods.ToolsCall,
+                        } request)
+                    {
+                        sentRequests.Enqueue(request);
+                    }
+                }));
+        using var host = ResourcesTestComposition.BuildHost(
+            session,
+            builder => builder.WithStreamServerTransport(
+                downstream.ServerInputStream,
+                downstream.ServerOutputStream));
+        _ = host.RunAsync();
+        await using var fakePython = FakePythonServer.Start(upstream, options);
+        await using var rawDownstream = await ConnectRawDownstreamAsync(downstream);
+
+        var listId = new RequestId(20L);
+        await rawDownstream.SendMessageAsync(new JsonRpcRequest
+        {
+            Id = listId,
+            Method = RequestMethods.ToolsList,
+        });
+        Assert.Equal(
+            listId,
+            Assert.IsType<JsonRpcResponse>(
+                await rawDownstream.MessageReader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10))).Id);
+
+        var callId = new RequestId("20");
+        await rawDownstream.SendMessageAsync(ToolRequest(callId));
+        Assert.Equal(
+            callId,
+            Assert.IsType<JsonRpcResponse>(
+                await rawDownstream.MessageReader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10))).Id);
+
+        var captured = sentRequests.ToArray();
+        Assert.Equal(2, captured.Length);
+        Assert.NotEqual(captured[0].Id, captured[1].Id);
+        Assert.IsType<JsonObject>(captured.Single(request => request.Method == RequestMethods.ToolsList).Params);
+        Assert.Empty(captured.Single(request => request.Method == RequestMethods.ToolsList).Params!.AsObject());
+        Assert.All(captured, request =>
+        {
+            Assert.Null(request.Context?.RelatedTransport);
+            var marker = Assert.Single(Assert.IsAssignableFrom<IDictionary<string, object?>>(request.Context?.Items));
+            Assert.IsType<RelaySession.ForwardLeg>(marker.Value);
+        });
+        Assert.Equal([0, 0], wireItemCounts);
+        await WaitForAsync(
+            () => session.RetainedDownstreamForwardLegCount == 0
+                && session.RetainedUpstreamForwardLegCount == 0,
+            TimeSpan.FromSeconds(10));
+        await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
+    [Fact]
+    public async Task ConcurrentCalls_OutOfOrderUpstreamTerminalsKeepExactPerLegFences()
+    {
+        var upstream = new DuplexChannel();
+        var downstream = new DuplexChannel();
+        var firstCallStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirstCall = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var terminalIndex = 0;
+        var options = SubscribablePythonOptions(callTool: async (context, cancellationToken) =>
+        {
+            if (context.Params?.Name == "A")
+            {
+                firstCallStarted.TrySetResult();
+                await releaseFirstCall.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+                return new CallToolResult { Content = [new TextContentBlock { Text = "A" }] };
+            }
+
+            await context.Server.SendMessageAsync(
+                ResourceUpdated(StateUri, "u1"),
+                cancellationToken).ConfigureAwait(false);
+            return new CallToolResult { Content = [new TextContentBlock { Text = "B" }] };
+        });
+        options.Filters.Message.OutgoingFilters.Add(next => async (context, cancellationToken) =>
+        {
+            if (context.JsonRpcMessage is not JsonRpcResponse { Result: JsonObject result }
+                || !result.ContainsKey("content"))
+            {
+                await next(context, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            var index = Interlocked.Increment(ref terminalIndex);
+            await next(context, cancellationToken).ConfigureAwait(false);
+            if (index == 1)
+            {
+                await context.Server.SendMessageAsync(
+                    ResourceUpdated(StateUri, "u2"),
+                    cancellationToken).ConfigureAwait(false);
+                releaseFirstCall.TrySetResult();
+            }
+            else
+            {
+                await context.Server.SendMessageAsync(
+                    ResourceUpdated(StateUri, "u3"),
+                    cancellationToken).ConfigureAwait(false);
+            }
+        });
+
+        await using var session = ResourcesTestComposition.CreateSession(upstream.CreateClientTransport);
+        using var host = ResourcesTestComposition.BuildHost(
+            session,
+            builder => builder.WithStreamServerTransport(
+                downstream.ServerInputStream,
+                downstream.ServerOutputStream));
+        _ = host.RunAsync();
+        await using var fakePython = FakePythonServer.Start(upstream, options);
+        await using var rawDownstream = await ConnectRawDownstreamAsync(downstream);
+        var firstId = new RequestId(30L);
+        var secondId = new RequestId("30");
+
+        await rawDownstream.SendMessageAsync(ToolRequest(firstId, "A"));
+        await firstCallStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await rawDownstream.SendMessageAsync(ToolRequest(secondId, "B"));
+
+        var u1 = Assert.IsType<JsonRpcNotification>(
+            await rawDownstream.MessageReader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+        var secondResponse = Assert.IsType<JsonRpcResponse>(
+            await rawDownstream.MessageReader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+        var u2 = Assert.IsType<JsonRpcNotification>(
+            await rawDownstream.MessageReader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+        var firstResponse = Assert.IsType<JsonRpcResponse>(
+            await rawDownstream.MessageReader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+        var u3 = Assert.IsType<JsonRpcNotification>(
+            await rawDownstream.MessageReader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+
+        Assert.Equal("u1", u1.Params?["_meta"]?["marker"]?.GetValue<string>());
+        Assert.Equal(secondId, secondResponse.Id);
+        Assert.Equal("u2", u2.Params?["_meta"]?["marker"]?.GetValue<string>());
+        Assert.Equal(firstId, firstResponse.Id);
+        Assert.Equal("u3", u3.Params?["_meta"]?["marker"]?.GetValue<string>());
+        await WaitForAsync(
+            () => session.RetainedDownstreamForwardLegCount == 0
+                && session.RetainedUpstreamForwardLegCount == 0,
+            TimeSpan.FromSeconds(10));
+        await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
+    [Fact]
+    public async Task CancelledLeg_IdReuseRejectsLateOldUpstreamTerminal()
+    {
+        var upstream = new DuplexChannel();
+        var downstream = new DuplexChannel();
+        var upstreamRequestIds = new ConcurrentQueue<RequestId>();
+        var firstStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSecond = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var invocation = 0;
+        var options = SubscribablePythonOptions(callTool: async (context, cancellationToken) =>
+        {
+            if (Interlocked.Increment(ref invocation) == 1)
+            {
+                firstStarted.TrySetResult();
+                await Task.Delay(Timeout.Infinite, cancellationToken).ConfigureAwait(false);
+                throw new InvalidOperationException("Unreachable after infinite delay.");
+            }
+
+            secondStarted.TrySetResult();
+            await releaseSecond.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+            return new CallToolResult { Content = [new TextContentBlock { Text = "new" }] };
+        });
+        await using var session = ResourcesTestComposition.CreateSession(
+            () => new SendObserverClientTransport(
+                upstream.CreateClientTransport(),
+                message =>
+                {
+                    if (message is JsonRpcRequest { Method: RequestMethods.ToolsCall } request)
+                    {
+                        upstreamRequestIds.Enqueue(request.Id);
+                    }
+                }));
+        using var host = ResourcesTestComposition.BuildHost(
+            session,
+            builder => builder.WithStreamServerTransport(
+                downstream.ServerInputStream,
+                downstream.ServerOutputStream));
+        _ = host.RunAsync();
+        await using var fakePython = FakePythonServer.Start(upstream, options);
+        await using var rawDownstream = await ConnectRawDownstreamAsync(downstream);
+        var reusedDownstreamId = new RequestId("reuse");
+
+        await rawDownstream.SendMessageAsync(ToolRequest(reusedDownstreamId, "old"));
+        await firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await rawDownstream.SendMessageAsync(new JsonRpcNotification
+        {
+            Method = NotificationMethods.CancelledNotification,
+            Params = JsonSerializer.SerializeToNode(
+                new CancelledNotificationParams { RequestId = reusedDownstreamId },
+                McpJsonUtilities.DefaultOptions),
+        });
+        await WaitForAsync(
+            () => session.RetainedDownstreamForwardLegCount == 0
+                && session.RetainedUpstreamForwardLegCount == 0,
+            TimeSpan.FromSeconds(10));
+
+        await rawDownstream.SendMessageAsync(ToolRequest(reusedDownstreamId, "new"));
+        await secondStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await WaitForAsync(() => upstreamRequestIds.Count == 2, TimeSpan.FromSeconds(10));
+        var assignedIds = upstreamRequestIds.ToArray();
+        Assert.NotEqual(assignedIds[0], assignedIds[1]);
+        Assert.Equal(1, session.RetainedDownstreamForwardLegCount);
+        Assert.Equal(1, session.RetainedUpstreamForwardLegCount);
+
+        await fakePython.Server.SendMessageAsync(new JsonRpcResponse
+        {
+            Id = assignedIds[0],
+            Result = JsonSerializer.SerializeToNode(
+                new CallToolResult { Content = [new TextContentBlock { Text = "stale" }] },
+                McpJsonUtilities.DefaultOptions)!,
+        });
+        await fakePython.Server.SendMessageAsync(ResourceUpdated(StateUri, "after-stale"));
+
+        while (true)
+        {
+            var message = await rawDownstream.MessageReader.ReadAsync().AsTask()
+                .WaitAsync(TimeSpan.FromSeconds(10));
+            if (message is JsonRpcNotification notification
+                && notification.Params?["_meta"]?["marker"]?.GetValue<string>() == "after-stale")
+            {
+                break;
+            }
+        }
+
+        Assert.Equal(1, session.RetainedDownstreamForwardLegCount);
+        Assert.Equal(1, session.RetainedUpstreamForwardLegCount);
+        releaseSecond.TrySetResult();
+
+        JsonRpcResponse successor;
+        do
+        {
+            successor = Assert.IsType<JsonRpcResponse>(
+                await rawDownstream.MessageReader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+        }
+        while (successor.Result?["content"]?[0]?["text"]?.GetValue<string>() != "new");
+
+        Assert.Equal(reusedDownstreamId, successor.Id);
+        await WaitForAsync(
+            () => session.RetainedDownstreamForwardLegCount == 0
+                && session.RetainedUpstreamForwardLegCount == 0,
+            TimeSpan.FromSeconds(10));
+        await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
+    [Fact]
+    public async Task UnifiedUpstreamTransport_PropagatesCompletionAndClearsRetainedLegs()
     {
         var (session, upstream, downstream) = BuildSession();
         await using var fakePython = FakePythonServer.Start(upstream, SubscribablePythonOptions());
@@ -334,462 +970,238 @@ public sealed class ResourceUpdatesRelayTests
 
         upstream.SimulateServerExit();
         var ended = session.RunUntilSessionEndedAsync(CancellationToken.None);
-        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+        var error = await Assert.ThrowsAnyAsync<Exception>(
             () => ended.WaitAsync(TimeSpan.FromSeconds(10)));
-        Assert.Contains("Python backend ended", error.Message);
+        Assert.Contains("Python backend", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(
+            "upstream transport",
+            Assert.IsType<IOException>(session.ForwardingFailure).Message,
+            StringComparison.OrdinalIgnoreCase);
 
         await client.DisposeAsync();
         await session.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(0, session.RetainedDownstreamForwardLegCount);
+        Assert.Equal(0, session.RetainedUpstreamForwardLegCount);
     }
 
     [Fact]
-    public async Task ResourceUpdatedNotification_CancellationDisconnectAndTerminalSuppressSend()
+    public async Task ContiguousResourceSegment_CoalescesLatestRawPayloadWithinUnifiedBound()
     {
-        var (session, upstream, downstream) = BuildSession();
-        await using var fakePython = FakePythonServer.Start(upstream, SubscribablePythonOptions());
-        var received = new ConcurrentQueue<JsonRpcNotification>();
-        var twoReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        await using var client = await McpClient.CreateAsync(
-            downstream.CreateClientTransport(),
-            new McpClientOptions
-            {
-                Handlers = new McpClientHandlers
+        const int updateCount = 1000;
+        var upstream = new DuplexChannel();
+        var downstream = new DuplexChannel();
+        var observedAll = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var observedResources = 0;
+        await using var session = ResourcesTestComposition.CreateSession(
+            () => new ReadObserverClientTransport(
+                upstream.CreateClientTransport(),
+                message =>
                 {
-                    NotificationHandlers =
-                    [
-                        new(NotificationMethods.ResourceUpdatedNotification, (notification, ct) =>
+                    if (message is JsonRpcNotification
                         {
-                            received.Enqueue(notification);
-                            if (received.Count == 2)
-                            {
-                                twoReceived.TrySetResult();
-                            }
-                            return ValueTask.CompletedTask;
-                        }),
-                    ],
-                },
-            });
-        await session.DownstreamReady;
+                            Method: NotificationMethods.ResourceUpdatedNotification,
+                        }
+                        && Interlocked.Increment(ref observedResources) == updateCount + 1)
+                    {
+                        observedAll.TrySetResult();
+                    }
+                }));
+        using var host = ResourcesTestComposition.BuildHost(
+            session,
+            builder => builder.WithStreamServerTransport(
+                downstream.ServerInputStream,
+                downstream.ServerOutputStream));
+        _ = host.RunAsync();
+        await using var fakePython = FakePythonServer.Start(upstream, SubscribablePythonOptions());
+        await using var rawDownstream = await ConnectRawDownstreamAsync(
+            downstream,
+            sendInitialized: false);
 
-        var orderedUpstream = ResourceUpdatesRelay.CreateOrderedUpstream();
-        var handlers = new McpClientHandlers();
-        orderedUpstream.ConfigureHandlers(handlers, session);
-        var callback = Assert.Single(handlers.NotificationHandlers!).Value;
-        Assert.Throws<InvalidOperationException>(() =>
-            orderedUpstream.ConfigureHandlers(handlers, session));
-
-        var first = new JsonRpcNotification
+        JsonRpcNotification latest = null!;
+        for (var i = 1; i <= updateCount; i++)
         {
-            Method = NotificationMethods.ResourceUpdatedNotification,
-            Params = JsonNode.Parse("""{"uri":"debug://state"}"""),
-        };
-        var second = new JsonRpcNotification
-        {
-            Method = NotificationMethods.ResourceUpdatedNotification,
-            Params = JsonNode.Parse("""{"uri":"debug://breakpoints"}"""),
-        };
-        orderedUpstream.StampReceivedMessage(first);
-        orderedUpstream.StampReceivedMessage(second);
-        // Callbacks complete immediately; ordered drain still delivers wire order.
-        await callback(second, CancellationToken.None);
-        await callback(first, CancellationToken.None);
-        await twoReceived.Task.WaitAsync(TimeSpan.FromSeconds(10));
-        await orderedUpstream.WaitForDrainAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
-        Assert.Equal(2, received.Count);
-
-        var cancelledNotification = new JsonRpcNotification
-        {
-            Method = NotificationMethods.ResourceUpdatedNotification,
-            Params = JsonNode.Parse("""{"uri":"debug://output"}"""),
-        };
-        orderedUpstream.StampReceivedMessage(cancelledNotification);
-        using (var cancelled = new CancellationTokenSource())
-        {
-            cancelled.Cancel();
-            await callback(cancelledNotification, cancelled.Token);
+            latest = i == updateCount
+                ? new JsonRpcNotification
+                {
+                    Method = NotificationMethods.ResourceUpdatedNotification,
+                    Params = JsonNode.Parse(
+                        """{"uri":"debug://state","_meta":{"marker":"1000","opaque":{"keep":true}}}"""),
+                }
+                : ResourceUpdated(StateUri, i.ToString());
+            await fakePython.Server.SendMessageAsync(latest);
         }
-        await orderedUpstream.WaitForDrainAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
-        Assert.Equal(2, received.Count);
 
-        var missingPredecessor = new JsonRpcNotification
+        await fakePython.Server.SendMessageAsync(ResourceUpdated(BreakpointsUri, "bp"));
+        await observedAll.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await rawDownstream.SendMessageAsync(new JsonRpcNotification
         {
-            Method = NotificationMethods.ResourceUpdatedNotification,
-            Params = JsonNode.Parse("""{"uri":"debug://threads"}"""),
-        };
-        var queuedAtTerminal = new JsonRpcNotification
-        {
-            Method = NotificationMethods.ResourceUpdatedNotification,
-            Params = JsonNode.Parse("""{"uri":"debug://state"}"""),
-        };
-        orderedUpstream.StampReceivedMessage(missingPredecessor);
-        orderedUpstream.StampReceivedMessage(queuedAtTerminal);
-        // Both URIs are pending at stamp time; second is ready behind an unready head.
-        await callback(queuedAtTerminal, CancellationToken.None);
-        Assert.Equal(2, orderedUpstream.PendingUriCount);
+            Method = NotificationMethods.InitializedNotification,
+        });
 
-        await client.DisposeAsync();
-        await session.DisposeAsync();
-        await callback(missingPredecessor, CancellationToken.None);
-        await orderedUpstream.WaitForDrainAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
-        Assert.Equal(2, received.Count);
-        Assert.Equal(0, orderedUpstream.PendingUriCount);
+        var state = Assert.IsType<JsonRpcNotification>(
+            await rawDownstream.MessageReader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+        var breakpoints = Assert.IsType<JsonRpcNotification>(
+            await rawDownstream.MessageReader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Equal(StateUri, state.Params?["uri"]?.GetValue<string>());
+        Assert.True(JsonNode.DeepEquals(latest.Params, state.Params));
+        Assert.Equal(BreakpointsUri, breakpoints.Params?["uri"]?.GetValue<string>());
+
+        var extra = rawDownstream.MessageReader.ReadAsync().AsTask();
+        Assert.NotSame(extra, await Task.WhenAny(extra, Task.Delay(TimeSpan.FromMilliseconds(250))));
+        await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
     }
 
     [Fact]
-    public async Task BlockedSubscriber_CoalescesPendingUpdatesPerUri_BoundedRetainedWork()
+    public async Task MalformedResourceUpdate_FailsClosedAndClearsRetainedState()
     {
-        var (session, upstream, downstream) = BuildSession();
+        var upstream = new DuplexChannel();
+        var downstream = new DuplexChannel();
+        await using var session = ResourcesTestComposition.CreateSession(upstream.CreateClientTransport);
+        using var host = ResourcesTestComposition.BuildHost(
+            session,
+            builder => builder.WithStreamServerTransport(
+                downstream.ServerInputStream,
+                downstream.ServerOutputStream));
+        _ = host.RunAsync();
         await using var fakePython = FakePythonServer.Start(upstream, SubscribablePythonOptions());
-        var received = new ConcurrentQueue<string>();
-        var receivedMarkers = new ConcurrentQueue<string>();
-        var expectedMarkers = new HashSet<string>(StringComparer.Ordinal) { "held", "1000", "bp" };
-        var allExpectedReceived = new TaskCompletionSource(
-            TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var rawDownstream = await ConnectRawDownstreamAsync(downstream);
+        var ended = session.RunUntilSessionEndedAsync(CancellationToken.None);
 
-        await using var client = await McpClient.CreateAsync(
-            downstream.CreateClientTransport(),
-            new McpClientOptions
+        await fakePython.Server.SendMessageAsync(new JsonRpcNotification
+        {
+            Method = NotificationMethods.ResourceUpdatedNotification,
+            Params = JsonNode.Parse("""{"_meta":{"marker":"missing-uri"}}"""),
+        });
+
+        _ = await Assert.ThrowsAnyAsync<Exception>(
+            () => ended.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Contains(
+            "params.uri",
+            Assert.IsType<InvalidOperationException>(session.ForwardingFailure).Message,
+            StringComparison.Ordinal);
+        Assert.Equal(0, session.RetainedDownstreamForwardLegCount);
+        Assert.Equal(0, session.RetainedUpstreamForwardLegCount);
+        await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
+    [Fact]
+    public async Task ResourceSegmentBound_FailsClosedWithoutUnboundedRetention()
+    {
+        var upstream = new DuplexChannel();
+        var downstream = new DuplexChannel();
+        await using var session = ResourcesTestComposition.CreateSession(upstream.CreateClientTransport);
+        using var host = ResourcesTestComposition.BuildHost(
+            session,
+            builder => builder.WithStreamServerTransport(
+                downstream.ServerInputStream,
+                downstream.ServerOutputStream));
+        _ = host.RunAsync();
+        await using var fakePython = FakePythonServer.Start(upstream, SubscribablePythonOptions());
+        await using var rawDownstream = await ConnectRawDownstreamAsync(
+            downstream,
+            sendInitialized: false);
+        var ended = session.RunUntilSessionEndedAsync(CancellationToken.None);
+
+        for (var i = 0; i <= ProgressLoggingRelay.MaxPendingMessages; i++)
+        {
+            await fakePython.Server.SendMessageAsync(
+                ResourceUpdated($"debug://uri-{i}", $"m{i}"));
+        }
+
+        _ = await Assert.ThrowsAnyAsync<Exception>(
+            () => ended.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Contains(
+            "64-URI bound",
+            Assert.IsType<InvalidOperationException>(session.ForwardingFailure).Message,
+            StringComparison.Ordinal);
+        Assert.Equal(0, session.RetainedDownstreamForwardLegCount);
+        Assert.Equal(0, session.RetainedUpstreamForwardLegCount);
+        await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
+    [Fact]
+    public async Task ResourceSendTimeout_FailsClosedBeforeResponseAndClearsRetainedState()
+    {
+        var upstream = new DuplexChannel();
+        var downstream = new DuplexChannel();
+        var writeGate = new ResourceUpdateWriteGate();
+        await using var session = ResourcesTestComposition.CreateSession(upstream.CreateClientTransport);
+        using var host = ResourcesTestComposition.BuildHost(
+            session,
+            builder => builder.WithStreamServerTransport(
+                downstream.ServerInputStream,
+                downstream.ServerOutputStream),
+            configureOptions: writeGate.Configure);
+        _ = host.RunAsync();
+        await using var fakePython = FakePythonServer.Start(
+            upstream,
+            SubscribablePythonOptions(callTool: async (context, cancellationToken) =>
             {
-                Handlers = new McpClientHandlers
+                await context.Server.SendMessageAsync(
+                    ResourceUpdated(StateUri, "timeout"),
+                    cancellationToken);
+                return new CallToolResult
                 {
-                    NotificationHandlers =
-                    [
-                        new(NotificationMethods.ResourceUpdatedNotification, (notification, ct) =>
-                        {
-                            received.Enqueue(notification.Params!["uri"]!.GetValue<string>());
-                            var marker = notification.Params?["_meta"]?["marker"]?.GetValue<string>();
-                            if (marker is not null)
-                            {
-                                receivedMarkers.Enqueue(marker);
-                                if (expectedMarkers.IsSubsetOf(receivedMarkers))
-                                {
-                                    allExpectedReceived.TrySetResult();
-                                }
-                            }
-                            return ValueTask.CompletedTask;
-                        }),
-                    ],
-                },
-            });
-        await session.DownstreamReady;
+                    Content = [new TextContentBlock { Text = "must-not-cross" }],
+                };
+            }));
+        await using var rawDownstream = await ConnectRawDownstreamAsync(downstream);
+        var ended = session.RunUntilSessionEndedAsync(CancellationToken.None);
 
-        var orderedUpstream = ResourceUpdatesRelay.CreateOrderedUpstream();
-        var handlers = new McpClientHandlers();
-        orderedUpstream.ConfigureHandlers(handlers, session);
-        var callback = Assert.Single(handlers.NotificationHandlers!).Value;
+        await rawDownstream.SendMessageAsync(ToolRequest(new RequestId("timeout-request")));
+        await writeGate.WaitUntilBlockedAsync(TimeSpan.FromSeconds(10));
+        var escaped = rawDownstream.MessageReader.ReadAsync().AsTask();
+        _ = await Assert.ThrowsAnyAsync<Exception>(
+            () => ended.WaitAsync(TimeSpan.FromSeconds(8)));
+        Assert.Contains(
+            "5-second bound",
+            Assert.IsType<TimeoutException>(session.ForwardingFailure).Message,
+            StringComparison.Ordinal);
+        Assert.NotSame(
+            escaped,
+            await Task.WhenAny(escaped, Task.Delay(TimeSpan.FromMilliseconds(250))));
+        Assert.Equal(0, session.RetainedDownstreamForwardLegCount);
+        Assert.Equal(0, session.RetainedUpstreamForwardLegCount);
+        writeGate.Release();
+        await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
+    }
 
-        // Distinct predecessor stamped first and left unready so same-URI flood cannot drain.
-        var held = ResourceUpdated("debug://gate", marker: "held");
-        orderedUpstream.StampReceivedMessage(held);
+    [Fact]
+    public async Task DuplicateLiveDownstreamId_FailsClosedWithoutOverwritingLeg()
+    {
+        var upstream = new DuplexChannel();
+        var downstream = new DuplexChannel();
+        var firstStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var session = ResourcesTestComposition.CreateSession(upstream.CreateClientTransport);
+        using var host = ResourcesTestComposition.BuildHost(
+            session,
+            builder => builder.WithStreamServerTransport(
+                downstream.ServerInputStream,
+                downstream.ServerOutputStream));
+        _ = host.RunAsync();
+        await using var fakePython = FakePythonServer.Start(
+            upstream,
+            SubscribablePythonOptions(callTool: async (context, cancellationToken) =>
+            {
+                firstStarted.TrySetResult();
+                await Task.Delay(Timeout.Infinite, cancellationToken);
+                return new CallToolResult();
+            }));
+        await using var rawDownstream = await ConnectRawDownstreamAsync(downstream);
+        var requestId = new RequestId("duplicate-live");
 
-        var notifications = new List<JsonRpcNotification>(1000);
-        for (var i = 1; i <= 1000; i++)
-        {
-            var notification = ResourceUpdated(StateUri, marker: i.ToString());
-            orderedUpstream.StampReceivedMessage(notification);
-            notifications.Add(notification);
-        }
+        await rawDownstream.SendMessageAsync(ToolRequest(requestId));
+        await firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await rawDownstream.SendMessageAsync(ToolRequest(requestId));
 
-        // Sparse callback arrival: latest, then even indices, then odds — predecessor last.
-        // Retained bookkeeping must stay O(unique URIs), not O(messages), even when callbacks
-        // arrive as 2,4,6,... before sequence 1.
-        var sparseTasks = new List<Task>(1000);
-        sparseTasks.Add(callback(notifications[^1], CancellationToken.None).AsTask());
-        for (var i = 0; i < notifications.Count - 1; i += 2)
-        {
-            sparseTasks.Add(callback(notifications[i], CancellationToken.None).AsTask());
-        }
-
-        for (var i = 1; i < notifications.Count - 1; i += 2)
-        {
-            sparseTasks.Add(callback(notifications[i], CancellationToken.None).AsTask());
-        }
-
-        Assert.All(sparseTasks, task => Assert.True(task.IsCompletedSuccessfully));
-        // Held + one coalesced StateUri slot only.
-        Assert.Equal(2, orderedUpstream.PendingUriCount);
-        Assert.Equal(2, orderedUpstream.PendingSlotCount);
-        Assert.True(orderedUpstream.PendingUriCount <= ResourceUpdatesRelay.MaxPendingUris);
-        // Retained objects stay a small constant over unique pending URIs, never O(messages).
-        Assert.True(
-            orderedUpstream.RetainedBackpressureObjectCount <= 8,
-            $"retained objects grew with message count: {orderedUpstream.RetainedBackpressureObjectCount}");
-
-        var breakpoints = ResourceUpdated(BreakpointsUri, marker: "bp");
-        orderedUpstream.StampReceivedMessage(breakpoints);
-        await callback(breakpoints, CancellationToken.None);
-        Assert.Equal(3, orderedUpstream.PendingUriCount);
-        Assert.Equal(3, orderedUpstream.PendingSlotCount);
-        Assert.True(
-            orderedUpstream.RetainedBackpressureObjectCount <= 8,
-            $"retained objects grew after third URI: {orderedUpstream.RetainedBackpressureObjectCount}");
-
-        // Release the held predecessor last: ordered drain must forward newest markers only.
-        await callback(held, CancellationToken.None);
-        await orderedUpstream.WaitForDrainAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(15));
-        await allExpectedReceived.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await Task.Delay(Timeout.Infinite, session.SessionEndingToken)
+                .WaitAsync(TimeSpan.FromSeconds(10)));
         await WaitForAsync(
-            () => orderedUpstream.PendingUriCount == 0 && orderedUpstream.ForwardAttempts >= 3,
+            () => session.RetainedDownstreamForwardLegCount == 0
+                && session.RetainedUpstreamForwardLegCount == 0,
             TimeSpan.FromSeconds(10));
-
-        Assert.Equal(0, orderedUpstream.PendingUriCount);
-        Assert.Equal(0, orderedUpstream.PendingSlotCount);
-        Assert.Equal(3, orderedUpstream.ForwardAttempts);
-        Assert.Equal(0, orderedUpstream.RetainedBackpressureObjectCount);
-        // Newest same-URI marker must be the one selected for forward (sequence-aware latest).
-        Assert.Contains("1000", receivedMarkers);
-        Assert.Contains("held", receivedMarkers);
-        Assert.Contains("bp", receivedMarkers);
-        Assert.True(
-            orderedUpstream.ForwardAttempts <= 3,
-            $"expected coalesced drain forwards, got {orderedUpstream.ForwardAttempts}");
-        // Downstream completion is deterministic: exact expected URI+marker set.
-        Assert.Equal(3, received.Count);
-        Assert.Equal(3, receivedMarkers.Count);
-        Assert.Contains(StateUri, received);
-        Assert.Contains("debug://gate", received);
-        Assert.Contains(BreakpointsUri, received);
-        Assert.True(expectedMarkers.SetEquals(receivedMarkers));
-        Assert.DoesNotContain("1", receivedMarkers);
-        Assert.DoesNotContain("999", receivedMarkers);
-
-        await client.DisposeAsync();
-        await session.DisposeAsync();
-    }
-
-    [Fact]
-    public async Task Coalesce_IsSequenceAware_LateOlderCallbackCannotOverwriteNewestMarker()
-    {
-        var (session, upstream, downstream) = BuildSession();
-        await using var fakePython = FakePythonServer.Start(upstream, SubscribablePythonOptions());
-        var receivedMarkers = new ConcurrentQueue<string>();
-        var expectedMarkers = new HashSet<string>(StringComparer.Ordinal) { "hold", "newest" };
-        var allExpectedReceived = new TaskCompletionSource(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-
-        await using var client = await McpClient.CreateAsync(
-            downstream.CreateClientTransport(),
-            new McpClientOptions
-            {
-                Handlers = new McpClientHandlers
-                {
-                    NotificationHandlers =
-                    [
-                        new(NotificationMethods.ResourceUpdatedNotification, (notification, ct) =>
-                        {
-                            var marker = notification.Params?["_meta"]?["marker"]?.GetValue<string>();
-                            if (marker is not null)
-                            {
-                                receivedMarkers.Enqueue(marker);
-                                if (expectedMarkers.IsSubsetOf(receivedMarkers))
-                                {
-                                    allExpectedReceived.TrySetResult();
-                                }
-                            }
-                            return ValueTask.CompletedTask;
-                        }),
-                    ],
-                },
-            });
-        await session.DownstreamReady;
-
-        var orderedUpstream = ResourceUpdatesRelay.CreateOrderedUpstream();
-        var handlers = new McpClientHandlers();
-        orderedUpstream.ConfigureHandlers(handlers, session);
-        var callback = Assert.Single(handlers.NotificationHandlers!).Value;
-
-        // Distinct predecessor stamped first and left unready so StateUri stays pending.
-        var heldOther = ResourceUpdated(BreakpointsUri, marker: "hold");
-        orderedUpstream.StampReceivedMessage(heldOther);
-
-        var cancelledOlder = ResourceUpdated(StateUri, marker: "cancelled-late");
-        var older = ResourceUpdated(StateUri, marker: "older");
-        var newer = ResourceUpdated(StateUri, marker: "newest");
-        orderedUpstream.StampReceivedMessage(cancelledOlder); // first StateUri order slot
-        orderedUpstream.StampReceivedMessage(older); // coalesce latest
-        orderedUpstream.StampReceivedMessage(newer); // coalesce latest
-
-        // Newest callback first; later older/cancelled callbacks arrive out of order.
-        await callback(newer, CancellationToken.None);
-        // held + one coalesced StateUri slot (stamp-time admission).
-        Assert.Equal(2, orderedUpstream.PendingUriCount);
-
-        await callback(older, CancellationToken.None);
-        using (var cancelled = new CancellationTokenSource())
-        {
-            cancelled.Cancel();
-            await callback(cancelledOlder, cancelled.Token);
-        }
-
-        // Still two pending URIs; late older/cancelled must not suppress or replace newest.
-        Assert.Equal(2, orderedUpstream.PendingUriCount);
-
-        await callback(heldOther, CancellationToken.None);
-        await orderedUpstream.WaitForDrainAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
-        await WaitForAsync(() => orderedUpstream.ForwardAttempts >= 2, TimeSpan.FromSeconds(10));
-        await allExpectedReceived.Task.WaitAsync(TimeSpan.FromSeconds(10));
-
-        Assert.Contains("hold", receivedMarkers);
-        Assert.Contains("newest", receivedMarkers);
-        Assert.DoesNotContain("older", receivedMarkers);
-        Assert.DoesNotContain("cancelled-late", receivedMarkers);
-        // Only the newest state marker is selected for debug://state.
-        Assert.Equal(
-            1,
-            receivedMarkers.Count(m => m is "older" or "newest" or "cancelled-late"));
-
-        await client.DisposeAsync();
-        await session.DisposeAsync();
-    }
-
-    [Fact]
-    public async Task MissingUri_IsRejectedWithoutEnteringPendingState()
-    {
-        var (session, upstream, downstream) = BuildSession();
-        await using var fakePython = FakePythonServer.Start(upstream, SubscribablePythonOptions());
-        await using var client = await McpClient.CreateAsync(downstream.CreateClientTransport());
-        await session.DownstreamReady;
-
-        var orderedUpstream = ResourceUpdatesRelay.CreateOrderedUpstream();
-        var handlers = new McpClientHandlers();
-        orderedUpstream.ConfigureHandlers(handlers, session);
-        var callback = Assert.Single(handlers.NotificationHandlers!).Value;
-
-        var missingUri = new JsonRpcNotification
-        {
-            Method = NotificationMethods.ResourceUpdatedNotification,
-            Params = JsonNode.Parse("""{"_meta":{"marker":"no-uri"}}"""),
-        };
-        var emptyUri = new JsonRpcNotification
-        {
-            Method = NotificationMethods.ResourceUpdatedNotification,
-            Params = JsonNode.Parse("""{"uri":"","_meta":{"marker":"empty"}}"""),
-        };
-        var nonStringUri = new JsonRpcNotification
-        {
-            Method = NotificationMethods.ResourceUpdatedNotification,
-            Params = JsonNode.Parse("""{"uri":123,"_meta":{"marker":"num"}}"""),
-        };
-
-        // Stamp must not accept malformed URIs into the sequenced pipeline.
-        orderedUpstream.StampReceivedMessage(missingUri);
-        orderedUpstream.StampReceivedMessage(emptyUri);
-        orderedUpstream.StampReceivedMessage(nonStringUri);
-        Assert.Equal(0, orderedUpstream.PendingUriCount);
-        Assert.Equal(0, orderedUpstream.PendingSlotCount);
-
-        await Assert.ThrowsAsync<InvalidOperationException>(
-            async () => await callback(missingUri, CancellationToken.None));
-        await Assert.ThrowsAsync<InvalidOperationException>(
-            async () => await callback(emptyUri, CancellationToken.None));
-        await Assert.ThrowsAsync<InvalidOperationException>(
-            async () => await callback(nonStringUri, CancellationToken.None));
-        Assert.Equal(0, orderedUpstream.PendingUriCount);
-        Assert.Equal(0, orderedUpstream.RetainedBackpressureObjectCount);
-
-        // A subsequent valid update still drains normally (no sequence hole from rejects).
-        var valid = ResourceUpdated(StateUri, marker: "after-reject");
-        orderedUpstream.StampReceivedMessage(valid);
-        await callback(valid, CancellationToken.None);
-        await orderedUpstream.WaitForDrainAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
-        Assert.Equal(0, orderedUpstream.PendingUriCount);
-
-        await client.DisposeAsync();
-        await session.DisposeAsync();
-    }
-
-    [Fact]
-    public async Task DistinctUriBound_RejectionDoesNotStrandLaterValidUpdates()
-    {
-        var (session, upstream, downstream) = BuildSession();
-        await using var fakePython = FakePythonServer.Start(upstream, SubscribablePythonOptions());
-        var received = new ConcurrentQueue<string>();
-        var receivedMarkers = new ConcurrentQueue<string>();
-        var allMarkersReceived = new TaskCompletionSource(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-
-        await using var client = await McpClient.CreateAsync(
-            downstream.CreateClientTransport(),
-            new McpClientOptions
-            {
-                Handlers = new McpClientHandlers
-                {
-                    NotificationHandlers =
-                    [
-                        new(NotificationMethods.ResourceUpdatedNotification, (notification, ct) =>
-                        {
-                            received.Enqueue(notification.Params!["uri"]!.GetValue<string>());
-                            var marker = notification.Params?["_meta"]?["marker"]?.GetValue<string>();
-                            if (marker is not null)
-                            {
-                                receivedMarkers.Enqueue(marker);
-                                if (receivedMarkers.Count >= ResourceUpdatesRelay.MaxPendingUris)
-                                {
-                                    allMarkersReceived.TrySetResult();
-                                }
-                            }
-                            return ValueTask.CompletedTask;
-                        }),
-                    ],
-                },
-            });
-        await session.DownstreamReady;
-
-        var orderedUpstream = ResourceUpdatesRelay.CreateOrderedUpstream();
-        var handlers = new McpClientHandlers();
-        orderedUpstream.ConfigureHandlers(handlers, session);
-        var callback = Assert.Single(handlers.NotificationHandlers!).Value;
-
-        // Stamp head first and leave it unready; fill the remaining bound at stamp time.
-        var held = ResourceUpdated("debug://held", marker: "held");
-        orderedUpstream.StampReceivedMessage(held);
-
-        for (var i = 0; i < ResourceUpdatesRelay.MaxPendingUris - 1; i++)
-        {
-            var notification = ResourceUpdated($"debug://uri-{i}", marker: $"m{i}");
-            orderedUpstream.StampReceivedMessage(notification);
-            await callback(notification, CancellationToken.None);
-        }
-
-        Assert.Equal(ResourceUpdatesRelay.MaxPendingUris, orderedUpstream.PendingUriCount);
-
-        // 65th distinct URI is bound-rejected at stamp (no pending) and throws at callback.
-        var overflow = ResourceUpdated("debug://overflow", marker: "overflow");
-        orderedUpstream.StampReceivedMessage(overflow);
-        Assert.Equal(ResourceUpdatesRelay.MaxPendingUris, orderedUpstream.PendingUriCount);
-        var overflowError = await Assert.ThrowsAsync<InvalidOperationException>(
-            async () => await callback(overflow, CancellationToken.None));
-        Assert.Contains("pending-URI bound exceeded", overflowError.Message);
-        Assert.Equal(ResourceUpdatesRelay.MaxPendingUris, orderedUpstream.PendingUriCount);
-
-        // Progress after bound rejection: coalesce into an existing pending URI.
-        var progress = ResourceUpdated("debug://uri-0", marker: "progress-after-overflow");
-        orderedUpstream.StampReceivedMessage(progress);
-        await callback(progress, CancellationToken.None);
-        Assert.Equal(ResourceUpdatesRelay.MaxPendingUris, orderedUpstream.PendingUriCount);
-
-        // Releasing the unready head lets every accepted order slot drain directly.
-        await callback(held, CancellationToken.None);
-        await orderedUpstream.WaitForDrainAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(20));
-        await WaitForAsync(
-            () => orderedUpstream.PendingUriCount == 0
-                && orderedUpstream.ForwardAttempts >= ResourceUpdatesRelay.MaxPendingUris,
-            TimeSpan.FromSeconds(15));
-        await allMarkersReceived.Task.WaitAsync(TimeSpan.FromSeconds(15));
-
-        Assert.Equal(0, orderedUpstream.PendingUriCount);
-        Assert.Equal(ResourceUpdatesRelay.MaxPendingUris, orderedUpstream.ForwardAttempts);
-        Assert.Contains("held", receivedMarkers);
-        Assert.Contains("progress-after-overflow", receivedMarkers);
-        Assert.DoesNotContain("overflow", receivedMarkers);
-        // Bound rejection must not strand the full drain (held + MaxPendingUris-1 accepted URIs).
-        Assert.Equal(
-            ResourceUpdatesRelay.MaxPendingUris,
-            receivedMarkers.Count);
-
-        await client.DisposeAsync();
-        await session.DisposeAsync();
+        await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
     }
 
     private static JsonRpcNotification ResourceUpdated(string uri, string marker) =>

@@ -10,19 +10,16 @@ using ModelContextProtocol.Server;
 namespace NetCoreDbg.Mcp.Host;
 
 /// <summary>
-/// FD-002: progress-token context, <c>notifications/progress</c>, <c>notifications/message</c>, and
-/// <c>logging/setLevel</c>. Forwards Python's upstream progress/log notifications to the real
-/// downstream client, and relays downstream <c>logging/setLevel</c> to Python only when Python's
-/// already-negotiated upstream capabilities actually advertise logging.
+/// FD-002 progress/logging relay plus the session's shared bounded upstream ingress. Forwards
+/// Python progress, logging, and resource-update notifications to the real downstream client;
+/// relays downstream <c>logging/setLevel</c> only when Python advertises logging; and holds each
+/// wire-later item behind the exact downstream response/error send correlated to its upstream
+/// terminal.
 ///
-/// Follows the <c>ToolsRelay</c> module convention for its downstream half: <see cref="Register"/> is
-/// the one call <c>RelayComposition.Build</c> adds (alongside <c>ToolsRelay.Register</c>), and
-/// <see cref="ConfigureFilters"/> is the production capability-aware logging/progress filter pair
-/// installed in that same <c>AddMcpServer(options =&gt; ...)</c> block. Its upstream half is
-/// <see cref="WrapUpstreamTransport"/>, which <c>Program.cs</c> wraps around
-/// <c>PythonBackendProcess.CreateUpstreamTransport</c> before constructing <see cref="RelaySession"/>
-/// - see that method's own doc comment for why progress/logging forwarding must happen at the
-/// transport layer rather than through <see cref="McpClientHandlers.NotificationHandlers"/>.
+/// <see cref="Register"/> and <see cref="ConfigureFilters"/> own downstream routes, capability
+/// projection, cancellation, and post-send acknowledgement. <see cref="WrapUpstreamTransport"/>
+/// wraps <c>PythonBackendProcess.CreateUpstreamTransport</c> with the sole reader and bounded drain,
+/// so progress/logging/resource ordering and response fences share one fail-closed pipeline.
 /// </summary>
 internal static class ProgressLoggingRelay
 {
@@ -280,10 +277,11 @@ internal static class ProgressLoggingRelay
                 throw new McpProtocolException("Method not found", McpErrorCode.MethodNotFound);
             }
 
-            // ForwardRequestAsync already unwraps the SDK remote prefix exactly once.
+            // ForwardApplicationRequestAsync unwraps the SDK remote prefix exactly once.
             // Do not strip again: a legitimate remote message that itself begins with
             // "Request failed (remote): " must survive as remote content.
-            var response = await RelaySession.ForwardRequestAsync(upstream, context.JsonRpcRequest, cancellationToken)
+            var response = await session
+                .ForwardApplicationRequestAsync(upstream, context.JsonRpcRequest, cancellationToken)
                 .ConfigureAwait(false);
             return response.Result.Deserialize<EmptyResult>(McpJsonUtilities.DefaultOptions)!;
         });
@@ -309,6 +307,7 @@ internal static class ProgressLoggingRelay
             if (context.JsonRpcMessage is JsonRpcNotification { Method: NotificationMethods.CancelledNotification } cancellation)
             {
                 notificationState.Cancel(cancellation);
+                session.ObserveDownstreamCancellation(cancellation);
                 await next(context, cancellationToken).ConfigureAwait(false);
                 return;
             }
@@ -320,27 +319,28 @@ internal static class ProgressLoggingRelay
             }
 
             var progressToken = notificationState.Begin(request);
-            if (progressToken is null)
-            {
-                await next(context, cancellationToken).ConfigureAwait(false);
-                return;
-            }
-
             var requestId = request.Id;
-            using var cancellationRegistration = cancellationToken.Register(
-                () => notificationState.End(requestId));
+            using var cancellationRegistration = progressToken is null
+                ? default
+                : cancellationToken.Register(() => notificationState.End(requestId));
             try
             {
                 await next(context, cancellationToken).ConfigureAwait(false);
             }
             finally
             {
-                notificationState.End(requestId);
+                if (progressToken is not null)
+                {
+                    notificationState.End(requestId);
+                }
+
+                session.CompleteDownstreamRequestHandling(requestId);
             }
         });
 
         filters.Message.OutgoingFilters.Add(next => async (context, cancellationToken) =>
         {
+            session.ThrowIfForwardingFailed();
             if (context.JsonRpcMessage is JsonRpcResponse { Result: JsonObject result }
                 && result.TryGetPropertyValue("capabilities", out var capabilitiesNode)
                 && capabilitiesNode is JsonObject capabilities)
@@ -352,7 +352,27 @@ internal static class ProgressLoggingRelay
                 }
             }
 
-            await next(context, cancellationToken).ConfigureAwait(false);
+            var hasForwardLeg = session.TryGetForwardLegForDownstreamTerminal(
+                context.JsonRpcMessage,
+                out var forwardLeg);
+            try
+            {
+                await next(context, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                session.FailForwarding(ex);
+                throw;
+            }
+
+            if (hasForwardLeg)
+            {
+                session.CompleteForwardLegSend(forwardLeg!);
+            }
         });
     }
 
@@ -361,19 +381,18 @@ internal static class ProgressLoggingRelay
     private static readonly TimeSpan NotificationSendTimeout = TimeSpan.FromSeconds(5);
 
     /// <summary>
-    /// Wraps the real upstream transport with one bounded wire-order delivery queue. The upstream
-    /// reader only classifies and enqueues messages, so slow downstream notification I/O cannot hold
-    /// Python's sole stdout reader. One independent drain forwards owned notifications and releases
-    /// every other message to the SDK in the exact order received.
+    /// Wraps the real upstream transport with one bounded wire-order delivery queue. The sole
+    /// upstream reader classifies progress, logging, contiguous resource-update segments, exact
+    /// correlated terminals, and ordinary traffic without awaiting downstream I/O. One drain sends
+    /// owned notifications with a five-second bound and releases ordinary messages to the SDK in
+    /// source order.
     /// <para>
-    /// Upstream request IDs are associated with their progress tokens on the outgoing leg. Reading
-    /// the matching terminal response deactivates that token before any later wire message is
-    /// classified, while the ordered drain still guarantees that earlier notifications finish before
-    /// the response is released. Cancellation invalidates token-scoped items still waiting in the
-    /// queue; a send already handed to the downstream transport remains bounded by the send timeout.
-    /// Queue saturation, downstream send failure, or send timeout completes the wrapped transport with
-    /// an error rather than retaining unbounded state or releasing a response across an undelivered
-    /// notification.
+    /// A mapped upstream response/error is released only after all wire-prior resource work; the
+    /// drain then waits for the exact downstream response/error to finish its transport send before
+    /// admitting any wire-later item. Cancellation is the only no-response completion. Saturation,
+    /// send failure, timeout, disconnect, and terminal shutdown fail closed and settle retained legs.
+    /// Same-URI resource updates coalesce only inside the current contiguous resource segment; every
+    /// non-resource message closes that segment.
     /// </para>
     /// </summary>
     public static IClientTransport WrapUpstreamTransport(
@@ -414,6 +433,8 @@ internal static class ProgressLoggingRelay
                 SingleWriter = true,
                 FullMode = BoundedChannelFullMode.Wait,
             });
+        private readonly Dictionary<string, ResourceUpdateBatch> _openResourceBatches =
+            new(StringComparer.Ordinal);
         private readonly CancellationTokenSource _pipelineCts;
         private readonly Task _pumpTask;
         private readonly Task _drainTask;
@@ -442,12 +463,25 @@ internal static class ProgressLoggingRelay
             JsonRpcMessage message,
             CancellationToken cancellationToken = default)
         {
-            if (message is JsonRpcRequest request)
+            try
             {
-                _notificationState.TrackUpstreamRequest(request);
-            }
+                if (message is JsonRpcRequest request)
+                {
+                    _notificationState.TrackUpstreamRequest(request);
+                    _session.BindForwardLeg(request);
+                }
 
-            await _inner.SendMessageAsync(message, cancellationToken).ConfigureAwait(false);
+                await _inner.SendMessageAsync(message, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                Fail(ex);
+                throw;
+            }
         }
 
         private async Task PumpAsync()
@@ -462,6 +496,16 @@ internal static class ProgressLoggingRelay
 
                     if (message is JsonRpcNotification
                         {
+                            Method: NotificationMethods.ResourceUpdatedNotification,
+                        } resourceUpdate)
+                    {
+                        EnqueueResourceUpdate(resourceUpdate);
+                        continue;
+                    }
+
+                    CloseResourceSegment();
+                    if (message is JsonRpcNotification
+                        {
                             Method: NotificationMethods.ProgressNotification
                                 or NotificationMethods.LoggingMessageNotification,
                         } notification)
@@ -474,22 +518,31 @@ internal static class ProgressLoggingRelay
 
                         Enqueue(new DeliveryItem(
                             notification,
-                            IsOwnedNotification: true,
+                            DeliveryKind.OwnedNotification,
                             authorization));
                         continue;
                     }
 
-                    Enqueue(new DeliveryItem(message, IsOwnedNotification: false));
+                    _session.TryTakeForwardLegForUpstreamTerminal(message, out var forwardLeg);
+                    Enqueue(new DeliveryItem(
+                        message,
+                        DeliveryKind.Ordinary,
+                        ForwardLeg: forwardLeg));
                 }
 
+                CloseResourceSegment();
+                _session.FailForwarding(
+                    new IOException("The upstream transport ended before all forwarded requests completed."));
                 _delivery.Writer.TryComplete();
             }
             catch (OperationCanceledException) when (_pipelineCts.IsCancellationRequested)
             {
+                CloseResourceSegment();
                 _delivery.Writer.TryComplete(_failure);
             }
             catch (Exception ex)
             {
+                CloseResourceSegment();
                 Fail(ex);
             }
         }
@@ -507,6 +560,63 @@ internal static class ProgressLoggingRelay
             }
 
             return _session.Downstream is not null;
+        }
+
+        private void EnqueueResourceUpdate(JsonRpcNotification notification)
+        {
+            var uri = TryGetResourceUri(notification)
+                ?? throw new InvalidOperationException(
+                    "Resource update rejected: params.uri must be a non-empty string.");
+            if (_openResourceBatches.TryGetValue(uri, out var current)
+                && current.TryReplace(notification))
+            {
+                return;
+            }
+
+            if (!_openResourceBatches.ContainsKey(uri)
+                && _openResourceBatches.Count >= MaxPendingMessages)
+            {
+                throw new InvalidOperationException(
+                    $"Resource update segment exceeded its {MaxPendingMessages}-URI bound.");
+            }
+
+            var batch = new ResourceUpdateBatch(notification);
+            _openResourceBatches[uri] = batch;
+            Enqueue(new DeliveryItem(
+                Message: null,
+                DeliveryKind.ResourceUpdate,
+                ResourceBatch: batch));
+        }
+
+        private void CloseResourceSegment()
+        {
+            foreach (var batch in _openResourceBatches.Values)
+            {
+                batch.Close();
+            }
+
+            _openResourceBatches.Clear();
+        }
+
+        private static string? TryGetResourceUri(JsonRpcNotification notification)
+        {
+            try
+            {
+                if (notification.Params is not JsonObject parameters
+                    || !parameters.TryGetPropertyValue("uri", out var uriNode)
+                    || uriNode is null
+                    || uriNode.GetValueKind() != JsonValueKind.String)
+                {
+                    return null;
+                }
+
+                var uri = uriNode.GetValue<string>();
+                return string.IsNullOrWhiteSpace(uri) ? null : uri;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
         }
 
         private void Enqueue(DeliveryItem item)
@@ -536,21 +646,36 @@ internal static class ProgressLoggingRelay
                     .ReadAllAsync(_pipelineCts.Token)
                     .ConfigureAwait(false))
                 {
-                    if (item.IsOwnedNotification)
+                    switch (item.Kind)
                     {
-                        if (!_notificationState.IsAuthorized(item.Authorization))
-                        {
-                            continue;
-                        }
+                        case DeliveryKind.OwnedNotification:
+                            if (!_notificationState.IsAuthorized(item.Authorization))
+                            {
+                                continue;
+                            }
 
-                        await ForwardNotificationAsync((JsonRpcNotification)item.Message)
-                            .ConfigureAwait(false);
-                    }
-                    else
-                    {
-                        await _passthrough.Writer
-                            .WriteAsync(item.Message, _pipelineCts.Token)
-                            .ConfigureAwait(false);
+                            await ForwardNotificationAsync((JsonRpcNotification)item.Message!)
+                                .ConfigureAwait(false);
+                            break;
+
+                        case DeliveryKind.ResourceUpdate:
+                            await _session.DownstreamReady
+                                .WaitAsync(_pipelineCts.Token).ConfigureAwait(false);
+                            await ForwardNotificationAsync(item.ResourceBatch!.Freeze())
+                                .ConfigureAwait(false);
+                            break;
+
+                        default:
+                            await _passthrough.Writer
+                                .WriteAsync(item.Message!, _pipelineCts.Token)
+                                .ConfigureAwait(false);
+                            if (item.ForwardLeg is not null)
+                            {
+                                await item.ForwardLeg.Publication.Task
+                                    .WaitAsync(_pipelineCts.Token).ConfigureAwait(false);
+                            }
+
+                            break;
                     }
                 }
             }
@@ -621,6 +746,7 @@ internal static class ProgressLoggingRelay
                 ref _failure,
                 failure,
                 null) ?? failure;
+            _session.FailForwarding(recordedFailure);
             _delivery.Writer.TryComplete(recordedFailure);
             _passthrough.Writer.TryComplete(recordedFailure);
             try
@@ -662,9 +788,56 @@ internal static class ProgressLoggingRelay
             }
         }
 
+        private enum DeliveryKind
+        {
+            Ordinary,
+            OwnedNotification,
+            ResourceUpdate,
+        }
+
+        private sealed class ResourceUpdateBatch(JsonRpcNotification initial)
+        {
+            private readonly object _gate = new();
+            private JsonRpcNotification _latest = initial;
+            private bool _open = true;
+
+            public bool TryReplace(JsonRpcNotification notification)
+            {
+                lock (_gate)
+                {
+                    if (!_open)
+                    {
+                        return false;
+                    }
+
+                    _latest = notification;
+                    return true;
+                }
+            }
+
+            public void Close()
+            {
+                lock (_gate)
+                {
+                    _open = false;
+                }
+            }
+
+            public JsonRpcNotification Freeze()
+            {
+                lock (_gate)
+                {
+                    _open = false;
+                    return _latest;
+                }
+            }
+        }
+
         private readonly record struct DeliveryItem(
-            JsonRpcMessage Message,
-            bool IsOwnedNotification,
-            NotificationState.DeliveryAuthorization Authorization = default);
+            JsonRpcMessage? Message,
+            DeliveryKind Kind,
+            NotificationState.DeliveryAuthorization Authorization = default,
+            ResourceUpdateBatch? ResourceBatch = null,
+            RelaySession.ForwardLeg? ForwardLeg = null);
     }
 }
