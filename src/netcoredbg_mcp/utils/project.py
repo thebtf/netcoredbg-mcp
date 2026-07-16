@@ -251,11 +251,9 @@ def _resolve_operator_project_root(config: ProjectRootConfig) -> Path | None:
             if path.exists() and path.is_dir():
                 logger.info(f"Using project root from {env_var}: {path}")
                 return path
-            logger.warning(
-                f"{env_var}={env_value} - path does not exist or is not a directory"
-            )
-            # Env pin is present but unusable: fail closed (no client override).
-            return None
+            logger.warning(f"{env_var}={env_value} - path does not exist or is not a directory")
+            # Keep trying operator-controlled sources; caller still forbids client fallback.
+            continue
 
     if config.explicit_project_path is not None:
         if config.explicit_project_path.exists() and config.explicit_project_path.is_dir():

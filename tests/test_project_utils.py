@@ -331,9 +331,7 @@ class TestGetProjectRoot:
         assert operator_project_scope_configured() is True
 
     @pytest.mark.asyncio
-    async def test_env_project_not_overridden_by_client_root(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_env_project_not_overridden_by_client_root(self, tmp_path, monkeypatch):
         """Operator env pin wins over client MCP roots."""
         env_path = tmp_path / "env_project"
         env_path.mkdir()
@@ -349,6 +347,54 @@ class TestGetProjectRoot:
 
         result = await get_project_root(ctx)
         assert result == env_path
+
+    @pytest.mark.asyncio
+    async def test_valid_env_project_precedes_explicit_project(self, tmp_path, monkeypatch):
+        """A valid environment pin remains the highest-precedence operator source."""
+        env_path = tmp_path / "env_project"
+        env_path.mkdir()
+        explicit_path = tmp_path / "explicit_project"
+        explicit_path.mkdir()
+        monkeypatch.setenv("NETCOREDBG_PROJECT_ROOT", str(env_path))
+        configure_project_root(explicit_project_path=str(explicit_path))
+
+        ctx = MagicMock()
+        ctx.session.list_roots = AsyncMock(side_effect=AssertionError("client roots used"))
+
+        assert await get_project_root(ctx) == env_path
+        ctx.session.list_roots.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_invalid_env_project_falls_through_to_explicit_project(
+        self, tmp_path, monkeypatch
+    ):
+        """An invalid environment pin must not hide a valid explicit project."""
+        invalid_env = tmp_path / "missing_env_project"
+        explicit_path = tmp_path / "explicit_project"
+        explicit_path.mkdir()
+        monkeypatch.setenv("NETCOREDBG_PROJECT_ROOT", str(invalid_env))
+        configure_project_root(explicit_project_path=str(explicit_path))
+
+        ctx = MagicMock()
+        ctx.session.list_roots = AsyncMock(side_effect=AssertionError("client roots used"))
+
+        assert await get_project_root(ctx) == explicit_path
+        ctx.session.list_roots.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_invalid_operator_sources_fail_closed_without_client_root(
+        self, tmp_path, monkeypatch
+    ):
+        """Invalid operator sources still forbid widening scope to client roots."""
+        monkeypatch.setenv("NETCOREDBG_PROJECT_ROOT", str(tmp_path / "missing_primary_env"))
+        monkeypatch.setenv("MCP_PROJECT_ROOT", str(tmp_path / "missing_legacy_env"))
+        configure_project_root(explicit_project_path=str(tmp_path / "missing_explicit_project"))
+
+        ctx = MagicMock()
+        ctx.session.list_roots = AsyncMock(side_effect=AssertionError("client roots used"))
+
+        assert await get_project_root(ctx) is None
+        ctx.session.list_roots.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_rejects_client_unc_file_authority_root(self, tmp_path, monkeypatch):
@@ -393,9 +439,7 @@ class TestGetProjectRoot:
         assert result.resolve() == client_path.resolve()
 
     @pytest.mark.asyncio
-    async def test_skips_network_first_root_and_uses_later_local_root(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_skips_network_first_root_and_uses_later_local_root(self, tmp_path, monkeypatch):
         """Rejected network/invalid roots must not hide a later valid local root."""
         monkeypatch.delenv("NETCOREDBG_PROJECT_ROOT", raising=False)
         monkeypatch.delenv("MCP_PROJECT_ROOT", raising=False)
@@ -421,9 +465,7 @@ class TestGetProjectRoot:
 
     @pytest.mark.asyncio
     @pytest.mark.skipif(sys.platform != "win32", reason="Windows localhost drive path")
-    async def test_localhost_file_uri_client_root_is_usable_local_path(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_localhost_file_uri_client_root_is_usable_local_path(self, tmp_path, monkeypatch):
         """file://localhost/C:/... must resolve as a local root, not UNC rejection."""
         monkeypatch.delenv("NETCOREDBG_PROJECT_ROOT", raising=False)
         monkeypatch.delenv("MCP_PROJECT_ROOT", raising=False)
@@ -450,9 +492,7 @@ class TestGetProjectRoot:
         assert is_unc_or_network_path(result) is False
 
     @pytest.mark.asyncio
-    async def test_roots_list_changed_cannot_replace_operator_pin(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_roots_list_changed_cannot_replace_operator_pin(self, tmp_path, monkeypatch):
         """Subsequent roots/list answers still cannot replace an operator pin."""
         monkeypatch.delenv("NETCOREDBG_PROJECT_ROOT", raising=False)
         monkeypatch.delenv("MCP_PROJECT_ROOT", raising=False)
@@ -482,9 +522,7 @@ class TestGetProjectRoot:
         assert await get_project_root(ctx) == pinned
 
     @pytest.mark.asyncio
-    async def test_start_debug_scope_keeps_operator_project(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_start_debug_scope_keeps_operator_project(self, tmp_path, monkeypatch):
         """resolve_project_root (start_debug path) must not widen operator scope."""
         monkeypatch.delenv("NETCOREDBG_PROJECT_ROOT", raising=False)
         monkeypatch.delenv("MCP_PROJECT_ROOT", raising=False)
