@@ -40,18 +40,29 @@ public static class Program
             try
             {
                 var rootsRelay = new RootsRelay();
+                var resourceUpdates = ResourceUpdatesRelay.CreateOrderedUpstream();
+                var progressNotificationState = new ProgressLoggingRelay.NotificationState();
                 RelaySession relaySession = null!;
                 relaySession = new RelaySession(
-                    pythonBackend.CreateUpstreamTransport,
+                    () => ProgressLoggingRelay.WrapUpstreamTransport(
+                        resourceUpdates.WrapTransport(pythonBackend.CreateUpstreamTransport()),
+                        relaySession,
+                        progressNotificationState),
                     RelayComposition.RequiredUpstreamCapabilityChecks,
-                    handlers => rootsRelay.ConfigureUpstreamHandlers(handlers, relaySession));
+                    handlers =>
+                    {
+                        rootsRelay.ConfigureUpstreamHandlers(handlers, relaySession);
+                        resourceUpdates.ConfigureHandlers(handlers, relaySession);
+                    },
+                    resourceUpdates.WaitForDrainAsync);
                 await using (relaySession)
                 {
                     await RelayComposition.RunAsync(
                         relaySession,
                         downstreamCapabilities => rootsRelay.ProjectCapabilities(
                             downstreamCapabilities,
-                            new ClientCapabilities()));
+                            new ClientCapabilities()),
+                        progressNotificationState);
                 }
             }
             catch (Exception ex)

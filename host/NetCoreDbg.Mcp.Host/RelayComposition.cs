@@ -9,7 +9,7 @@ namespace NetCoreDbg.Mcp.Host;
 
 /// <summary>
 /// The only integration-owned module list and downstream host construction point. Builds
-/// one explicit <see cref="RelayRouteCatalog"/>, wires the logging-suppression filter pair
+/// one explicit <see cref="RelayRouteCatalog"/>, wires the progress/logging capability-aware filter pair
 /// and the paired-session bootstrap filter, and calls every accepted relay or native
 /// module's <c>Register</c> method. Feature makers never edit this file directly for their
 /// own module; the integrator adds an accepted module here after checker PASS.
@@ -22,8 +22,9 @@ internal static class RelayComposition
 
     /// <summary>
     /// Bootstrap-time validation that Python's advertised capabilities cover every
-    /// downstream route this build always advertises. Conditionally projected resources and
-    /// experimental capabilities are removed downstream when Python does not advertise them.
+    /// downstream route this build always advertises. Conditionally projected resources,
+    /// logging, and experimental capabilities are removed downstream when Python does not
+    /// advertise them.
     /// </summary>
     public static readonly IReadOnlyList<Func<ServerCapabilities?, string?>> RequiredUpstreamCapabilityChecks =
         new Func<ServerCapabilities?, string?>[]
@@ -41,9 +42,10 @@ internal static class RelayComposition
     /// </summary>
     public static async Task RunAsync(
         RelaySession session,
-        Func<ClientCapabilities?, ClientCapabilities> projectReverseRouteCapabilities)
+        Func<ClientCapabilities?, ClientCapabilities> projectReverseRouteCapabilities,
+        ProgressLoggingRelay.NotificationState? progressNotificationState = null)
     {
-        using var host = Build(session, static builder => builder.WithStdioServerTransport(), projectReverseRouteCapabilities);
+        using var host = Build(session, static builder => builder.WithStdioServerTransport(), projectReverseRouteCapabilities, progressNotificationState);
 
         var hostRunTask = host.RunAsync();
         var sessionEndedTask = session.RunUntilSessionEndedAsync(CancellationToken.None);
@@ -62,7 +64,7 @@ internal static class RelayComposition
 
     /// <summary>
     /// Builds the downstream host: one explicit <see cref="RelayRouteCatalog"/>, the
-    /// logging-suppression filter pair, the paired-session bootstrap filter, and every
+    /// progress/logging capability-aware filter pair, the paired-session bootstrap filter, and every
     /// accepted relay module's <c>Register</c> call. Internal (not private) so the focused
     /// .NET test project can build the exact same real composition over an in-memory
     /// transport instead of real stdio - a transport choice, never a mock of this method's
@@ -73,9 +75,11 @@ internal static class RelayComposition
     internal static IHost Build(
         RelaySession session,
         Action<IMcpServerBuilder> configureTransport,
-        Func<ClientCapabilities?, ClientCapabilities> projectReverseRouteCapabilities)
+        Func<ClientCapabilities?, ClientCapabilities> projectReverseRouteCapabilities,
+        ProgressLoggingRelay.NotificationState? progressNotificationState = null)
     {
         var catalog = new RelayRouteCatalog();
+        var notificationState = progressNotificationState ?? new ProgressLoggingRelay.NotificationState();
 
         var builder = global::Microsoft.Extensions.Hosting.Host.CreateApplicationBuilder(Array.Empty<string>());
 
@@ -98,13 +102,15 @@ internal static class RelayComposition
             ResourcesRelay.ConfigureCapabilityProjection(options.Capabilities, options.Filters, session);
             MuxCapabilityRelay.RegisterCapabilityProjectionFilter(options.Filters, session);
 
-            RelayRouteCatalog.SuppressUnregisteredLogging(options.Filters);
+            ProgressLoggingRelay.ConfigureFilters(options.Filters, session, notificationState);
             options.Filters.Message.IncomingFilters.Add(session.CreateBootstrapFilter(projectReverseRouteCapabilities));
         });
 
         ToolsRelay.Register(mcpBuilder, catalog, session);
+        ProgressLoggingRelay.Register(mcpBuilder, catalog, session);
         RootsRelay.Register(mcpBuilder, catalog, session);
         ResourcesRelay.Register(mcpBuilder, catalog, session);
+        ResourceUpdatesRelay.Register(mcpBuilder, catalog, session);
         configureTransport(mcpBuilder);
 
         return builder.Build();
