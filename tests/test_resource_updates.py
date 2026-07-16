@@ -219,7 +219,8 @@ async def test_line_breakpoint_mutations_publish_one_final_resource_snapshot() -
 
 
 @pytest.mark.asyncio
-async def test_sync_all_publishes_visible_line_changes_but_not_function_or_id_only_changes() -> None:
+async def test_sync_all_publishes_visible_line_changes_but_not_function_or_id_only_changes(
+) -> None:
     with patch("netcoredbg_mcp.session.manager.DAPClient"):
         from netcoredbg_mcp.session import SessionManager
 
