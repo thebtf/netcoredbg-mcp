@@ -11,8 +11,9 @@ successful reads for state/breakpoints/output, an invalid-URI protocol error, an
 *successful* ``debug://threads`` read during a live debug session (the DAP-backed resource
 that legitimately errors while idle - see ``ResourcesRealPythonTests.cs`` for that idle-state
 ground truth). This file never starts the .NET host; the host-relay proof against both a fake
-and this exact real Python contract lives in ``host/NetCoreDbg.Mcp.Host.Tests/ResourcesRelayTests.cs``
-and ``ResourcesRealPythonTests.cs``.
+and this exact real Python contract lives in
+``host/NetCoreDbg.Mcp.Host.Tests/ResourcesRelayTests.cs`` and
+``ResourcesRealPythonTests.cs``.
 """
 
 from __future__ import annotations
@@ -25,8 +26,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
 import mcp.types as types
+import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import get_default_environment, stdio_client
 from mcp.shared.exceptions import McpError
@@ -98,6 +99,7 @@ async def _collect_updates(
         seen.append(await asyncio.wait_for(queue.get(), timeout=remaining))
     return seen
 
+
 async def _wait_for_state_update(
     session: ClientSession,
     queue: asyncio.Queue[str],
@@ -108,9 +110,7 @@ async def _wait_for_state_update(
     while True:
         remaining = deadline - asyncio.get_running_loop().time()
         if remaining <= 0:
-            raise AssertionError(
-                f"Missing state update for execState in {expected_exec_states}"
-            )
+            raise AssertionError(f"Missing state update for execState in {expected_exec_states}")
         uri = await asyncio.wait_for(queue.get(), timeout=remaining)
         if uri != "debug://state":
             continue
@@ -186,7 +186,9 @@ async def test_resources_threads_reads_successfully_during_a_live_debug_session(
         timeout=120,
         check=False,
     )
-    assert build.returncode == 0, f"SmokeTestApp build failed:\nstdout:\n{build.stdout}\nstderr:\n{build.stderr}"
+    assert build.returncode == 0, (
+        f"SmokeTestApp build failed:\nstdout:\n{build.stdout}\nstderr:\n{build.stderr}"
+    )
     assert SMOKE_DLL.exists(), f"dotnet build did not produce {SMOKE_DLL}"
 
     env = _backend_env()
