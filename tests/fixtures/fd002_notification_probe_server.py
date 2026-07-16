@@ -33,9 +33,26 @@ from mcp import types
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import LoggingLevel
 
-
 _interleave_conditions: dict[str, asyncio.Condition] = {}
 _interleave_turns: dict[str, int] = {}
+
+
+def _unexpected_teardown_error(error: BaseException) -> BaseException | None:
+    if isinstance(error, ClosedResourceError):
+        return None
+
+    children = getattr(error, "exceptions", None)
+    derive = getattr(error, "derive", None)
+    if not isinstance(children, tuple) or not callable(derive):
+        return error
+
+    unexpected_children = []
+    for child in children:
+        unexpected = _unexpected_teardown_error(child)
+        if unexpected is not None:
+            unexpected_children.append(unexpected)
+
+    return derive(unexpected_children) if unexpected_children else None
 
 
 async def _wait_for_turn(key: str, turn: int) -> asyncio.Condition:
@@ -72,7 +89,9 @@ def build_server(advertise_logging: bool) -> FastMCP:
             if ctx.request_context.meta
             else None
         )
-        progress_token = ctx.request_context.meta.progressToken if ctx.request_context.meta else None
+        progress_token = (
+            ctx.request_context.meta.progressToken if ctx.request_context.meta else None
+        )
 
         for step in range(1, steps + 1):
             condition = None
@@ -87,7 +106,11 @@ def build_server(advertise_logging: bool) -> FastMCP:
                         params=types.LoggingMessageNotificationParams(
                             level="info",
                             logger=logger_name,
-                            data={"message": f"log-{step}", "step": step, "progressToken": progress_token},
+                            data={
+                                "message": f"log-{step}",
+                                "step": step,
+                                "progressToken": progress_token,
+                            },
                             _meta={
                                 "fixture": "fd002-notification-probe",
                                 "step": step,
@@ -136,10 +159,12 @@ def main() -> None:
 
     try:
         build_server(args.with_logging_capability).run()
-    except* ClosedResourceError:
-        # Closing stdio while a cancelled request is unwinding is a normal fixture shutdown.
-        # Any sibling exception in the group remains unhandled and therefore fails the child.
-        pass
+    except BaseException as error:
+        unexpected = _unexpected_teardown_error(error)
+        if unexpected is error:
+            raise
+        if unexpected is not None:
+            raise unexpected from error
 
     if args.shutdown_marker:
         Path(args.shutdown_marker).write_text("clean\n", encoding="utf-8")
