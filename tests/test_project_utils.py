@@ -62,6 +62,22 @@ class TestParseFileUri:
         result = parse_file_uri(uri)
         assert result == Path("\\\\server\\share\\path")
 
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only localhost path shape")
+    def test_parse_windows_localhost_authority_is_local_path(self):
+        """RFC 8089: file://localhost/C:/... is a local path, not \\\\localhost\\ UNC."""
+        uri = "file://localhost/C:/Users/project"
+        assert is_network_file_uri(uri) is False
+        result = parse_file_uri(uri)
+        assert result == Path("C:/Users/project")
+        assert is_unc_or_network_path(result) is False
+
+    def test_parse_localhost_loopback_authorities_are_not_network(self):
+        """localhost / 127.0.0.1 / [::1] authorities stay local for root policy."""
+        assert is_network_file_uri("file://localhost/home/user") is False
+        assert is_network_file_uri("file://127.0.0.1/home/user") is False
+        assert is_network_file_uri("file://[::1]/home/user") is False
+        assert is_network_file_uri("file://attacker.invalid/share") is True
+
 
 class TestFindDotnetProjectRoot:
     """Tests for find_dotnet_project_root function."""
@@ -375,6 +391,63 @@ class TestGetProjectRoot:
         result = await get_project_root(ctx)
         assert result is not None
         assert result.resolve() == client_path.resolve()
+
+    @pytest.mark.asyncio
+    async def test_skips_network_first_root_and_uses_later_local_root(
+        self, tmp_path, monkeypatch
+    ):
+        """Rejected network/invalid roots must not hide a later valid local root."""
+        monkeypatch.delenv("NETCOREDBG_PROJECT_ROOT", raising=False)
+        monkeypatch.delenv("MCP_PROJECT_ROOT", raising=False)
+        local_path = tmp_path / "local_project"
+        local_path.mkdir()
+        configure_project_root()
+
+        network_root = MagicMock()
+        network_root.uri = "file://attacker.invalid/share"
+        invalid_root = MagicMock()
+        invalid_root.uri = "file:///definitely/not/a/real/path/for-netcoredbg-mcp"
+        local_root = MagicMock()
+        local_root.uri = local_path.as_uri()
+
+        ctx = MagicMock()
+        ctx.session.list_roots = AsyncMock(
+            return_value=MagicMock(roots=[network_root, invalid_root, local_root])
+        )
+
+        result = await get_project_root(ctx)
+        assert result is not None
+        assert result.resolve() == local_path.resolve()
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows localhost drive path")
+    async def test_localhost_file_uri_client_root_is_usable_local_path(
+        self, tmp_path, monkeypatch
+    ):
+        """file://localhost/C:/... must resolve as a local root, not UNC rejection."""
+        monkeypatch.delenv("NETCOREDBG_PROJECT_ROOT", raising=False)
+        monkeypatch.delenv("MCP_PROJECT_ROOT", raising=False)
+        local_path = tmp_path / "localhost_project"
+        local_path.mkdir()
+        configure_project_root()
+
+        # Build an explicit localhost-authority URI for the temp path.
+        drive_path = local_path.resolve().as_posix()
+        if ":" in drive_path:
+            # e.g. C:/Users/... → file://localhost/C:/Users/...
+            localhost_uri = f"file://localhost/{drive_path}"
+        else:
+            localhost_uri = f"file://localhost{drive_path}"
+
+        mock_root = MagicMock()
+        mock_root.uri = localhost_uri
+        ctx = MagicMock()
+        ctx.session.list_roots = AsyncMock(return_value=MagicMock(roots=[mock_root]))
+
+        result = await get_project_root(ctx)
+        assert result is not None
+        assert result.resolve() == local_path.resolve()
+        assert is_unc_or_network_path(result) is False
 
     @pytest.mark.asyncio
     async def test_roots_list_changed_cannot_replace_operator_pin(

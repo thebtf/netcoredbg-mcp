@@ -142,6 +142,7 @@ def parse_file_uri(uri: str) -> Path | None:
     Handles platform-specific path formats:
     - Unix: file:///home/user/project → /home/user/project
     - Windows: file:///C:/Users/project → C:\\Users\\project
+    - Localhost authority (RFC 8089): file://localhost/C:/path → C:\\path (local, not UNC)
     - Windows UNC: file://server/share → \\\\server\\share
 
     Args:
@@ -159,6 +160,10 @@ def parse_file_uri(uri: str) -> Path | None:
 
         # URL-decode the path component
         path_str = unquote(parsed.path)
+        netloc = (parsed.netloc or "").strip()
+        netloc_lower = netloc.lower()
+        # RFC 8089: file://localhost/... and loopback authorities are local filesystem paths.
+        is_local_authority = netloc_lower in {"", "localhost", "127.0.0.1", "[::1]"}
 
         # Handle Windows paths
         if sys.platform == "win32":
@@ -169,9 +174,13 @@ def parse_file_uri(uri: str) -> Path | None:
                 if path_str[2] == ":":
                     path_str = path_str[1:]  # Remove leading slash
 
-            # Handle UNC paths: file://server/share
-            if parsed.netloc:
-                path_str = f"\\\\{parsed.netloc}{path_str}"
+            # UNC only for non-local authorities: file://server/share
+            if netloc and not is_local_authority:
+                path_str = f"\\\\{netloc}{path_str}"
+        elif netloc and not is_local_authority:
+            # Non-Windows network file authorities are not used as local roots.
+            logger.warning(f"Unsupported non-local file URI authority: {uri}")
+            return None
 
         path = Path(path_str)
 
@@ -323,18 +332,22 @@ async def get_project_root(ctx: Context | None = None) -> Path | None:
         return _resolve_operator_project_root(config)
 
     # 2. Client MCP roots (fallback only; never UNC/network).
+    # Iterate every reported root so a rejected network/invalid entry cannot hide a
+    # later valid local root.
     if ctx is not None:
         try:
             list_roots_result = await ctx.session.list_roots()
             roots = list_roots_result.roots
             logger.info(f"MCP list_roots() returned {len(roots) if roots else 0} roots")
             if roots:
-                uri = str(roots[0].uri)
-                logger.info(f"Got root from client: {uri}")
-                path = _client_root_path_from_uri(uri)
-                if path is not None:
-                    logger.info(f"Using project root from MCP client: {path}")
-                    return path
+                for index, root in enumerate(roots):
+                    uri = str(root.uri)
+                    logger.info(f"Considering client root[{index}]: {uri}")
+                    path = _client_root_path_from_uri(uri)
+                    if path is not None:
+                        logger.info(f"Using project root from MCP client: {path}")
+                        return path
+                logger.info("All client MCP roots were rejected or inaccessible")
             else:
                 logger.info("MCP client did not provide any roots")
         except Exception as e:
