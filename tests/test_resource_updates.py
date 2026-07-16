@@ -182,6 +182,44 @@ async def test_blocked_subscriber_coalesces_to_one_live_task_per_uri() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_threads_refresh_publishes_state_and_threads_resources() -> None:
+    with patch("netcoredbg_mcp.session.manager.DAPClient"):
+        from netcoredbg_mcp.session import SessionManager
+
+        manager = SessionManager()
+
+    manager._client = SimpleNamespace(
+        threads=AsyncMock(
+            return_value=SimpleNamespace(
+                success=True,
+                body={"threads": [{"id": 7, "name": "Main"}]},
+            )
+        )
+    )
+    published: list[tuple[str, ...]] = []
+
+    async def record(uris: tuple[str, ...]) -> None:
+        published.append(uris)
+
+    manager.set_resource_update_callback(record)
+
+    await manager.get_threads()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert len(published) == 2
+    assert {uris for uris in published} == {(STATE_URI,), (THREADS_URI,)}
+
+    published.clear()
+    await manager.get_threads()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert published == []
+    await manager.close_resource_update_notifications()
+
+
+@pytest.mark.asyncio
 async def test_line_breakpoint_mutations_publish_one_final_resource_snapshot() -> None:
     with patch("netcoredbg_mcp.session.manager.DAPClient"):
         from netcoredbg_mcp.session import SessionManager

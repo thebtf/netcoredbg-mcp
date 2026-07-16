@@ -2034,7 +2034,7 @@ class SessionManager:
             ]
             if self._state.threads != threads:
                 self._state.threads = threads
-                self._publish_resource_updates(STATE_URI)
+                self._publish_resource_updates(STATE_URI, THREADS_URI)
             return threads
         return []
 
