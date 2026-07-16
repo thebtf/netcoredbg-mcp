@@ -56,6 +56,183 @@ public sealed class ProgressLoggingRelayTests
         }
     }
 
+    private sealed class ReadCounter
+    {
+        private readonly SemaphoreSlim _messages = new(0);
+        private int _count;
+
+        public int Count => Volatile.Read(ref _count);
+
+        public void Record()
+        {
+            Interlocked.Increment(ref _count);
+            _messages.Release();
+        }
+
+        public async Task<bool> WaitForCountAsync(int target, TimeSpan timeout)
+        {
+            using var timeoutCts = new CancellationTokenSource(timeout);
+            try
+            {
+                while (Count < target)
+                {
+                    await _messages.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+                }
+
+                return true;
+            }
+            catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
+            {
+                return false;
+            }
+        }
+    }
+
+    private sealed class CountingClientTransport(IClientTransport inner, ReadCounter counter)
+        : IClientTransport
+    {
+        public string Name => inner.Name;
+
+        public async Task<ITransport> ConnectAsync(CancellationToken cancellationToken = default)
+        {
+            var transport = await inner.ConnectAsync(cancellationToken).ConfigureAwait(false);
+            return new CountingTransport(transport, counter);
+        }
+
+        private sealed class CountingTransport : ITransport
+        {
+            private readonly ITransport _inner;
+
+            public CountingTransport(ITransport inner, ReadCounter counter)
+            {
+                _inner = inner;
+                MessageReader = new CountingChannelReader(inner.MessageReader, counter);
+            }
+
+            public string? SessionId => _inner.SessionId;
+
+            public ChannelReader<JsonRpcMessage> MessageReader { get; }
+
+            public Task SendMessageAsync(
+                JsonRpcMessage message,
+                CancellationToken cancellationToken = default) =>
+                _inner.SendMessageAsync(message, cancellationToken);
+
+            public ValueTask DisposeAsync() => _inner.DisposeAsync();
+        }
+
+        private sealed class CountingChannelReader(
+            ChannelReader<JsonRpcMessage> inner,
+            ReadCounter counter) : ChannelReader<JsonRpcMessage>
+        {
+            public override Task Completion => inner.Completion;
+
+            public override bool TryRead(out JsonRpcMessage item)
+            {
+                if (!inner.TryRead(out item!))
+                {
+                    return false;
+                }
+
+                counter.Record();
+                return true;
+            }
+
+            public override ValueTask<bool> WaitToReadAsync(
+                CancellationToken cancellationToken = default) =>
+                inner.WaitToReadAsync(cancellationToken);
+        }
+    }
+
+    private sealed class GatedWriteStream(Stream inner) : Stream
+    {
+        private readonly TaskCompletionSource _blockedWriteStarted =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _blocked;
+
+        public override bool CanRead => inner.CanRead;
+        public override bool CanSeek => inner.CanSeek;
+        public override bool CanWrite => inner.CanWrite;
+        public override long Length => inner.Length;
+        public override long Position
+        {
+            get => inner.Position;
+            set => inner.Position = value;
+        }
+
+        public void Block() => Volatile.Write(ref _blocked, 1);
+
+        public void Release()
+        {
+            Volatile.Write(ref _blocked, 0);
+            _release.TrySetResult();
+        }
+
+        public Task WaitUntilBlockedAsync(TimeSpan timeout) =>
+            _blockedWriteStarted.Task.WaitAsync(timeout);
+
+        public override void Flush() => inner.Flush();
+
+        public override Task FlushAsync(CancellationToken cancellationToken) =>
+            inner.FlushAsync(cancellationToken);
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            inner.Read(buffer, offset, count);
+
+        public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
+
+        public override void SetLength(long value) => inner.SetLength(value);
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            WaitIfBlockedAsync(CancellationToken.None).AsTask().GetAwaiter().GetResult();
+            inner.Write(buffer, offset, count);
+        }
+
+        public override async Task WriteAsync(
+            byte[] buffer,
+            int offset,
+            int count,
+            CancellationToken cancellationToken)
+        {
+            await WaitIfBlockedAsync(cancellationToken).ConfigureAwait(false);
+            await inner.WriteAsync(buffer, offset, count, cancellationToken).ConfigureAwait(false);
+        }
+
+        public override async ValueTask WriteAsync(
+            ReadOnlyMemory<byte> buffer,
+            CancellationToken cancellationToken = default)
+        {
+            await WaitIfBlockedAsync(cancellationToken).ConfigureAwait(false);
+            await inner.WriteAsync(buffer, cancellationToken).ConfigureAwait(false);
+        }
+
+        public override ValueTask DisposeAsync() => inner.DisposeAsync();
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                inner.Dispose();
+            }
+
+            base.Dispose(disposing);
+        }
+
+        private async ValueTask WaitIfBlockedAsync(CancellationToken cancellationToken)
+        {
+            if (Volatile.Read(ref _blocked) == 0)
+            {
+                return;
+            }
+
+            _blockedWriteStarted.TrySetResult();
+            await _release.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     /// <summary>
     /// Test-only transport wrapper that observes every message a real downstream <see cref="McpClient"/>
     /// receives in the exact order this wrapper's own single sequential reader loop consumed them from
@@ -502,6 +679,172 @@ public sealed class ProgressLoggingRelayTests
     }
 
     [Fact]
+    public async Task BlockedDownstreamNotification_DoesNotStopUpstreamReader()
+    {
+        var upstreamChannel = new DuplexChannel();
+        var downstreamChannel = new DuplexChannel();
+        var innerReadCounter = new ReadCounter();
+        var relayReadCounter = new ReadCounter();
+        var gatedOutput = new GatedWriteStream(downstreamChannel.ServerOutputStream);
+        var fakePython = StartProbeFakePython(upstreamChannel, steps: 2);
+        var (session, host) = ProgressLoggingComposition.Build(
+            () => new CountingClientTransport(upstreamChannel.CreateClientTransport(), innerReadCounter),
+            builder => builder.WithStreamServerTransport(
+                downstreamChannel.ServerInputStream,
+                gatedOutput),
+            observeRelayTransport: transport => new CountingClientTransport(transport, relayReadCounter));
+
+        await using var downstreamClient = await McpClient.CreateAsync(
+            downstreamChannel.CreateClientTransport());
+        var baselineInnerReads = innerReadCounter.Count;
+        var baselineRelayReads = relayReadCounter.Count;
+        gatedOutput.Block();
+
+        var call = downstreamClient.CallToolAsync(ProbeCall("token-backpressure")).AsTask();
+        await gatedOutput.WaitUntilBlockedAsync(TimeSpan.FromSeconds(10));
+        var consumedThroughResponse = await innerReadCounter.WaitForCountAsync(
+            baselineInnerReads + 5,
+            TimeSpan.FromMilliseconds(500));
+        Assert.Equal(baselineRelayReads, relayReadCounter.Count);
+        Assert.False(
+            call.IsCompleted,
+            "The terminal response escaped before the blocked notification was delivered.");
+
+        gatedOutput.Release();
+        var result = await call.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(baselineRelayReads + 1, relayReadCounter.Count);
+
+        await downstreamClient.DisposeAsync();
+        await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        host.Dispose();
+        await session.DisposeAsync();
+        await fakePython.DisposeAsync();
+
+        Assert.True(
+            consumedThroughResponse,
+            "The upstream reader stopped behind downstream notification I/O instead of draining Python output.");
+        Assert.False(result.IsError == true);
+    }
+
+    [Fact]
+    public async Task BlockedDownstreamNotification_QueueSaturationEndsSessionFailClosed()
+    {
+        var upstreamChannel = new DuplexChannel();
+        var downstreamChannel = new DuplexChannel();
+        var gatedOutput = new GatedWriteStream(downstreamChannel.ServerOutputStream);
+        var fakePython = StartProbeFakePython(upstreamChannel, steps: 80);
+        var (session, host) = ProgressLoggingComposition.Build(
+            upstreamChannel.CreateClientTransport,
+            builder => builder.WithStreamServerTransport(
+                downstreamChannel.ServerInputStream,
+                gatedOutput));
+
+        await using var downstreamClient = await McpClient.CreateAsync(
+            downstreamChannel.CreateClientTransport());
+        var sessionEnded = session.RunUntilSessionEndedAsync(CancellationToken.None);
+        gatedOutput.Block();
+        _ = downstreamClient.CallToolAsync(ProbeCall("token-saturation"));
+
+        await gatedOutput.WaitUntilBlockedAsync(TimeSpan.FromSeconds(10));
+        var completed = await Task.WhenAny(sessionEnded, Task.Delay(TimeSpan.FromSeconds(1)));
+        Exception? terminalFailure = null;
+        if (completed == sessionEnded)
+        {
+            try
+            {
+                await sessionEnded;
+            }
+            catch (Exception ex)
+            {
+                terminalFailure = ex;
+            }
+        }
+
+        gatedOutput.Release();
+        await downstreamClient.DisposeAsync();
+        await session.DisposeAsync();
+        await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        host.Dispose();
+        await fakePython.DisposeAsync();
+
+        Assert.Same(sessionEnded, completed);
+        Assert.NotNull(terminalFailure);
+    }
+
+    [Fact]
+    public async Task Cancellation_InvalidatesProgressQueuedBehindBlockedDownstream()
+    {
+        var upstreamChannel = new DuplexChannel();
+        var downstreamChannel = new DuplexChannel();
+        var readCounter = new ReadCounter();
+        var gatedOutput = new GatedWriteStream(downstreamChannel.ServerOutputStream);
+        ProgressLoggingRelay.NotificationState? notificationState = null;
+        const string progressTokenValue = "token-cancel-backlog";
+        var progressToken = new ProgressToken(progressTokenValue);
+        var fakePython = StartProbeFakePython(
+            upstreamChannel,
+            steps: 1000,
+            afterStep: async (_, cancellationToken) =>
+                await Task.Delay(TimeSpan.FromMilliseconds(20), cancellationToken).ConfigureAwait(false));
+        var (session, host) = ProgressLoggingComposition.Build(
+            () => new CountingClientTransport(upstreamChannel.CreateClientTransport(), readCounter),
+            builder => builder.WithStreamServerTransport(
+                downstreamChannel.ServerInputStream,
+                gatedOutput),
+            observeNotificationState: state => notificationState = state);
+
+        var log = new EventLog();
+        await using var downstreamClient = await CreateObservedDownstreamClientAsync(downstreamChannel, log);
+        var baselineReads = readCounter.Count;
+        gatedOutput.Block();
+
+        var slowCall = downstreamClient.CallToolAsync(ProbeCall(progressTokenValue));
+        await gatedOutput.WaitUntilBlockedAsync(TimeSpan.FromSeconds(10));
+        Assert.True(await readCounter.WaitForCountAsync(
+            baselineReads + 6,
+            TimeSpan.FromSeconds(2)));
+        var state = Assert.IsType<ProgressLoggingRelay.NotificationState>(notificationState);
+        Assert.True(state.IsActive(progressToken));
+        Assert.True(state.TryAuthorize(
+            MakeProgressNotification(progressToken),
+            out var queuedAuthorization));
+
+        var downstreamRequestSequence = log.Events.Single(e => e.Label == $"request|{progressTokenValue}").Sequence;
+        var downstreamRequest = Assert.IsType<JsonRpcRequest>(
+            log.Messages.Single(e => e.Sequence == downstreamRequestSequence).Message);
+        await downstreamClient.SendMessageAsync(new JsonRpcNotification
+        {
+            Method = NotificationMethods.CancelledNotification,
+            Params = JsonSerializer.SerializeToNode(
+                new CancelledNotificationParams { RequestId = downstreamRequest.Id },
+                McpJsonUtilities.DefaultOptions),
+        });
+        await WaitForEventAsync(log, label => label == $"cancel|{progressTokenValue}");
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => slowCall.AsTask());
+        using (var cancellationObserved = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+        {
+            while (state.IsAuthorized(queuedAuthorization))
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(10), cancellationObserved.Token);
+            }
+        }
+
+        gatedOutput.Release();
+        var followUp = await downstreamClient.CallToolAsync(
+            FastProbeCall("token-after-queued-cancel")).AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.False(followUp.IsError == true);
+        Assert.Single(
+            log.Events,
+            e => e.Label.StartsWith("progress|token-cancel-backlog|", StringComparison.Ordinal));
+
+        await downstreamClient.DisposeAsync();
+        await host.StopAsync();
+        host.Dispose();
+        await session.DisposeAsync();
+        await fakePython.DisposeAsync();
+    }
+
+    [Fact]
     public async Task Cancellation_DownstreamCancelsMidRun_CleansUpAndSessionStaysUsable()
     {
         var upstreamChannel = new DuplexChannel();
@@ -727,6 +1070,34 @@ public sealed class ProgressLoggingRelayTests
         }
     }
 
+    [Fact]
+    public void UpstreamErrorResponse_DeactivatesTokenBeforeLateProgress()
+    {
+        var state = new ProgressLoggingRelay.NotificationState();
+        var progressToken = new ProgressToken("error-terminal-token");
+        var upstreamRequestId = new RequestId("upstream-error-request");
+        Assert.NotNull(state.Begin(MakeProgressRequest(
+            new RequestId("downstream-error-request"),
+            progressToken)));
+        state.TrackUpstreamRequest(MakeProgressRequest(upstreamRequestId, progressToken));
+
+        var lateProgress = MakeProgressNotification(progressToken);
+        Assert.True(state.Allows(lateProgress));
+
+        state.ObserveUpstreamMessage(new JsonRpcError
+        {
+            Id = upstreamRequestId,
+            Error = new JsonRpcErrorDetail
+            {
+                Code = -32603,
+                Message = "probe failed",
+            },
+        });
+
+        Assert.False(state.IsActive(progressToken));
+        Assert.False(state.Allows(lateProgress));
+    }
+
     private static JsonRpcRequest MakeProgressRequest(RequestId requestId, ProgressToken progressToken) =>
         new()
         {
@@ -747,6 +1118,19 @@ public sealed class ProgressLoggingRelayTests
                     },
                 },
             },
+        };
+
+    private static JsonRpcNotification MakeProgressNotification(ProgressToken progressToken) =>
+        new()
+        {
+            Method = NotificationMethods.ProgressNotification,
+            Params = JsonSerializer.SerializeToNode(
+                new ProgressNotificationParams
+                {
+                    ProgressToken = progressToken,
+                    Progress = new ProgressNotificationValue { Progress = 1, Total = 1 },
+                },
+                McpJsonUtilities.DefaultOptions),
         };
 
     private static JsonRpcNotification MakeCancelledNotification(RequestId requestId) =>
@@ -914,9 +1298,9 @@ public sealed class ProgressLoggingRelayTests
         var results = await Task.WhenAll(callA.AsTask(), callB.AsTask()).WaitAsync(TimeSpan.FromSeconds(20));
 
         var notificationCountAtTerminal = log.Messages.Count(e => e.Message is JsonRpcNotification
-            {
-                Method: NotificationMethods.ProgressNotification or NotificationMethods.LoggingMessageNotification,
-            });
+        {
+            Method: NotificationMethods.ProgressNotification or NotificationMethods.LoggingMessageNotification,
+        });
         Assert.Equal(16, notificationCountAtTerminal);
         await Task.Delay(TimeSpan.FromMilliseconds(100));
         Assert.Equal(

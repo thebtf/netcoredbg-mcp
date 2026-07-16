@@ -23,13 +23,21 @@ internal static class ProgressLoggingComposition
         Func<IClientTransport> createUpstreamTransport,
         Action<IMcpServerBuilder> configureTransport,
         IReadOnlyList<Func<ServerCapabilities?, string?>>? requiredUpstreamCapabilityChecks = null,
-        Action<ProgressLoggingRelay.NotificationState>? observeNotificationState = null)
+        Action<ProgressLoggingRelay.NotificationState>? observeNotificationState = null,
+        Func<IClientTransport, IClientTransport>? observeRelayTransport = null)
     {
         var notificationState = new ProgressLoggingRelay.NotificationState();
         observeNotificationState?.Invoke(notificationState);
         RelaySession? session = null;
         session = new RelaySession(
-            () => ProgressLoggingRelay.WrapUpstreamTransport(createUpstreamTransport(), session!, notificationState),
+            () =>
+            {
+                var transport = ProgressLoggingRelay.WrapUpstreamTransport(
+                    createUpstreamTransport(),
+                    session!,
+                    notificationState);
+                return observeRelayTransport?.Invoke(transport) ?? transport;
+            },
             requiredUpstreamCapabilityChecks ?? RelayComposition.RequiredUpstreamCapabilityChecks);
 
         var catalog = new RelayRouteCatalog();

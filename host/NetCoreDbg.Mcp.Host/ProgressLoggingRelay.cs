@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Channels;
@@ -29,9 +28,11 @@ internal static class ProgressLoggingRelay
 {
     internal sealed class NotificationState
     {
-        private readonly ConcurrentDictionary<ProgressToken, byte> _activeProgressTokens = new();
+        private readonly object _gate = new();
+        private readonly Dictionary<ProgressToken, ProgressRegistration> _activeProgressTokens = [];
         // RequestId equality preserves JSON-RPC type: numeric 1 and string "1" are distinct keys.
-        private readonly ConcurrentDictionary<RequestId, ProgressToken> _progressTokensByRequestId = new();
+        private readonly Dictionary<RequestId, ProgressRegistration> _registrationsByRequestId = [];
+        private readonly Dictionary<RequestId, ProgressRegistration> _registrationsByUpstreamRequestId = [];
 
         public ProgressToken? Begin(JsonRpcRequest request)
         {
@@ -40,17 +41,24 @@ internal static class ProgressLoggingRelay
                 return null;
             }
 
-            _activeProgressTokens[progressToken] = 0;
-            _progressTokensByRequestId[request.Id] = progressToken;
+            var registration = new ProgressRegistration(progressToken);
+            lock (_gate)
+            {
+                _activeProgressTokens[progressToken] = registration;
+                _registrationsByRequestId[request.Id] = registration;
+            }
+
             return progressToken;
         }
 
-        public void End(RequestId requestId, ProgressToken? progressToken)
+        public void End(RequestId requestId)
         {
-            _progressTokensByRequestId.TryRemove(requestId, out _);
-            if (progressToken is { } activeProgressToken)
+            lock (_gate)
             {
-                _activeProgressTokens.TryRemove(activeProgressToken, out _);
+                if (_registrationsByRequestId.Remove(requestId, out var registration))
+                {
+                    InvalidateLocked(registration);
+                }
             }
         }
 
@@ -60,10 +68,9 @@ internal static class ProgressLoggingRelay
             {
                 var requestId = notification.Params?
                     .Deserialize<CancelledNotificationParams>(McpJsonUtilities.DefaultOptions)?.RequestId;
-                if (requestId is { } typedRequestId
-                    && _progressTokensByRequestId.TryRemove(typedRequestId, out var progressToken))
+                if (requestId is { } typedRequestId)
                 {
-                    _activeProgressTokens.TryRemove(progressToken, out _);
+                    End(typedRequestId);
                 }
             }
             catch (JsonException)
@@ -72,19 +79,122 @@ internal static class ProgressLoggingRelay
             }
         }
 
-        public bool IsActive(ProgressToken progressToken) => _activeProgressTokens.ContainsKey(progressToken);
+        public void TrackUpstreamRequest(JsonRpcRequest request)
+        {
+            if (!TryReadMetaProgressToken(request.Params, out var progressToken))
+            {
+                return;
+            }
 
-        public bool Allows(JsonRpcNotification notification)
+            lock (_gate)
+            {
+                if (_activeProgressTokens.TryGetValue(progressToken, out var registration))
+                {
+                    _registrationsByUpstreamRequestId[request.Id] = registration;
+                    registration.UpstreamRequestIds.Add(request.Id);
+                }
+            }
+        }
+
+        public void ObserveUpstreamMessage(JsonRpcMessage message)
+        {
+            var requestId = message switch
+            {
+                JsonRpcResponse response => response.Id,
+                JsonRpcError error => error.Id,
+                _ => (RequestId?)null,
+            };
+            if (requestId is not { } terminalRequestId)
+            {
+                return;
+            }
+
+            lock (_gate)
+            {
+                if (_registrationsByUpstreamRequestId.Remove(terminalRequestId, out var registration))
+                {
+                    registration.UpstreamRequestIds.Remove(terminalRequestId);
+                    RemoveActiveLocked(registration);
+                }
+            }
+        }
+
+        public bool IsActive(ProgressToken progressToken)
+        {
+            lock (_gate)
+            {
+                return _activeProgressTokens.ContainsKey(progressToken);
+            }
+        }
+
+        public bool Allows(JsonRpcNotification notification) =>
+            TryAuthorize(notification, out _);
+
+        public bool TryAuthorize(
+            JsonRpcNotification notification,
+            out DeliveryAuthorization authorization)
         {
             if (notification.Method == NotificationMethods.ProgressNotification)
             {
-                return notification.Params is JsonObject progressParams
-                    && TryReadProgressToken(progressParams["progressToken"], out var progressToken)
-                    && _activeProgressTokens.ContainsKey(progressToken);
+                if (notification.Params is not JsonObject progressParams
+                    || !TryReadProgressToken(progressParams["progressToken"], out var progressToken))
+                {
+                    authorization = default;
+                    return false;
+                }
+
+                return TryAuthorize(progressToken, out authorization);
             }
 
-            return !TryReadMetaProgressToken(notification.Params, out var loggingProgressToken)
-                || _activeProgressTokens.ContainsKey(loggingProgressToken);
+            if (TryReadMetaProgressToken(notification.Params, out var loggingProgressToken))
+            {
+                return TryAuthorize(loggingProgressToken, out authorization);
+            }
+
+            authorization = default;
+            return true;
+        }
+
+        public bool IsAuthorized(DeliveryAuthorization authorization) =>
+            authorization.IsValid;
+
+        private bool TryAuthorize(
+            ProgressToken progressToken,
+            out DeliveryAuthorization authorization)
+        {
+            lock (_gate)
+            {
+                if (_activeProgressTokens.TryGetValue(progressToken, out var registration)
+                    && !registration.IsInvalidated)
+                {
+                    authorization = new DeliveryAuthorization(registration);
+                    return true;
+                }
+            }
+
+            authorization = default;
+            return false;
+        }
+
+        private void InvalidateLocked(ProgressRegistration registration)
+        {
+            registration.Invalidate();
+            RemoveActiveLocked(registration);
+            foreach (var upstreamRequestId in registration.UpstreamRequestIds)
+            {
+                _registrationsByUpstreamRequestId.Remove(upstreamRequestId);
+            }
+
+            registration.UpstreamRequestIds.Clear();
+        }
+
+        private void RemoveActiveLocked(ProgressRegistration registration)
+        {
+            if (_activeProgressTokens.TryGetValue(registration.ProgressToken, out var activeRegistration)
+                && ReferenceEquals(activeRegistration, registration))
+            {
+                _activeProgressTokens.Remove(registration.ProgressToken);
+            }
         }
 
         private static bool TryReadMetaProgressToken(JsonNode? parameters, out ProgressToken progressToken)
@@ -119,6 +229,31 @@ internal static class ProgressLoggingRelay
 
             progressToken = default;
             return false;
+        }
+
+        public readonly struct DeliveryAuthorization
+        {
+            private readonly ProgressRegistration? _registration;
+
+            internal DeliveryAuthorization(ProgressRegistration registration)
+            {
+                _registration = registration;
+            }
+
+            internal bool IsValid => _registration is null || !_registration.IsInvalidated;
+        }
+
+        internal sealed class ProgressRegistration(ProgressToken progressToken)
+        {
+            private int _invalidated;
+
+            public ProgressToken ProgressToken { get; } = progressToken;
+
+            public HashSet<RequestId> UpstreamRequestIds { get; } = [];
+
+            public bool IsInvalidated => Volatile.Read(ref _invalidated) != 0;
+
+            public void Invalidate() => Interlocked.Exchange(ref _invalidated, 1);
         }
     }
 
@@ -193,14 +328,14 @@ internal static class ProgressLoggingRelay
 
             var requestId = request.Id;
             using var cancellationRegistration = cancellationToken.Register(
-                () => notificationState.End(requestId, progressToken));
+                () => notificationState.End(requestId));
             try
             {
                 await next(context, cancellationToken).ConfigureAwait(false);
             }
             finally
             {
-                notificationState.End(requestId, progressToken);
+                notificationState.End(requestId);
             }
         });
 
@@ -221,35 +356,25 @@ internal static class ProgressLoggingRelay
         });
     }
 
+    internal const int MaxPendingMessages = 64;
+
+    private static readonly TimeSpan NotificationSendTimeout = TimeSpan.FromSeconds(5);
+
     /// <summary>
-    /// Wraps the real upstream transport (production: <c>PythonBackendProcess.CreateUpstreamTransport()</c>;
-    /// tests: any real <see cref="IClientTransport"/>) so that <c>notifications/progress</c> and
-    /// <c>notifications/message</c> are forwarded downstream synchronously, in the exact order the
-    /// wrapped transport delivered them - never through
-    /// <see cref="McpClientHandlers.NotificationHandlers"/>.
-    ///
-    /// This closes a real reordering hazard verified directly against SDK 1.4.1's
-    /// <c>McpSessionHandler.ProcessMessagesCoreAsync</c>: every incoming message on a session - request,
-    /// response, or notification alike - is dispatched via an unawaited <c>_ = ProcessMessageAsync()</c>
-    /// so the transport's own read loop is never blocked. That is safe for the SDK's own request/response
-    /// correlation (each carries its own ID), but it means two *notifications* for the same or different
-    /// progress tokens, or a notification and the eventual response to the request it was progressing,
-    /// can have their <em>handler dispatch</em> - and therefore any relay forward triggered from within
-    /// that handler - complete out of the order they were actually read off the wire. No message filter
-    /// or notification-handler registration runs earlier than that dispatch, so no fix inside those
-    /// extension points can observe true wire order.
-    ///
-    /// The one place wire order is still guaranteed is the sequential reader loop that produces each
-    /// <see cref="ITransport.MessageReader"/> element in the first place. This wrapper's own single
-    /// reader loop consumes exactly that: for the two methods this module owns, it awaits the downstream
-    /// forward to completion before reading the next upstream message at all, which is what actually
-    /// proves both "per-token source order" and "no progress after the owning call's terminal result" -
-    /// the latter follows for free, since the response message itself cannot reach the wrapped channel
-    /// (and therefore cannot reach <c>ToolsRelay</c>'s pending request) until every progress notification
-    /// that precedes it on the wire has already been fully forwarded. Every other message - requests,
-    /// responses, and any notification method this module does not own - passes through completely
-    /// unchanged for the SDK's own normal (fire-and-forget) processing; this module claims no route
-    /// other than the two it registers in <see cref="Register"/>.
+    /// Wraps the real upstream transport with one bounded wire-order delivery queue. The upstream
+    /// reader only classifies and enqueues messages, so slow downstream notification I/O cannot hold
+    /// Python's sole stdout reader. One independent drain forwards owned notifications and releases
+    /// every other message to the SDK in the exact order received.
+    /// <para>
+    /// Upstream request IDs are associated with their progress tokens on the outgoing leg. Reading
+    /// the matching terminal response deactivates that token before any later wire message is
+    /// classified, while the ordered drain still guarantees that earlier notifications finish before
+    /// the response is released. Cancellation invalidates token-scoped items still waiting in the
+    /// queue; a send already handed to the downstream transport remains bounded by the send timeout.
+    /// Queue saturation, downstream send failure, or send timeout completes the wrapped transport with
+    /// an error rather than retaining unbounded state or releasing a response across an undelivered
+    /// notification.
+    /// </para>
     /// </summary>
     public static IClientTransport WrapUpstreamTransport(
         IClientTransport inner,
@@ -277,14 +402,35 @@ internal static class ProgressLoggingRelay
         private readonly RelaySession _session;
         private readonly NotificationState _notificationState;
         private readonly Channel<JsonRpcMessage> _passthrough =
-            Channel.CreateUnbounded<JsonRpcMessage>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
+            Channel.CreateUnbounded<JsonRpcMessage>(new UnboundedChannelOptions
+            {
+                SingleReader = true,
+                SingleWriter = true,
+            });
+        private readonly Channel<DeliveryItem> _delivery =
+            Channel.CreateBounded<DeliveryItem>(new BoundedChannelOptions(MaxPendingMessages)
+            {
+                SingleReader = true,
+                SingleWriter = true,
+                FullMode = BoundedChannelFullMode.Wait,
+            });
+        private readonly CancellationTokenSource _pipelineCts;
         private readonly Task _pumpTask;
+        private readonly Task _drainTask;
+        private Exception? _failure;
+        private int _disposed;
 
-        public OrderPreservingTransport(ITransport inner, RelaySession session, NotificationState notificationState)
+        public OrderPreservingTransport(
+            ITransport inner,
+            RelaySession session,
+            NotificationState notificationState)
         {
             _inner = inner;
             _session = session;
             _notificationState = notificationState;
+            _pipelineCts = CancellationTokenSource.CreateLinkedTokenSource(
+                session.SessionEndingToken);
+            _drainTask = DrainAsync();
             _pumpTask = PumpAsync();
         }
 
@@ -292,85 +438,233 @@ internal static class ProgressLoggingRelay
 
         public ChannelReader<JsonRpcMessage> MessageReader => _passthrough.Reader;
 
-        public Task SendMessageAsync(JsonRpcMessage message, CancellationToken cancellationToken = default) =>
-            _inner.SendMessageAsync(message, cancellationToken);
+        public async Task SendMessageAsync(
+            JsonRpcMessage message,
+            CancellationToken cancellationToken = default)
+        {
+            if (message is JsonRpcRequest request)
+            {
+                _notificationState.TrackUpstreamRequest(request);
+            }
 
-        /// <summary>
-        /// The one sequential reader of <see cref="_inner"/>'s <see cref="ITransport.MessageReader"/>:
-        /// forwards this module's two owned notification methods downstream and awaits completion before
-        /// reading the next upstream message at all; every other message is handed off to
-        /// <see cref="_passthrough"/> unchanged for the SDK's own normal processing.
-        /// </summary>
+            await _inner.SendMessageAsync(message, cancellationToken).ConfigureAwait(false);
+        }
+
         private async Task PumpAsync()
+        {
+            try
+            {
+                await foreach (var message in _inner.MessageReader
+                    .ReadAllAsync(_pipelineCts.Token)
+                    .ConfigureAwait(false))
+                {
+                    _notificationState.ObserveUpstreamMessage(message);
+
+                    if (message is JsonRpcNotification
+                        {
+                            Method: NotificationMethods.ProgressNotification
+                                or NotificationMethods.LoggingMessageNotification,
+                        } notification)
+                    {
+                        if (!_notificationState.TryAuthorize(notification, out var authorization)
+                            || !await ShouldForwardNotificationAsync(notification).ConfigureAwait(false))
+                        {
+                            continue;
+                        }
+
+                        Enqueue(new DeliveryItem(
+                            notification,
+                            IsOwnedNotification: true,
+                            authorization));
+                        continue;
+                    }
+
+                    Enqueue(new DeliveryItem(message, IsOwnedNotification: false));
+                }
+
+                _delivery.Writer.TryComplete();
+            }
+            catch (OperationCanceledException) when (_pipelineCts.IsCancellationRequested)
+            {
+                _delivery.Writer.TryComplete(_failure);
+            }
+            catch (Exception ex)
+            {
+                Fail(ex);
+            }
+        }
+
+        private async Task<bool> ShouldForwardNotificationAsync(
+            JsonRpcNotification notification)
+        {
+
+            if (notification.Method == NotificationMethods.LoggingMessageNotification
+                && (!_session.DownstreamReady.IsCompletedSuccessfully
+                    || (await _session.UpstreamAsync(_pipelineCts.Token)
+                        .ConfigureAwait(false)).ServerCapabilities?.Logging is null))
+            {
+                return false;
+            }
+
+            return _session.Downstream is not null;
+        }
+
+        private void Enqueue(DeliveryItem item)
+        {
+            if (_delivery.Writer.TryWrite(item))
+            {
+                return;
+            }
+
+            if (_pipelineCts.IsCancellationRequested)
+            {
+                throw new OperationCanceledException(_pipelineCts.Token);
+            }
+
+            var failure = new InvalidOperationException(
+                $"Progress/log delivery queue exceeded its {MaxPendingMessages}-message bound.");
+            Fail(failure);
+            throw failure;
+        }
+
+        private async Task DrainAsync()
         {
             Exception? failure = null;
             try
             {
-                await foreach (var message in _inner.MessageReader.ReadAllAsync().ConfigureAwait(false))
+                await foreach (var item in _delivery.Reader
+                    .ReadAllAsync(_pipelineCts.Token)
+                    .ConfigureAwait(false))
                 {
-                    if (message is JsonRpcNotification
-                        {
-                            Method: NotificationMethods.ProgressNotification or NotificationMethods.LoggingMessageNotification,
-                        } notification)
+                    if (item.IsOwnedNotification)
                     {
-                        if (!_notificationState.Allows(notification))
+                        if (!_notificationState.IsAuthorized(item.Authorization))
                         {
                             continue;
                         }
 
-                        if (notification.Method == NotificationMethods.LoggingMessageNotification
-                            && (!_session.DownstreamReady.IsCompletedSuccessfully
-                                || (await _session.UpstreamAsync(CancellationToken.None).ConfigureAwait(false))
-                                    .ServerCapabilities?.Logging is null))
-                        {
-                            continue;
-                        }
-
-                        if (_session.Downstream is { } downstream)
-                        {
-                            try
-                            {
-                                await RelaySession.ForwardNotificationAsync(downstream, notification, _session.SessionEndingToken)
-                                    .ConfigureAwait(false);
-                            }
-                            catch
-                            {
-                                // A downstream send failure for one notification must not stop the
-                                // upstream pump or corrupt session teardown; downstream disconnect and
-                                // session-ending cleanup are RelaySession's own responsibility, not this
-                                // pump's.
-                            }
-                        }
-
-                        continue;
+                        await ForwardNotificationAsync((JsonRpcNotification)item.Message)
+                            .ConfigureAwait(false);
                     }
-
-                    await _passthrough.Writer.WriteAsync(message).ConfigureAwait(false);
+                    else
+                    {
+                        await _passthrough.Writer
+                            .WriteAsync(item.Message, _pipelineCts.Token)
+                            .ConfigureAwait(false);
+                    }
                 }
+            }
+            catch (OperationCanceledException) when (_pipelineCts.IsCancellationRequested)
+            {
+                failure = _failure;
             }
             catch (Exception ex)
             {
                 failure = ex;
+                Fail(ex);
             }
             finally
             {
-                _passthrough.Writer.TryComplete(failure);
+                _passthrough.Writer.TryComplete(failure ?? _failure);
+            }
+        }
+
+        private async Task ForwardNotificationAsync(JsonRpcNotification notification)
+        {
+            var downstream = _session.Downstream
+                ?? throw new InvalidOperationException(
+                    "Downstream session disappeared while a notification was queued.");
+            using var sendCts = CancellationTokenSource.CreateLinkedTokenSource(
+                _pipelineCts.Token);
+            var sendTask = RelaySession.ForwardNotificationAsync(
+                downstream,
+                notification,
+                sendCts.Token);
+
+            try
+            {
+                await sendTask.WaitAsync(
+                    NotificationSendTimeout,
+                    _pipelineCts.Token).ConfigureAwait(false);
+            }
+            catch (TimeoutException ex)
+            {
+                sendCts.Cancel();
+                ObserveLateFailure(sendTask);
+                throw new TimeoutException(
+                    $"Downstream {notification.Method} send exceeded "
+                    + $"{NotificationSendTimeout.TotalSeconds:g}-second bound.",
+                    ex);
+            }
+            catch (OperationCanceledException ex)
+                when (!_pipelineCts.IsCancellationRequested)
+            {
+                ObserveLateFailure(sendTask);
+                throw new TimeoutException(
+                    $"Downstream {notification.Method} send exceeded "
+                    + $"{NotificationSendTimeout.TotalSeconds:g}-second bound.",
+                    ex);
+            }
+        }
+
+        private static void ObserveLateFailure(Task task) =>
+            _ = task.ContinueWith(
+                static completed => _ = completed.Exception,
+                CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted
+                    | TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+
+        private void Fail(Exception failure)
+        {
+            var recordedFailure = Interlocked.CompareExchange(
+                ref _failure,
+                failure,
+                null) ?? failure;
+            _delivery.Writer.TryComplete(recordedFailure);
+            _passthrough.Writer.TryComplete(recordedFailure);
+            try
+            {
+                _pipelineCts.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+                // Disposal already completed the same terminal transition.
             }
         }
 
         public async ValueTask DisposeAsync()
         {
-            await _inner.DisposeAsync().ConfigureAwait(false);
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
 
+            _pipelineCts.Cancel();
+            _delivery.Writer.TryComplete();
             try
             {
-                await _pumpTask.ConfigureAwait(false);
+                await _inner.DisposeAsync().ConfigureAwait(false);
             }
-            catch
+            finally
             {
-                // The pump's own failure (if any) already completed _passthrough with it; nothing
-                // further to propagate from disposal itself.
+                try
+                {
+                    await Task.WhenAll(_pumpTask, _drainTask).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Pipeline failures already complete MessageReader with their exact cause.
+                }
+
+                _passthrough.Writer.TryComplete(_failure);
+                _pipelineCts.Dispose();
             }
         }
+
+        private readonly record struct DeliveryItem(
+            JsonRpcMessage Message,
+            bool IsOwnedNotification,
+            NotificationState.DeliveryAuthorization Authorization = default);
     }
 }
