@@ -1,5 +1,6 @@
 """Tests for project root detection utilities."""
 
+import asyncio
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -292,6 +293,30 @@ class TestGetProjectRoot:
         ctx.session.list_roots = AsyncMock(return_value=MagicMock(roots=[]))
 
         result = await get_project_root(ctx)
+        assert result == tmp_path
+
+    @pytest.mark.asyncio
+    async def test_falls_back_when_client_roots_never_reply(self, tmp_path):
+        """A stalled roots-capable client must not deadlock project resolution."""
+        (tmp_path / "Solution.sln").touch()
+        configure_project_root(
+            use_project_from_cwd=True,
+            startup_cwd=str(tmp_path),
+        )
+
+        async def never_reply():
+            await asyncio.Event().wait()
+
+        ctx = MagicMock()
+        ctx.session.list_roots = AsyncMock(side_effect=never_reply)
+
+        with patch(
+            "netcoredbg_mcp.utils.project.CLIENT_ROOTS_TIMEOUT_SECONDS",
+            0.01,
+            create=True,
+        ):
+            result = await asyncio.wait_for(get_project_root(ctx), timeout=0.25)
+
         assert result == tmp_path
 
     @pytest.mark.asyncio

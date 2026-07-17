@@ -18,6 +18,7 @@ hardened so relayed/downstream client roots cannot override operator intent.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
@@ -31,6 +32,8 @@ if TYPE_CHECKING:
     from mcp.server.fastmcp import Context
 
 logger = logging.getLogger(__name__)
+
+CLIENT_ROOTS_TIMEOUT_SECONDS = 2.0
 
 
 @dataclass
@@ -334,7 +337,10 @@ async def get_project_root(ctx: Context | None = None) -> Path | None:
     # later valid local root.
     if ctx is not None:
         try:
-            list_roots_result = await ctx.session.list_roots()
+            list_roots_result = await asyncio.wait_for(
+                ctx.session.list_roots(),
+                timeout=CLIENT_ROOTS_TIMEOUT_SECONDS,
+            )
             roots = list_roots_result.roots
             logger.info(f"MCP list_roots() returned {len(roots) if roots else 0} roots")
             if roots:
