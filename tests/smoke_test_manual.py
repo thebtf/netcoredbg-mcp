@@ -155,6 +155,54 @@ async def _get_debug_state_via_tool(session: SessionManager) -> dict[str, Any]:
     return await mcp.tools["get_debug_state"]()
 
 
+async def test_project_root_timeout_fallback():
+    """Engram #380: an unanswered roots/list request must fail over promptly."""
+    print("\n0. PROJECT ROOT TIMEOUT FALLBACK (ENGRAM #380)")
+    from netcoredbg_mcp.utils import project as project_utils
+
+    previous_config = project_utils.get_config()
+    had_timeout = hasattr(project_utils, "CLIENT_ROOTS_TIMEOUT_SECONDS")
+    previous_timeout = getattr(project_utils, "CLIENT_ROOTS_TIMEOUT_SECONDS", None)
+
+    async def never_reply():
+        await asyncio.Event().wait()
+
+    ctx = SimpleNamespace(session=SimpleNamespace(list_roots=never_reply))
+    try:
+        project_utils.configure_project_root(
+            use_project_from_cwd=True,
+            startup_cwd=BASE,
+        )
+        project_utils.CLIENT_ROOTS_TIMEOUT_SECONDS = 0.01
+        try:
+            resolved = await asyncio.wait_for(
+                project_utils.get_project_root(ctx),
+                timeout=0.25,
+            )
+        except asyncio.TimeoutError:
+            check(
+                "Project root: unanswered roots/list falls back",
+                False,
+                "resolution exceeded 250 ms",
+            )
+        else:
+            check(
+                "Project root: unanswered roots/list falls back",
+                resolved is not None and os.path.samefile(resolved, BASE),
+                f"resolved={resolved}",
+            )
+    finally:
+        project_utils.configure_project_root(
+            use_project_from_cwd=previous_config.use_project_from_cwd,
+            explicit_project_path=previous_config.explicit_project_path,
+            startup_cwd=previous_config.startup_cwd,
+        )
+        if had_timeout:
+            project_utils.CLIENT_ROOTS_TIMEOUT_SECONDS = previous_timeout
+        else:
+            del project_utils.CLIENT_ROOTS_TIMEOUT_SECONDS
+
+
 # ─────────────────────────────────────────────────────────────
 # Scenario 1: Hit counting + breakpoint fundamentals
 # ─────────────────────────────────────────────────────────────
@@ -6483,6 +6531,7 @@ def get_scenarios():
         ("Tracepoint Performance", test_tracepoint_performance),
         ("Tracepoint Auto-Resume", test_tracepoint_auto_resume),
         ("Path Validation", test_path_validation_worktrees),
+        ("Project Root Timeout Fallback", test_project_root_timeout_fallback),
         ("Heartbeat During Wait", test_heartbeat_during_wait),
         ("Runtime Hygiene Preflight", test_runtime_hygiene_preflight),
         ("Instrumentation Group Lifecycle", test_instrumentation_group_lifecycle),
