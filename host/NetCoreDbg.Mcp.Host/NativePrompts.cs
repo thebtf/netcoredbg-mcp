@@ -165,6 +165,9 @@ internal static partial class NativePrompts
 
     private static GetPromptResult GetPrompt(GetPromptRequestParams request)
     {
+        // Direct Python parses arguments as dict[str, str] before prompt lookup or render.
+        ValidateArguments(request.Arguments);
+
         if (!CatalogByName.TryGetValue(request.Name, out var prompt))
         {
             // Matches direct Python's FastMCP.get_prompt(): "raise ValueError(f"Unknown
@@ -191,11 +194,27 @@ internal static partial class NativePrompts
         return new GetPromptResult { Description = prompt.Description, Messages = messages };
     }
 
+    private static void ValidateArguments(IDictionary<string, JsonElement>? arguments)
+    {
+        if (arguments is null)
+        {
+            return;
+        }
+
+        foreach (var element in arguments.Values)
+        {
+            _ = StringArgument(element);
+        }
+    }
+
     private static McpProtocolException UnknownPromptError(string name) =>
         new($"Unknown prompt: {name}", (McpErrorCode)0);
 
     private static McpProtocolException MissingRequiredArgumentError(string name) =>
         new($"Missing required arguments: {{'{name}'}}", (McpErrorCode)0);
+
+    private static McpProtocolException InvalidRequestParametersError() =>
+        new("Invalid request parameters", McpErrorCode.InvalidParams);
 
     // ── Message builders for the six argument-less prompts ──────────────
 
@@ -245,18 +264,21 @@ internal static partial class NativePrompts
             throw MissingRequiredArgumentError(name);
         }
 
-        return element.ValueKind == JsonValueKind.String ? element.GetString()! : element.GetRawText();
+        return StringArgument(element);
     }
 
     private static string OptionalArgument(IDictionary<string, JsonElement>? arguments, string name, string defaultValue)
     {
-        if (arguments is not null
-            && arguments.TryGetValue(name, out var element)
-            && element.ValueKind == JsonValueKind.String)
+        if (arguments is null || !arguments.TryGetValue(name, out var element))
         {
-            return element.GetString()!;
+            return defaultValue;
         }
 
-        return defaultValue;
+        return StringArgument(element);
     }
+
+    private static string StringArgument(JsonElement element) =>
+        element.ValueKind == JsonValueKind.String
+            ? element.GetString()!
+            : throw InvalidRequestParametersError();
 }

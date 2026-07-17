@@ -1,3 +1,4 @@
+using System.Text.Json;
 using ModelContextProtocol;
 using Xunit;
 
@@ -107,6 +108,35 @@ public sealed class PromptErrorParityTests
         var pythonException = await Assert.ThrowsAsync<McpProtocolException>(
             () => _python.Server.Client.GetPromptAsync("debug-scenario", arguments).AsTask());
 
+        Assert.Equal(pythonException.Message, nativeException.Message);
+    }
+
+    [Theory]
+    [InlineData("investigate", "symptom", "123")]
+    [InlineData("investigate", "app_type", "{\"kind\":\"console\"}")]
+    [InlineData("nonexistent-prompt", "extra", "null")]
+    public async Task GetPrompt_NonStringArgument_MatchesDirectPythonValidationError(
+        string promptName,
+        string argumentName,
+        string argumentJson)
+    {
+        await using var native = await NativePromptsHost.StartAsync();
+        var arguments = promptName switch
+        {
+            "investigate" => new Dictionary<string, object?> { ["symptom"] = "app crashes" },
+            "nonexistent-prompt" => new Dictionary<string, object?>(),
+            _ => throw new ArgumentOutOfRangeException(nameof(promptName), promptName, null),
+        };
+        arguments[argumentName] = JsonSerializer.Deserialize<JsonElement>(argumentJson);
+
+        var pythonException = await Assert.ThrowsAsync<McpProtocolException>(
+            () => _python.Server.Client.GetPromptAsync(promptName, arguments).AsTask());
+        Assert.Equal(McpErrorCode.InvalidParams, pythonException.ErrorCode);
+        Assert.Equal("Request failed (remote): Invalid request parameters", pythonException.Message);
+
+        var nativeException = await Assert.ThrowsAsync<McpProtocolException>(
+            () => native.Client.GetPromptAsync(promptName, arguments).AsTask());
+        Assert.Equal(pythonException.ErrorCode, nativeException.ErrorCode);
         Assert.Equal(pythonException.Message, nativeException.Message);
     }
 
