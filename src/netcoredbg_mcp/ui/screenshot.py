@@ -25,6 +25,48 @@ logger = logging.getLogger(__name__)
 SCREENSHOT_MAX_WIDTH = int(os.environ.get("NETCOREDBG_SCREENSHOT_MAX_WIDTH", "1568"))
 SCREENSHOT_QUALITY = int(os.environ.get("NETCOREDBG_SCREENSHOT_QUALITY", "80"))
 
+PROBABLE_BLACK_DARK_LUMINANCE = 16
+PROBABLE_BLACK_MAX_MEAN_LUMINANCE = 8.0
+PROBABLE_BLACK_MIN_DARK_PIXEL_FRACTION = 0.995
+
+
+def analyze_screenshot_frame(image_data: bytes) -> dict[str, Any]:
+    """Classify whether encoded screenshot bytes are overwhelmingly near-black."""
+    from PIL import Image
+
+    with Image.open(io.BytesIO(image_data)) as image:
+        grayscale = image.convert("L")
+
+    try:
+        histogram = grayscale.histogram()
+        pixel_count = grayscale.width * grayscale.height
+        luminance_sum = sum(value * count for value, count in enumerate(histogram))
+        luminance_square_sum = sum(value * value * count for value, count in enumerate(histogram))
+        mean_luminance = luminance_sum / pixel_count
+        variance = max(
+            0.0,
+            (luminance_square_sum / pixel_count) - (mean_luminance * mean_luminance),
+        )
+        dark_pixel_fraction = sum(histogram[: PROBABLE_BLACK_DARK_LUMINANCE + 1]) / pixel_count
+    finally:
+        grayscale.close()
+
+    probable_black = (
+        mean_luminance <= PROBABLE_BLACK_MAX_MEAN_LUMINANCE
+        and dark_pixel_fraction >= PROBABLE_BLACK_MIN_DARK_PIXEL_FRACTION
+    )
+    return {
+        "probable_black": probable_black,
+        "width": image.width,
+        "height": image.height,
+        "mean_luminance": round(mean_luminance, 4),
+        "luminance_variance": round(variance, 4),
+        "dark_pixel_fraction": round(dark_pixel_fraction, 6),
+        "dark_luminance_threshold": PROBABLE_BLACK_DARK_LUMINANCE,
+        "max_mean_luminance": PROBABLE_BLACK_MAX_MEAN_LUMINANCE,
+        "minimum_dark_pixel_fraction": PROBABLE_BLACK_MIN_DARK_PIXEL_FRACTION,
+    }
+
 
 def create_preview(
     image_data: bytes,
