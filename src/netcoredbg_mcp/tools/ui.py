@@ -1430,6 +1430,7 @@ def register_ui_tools(
             # Validate format against allow-list
             safe_format = format if format in valid_formats else "webp"
             bridge_screenshot: dict[str, Any] | None = None
+            foreground_mutation_attempted = False
             png_bytes: bytes
 
             pid = session.state.process_id
@@ -1447,6 +1448,9 @@ def register_ui_tools(
 
                 if isinstance(ui, FlaUIBackend):
                     bridge_result = await ui.client.call("screenshot", {})
+                    foreground_mutation_attempted = (
+                        _stealth_response_mode(bridge_result) == "flash-focus"
+                    )
                     if not isinstance(bridge_result, dict) or "base64" not in bridge_result:
                         logger.warning(
                             "screenshot: bridge returned invalid screenshot response; "
@@ -1478,9 +1482,6 @@ def register_ui_tools(
                 lambda: analyze_screenshot_frame(png_bytes),
             )
             if frame_analysis["probable_black"]:
-                foreground_mutation_attempted = bool(
-                    bridge_screenshot and bridge_screenshot.get("fallback") == "flash-focus"
-                )
                 return _probable_black_frame_response(
                     frame_analysis,
                     retry_tool="ui_take_screenshot",
@@ -1615,6 +1616,7 @@ def register_ui_tools(
                 lambda: analyze_screenshot_frame(png_bytes),
             )
             if frame_analysis["probable_black"]:
+                _last_annotation = None
                 return _probable_black_frame_response(
                     frame_analysis,
                     retry_tool="ui_take_annotated_screenshot",

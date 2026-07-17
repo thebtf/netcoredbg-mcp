@@ -64,6 +64,57 @@ async def test_ui_take_screenshot_rejects_probable_black_without_foreground_muta
     assert "ui_bring_to_front" in response["data"]["next_step"]
 
 
+@pytest.mark.parametrize(
+    "bridge_result",
+    [
+        pytest.param({"fallback": "flash-focus"}, id="fallback"),
+        pytest.param({"method": "flash-focus"}, id="method"),
+        pytest.param({"flash_ms": 80}, id="flash-duration"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_ui_take_screenshot_preserves_bridge_foreground_mutation_on_invalid_response(
+    capturing_mcp,
+    monkeypatch,
+    bridge_result,
+) -> None:
+    from unittest.mock import AsyncMock, patch
+
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    black_png = _png((0, 0, 0))
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._process_id = 42
+    backend._client = SimpleNamespace(
+        call=AsyncMock(return_value=bridge_result),
+        is_running=True,
+    )
+    monkeypatch.setattr("netcoredbg_mcp.ui.screenshot.get_hwnd_for_pid", lambda _pid: 123)
+    monkeypatch.setattr(
+        "netcoredbg_mcp.ui.screenshot.capture_window",
+        lambda _hwnd: (black_png, 64, 64),
+    )
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=True,
+        session_id=None,
+    )
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(capturing_mcp, session, check_session_access=lambda _ctx: None)
+        response = await capturing_mcp.tools["ui_take_screenshot"](
+            SimpleNamespace(),
+            format="png",
+        )
+
+    assert response.get("classification") == "PROBABLE_BLACK_FRAME", response
+    assert response["data"]["foreground_mutation_attempted"] is True
+    backend._client.call.assert_awaited_once_with("screenshot", {})
+
+
 @pytest.mark.asyncio
 async def test_ui_take_annotated_screenshot_rejects_black_before_annotation(
     capturing_mcp,
@@ -105,6 +156,80 @@ async def test_ui_take_annotated_screenshot_rejects_black_before_annotation(
     assert isinstance(response, dict)
     assert response["classification"] == "PROBABLE_BLACK_FRAME"
     assert response["data"]["foreground_mutation_attempted"] is False
+
+
+@pytest.mark.asyncio
+async def test_black_annotated_capture_invalidates_cached_click_targets(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    from unittest.mock import AsyncMock, patch
+
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.pywinauto_backend import PywinautoBackend
+
+    captures = iter(
+        [
+            (_png((255, 255, 255), (120, 80)), 120, 80),
+            (_png((0, 0, 0), (120, 80)), 120, 80),
+        ]
+    )
+    backend = PywinautoBackend.__new__(PywinautoBackend)
+    backend._ui = SimpleNamespace(process_id=42, _app=object())
+    backend.click_at = AsyncMock()
+
+    def fake_get_window_rect(_hwnd, rect_ptr):
+        rect = rect_ptr._obj
+        rect.left = 100
+        rect.top = 200
+        rect.right = 220
+        rect.bottom = 280
+        return True
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.screenshot.get_hwnd_for_pid", lambda _pid: 555)
+    monkeypatch.setattr(
+        "netcoredbg_mcp.ui.screenshot.capture_window",
+        lambda _hwnd: next(captures),
+    )
+    monkeypatch.setattr(
+        "netcoredbg_mcp.ui.screenshot.collect_visible_elements",
+        lambda _app, _max_depth, _interactive_only: [
+            {
+                "id": 7,
+                "name": "Save",
+                "type": "Button",
+                "automationId": "saveButton",
+                "bounds": {"x": 110, "y": 220, "width": 40, "height": 20},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "ctypes.windll",
+        SimpleNamespace(user32=SimpleNamespace(GetWindowRect=fake_get_window_rect)),
+        raising=False,
+    )
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+        session_id=None,
+    )
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(capturing_mcp, session, check_session_access=lambda _ctx: None)
+        first = await capturing_mcp.tools["ui_take_annotated_screenshot"](SimpleNamespace())
+        rejected = await capturing_mcp.tools["ui_take_annotated_screenshot"](SimpleNamespace())
+        click = await capturing_mcp.tools["ui_click_annotated"](
+            SimpleNamespace(),
+            element_id=7,
+            generation=1,
+        )
+
+    assert isinstance(first, list)
+    assert rejected["classification"] == "PROBABLE_BLACK_FRAME"
+    assert click["error"].startswith("No annotation data")
+    backend.click_at.assert_not_awaited()
 
 
 @pytest.mark.asyncio
