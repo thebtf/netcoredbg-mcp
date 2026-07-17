@@ -188,7 +188,7 @@ async def test_project_root_timeout_fallback():
         else:
             check(
                 "Project root: unanswered roots/list falls back",
-                os.path.samefile(str(resolved), BASE),
+                resolved is not None and os.path.samefile(resolved, BASE),
                 f"resolved={resolved}",
             )
     finally:
