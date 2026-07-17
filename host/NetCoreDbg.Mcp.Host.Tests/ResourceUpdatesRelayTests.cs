@@ -60,7 +60,9 @@ public sealed class ResourceUpdatesRelayTests
         public Task WaitUntilBlockedAsync(TimeSpan timeout) =>
             _blockedWriteStarted.Task.WaitAsync(timeout);
     }
-    private sealed class TerminalWriteGate(RequestId terminalId)
+    private sealed class TerminalWriteGate(
+        RequestId terminalId,
+        bool ignoreTerminalCancellation = false)
     {
         private readonly TaskCompletionSource _resourceWriteStarted =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -92,15 +94,19 @@ public sealed class ResourceUpdatesRelayTests
                     JsonRpcError error => error.Id,
                     _ => (RequestId?)null,
                 };
+                var nextCancellationToken = cancellationToken;
                 if (responseId is { } id
                     && id.Equals(terminalId)
                     && Interlocked.CompareExchange(ref _terminalWriteClaimed, 1, 0) == 0)
                 {
                     _terminalWriteStarted.TrySetResult();
-                    await _releaseTerminal.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    nextCancellationToken = ignoreTerminalCancellation
+                        ? CancellationToken.None
+                        : cancellationToken;
+                    await _releaseTerminal.Task.WaitAsync(nextCancellationToken).ConfigureAwait(false);
                 }
 
-                await next(context, cancellationToken).ConfigureAwait(false);
+                await next(context, nextCancellationToken).ConfigureAwait(false);
             });
 
         public Task WaitUntilResourceBlockedAsync(TimeSpan timeout) =>
@@ -112,6 +118,38 @@ public sealed class ResourceUpdatesRelayTests
         public void ReleaseResource() => _releaseResource.TrySetResult();
 
         public void ReleaseTerminal() => _releaseTerminal.TrySetResult();
+    }
+
+    private sealed class CancellationHandlingGate(RequestId requestId)
+    {
+        private readonly TaskCompletionSource _entered =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void Configure(McpServerOptions options) =>
+            options.Filters.Message.IncomingFilters.Add(next => async (context, cancellationToken) =>
+            {
+                if (context.JsonRpcMessage is JsonRpcNotification
+                    {
+                        Method: NotificationMethods.CancelledNotification,
+                    } cancellation
+                    && cancellation.Params?
+                        .Deserialize<CancelledNotificationParams>(McpJsonUtilities.DefaultOptions)
+                        ?.RequestId is { } cancellationRequestId
+                    && cancellationRequestId.Equals(requestId))
+                {
+                    _entered.TrySetResult();
+                    await _release.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                await next(context, cancellationToken).ConfigureAwait(false);
+            });
+
+        public Task WaitUntilEnteredAsync(TimeSpan timeout) =>
+            _entered.Task.WaitAsync(timeout);
+
+        public void Release() => _release.TrySetResult();
     }
 
 
@@ -226,7 +264,9 @@ public sealed class ResourceUpdatesRelayTests
         };
     private static McpServerOptions ReadAheadPythonOptions(
         bool error,
-        TaskCompletionSource tailSent)
+        TaskCompletionSource tailSent,
+        Task? responseRelease = null,
+        TaskCompletionSource? requestStarted = null)
     {
         var terminalArmed = 0;
         var options = SubscribablePythonOptions(callTool: async (context, cancellationToken) =>
@@ -234,6 +274,12 @@ public sealed class ResourceUpdatesRelayTests
             await context.Server.SendMessageAsync(
                 ResourceUpdated(StateUri, marker: "u1"),
                 cancellationToken).ConfigureAwait(false);
+            requestStarted?.TrySetResult();
+            if (responseRelease is not null)
+            {
+                await responseRelease.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+
             Volatile.Write(ref terminalArmed, 1);
 
             if (error)
@@ -799,6 +845,160 @@ public sealed class ResourceUpdatesRelayTests
     }
 
     [Fact]
+    public async Task ResourceUpdatedReadAhead_CancellationAfterCommittedTerminalKeepsResponseBeforeTail()
+    {
+        var upstream = new DuplexChannel();
+        var downstream = new DuplexChannel();
+        var requestId = new RequestId("committed-cancel-request");
+        var writeGate = new TerminalWriteGate(requestId, ignoreTerminalCancellation: true);
+        var tailSent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var session = ResourcesTestComposition.CreateSession(upstream.CreateClientTransport);
+        using var host = ResourcesTestComposition.BuildHost(
+            session,
+            builder => builder.WithStreamServerTransport(
+                downstream.ServerInputStream,
+                downstream.ServerOutputStream),
+            configureOptions: writeGate.Configure);
+        _ = host.RunAsync();
+        await using var fakePython = FakePythonServer.Start(
+            upstream,
+            ReadAheadPythonOptions(error: false, tailSent));
+        await using var rawDownstream = await ConnectRawDownstreamAsync(downstream);
+
+        try
+        {
+            await rawDownstream.SendMessageAsync(ToolRequest(requestId));
+            await tailSent.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await writeGate.WaitUntilResourceBlockedAsync(TimeSpan.FromSeconds(10));
+            writeGate.ReleaseResource();
+
+            var first = Assert.IsType<JsonRpcNotification>(
+                await rawDownstream.MessageReader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.Equal("u1", first.Params?["_meta"]?["marker"]?.GetValue<string>());
+            await writeGate.WaitUntilTerminalBlockedAsync(TimeSpan.FromSeconds(10));
+            await rawDownstream.SendMessageAsync(new JsonRpcNotification
+            {
+                Method = NotificationMethods.CancelledNotification,
+                Params = JsonSerializer.SerializeToNode(
+                    new CancelledNotificationParams { RequestId = requestId },
+                    McpJsonUtilities.DefaultOptions),
+            });
+
+            var committedTerminal = rawDownstream.MessageReader.ReadAsync().AsTask();
+            var early = await Task.WhenAny(
+                committedTerminal,
+                Task.Delay(TimeSpan.FromMilliseconds(250)));
+            var escaped = ReferenceEquals(early, committedTerminal)
+                ? await committedTerminal
+                : null;
+            Assert.False(
+                escaped is JsonRpcNotification notification
+                    && notification.Params?["_meta"]?["marker"]?.GetValue<string>() == "u2",
+                "Wire-later U2 crossed before the committed terminal transport send completed.");
+            Assert.Null(escaped);
+            Assert.Equal(1, session.RetainedDownstreamForwardLegCount);
+            Assert.Equal(0, session.RetainedUpstreamForwardLegCount);
+
+            writeGate.ReleaseTerminal();
+            var response = Assert.IsType<JsonRpcResponse>(
+                await committedTerminal.WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.Equal(requestId, response.Id);
+            var tail = Assert.IsType<JsonRpcNotification>(
+                await rawDownstream.MessageReader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.Equal("u2", tail.Params?["_meta"]?["marker"]?.GetValue<string>());
+
+            await WaitForAsync(
+                () => session.RetainedDownstreamForwardLegCount == 0
+                    && session.RetainedUpstreamForwardLegCount == 0,
+                TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            writeGate.ReleaseResource();
+            writeGate.ReleaseTerminal();
+            await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        }
+    }
+
+    [Fact]
+    public async Task ResourceUpdatedReadAhead_CancellationBeforeSdkHandlerKeepsResponseBeforeTail()
+    {
+        var upstream = new DuplexChannel();
+        var downstream = new DuplexChannel();
+        var requestId = new RequestId("pre-sdk-cancel-request");
+        var updateWriteGate = new ResourceUpdateWriteGate();
+        var cancellationGate = new CancellationHandlingGate(requestId);
+        var requestStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseResponse = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tailSent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var session = ResourcesTestComposition.CreateSession(upstream.CreateClientTransport);
+        using var host = ResourcesTestComposition.BuildHost(
+            session,
+            builder => builder.WithStreamServerTransport(
+                downstream.ServerInputStream,
+                downstream.ServerOutputStream),
+            configureOptions: options =>
+            {
+                updateWriteGate.Configure(options);
+                cancellationGate.Configure(options);
+            });
+        _ = host.RunAsync();
+        await using var fakePython = FakePythonServer.Start(
+            upstream,
+            ReadAheadPythonOptions(
+                error: false,
+                tailSent,
+                releaseResponse.Task,
+                requestStarted));
+        await using var rawDownstream = await ConnectRawDownstreamAsync(downstream);
+
+        try
+        {
+            await rawDownstream.SendMessageAsync(ToolRequest(requestId));
+            await requestStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await updateWriteGate.WaitUntilBlockedAsync(TimeSpan.FromSeconds(10));
+            updateWriteGate.Release();
+
+            var first = Assert.IsType<JsonRpcNotification>(
+                await rawDownstream.MessageReader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.Equal("u1", first.Params?["_meta"]?["marker"]?.GetValue<string>());
+            await rawDownstream.SendMessageAsync(new JsonRpcNotification
+            {
+                Method = NotificationMethods.CancelledNotification,
+                Params = JsonSerializer.SerializeToNode(
+                    new CancelledNotificationParams { RequestId = requestId },
+                    McpJsonUtilities.DefaultOptions),
+            });
+            await cancellationGate.WaitUntilEnteredAsync(TimeSpan.FromSeconds(10));
+
+            Assert.Equal(1, session.RetainedDownstreamForwardLegCount);
+            Assert.Equal(1, session.RetainedUpstreamForwardLegCount);
+            releaseResponse.TrySetResult();
+            await tailSent.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+            var response = Assert.IsType<JsonRpcResponse>(
+                await rawDownstream.MessageReader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.Equal(requestId, response.Id);
+            var tail = Assert.IsType<JsonRpcNotification>(
+                await rawDownstream.MessageReader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.Equal("u2", tail.Params?["_meta"]?["marker"]?.GetValue<string>());
+
+            cancellationGate.Release();
+            await WaitForAsync(
+                () => session.RetainedDownstreamForwardLegCount == 0
+                    && session.RetainedUpstreamForwardLegCount == 0,
+                TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            updateWriteGate.Release();
+            releaseResponse.TrySetResult();
+            cancellationGate.Release();
+            await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        }
+    }
+
+    [Fact]
     public async Task CorrelationMarker_BindsAssignedUpstreamIdForNormalAndNullParamsWithoutWireMetadata()
     {
         var upstream = new DuplexChannel();
@@ -1343,6 +1543,132 @@ public sealed class ResourceUpdatesRelayTests
     }
 
     [Fact]
+    public async Task CompleteDownstreamRequestHandling_CancelledWithoutTerminalDoesNotDependOnCallbackOrder()
+    {
+        var upstream = new DuplexChannel();
+        await using var session = ResourcesTestComposition.CreateSession(upstream.CreateClientTransport);
+        var downstreamRequestId = new RequestId("cancel-before-callback");
+        var upstreamRequestId = new RequestId("bound-before-callback");
+        session.CheckAddDownstreamRequestId(downstreamRequestId);
+
+        var beginForwardLeg = Assert.IsAssignableFrom<MethodInfo>(
+            typeof(RelaySession).GetMethod(
+                "BeginForwardLeg",
+                BindingFlags.Instance | BindingFlags.NonPublic));
+        var leg = Assert.IsType<RelaySession.ForwardLeg>(
+            beginForwardLeg.Invoke(
+                session,
+                new object?[] { downstreamRequestId, CancellationToken.None }));
+        var contextItemKey = Assert.IsType<string>(
+            typeof(RelaySession)
+                .GetField(
+                    "ForwardLegContextItemKey",
+                    BindingFlags.Static | BindingFlags.NonPublic)!
+                .GetRawConstantValue());
+        session.BindForwardLeg(new JsonRpcRequest
+        {
+            Id = upstreamRequestId,
+            Method = RequestMethods.ToolsCall,
+            Params = new JsonObject(),
+            Context = new JsonRpcMessageContext
+            {
+                Items = new Dictionary<string, object?> { [contextItemKey] = leg },
+            },
+        });
+        Assert.Equal(1, session.RetainedDownstreamForwardLegCount);
+        Assert.Equal(1, session.RetainedUpstreamForwardLegCount);
+
+        session.CompleteDownstreamRequestHandling(
+            downstreamRequestId,
+            requestCancellationSuppressedTerminal: true);
+
+        Assert.Equal(RelaySession.ForwardLegState.Abandoned, leg.State);
+        Assert.Equal(
+            RelaySession.ForwardLegCompletion.Abandoned,
+            await leg.Publication.Task.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Equal(0, session.RetainedDownstreamForwardLegCount);
+        Assert.Equal(0, session.RetainedUpstreamForwardLegCount);
+
+        session.ObserveDownstreamCancellation(new JsonRpcNotification
+        {
+            Method = NotificationMethods.CancelledNotification,
+            Params = JsonSerializer.SerializeToNode(
+                new CancelledNotificationParams { RequestId = downstreamRequestId },
+                McpJsonUtilities.DefaultOptions),
+        });
+        Assert.Equal(0, session.RetainedDownstreamForwardLegCount);
+        Assert.Equal(0, session.RetainedUpstreamForwardLegCount);
+    }
+
+    [Fact]
+    public async Task BindForwardLeg_CancellationPendingStillBindsAssignedUpstreamId()
+    {
+        var upstream = new DuplexChannel();
+        await using var session = ResourcesTestComposition.CreateSession(upstream.CreateClientTransport);
+        var downstreamRequestId = new RequestId("pending-before-bind");
+        var upstreamRequestId = new RequestId("assigned-after-cancel");
+        session.CheckAddDownstreamRequestId(downstreamRequestId);
+
+        var beginForwardLeg = Assert.IsAssignableFrom<MethodInfo>(
+            typeof(RelaySession).GetMethod(
+                "BeginForwardLeg",
+                BindingFlags.Instance | BindingFlags.NonPublic));
+        var leg = Assert.IsType<RelaySession.ForwardLeg>(
+            beginForwardLeg.Invoke(
+                session,
+                new object?[] { downstreamRequestId, CancellationToken.None }));
+        session.ObserveDownstreamCancellation(new JsonRpcNotification
+        {
+            Method = NotificationMethods.CancelledNotification,
+            Params = JsonSerializer.SerializeToNode(
+                new CancelledNotificationParams { RequestId = downstreamRequestId },
+                McpJsonUtilities.DefaultOptions),
+        });
+
+        Assert.Equal(RelaySession.ForwardLegState.CancellationPending, leg.State);
+        Assert.False(leg.Publication.Task.IsCompleted);
+        Assert.Equal(1, session.RetainedDownstreamForwardLegCount);
+        Assert.Equal(0, session.RetainedUpstreamForwardLegCount);
+
+        var contextItemKey = Assert.IsType<string>(
+            typeof(RelaySession)
+                .GetField(
+                    "ForwardLegContextItemKey",
+                    BindingFlags.Static | BindingFlags.NonPublic)!
+                .GetRawConstantValue());
+        session.BindForwardLeg(new JsonRpcRequest
+        {
+            Id = upstreamRequestId,
+            Method = RequestMethods.ToolsCall,
+            Params = new JsonObject(),
+            Context = new JsonRpcMessageContext
+            {
+                Items = new Dictionary<string, object?> { [contextItemKey] = leg },
+            },
+        });
+
+        Assert.Equal(upstreamRequestId, leg.UpstreamRequestId);
+        Assert.Equal(1, session.RetainedUpstreamForwardLegCount);
+        Assert.True(
+            session.TryTakeForwardLegForUpstreamTerminal(
+                new JsonRpcResponse { Id = upstreamRequestId, Result = new JsonObject() },
+                out var takenLeg));
+        Assert.Same(leg, takenLeg);
+        Assert.Equal(RelaySession.ForwardLegState.CancellationPending, leg.State);
+        Assert.False(leg.Publication.Task.IsCompleted);
+        Assert.Equal(1, session.RetainedDownstreamForwardLegCount);
+        Assert.Equal(0, session.RetainedUpstreamForwardLegCount);
+
+        session.CompleteForwardLegSend(leg);
+
+        Assert.Equal(
+            RelaySession.ForwardLegCompletion.Sent,
+            await leg.Publication.Task.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Equal(0, session.RetainedDownstreamForwardLegCount);
+        Assert.Equal(0, session.RetainedUpstreamForwardLegCount);
+    }
+
+    [Fact]
     public async Task BeginForwardLeg_DoesNotCreateLegAfterDuplicateIdFailureWhileWaitingForGate()
     {
         var upstream = new DuplexChannel();
@@ -1405,7 +1731,9 @@ public sealed class ResourceUpdatesRelayTests
         }
 
         var (leg, beginException) = await beginOutcome.Task.WaitAsync(TimeSpan.FromSeconds(10));
-        session.CompleteDownstreamRequestHandling(requestId);
+        session.CompleteDownstreamRequestHandling(
+            requestId,
+            requestCancellationSuppressedTerminal: false);
         var retainedDownstream = session.RetainedDownstreamForwardLegCount;
         var retainedUpstream = session.RetainedUpstreamForwardLegCount;
         var legCreatedAfterFailure = leg is not null && beginException is null;

@@ -169,7 +169,9 @@ internal sealed class RelaySession : IAsyncDisposable
         {
             if (!_forwardLegsByDownstreamId.TryGetValue(leg.DownstreamRequestId, out var current)
                 || !ReferenceEquals(current, leg)
-                || leg.State != ForwardLegState.Active)
+                || leg.State is not (
+                    ForwardLegState.Active
+                    or ForwardLegState.CancellationPending))
             {
                 return;
             }
@@ -216,9 +218,18 @@ internal sealed class RelaySession : IAsyncDisposable
 
         lock (_forwardLegGate)
         {
-            if (_forwardLegsByUpstreamId.Remove(terminalRequestId, out leg))
+            if (_forwardLegsByUpstreamId.TryGetValue(terminalRequestId, out leg)
+                && leg.State is (
+                    ForwardLegState.Active
+                    or ForwardLegState.CancellationPending))
             {
+                _forwardLegsByUpstreamId.Remove(terminalRequestId);
                 leg.UpstreamRequestId = null;
+                if (leg.State == ForwardLegState.Active)
+                {
+                    leg.State = ForwardLegState.TerminalReceived;
+                }
+
                 return true;
             }
         }
@@ -256,7 +267,11 @@ internal sealed class RelaySession : IAsyncDisposable
         lock (_forwardLegGate)
         {
             if (!_forwardLegsByDownstreamId.TryGetValue(leg.DownstreamRequestId, out var current)
-                || !ReferenceEquals(current, leg))
+                || !ReferenceEquals(current, leg)
+                || leg.State is not (
+                    ForwardLegState.Active
+                    or ForwardLegState.TerminalReceived
+                    or ForwardLegState.CancellationPending))
             {
                 return;
             }
@@ -270,12 +285,8 @@ internal sealed class RelaySession : IAsyncDisposable
                 leg.UpstreamRequestId = null;
             }
 
-            if (leg.State == ForwardLegState.Active)
-            {
-                leg.State = ForwardLegState.Sent;
-                leg.Publication.TrySetResult(ForwardLegCompletion.Sent);
-            }
-
+            leg.State = ForwardLegState.Sent;
+            leg.Publication.TrySetResult(ForwardLegCompletion.Sent);
             registration = TakeCancellationRegistrationLocked(leg, out hasRegistration);
         }
 
@@ -311,19 +322,41 @@ internal sealed class RelaySession : IAsyncDisposable
         }
     }
 
-    internal void CompleteDownstreamRequestHandling(RequestId requestId)
+    internal void CompleteDownstreamRequestHandling(
+        RequestId requestId,
+        bool requestCancellationSuppressedTerminal)
     {
         CancellationTokenRegistration registration = default;
         var hasRegistration = false;
         lock (_forwardLegGate)
         {
-            if (!_forwardLegsByDownstreamId.TryGetValue(requestId, out var leg)
-                || leg.State != ForwardLegState.Abandoned)
+            if (!_forwardLegsByDownstreamId.TryGetValue(requestId, out var leg))
+            {
+                return;
+            }
+
+            if (requestCancellationSuppressedTerminal
+                && leg.State is (
+                    ForwardLegState.Active
+                    or ForwardLegState.TerminalReceived
+                    or ForwardLegState.CancellationPending))
+            {
+                leg.State = ForwardLegState.Abandoned;
+                leg.Publication.TrySetResult(ForwardLegCompletion.Abandoned);
+            }
+            else if (leg.State != ForwardLegState.Abandoned)
             {
                 return;
             }
 
             _forwardLegsByDownstreamId.Remove(requestId);
+            if (leg.UpstreamRequestId is { } upstreamRequestId
+                && _forwardLegsByUpstreamId.TryGetValue(upstreamRequestId, out var upstreamLeg)
+                && ReferenceEquals(upstreamLeg, leg))
+            {
+                _forwardLegsByUpstreamId.Remove(upstreamRequestId);
+                leg.UpstreamRequestId = null;
+            }
             registration = TakeCancellationRegistrationLocked(leg, out hasRegistration);
         }
 
@@ -346,7 +379,9 @@ internal sealed class RelaySession : IAsyncDisposable
 
             foreach (var leg in _forwardLegsByDownstreamId.Values)
             {
-                if (leg.State == ForwardLegState.Active)
+                if (leg.State is ForwardLegState.Active
+                    or ForwardLegState.TerminalReceived
+                    or ForwardLegState.CancellationPending)
                 {
                     leg.State = ForwardLegState.Failed;
                     leg.Publication.TrySetException(failure);
@@ -456,22 +491,15 @@ internal sealed class RelaySession : IAsyncDisposable
         lock (_forwardLegGate)
         {
             if (!_forwardLegsByDownstreamId.TryGetValue(leg.DownstreamRequestId, out var current)
-                || !ReferenceEquals(current, leg)
-                || leg.State != ForwardLegState.Active)
+                || !ReferenceEquals(current, leg))
             {
                 return;
             }
 
-            leg.State = ForwardLegState.Abandoned;
-            if (leg.UpstreamRequestId is { } upstreamRequestId
-                && _forwardLegsByUpstreamId.TryGetValue(upstreamRequestId, out var upstreamLeg)
-                && ReferenceEquals(upstreamLeg, leg))
+            if (leg.State is ForwardLegState.Active or ForwardLegState.TerminalReceived)
             {
-                _forwardLegsByUpstreamId.Remove(upstreamRequestId);
-                leg.UpstreamRequestId = null;
+                leg.State = ForwardLegState.CancellationPending;
             }
-
-            leg.Publication.TrySetResult(ForwardLegCompletion.Abandoned);
         }
     }
 
@@ -509,6 +537,8 @@ internal sealed class RelaySession : IAsyncDisposable
     internal enum ForwardLegState
     {
         Active,
+        TerminalReceived,
+        CancellationPending,
         Abandoned,
         Sent,
         Failed,

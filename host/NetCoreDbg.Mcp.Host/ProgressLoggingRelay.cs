@@ -324,9 +324,15 @@ internal static class ProgressLoggingRelay
             using var cancellationRegistration = progressToken is null
                 ? default
                 : cancellationToken.Register(() => notificationState.End(requestId));
+            var requestCancellationSuppressedTerminal = false;
             try
             {
                 await next(context, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                requestCancellationSuppressedTerminal = true;
+                throw;
             }
             finally
             {
@@ -335,7 +341,9 @@ internal static class ProgressLoggingRelay
                     notificationState.End(requestId);
                 }
 
-                session.CompleteDownstreamRequestHandling(requestId);
+                session.CompleteDownstreamRequestHandling(
+                    requestId,
+                    requestCancellationSuppressedTerminal);
             }
         });
 
