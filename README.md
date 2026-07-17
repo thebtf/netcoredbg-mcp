@@ -14,7 +14,7 @@ set breakpoints, step through code, inspect variables, evaluate expressions, rea
 debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
 and Avalonia windows without opening an IDE.
 
-**135 MCP tools · 8 prompts · 4 resources · 2032 collected tests · release v0.23.1**
+**135 MCP tools · 8 prompts · 4 resources · 2092 collected tests · release v0.23.2**
 
 ## Quick Links
 
@@ -23,21 +23,29 @@ and Avalonia windows without opening an IDE.
 - **Reference:** [Available Tools](#available-tools) · [Resources](#mcp-resources) · [Prompts](#mcp-prompts) · [Architecture](#architecture-overview)
 - **Project:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## What's New in v0.23.1
+## What's New in v0.23.2
 
-- **Source/developer .NET compatibility host preview** — a new .NET 8 stdio
-  process at `host/NetCoreDbg.Mcp.Host` creates its own upstream Python MCP
-  client session, handles the downstream `initialize` handshake locally, and
-  then proxies real `tools/list` and `tools/call` exchanges to that same
-  upstream session. It builds only from a source checkout — it ships in
-  neither the PyPI wheel nor as a published entrypoint — and does not yet
-  relay client roots, progress/log notifications, resources, prompts, or
-  other callbacks.
-- **Hardened source-checkout launches** — "Running from a Source Checkout"
-  below now documents a one-time preparation `uv sync --locked` step, followed
-  by repeated supervised `uv run --no-sync --project ...` restarts that never
-  mutate the shared `.venv`, so the calling .NET workspace keeps its role as
-  the debug project root across restarts.
+- **Bounded MCP root discovery** — the published Python server now waits at
+  most two seconds for a client `roots/list` response. Explicit environment or
+  `--project` scope remains authoritative, valid local client roots retain
+  precedence over startup CWD, network/UNC roots are rejected, and a silent
+  client falls back to the configured startup CWD instead of hanging the tool
+  and cleanup path (Engram #380).
+- **Safe managed FlaUI bridge fallback** — when another live session prevents
+  rebuilding the managed bridge, the resolver keeps the last successful managed
+  binary ahead of uncontrolled PATH candidates, avoiding a silent protocol
+  downgrade.
+- **Live resource subscriptions** — the installed Python entrypoint now
+  advertises `resources.subscribe=true`, supports idempotent subscribe and
+  unsubscribe for all four `debug://` resources, and emits ordered, coalesced
+  `notifications/resources/updated` events when state, breakpoints, output, or
+  threads change.
+- **Complete source-only .NET front-door preview** — the .NET 8 compatibility
+  host now covers tools, native prompts, downstream roots, resources and
+  subscriptions, progress/logging notifications, and allowlisted `x-mux`
+  metadata while Python remains the execution authority. The host still builds
+  only from source; it is not included in the PyPI wheel, is not a published
+  entrypoint, and performs no cutover.
 
 ## Highlights
 
