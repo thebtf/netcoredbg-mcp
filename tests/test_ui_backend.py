@@ -34,6 +34,36 @@ class TestFindFlauiBridge:
             assert result is None
 
 
+class TestManagedBridgeDiscovery:
+    def test_failed_rebuild_prefers_existing_managed_bridge_over_path(self, tmp_path):
+        from netcoredbg_mcp.setup.bridge import find_or_build_bridge
+
+        home_dir = tmp_path / "home"
+        managed_bridge = home_dir / "bridge" / "FlaUIBridge.exe"
+        managed_bridge.parent.mkdir(parents=True)
+        managed_bridge.write_text("managed")
+
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        path_bridge = tmp_path / "path" / "FlaUIBridge.exe"
+        path_bridge.parent.mkdir()
+        path_bridge.write_text("path")
+
+        with (
+            patch("netcoredbg_mcp.setup.bridge.get_home_dir", return_value=home_dir),
+            patch("netcoredbg_mcp.setup.bridge.find_bridge_source", return_value=source_dir),
+            patch("netcoredbg_mcp.setup.bridge.build_bridge", return_value=None),
+            patch(
+                "netcoredbg_mcp.setup.bridge.shutil.which", return_value=str(path_bridge)
+            ) as which,
+            patch.dict("netcoredbg_mcp.setup.bridge.os.environ", {"FLAUI_BRIDGE_PATH": ""}),
+        ):
+            result = find_or_build_bridge()
+
+        assert result == str(managed_bridge.resolve())
+        which.assert_not_called()
+
+
 class TestCreateBackend:
     """Tests for backend factory."""
 

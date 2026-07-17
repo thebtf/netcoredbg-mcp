@@ -161,9 +161,9 @@ def find_or_build_bridge() -> str | None:
         built = build_bridge(source_dir)
         if built:
             return str(Path(built).resolve())
-    elif home_bridge.is_file():
-        # No source but previously built — use cached
-        logger.info("Using cached bridge: %s", home_bridge)
+    if home_bridge.is_file():
+        # Keep the last successful managed build ahead of uncontrolled PATH binaries.
+        logger.info("Using cached managed bridge: %s", home_bridge)
         return str(home_bridge.resolve())
 
     # 3. System PATH

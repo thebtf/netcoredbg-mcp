@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.2] - 2026-07-17
+
+### Added
+- The published Python MCP server now advertises resource subscription support,
+  accepts idempotent subscribe/unsubscribe requests for the four `debug://`
+  resources, and sends ordered, coalesced update notifications when their
+  backing state changes (Engram #393, PR #235).
+- The source/developer .NET 8 compatibility host preview now covers native
+  prompts, downstream roots, tools, resources and subscriptions, progress/log
+  notifications, and allowlisted `x-mux` metadata through one bidirectional
+  relay session. Python remains the execution authority, and the host remains
+  excluded from the published wheel and console entrypoint (PRs #233–#235).
+
+### Changed
+- Project-root selection now preserves operator-pinned environment or
+  `--project` scope, accepts only valid local client roots, rejects network/UNC
+  authorities, and retains startup-CWD fallback when no usable client root is
+  available (PR #235).
+
+### Fixed
+- Provider-to-client `roots/list` waits are bounded at two seconds, so a client
+  that accepts but never answers the request can no longer hang read-only launch
+  compatibility inspection or subsequent cleanup; startup-CWD fallback remains
+  available after the deadline (Engram #380, PR #236).
+- Managed FlaUI bridge discovery now retains the last successful managed build
+  when a source rebuild cannot replace an in-use executable, instead of falling
+  through to an uncontrolled and potentially protocol-incompatible PATH binary.
+
 ## [0.23.1] - 2026-07-15
 
 ### Added

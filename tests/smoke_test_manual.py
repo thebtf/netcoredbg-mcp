@@ -203,6 +203,52 @@ async def test_project_root_timeout_fallback():
             del project_utils.CLIENT_ROOTS_TIMEOUT_SECONDS
 
 
+async def test_managed_bridge_fallback():
+    """A failed managed rebuild must not select an uncontrolled PATH bridge."""
+    print("\n0B. MANAGED BRIDGE FALLBACK")
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+    from unittest.mock import patch
+
+    from netcoredbg_mcp.setup.bridge import find_or_build_bridge
+
+    with TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        home_dir = root / "home"
+        managed_bridge = home_dir / "bridge" / "FlaUIBridge.exe"
+        managed_bridge.parent.mkdir(parents=True)
+        managed_bridge.write_text("managed")
+        source_dir = root / "source"
+        source_dir.mkdir()
+        path_bridge = root / "path" / "FlaUIBridge.exe"
+        path_bridge.parent.mkdir()
+        path_bridge.write_text("path")
+
+        with (
+            patch("netcoredbg_mcp.setup.bridge.get_home_dir", return_value=home_dir),
+            patch(
+                "netcoredbg_mcp.setup.bridge.find_bridge_source",
+                return_value=source_dir,
+            ),
+            patch("netcoredbg_mcp.setup.bridge.build_bridge", return_value=None),
+            patch(
+                "netcoredbg_mcp.setup.bridge.shutil.which",
+                return_value=str(path_bridge),
+            ) as which,
+            patch.dict(
+                "netcoredbg_mcp.setup.bridge.os.environ",
+                {"FLAUI_BRIDGE_PATH": ""},
+            ),
+        ):
+            result = find_or_build_bridge()
+
+        check(
+            "Managed bridge cache wins after rebuild failure",
+            result == str(managed_bridge.resolve()) and not which.called,
+            f"result={result}, path_bridge={path_bridge}",
+        )
+
+
 # ─────────────────────────────────────────────────────────────
 # Scenario 1: Hit counting + breakpoint fundamentals
 # ─────────────────────────────────────────────────────────────
@@ -6532,6 +6578,7 @@ def get_scenarios():
         ("Tracepoint Auto-Resume", test_tracepoint_auto_resume),
         ("Path Validation", test_path_validation_worktrees),
         ("Project Root Timeout Fallback", test_project_root_timeout_fallback),
+        ("Managed Bridge Fallback", test_managed_bridge_fallback),
         ("Heartbeat During Wait", test_heartbeat_during_wait),
         ("Runtime Hygiene Preflight", test_runtime_hygiene_preflight),
         ("Instrumentation Group Lifecycle", test_instrumentation_group_lifecycle),
