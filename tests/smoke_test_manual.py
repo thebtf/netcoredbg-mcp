@@ -6537,6 +6537,86 @@ async def test_stealth_screenshot():
             await m.stop()
 
 
+async def test_screenshot_black_frame_guard():
+    """Scenario: probable-black screenshot evidence fails closed without foreground mutation."""
+    print("\n--- Screenshot Black Frame Guard ---")
+    import ctypes
+    import io
+    from unittest.mock import patch
+
+    from PIL import Image
+
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.pywinauto_backend import PywinautoBackend
+
+    black_buffer = io.BytesIO()
+    Image.new("RGB", (64, 64), (0, 0, 0)).save(black_buffer, format="PNG")
+    black_png = black_buffer.getvalue()
+    registry = _CapturingMCP()
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+        session_id=None,
+    )
+
+    with (
+        patch("netcoredbg_mcp.ui.screenshot.get_hwnd_for_pid", return_value=123),
+        patch(
+            "netcoredbg_mcp.ui.screenshot.capture_window",
+            return_value=(black_png, 64, 64),
+        ),
+    ):
+        register_ui_tools(registry, session, check_session_access=lambda _ctx: None)
+        response = await registry.tools["ui_take_screenshot"](
+            SimpleNamespace(),
+            format="png",
+        )
+
+    guarded = isinstance(response, dict) and response.get("classification") == (
+        "PROBABLE_BLACK_FRAME"
+    )
+    data = response.get("data", {}) if isinstance(response, dict) else {}
+    check("Probable black frame rejected", guarded, str(response)[:240])
+    check(
+        "Black-frame guard avoids foreground mutation",
+        data.get("foreground_mutation_attempted") is False,
+        str(data)[:240],
+    )
+    check(
+        "Black-frame guard names explicit recovery",
+        "ui_bring_to_front" in str(data.get("next_step", "")),
+        str(data)[:240],
+    )
+
+    fallback_backend = PywinautoBackend.__new__(PywinautoBackend)
+    fallback_backend._ui = SimpleNamespace(process_id=42)
+    with (
+        patch(
+            "netcoredbg_mcp.ui.backend.create_backend",
+            return_value=fallback_backend,
+        ),
+        patch("netcoredbg_mcp.ui.screenshot.get_hwnd_for_pid", return_value=123),
+        patch(
+            "netcoredbg_mcp.ui.foreground.restore_foreground_window",
+            return_value=True,
+        ),
+        patch.object(
+            ctypes.windll,
+            "user32",
+            SimpleNamespace(ShowWindow=lambda _hwnd, _command: True),
+        ),
+    ):
+        recovery = await registry.tools["ui_bring_to_front"](SimpleNamespace())
+
+    recovery_data = recovery.get("data", {}) if isinstance(recovery, dict) else {}
+    check(
+        "Black-frame recovery supports pywinauto fallback",
+        "error" not in recovery and recovery_data.get("activated") is True,
+        str(recovery)[:240],
+    )
+
+
 async def test_code_search():
     """Scenario: project-scoped code search finds fixture symbols."""
     print("\n--- Code Search ---")
@@ -6588,6 +6668,7 @@ def get_scenarios():
         ("Stealth Launch", test_stealth_launch),
         ("Stealth Click", test_stealth_click),
         ("Stealth Screenshot", test_stealth_screenshot),
+        ("Screenshot Black Frame Guard", test_screenshot_black_frame_guard),
         ("Code Search", test_code_search),
         ("WPF V2 State Oracle Runtime Smoke", test_wpf_v2_state_oracle_runtime_smoke),
         (

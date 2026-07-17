@@ -118,6 +118,26 @@ def register_ui_tools(
             )
         return backend
 
+    def _probable_black_frame_response(
+        frame_analysis: dict[str, Any],
+        *,
+        retry_tool: str,
+        foreground_mutation_attempted: bool,
+    ) -> dict[str, Any]:
+        next_step = f"Call ui_bring_to_front explicitly, then retry {retry_tool}."
+        response = build_error_response(
+            "Captured frame is near-uniform black and cannot be trusted as visual evidence",
+            state=session.state.state,
+            next_actions=["ui_bring_to_front", retry_tool, "get_debug_state", "stop_debug"],
+        )
+        response["classification"] = "PROBABLE_BLACK_FRAME"
+        response["data"] = {
+            "frame_analysis": frame_analysis,
+            "foreground_mutation_attempted": foreground_mutation_attempted,
+            "next_step": next_step,
+        }
+        return response
+
     async def _reconnect_ui_backend(backend: Any, process_id: int) -> None:
         from ..ui.backend import connect_backend
 
@@ -512,12 +532,29 @@ def register_ui_tools(
             ui = await _ensure_ui_connected()
             bring_to_front = getattr(ui, "bring_to_front", None)
             if bring_to_front is None:
-                return build_error_response(
-                    "ui_bring_to_front is only supported by the FlaUI backend",
-                    state=session.state.state,
-                )
+                import ctypes
 
-            result = await bring_to_front()
+                from ..ui.foreground import restore_foreground_window
+                from ..ui.screenshot import get_hwnd_for_pid
+
+                pid = session.state.process_id
+                hwnd = get_hwnd_for_pid(pid) if pid else None
+                if not hwnd:
+                    return build_error_response(
+                        f"No visible window for process {pid}.",
+                        state=session.state.state,
+                    )
+
+                loop = asyncio.get_running_loop()
+
+                def activate_window() -> bool:
+                    ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                    return restore_foreground_window(hwnd)
+
+                activated = await loop.run_in_executor(None, activate_window)
+                result = {"activated": activated, "hwnd": hwnd}
+            else:
+                result = await bring_to_front()
             if not isinstance(result, dict):
                 return build_error_response(
                     f"bring_to_front: backend returned non-dict response ({type(result).__name__})",
@@ -1384,6 +1421,7 @@ def register_ui_tools(
 
             from ..ui.screenshot import (
                 _process_screenshot,
+                analyze_screenshot_frame,
                 capture_window,
                 create_preview,
                 get_hwnd_for_pid,
@@ -1433,6 +1471,20 @@ def register_ui_tools(
                 png_bytes, _, _ = await loop.run_in_executor(
                     None,
                     lambda: capture_window(hwnd),
+                )
+
+            frame_analysis = await loop.run_in_executor(
+                None,
+                lambda: analyze_screenshot_frame(png_bytes),
+            )
+            if frame_analysis["probable_black"]:
+                foreground_mutation_attempted = bool(
+                    bridge_screenshot and bridge_screenshot.get("fallback") == "flash-focus"
+                )
+                return _probable_black_frame_response(
+                    frame_analysis,
+                    retry_tool="ui_take_screenshot",
+                    foreground_mutation_attempted=foreground_mutation_attempted,
                 )
 
             # Create HD version in requested format
@@ -1530,6 +1582,7 @@ def register_ui_tools(
             from ctypes import wintypes
 
             from ..ui.screenshot import (
+                analyze_screenshot_frame,
                 annotate_screenshot,
                 capture_window,
                 collect_visible_elements,
@@ -1556,6 +1609,17 @@ def register_ui_tools(
                 None,
                 lambda: capture_window(hwnd),
             )
+
+            frame_analysis = await loop.run_in_executor(
+                None,
+                lambda: analyze_screenshot_frame(png_bytes),
+            )
+            if frame_analysis["probable_black"]:
+                return _probable_black_frame_response(
+                    frame_analysis,
+                    retry_tool="ui_take_annotated_screenshot",
+                    foreground_mutation_attempted=False,
+                )
 
             # Collect elements — needs pywinauto _app access
             from ..ui.pywinauto_backend import PywinautoBackend
