@@ -317,13 +317,14 @@ async def test_session_manager_stop_cancels_stealth_foreground_restore_task() ->
     async def sleepy_restore() -> None:
         await asyncio.sleep(60)
 
-    manager = SessionManager.__new__(SessionManager)
+    with patch("netcoredbg_mcp.session.manager.DAPClient"):
+        manager = SessionManager()
     task = asyncio.create_task(sleepy_restore())
     manager._stealth_foreground_restore_task = task
     manager._client = SimpleNamespace(is_running=False)
     manager._process_registry = SimpleNamespace(cleanup_all=MagicMock())
     manager._session_id = None
-    manager._state = SimpleNamespace(state=DebugState.RUNNING)
+    manager._state.state = DebugState.RUNNING
     manager._state_listeners = []
     manager._initialized_event = asyncio.Event()
     manager._execution_event = asyncio.Event()
@@ -368,9 +369,10 @@ async def test_session_manager_stealth_launch_defers_foreground_restore_until_ui
     program = tmp_path / "WpfSmokeApp.dll"
     program.write_bytes(b"")
 
-    manager = SessionManager.__new__(SessionManager)
+    with patch("netcoredbg_mcp.session.manager.DAPClient"):
+        manager = SessionManager()
     manager._client = FakeLaunchClient()
-    manager._state = SimpleNamespace(state=DebugState.IDLE, process_id=None)
+    manager._state.state = DebugState.IDLE
     manager._initialized_event = asyncio.Event()
     manager._execution_event = asyncio.Event()
     manager._initialized_event.set()

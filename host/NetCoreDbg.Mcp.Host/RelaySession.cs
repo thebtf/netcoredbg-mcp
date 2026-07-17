@@ -23,12 +23,20 @@ internal sealed class RelaySession : IAsyncDisposable
     private readonly Func<IClientTransport> _createUpstreamTransport;
     private readonly IReadOnlyList<Func<ServerCapabilities?, string?>> _requiredUpstreamCapabilityChecks;
     private readonly Action<McpClientHandlers>? _configureUpstreamHandlers;
+    private readonly Func<ValueTask>? _awaitUpstreamHandlerDrain;
     private readonly CancellationTokenSource _sessionEndingCts = new();
     private readonly TaskCompletionSource<Task<McpClient>> _upstreamStarted =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource _downstreamReady =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly object _bootstrapGate = new();
+    private readonly object _downstreamRequestIdGate = new();
+    private readonly HashSet<RequestId> _seenDownstreamRequestIds = [];
+    private const string ForwardLegContextItemKey = "NetCoreDbg.Mcp.Host.ForwardLeg";
+    private readonly object _forwardLegGate = new();
+    private readonly Dictionary<RequestId, ForwardLeg> _forwardLegsByDownstreamId = [];
+    private readonly Dictionary<RequestId, ForwardLeg> _forwardLegsByUpstreamId = [];
+    private Exception? _forwardingFailure;
 
     private Task<McpClient>? _upstreamInitTask;
     private int _disposed;
@@ -51,14 +59,21 @@ internal sealed class RelaySession : IAsyncDisposable
     /// ever reaches production composition. Only test-only fixtures and (later) accepted
     /// FD-001/FD-002 modules supply this.
     /// </param>
+    /// <param name="awaitUpstreamHandlerDrain">
+    /// Optional terminal hook for a reverse-route module that owns asynchronous callback
+    /// work. It runs after SessionEndingToken is cancelled and before the upstream client
+    /// and transport are disposed.
+    /// </param>
     public RelaySession(
         Func<IClientTransport> createUpstreamTransport,
         IReadOnlyList<Func<ServerCapabilities?, string?>> requiredUpstreamCapabilityChecks,
-        Action<McpClientHandlers>? configureUpstreamHandlers = null)
+        Action<McpClientHandlers>? configureUpstreamHandlers = null,
+        Func<ValueTask>? awaitUpstreamHandlerDrain = null)
     {
         _createUpstreamTransport = createUpstreamTransport;
         _requiredUpstreamCapabilityChecks = requiredUpstreamCapabilityChecks;
         _configureUpstreamHandlers = configureUpstreamHandlers;
+        _awaitUpstreamHandlerDrain = awaitUpstreamHandlerDrain;
     }
 
     /// <summary>The downstream server for this session, bound by the bootstrap filter on first message.</summary>
@@ -80,6 +95,454 @@ internal sealed class RelaySession : IAsyncDisposable
     public Task DownstreamReady => _downstreamReady.Task;
 
     public void BindDownstream(McpServer server) => Downstream ??= server;
+
+    internal int RetainedDownstreamForwardLegCount
+    {
+        get
+        {
+            lock (_forwardLegGate)
+            {
+                return _forwardLegsByDownstreamId.Count;
+            }
+        }
+    }
+
+    internal int RetainedUpstreamForwardLegCount
+    {
+        get
+        {
+            lock (_forwardLegGate)
+            {
+                return _forwardLegsByUpstreamId.Count;
+            }
+        }
+    }
+
+    internal Exception? ForwardingFailure => Volatile.Read(ref _forwardingFailure);
+
+    internal void CheckAddDownstreamRequestId(RequestId requestId)
+    {
+        lock (_downstreamRequestIdGate)
+        {
+            if (_seenDownstreamRequestIds.Add(requestId))
+            {
+                return;
+            }
+        }
+
+        var duplicate = new InvalidOperationException(
+            $"Duplicate downstream request ID '{requestId}' was already accepted by this relay session.");
+        FailForwardingAndEndSession(duplicate);
+        throw duplicate;
+    }
+
+
+    internal void ThrowIfForwardingFailed()
+    {
+        if (Volatile.Read(ref _forwardingFailure) is { } failure)
+        {
+            throw new InvalidOperationException("Relay forwarding has terminated.", failure);
+        }
+    }
+
+    internal void FailForwarding(Exception failure)
+    {
+        var recordedFailure = Interlocked.CompareExchange(
+            ref _forwardingFailure,
+            failure,
+            null) ?? failure;
+        FailForwardLegs(recordedFailure);
+    }
+
+    internal void BindForwardLeg(JsonRpcRequest request)
+    {
+        if (request.Context?.Items?.TryGetValue(ForwardLegContextItemKey, out var marker) != true
+            || marker is not ForwardLeg leg)
+        {
+            return;
+        }
+
+        ThrowIfForwardingFailed();
+
+        InvalidOperationException? collision = null;
+        lock (_forwardLegGate)
+        {
+            if (!_forwardLegsByDownstreamId.TryGetValue(leg.DownstreamRequestId, out var current)
+                || !ReferenceEquals(current, leg)
+                || leg.State is not (
+                    ForwardLegState.Active
+                    or ForwardLegState.CancellationPending))
+            {
+                return;
+            }
+
+            if (leg.UpstreamRequestId is not null)
+            {
+                collision = new InvalidOperationException(
+                    $"Forwarded downstream request '{leg.DownstreamRequestId}' was assigned more than one upstream request ID.");
+            }
+            else if (_forwardLegsByUpstreamId.ContainsKey(request.Id))
+            {
+                collision = new InvalidOperationException(
+                    $"Duplicate live upstream request ID '{request.Id}' cannot replace an existing forward leg.");
+            }
+            else
+            {
+                leg.UpstreamRequestId = request.Id;
+                _forwardLegsByUpstreamId.Add(request.Id, leg);
+            }
+        }
+
+        if (collision is not null)
+        {
+            FailForwardingAndEndSession(collision);
+            throw collision;
+        }
+    }
+
+    internal bool TryTakeForwardLegForUpstreamTerminal(
+        JsonRpcMessage message,
+        out ForwardLeg? leg)
+    {
+        var requestId = message switch
+        {
+            JsonRpcResponse response => response.Id,
+            JsonRpcError error => error.Id,
+            _ => (RequestId?)null,
+        };
+        if (requestId is not { } terminalRequestId)
+        {
+            leg = null;
+            return false;
+        }
+
+        lock (_forwardLegGate)
+        {
+            if (_forwardLegsByUpstreamId.TryGetValue(terminalRequestId, out leg)
+                && leg.State is (
+                    ForwardLegState.Active
+                    or ForwardLegState.CancellationPending))
+            {
+                _forwardLegsByUpstreamId.Remove(terminalRequestId);
+                leg.UpstreamRequestId = null;
+                if (leg.State == ForwardLegState.Active)
+                {
+                    leg.State = ForwardLegState.TerminalReceived;
+                }
+
+                return true;
+            }
+        }
+
+        leg = null;
+        return false;
+    }
+
+    internal bool TryGetForwardLegForDownstreamTerminal(
+        JsonRpcMessage message,
+        out ForwardLeg? leg)
+    {
+        var requestId = message switch
+        {
+            JsonRpcResponse response => response.Id,
+            JsonRpcError error => error.Id,
+            _ => (RequestId?)null,
+        };
+        if (requestId is not { } terminalRequestId)
+        {
+            leg = null;
+            return false;
+        }
+
+        lock (_forwardLegGate)
+        {
+            return _forwardLegsByDownstreamId.TryGetValue(terminalRequestId, out leg);
+        }
+    }
+
+    internal void CompleteForwardLegSend(ForwardLeg leg)
+    {
+        CancellationTokenRegistration registration = default;
+        var hasRegistration = false;
+        lock (_forwardLegGate)
+        {
+            if (!_forwardLegsByDownstreamId.TryGetValue(leg.DownstreamRequestId, out var current)
+                || !ReferenceEquals(current, leg)
+                || leg.State is not (
+                    ForwardLegState.Active
+                    or ForwardLegState.TerminalReceived
+                    or ForwardLegState.CancellationPending))
+            {
+                return;
+            }
+
+            _forwardLegsByDownstreamId.Remove(leg.DownstreamRequestId);
+            if (leg.UpstreamRequestId is { } upstreamRequestId
+                && _forwardLegsByUpstreamId.TryGetValue(upstreamRequestId, out var upstreamLeg)
+                && ReferenceEquals(upstreamLeg, leg))
+            {
+                _forwardLegsByUpstreamId.Remove(upstreamRequestId);
+                leg.UpstreamRequestId = null;
+            }
+
+            leg.State = ForwardLegState.Sent;
+            leg.Publication.TrySetResult(ForwardLegCompletion.Sent);
+            registration = TakeCancellationRegistrationLocked(leg, out hasRegistration);
+        }
+
+        if (hasRegistration)
+        {
+            registration.Dispose();
+        }
+    }
+
+    internal void ObserveDownstreamCancellation(JsonRpcNotification notification)
+    {
+        try
+        {
+            var requestId = notification.Params?
+                .Deserialize<CancelledNotificationParams>(McpJsonUtilities.DefaultOptions)?.RequestId;
+            if (requestId is { } typedRequestId)
+            {
+                ForwardLeg? leg;
+                lock (_forwardLegGate)
+                {
+                    _forwardLegsByDownstreamId.TryGetValue(typedRequestId, out leg);
+                }
+
+                if (leg is not null)
+                {
+                    AbandonForwardLeg(leg);
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            // Invalid cancellation notifications are ignored by the MCP protocol.
+        }
+    }
+
+    internal void CompleteDownstreamRequestHandling(
+        RequestId requestId,
+        bool requestCancellationSuppressedTerminal)
+    {
+        CancellationTokenRegistration registration = default;
+        var hasRegistration = false;
+        lock (_forwardLegGate)
+        {
+            if (!_forwardLegsByDownstreamId.TryGetValue(requestId, out var leg))
+            {
+                return;
+            }
+
+            if (requestCancellationSuppressedTerminal
+                && leg.State is (
+                    ForwardLegState.Active
+                    or ForwardLegState.TerminalReceived
+                    or ForwardLegState.CancellationPending))
+            {
+                leg.State = ForwardLegState.Abandoned;
+                leg.Publication.TrySetResult(ForwardLegCompletion.Abandoned);
+            }
+            else if (leg.State != ForwardLegState.Abandoned)
+            {
+                return;
+            }
+
+            _forwardLegsByDownstreamId.Remove(requestId);
+            if (leg.UpstreamRequestId is { } upstreamRequestId
+                && _forwardLegsByUpstreamId.TryGetValue(upstreamRequestId, out var upstreamLeg)
+                && ReferenceEquals(upstreamLeg, leg))
+            {
+                _forwardLegsByUpstreamId.Remove(upstreamRequestId);
+                leg.UpstreamRequestId = null;
+            }
+            registration = TakeCancellationRegistrationLocked(leg, out hasRegistration);
+        }
+
+        if (hasRegistration)
+        {
+            registration.Dispose();
+        }
+    }
+
+    internal void FailForwardLegs(Exception failure)
+    {
+        List<CancellationTokenRegistration>? registrations = null;
+        lock (_forwardLegGate)
+        {
+            if (_forwardLegsByDownstreamId.Count == 0)
+            {
+                _forwardLegsByUpstreamId.Clear();
+                return;
+            }
+
+            foreach (var leg in _forwardLegsByDownstreamId.Values)
+            {
+                if (leg.State is ForwardLegState.Active
+                    or ForwardLegState.TerminalReceived
+                    or ForwardLegState.CancellationPending)
+                {
+                    leg.State = ForwardLegState.Failed;
+                    leg.Publication.TrySetException(failure);
+                }
+
+                var registration = TakeCancellationRegistrationLocked(leg, out var hasRegistration);
+                if (hasRegistration)
+                {
+                    (registrations ??= []).Add(registration);
+                }
+            }
+
+            _forwardLegsByDownstreamId.Clear();
+            _forwardLegsByUpstreamId.Clear();
+        }
+
+        if (registrations is not null)
+        {
+            foreach (var registration in registrations)
+            {
+                registration.Dispose();
+            }
+        }
+    }
+
+    private void FailForwardingAndEndSession(Exception failure)
+    {
+        FailForwarding(failure);
+        try
+        {
+            _sessionEndingCts.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Disposal already completed the same terminal transition.
+        }
+    }
+
+    private ForwardLeg BeginForwardLeg(
+        RequestId downstreamRequestId,
+        CancellationToken cancellationToken)
+    {
+
+        var leg = new ForwardLeg(downstreamRequestId);
+        InvalidOperationException? collision = null;
+        lock (_forwardLegGate)
+        {
+            ThrowIfForwardingFailed();
+            if (_sessionEndingCts.IsCancellationRequested)
+            {
+                throw new OperationCanceledException(_sessionEndingCts.Token);
+            }
+
+            if (_forwardLegsByDownstreamId.ContainsKey(downstreamRequestId))
+            {
+                collision = new InvalidOperationException(
+                    $"Duplicate live downstream request ID '{downstreamRequestId}' cannot replace an existing forward leg.");
+            }
+            else
+            {
+                _forwardLegsByDownstreamId.Add(downstreamRequestId, leg);
+            }
+        }
+
+        if (collision is not null)
+        {
+            FailForwardingAndEndSession(collision);
+            throw collision;
+        }
+
+        if (cancellationToken.CanBeCanceled)
+        {
+            var registration = cancellationToken.Register(
+                static state =>
+                {
+                    var tuple = (Tuple<RelaySession, ForwardLeg>)state!;
+                    tuple.Item1.AbandonForwardLeg(tuple.Item2);
+                },
+                Tuple.Create(this, leg));
+            var disposeRegistration = false;
+            lock (_forwardLegGate)
+            {
+                if (leg.State == ForwardLegState.Active
+                    && _forwardLegsByDownstreamId.TryGetValue(downstreamRequestId, out var current)
+                    && ReferenceEquals(current, leg))
+                {
+                    leg.CancellationRegistration = registration;
+                    leg.HasCancellationRegistration = true;
+                }
+                else
+                {
+                    disposeRegistration = true;
+                }
+            }
+
+            if (disposeRegistration)
+            {
+                registration.Dispose();
+            }
+        }
+
+        return leg;
+    }
+
+    private void AbandonForwardLeg(ForwardLeg leg)
+    {
+        lock (_forwardLegGate)
+        {
+            if (!_forwardLegsByDownstreamId.TryGetValue(leg.DownstreamRequestId, out var current)
+                || !ReferenceEquals(current, leg))
+            {
+                return;
+            }
+
+            if (leg.State is ForwardLegState.Active or ForwardLegState.TerminalReceived)
+            {
+                leg.State = ForwardLegState.CancellationPending;
+            }
+        }
+    }
+
+    private static CancellationTokenRegistration TakeCancellationRegistrationLocked(
+        ForwardLeg leg,
+        out bool hasRegistration)
+    {
+        hasRegistration = leg.HasCancellationRegistration;
+        leg.HasCancellationRegistration = false;
+        return leg.CancellationRegistration;
+    }
+
+    internal enum ForwardLegCompletion
+    {
+        Sent,
+        Abandoned,
+    }
+
+    internal sealed class ForwardLeg(RequestId downstreamRequestId)
+    {
+        public RequestId DownstreamRequestId { get; } = downstreamRequestId;
+
+        public RequestId? UpstreamRequestId { get; set; }
+
+        public TaskCompletionSource<ForwardLegCompletion> Publication { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public CancellationTokenRegistration CancellationRegistration { get; set; }
+
+        public bool HasCancellationRegistration { get; set; }
+
+        public ForwardLegState State { get; set; }
+    }
+
+    internal enum ForwardLegState
+    {
+        Active,
+        TerminalReceived,
+        CancellationPending,
+        Abandoned,
+        Sent,
+        Failed,
+    }
 
     /// <summary>
     /// Ordinary route handlers (any direction) call this to reach the already-bootstrapped
@@ -217,21 +680,56 @@ internal sealed class RelaySession : IAsyncDisposable
     private const string RemoteErrorMessagePrefix = "Request failed (remote): ";
 
     /// <summary>
-    /// Raw, direction-agnostic forward: creates a fresh request on <paramref name="target"/>
-    /// preserving method and params (including <c>_meta</c> and any progress token) exactly,
-    /// and returns the target's raw response without host-defined DTO conversion. The SDK
-    /// assigns a fresh connection-local ID for the target leg since the forwarded request's
-    /// ID is left unset; the target's own cancellation semantics (its own
-    /// <c>notifications/cancelled</c>) apply to the new leg independently of the source.
+    /// Raw downstream-to-upstream forward with one exact, typed two-leg correlation marker.
+    /// The target request keeps the source method/params but receives a fresh target-leg ID;
+    /// its context contains only the private non-wire marker consumed by the wrapped upstream
+    /// transport. The downstream request's transport context is never reused.
     /// </summary>
-    public static async Task<JsonRpcResponse> ForwardRequestAsync(
-        McpSession target, JsonRpcRequest source, CancellationToken cancellationToken)
+    public Task<JsonRpcResponse> ForwardApplicationRequestAsync(
+        McpSession target,
+        JsonRpcRequest source,
+        CancellationToken cancellationToken)
+    {
+        var leg = BeginForwardLeg(source.Id, cancellationToken);
+        return SendForwardedRequestAsync(
+            target,
+            new JsonRpcRequest
+            {
+                Method = source.Method,
+                Params = source.Params,
+                Context = new JsonRpcMessageContext
+                {
+                    Items = new Dictionary<string, object?>
+                    {
+                        [ForwardLegContextItemKey] = leg,
+                    },
+                },
+            },
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Raw, direction-agnostic uncorrelated forward used by reverse routes and focused shared
+    /// primitive tests. Application requests flowing downstream-to-Python use
+    /// <see cref="ForwardApplicationRequestAsync"/> instead.
+    /// </summary>
+    public static Task<JsonRpcResponse> ForwardRequestAsync(
+        McpSession target,
+        JsonRpcRequest source,
+        CancellationToken cancellationToken) =>
+        SendForwardedRequestAsync(
+            target,
+            new JsonRpcRequest { Method = source.Method, Params = source.Params },
+            cancellationToken);
+
+    private static async Task<JsonRpcResponse> SendForwardedRequestAsync(
+        McpSession target,
+        JsonRpcRequest request,
+        CancellationToken cancellationToken)
     {
         try
         {
-            return await target
-                .SendRequestAsync(new JsonRpcRequest { Method = source.Method, Params = source.Params }, cancellationToken)
-                .ConfigureAwait(false);
+            return await target.SendRequestAsync(request, cancellationToken).ConfigureAwait(false);
         }
         catch (McpProtocolException ex) when (ex.Message.StartsWith(RemoteErrorMessagePrefix, StringComparison.Ordinal))
         {
@@ -273,7 +771,10 @@ internal sealed class RelaySession : IAsyncDisposable
         }
 
         _sessionEndingCts.Cancel();
-        _sessionEndingCts.Dispose();
+        if (_awaitUpstreamHandlerDrain is not null)
+        {
+            await _awaitUpstreamHandlerDrain().ConfigureAwait(false);
+        }
 
         if (_upstreamInitTask is { } initTask)
         {
@@ -287,5 +788,8 @@ internal sealed class RelaySession : IAsyncDisposable
                 // The handshake itself failed; there is no client to dispose.
             }
         }
+
+        FailForwardLegs(new OperationCanceledException("The relay session is ending.", _sessionEndingCts.Token));
+        _sessionEndingCts.Dispose();
     }
 }

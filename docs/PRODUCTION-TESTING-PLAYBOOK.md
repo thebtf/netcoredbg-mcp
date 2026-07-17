@@ -528,10 +528,23 @@ async def main():
                 {"plan": {"name": "netcoredbg-mcp-host-proxy-check", "actions": [{"name": "output_checkpoint", "args": {"name": "start"}}]}},
             )
             payload = json.loads(call.content[0].text)
+            prompts = await session.list_prompts()
+            prompt_names = [prompt.name for prompt in prompts.prompts]
+            resources = await session.list_resources()
+            resource_uris = sorted(str(resource.uri) for resource in resources.resources)
+            templates = await session.list_resource_templates()
+            state = await session.read_resource("debug://state")
             result = {
                 "server_name": initialized.serverInfo.name,
                 "x_mux": (initialized.capabilities.experimental or {}).get("x-mux"),
                 "tools_capability": initialized.capabilities.tools is not None,
+                "prompts_capability": initialized.capabilities.prompts is not None,
+                "resources_capability": initialized.capabilities.resources is not None,
+                "resources_subscribe": bool(
+                    initialized.capabilities.resources
+                    and initialized.capabilities.resources.subscribe
+                ),
+                "logging_capability": initialized.capabilities.logging is not None,
                 "direct_tool_count": len(direct_names),
                 "host_tool_count": len(host_names),
                 "missing_tools": missing,
@@ -540,16 +553,44 @@ async def main():
                 "catalog_match": host_names == direct_names,
                 "call_is_error": call.isError,
                 "call_status": (payload.get("data") or {}).get("status"),
+                "prompt_names": prompt_names,
+                "resource_uris": resource_uris,
+                "resource_template_count": len(templates.resourceTemplates),
+                "state_read_ok": bool(state.contents and '"execState"' in (state.contents[0].text or "")),
             }
             print(json.dumps(result, sort_keys=True))
             if (
                 result["server_name"] != "netcoredbg-mcp-host"
                 or result["x_mux"] != {"sharing": "isolated"}
                 or not result["tools_capability"]
+                or not result["prompts_capability"]
+                or not result["resources_capability"]
+                or not result["resources_subscribe"]
+                or result["logging_capability"]
                 or missing
                 or not result["catalog_match"]
                 or result["call_is_error"]
                 or result["call_status"] != "PASS"
+                or result["prompt_names"]
+                != [
+                    "debug",
+                    "debug-gui",
+                    "debug-exception",
+                    "debug-visual",
+                    "debug-mistakes",
+                    "investigate",
+                    "debug-scenario",
+                    "dap-escape-hatch",
+                ]
+                or result["resource_uris"]
+                != [
+                    "debug://breakpoints",
+                    "debug://output",
+                    "debug://state",
+                    "debug://threads",
+                ]
+                or result["resource_template_count"] != 0
+                or not result["state_read_ok"]
             ):
                 raise SystemExit(1)
 
@@ -576,6 +617,23 @@ Expected result:
   repository-proven minimal plan (`tests/test_host_proxy.py::MINIMAL_PLAN`)
   completes and returns Python's own real `PASS` decision — not a protocol
   fault, and not a silently-accepted `INVALID_SETUP`/`BLOCKED`/`FAIL`.
+- Prompts capability is present and `prompt_names` is exactly the eight native
+  host prompts (`debug`, `debug-gui`, `debug-exception`, `debug-visual`,
+  `debug-mistakes`, `investigate`, `debug-scenario`, `dap-escape-hatch`).
+- Resources capability is present with `subscribe=true`; `resource_uris` is
+  exactly the four `debug://` URIs; `resource_template_count` is `0`; and a
+  real `resources/read` of `debug://state` succeeds (`state_read_ok=true`).
+- Logging capability is absent (`logging_capability=false`), matching the
+  installed Python backend; progress/logging tokens still forward when Python
+  emits them (covered by the supporting critical host-proxy gate below, not by
+  inventing a second consumer smoke).
+
+The same installed-host journey also owns roots reverse routing, resource
+subscribe/update/unsubscribe, progress notifications before a final tool
+response, and x-mux metadata ownership. Those surfaces are exercised load-
+bearingly by the supporting critical gate rather than inventing a second
+parallel installed smoke here, so the consumer journey stays one real external
+process exchange while still requiring the full front-door matrix to pass.
 
 Supporting protocol check; this source-tree test is mandatory but does not
 produce the UXDD verdict:
@@ -615,12 +673,18 @@ point; rolling back requires no uninstall and no data migration:
 - `PRODUCT_WORKS`: `dotnet publish` succeeds; the real external client observes
   `server_name` exactly equal to `netcoredbg-mcp-host` (never the Python
   server's own identity or any other value), `x-mux.sharing=isolated`, a
-  tools capability, zero missing named tools, and `catalog_match=true` (the
-  complete host tool-name set exactly equals the complete direct-Python
-  tool-name set fetched live in the same run); and a real `tools/call` for
-  the repository-proven minimal plan (`tests/test_host_proxy.py::MINIMAL_PLAN`)
-  returns `call_status=PASS` (not merely `call_is_error=false`); rollback to
-  `$ConsumerCli` still succeeds afterward.
+  tools capability, prompts capability, resources capability with
+  `subscribe=true`, no logging capability (matching installed Python), zero
+  missing named tools, and `catalog_match=true` (the complete host tool-name
+  set exactly equals the complete direct-Python tool-name set fetched live in
+  the same run); the eight native prompts list and four `debug://` resources
+  with zero templates plus a successful `debug://state` read; and a real
+  `tools/call` for the repository-proven minimal plan
+  (`tests/test_host_proxy.py::MINIMAL_PLAN`) returns `call_status=PASS` (not
+  merely `call_is_error=false`); the supporting critical host-proxy gate also
+  proves roots, progress/logging, resource subscriptions, and x-mux ownership
+  through the same real host process surface; rollback to `$ConsumerCli` still
+  succeeds afterward.
 - `PARTIALLY_WORKS`: a named pre-host-start workstation prerequisite blocks
   `dotnet publish` itself, before any process can even attempt to start —
   for example no compatible `-r <RID>` runtime pack for this workstation's
@@ -669,12 +733,17 @@ point; rolling back requires no uninstall and no data migration:
   in-process call instead of a real external `$ConsumerNetHost` process, or
   omits the real MCP client's `initialize`/`tools/list`/`tools/call` exchange.
 - The candidate host's tool catalog (a non-empty `missing_from_host` or
-  `extra_in_host`, i.e. `catalog_match=false`), `x-mux` capability, or a real
-  `tools/call` result diverges from the direct-Python journey without an
-  honest `BROKEN` verdict naming the divergence.
+  `extra_in_host`, i.e. `catalog_match=false`), `x-mux` capability, prompts
+  catalog, resources/read/subscribe surface, or a real `tools/call` result
+  diverges from the direct-Python journey without an honest `BROKEN` verdict
+  naming the divergence.
 - The candidate host's documentation claims publication, packaging
   completion, or that it replaces `netcoredbg-mcp --project-from-cwd` as the
   default entry point.
+- Flow 10 invents a second parallel installed smoke instead of extending the
+  same `$ConsumerNetHost` exchange plus the supporting
+  `tests/critical/test_host_proxy_critical.py` gate for roots, progress/
+  logging, prompts, resources/subscriptions, and x-mux.
 
 ## Verdict Template
 
@@ -688,7 +757,7 @@ point; rolling back requires no uninstall and no data migration:
 | Avalonia fixture compatibility | Fixture found; key cleanup succeeds; UIA gaps are bounded UNSUPPORTED/BLOCKED evidence |  |  |
 | WPF DataGrid drag/drop customer-mode gate | `docs/examples/runtime-smoke-v2-drag-drop-grid.json` returns PASS or an honest BLOCKED with route, viewport, selected-payload, negative no-op, and offscreen row-target `drop.ensure_visible=true` evidence requirements named |  |  |
 | NovaScript action-oracle app diagnostics | `docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json` expands to `app_diagnostics` and returns PASS or an honest BLOCKED with freshness and cleanup evidence |  |  |
-| .NET compatibility-host candidate journey | `$ConsumerNetHost` real external client exchange returns `catalog_match=true` against the same-run direct-Python tool list, matching capabilities, and PASS on a real `tools/call`, or an honest BLOCKED/FAIL naming the missing prerequisite; rollback to `$ConsumerCli` still works |  |  |
+| .NET compatibility-host candidate journey | `$ConsumerNetHost` real external client exchange returns `catalog_match=true` against the same-run direct-Python tool list, matching tools/prompts/resources/x-mux capabilities (logging absent), eight prompts, four resources/zero templates/read, and PASS on a real `tools/call`, with supporting critical proof of roots/progress/subscriptions; or an honest BLOCKED/FAIL naming the missing prerequisite; rollback to `$ConsumerCli` still works |  |  |
 
 Overall verdict: `PRODUCT_WORKS` / `PARTIALLY_WORKS` / `BROKEN`
 

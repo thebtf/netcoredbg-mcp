@@ -1133,6 +1133,47 @@ def test_playbook_documents_dotnet_compatibility_host_candidate_journey_as_real_
         "tests/critical/test_host_proxy_critical.py -m critical" in playbook
     )
 
+    # Front-door consumer journey must cover prompts, resources/read/subscribe,
+    # logging-absent truth, and the supporting critical gate for roots/
+    # progress/subscriptions/x-mux — without inventing a second parallel smoke.
+    assert "prompt_names" in playbook
+    assert "resource_uris" in playbook
+    assert "resource_template_count" in playbook
+    assert "state_read_ok" in playbook
+    assert "logging_capability" in playbook
+    assert "prompts_capability" in playbook
+    assert "resources_capability" in playbook
+    assert "resources_subscribe" in playbook
+    assert "dap-escape-hatch" in playbook
+    assert "debug://state" in playbook
+    assert "debug://breakpoints" in playbook
+    assert "debug://output" in playbook
+    assert "debug://threads" in playbook
+    assert _collapsed(
+        "Logging capability is absent (`logging_capability=false`), matching "
+        "the installed Python backend"
+    ) in collapsed
+    assert _collapsed(
+        "Prompts capability is present and `prompt_names` is exactly the "
+        "eight native host prompts"
+    ) in collapsed
+    assert _collapsed(
+        "Resources capability is present with `subscribe=true`"
+    ) in collapsed
+    assert "inventing a second parallel installed smoke" in collapsed
+    assert (
+        "invents a second parallel installed smoke instead of extending the "
+        "same `$ConsumerNetHost` exchange" in collapsed
+    )
+    assert _collapsed(
+        "gate for roots, progress/ logging, prompts, resources/subscriptions, "
+        "and x-mux"
+    ) in collapsed or _collapsed(
+        "gate for roots, progress/logging, prompts, resources/subscriptions, "
+        "and x-mux"
+    ) in collapsed
+    assert "resource subscriptions, and x-mux ownership" in collapsed
+
 
 def test_playbook_dotnet_candidate_journey_does_not_erode_python_default_boundary() -> (
     None

@@ -1,0 +1,1543 @@
+using Microsoft.Extensions.DependencyInjection;
+using System.Collections.Concurrent;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Threading.Channels;
+using ModelContextProtocol;
+using ModelContextProtocol.Client;
+using ModelContextProtocol.Protocol;
+using ModelContextProtocol.Server;
+using Xunit;
+
+namespace NetCoreDbg.Mcp.Host.Tests;
+
+/// <summary>
+/// Proves FD-002's <see cref="ProgressLoggingRelay"/> against real SDK endpoints
+/// (<c>McpServer</c>/<c>McpClient</c>) over an in-memory <see cref="DuplexChannel"/> - never mocks.
+/// Composition is built by <see cref="ProgressLoggingComposition"/>, which wires this module exactly
+/// as the reported integration hook describes; production composition (<c>RelayComposition.cs</c>)
+/// is untouched and continues to advertise no logging capability and no progress/logging routes until
+/// an integrator adds them. The real-stdio cases below cover the same contracts against a real Python
+/// child process instead of a fake in-memory one.
+///
+/// Ordering-sensitive assertions never rely on <see cref="McpClientHandlers.NotificationHandlers"/> for
+/// *observation*: SDK 1.4.1 dispatches every incoming message (requests, responses, and notifications
+/// alike) via an unawaited fire-and-forget task on the reading side too, so a client's own notification
+/// handlers can be invoked out of the order the messages actually arrived - the same hazard this
+/// module's <c>WrapUpstreamTransport</c> closes on the upstream leg. Tests that need true arrival order
+/// use <see cref="SequentialOrderObserverTransport"/>, a test-only transport wrapper built the same way,
+/// to observe the downstream leg reliably.
+/// </summary>
+public sealed class ProgressLoggingRelayTests
+{
+    private const string SlowProbeToolName = "probe";
+    private const string FastProbeToolName = "probe-fast";
+
+    /// <summary>Records events in the order this process observed them, for cross-checking relative
+    /// order between concurrently-dispatched notifications and request completions.</summary>
+    private sealed class EventLog
+    {
+        private int _sequence;
+
+        public ConcurrentQueue<(int Sequence, string Label)> Events { get; } = new();
+
+        public ConcurrentQueue<(int Sequence, JsonRpcMessage Message)> Messages { get; } = new();
+
+        public int Record(string label, JsonRpcMessage? message = null)
+        {
+            var sequence = Interlocked.Increment(ref _sequence);
+            Events.Enqueue((sequence, label));
+            if (message is not null)
+            {
+                Messages.Enqueue((sequence, message));
+            }
+
+            return sequence;
+        }
+    }
+
+    private sealed class ReadCounter
+    {
+        private readonly SemaphoreSlim _messages = new(0);
+        private int _count;
+
+        public int Count => Volatile.Read(ref _count);
+
+        public void Record()
+        {
+            Interlocked.Increment(ref _count);
+            _messages.Release();
+        }
+
+        public async Task<bool> WaitForCountAsync(int target, TimeSpan timeout)
+        {
+            using var timeoutCts = new CancellationTokenSource(timeout);
+            try
+            {
+                while (Count < target)
+                {
+                    await _messages.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+                }
+
+                return true;
+            }
+            catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
+            {
+                return false;
+            }
+        }
+    }
+
+    private sealed class CountingClientTransport(IClientTransport inner, ReadCounter counter)
+        : IClientTransport
+    {
+        public string Name => inner.Name;
+
+        public async Task<ITransport> ConnectAsync(CancellationToken cancellationToken = default)
+        {
+            var transport = await inner.ConnectAsync(cancellationToken).ConfigureAwait(false);
+            return new CountingTransport(transport, counter);
+        }
+
+        private sealed class CountingTransport : ITransport
+        {
+            private readonly ITransport _inner;
+
+            public CountingTransport(ITransport inner, ReadCounter counter)
+            {
+                _inner = inner;
+                MessageReader = new CountingChannelReader(inner.MessageReader, counter);
+            }
+
+            public string? SessionId => _inner.SessionId;
+
+            public ChannelReader<JsonRpcMessage> MessageReader { get; }
+
+            public Task SendMessageAsync(
+                JsonRpcMessage message,
+                CancellationToken cancellationToken = default) =>
+                _inner.SendMessageAsync(message, cancellationToken);
+
+            public ValueTask DisposeAsync() => _inner.DisposeAsync();
+        }
+
+        private sealed class CountingChannelReader(
+            ChannelReader<JsonRpcMessage> inner,
+            ReadCounter counter) : ChannelReader<JsonRpcMessage>
+        {
+            public override Task Completion => inner.Completion;
+
+            public override bool TryRead(out JsonRpcMessage item)
+            {
+                if (!inner.TryRead(out item!))
+                {
+                    return false;
+                }
+
+                counter.Record();
+                return true;
+            }
+
+            public override ValueTask<bool> WaitToReadAsync(
+                CancellationToken cancellationToken = default) =>
+                inner.WaitToReadAsync(cancellationToken);
+        }
+    }
+
+    private sealed class GatedWriteStream(Stream inner) : Stream
+    {
+        private readonly TaskCompletionSource _blockedWriteStarted =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _blocked;
+
+        public override bool CanRead => inner.CanRead;
+        public override bool CanSeek => inner.CanSeek;
+        public override bool CanWrite => inner.CanWrite;
+        public override long Length => inner.Length;
+        public override long Position
+        {
+            get => inner.Position;
+            set => inner.Position = value;
+        }
+
+        public void Block() => Volatile.Write(ref _blocked, 1);
+
+        public void Release()
+        {
+            Volatile.Write(ref _blocked, 0);
+            _release.TrySetResult();
+        }
+
+        public Task WaitUntilBlockedAsync(TimeSpan timeout) =>
+            _blockedWriteStarted.Task.WaitAsync(timeout);
+
+        public override void Flush() => inner.Flush();
+
+        public override Task FlushAsync(CancellationToken cancellationToken) =>
+            inner.FlushAsync(cancellationToken);
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            inner.Read(buffer, offset, count);
+
+        public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
+
+        public override void SetLength(long value) => inner.SetLength(value);
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            WaitIfBlockedAsync(CancellationToken.None).AsTask().GetAwaiter().GetResult();
+            inner.Write(buffer, offset, count);
+        }
+
+        public override async Task WriteAsync(
+            byte[] buffer,
+            int offset,
+            int count,
+            CancellationToken cancellationToken)
+        {
+            await WaitIfBlockedAsync(cancellationToken).ConfigureAwait(false);
+            await inner.WriteAsync(buffer, offset, count, cancellationToken).ConfigureAwait(false);
+        }
+
+        public override async ValueTask WriteAsync(
+            ReadOnlyMemory<byte> buffer,
+            CancellationToken cancellationToken = default)
+        {
+            await WaitIfBlockedAsync(cancellationToken).ConfigureAwait(false);
+            await inner.WriteAsync(buffer, cancellationToken).ConfigureAwait(false);
+        }
+
+        public override ValueTask DisposeAsync() => inner.DisposeAsync();
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                inner.Dispose();
+            }
+
+            base.Dispose(disposing);
+        }
+
+        private async ValueTask WaitIfBlockedAsync(CancellationToken cancellationToken)
+        {
+            if (Volatile.Read(ref _blocked) == 0)
+            {
+                return;
+            }
+
+            _blockedWriteStarted.TrySetResult();
+            await _release.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Test-only transport wrapper that observes every message a real downstream <see cref="McpClient"/>
+    /// receives in the exact order this wrapper's own single sequential reader loop consumed them from
+    /// the wrapped transport, before handing each message off unchanged to the wrapped
+    /// <see cref="McpClient"/> for its own normal processing. This is the reliable oracle for
+    /// arrival-order assertions in this file - see the type's own class doc comment for why
+    /// <see cref="McpClientHandlers.NotificationHandlers"/> is not.
+    /// </summary>
+    private sealed class SequentialOrderObserverTransport(IClientTransport inner, EventLog log) : IClientTransport
+    {
+        public string Name => inner.Name;
+
+        public async Task<ITransport> ConnectAsync(CancellationToken cancellationToken = default)
+        {
+            var innerTransport = await inner.ConnectAsync(cancellationToken).ConfigureAwait(false);
+            return new ObservingSessionTransport(innerTransport, log);
+        }
+
+        private sealed class ObservingSessionTransport : ITransport
+        {
+            private readonly ITransport _inner;
+            private readonly EventLog _log;
+            private readonly ConcurrentDictionary<string, string> _progressTokensByRequestId = new();
+            private readonly Channel<JsonRpcMessage> _passthrough =
+                Channel.CreateUnbounded<JsonRpcMessage>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
+            private readonly Task _pumpTask;
+
+            public ObservingSessionTransport(ITransport inner, EventLog log)
+            {
+                _inner = inner;
+                _log = log;
+                _pumpTask = PumpAsync();
+            }
+
+            public string? SessionId => _inner.SessionId;
+
+            public ChannelReader<JsonRpcMessage> MessageReader => _passthrough.Reader;
+
+            public Task SendMessageAsync(JsonRpcMessage message, CancellationToken cancellationToken = default)
+            {
+                if (message is JsonRpcRequest { Method: RequestMethods.ToolsCall } request
+                    && request.Params?.Deserialize<CallToolRequestParams>(McpJsonUtilities.DefaultOptions)?.ProgressToken is { } token)
+                {
+                    _progressTokensByRequestId[request.Id.ToString()] = token.ToString()!;
+                    _log.Record($"request|{token}", request);
+                }
+                else if (message is JsonRpcNotification { Method: NotificationMethods.CancelledNotification } cancellation
+                    && cancellation.Params?.Deserialize<CancelledNotificationParams>(McpJsonUtilities.DefaultOptions) is { } cancellationParams)
+                {
+                    var requestId = cancellationParams.RequestId.ToString();
+                    _log.Record(
+                        _progressTokensByRequestId.TryGetValue(requestId, out var cancelledToken)
+                            ? $"cancel|{cancelledToken}"
+                            : $"cancel-id|{requestId}",
+                        cancellation);
+                }
+
+                return _inner.SendMessageAsync(message, cancellationToken);
+            }
+
+            private async Task PumpAsync()
+            {
+                Exception? failure = null;
+                try
+                {
+                    await foreach (var message in _inner.MessageReader.ReadAllAsync().ConfigureAwait(false))
+                    {
+                        switch (message)
+                        {
+                            case JsonRpcNotification { Method: NotificationMethods.ProgressNotification } progress:
+                                var progressParams = progress.Params.Deserialize<ProgressNotificationParams>(McpJsonUtilities.DefaultOptions)!;
+                                _log.Record($"progress|{progressParams.ProgressToken}|{progressParams.Progress.Progress}", progress);
+                                break;
+
+                            case JsonRpcNotification { Method: NotificationMethods.LoggingMessageNotification } logging:
+                                var loggingParams = logging.Params.Deserialize<LoggingMessageNotificationParams>(McpJsonUtilities.DefaultOptions)!;
+                                var data = loggingParams.Data.ValueKind == JsonValueKind.String
+                                    ? loggingParams.Data.GetString()
+                                    : loggingParams.Data.GetRawText();
+                                _log.Record($"log|{loggingParams.Logger}|{loggingParams.Level}|{data}", logging);
+                                break;
+
+                            case JsonRpcResponse response:
+                                var responseId = response.Id.ToString();
+                                _log.Record(
+                                    _progressTokensByRequestId.TryRemove(responseId, out var token)
+                                        ? $"response|{token}"
+                                        : $"response|{responseId}",
+                                    response);
+                                break;
+                        }
+
+                        await _passthrough.Writer.WriteAsync(message).ConfigureAwait(false);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    failure = ex;
+                }
+                finally
+                {
+                    _passthrough.Writer.TryComplete(failure);
+                }
+            }
+
+            public async ValueTask DisposeAsync()
+            {
+                await _inner.DisposeAsync().ConfigureAwait(false);
+                try
+                {
+                    await _pumpTask.ConfigureAwait(false);
+                }
+                catch
+                {
+                    // The pump's own failure (if any) already completed _passthrough with it.
+                }
+            }
+        }
+    }
+
+    private static Task<McpClient> CreateObservedDownstreamClientAsync(DuplexChannel channel, EventLog log) =>
+        McpClient.CreateAsync(new SequentialOrderObserverTransport(channel.CreateClientTransport(), log));
+
+    /// <summary>A fake Python advertising Tools (and, optionally, Logging). Its <c>probe</c> tool
+    /// reports <paramref name="steps"/> increasing progress notifications interleaved with log
+    /// messages for the caller's own progress token, invoking <paramref name="afterStep"/> (a no-op
+    /// unless supplied) between steps, then returns a structured result; its independent
+    /// <c>probe-fast</c> tool always runs two steps with no delay, so a test can prove the session
+    /// stays usable after cancelling/disconnecting a slow <c>probe</c> call without inheriting that
+    /// call's own delay configuration.</summary>
+    private static FakePythonServer StartProbeFakePython(
+        DuplexChannel channel,
+        int steps = 3,
+        bool advertiseLogging = false,
+        McpRequestHandler<SetLevelRequestParams, EmptyResult>? setLoggingLevelHandler = null,
+        Func<int, CancellationToken, Task>? afterStep = null)
+    {
+        async ValueTask<CallToolResult> RunProbeAsync(
+            RequestContext<CallToolRequestParams> context, int stepCount, Func<int, CancellationToken, Task>? afterStepHook, CancellationToken cancellationToken)
+        {
+            var token = context.Params?.ProgressToken;
+
+            for (var step = 1; step <= stepCount; step++)
+            {
+                if (token is { } activeToken)
+                {
+                    await context.Server.SendMessageAsync(
+                        new JsonRpcNotification
+                        {
+                            Method = NotificationMethods.ProgressNotification,
+                            Params = JsonSerializer.SerializeToNode(
+                                new ProgressNotificationParams
+                                {
+                                    ProgressToken = activeToken,
+                                    Progress = new ProgressNotificationValue { Progress = step, Total = stepCount },
+                                },
+                                McpJsonUtilities.DefaultOptions),
+                        },
+                        cancellationToken).ConfigureAwait(false);
+                }
+
+                await context.Server.SendMessageAsync(
+                    new JsonRpcNotification
+                    {
+                        Method = NotificationMethods.LoggingMessageNotification,
+                        Params = JsonSerializer.SerializeToNode(
+                            new LoggingMessageNotificationParams
+                            {
+                                Level = LoggingLevel.Info,
+                                Logger = "fake-python",
+                                Data = JsonSerializer.SerializeToElement($"log-{step}"),
+                            },
+                            McpJsonUtilities.DefaultOptions),
+                    },
+                    cancellationToken).ConfigureAwait(false);
+
+                if (afterStepHook is not null)
+                {
+                    await afterStepHook(step, cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            return new CallToolResult { Content = [new TextContentBlock { Text = "done" }] };
+        }
+
+        var options = new McpServerOptions
+        {
+            ServerInfo = new Implementation { Name = "fake-python", Version = "1.0.0" },
+            Capabilities = new ServerCapabilities { Tools = new ToolsCapability() },
+            Handlers = new McpServerHandlers
+            {
+                ListToolsHandler = (context, cancellationToken) => ValueTask.FromResult(new ListToolsResult { Tools = [] }),
+                CallToolHandler = (context, cancellationToken) => context.Params?.Name == FastProbeToolName
+                    ? RunProbeAsync(context, stepCount: 2, afterStepHook: null, cancellationToken)
+                    : RunProbeAsync(context, steps, afterStep, cancellationToken),
+                SetLoggingLevelHandler = setLoggingLevelHandler,
+            },
+        };
+
+        if (!advertiseLogging)
+        {
+            // SDK 1.4.1's McpServerImpl.ConfigureLogging unconditionally sets ServerCapabilities.Logging
+            // regardless of options.Capabilities (verified directly against the compiled SDK, same as
+            // ProgressLoggingRelay.ConfigureFilters capability-absent baseline for the host itself).
+            // To make this fake accurately represent "Python has no logging capability" the way real,
+            // unmodified netcoredbg_mcp genuinely does not, strip the same JSON key from this fake's own
+            // initialize response.
+            options.Filters.Message.OutgoingFilters.Add(next => async (context, cancellationToken) =>
+            {
+                if (context.JsonRpcMessage is JsonRpcResponse { Result: JsonObject result }
+                    && result.TryGetPropertyValue("capabilities", out var capabilitiesNode)
+                    && capabilitiesNode is JsonObject capabilities)
+                {
+                    capabilities.Remove("logging");
+                }
+
+                await next(context, cancellationToken).ConfigureAwait(false);
+            });
+        }
+
+        return FakePythonServer.Start(channel, options);
+    }
+
+    private static CallToolRequestParams ProbeCall(string progressToken) => new()
+    {
+        Name = SlowProbeToolName,
+        Meta = new JsonObject { ["progressToken"] = progressToken },
+    };
+
+    private static CallToolRequestParams FastProbeCall(string progressToken) => new()
+    {
+        Name = FastProbeToolName,
+        Meta = new JsonObject { ["progressToken"] = progressToken },
+    };
+
+    [Fact]
+    public async Task MultipleConcurrentProgressTokens_EachPreservesMonotonicOrderIndependently()
+    {
+        var upstreamChannel = new DuplexChannel();
+        var downstreamChannel = new DuplexChannel();
+        var fakePython = StartProbeFakePython(upstreamChannel, steps: 5);
+        var (session, host) = ProgressLoggingComposition.Build(
+            upstreamChannel.CreateClientTransport,
+            builder => builder.WithStreamServerTransport(downstreamChannel.ServerInputStream, downstreamChannel.ServerOutputStream));
+
+        var log = new EventLog();
+        await using var downstreamClient = await CreateObservedDownstreamClientAsync(downstreamChannel, log);
+
+        var callA = downstreamClient.CallToolAsync(ProbeCall("token-a"));
+        var callB = downstreamClient.CallToolAsync(ProbeCall("token-b"));
+        await Task.WhenAll(callA.AsTask(), callB.AsTask());
+
+        var progressValuesByToken = log.Events
+            .Where(e => e.Label.StartsWith("progress|", StringComparison.Ordinal))
+            .OrderBy(e => e.Sequence)
+            .Select(e => e.Label.Split('|'))
+            .GroupBy(parts => parts[1], parts => float.Parse(parts[2]));
+
+        foreach (var tokenGroup in progressValuesByToken)
+        {
+            var observed = tokenGroup.ToArray();
+            Assert.Equal(5, observed.Length);
+            Assert.Equal([1f, 2f, 3f, 4f, 5f], observed);
+        }
+
+        await downstreamClient.DisposeAsync();
+        await host.StopAsync();
+        host.Dispose();
+        await session.DisposeAsync();
+        await fakePython.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Progress_NeverArrivesAfterOwningCallsTerminalResult()
+    {
+        var upstreamChannel = new DuplexChannel();
+        var downstreamChannel = new DuplexChannel();
+        var fakePython = StartProbeFakePython(upstreamChannel, steps: 6);
+        var (session, host) = ProgressLoggingComposition.Build(
+            upstreamChannel.CreateClientTransport,
+            builder => builder.WithStreamServerTransport(downstreamChannel.ServerInputStream, downstreamChannel.ServerOutputStream));
+
+        var log = new EventLog();
+        await using var downstreamClient = await CreateObservedDownstreamClientAsync(downstreamChannel, log);
+
+        var result = await downstreamClient.CallToolAsync(ProbeCall("token-x"));
+        await Task.Delay(TimeSpan.FromMilliseconds(50));
+
+        Assert.False(result.IsError == true);
+        var responseSequence = log.Events.Single(e => e.Label == "response|token-x").Sequence;
+        var progressSequences = log.Events
+            .Where(e => e.Label.StartsWith("progress|token-x|", StringComparison.Ordinal))
+            .Select(e => e.Sequence)
+            .ToArray();
+        Assert.Equal(6, progressSequences.Length);
+        Assert.All(progressSequences, sequence => Assert.True(
+            sequence < responseSequence,
+            $"progress observed at sequence {sequence} arrived at or after the terminal result at sequence {responseSequence}"));
+
+        await downstreamClient.DisposeAsync();
+        await host.StopAsync();
+        host.Dispose();
+        await session.DisposeAsync();
+        await fakePython.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task LoggingNotifications_CapabilityPresent_PreserveSendOrderAndStructuredFields()
+    {
+        var upstreamChannel = new DuplexChannel();
+        var downstreamChannel = new DuplexChannel();
+        var fakePython = StartProbeFakePython(upstreamChannel, steps: 4, advertiseLogging: true);
+        var (session, host) = ProgressLoggingComposition.Build(
+            upstreamChannel.CreateClientTransport,
+            builder => builder.WithStreamServerTransport(downstreamChannel.ServerInputStream, downstreamChannel.ServerOutputStream));
+
+        var log = new EventLog();
+        await using var downstreamClient = await CreateObservedDownstreamClientAsync(downstreamChannel, log);
+
+        await downstreamClient.CallToolAsync(ProbeCall("token-y"));
+
+        var observedLogs = log.Events
+            .Where(e => e.Label.StartsWith("log|", StringComparison.Ordinal))
+            .OrderBy(e => e.Sequence)
+            .Select(e => e.Label)
+            .ToArray();
+        Assert.Equal(
+            ["log|fake-python|Info|log-1", "log|fake-python|Info|log-2", "log|fake-python|Info|log-3", "log|fake-python|Info|log-4"],
+            observedLogs);
+
+        await downstreamClient.DisposeAsync();
+        await host.StopAsync();
+        host.Dispose();
+        await session.DisposeAsync();
+        await fakePython.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task LoggingNotifications_CapabilityAbsent_AreSuppressedWhileProgressContinues()
+    {
+        var upstreamChannel = new DuplexChannel();
+        var downstreamChannel = new DuplexChannel();
+        var fakePython = StartProbeFakePython(upstreamChannel, steps: 3, advertiseLogging: false);
+        var (session, host) = ProgressLoggingComposition.Build(
+            upstreamChannel.CreateClientTransport,
+            builder => builder.WithStreamServerTransport(downstreamChannel.ServerInputStream, downstreamChannel.ServerOutputStream));
+
+        var log = new EventLog();
+        await using var downstreamClient = await CreateObservedDownstreamClientAsync(downstreamChannel, log);
+        Assert.Null(downstreamClient.ServerCapabilities?.Logging);
+
+        await downstreamClient.CallToolAsync(ProbeCall("token-no-logging"));
+        await Task.Delay(TimeSpan.FromMilliseconds(50));
+
+        Assert.Equal(3, log.Events.Count(e => e.Label.StartsWith("progress|token-no-logging|", StringComparison.Ordinal)));
+        Assert.DoesNotContain(log.Events, e => e.Label.StartsWith("log|", StringComparison.Ordinal));
+
+        await downstreamClient.DisposeAsync();
+        await host.StopAsync();
+        host.Dispose();
+        await session.DisposeAsync();
+        await fakePython.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task SetLoggingLevel_CapabilityAbsent_RejectsWithMethodNotFoundAndStripsCapabilityKey()
+    {
+        var upstreamChannel = new DuplexChannel();
+        var downstreamChannel = new DuplexChannel();
+        var fakePython = StartProbeFakePython(upstreamChannel, advertiseLogging: false);
+        var (session, host) = ProgressLoggingComposition.Build(
+            upstreamChannel.CreateClientTransport,
+            builder => builder.WithStreamServerTransport(downstreamChannel.ServerInputStream, downstreamChannel.ServerOutputStream));
+
+        await using var downstreamClient = await McpClient.CreateAsync(downstreamChannel.CreateClientTransport());
+
+        Assert.Null(downstreamClient.ServerCapabilities?.Logging);
+
+        var error = await Assert.ThrowsAsync<McpProtocolException>(() => downstreamClient.SetLoggingLevelAsync(LoggingLevel.Info));
+        Assert.Equal((int)McpErrorCode.MethodNotFound, (int)error.ErrorCode);
+        Assert.Equal("Request failed (remote): Method not found", error.Message);
+
+        await downstreamClient.DisposeAsync();
+        await host.StopAsync();
+        host.Dispose();
+        await session.DisposeAsync();
+        await fakePython.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task SetLoggingLevel_CapabilityPresent_ForwardsToPythonAndPreservesCapabilityKey()
+    {
+        var upstreamChannel = new DuplexChannel();
+        var downstreamChannel = new DuplexChannel();
+        LoggingLevel? observedLevel = null;
+        var fakePython = StartProbeFakePython(
+            upstreamChannel,
+            advertiseLogging: true,
+            setLoggingLevelHandler: (context, cancellationToken) =>
+            {
+                observedLevel = context.Params.Level;
+                return ValueTask.FromResult(new EmptyResult());
+            });
+        var (session, host) = ProgressLoggingComposition.Build(
+            upstreamChannel.CreateClientTransport,
+            builder => builder.WithStreamServerTransport(downstreamChannel.ServerInputStream, downstreamChannel.ServerOutputStream));
+
+        await using var downstreamClient = await McpClient.CreateAsync(downstreamChannel.CreateClientTransport());
+
+        Assert.NotNull(downstreamClient.ServerCapabilities?.Logging);
+
+        await downstreamClient.SetLoggingLevelAsync(LoggingLevel.Warning);
+        Assert.Equal(LoggingLevel.Warning, observedLevel);
+
+        await downstreamClient.DisposeAsync();
+        await host.StopAsync();
+        host.Dispose();
+        await session.DisposeAsync();
+        await fakePython.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task NonConsumingDownstreamClient_ToolCallStillCompletesWithoutDeadlock()
+    {
+        var upstreamChannel = new DuplexChannel();
+        var downstreamChannel = new DuplexChannel();
+        var fakePython = StartProbeFakePython(upstreamChannel, steps: 4);
+        var (session, host) = ProgressLoggingComposition.Build(
+            upstreamChannel.CreateClientTransport,
+            builder => builder.WithStreamServerTransport(downstreamChannel.ServerInputStream, downstreamChannel.ServerOutputStream));
+
+        // No NotificationHandlers registered at all: this client neither advertised nor consumes
+        // progress/logging notifications - it must still receive its own tool result promptly.
+        await using var downstreamClient = await McpClient.CreateAsync(downstreamChannel.CreateClientTransport());
+
+        var result = await downstreamClient.CallToolAsync(ProbeCall("token-z")).AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.False(result.IsError == true);
+
+        await downstreamClient.DisposeAsync();
+        await host.StopAsync();
+        host.Dispose();
+        await session.DisposeAsync();
+        await fakePython.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task BlockedDownstreamNotification_DoesNotStopUpstreamReader()
+    {
+        var upstreamChannel = new DuplexChannel();
+        var downstreamChannel = new DuplexChannel();
+        var innerReadCounter = new ReadCounter();
+        var relayReadCounter = new ReadCounter();
+        var gatedOutput = new GatedWriteStream(downstreamChannel.ServerOutputStream);
+        var fakePython = StartProbeFakePython(upstreamChannel, steps: 2);
+        var (session, host) = ProgressLoggingComposition.Build(
+            () => new CountingClientTransport(upstreamChannel.CreateClientTransport(), innerReadCounter),
+            builder => builder.WithStreamServerTransport(
+                downstreamChannel.ServerInputStream,
+                gatedOutput),
+            observeRelayTransport: transport => new CountingClientTransport(transport, relayReadCounter));
+
+        await using var downstreamClient = await McpClient.CreateAsync(
+            downstreamChannel.CreateClientTransport());
+        var baselineInnerReads = innerReadCounter.Count;
+        var baselineRelayReads = relayReadCounter.Count;
+        gatedOutput.Block();
+
+        var call = downstreamClient.CallToolAsync(ProbeCall("token-backpressure")).AsTask();
+        await gatedOutput.WaitUntilBlockedAsync(TimeSpan.FromSeconds(10));
+        var consumedThroughResponse = await innerReadCounter.WaitForCountAsync(
+            baselineInnerReads + 5,
+            TimeSpan.FromMilliseconds(500));
+        Assert.Equal(baselineRelayReads, relayReadCounter.Count);
+        Assert.False(
+            call.IsCompleted,
+            "The terminal response escaped before the blocked notification was delivered.");
+
+        gatedOutput.Release();
+        var result = await call.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(baselineRelayReads + 1, relayReadCounter.Count);
+
+        await downstreamClient.DisposeAsync();
+        await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        host.Dispose();
+        await session.DisposeAsync();
+        await fakePython.DisposeAsync();
+
+        Assert.True(
+            consumedThroughResponse,
+            "The upstream reader stopped behind downstream notification I/O instead of draining Python output.");
+        Assert.False(result.IsError == true);
+    }
+
+    [Fact]
+    public async Task BlockedDownstreamNotification_QueueSaturationEndsSessionFailClosed()
+    {
+        var upstreamChannel = new DuplexChannel();
+        var downstreamChannel = new DuplexChannel();
+        var gatedOutput = new GatedWriteStream(downstreamChannel.ServerOutputStream);
+        var fakePython = StartProbeFakePython(upstreamChannel, steps: 80);
+        var (session, host) = ProgressLoggingComposition.Build(
+            upstreamChannel.CreateClientTransport,
+            builder => builder.WithStreamServerTransport(
+                downstreamChannel.ServerInputStream,
+                gatedOutput));
+
+        await using var downstreamClient = await McpClient.CreateAsync(
+            downstreamChannel.CreateClientTransport());
+        var sessionEnded = session.RunUntilSessionEndedAsync(CancellationToken.None);
+        gatedOutput.Block();
+        _ = downstreamClient.CallToolAsync(ProbeCall("token-saturation"));
+
+        await gatedOutput.WaitUntilBlockedAsync(TimeSpan.FromSeconds(10));
+        var completed = await Task.WhenAny(sessionEnded, Task.Delay(TimeSpan.FromSeconds(1)));
+        Exception? terminalFailure = null;
+        if (completed == sessionEnded)
+        {
+            try
+            {
+                await sessionEnded;
+            }
+            catch (Exception ex)
+            {
+                terminalFailure = ex;
+            }
+        }
+
+        gatedOutput.Release();
+        await downstreamClient.DisposeAsync();
+        await session.DisposeAsync();
+        await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        host.Dispose();
+        await fakePython.DisposeAsync();
+
+        Assert.Same(sessionEnded, completed);
+        Assert.NotNull(terminalFailure);
+    }
+
+    [Fact]
+    public async Task Cancellation_InvalidatesProgressQueuedBehindBlockedDownstream()
+    {
+        var upstreamChannel = new DuplexChannel();
+        var downstreamChannel = new DuplexChannel();
+        var readCounter = new ReadCounter();
+        var gatedOutput = new GatedWriteStream(downstreamChannel.ServerOutputStream);
+        ProgressLoggingRelay.NotificationState? notificationState = null;
+        const string progressTokenValue = "token-cancel-backlog";
+        var progressToken = new ProgressToken(progressTokenValue);
+        var fakePython = StartProbeFakePython(
+            upstreamChannel,
+            steps: 1000,
+            afterStep: async (_, cancellationToken) =>
+                await Task.Delay(TimeSpan.FromMilliseconds(20), cancellationToken).ConfigureAwait(false));
+        var (session, host) = ProgressLoggingComposition.Build(
+            () => new CountingClientTransport(upstreamChannel.CreateClientTransport(), readCounter),
+            builder => builder.WithStreamServerTransport(
+                downstreamChannel.ServerInputStream,
+                gatedOutput),
+            observeNotificationState: state => notificationState = state);
+
+        var log = new EventLog();
+        await using var downstreamClient = await CreateObservedDownstreamClientAsync(downstreamChannel, log);
+        var baselineReads = readCounter.Count;
+        gatedOutput.Block();
+
+        var slowCall = downstreamClient.CallToolAsync(ProbeCall(progressTokenValue));
+        await gatedOutput.WaitUntilBlockedAsync(TimeSpan.FromSeconds(10));
+        Assert.True(await readCounter.WaitForCountAsync(
+            baselineReads + 6,
+            TimeSpan.FromSeconds(2)));
+        var state = Assert.IsType<ProgressLoggingRelay.NotificationState>(notificationState);
+        Assert.True(state.IsActive(progressToken));
+        Assert.True(state.TryAuthorize(
+            MakeProgressNotification(progressToken),
+            out var queuedAuthorization));
+
+        var downstreamRequestSequence = log.Events.Single(e => e.Label == $"request|{progressTokenValue}").Sequence;
+        var downstreamRequest = Assert.IsType<JsonRpcRequest>(
+            log.Messages.Single(e => e.Sequence == downstreamRequestSequence).Message);
+        await downstreamClient.SendMessageAsync(new JsonRpcNotification
+        {
+            Method = NotificationMethods.CancelledNotification,
+            Params = JsonSerializer.SerializeToNode(
+                new CancelledNotificationParams { RequestId = downstreamRequest.Id },
+                McpJsonUtilities.DefaultOptions),
+        });
+        await WaitForEventAsync(log, label => label == $"cancel|{progressTokenValue}");
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => slowCall.AsTask());
+        using (var cancellationObserved = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+        {
+            while (state.IsAuthorized(queuedAuthorization))
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(10), cancellationObserved.Token);
+            }
+        }
+
+        gatedOutput.Release();
+        var followUp = await downstreamClient.CallToolAsync(
+            FastProbeCall("token-after-queued-cancel")).AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.False(followUp.IsError == true);
+        Assert.Single(
+            log.Events,
+            e => e.Label.StartsWith("progress|token-cancel-backlog|", StringComparison.Ordinal));
+
+        await downstreamClient.DisposeAsync();
+        await host.StopAsync();
+        host.Dispose();
+        await session.DisposeAsync();
+        await fakePython.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Cancellation_DownstreamCancelsMidRun_CleansUpAndSessionStaysUsable()
+    {
+        var upstreamChannel = new DuplexChannel();
+        var downstreamChannel = new DuplexChannel();
+        var firstStepStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var fakePython = StartProbeFakePython(
+            upstreamChannel,
+            steps: 1000,
+            afterStep: async (step, cancellationToken) =>
+            {
+                if (step == 1)
+                {
+                    firstStepStarted.TrySetResult();
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(20), cancellationToken).ConfigureAwait(false);
+            });
+        var (session, host) = ProgressLoggingComposition.Build(
+            upstreamChannel.CreateClientTransport,
+            builder => builder.WithStreamServerTransport(downstreamChannel.ServerInputStream, downstreamChannel.ServerOutputStream));
+
+        await using var downstreamClient = await McpClient.CreateAsync(downstreamChannel.CreateClientTransport());
+
+        using var deadline = new CancellationTokenSource();
+        var slowCall = downstreamClient.CallToolAsync(ProbeCall("token-slow"), cancellationToken: deadline.Token);
+        await firstStepStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        deadline.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => slowCall.AsTask());
+
+        // The relay's upstream pump and the underlying connection must both remain healthy: an
+        // unrelated, independent (always-fast) call still completes normally afterward.
+        var followUp = await downstreamClient.CallToolAsync(FastProbeCall("token-after-cancel")).AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.False(followUp.IsError == true);
+
+        await downstreamClient.DisposeAsync();
+        await host.StopAsync();
+        host.Dispose();
+        await session.DisposeAsync();
+        await fakePython.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task DownstreamDisconnect_DuringInFlightProgress_SessionEndsCleanlyWithoutException()
+    {
+        var upstreamChannel = new DuplexChannel();
+        var downstreamChannel = new DuplexChannel();
+        var firstStepStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var fakePython = StartProbeFakePython(
+            upstreamChannel,
+            steps: 1000,
+            afterStep: async (step, cancellationToken) =>
+            {
+                if (step == 1)
+                {
+                    firstStepStarted.TrySetResult();
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(20), cancellationToken).ConfigureAwait(false);
+            });
+        var (session, host) = ProgressLoggingComposition.Build(
+            upstreamChannel.CreateClientTransport,
+            builder => builder.WithStreamServerTransport(downstreamChannel.ServerInputStream, downstreamChannel.ServerOutputStream));
+
+        var downstreamClient = await McpClient.CreateAsync(downstreamChannel.CreateClientTransport());
+        _ = downstreamClient.CallToolAsync(ProbeCall("token-disconnect"));
+        await firstStepStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        // Simulate the downstream client disconnecting mid-flight while progress is still arriving.
+        await downstreamClient.DisposeAsync();
+
+        await session.DisposeAsync();
+        await host.StopAsync();
+        host.Dispose();
+        await fakePython.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task SetLoggingLevel_PythonSideError_PreservesExactCodeMessageAndData()
+    {
+        var upstreamChannel = new DuplexChannel();
+        var downstreamChannel = new DuplexChannel();
+        var fakePython = StartProbeFakePython(
+            upstreamChannel,
+            advertiseLogging: true,
+            setLoggingLevelHandler: (context, cancellationToken) =>
+            {
+                var protocolError = new McpProtocolException("invalid level requested by test", McpErrorCode.InvalidParams);
+                protocolError.Data["field"] = "level";
+                protocolError.Data["retryable"] = false;
+                protocolError.Data["details"] = new { expected = "warning", received = "info" };
+                throw protocolError;
+            });
+        var (session, host) = ProgressLoggingComposition.Build(
+            upstreamChannel.CreateClientTransport,
+            builder => builder.WithStreamServerTransport(downstreamChannel.ServerInputStream, downstreamChannel.ServerOutputStream));
+
+        await using var downstreamClient = await McpClient.CreateAsync(downstreamChannel.CreateClientTransport());
+
+        var error = await Assert.ThrowsAsync<McpProtocolException>(() => downstreamClient.SetLoggingLevelAsync(LoggingLevel.Info));
+
+        Assert.Equal((int)McpErrorCode.InvalidParams, (int)error.ErrorCode);
+        Assert.Equal("Request failed (remote): invalid level requested by test", error.Message);
+        Assert.Equal("level", error.Data["field"]);
+        Assert.Equal(false, error.Data["retryable"]);
+        var details = Assert.IsType<JsonElement>(error.Data["details"]);
+        Assert.Equal("warning", details.GetProperty("expected").GetString());
+        Assert.Equal("info", details.GetProperty("received").GetString());
+
+        await downstreamClient.DisposeAsync();
+        await host.StopAsync();
+        host.Dispose();
+        await session.DisposeAsync();
+        await fakePython.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task SetLoggingLevel_RemoteMessageAlreadyPrefixed_PreservesExactlyOneUnwrapParity()
+    {
+        // RelaySession.ForwardRequestAsync already unwraps the SDK's remote prefix once.
+        // A legitimate remote message that itself begins with "Request failed (remote): "
+        // must not be stripped a second time by the logging handler.
+        const string remoteMessage = "Request failed (remote): nested remote detail from test";
+        var upstreamChannel = new DuplexChannel();
+        var downstreamChannel = new DuplexChannel();
+        var fakePython = StartProbeFakePython(
+            upstreamChannel,
+            advertiseLogging: true,
+            setLoggingLevelHandler: (context, cancellationToken) =>
+                throw new McpProtocolException(remoteMessage, McpErrorCode.InvalidParams));
+        var (session, host) = ProgressLoggingComposition.Build(
+            upstreamChannel.CreateClientTransport,
+            builder => builder.WithStreamServerTransport(downstreamChannel.ServerInputStream, downstreamChannel.ServerOutputStream));
+
+        await using var downstreamClient = await McpClient.CreateAsync(downstreamChannel.CreateClientTransport());
+
+        var error = await Assert.ThrowsAsync<McpProtocolException>(() => downstreamClient.SetLoggingLevelAsync(LoggingLevel.Info));
+
+        Assert.Equal((int)McpErrorCode.InvalidParams, (int)error.ErrorCode);
+        Assert.Equal($"Request failed (remote): {remoteMessage}", error.Message);
+        Assert.DoesNotContain(
+            "Request failed (remote): Request failed (remote): Request failed (remote): ",
+            error.Message);
+
+        await downstreamClient.DisposeAsync();
+        await host.StopAsync();
+        host.Dispose();
+        await session.DisposeAsync();
+        await fakePython.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Cancellation_NumericAndStringRequestIdsAreDistinct_ConcurrentCancelRemovesOnlyMatch()
+    {
+        // JSON-RPC id 1 (number) and "1" (string) must not share a cancellation key.
+        var state = new ProgressLoggingRelay.NotificationState();
+        var numericId = new RequestId(1L);
+        var stringId = new RequestId("1");
+        var numericToken = new ProgressToken("token-numeric-1");
+        var stringToken = new ProgressToken("token-string-1");
+
+        Assert.NotNull(state.Begin(MakeProgressRequest(numericId, numericToken)));
+        Assert.NotNull(state.Begin(MakeProgressRequest(stringId, stringToken)));
+        Assert.True(state.IsActive(numericToken));
+        Assert.True(state.IsActive(stringToken));
+
+        var cancelNumeric = MakeCancelledNotification(numericId);
+        var cancelString = MakeCancelledNotification(stringId);
+
+        // Concurrent cancel of the numeric id must leave the string-id token active.
+        await Task.WhenAll(
+            Task.Run(() => state.Cancel(cancelNumeric)),
+            Task.Run(() =>
+            {
+                // Interleave with a no-op cancel of a third distinct id so the race is real.
+                state.Cancel(MakeCancelledNotification(new RequestId(2L)));
+            }));
+
+        Assert.False(state.IsActive(numericToken));
+        Assert.True(state.IsActive(stringToken));
+
+        state.Cancel(cancelString);
+        Assert.False(state.IsActive(stringToken));
+    }
+
+    [Fact]
+    public async Task Cancellation_ConcurrentDistinctTypedIds_NeverCrossCancel()
+    {
+        var state = new ProgressLoggingRelay.NotificationState();
+        var pairs = Enumerable.Range(0, 64)
+            .Select(i => (
+                NumericId: new RequestId(i),
+                StringId: new RequestId(i.ToString()),
+                NumericToken: new ProgressToken($"n-{i}"),
+                StringToken: new ProgressToken($"s-{i}")))
+            .ToArray();
+
+        foreach (var pair in pairs)
+        {
+            Assert.NotNull(state.Begin(MakeProgressRequest(pair.NumericId, pair.NumericToken)));
+            Assert.NotNull(state.Begin(MakeProgressRequest(pair.StringId, pair.StringToken)));
+        }
+
+        await Task.WhenAll(pairs.Select(pair => Task.Run(() =>
+        {
+            state.Cancel(MakeCancelledNotification(pair.NumericId));
+        })));
+
+        foreach (var pair in pairs)
+        {
+            Assert.False(state.IsActive(pair.NumericToken));
+            Assert.True(state.IsActive(pair.StringToken));
+        }
+
+        await Task.WhenAll(pairs.Select(pair => Task.Run(() =>
+        {
+            state.Cancel(MakeCancelledNotification(pair.StringId));
+        })));
+
+        foreach (var pair in pairs)
+        {
+            Assert.False(state.IsActive(pair.StringToken));
+        }
+    }
+
+    [Fact]
+    public void UpstreamErrorResponse_DeactivatesTokenBeforeLateProgress()
+    {
+        var state = new ProgressLoggingRelay.NotificationState();
+        var progressToken = new ProgressToken("error-terminal-token");
+        var upstreamRequestId = new RequestId("upstream-error-request");
+        Assert.NotNull(state.Begin(MakeProgressRequest(
+            new RequestId("downstream-error-request"),
+            progressToken)));
+        state.TrackUpstreamRequest(MakeProgressRequest(upstreamRequestId, progressToken));
+
+        var lateProgress = MakeProgressNotification(progressToken);
+        Assert.True(state.Allows(lateProgress));
+
+        state.ObserveUpstreamMessage(new JsonRpcError
+        {
+            Id = upstreamRequestId,
+            Error = new JsonRpcErrorDetail
+            {
+                Code = -32603,
+                Message = "probe failed",
+            },
+        });
+
+        Assert.False(state.IsActive(progressToken));
+        Assert.False(state.Allows(lateProgress));
+    }
+
+    private static JsonRpcRequest MakeProgressRequest(RequestId requestId, ProgressToken progressToken) =>
+        new()
+        {
+            Id = requestId,
+            Method = RequestMethods.ToolsCall,
+            Params = new JsonObject
+            {
+                ["name"] = "probe",
+                ["arguments"] = new JsonObject(),
+                ["_meta"] = new JsonObject
+                {
+                    ["progressToken"] = progressToken.Token switch
+                    {
+                        string s => JsonValue.Create(s),
+                        long l => JsonValue.Create(l),
+                        int i => JsonValue.Create(i),
+                        _ => JsonValue.Create(progressToken.ToString()),
+                    },
+                },
+            },
+        };
+
+    private static JsonRpcNotification MakeProgressNotification(ProgressToken progressToken) =>
+        new()
+        {
+            Method = NotificationMethods.ProgressNotification,
+            Params = JsonSerializer.SerializeToNode(
+                new ProgressNotificationParams
+                {
+                    ProgressToken = progressToken,
+                    Progress = new ProgressNotificationValue { Progress = 1, Total = 1 },
+                },
+                McpJsonUtilities.DefaultOptions),
+        };
+
+    private static JsonRpcNotification MakeCancelledNotification(RequestId requestId) =>
+        new()
+        {
+            Method = NotificationMethods.CancelledNotification,
+            Params = JsonSerializer.SerializeToNode(
+                new CancelledNotificationParams { RequestId = requestId },
+                McpJsonUtilities.DefaultOptions),
+        };
+
+    private sealed class RealProbePython : IAsyncDisposable
+    {
+        private static readonly string RepoRoot = Path.GetFullPath(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+
+        private readonly string _packageRoot;
+        private readonly string _shutdownMarker;
+
+        private RealProbePython(PythonBackendProcess backend, string packageRoot, string shutdownMarker)
+        {
+            Backend = backend;
+            _packageRoot = packageRoot;
+            _shutdownMarker = shutdownMarker;
+        }
+
+        public PythonBackendProcess Backend { get; }
+
+        public static RealProbePython Start(bool advertiseLogging)
+        {
+            var pythonExecutable = Path.Combine(
+                RepoRoot,
+                ".venv",
+                OperatingSystem.IsWindows() ? Path.Combine("Scripts", "python.exe") : Path.Combine("bin", "python"));
+            Assert.True(File.Exists(pythonExecutable), $"expected the worktree venv interpreter at {pythonExecutable}");
+
+            var fixturePath = Path.Combine(RepoRoot, "tests", "fixtures", "fd002_notification_probe_server.py");
+            Assert.True(File.Exists(fixturePath), $"expected the FD-002 probe fixture at {fixturePath}");
+
+            var packageRoot = Path.Combine(Path.GetTempPath(), $"netcoredbg-mcp-fd002-{Guid.NewGuid():N}");
+            var shutdownMarker = Path.Combine(packageRoot, "clean.shutdown");
+            var packageDir = Path.Combine(packageRoot, "netcoredbg_mcp");
+            Directory.CreateDirectory(packageDir);
+            File.WriteAllText(Path.Combine(packageDir, "__init__.py"), string.Empty);
+            File.WriteAllText(
+                Path.Combine(packageDir, "__main__.py"),
+                $"import runpy\nrunpy.run_path({JsonSerializer.Serialize(fixturePath)}, run_name=\"__main__\")\n");
+
+            var originalPython = Environment.GetEnvironmentVariable("NETCOREDBG_MCP_PYTHON_EXECUTABLE");
+            var originalPythonPath = Environment.GetEnvironmentVariable("PYTHONPATH");
+            try
+            {
+                Environment.SetEnvironmentVariable("NETCOREDBG_MCP_PYTHON_EXECUTABLE", pythonExecutable);
+                Environment.SetEnvironmentVariable("PYTHONPATH", packageRoot);
+                var arguments = new List<string>();
+                if (advertiseLogging)
+                {
+                    arguments.Add("--with-logging-capability");
+                }
+
+                arguments.Add("--shutdown-marker");
+                arguments.Add(shutdownMarker);
+                var backend = PythonBackendProcess.Start(arguments);
+                return new RealProbePython(backend, packageRoot, shutdownMarker);
+            }
+            catch
+            {
+                Directory.Delete(packageRoot, recursive: true);
+                throw;
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("NETCOREDBG_MCP_PYTHON_EXECUTABLE", originalPython);
+                Environment.SetEnvironmentVariable("PYTHONPATH", originalPythonPath);
+            }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            try
+            {
+                await Backend.StopAsync().ConfigureAwait(false);
+                await Backend.WaitForStderrForwardedAsync().ConfigureAwait(false);
+                Assert.True(
+                    File.Exists(_shutdownMarker),
+                    "FD-002 probe child did not reach a clean or expected closed-stdio shutdown.");
+            }
+            finally
+            {
+                Backend.Dispose();
+                Directory.Delete(_packageRoot, recursive: true);
+            }
+        }
+    }
+
+    private static CallToolRequestParams RealProbeCall(
+        ProgressToken progressToken,
+        int steps,
+        double holdSeconds,
+        string loggerName,
+        JsonObject? siblingMeta = null,
+        string? interleaveKey = null,
+        int interleaveIndex = 0,
+        int interleaveParticipants = 1)
+    {
+        var arguments = new Dictionary<string, JsonElement>
+        {
+            ["steps"] = JsonSerializer.SerializeToElement(steps),
+            ["hold_seconds"] = JsonSerializer.SerializeToElement(holdSeconds),
+            ["logger_name"] = JsonSerializer.SerializeToElement(loggerName),
+        };
+        if (interleaveKey is not null)
+        {
+            arguments["interleave_key"] = JsonSerializer.SerializeToElement(interleaveKey);
+            arguments["interleave_index"] = JsonSerializer.SerializeToElement(interleaveIndex);
+            arguments["interleave_participants"] = JsonSerializer.SerializeToElement(interleaveParticipants);
+        }
+
+        var meta = siblingMeta is null ? new JsonObject() : siblingMeta.DeepClone().AsObject();
+        meta["progressToken"] = progressToken.Token switch
+        {
+            string value => value,
+            long value => value,
+            _ => throw new InvalidOperationException("A real probe progress token must be a string or integer."),
+        };
+
+        return new CallToolRequestParams
+        {
+            Name = "emit_progress_and_logs",
+            Arguments = arguments,
+            Meta = meta,
+        };
+    }
+
+    private static async Task WaitForEventAsync(EventLog log, Func<string, bool> predicate)
+    {
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        while (!log.Events.Any(e => predicate(e.Label)))
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(10), deadline.Token).ConfigureAwait(false);
+        }
+    }
+
+
+    [Fact]
+    public async Task RealStdio_InterleavesTokensAndPreservesFieldsAndTerminalOrder()
+    {
+        await using var probePython = RealProbePython.Start(advertiseLogging: true);
+        var downstreamChannel = new DuplexChannel();
+        var (session, host) = ProgressLoggingComposition.Build(
+            probePython.Backend.CreateUpstreamTransport,
+            builder => builder.WithStreamServerTransport(downstreamChannel.ServerInputStream, downstreamChannel.ServerOutputStream));
+
+        var log = new EventLog();
+        await using var downstreamClient = await CreateObservedDownstreamClientAsync(downstreamChannel, log)
+            .WaitAsync(TimeSpan.FromSeconds(20));
+
+        Assert.NotNull(downstreamClient.ServerCapabilities?.Logging);
+        await downstreamClient.SetLoggingLevelAsync(LoggingLevel.Warning).WaitAsync(TimeSpan.FromSeconds(10));
+
+        var callA = downstreamClient.CallToolAsync(RealProbeCall(
+            new ProgressToken("real-a"), 4, 0, "real-a", interleaveKey: "real-pair", interleaveIndex: 0, interleaveParticipants: 2));
+        var callB = downstreamClient.CallToolAsync(RealProbeCall(
+            new ProgressToken("real-b"), 4, 0, "real-b", interleaveKey: "real-pair", interleaveIndex: 1, interleaveParticipants: 2));
+        var results = await Task.WhenAll(callA.AsTask(), callB.AsTask()).WaitAsync(TimeSpan.FromSeconds(20));
+
+        var notificationCountAtTerminal = log.Messages.Count(e => e.Message is JsonRpcNotification
+        {
+            Method: NotificationMethods.ProgressNotification or NotificationMethods.LoggingMessageNotification,
+        });
+        Assert.Equal(16, notificationCountAtTerminal);
+        await Task.Delay(TimeSpan.FromMilliseconds(100));
+        Assert.Equal(
+            notificationCountAtTerminal,
+            log.Messages.Count(e => e.Message is JsonRpcNotification
+            {
+                Method: NotificationMethods.ProgressNotification or NotificationMethods.LoggingMessageNotification,
+            }));
+
+        Assert.All(results, result =>
+        {
+            Assert.False(result.IsError == true);
+            var text = Assert.IsType<TextContentBlock>(Assert.Single(result.Content));
+            using var structured = JsonDocument.Parse(text.Text);
+            Assert.Equal(4, structured.RootElement.GetProperty("logs_emitted").GetInt32());
+            Assert.Equal("warning", structured.RootElement.GetProperty("active_logging_level").GetString());
+        });
+
+        var progress = log.Messages
+            .Where(e => e.Message is JsonRpcNotification { Method: NotificationMethods.ProgressNotification })
+            .OrderBy(e => e.Sequence)
+            .Select(e => (
+                e.Sequence,
+                Params: ((JsonRpcNotification)e.Message).Params.Deserialize<ProgressNotificationParams>(McpJsonUtilities.DefaultOptions)!))
+            .ToArray();
+        var logging = log.Messages
+            .Where(e => e.Message is JsonRpcNotification { Method: NotificationMethods.LoggingMessageNotification })
+            .OrderBy(e => e.Sequence)
+            .Select(e => (
+                e.Sequence,
+                Params: ((JsonRpcNotification)e.Message).Params.Deserialize<LoggingMessageNotificationParams>(McpJsonUtilities.DefaultOptions)!))
+            .ToArray();
+
+        Assert.Equal(
+            ["real-a", "real-b", "real-a", "real-b", "real-a", "real-b", "real-a", "real-b"],
+            progress.Select(e => Assert.IsType<string>(e.Params.ProgressToken.Token)));
+        Assert.Equal(
+            ["real-a", "real-b", "real-a", "real-b", "real-a", "real-b", "real-a", "real-b"],
+            logging.Select(e => e.Params.Logger));
+
+        foreach (var token in new[] { "real-a", "real-b" })
+        {
+            var responseSequence = log.Events.Single(e => e.Label == $"response|{token}").Sequence;
+            var tokenProgress = progress.Where(e => Equals(e.Params.ProgressToken.Token, token)).ToArray();
+            var tokenLogs = logging.Where(e => e.Params.Logger == token).ToArray();
+
+            Assert.Equal([1f, 2f, 3f, 4f], tokenProgress.Select(e => e.Params.Progress.Progress));
+            Assert.Equal(4, tokenLogs.Length);
+            for (var index = 0; index < 4; index++)
+            {
+                var step = index + 1;
+                Assert.Equal(4f, tokenProgress[index].Params.Progress.Total);
+                Assert.Equal($"step-{step}", tokenProgress[index].Params.Progress.Message);
+                Assert.True(tokenProgress[index].Sequence < responseSequence);
+
+                var logParams = tokenLogs[index].Params;
+                Assert.Equal(LoggingLevel.Info, logParams.Level);
+                Assert.Equal(JsonValueKind.Object, logParams.Data.ValueKind);
+                Assert.Equal($"log-{step}", logParams.Data.GetProperty("message").GetString());
+                Assert.Equal(step, logParams.Data.GetProperty("step").GetInt32());
+                Assert.Equal(token, logParams.Data.GetProperty("progressToken").GetString());
+                Assert.NotNull(logParams.Meta);
+                Assert.Equal("fd002-notification-probe", logParams.Meta["fixture"]!.GetValue<string>());
+                Assert.Equal(step, logParams.Meta["step"]!.GetValue<int>());
+                Assert.Equal(token, logParams.Meta["progressToken"]!.GetValue<string>());
+                Assert.True(tokenLogs[index].Sequence < responseSequence);
+            }
+        }
+
+        await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        host.Dispose();
+        await session.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task RealStdio_NonAdvertisingLogsAreSuppressedAndIntegerTokenMetaStayExact()
+    {
+        await using var probePython = RealProbePython.Start(advertiseLogging: false);
+        var downstreamChannel = new DuplexChannel();
+        var (session, host) = ProgressLoggingComposition.Build(
+            probePython.Backend.CreateUpstreamTransport,
+            builder => builder.WithStreamServerTransport(downstreamChannel.ServerInputStream, downstreamChannel.ServerOutputStream));
+
+        var log = new EventLog();
+        await using var downstreamClient = await CreateObservedDownstreamClientAsync(downstreamChannel, log)
+            .WaitAsync(TimeSpan.FromSeconds(20));
+        Assert.Null(downstreamClient.ServerCapabilities?.Logging);
+
+        var result = await downstreamClient.CallToolAsync(RealProbeCall(
+            new ProgressToken(4242L),
+            2,
+            0,
+            "suppressed-real-log",
+            new JsonObject
+            {
+                ["trace"] = new JsonObject { ["id"] = "trace-4242" },
+                ["attempt"] = 3,
+            })).AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        await Task.Delay(TimeSpan.FromMilliseconds(50));
+
+        var text = Assert.IsType<TextContentBlock>(Assert.Single(result.Content));
+        using var structured = JsonDocument.Parse(text.Text);
+        Assert.Equal(2, structured.RootElement.GetProperty("logs_emitted").GetInt32());
+        var requestMeta = structured.RootElement.GetProperty("request_meta");
+        Assert.Equal(4242L, requestMeta.GetProperty("progressToken").GetInt64());
+        Assert.Equal(3, requestMeta.GetProperty("attempt").GetInt32());
+        Assert.Equal("trace-4242", requestMeta.GetProperty("trace").GetProperty("id").GetString());
+
+        var progress = log.Messages
+            .Where(e => e.Message is JsonRpcNotification { Method: NotificationMethods.ProgressNotification })
+            .Select(e => ((JsonRpcNotification)e.Message).Params.Deserialize<ProgressNotificationParams>(McpJsonUtilities.DefaultOptions)!)
+            .ToArray();
+        Assert.Equal(2, progress.Length);
+        Assert.All(progress, item => Assert.Equal(4242L, Assert.IsType<long>(item.ProgressToken.Token)));
+        Assert.Equal([1f, 2f], progress.Select(item => item.Progress.Progress));
+        Assert.Equal([2f, 2f], progress.Select(item => item.Progress.Total));
+        Assert.Equal(["step-1", "step-2"], progress.Select(item => item.Progress.Message));
+        Assert.DoesNotContain(
+            log.Messages,
+            e => e.Message is JsonRpcNotification { Method: NotificationMethods.LoggingMessageNotification });
+
+        await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        host.Dispose();
+        await session.DisposeAsync();
+    }
+
+
+    [Fact]
+    public async Task RealStdio_CancellationHasNoLateNotificationsAndLeavesSessionUsable()
+    {
+        await using var probePython = RealProbePython.Start(advertiseLogging: true);
+        var downstreamChannel = new DuplexChannel();
+        ProgressLoggingRelay.NotificationState? notificationState = null;
+        var (session, host) = ProgressLoggingComposition.Build(
+            probePython.Backend.CreateUpstreamTransport,
+            builder => builder.WithStreamServerTransport(downstreamChannel.ServerInputStream, downstreamChannel.ServerOutputStream),
+            observeNotificationState: state => notificationState = state);
+
+        var log = new EventLog();
+        await using var downstreamClient = await CreateObservedDownstreamClientAsync(downstreamChannel, log)
+            .WaitAsync(TimeSpan.FromSeconds(20));
+        Assert.NotNull(downstreamClient.ServerCapabilities?.Logging);
+
+        var cancelledToken = new ProgressToken("real-cancel");
+        var slowCall = downstreamClient.CallToolAsync(
+            RealProbeCall(cancelledToken, 1000, 0.02, "real-cancel"));
+        await WaitForEventAsync(log, label => label.StartsWith("progress|real-cancel|", StringComparison.Ordinal));
+        await WaitForEventAsync(log, label => label.StartsWith("log|real-cancel|", StringComparison.Ordinal));
+        Assert.True(notificationState!.IsActive(cancelledToken));
+
+        var downstreamRequestSequence = log.Events.Single(e => e.Label == "request|real-cancel").Sequence;
+        var downstreamRequest = Assert.IsType<JsonRpcRequest>(
+            log.Messages.Single(e => e.Sequence == downstreamRequestSequence).Message);
+        await downstreamClient.SendMessageAsync(new JsonRpcNotification
+        {
+            Method = NotificationMethods.CancelledNotification,
+            Params = JsonSerializer.SerializeToNode(
+                new CancelledNotificationParams { RequestId = downstreamRequest.Id },
+                McpJsonUtilities.DefaultOptions),
+        });
+        await WaitForEventAsync(log, label => label == "cancel|real-cancel");
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => slowCall.AsTask());
+
+        using (var terminalDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+        {
+            while (notificationState.IsActive(cancelledToken))
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(10), terminalDeadline.Token);
+            }
+        }
+
+        await Task.Delay(TimeSpan.FromMilliseconds(25));
+        var progressAtCancellation = log.Events.Count(e => e.Label.StartsWith("progress|real-cancel|", StringComparison.Ordinal));
+        var logsAtCancellation = log.Events.Count(e => e.Label.StartsWith("log|real-cancel|", StringComparison.Ordinal));
+        Assert.True(progressAtCancellation > 0);
+        Assert.True(logsAtCancellation > 0);
+        await Task.Delay(TimeSpan.FromMilliseconds(150));
+        Assert.Equal(progressAtCancellation, log.Events.Count(e => e.Label.StartsWith("progress|real-cancel|", StringComparison.Ordinal)));
+        Assert.Equal(logsAtCancellation, log.Events.Count(e => e.Label.StartsWith("log|real-cancel|", StringComparison.Ordinal)));
+
+        var followUp = await downstreamClient.CallToolAsync(
+            RealProbeCall(new ProgressToken("real-after-cancel"), 2, 0, "real-after-cancel"))
+            .AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.False(followUp.IsError == true);
+
+        await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        host.Dispose();
+        await session.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task RealStdio_DownstreamDisconnectDuringProgressCleansUpDeterministically()
+    {
+        await using var probePython = RealProbePython.Start(advertiseLogging: false);
+        var downstreamChannel = new DuplexChannel();
+        var (session, host) = ProgressLoggingComposition.Build(
+            probePython.Backend.CreateUpstreamTransport,
+            builder => builder.WithStreamServerTransport(downstreamChannel.ServerInputStream, downstreamChannel.ServerOutputStream));
+
+        var log = new EventLog();
+        var downstreamClient = await CreateObservedDownstreamClientAsync(downstreamChannel, log)
+            .WaitAsync(TimeSpan.FromSeconds(20));
+        _ = downstreamClient.CallToolAsync(RealProbeCall(new ProgressToken("real-disconnect"), 1000, 0.02, "real-disconnect"));
+        await WaitForEventAsync(log, label => label.StartsWith("progress|real-disconnect|", StringComparison.Ordinal));
+
+        await downstreamClient.DisposeAsync();
+        await session.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        host.Dispose();
+    }
+
+    [Fact]
+    public void Register_RecordsExactlyItsOwnRoutesWithoutDuplicateConflict()
+    {
+        var catalog = new RelayRouteCatalog();
+        var upstreamChannel = new DuplexChannel();
+        var session = new RelaySession(upstreamChannel.CreateClientTransport, RelayComposition.RequiredUpstreamCapabilityChecks);
+
+        var builder = Microsoft.Extensions.Hosting.Host.CreateApplicationBuilder(Array.Empty<string>());
+        var mcpBuilder = builder.Services.AddMcpServer();
+        ProgressLoggingRelay.Register(mcpBuilder, catalog, session);
+
+        Assert.Contains(
+            catalog.Routes,
+            route => route.Method == RequestMethods.LoggingSetLevel && route.Direction == RelayDirection.DownstreamToUpstream
+                && route.Kind == RelayRouteKind.Request);
+        Assert.Contains(
+            catalog.Routes,
+            route => route.Method == NotificationMethods.ProgressNotification && route.Direction == RelayDirection.UpstreamToDownstream
+                && route.Kind == RelayRouteKind.Notification);
+        Assert.Contains(
+            catalog.Routes,
+            route => route.Method == NotificationMethods.LoggingMessageNotification && route.Direction == RelayDirection.UpstreamToDownstream
+                && route.Kind == RelayRouteKind.Notification);
+
+        // Same (direction, method) registered again must still fail fast, per the FD-000 contract.
+        Assert.Throws<InvalidOperationException>(() =>
+            catalog.Add(new RelayRoute(RequestMethods.LoggingSetLevel, RelayDirection.DownstreamToUpstream, RelayRouteKind.Request)));
+    }
+}
