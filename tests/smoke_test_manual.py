@@ -286,6 +286,7 @@ async def test_startup_temp_gc_skips_unrelated_entries():
                         [str(site_dir), os.path.join(BASE, "src"), environment.get("PYTHONPATH")],
                     )
                 ),
+                "TMPDIR": str(temp_root),
                 "TEMP": str(temp_root),
                 "TMP": str(temp_root),
             }
