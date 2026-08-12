@@ -133,7 +133,7 @@ class SessionTempManager:
 
         try:
             for entry in temp_root.iterdir():
-                if not entry.is_dir() or not entry.name.startswith(TEMP_PREFIX):
+                if not entry.name.startswith(TEMP_PREFIX) or not entry.is_dir():
                     continue
 
                 try:

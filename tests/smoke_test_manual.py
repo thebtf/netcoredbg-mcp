@@ -249,6 +249,134 @@ async def test_managed_bridge_fallback():
         )
 
 
+async def test_startup_temp_gc_skips_unrelated_entries():
+    """Public MCP startup skips unrelated temp entries before metadata probes."""
+    import json
+    import subprocess
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+
+    print("\n0C. STARTUP TEMP GC PREFIX FILTER")
+    with TemporaryDirectory() as workspace:
+        root = Path(workspace)
+        temp_root = root / "temp"
+        probe_entry = temp_root / "unrelated-probe"
+        site_dir = root / "site"
+        temp_root.mkdir()
+        probe_entry.mkdir()
+        site_dir.mkdir()
+        (site_dir / "sitecustomize.py").write_text(
+            "from pathlib import Path\n"
+            "_original_is_dir = Path.is_dir\n"
+            f"_PROBE_ENTRY = {str(probe_entry)!r}\n"
+            "def _guarded_is_dir(self):\n"
+            "    if str(self) == _PROBE_ENTRY:\n"
+            "        raise AssertionError('unrelated temp entry was probed')\n"
+            "    return _original_is_dir(self)\n"
+            "Path.is_dir = _guarded_is_dir\n",
+            encoding="utf-8",
+        )
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "LOG_LEVEL": "ERROR",
+                "PYTHONPATH": os.pathsep.join(
+                    filter(
+                        None,
+                        [str(site_dir), os.path.join(BASE, "src"), environment.get("PYTHONPATH")],
+                    )
+                ),
+                "TMPDIR": str(temp_root),
+                "TEMP": str(temp_root),
+                "TMP": str(temp_root),
+            }
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-m", "netcoredbg_mcp", "--project-from-cwd"],
+            cwd=BASE,
+            env=environment,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        response_line = ""
+        response: dict[str, Any] = {}
+        timed_out = False
+        shutdown_failed = False
+        try:
+            assert process.stdin is not None
+            assert process.stdout is not None
+            process.stdin.write(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "initialize",
+                        "params": {
+                            "protocolVersion": "2024-11-05",
+                            "capabilities": {},
+                            "clientInfo": {
+                                "name": "startup-temp-gc-smoke",
+                                "version": "1",
+                            },
+                        },
+                    }
+                )
+                + "\n"
+            )
+            process.stdin.flush()
+            try:
+                response_line = await asyncio.wait_for(
+                    asyncio.to_thread(process.stdout.readline), timeout=5
+                )
+            except asyncio.TimeoutError:
+                timed_out = True
+            try:
+                response = json.loads(response_line) if response_line else {}
+            except json.JSONDecodeError:
+                response = {}
+            if response.get("id") == 1 and "result" in response:
+                process.stdin.write(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "notifications/initialized",
+                            "params": {},
+                        }
+                    )
+                    + "\n"
+                )
+                process.stdin.flush()
+        finally:
+            if process.stdin is not None:
+                process.stdin.close()
+            try:
+                await asyncio.wait_for(asyncio.to_thread(process.wait), timeout=5)
+            except asyncio.TimeoutError:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(asyncio.to_thread(process.wait), timeout=5)
+                except asyncio.TimeoutError:
+                    process.kill()
+                    try:
+                        await asyncio.wait_for(asyncio.to_thread(process.wait), timeout=5)
+                    except asyncio.TimeoutError:
+                        shutdown_failed = True
+
+        stderr = process.stderr.read() if process.stderr is not None and not shutdown_failed else ""
+        check(
+            "Startup temp GC initializes public MCP server",
+            not timed_out
+            and not shutdown_failed
+            and process.returncode == 0
+            and response.get("id") == 1
+            and "result" in response,
+            f"returncode={process.returncode}, shutdown_failed={shutdown_failed}, "
+            f"stderr={stderr.strip()}",
+        )
+
+
 # ─────────────────────────────────────────────────────────────
 # Scenario 1: Hit counting + breakpoint fundamentals
 # ─────────────────────────────────────────────────────────────
@@ -6659,6 +6787,10 @@ def get_scenarios():
         ("Path Validation", test_path_validation_worktrees),
         ("Project Root Timeout Fallback", test_project_root_timeout_fallback),
         ("Managed Bridge Fallback", test_managed_bridge_fallback),
+        (
+            "Startup Temp GC Prefix Filter",
+            test_startup_temp_gc_skips_unrelated_entries,
+        ),
         ("Heartbeat During Wait", test_heartbeat_during_wait),
         ("Runtime Hygiene Preflight", test_runtime_hygiene_preflight),
         ("Instrumentation Group Lifecycle", test_instrumentation_group_lifecycle),
