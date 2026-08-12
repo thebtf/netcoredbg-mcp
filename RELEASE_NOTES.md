@@ -1,6 +1,6 @@
 # netcoredbg-mcp v0.23.3
 
-Released: 2026-08-13
+Planned release: 2026-08-13
 
 ## Summary
 
