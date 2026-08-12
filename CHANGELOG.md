@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.3] - 2026-08-13
+
+### Fixed
+- Near-black screenshots now fail closed as `PROBABLE_BLACK_FRAME`, returning
+  luminance metrics, foreground-mutation provenance, and explicit recovery;
+  annotated screenshots invalidate cached annotation data before that result.
+- `ui_bring_to_front` now supports a pywinauto HWND foreground-restoration
+  fallback and clears stealth mode only after successful activation.
+- Startup stale-temp GC now rejects unrelated names before calling `is_dir` or
+  `stat`, preventing filesystem probes outside its managed session prefix.
+
 ## [0.23.2] - 2026-07-17
 
 ### Added
