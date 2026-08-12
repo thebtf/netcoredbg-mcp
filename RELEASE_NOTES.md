@@ -37,8 +37,8 @@ clear cached annotation data when they reject such a frame.
 ### Foreground recovery after stealth mode
 
 `ui_bring_to_front` can use its pywinauto HWND foreground-restoration fallback
-when the primary backend cannot activate the window. A successful result exits
-stealth mode; an unsuccessful activation leaves that mode unchanged.
+when the active backend does not provide its own foreground activation method.
+A successful result exits stealth mode; an unsuccessful activation leaves that mode unchanged.
 
 ### Managed temp cleanup stays scoped
 
