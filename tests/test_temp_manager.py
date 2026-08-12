@@ -1,7 +1,7 @@
 """Tests for SessionTempManager."""
 
 import time
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from netcoredbg_mcp.ui.temp_manager import TEMP_PREFIX, SessionTempManager
 
@@ -145,3 +145,22 @@ class TestSessionTempManager:
 
         assert removed == 0
         assert recent_dir.exists()
+
+    def test_gc_stale_skips_unrelated_entries_before_metadata_probes(self, tmp_path):
+        unrelated_entries = []
+        for name in ("unrelated-file", "unrelated-dir"):
+            entry = MagicMock()
+            entry.name = name
+            unrelated_entries.append(entry)
+
+        with (
+            patch("netcoredbg_mcp.ui.temp_manager.tempfile") as mock_tf,
+            patch("netcoredbg_mcp.ui.temp_manager.Path.iterdir", return_value=unrelated_entries),
+        ):
+            mock_tf.gettempdir.return_value = str(tmp_path)
+            removed = SessionTempManager.gc_stale()
+
+        assert removed == 0
+        for entry in unrelated_entries:
+            entry.is_dir.assert_not_called()
+            entry.stat.assert_not_called()
