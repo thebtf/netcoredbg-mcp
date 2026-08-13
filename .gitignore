@@ -78,6 +78,3 @@ obj/
 .manual_app_type_checks/
 bridge/obj-codex/
 
-
-# Spec Kit local workflow execution state
-.specify/workflows/runs/
