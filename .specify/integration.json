@@ -1,0 +1,15 @@
+{
+  "version": "0.13.2",
+  "integration_state_schema": 1,
+  "installed_integrations": [
+    "omp"
+  ],
+  "integration_settings": {
+    "omp": {
+      "script": "ps",
+      "invoke_separator": "."
+    }
+  },
+  "integration": "omp",
+  "default_integration": "omp"
+}

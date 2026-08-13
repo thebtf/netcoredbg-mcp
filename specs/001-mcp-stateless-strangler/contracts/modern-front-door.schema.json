@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "netcoredbg.mcp.stateless-strangler.m1.application",
+  "title": "Milestone M1 application payloads and tool inputs",
+  "description": "Application-scoped schemas only. Official MCP schemas define envelopes, discovery/list/call, request metadata, cache fields, CallToolResult, InputRequiredResult, inputResponses, and version errors.",
+  "$ref": "#/$defs/toolStructuredContent",
+  "$defs": {
+    "debugSessionId": {
+      "type": "string",
+      "minLength": 32,
+      "description": "Opaque server-minted process-local capability; format is private."
+    },
+    "startDebugArguments": {
+      "type": "object",
+      "properties": {
+        "program": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "debugSessionArguments": {
+      "type": "object",
+      "required": [
+        "debugSessionId"
+      ],
+      "properties": {
+        "debugSessionId": {
+          "$ref": "#/$defs/debugSessionId"
+        }
+      },
+      "additionalProperties": false
+    },
+    "startDebugSuccess": {
+      "type": "object",
+      "required": [
+        "kind",
+        "debugSessionId",
+        "state"
+      ],
+      "properties": {
+        "kind": {
+          "const": "start_debug_success"
+        },
+        "debugSessionId": {
+          "$ref": "#/$defs/debugSessionId"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "debugStateSuccess": {
+      "type": "object",
+      "required": [
+        "kind",
+        "debugSessionId",
+        "state"
+      ],
+      "properties": {
+        "kind": {
+          "const": "debug_state_success"
+        },
+        "debugSessionId": {
+          "$ref": "#/$defs/debugSessionId"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "stopDebugSuccess": {
+      "type": "object",
+      "required": [
+        "kind",
+        "state"
+      ],
+      "properties": {
+        "kind": {
+          "const": "stop_debug_success"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "debugSessionNotFound": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "debug_session_not_found"
+        },
+        "error": {
+          "const": "DEBUG_SESSION_NOT_FOUND"
+        }
+      },
+      "additionalProperties": false
+    },
+    "missingProgramCapability": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "start_debug_input_unavailable"
+        },
+        "error": {
+          "const": "START_DEBUG_PROGRAM_REQUIRED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "invalidToolArguments": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error",
+        "tool"
+      ],
+      "properties": {
+        "kind": {
+          "const": "invalid_tool_arguments"
+        },
+        "error": {
+          "const": "INVALID_TOOL_ARGUMENTS"
+        },
+        "tool": {
+          "enum": [
+            "start_debug",
+            "get_debug_state",
+            "stop_debug"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "toolStructuredContent": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/startDebugSuccess"
+        },
+        {
+          "$ref": "#/$defs/debugStateSuccess"
+        },
+        {
+          "$ref": "#/$defs/stopDebugSuccess"
+        },
+        {
+          "$ref": "#/$defs/debugSessionNotFound"
+        },
+        {
+          "$ref": "#/$defs/missingProgramCapability"
+        },
+        {
+          "$ref": "#/$defs/invalidToolArguments"
+        }
+      ]
+    }
+  }
+}
