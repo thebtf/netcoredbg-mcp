@@ -60,7 +60,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             }
         }
     }
-    internal bool IsUsable => !HasExited();
+    internal bool IsUsable => !_readerTask.IsCompleted && !HasExited();
 
     internal static async Task<NetCoreDbgSession> StartAsync(
         string debuggerPath,
@@ -406,7 +406,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
                 await TrySendCleanupRequestAsync(
                     "disconnect",
-                    new { restart = false, terminateDebuggee = false }).ConfigureAwait(false);
+                    new { restart = false, terminateDebuggee = true }).ConfigureAwait(false);
                 _input.Dispose();
 
                 if (!await WaitForProcessExitAsync().ConfigureAwait(false))

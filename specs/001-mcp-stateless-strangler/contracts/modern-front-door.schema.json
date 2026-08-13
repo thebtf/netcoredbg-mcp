@@ -8,7 +8,7 @@
     "debugSessionId": {
       "type": "string",
       "minLength": 32,
-      "description": "Opaque server-minted process-local capability; format is private."
+      "description": "Opaque server-minted process-local capability; format is private. `required`/`minLength` advertise a valid capability-bearing call. Direct runtime maps a missing `debugSessionId` or non-empty short/malformed token string uniformly to not-found; empty/whitespace, non-string, and extra-field shapes are invalid arguments."
     },
     "lifecycleState": {
       "type": "object",

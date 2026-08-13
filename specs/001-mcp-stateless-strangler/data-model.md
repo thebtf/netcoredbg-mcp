@@ -32,10 +32,13 @@ Validate application arguments before MRTR or native action:
 | Tool/input condition | Complete application result | Native side effect |
 |---|---|---|
 | `start_debug.program` empty, or any extra field | `invalid_tool_arguments` / `INVALID_TOOL_ARGUMENTS`, `isError: true` | No launch; no MRTR |
-| `get_debug_state` / `stop_debug` extra field | Same invalid-arguments class | No native state/stop |
-| Missing, short, or malformed `debugSessionId` | Uniform `debug_session_not_found` / `DEBUG_SESSION_NOT_FOUND` | No native state/stop |
+| `get_debug_state` / `stop_debug` empty/whitespace `debugSessionId`, non-string `debugSessionId`, or any extra field | Same invalid-arguments class | No native state/stop |
+| Missing `debugSessionId`, or non-empty short/malformed `debugSessionId` string | Uniform `debug_session_not_found` / `DEBUG_SESSION_NOT_FOUND` | No native state/stop |
 | Well-formed but unusable token | Same uniform not-found class | No native state/stop |
 
+
+`required`/`minLength` advertise a valid capability-bearing call; direct runtime
+uses the taxonomy above rather than relaxing the published schema.
 Published JSON Schema is not sufficient evidence; process tests must assert
 these runtime outcomes and observable zero native actions.
 

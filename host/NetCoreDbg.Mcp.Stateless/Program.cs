@@ -59,8 +59,8 @@ internal static class Program
         private const string GetDebugState = "get_debug_state";
         private const string StopDebug = "stop_debug";
         private const string InputRequestId = "start_debug_program";
-        private static readonly TimeSpan InitializeTimeout = TimeSpan.FromSeconds(1);
-        private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(1);
+        private static readonly TimeSpan InitializeTimeout = TimeSpan.FromSeconds(10);
+        private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(30);
         private static readonly TimeSpan StopTimeout = TimeSpan.FromSeconds(1);
 
         private readonly ConcurrentDictionary<string, NetCoreDbgSession> _sessions = new(StringComparer.Ordinal);
@@ -91,10 +91,10 @@ internal static class Program
 
             if (!hasProgram)
             {
-                program = ReadElicitedProgram(context.Params.InputResponses);
+                program = ReadElicitedProgram(context.Params.InputResponses, out var hasElicitedResponse);
                 if (program is null)
                 {
-                    if (!context.Server.IsMrtrSupported || context.Server.ClientCapabilities?.Elicitation?.Form is null)
+                    if (hasElicitedResponse || !context.Server.IsMrtrSupported || context.Server.ClientCapabilities?.Elicitation?.Form is null)
                     {
                         return Error("start_debug_input_unavailable", "START_DEBUG_PROGRAM_REQUIRED");
                     }
@@ -273,12 +273,15 @@ internal static class Program
             return true;
         }
 
-        private static string? ReadElicitedProgram(IDictionary<string, InputResponse>? responses)
+        private static string? ReadElicitedProgram(IDictionary<string, InputResponse>? responses, out bool hasResponse)
         {
             if (responses is null || !responses.TryGetValue(InputRequestId, out var response))
             {
+                hasResponse = false;
                 return null;
             }
+
+            hasResponse = true;
 
             var result = response.Deserialize(InputResponse.ElicitResultJsonTypeInfo);
             return result is { IsAccepted: true, Content: { } content }

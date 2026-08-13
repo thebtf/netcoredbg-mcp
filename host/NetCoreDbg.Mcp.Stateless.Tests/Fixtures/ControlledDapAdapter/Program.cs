@@ -29,7 +29,9 @@ internal sealed record AdapterOptions(
     int ExitCode,
     bool BlockGracefulShutdown,
     bool HoldExitAfterDisconnectResponse,
-    bool MalformedCapabilitiesEvent)
+    bool MalformedCapabilitiesEvent,
+    bool SendMalformedDapFrameAfterStartup,
+    bool DelayLaunchResponseForStartupTimeout)
 {
     public static AdapterOptions Parse(string[] args, string? environmentOptions)
     {
@@ -45,6 +47,8 @@ internal sealed record AdapterOptions(
         var blockGracefulShutdown = false;
         var holdExitAfterDisconnectResponse = false;
         var malformedCapabilitiesEvent = false;
+        var sendMalformedDapFrameAfterStartup = false;
+        var delayLaunchResponseForStartupTimeout = false;
 
         foreach (var argument in args.Concat(SplitOptions(environmentOptions)))
         {
@@ -82,6 +86,12 @@ internal sealed record AdapterOptions(
                 case "--malformed-capabilities-event":
                     malformedCapabilitiesEvent = true;
                     break;
+                case "--send-malformed-dap-frame-after-startup":
+                    sendMalformedDapFrameAfterStartup = true;
+                    break;
+                case "--delay-launch-response-for-startup-timeout":
+                    delayLaunchResponseForStartupTimeout = true;
+                    break;
                 case var _ when argument.StartsWith("--stop-reason=", StringComparison.Ordinal):
                     stopReason = argument["--stop-reason=".Length..];
                     break;
@@ -106,7 +116,9 @@ internal sealed record AdapterOptions(
             exitCode,
             blockGracefulShutdown,
             holdExitAfterDisconnectResponse,
-            malformedCapabilitiesEvent);
+            malformedCapabilitiesEvent,
+            sendMalformedDapFrameAfterStartup,
+            delayLaunchResponseForStartupTimeout);
     }
 
     private static IEnumerable<string> SplitOptions(string? options) =>
@@ -120,6 +132,7 @@ internal sealed class ControlledDapAdapter
     private static readonly Encoding HeaderEncoding = Encoding.ASCII;
     private static readonly Encoding BodyEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
     private static readonly JsonSerializerOptions MessageSerializerOptions = new() { Encoder = JavaScriptEncoder.Create(UnicodeRanges.All) };
+    private static readonly byte[] MalformedDapFrame = HeaderEncoding.GetBytes("Content-Length: 1\r\n\r\n{");
 
     private readonly AdapterOptions _options;
     private readonly string _transcriptPath;
@@ -132,9 +145,11 @@ internal sealed class ControlledDapAdapter
     private readonly string? _gracefulReleasePath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_GRACEFUL_RELEASE");
     private Process? _descendant;
     private Task? _lifecycleEvents;
+    private readonly CancellationTokenSource _lifecycleEventsCancellation = new();
     private static readonly TimeSpan InitializeGateWindow = TimeSpan.FromMilliseconds(75);
     private static readonly TimeSpan GracefulReleaseTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DescendantCleanupTimeout = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan LifecycleEventsCompletionTimeout = TimeSpan.FromSeconds(1);
     private Task<DapFrame?>? _nextRequest;
     private int _outgoingSequence = 1;
 
@@ -173,6 +188,19 @@ internal sealed class ControlledDapAdapter
         }
         finally
         {
+            _lifecycleEventsCancellation.Cancel();
+            if (_lifecycleEvents is { } lifecycleEvents)
+            {
+                try
+                {
+                    await lifecycleEvents.WaitAsync(LifecycleEventsCompletionTimeout);
+                }
+                catch (OperationCanceledException) when (_lifecycleEventsCancellation.IsCancellationRequested)
+                {
+                    // Fixture teardown canceled the remaining synthetic lifecycle events.
+                }
+            }
+
             if (_descendant is { HasExited: false })
             {
                 _descendant.Kill(entireProcessTree: true);
@@ -181,6 +209,7 @@ internal sealed class ControlledDapAdapter
             }
 
             _descendant?.Dispose();
+            _lifecycleEventsCancellation.Dispose();
             _writeGate.Dispose();
         }
     }
@@ -285,11 +314,24 @@ internal sealed class ControlledDapAdapter
         }
 
         _pendingLaunch = null;
+        if (_options.DelayLaunchResponseForStartupTimeout)
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(1100), cancellationToken);
+        }
+
         await WriteResponseAsync(launch.Document.RootElement.GetProperty("seq").GetInt32(), "launch", body: null, cancellationToken);
         await RecordAsync(new { kind = "launch-released" }, cancellationToken);
+        if (_options.SendMalformedDapFrameAfterStartup)
+        {
+            await WriteMalformedDapFrameAsync(cancellationToken);
+            await RecordAsync(new { kind = "malformed-dap-frame-sent" }, cancellationToken);
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return;
+        }
+
         if (!_options.SuppressLifecycleEvents)
         {
-            _lifecycleEvents ??= EmitLifecycleEventsAsync(cancellationToken);
+            _lifecycleEvents ??= EmitLifecycleEventsAsync(_lifecycleEventsCancellation.Token);
         }
 
         launch.Document.Dispose();
@@ -437,7 +479,6 @@ internal sealed class ControlledDapAdapter
             }
         }
     }
-
     private async Task WriteResponseAsync(int requestSequence, string command, object? body, CancellationToken cancellationToken) =>
         await WriteMessageAsync(new
         {
@@ -449,7 +490,8 @@ internal sealed class ControlledDapAdapter
             body,
         }, cancellationToken);
 
-    private async Task WriteEventAsync(string eventName, object? body, CancellationToken cancellationToken) =>
+    private async Task WriteEventAsync(string eventName, object? body, CancellationToken cancellationToken)
+    {
         await WriteMessageAsync(new
         {
             seq = _outgoingSequence++,
@@ -457,6 +499,8 @@ internal sealed class ControlledDapAdapter
             @event = eventName,
             body,
         }, cancellationToken);
+        await RecordAsync(new { kind = "event", @event = eventName }, cancellationToken);
+    }
 
     private async Task WriteMessageAsync(object message, CancellationToken cancellationToken)
     {
@@ -467,6 +511,20 @@ internal sealed class ControlledDapAdapter
         {
             await _output.WriteAsync(header, cancellationToken);
             await _output.WriteAsync(payload, cancellationToken);
+            await _output.FlushAsync(cancellationToken);
+        }
+        finally
+        {
+            _writeGate.Release();
+        }
+    }
+
+    private async Task WriteMalformedDapFrameAsync(CancellationToken cancellationToken)
+    {
+        await _writeGate.WaitAsync(cancellationToken);
+        try
+        {
+            await _output.WriteAsync(MalformedDapFrame, cancellationToken);
             await _output.FlushAsync(cancellationToken);
         }
         finally

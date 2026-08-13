@@ -66,9 +66,8 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         McpClient? client = null;
         try
         {
-            fixture = FixtureProcess.Create(new FixtureConfiguration());
-            var candidate = CandidateExecutablePath();
-            Assert.True(File.Exists(candidate), $"Candidate executable is absent: '{candidate}'.");
+            fixture = FixtureProcess.Create(options.FixtureConfiguration ?? new FixtureConfiguration());
+            var candidate = TestOutputPathResolver.ResolveProcess(Path.Combine(RepositoryLayout.Root, "host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
 
             var inertProgramPath = Path.Combine(scratchDirectory, "controlled-program.dll");
             using var operation = CreateBoundedCancellation(cancellationToken);
@@ -77,7 +76,8 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
             ModernMcpProcessDriver? driver = null;
             transport = new StdioClientTransport(new StdioClientTransportOptions
             {
-                Command = candidate,
+                Command = candidate.Command,
+                Arguments = candidate.Arguments,
                 Name = "netcoredbg-mcp-stateless-modern-contract",
                 WorkingDirectory = RepositoryLayout.Root,
                 EnvironmentVariables = CandidateEnvironment(fixture, inertProgramPath),
@@ -114,8 +114,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         try
         {
             fixture = FixtureProcess.Create(new FixtureConfiguration());
-            var candidate = CandidateExecutablePath();
-            Assert.True(File.Exists(candidate), $"Candidate executable is absent: '{candidate}'.");
+            var candidate = TestOutputPathResolver.ResolveProcess(Path.Combine(RepositoryLayout.Root, "host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
 
             var inertProgramPath = Path.Combine(scratchDirectory, "controlled-program.dll");
             using var operation = CreateBoundedCancellation(cancellationToken);
@@ -123,7 +122,8 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
 
             transport = new StdioClientTransport(new StdioClientTransportOptions
             {
-                Command = candidate,
+                Command = candidate.Command,
+                Arguments = candidate.Arguments,
                 Name = "netcoredbg-mcp-stateless-first-wire-contract",
                 WorkingDirectory = RepositoryLayout.Root,
                 EnvironmentVariables = CandidateEnvironment(fixture, inertProgramPath),
@@ -347,14 +347,6 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         }
     }
 
-    private static string CandidateExecutablePath() => Path.Combine(
-        RepositoryLayout.Root,
-        "host",
-        "NetCoreDbg.Mcp.Stateless",
-        "bin",
-        "Debug",
-        "net8.0",
-        "NetCoreDbg.Mcp.Stateless.exe");
 
     private static Dictionary<string, string?> CandidateEnvironment(FixtureProcess fixture, string inertProgramPath) =>
         new()
@@ -419,7 +411,8 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
 internal sealed record ModernMcpStartOptions(
     JsonObject? InitialMeta = null,
     bool DisableFormElicitation = false,
-    string? PriorProcessToken = null);
+    string? PriorProcessToken = null,
+    FixtureConfiguration? FixtureConfiguration = null);
 
 /// <summary>Kind is the controlled transcript kind: <c>startup</c> or <c>request</c>.</summary>
 internal sealed record ModernNativeAction(string Kind, string? Command, string? Detail);

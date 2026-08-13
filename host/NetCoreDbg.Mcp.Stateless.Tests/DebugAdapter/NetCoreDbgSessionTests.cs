@@ -160,38 +160,52 @@ public sealed class NetCoreDbgSessionTests
         var stopReason = $"controlled-stop-причина-雪-{Guid.NewGuid():N}";
         const int exitCode = 47_003;
         await using var emitting = await StartAsync(new FixtureConfiguration(StopReason: stopReason, ExitCode: exitCode));
-        var sawStopped = false;
-        var sawContinued = false;
-        var sawExited = false;
-        var sawTerminated = false;
-        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-        while (!sawTerminated)
+        string?[] lifecycleEvents = [];
+        var startedAt = Stopwatch.GetTimestamp();
+        while (true)
         {
-            var state = emitting.State;
-            if (!sawStopped && state.Event == "stopped" && state.StopReason == stopReason && state.ExitCode is null)
+            var transcript = await emitting.Fixture.ReadTranscriptAsync();
+            var launchReleased = Array.FindLastIndex(transcript.ToArray(), static entry => entry.Kind == "launch-released");
+            lifecycleEvents = launchReleased < 0
+                ? []
+                : transcript[(launchReleased + 1)..]
+                    .Where(static entry => entry.Kind == "event")
+                    .Select(static entry => entry.Event)
+                    .ToArray();
+            if (lifecycleEvents.Contains("terminated"))
             {
-                sawStopped = true;
-            }
-            else if (sawStopped && !sawContinued && state.Event == "continued")
-            {
-                sawContinued = true;
-            }
-            else if (sawContinued && !sawExited && state.Event == "exited" && state.ExitCode == exitCode)
-            {
-                sawExited = true;
-            }
-            else if (sawExited && state.Event == "terminated" && state.StopReason == stopReason && state.ExitCode == exitCode)
-            {
-                sawTerminated = true;
+                break;
             }
 
-            if (!sawTerminated)
+            if (Stopwatch.GetElapsedTime(startedAt) >= TimeSpan.FromSeconds(2))
             {
-                await Task.Delay(TimeSpan.FromMilliseconds(15), cancellation.Token);
+                Assert.True(false, $"Timed out waiting for the controlled lifecycle transcript. Observed: [{string.Join(", ", lifecycleEvents.Select(static value => value ?? "<missing>"))}].");
+                return;
             }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(15));
         }
 
-        Assert.True(sawStopped && sawContinued && sawExited && sawTerminated);
+        Assert.Equal(["stopped", "continued", "exited", "terminated"], lifecycleEvents);
+        Assert.Equal(new DapSessionSnapshot("terminated", stopReason, exitCode), emitting.State);
+    }
+
+    [Fact]
+    public async Task IsUsable_FalseAfterMalformedDapFrameEndsReaderWhileAdapterRemainsAlive()
+    {
+        await using var session = await StartAsync(new FixtureConfiguration(SendMalformedDapFrameAfterStartup: true));
+        var adapterProcessId = await session.Fixture.GetProcessIdAsync(CancellationToken.None);
+
+        await WaitUntilAsync(
+            async () => (await session.Fixture.ReadTranscriptAsync()).Any(entry => entry.Kind == "malformed-dap-frame-sent"),
+            TimeSpan.FromSeconds(2));
+        Assert.False(HasExited(adapterProcessId), "The controlled adapter must remain alive after sending its malformed DAP frame.");
+
+        using var readerCompletion = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await session.WaitForReaderCompletionAsync(readerCompletion.Token);
+
+        Assert.False(HasExited(adapterProcessId), "DAP reader completion must not depend on the adapter process exiting.");
+        Assert.False(session.IsUsable, "A session whose DAP reader ended after a malformed frame must not remain usable while its adapter process is alive.");
     }
 
     [Fact]
@@ -240,7 +254,13 @@ public sealed class NetCoreDbgSessionTests
 
         await stop;
         Assert.True(HasExited(adapterProcessId), "StopAsync must not complete before the graceful adapter process exits.");
-        var commands = Requests(await session.Fixture.ReadTranscriptAsync());
+        var transcript = await session.Fixture.ReadTranscriptAsync();
+        var commands = Requests(transcript);
+        var disconnect = Assert.Single(transcript, entry => entry.Command == "disconnect");
+        using var disconnectArguments = JsonDocument.Parse(disconnect.Arguments ?? "{}");
+        Assert.True(
+            !disconnectArguments.RootElement.TryGetProperty("terminateDebuggee", out var terminateDebuggee) || terminateDebuggee.ValueKind == JsonValueKind.True,
+            "launch-session disconnect must omit terminateDebuggee or set it true.");
         Assert.DoesNotContain("terminate", commands);
         Assert.Contains("disconnect", commands);
     }

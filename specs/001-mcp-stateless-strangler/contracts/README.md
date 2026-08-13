@@ -21,17 +21,20 @@ cacheable `ttlMs`/`cacheScope`, `CallToolResult`, `InputRequiredResult`,
 
 ## Application runtime validation
 
-`start_debug` accepts optional non-empty `program` and no extras. State/stop
-accept only required minimum-length `debugSessionId` and no extras. Runtime,
-not generated schema alone, validates before any native side effect:
+`start_debug` accepts optional non-empty `program` and no extras. For state and
+stop, required/minimum-length schema constraints advertise a valid
+capability-bearing call. At direct runtime, a missing `debugSessionId` or
+non-empty short/malformed token string intentionally maps to the uniform
+not-found result; empty/whitespace, non-string, and extra-field shapes remain
+invalid arguments. Runtime, not generated schema alone, validates before any native
+side effect:
 
 ```json
 {"kind":"invalid_tool_arguments","error":"INVALID_TOOL_ARGUMENTS","tool":"start_debug"}
 ```
 
 This is a complete `CallToolResult` application error with `isError: true`.
-Missing/short/malformed handles intentionally remain the separate uniform
-not-found capability result, never invalid arguments:
+Missing/short/malformed handles use:
 
 ```json
 {"kind":"debug_session_not_found","error":"DEBUG_SESSION_NOT_FOUND"}

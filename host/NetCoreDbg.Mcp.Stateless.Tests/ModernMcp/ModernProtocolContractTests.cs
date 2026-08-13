@@ -119,29 +119,27 @@ public sealed class ModernProtocolContractTests
     }
 
     [Fact]
+    public async Task DelayedControlledStartup_ReturnsCompleteStartEnvelope()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(
+            new ModernMcpStartOptions(FixtureConfiguration: new(DelayLaunchResponseForStartupTimeout: true)));
+
+        var response = await driver.CallToolRawAsync(
+            "start_debug",
+            new JsonObject { ["program"] = ValidProgram },
+            ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("startup-timeout"));
+        var result = ModernMcpProcessDriver.RequireResult(response);
+
+        AssertCompleteStartEnvelope(result);
+    }
+
+    [Fact]
     public async Task MissingProgram_WithFormElicitation_UsesInputRequiredAndNewIdRetryWithoutRequestState()
     {
         await using var driver = await ModernMcpProcessDriver.StartFirstWireAsync();
         var initialId = new RequestId("input-required");
-        var initial = await driver.SendFirstRequestAsync(
-            "tools/call",
-            new JsonObject
-            {
-                ["name"] = "start_debug",
-                ["arguments"] = new JsonObject(),
-                ["_meta"] = ModernMcpProcessDriver.CurrentMeta(formElicitation: true),
-            },
-            initialId);
-        var initialResult = ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(initial));
-
-        Assert.Equal("input_required", initialResult["resultType"]?.GetValue<string>());
-        var inputRequests = Assert.IsType<JsonObject>(initialResult["inputRequests"]);
-        var inputRequest = Assert.Single(inputRequests);
-        var inputRequestEnvelope = Assert.IsType<JsonObject>(inputRequest.Value);
-        Assert.Equal("elicitation/create", inputRequestEnvelope["method"]?.GetValue<string>());
-        Assert.Equal("form", inputRequestEnvelope["params"]?["mode"]?.GetValue<string>());
-        Assert.False(initialResult.ContainsKey("requestState"));
-
+        var inputRequestId = await RequestProgramElicitationAsync(driver, initialId);
         var retryId = new RequestId("input-required-retry");
         var retry = await driver.SendFirstRequestAsync(
             "tools/call",
@@ -149,13 +147,41 @@ public sealed class ModernProtocolContractTests
             {
                 ["name"] = "start_debug",
                 ["arguments"] = new JsonObject(),
-                ["inputResponses"] = new JsonObject { [inputRequest.Key] = new JsonObject { ["action"] = "accept", ["content"] = new JsonObject { ["program"] = ValidProgram } } },
+                ["inputResponses"] = new JsonObject { [inputRequestId] = new JsonObject { ["action"] = "accept", ["content"] = new JsonObject { ["program"] = ValidProgram } } },
                 ["_meta"] = ModernMcpProcessDriver.CurrentMeta(formElicitation: true),
             },
             retryId);
 
         Assert.NotEqual(initialId, retryId);
         AssertCompleteStartEnvelope(ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(retry)));
+    }
+
+    [Theory]
+    [InlineData("decline")]
+    [InlineData("cancel")]
+    public async Task MissingProgram_WithFormElicitation_DeclineOrCancelReturnsCompleteApplicationErrorWithoutNativeAction(string action)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartFirstWireAsync();
+        var inputRequestId = await RequestProgramElicitationAsync(driver, new RequestId($"input-required-{action}-initial"));
+
+        var retry = await driver.SendFirstRequestAsync(
+            "tools/call",
+            new JsonObject
+            {
+                ["name"] = "start_debug",
+                ["arguments"] = new JsonObject(),
+                ["inputResponses"] = new JsonObject { [inputRequestId] = new JsonObject { ["action"] = action } },
+                ["_meta"] = ModernMcpProcessDriver.CurrentMeta(formElicitation: true),
+            },
+            new RequestId($"input-required-{action}"));
+        var result = ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(retry));
+
+        Assert.Equal("complete", result["resultType"]?.GetValue<string>());
+        Assert.True(result["isError"]?.GetValue<bool>() ?? false);
+        Assert.Equal("start_debug_input_unavailable", result["structuredContent"]?["kind"]?.GetValue<string>());
+        Assert.Equal("START_DEBUG_PROGRAM_REQUIRED", result["structuredContent"]?["error"]?.GetValue<string>());
+        Assert.False(result.ContainsKey("requestState"));
+        await AssertNoNativeActionsAsync(driver);
     }
 
     [Fact]
@@ -286,6 +312,29 @@ public sealed class ModernProtocolContractTests
             Assert.Contains("debugSessionId", Assert.IsType<JsonArray>(schema["required"]).Select(static value => value?.GetValue<string>()));
             Assert.Equal(32, Assert.IsType<JsonObject>(schema["properties"])["debugSessionId"]?["minLength"]?.GetValue<int>());
         }
+    }
+
+    private static async Task<string> RequestProgramElicitationAsync(ModernMcpFirstWireDriver driver, RequestId initialId)
+    {
+        var initial = await driver.SendFirstRequestAsync(
+            "tools/call",
+            new JsonObject
+            {
+                ["name"] = "start_debug",
+                ["arguments"] = new JsonObject(),
+                ["_meta"] = ModernMcpProcessDriver.CurrentMeta(formElicitation: true),
+            },
+            initialId);
+        var initialResult = ModernMcpProcessDriver.RequireResult(Assert.IsType<JsonRpcResponse>(initial));
+
+        Assert.Equal("input_required", initialResult["resultType"]?.GetValue<string>());
+        var inputRequests = Assert.IsType<JsonObject>(initialResult["inputRequests"]);
+        var inputRequest = Assert.Single(inputRequests);
+        var inputRequestEnvelope = Assert.IsType<JsonObject>(inputRequest.Value);
+        Assert.Equal("elicitation/create", inputRequestEnvelope["method"]?.GetValue<string>());
+        Assert.Equal("form", inputRequestEnvelope["params"]?["mode"]?.GetValue<string>());
+        Assert.False(initialResult.ContainsKey("requestState"));
+        return inputRequest.Key;
     }
 
     private static void AssertCompleteStartEnvelope(JsonObject result)

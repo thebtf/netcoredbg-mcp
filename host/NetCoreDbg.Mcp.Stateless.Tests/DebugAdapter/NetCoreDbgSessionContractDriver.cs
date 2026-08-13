@@ -18,6 +18,8 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
     private readonly object _session;
     private readonly MethodInfo _stopAsync;
     private readonly PropertyInfo _state;
+    private readonly PropertyInfo _isUsable;
+    private readonly Task _readerTask;
     private readonly MethodInfo _disposeAsync;
 
     private NetCoreDbgSessionContractDriver(
@@ -25,12 +27,16 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         object session,
         MethodInfo stopAsync,
         PropertyInfo state,
+        PropertyInfo isUsable,
+        Task readerTask,
         MethodInfo disposeAsync)
     {
         _fixture = fixture;
         _session = session;
         _stopAsync = stopAsync;
         _state = state;
+        _isUsable = isUsable;
+        _readerTask = readerTask;
         _disposeAsync = disposeAsync;
     }
 
@@ -49,6 +55,11 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
                 (int?)RequireProperty(stateType, "ExitCode", typeof(int?)).GetValue(value));
         }
     }
+
+    public bool IsUsable => (bool)(_isUsable.GetValue(_session)
+        ?? throw new InvalidOperationException("NetCoreDbgSession.IsUsable returned null."));
+
+    public Task WaitForReaderCompletionAsync(CancellationToken cancellationToken) => _readerTask.WaitAsync(cancellationToken);
 
     public bool CapabilitiesObserved => (bool)(RequirePrivateProperty(_session.GetType(), "CapabilitiesObserved", typeof(bool)).GetValue(_session)
         ?? throw new InvalidOperationException("NetCoreDbgSession.CapabilitiesObserved returned null."));
@@ -70,6 +81,8 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             var stateType = RequireType(assembly, StateTypeName);
             var startAsync = RequireStaticStartAsync(sessionType);
             var state = RequireProperty(sessionType, "State", stateType);
+            var isUsable = RequireInternalProperty(sessionType, "IsUsable", typeof(bool));
+            var readerTask = RequirePrivateTaskField(sessionType, "_readerTask");
             var stopAsync = RequireTaskMethod(sessionType, "StopAsync", typeof(CancellationToken));
             var disposeAsync = RequireAsyncDisposable(sessionType);
             RequireNarrowSessionSurface(sessionType);
@@ -88,8 +101,10 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             ]);
             var session = await AwaitAsyncResult(started, "StartAsync", startupCancellation.Token);
             Assert.NotNull(session);
+            var activeReaderTask = readerTask.GetValue(session) as Task
+                ?? throw new InvalidOperationException("NetCoreDbgSession._readerTask returned null.");
             await fixture.WaitForStartupAsync(startupCancellation.Token);
-            return new NetCoreDbgSessionContractDriver(fixture, session, stopAsync, state, disposeAsync);
+            return new NetCoreDbgSessionContractDriver(fixture, session, stopAsync, state, isUsable, activeReaderTask, disposeAsync);
         }
         catch
         {
@@ -132,10 +147,7 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             File.Exists(productionProject),
             $"Missing production contract: expected future project '{productionProject}'. T-009 must create it without changing this suite.");
 
-        var productionAssembly = Path.Combine(RepositoryLayout.Root, "host", ProductionAssemblyName, "bin", "Debug", "net8.0", $"{ProductionAssemblyName}.dll");
-        Assert.True(
-            File.Exists(productionAssembly),
-            $"Missing production contract: expected built future assembly '{productionAssembly}'. T-009 must build its owned project.");
+        var productionAssembly = TestOutputPathResolver.ResolveManagedAssembly(RepositoryLayout.Root, Path.Combine("host", ProductionAssemblyName), ProductionAssemblyName);
         return AssemblyLoadContext.Default.LoadFromAssemblyPath(productionAssembly);
     }
 
@@ -188,6 +200,25 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         Assert.Equal(expectedType, property.PropertyType);
         Assert.True(property.SetMethod is null || property.SetMethod.IsPrivate, $"Missing production contract: {type.FullName}.{name} must be immutable externally.");
         return property;
+    }
+
+    private static PropertyInfo RequireInternalProperty(Type type, string name, Type expectedType)
+    {
+        var property = type.GetProperty(name, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+        Assert.NotNull(property);
+        Assert.True(property!.GetMethod?.IsAssembly, $"Missing production contract: {type.FullName}.{name} getter must be internal.");
+        Assert.Equal(expectedType, property.PropertyType);
+        Assert.True(IsImmutable(property), $"Missing production contract: {type.FullName}.{name} must be immutable.");
+        return property;
+    }
+
+    private static FieldInfo RequirePrivateTaskField(Type type, string name)
+    {
+        var field = type.GetField(name, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+        Assert.NotNull(field);
+        Assert.True(field!.IsPrivate, $"Missing production contract: {type.FullName}.{name} must be private.");
+        Assert.Equal(typeof(Task), field.FieldType);
+        return field;
     }
 
     private static void RequireStateShape(Type stateType)
@@ -290,7 +321,9 @@ internal sealed record FixtureConfiguration(
     bool BlockGracefulShutdown = false,
     bool HoldExitAfterDisconnectResponse = false,
     bool SuppressInitializedAfterInitializeResponse = false,
-    bool MalformedCapabilitiesEvent = false)
+    bool MalformedCapabilitiesEvent = false,
+    bool SendMalformedDapFrameAfterStartup = false,
+    bool DelayLaunchResponseForStartupTimeout = false)
 {
     public string AsEnvironmentValue() => string.Join(
         ';',
@@ -308,6 +341,8 @@ internal sealed record FixtureConfiguration(
             HoldExitAfterDisconnectResponse ? "--hold-exit-after-disconnect-response" : null,
             SuppressInitializedAfterInitializeResponse ? "--suppress-initialized-after-initialize-response" : null,
             MalformedCapabilitiesEvent ? "--malformed-capabilities-event" : null,
+            SendMalformedDapFrameAfterStartup ? "--send-malformed-dap-frame-after-startup" : null,
+            DelayLaunchResponseForStartupTimeout ? "--delay-launch-response-for-startup-timeout" : null,
         }.Where(static value => value is not null));
 }
 
@@ -320,33 +355,36 @@ internal sealed class FixtureProcess : IAsyncDisposable
     private readonly string? _previousOptions;
     private readonly string? _previousRelease;
     private readonly HashSet<int> _preExistingAdapterPids;
+    private readonly string _executablePath;
     private const int StartupPollAttempts = 20;
     private static readonly TimeSpan ProcessCleanupTimeout = TimeSpan.FromSeconds(1);
     private bool _adapterStartAttempted;
     private bool _disposed;
 
-    private FixtureProcess(string scratchDirectory, string transcriptPath, string releasePath, string? previousTranscript, string? previousOptions, string? previousRelease, HashSet<int> preExistingAdapterPids)
+    private FixtureProcess(string scratchDirectory, string transcriptPath, string releasePath, string executablePath, string? previousTranscript, string? previousOptions, string? previousRelease, HashSet<int> preExistingAdapterPids)
     {
         _scratchDirectory = scratchDirectory;
         _transcriptPath = transcriptPath;
         _releasePath = releasePath;
+        _executablePath = executablePath;
         _previousTranscript = previousTranscript;
         _previousOptions = previousOptions;
         _previousRelease = previousRelease;
         _preExistingAdapterPids = preExistingAdapterPids;
     }
 
-    public string ExecutablePath => Path.Combine(RepositoryLayout.ControlledAdapterDirectory, "bin", "Debug", "net8.0", "ControlledDapAdapter.exe");
+    public string ExecutablePath => _executablePath;
 
     public static FixtureProcess Create(FixtureConfiguration configuration)
     {
+        var adapter = TestOutputPathResolver.ResolveProcess(RepositoryLayout.ControlledAdapterDirectory, "ControlledDapAdapter");
+        Assert.Empty(adapter.Arguments);
+        var executable = adapter.Command;
         var scratchDirectory = Path.Combine(RepositoryLayout.ScratchRoot, $"controlled-dap-{Guid.NewGuid():N}");
         Directory.CreateDirectory(scratchDirectory);
         var transcriptPath = Path.Combine(scratchDirectory, "transcript.jsonl");
         var releasePath = Path.Combine(scratchDirectory, "graceful-shutdown.release");
         File.WriteAllText(transcriptPath, string.Empty, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-        var executable = Path.Combine(RepositoryLayout.ControlledAdapterDirectory, "bin", "Debug", "net8.0", "ControlledDapAdapter.exe");
-        Assert.True(File.Exists(executable), $"Controlled adapter executable is absent: '{executable}'.");
 
         var previousTranscript = Environment.GetEnvironmentVariable("CONTROLLED_DAP_TRANSCRIPT");
         var previousOptions = Environment.GetEnvironmentVariable("CONTROLLED_DAP_OPTIONS");
@@ -355,7 +393,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
         Environment.SetEnvironmentVariable("CONTROLLED_DAP_TRANSCRIPT", transcriptPath);
         Environment.SetEnvironmentVariable("CONTROLLED_DAP_OPTIONS", configuration.AsEnvironmentValue());
         Environment.SetEnvironmentVariable("CONTROLLED_DAP_GRACEFUL_RELEASE", releasePath);
-        return new FixtureProcess(scratchDirectory, transcriptPath, releasePath, previousTranscript, previousOptions, previousRelease, preExistingAdapterPids);
+        return new FixtureProcess(scratchDirectory, transcriptPath, releasePath, executable, previousTranscript, previousOptions, previousRelease, preExistingAdapterPids);
     }
     public void MarkAdapterStartAttempted() => _adapterStartAttempted = true;
 
@@ -596,7 +634,8 @@ internal sealed record FixtureTranscriptEntry(
     int? ProcessId,
     int? ContentLength,
     int? PayloadByteCount,
-    string? Stage)
+    string? Stage,
+    string? Event)
 {
     public static FixtureTranscriptEntry Parse(string json)
     {
@@ -611,7 +650,8 @@ internal sealed record FixtureTranscriptEntry(
             root.TryGetProperty("processId", out var processId) ? processId.GetInt32() : null,
             root.TryGetProperty("contentLength", out var contentLength) ? contentLength.GetInt32() : null,
             root.TryGetProperty("payloadByteCount", out var payloadByteCount) ? payloadByteCount.GetInt32() : null,
-            root.TryGetProperty("stage", out var stage) ? stage.GetString() : null);
+            root.TryGetProperty("stage", out var stage) ? stage.GetString() : null,
+            root.TryGetProperty("event", out var eventName) ? eventName.GetString() : null);
     }
 }
 
@@ -632,5 +672,38 @@ internal static class RepositoryLayout
         }
 
         throw new InvalidOperationException("Repository root could not be located from the test assembly base directory.");
+    }
+}
+
+internal sealed record TestOutputProcess(string Command, List<string> Arguments, string TargetPath);
+
+internal static class TestOutputPathResolver
+{
+    public static string ResolveManagedAssembly(string repositoryRoot, string projectRelativePath, string assemblyName) =>
+        ResolveTargetPath(repositoryRoot, projectRelativePath, assemblyName);
+
+    public static TestOutputProcess ResolveProcess(string projectDirectory, string assemblyName)
+    {
+        var targetPath = ResolveTargetPath(projectDirectory, projectRelativePath: null, assemblyName);
+        var appHost = Path.Combine(
+            Path.GetDirectoryName(targetPath) ?? throw new InvalidOperationException($"Output directory is absent for '{targetPath}'."),
+            OperatingSystem.IsWindows() ? $"{assemblyName}.exe" : assemblyName);
+        return File.Exists(appHost)
+            ? new TestOutputProcess(appHost, [], targetPath)
+            : new TestOutputProcess("dotnet", [targetPath], targetPath);
+    }
+
+    private static string ResolveTargetPath(string projectDirectoryOrRepositoryRoot, string? projectRelativePath, string assemblyName)
+    {
+        var outputDirectory = new DirectoryInfo(AppContext.BaseDirectory);
+        var targetFramework = outputDirectory.Name;
+        var configuration = outputDirectory.Parent?.Name
+            ?? throw new InvalidOperationException($"Test output configuration is absent from '{AppContext.BaseDirectory}'.");
+        var projectDirectory = projectRelativePath is null
+            ? projectDirectoryOrRepositoryRoot
+            : Path.Combine(projectDirectoryOrRepositoryRoot, projectRelativePath);
+        var targetPath = Path.Combine(projectDirectory, "bin", configuration, targetFramework, $"{assemblyName}.dll");
+        Assert.True(File.Exists(targetPath), $"Built test target is absent: '{targetPath}'.");
+        return targetPath;
     }
 }
