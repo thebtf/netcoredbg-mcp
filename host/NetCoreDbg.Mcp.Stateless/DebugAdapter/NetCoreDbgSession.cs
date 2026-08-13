@@ -338,8 +338,15 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 {
                     throw new InvalidDataException("DAP capabilities event body.capabilities must be a JSON object.");
                 }
-                _ = ReadOptionalBoolean(capabilities, "supportsTerminateRequest");
-                _ = ReadOptionalBoolean(capabilities, "supportsConfigurationDoneRequest");
+                if (capabilities.TryGetProperty("supportsTerminateRequest", out _))
+                {
+                    _supportsTerminate = ReadOptionalBoolean(capabilities, "supportsTerminateRequest");
+                }
+
+                if (capabilities.TryGetProperty("supportsConfigurationDoneRequest", out _))
+                {
+                    _supportsConfigurationDone = ReadOptionalBoolean(capabilities, "supportsConfigurationDoneRequest");
+                }
 
                 CapabilitiesObserved = true;
                 break;

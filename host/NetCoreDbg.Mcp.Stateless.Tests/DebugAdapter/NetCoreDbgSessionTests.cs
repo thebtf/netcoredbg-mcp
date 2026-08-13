@@ -236,6 +236,36 @@ public sealed class NetCoreDbgSessionTests
     }
 
     [Fact]
+    public async Task StopAsync_UsesTerminateEnabledByCapabilityDeltaBeforeDisconnect()
+    {
+        await using var session = await StartAsync(new FixtureConfiguration(
+            SupportsConfigurationDone: true,
+            SupportsTerminate: false,
+            EnableTerminateAfterInitialization: true,
+            HoldExitAfterDisconnectResponse: true));
+        Assert.Contains(await session.Fixture.ReadTranscriptAsync(), entry => entry.Kind == "capabilities-delta-event");
+
+        var stop = session.StopAsync(CancellationToken.None);
+        try
+        {
+            await WaitUntilAsync(async () => (await session.Fixture.ReadTranscriptAsync()).Any(entry => entry.Kind == "disconnect-response"), TimeSpan.FromSeconds(2));
+        }
+        finally
+        {
+            session.Fixture.ReleaseGracefulShutdown();
+        }
+
+        await stop;
+        var commands = Requests(await session.Fixture.ReadTranscriptAsync());
+        var terminate = Array.IndexOf(commands, "terminate");
+        var disconnect = Array.IndexOf(commands, "disconnect");
+        Assert.Equal(1, commands.Count(command => command == "configurationDone"));
+        Assert.Equal(1, commands.Count(command => command == "terminate"));
+        Assert.Equal(1, commands.Count(command => command == "disconnect"));
+        Assert.True(terminate >= 0 && terminate < disconnect, "terminate must precede disconnect after the capability delta enables it.");
+    }
+
+    [Fact]
     public async Task StopAsync_SkipsTerminateWhenUnsupported()
     {
         await using var session = await StartAsync(new FixtureConfiguration(SupportsTerminate: false, HoldExitAfterDisconnectResponse: true));

@@ -20,7 +20,7 @@ repository root with .NET 8:
 
 ```powershell
 dotnet build host/NetCoreDbg.Mcp.Stateless/NetCoreDbg.Mcp.Stateless.csproj -c Debug --nologo
-dotnet test host/NetCoreDbg.Mcp.Stateless.Tests/NetCoreDbg.Mcp.Stateless.Tests.csproj --no-restore --nologo
+dotnet test host/NetCoreDbg.Mcp.Stateless.Tests/NetCoreDbg.Mcp.Stateless.Tests.csproj --nologo
 ```
 
 The test command builds the controlled adapter as test infrastructure. This
@@ -42,7 +42,7 @@ Run from the repository root with .NET 8:
 
 ```powershell
 dotnet build host/NetCoreDbg.Mcp.Stateless/NetCoreDbg.Mcp.Stateless.csproj -c Debug --nologo
-dotnet test host/NetCoreDbg.Mcp.Stateless.Tests/NetCoreDbg.Mcp.Stateless.Tests.csproj --no-restore --filter 'FullyQualifiedName~ModernMcp' --nologo
+dotnet test host/NetCoreDbg.Mcp.Stateless.Tests/NetCoreDbg.Mcp.Stateless.Tests.csproj --filter 'FullyQualifiedName~ModernMcp' --nologo
 ```
 
 The build produces the internal candidate at

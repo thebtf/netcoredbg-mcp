@@ -31,7 +31,8 @@ internal sealed record AdapterOptions(
     bool HoldExitAfterDisconnectResponse,
     bool MalformedCapabilitiesEvent,
     bool SendMalformedDapFrameAfterStartup,
-    bool DelayLaunchResponseForStartupTimeout)
+    bool DelayLaunchResponseForStartupTimeout,
+    bool EnableTerminateAfterInitialization)
 {
     public static AdapterOptions Parse(string[] args, string? environmentOptions)
     {
@@ -49,6 +50,7 @@ internal sealed record AdapterOptions(
         var malformedCapabilitiesEvent = false;
         var sendMalformedDapFrameAfterStartup = false;
         var delayLaunchResponseForStartupTimeout = false;
+        var enableTerminateAfterInitialization = false;
 
         foreach (var argument in args.Concat(SplitOptions(environmentOptions)))
         {
@@ -92,6 +94,9 @@ internal sealed record AdapterOptions(
                 case "--delay-launch-response-for-startup-timeout":
                     delayLaunchResponseForStartupTimeout = true;
                     break;
+                case "--enable-terminate-after-initialization":
+                    enableTerminateAfterInitialization = true;
+                    break;
                 case var _ when argument.StartsWith("--stop-reason=", StringComparison.Ordinal):
                     stopReason = argument["--stop-reason=".Length..];
                     break;
@@ -118,7 +123,8 @@ internal sealed record AdapterOptions(
             holdExitAfterDisconnectResponse,
             malformedCapabilitiesEvent,
             sendMalformedDapFrameAfterStartup,
-            delayLaunchResponseForStartupTimeout);
+            delayLaunchResponseForStartupTimeout,
+            enableTerminateAfterInitialization);
     }
 
     private static IEnumerable<string> SplitOptions(string? options) =>
@@ -237,13 +243,17 @@ internal sealed class ControlledDapAdapter
         switch (command)
         {
             case "initialize":
-                await WriteEventAsync(
-                    "capabilities",
-                    _options.MalformedCapabilitiesEvent
-                        ? new { capabilities = new { supportsTerminateRequest = "true" } }
-                        : new { capabilities = new { supportsTerminateRequest = true } },
-                    cancellationToken);
-                await RecordAsync(new { kind = "capabilities-event" }, cancellationToken);
+                if (!_options.EnableTerminateAfterInitialization)
+                {
+                    await WriteEventAsync(
+                        "capabilities",
+                        _options.MalformedCapabilitiesEvent
+                            ? new { capabilities = new { supportsTerminateRequest = "true" } }
+                            : new { capabilities = new { supportsTerminateRequest = true } },
+                        cancellationToken);
+                    await RecordAsync(new { kind = "capabilities-event" }, cancellationToken);
+                }
+
                 await WriteResponseAsync(sequence + 10_000, command, body: null, cancellationToken);
                 await RecordAsync(new { kind = "unmatched-response", requestSequence = sequence + 10_000 }, cancellationToken);
                 if (_options.InitializedBeforeCorrectInitializeResponse)
@@ -261,11 +271,18 @@ internal sealed class ControlledDapAdapter
                 await RecordAsync(new { kind = "initialize-response", requestSequence = sequence }, cancellationToken);
                 await ProcessDeferredRequestsAsync(cancellationToken);
                 await DeferGateRequestAsync("before-initialized-event", cancellationToken);
+                if (_options.EnableTerminateAfterInitialization)
+                {
+                    await WriteEventAsync("capabilities", new { capabilities = new { supportsTerminateRequest = true } }, cancellationToken);
+                    await RecordAsync(new { kind = "capabilities-delta-event" }, cancellationToken);
+                }
+
                 if (!_options.SuppressInitializedAfterInitializeResponse)
                 {
                     await WriteEventAsync("initialized", body: null, cancellationToken);
                     await RecordAsync(new { kind = "initialized-event" }, cancellationToken);
                 }
+
                 await ProcessDeferredRequestsAsync(cancellationToken);
                 return false;
             case "launch":

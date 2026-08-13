@@ -392,7 +392,8 @@ internal sealed record FixtureConfiguration(
     bool SuppressInitializedAfterInitializeResponse = false,
     bool MalformedCapabilitiesEvent = false,
     bool SendMalformedDapFrameAfterStartup = false,
-    bool DelayLaunchResponseForStartupTimeout = false)
+    bool DelayLaunchResponseForStartupTimeout = false,
+    bool EnableTerminateAfterInitialization = false)
 {
     public string AsEnvironmentValue() => string.Join(
         ';',
@@ -412,6 +413,7 @@ internal sealed record FixtureConfiguration(
             MalformedCapabilitiesEvent ? "--malformed-capabilities-event" : null,
             SendMalformedDapFrameAfterStartup ? "--send-malformed-dap-frame-after-startup" : null,
             DelayLaunchResponseForStartupTimeout ? "--delay-launch-response-for-startup-timeout" : null,
+            EnableTerminateAfterInitialization ? "--enable-terminate-after-initialization" : null,
         }.Where(static value => value is not null));
 }
 
