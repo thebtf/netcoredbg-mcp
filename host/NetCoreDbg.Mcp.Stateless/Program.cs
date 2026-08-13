@@ -360,4 +360,3 @@ internal static class Program
         public Task StopAsync(CancellationToken cancellationToken) => sessions.DisposeAsync().AsTask();
     }
 }
-
