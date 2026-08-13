@@ -10,6 +10,35 @@
       "minLength": 32,
       "description": "Opaque server-minted process-local capability; format is private."
     },
+    "lifecycleState": {
+      "type": "object",
+      "required": [
+        "event",
+        "stopReason",
+        "exitCode"
+      ],
+      "properties": {
+        "event": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stopReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "exitCode": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "startDebugArguments": {
       "type": "object",
       "properties": {
@@ -47,7 +76,7 @@
           "$ref": "#/$defs/debugSessionId"
         },
         "state": {
-          "type": "string"
+          "$ref": "#/$defs/lifecycleState"
         }
       },
       "additionalProperties": false
@@ -67,7 +96,7 @@
           "$ref": "#/$defs/debugSessionId"
         },
         "state": {
-          "type": "string"
+          "$ref": "#/$defs/lifecycleState"
         }
       },
       "additionalProperties": false
@@ -83,7 +112,7 @@
           "const": "stop_debug_success"
         },
         "state": {
-          "type": "string"
+          "$ref": "#/$defs/lifecycleState"
         }
       },
       "additionalProperties": false

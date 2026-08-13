@@ -51,8 +51,10 @@ never sends a server request.
 ## Capability invariants
 
 1. Tokens are cryptographically strong, opaque, non-enumerable, and not logged.
-2. There is no current-session or connection-token map; creator disconnect does
-   not stop a live debugger.
+2. There is no current-session, creator, client, or connection-token map. While
+   the candidate host remains live, a token is resolved only by its explicit
+   value. Closing the stdio client ends the single-session candidate host; it
+   is not a capability-survival boundary.
 3. Independent/interleaved requests may resolve one live token.
 4. Stop atomically removes the token before native stop. One winner succeeds;
    all concurrent/later losers receive uniform not-found and cause no stop.

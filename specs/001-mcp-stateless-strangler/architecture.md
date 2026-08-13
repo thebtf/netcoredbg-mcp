@@ -1,192 +1,164 @@
-# Architecture — D2 Decision Record and Design for Milestone M1
+# Architecture — D2 Decision Record and D1 Native-Lifecycle Amendment for M1
 
 ## Design-depth decision
 
-**Rung: D2.** M1 creates a durable protocol/front-door boundary consumed across
-sessions and components. It remains a bounded milestone, not a D3 migration
-program: it does not design full catalog migration, package publication, or
-Python retirement.
+**D2 parent; D1 amendment.** M1 remains a bounded internal MCP candidate. This
+amendment owns one reversible internal lifecycle boundary; it neither redesigns
+the legacy relay nor expands M1 into a public migration program.
 
-## Context
+## Context and disposition
 
-The frozen audit records a Python-backed .NET strangler whose installed SDKs
-cannot satisfy MCP 2026-07-28. The legacy host’s initialize/paired-session
-assumptions cannot establish modern request context. Modern traffic instead
-requires `server/discover`, request-local metadata, `tools/list`/`tools/call`,
-standard result behavior, and explicit application handles.
+The frozen repository has no native C# DAP lifecycle owner. The existing
+`host/NetCoreDbg.Mcp.Host` is an MCP 1.4.1 relay that starts Python and remains
+unchanged. It is not the attach point for M1's modern candidate.
 
-M1 deliberately proves only discover → list → call → MRTR/native
-start-state-stop. The native C# debugger/DAP lifecycle seam is not verified in
-the frozen source; M1 therefore starts with a mandatory Explore/Design gate.
-
-## ADR-001 — Adopt the official C# v2.1.0 SDK for a tools-based front door
-
-**Status:** Accepted design decision; implementation waits on T-002 seam
-receipt.
-
-### Alternatives
-
-| Alternative | Benefits | Rejected trade-off |
+| Concern | Disposition | Reason |
 |---|---|---|
-| A. Hand-write 2026 JSON-RPC/MCP in the existing host. | Could retain local host structure. | Reimplements standard discovery, metadata, cache/result decoration, MRTR, and version behavior despite official support. |
-| B. Upgrade Python’s published public path to Python MCP v2.0.0. | Uses an official current SDK on the existing executable. | Changes the retained consumer path and does not prove the requested .NET strangler. |
-| C. Add an additive C# `ModelContextProtocol` v2.1.0 candidate. | Official support for discover, tools, metadata, cache, result, version, and MRTR semantics; reversible boundary. | Requires a new C# dependency and an accepted native lifecycle seam. |
+| Modern MCP front door | **ADOPT** `ModelContextProtocol` v2.1.0 in the new internal candidate | The official SDK owns standard MCP wire, discovery, cache/result, version, and MRTR semantics. |
+| Native debugger lifecycle | **OWN** a narrow internal DAP component with BCL `Process`, redirected streams, and `System.Text.Json` | No repository seam owns process lifetime, DAP framing, correlation, and atomic teardown. OmniSharp.Extensions.DebugAdapter.Client 0.19.9 is stale/DI-heavy and lacks that ownership; StreamJsonRpc still leaves DAP framing, DTO, and lifecycle ownership to M1. |
+| Legacy Python relay | **RETAIN** unchanged | It remains the published consumer path and comparative parity evidence. |
 
-### Decision
+This is a parent ADOPT-vs-OWN disposition, not a new ADR. It supersedes the
+failed premise that an existing native seam must be found.
 
-Choose C. The candidate implements only MCP methods `server/discover`,
-`tools/list`, and `tools/call`; debugger actions are cataloged tool names, not
-methods. The server MUST implement discovery, but it retains no first-request
-ordering state: any valid supported modern RPC may be a fresh process's first
-request because its own `_meta` carries context. M1 deliberately sends discover
-first only as a compatibility/proof probe and separately tests list/call first.
-Discovery declares tools; discovery/list use official cacheable result behavior.
-Every complete tool call uses official `CallToolResult` with `resultType:
-complete`, content, structured content, and applicable `isError`.
+## D1 amendment packet — owned native DAP lifecycle
 
-Runtime validates application arguments before MRTR or native action. Empty
-program/extra fields produce complete `invalid_tool_arguments` with
-`isError: true`; missing/short/malformed handle remains uniform not-found. No
-validation failure launches, reads, or stops native state.
+**Status:** Contract-test ready. The paths below are authorized target
+ownership, not files that exist today.
 
-`start_debug` is M1’s mandatory MRTR demonstration. A valid supplied program
-may complete. A valid no-program call with form elicitation receives official
-`InputRequiredResult` and one `elicitation/create` request. M1 emits no
-`requestState`; a new-id retry repeats arguments and uses `inputResponses`.
-Valid no-program without capability produces deterministic complete application
-error. The server never initiates MCP requests.
+### Boundary contract
 
-### Consequences and tags
+| Boundary | Contract |
+|---|---|
+| Inputs | `netcoredbg` executable path, launch program path, caller cancellation, and bounded initialize/response/stop time limits. |
+| Output | One owned `NetCoreDbgSession` with an event-backed coarse state snapshot and async idempotent `StopAsync`/`DisposeAsync`. It exposes no raw adapter stream or generic request surface. |
+| Attach point | New executable `host/NetCoreDbg.Mcp.Stateless/` in namespace `NetCoreDbg.Mcp.Stateless`; `host/NetCoreDbg.Mcp.Host` is not referenced, upgraded, or selected. |
+| Narrow ownership | `DebugAdapter/NetCoreDbgSession.cs` owns child process, stdin/stdout, framing, outbound sequence allocation, pending-request correlation, state observation, and one shared cleanup task. `DebugAdapter/DapSessionState.cs` owns the coarse-state value. `Program.cs` composes the later MCP candidate with this internal boundary only. |
+| Test ownership | T-008 creates sibling `host/NetCoreDbg.Mcp.Stateless.Tests/`, its controlled executable DAP adapter fixture project, and the complete test-side reflection/process contract driver; lifecycle cases live in `DebugAdapter/NetCoreDbgSessionTests.cs`. The driver builds and runs without a production project/reference, launches the fixture, and treats absent future internal assembly/type behavior as runtime assertion failures. T-009 supplies the discoverable production assembly/reference wiring but does not own that suite. Independent T-009 acceptance hardened incomplete discriminators, proved the corrected cases RED against frozen production, then the same final 11-case suite went GREEN. T-003/T-004 own later modern MCP RED tests, and T-005 owns the front door and final command materialization. |
+| Does not touch | Python package/entrypoint, `uv.lock`, public selection, legacy host, public protocol contract, attach mode, breakpoints, stacks, evaluate, persistence, auth, generic DAP framework, or a new third-party DAP/JSON-RPC package. |
 
-| Decision | Tag | Consequence |
-|---|---|---|
-| Official C# SDK, not bespoke framing | Compatibility: forward | Standard 2026 behavior is typed and testable through the SDK. |
-| Optional client discovery | Compatibility: forward | Server implements discover while list/call remain request-local first-call options. |
-| Runtime validation before native work | Safety: bounded | Advertised input schemas have load-bearing no-side-effect enforcement. |
-| `tools/list` / `tools/call` catalog contract | Compatibility: precise | Tool names and input schemas are discoverable; no false method routing. |
-| MRTR without `requestState` in M1 | Security: bounded | Avoids an unnecessary integrity/replay surface; retry reconstructs input from repeated arguments plus `inputResponses`. |
+`NetCoreDbgSession` starts `netcoredbg --interpreter=vscode` as its owned child
+process. It writes and reads DAP messages as `Content-Length` frames whose JSON
+body is UTF-8; `Content-Length` is the UTF-8 byte count. A single reader parses
+frames and completes only the pending request keyed by response `request_seq`.
+It must accept an adapter `capabilities` event before the `initialize` response,
+record that observation, and still gate launch on the correlated successful
+`initialize` response.
 
-## ADR-002 — Treat debugSessionId as a live local capability
+The lifecycle is deliberately only: `initialize` response gate → `initialized`
+event → `launch` and `configurationDone`, then event-backed coarse states.
+`stopped`, `continued`, `exited`, and `terminated` events update the snapshot;
+`exited` retains its reported code when present. No breakpoint/configuration,
+stack, evaluate, or attach operation is added.
 
-**Status:** Accepted design decision; concrete native handle waits on T-002.
+`StopAsync` and `DisposeAsync` share one asynchronous cleanup operation. It
+uses the configured bounds to try DAP `terminate`, then `disconnect`, waits for
+process exit, and kills the owned process tree only if graceful cleanup exceeds
+its bound. Concurrent callers await the same result; the session never starts a
+second cleanup or leaves an owned child process intentionally alive.
 
-A successful `tools/call(start_debug)` mints an opaque, high-entropy,
-process-local `debugSessionId` in its application structured content. Calls to
-`get_debug_state` and `stop_debug` put it in `params.arguments`. The token is a
-capability in one trusted local domain, not authentication. It is never listed,
-connection-bound, inferred as current, persisted, or logged.
+### Integration points
 
-The registry lifetime is the live native debugger plus host process, not an
-elapsed TTL. Creator disconnect does not stop a live debugger. Independent and
-interleaved requests may use the capability. A process restart discards every
-entry. Random/malformed, stopped/closed, native-unavailable, and prior-process
-tokens are externally identical: a complete tool application error
-`DEBUG_SESSION_NOT_FOUND`.
+1. `Program.cs` in the new candidate composes the internal session; it does not
+   modify the legacy `host/NetCoreDbg.Mcp.Host/Program.cs` relay composition.
+2. The later `start_debug` handler creates and receives a
+   `NetCoreDbgSession`; the process-local capability registry owns that
+   reference after complete start.
+3. The later `get_debug_state` handler reads the session's coarse snapshot;
+   `stop_debug` atomically removes its capability before awaiting the shared
+   session cleanup.
+4. T-009 records only the lifecycle project build/test, controlled-adapter
+   readiness, and cleanup receipt after it creates the executable. T-005
+   mechanically verifies and materializes the actual candidate launch, C# v2.1.0
+   client, environment, cleanup, and `PRODUCT_WORKS` commands after its front door
+   is real; no candidate command is inferable from this contract.
 
-### Atomic stop rule
+### Named test plan and checker commitment
 
-`stop_debug` atomically resolves **and removes** the token. One winning caller
-owns native stop and returns stop success. A concurrent/later caller cannot
-resolve it, returns `DEBUG_SESSION_NOT_FOUND`, and must not issue another native
-stop. This is an at-most-once stop rule; it is not a claim that repeated stop
-responses are idempotent successes.
+T-002 records this ownership packet. T-008 creates the sibling test project, a controlled
+executable DAP adapter fixture project, and complete reflection/process contract driver,
+then adds lifecycle RED cases in `DebugAdapter/NetCoreDbgSessionTests.cs`: UTF-8
+`Content-Length` byte framing; `request_seq` correlation; a `capabilities` event before
+the initialize response with launch still gated on that response;
+initialize/initialized/launch/configurationDone ordering; event-backed
+stopped/continued/exited/terminated state; and concurrent `StopAsync`/`DisposeAsync`
+terminate–disconnect–process-tree-kill fallback. Its `dotnet test
+host/NetCoreDbg.Mcp.Stateless.Tests/NetCoreDbg.Mcp.Stateless.Tests.csproj` command builds
+and runs every case before production exists: the driver reflects and process-exercises
+the future internal assembly/type, so absence is a behavioral contract assertion failure,
+never missing project/reference/type compilation. T-009 creates only the production
+executable/component and discoverable production assembly/reference wiring. Independent
+T-009 acceptance hardened incomplete discriminators, proved the corrected cases RED
+against frozen production, then the same final 11-case T-008 suite went GREEN with a
+lifecycle-only receipt. T-003 and T-004 add modern MCP RED cases after completed T-009;
+T-005 materializes final candidate commands.
 
-## ADR-003 — Add a strangler candidate without public release cutover
+**Only checker commitment:** T-006 is an independent re-derivation of this
+amended boundary packet, every `Blocked by` relation, and its Mermaid edge
+after the maker's work; the parent owns that pass. T-007 remains blocked on
+T-001 and this final review.
+### D1 challenger LITE record
 
-**Status:** Accepted design decision.
+**GO.** M1 needs this boundary because neither legacy relay process ownership
+nor MCP SDK adoption supplies DAP framing, correlation, and cleanup ownership.
 
-.NET owns only the three M1 MCP methods and tool catalog described in ADR-001.
-Python owns `netcoredbg-mcp`, its dependency constraint, and every non-M1 route.
-There is no dual owner for a public tool name, and M1 does not translate the
-legacy relay into asserted modern behavior.
+| Alternative | M1 fit | Dependency and maintenance weight | Process ownership | Framing | Event state | Atomic teardown | Deletion/replacement cost |
+|---|---|---|---|---|---|---|---|
+| Adopt OmniSharp.Extensions.DebugAdapter.Client 0.19.9 | Does not close M1's owned lifecycle boundary. | Stale/DI-heavy added dependency. | No verified first-class external process/tree owner. | Typed client patterns do not reduce M1 framing work. | Does not supply M1's coarse-state owner. | No unified at-most-once terminate/disconnect/tree cleanup. | Package and composition removal work remains. |
+| Adopt StreamJsonRpc | Generic transport, not a DAP lifecycle fit. | Maintained added dependency plus M1-owned DAP work. | Generic transport only. | No DAP `Content-Length` contract. | No DAP event-state contract. | Disposal only; M1 still owns cleanup. | A second future migration removes it. |
+| **OWN `NetCoreDbgSession`** | Exact narrow internal M1 boundary. | BCL/`System.Text.Json`; no new package. | Owns `ProcessStartInfo`, streams, descendants. | Owns UTF-8 frames and `request_seq` correlation. | Owns only required coarse events. | One terminate→disconnect→bounded wait→tree-kill task. | Removing candidate removes its bounded component. |
 
-```mermaid
-flowchart LR
-    Modern[Modern C# v2.1 client] -->|stdio MCP: discover/list/call| Candidate[M1 .NET candidate]
-    Candidate -->|accepted T-002 seam| Native[Native C# debugger lifecycle]
-    Legacy[Installed consumer] -->|published console script| Python[Python legacy server]
-```
+The first two leave material ownership absent or add a dependency without
+shrinking it. The narrow BCL component is the smallest shape and excludes
+generic DAP functionality, breakpoints, stacks, evaluate, attach, auth, and
+persistence.
 
-### Data flow
+## Existing M1 decisions retained
+
+M1's MCP wire remains a local stdio candidate using official C#
+`ModelContextProtocol` v2.1.0. It implements only `server/discover`,
+`tools/list`, and `tools/call`; debugger actions are the ordered cataloged tool
+names `start_debug`, `get_debug_state`, and `stop_debug`. Discovery is
+server-mandatory but client-optional because request metadata is local to each
+request. Discover/list may use official cache fields; ordinary tool results do
+not. Runtime validation happens before MRTR or native side effects.
+
+A complete start mints an opaque process-local `debugSessionId`. It is not
+connection-bound, listed, persisted, or a current-session inference. State and
+stop require it explicitly. `stop_debug` atomically removes the token; one
+winner owns the session stop and every concurrent/later caller gets the same
+not-found result. This application rule is separate from the session's own
+idempotent internal cleanup.
 
 ```mermaid
 sequenceDiagram
-    participant C as Modern Client
-    participant F as M1 .NET Front Door
-    participant R as Request Context
-    participant S as Capability Registry
-    participant D as Accepted Native Seam
+    participant M as M1 MCP handler
+    participant S as NetCoreDbgSession
+    participant D as netcoredbg --interpreter=vscode
 
-    Note over C,F: Any valid RPC may be first; this probe deliberately sends discover first
-    C->>F: server/discover + request _meta
-    F->>R: validate current metadata
-    F-->>C: cacheable discover; tools capability
-    C->>F: tools/list + request _meta
-    F-->>C: cacheable ordered three-tool catalog
-    C->>F: tools/call(start_debug, valid program) + request _meta
-    F->>F: validate arguments before native action
-    F->>D: native start
-    D-->>S: mint and store token
-    F-->>C: complete CallToolResult structured content
-    C->>F: tools/call(get_debug_state, debugSessionId)
-    F->>F: validate arguments then resolve explicit token
-    F->>S: resolve explicit token
-    S->>D: read state
-    F-->>C: complete CallToolResult
-    C->>F: tools/call(stop_debug, debugSessionId)
-    F->>F: validate arguments then atomically remove token
-    F->>S: atomically remove token
-    S->>D: native stop once
-    F-->>C: complete CallToolResult
+    M->>S: StartAsync(path, program, bounds, cancellation)
+    S->>D: spawn; initialize (UTF-8 Content-Length)
+    D-->>S: capabilities event (may precede response)
+    D-->>S: initialize response(request_seq)
+    D-->>S: initialized event
+    S->>D: launch; configurationDone
+    D-->>S: stopped / continued / exited / terminated
+    M->>S: StopAsync or DisposeAsync
+    S->>D: terminate; disconnect; bounded exit; kill tree fallback
 ```
 
-### Deployment and executable rollback
+## Scope and rollback
 
-M1 is an internal candidate, not package publication. The rollback rehearsal is
-mechanical: stop selecting the candidate, confirm no persisted state/package/
-console-script/client configuration changed, then rerun the established Python
-consumer journey. `PRODUCT_WORKS` on that journey proves rollback. Any M1 task
-that proposes modifying `pyproject.toml`, `uv.lock`, the public entrypoint, or
-customer configuration returns to architecture because that is release-prep
-scope.
+The candidate is selected only for internal M1 evidence. The published Python
+console script remains selected for existing consumers. Rollback is
+non-selection/removal of the new executable, followed by the unchanged Python
+consumer journey. There is no package publication, entrypoint replacement,
+persisted state, or client configuration reversal in M1.
 
-## Verified anchors and native-seam limit
-
-| Responsibility | Verified anchor | M1 rule |
-|---|---|---|
-| Legacy host entry/composition | `host/NetCoreDbg.Mcp.Host/Program.cs`, `RelayComposition.cs`, `NetCoreDbg.Mcp.Host.csproj` | Existing v1.4.1 relay is legacy evidence, not the native tool seam. |
-| Host test convention | `host/NetCoreDbg.Mcp.Host.Tests/ProductionCompositionTests.cs`, `FakePythonServer.cs`, `DuplexChannel.cs` | Use as test-layout evidence only. |
-| Existing Python lifecycle | `src/netcoredbg_mcp/tools/debug.py` | Python-only behavior evidence; never call it a native anchor. |
-| Legacy parity | `tests/test_host_proxy.py`, `tests/critical/test_host_proxy_critical.py`, `tests/test_mcp_compliance.py` | Retain unchanged as a separate parity gate. |
-| Published package | `pyproject.toml`, `uv.lock` | Do not modify in M1. |
-
-T-002 must identify and prove a bounded native C# lifecycle seam from
-repository/vendored DAP/process sources. If none can safely support start,
-state, and stop, it returns a written blocker to architecture. No Code task is
-claimable before an accepted T-002 receipt cites the exact seam.
-
-## Plan-challenger correction record (draft; awaiting fresh independent GO)
-
-The first independent Challenge-FULL verdict was **REVISE**. This revised
-draft applied these correction classes:
-
-| Correction class | Applied disposition |
-|---|---|
-| Tool wire contract | Replaced invented start/state/stop MCP methods with `tools/list` and `tools/call` tool names. |
-| MRTR | Added mandatory `InputRequiredResult`/new-id retry path with no `requestState`. |
-| Exact version fields | Standardized error data to `requested` and `supported`. |
-| Cache/result contract | Limited cache metadata to discover/list; specified complete `CallToolResult` for tools. |
-| Schema validity | Replaced overlapping wire/application union with kind-discriminated application payloads. |
-| Native readiness | Replaced Python-as-native assumption with T-002 Explore/Design blocker. |
-| Token lifecycle/race | Removed expiry; specified live-debugger/process bound and atomic stop winner/loser behavior. |
-| Delivery semantics | Renamed Release 1 to internal M1, set `release_intent: none`, and excluded public publication. |
-| Challenge/readiness | Recorded the first independent REVISE and requires a fresh independent Challenge-FULL GO before implementation readiness. |
-| Task graph | Replaced ambiguous edges with a single `Blocked by` direction matching Mermaid. |
-| Client request ordering | Corrected discovery to server-mandatory/client-optional and added fresh-process list/call-first proof. |
-| Runtime validation | Added exclusive invalid-arguments payload and no-native-side-effect contract. |
-| Command materialization | Made T-001/T-002 the owners of exact quickstart commands and T-006/T-007 their readiness gate. |
-
-The additive strangler premise and SDK choice remain sound. This package is
-`READY_FOR_INDEPENDENT_RECHECK`, not implementation-ready, until a fresh
-independent Challenge-FULL verdict is GO and the native-seam exploration result
-is accepted.
+The frozen anchors remain `host/NetCoreDbg.Mcp.Host/Program.cs`,
+`RelayComposition.cs`, and its test project for legacy-relay evidence only;
+`src/netcoredbg_mcp/tools/debug.py` remains Python-only comparative evidence.
+Neither is a native C# anchor. T-008 creates the M1 test project, fixture, and
+test-side driver; T-009 subsequently creates the candidate source. Independent T-009
+acceptance hardened incomplete discriminators, proved the corrected cases RED against
+frozen production, then the same final 11-case T-008 lifecycle suite went GREEN.

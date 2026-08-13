@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageReference Include="ModelContextProtocol" Version="2.1.0" />
+    <PackageReference Include="ModelContextProtocol.Core" Version="2.1.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Remove="Fixtures\**\*.cs" />
+  </ItemGroup>
+
+
+  <ItemGroup>
+    <ProjectReference Include="Fixtures\ControlledDapAdapter\ControlledDapAdapter.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\NetCoreDbg.Mcp.Stateless\NetCoreDbg.Mcp.Stateless.csproj" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+</Project>
