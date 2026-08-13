@@ -95,6 +95,25 @@ public sealed class CapabilityLifecycleContractTests
     }
 
     [Fact]
+    public async Task GetDebugState_UsesOneUsabilityObservationPerRequest()
+    {
+        await using var session = await NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter.NetCoreDbgSessionContractDriver.StartAsync(
+            new NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter.FixtureConfiguration(),
+            "D:\\fixtures\\program.dll",
+            TimeSpan.FromSeconds(2),
+            TimeSpan.FromSeconds(2),
+            TimeSpan.FromMilliseconds(300),
+            CancellationToken.None);
+        var evaluatorCalls = 0;
+
+        var result = await session.GetStateThroughRegistryAsync(_ => evaluatorCalls++ == 0);
+
+        Assert.Equal(
+            (Kind: "debug_state_success", TokenRetained: true, AdapterAlive: true, EvaluatorCalls: 1),
+            (result.Kind, result.TokenRetained, result.AdapterAlive, EvaluatorCalls: evaluatorCalls));
+    }
+
+    [Fact]
     public async Task InvalidOrUnusableTokens_AreUniformNotFoundOrInvalidArgumentsWithoutProhibitedNativeAction()
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync();

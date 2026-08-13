@@ -53,7 +53,7 @@ internal static class Program
         await host.RunAsync().ConfigureAwait(false);
     }
 
-    private sealed class DebugSessionRegistry(string? debuggerPath) : IAsyncDisposable
+    private sealed class DebugSessionRegistry : IAsyncDisposable
     {
         private const string StartDebug = "start_debug";
         private const string GetDebugState = "get_debug_state";
@@ -64,7 +64,19 @@ internal static class Program
         private static readonly TimeSpan StopTimeout = TimeSpan.FromSeconds(1);
 
         private readonly ConcurrentDictionary<string, NetCoreDbgSession> _sessions = new(StringComparer.Ordinal);
-        private readonly string? _debuggerPath = debuggerPath;
+        private readonly string? _debuggerPath;
+        private readonly Func<NetCoreDbgSession, bool> _isUsable;
+
+        internal DebugSessionRegistry(string? debuggerPath)
+            : this(debuggerPath, static session => session.IsUsable)
+        {
+        }
+
+        private DebugSessionRegistry(string? debuggerPath, Func<NetCoreDbgSession, bool> isUsable)
+        {
+            _debuggerPath = debuggerPath;
+            _isUsable = isUsable;
+        }
 
         internal async ValueTask<CallToolResult> CallAsync(
             RequestContext<CallToolRequestParams> context,
@@ -164,13 +176,15 @@ internal static class Program
                 return NotFound();
             }
 
-            if (!session.IsUsable && _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(sessionId!, session)))
+            var isUsable = _isUsable(session);
+
+            if (!isUsable && _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(sessionId!, session)))
             {
                 await session.DisposeAsync().ConfigureAwait(false);
                 return NotFound();
             }
 
-            return session.IsUsable
+            return isUsable
                 ? Success("debug_state_success", sessionId!, session.State)
                 : NotFound();
         }

@@ -126,6 +126,73 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
 
     public async Task DisposeSessionAsync() =>
         _ = await AwaitAsyncResult(_disposeAsync.Invoke(_session, []), "DisposeAsync", CancellationToken.None);
+    public async Task<RegistryStateProbe> GetStateThroughRegistryAsync(Func<object, bool> isUsable)
+    {
+        const string sessionId = "test-session";
+        var registryType = RequireType(_session.GetType().Assembly, "NetCoreDbg.Mcp.Stateless.Program+DebugSessionRegistry");
+        var evaluatorType = typeof(Func<,>).MakeGenericType(_session.GetType(), typeof(bool));
+        var constructor = registryType.GetConstructor(
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            types: [typeof(string), evaluatorType],
+            modifiers: null);
+        Assert.NotNull(constructor);
+        var registry = constructor!.Invoke([null, isUsable]);
+        var sessionsField = registryType.GetField("_sessions", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(sessionsField);
+        var sessions = sessionsField!.GetValue(registry)
+            ?? throw new InvalidOperationException("DebugSessionRegistry._sessions returned null.");
+        var tryAdd = sessions.GetType().GetMethod("TryAdd", [typeof(string), _session.GetType()]);
+        Assert.NotNull(tryAdd);
+        Assert.True((bool)tryAdd!.Invoke(sessions, [sessionId, _session])!);
+        var containsKey = sessions.GetType().GetMethod("ContainsKey", [typeof(string)]);
+        var getStateAsync = registryType.GetMethod("GetStateAsync", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(containsKey);
+        Assert.NotNull(getStateAsync);
+        var request = new ModelContextProtocol.Protocol.CallToolRequestParams
+        {
+            Name = "get_debug_state",
+            Arguments = new Dictionary<string, JsonElement>
+            {
+                ["debugSessionId"] = JsonSerializer.SerializeToElement(sessionId),
+            },
+        };
+
+        try
+        {
+            var result = (ModelContextProtocol.Protocol.CallToolResult?)await AwaitAsyncResult(
+                getStateAsync!.Invoke(registry, [request, CancellationToken.None]),
+                "GetStateAsync",
+                CancellationToken.None);
+            Assert.NotNull(result);
+            var structured = Assert.IsType<JsonElement>(result!.StructuredContent);
+            var processId = await _fixture.GetProcessIdAsync(CancellationToken.None);
+            return new RegistryStateProbe(
+                structured.GetProperty("kind").GetString(),
+                (bool)containsKey!.Invoke(sessions, [sessionId])!,
+                !HasExited(processId));
+        }
+        finally
+        {
+            var tryRemove = sessions.GetType().GetMethod("TryRemove", [typeof(string), _session.GetType().MakeByRefType()]);
+            Assert.NotNull(tryRemove);
+            _ = tryRemove!.Invoke(sessions, [sessionId, null]);
+        }
+    }
+
+    private static bool HasExited(int processId)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            return process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return true;
+        }
+    }
+
 
     async ValueTask IAsyncDisposable.DisposeAsync()
     {
@@ -308,6 +375,8 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
 }
 
 internal sealed record DapSessionSnapshot(string? Event, string? StopReason, int? ExitCode);
+internal sealed record RegistryStateProbe(string? Kind, bool TokenRetained, bool AdapterAlive);
+
 
 internal sealed record FixtureConfiguration(
     bool SupportsConfigurationDone = true,

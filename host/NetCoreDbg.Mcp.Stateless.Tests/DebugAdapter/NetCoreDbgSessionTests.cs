@@ -168,7 +168,7 @@ public sealed class NetCoreDbgSessionTests
             var launchReleased = Array.FindLastIndex(transcript.ToArray(), static entry => entry.Kind == "launch-released");
             lifecycleEvents = launchReleased < 0
                 ? []
-                : transcript[(launchReleased + 1)..]
+                : transcript.Skip(launchReleased + 1)
                     .Where(static entry => entry.Kind == "event")
                     .Select(static entry => entry.Event)
                     .ToArray();
@@ -179,14 +179,14 @@ public sealed class NetCoreDbgSessionTests
 
             if (Stopwatch.GetElapsedTime(startedAt) >= TimeSpan.FromSeconds(2))
             {
-                Assert.True(false, $"Timed out waiting for the controlled lifecycle transcript. Observed: [{string.Join(", ", lifecycleEvents.Select(static value => value ?? "<missing>"))}].");
+                Assert.Fail($"Timed out waiting for the controlled lifecycle transcript. Observed: [{string.Join(", ", lifecycleEvents.Select(static value => value ?? "<missing>"))}].");
                 return;
             }
 
             await Task.Delay(TimeSpan.FromMilliseconds(15));
         }
 
-        Assert.Equal(["stopped", "continued", "exited", "terminated"], lifecycleEvents);
+        Assert.Equal(new string?[] { "stopped", "continued", "exited", "terminated" }, lifecycleEvents);
         Assert.Equal(new DapSessionSnapshot("terminated", stopReason, exitCode), emitting.State);
     }
 
