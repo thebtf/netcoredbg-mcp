@@ -88,7 +88,7 @@ internal static class Program
                 StartDebug => await StartAsync(context, cancellationToken).ConfigureAwait(false),
                 GetDebugState => await GetStateAsync(request, cancellationToken).ConfigureAwait(false),
                 StopDebug => await StopAsync(request, cancellationToken).ConfigureAwait(false),
-                _ => InvalidArguments(request.Name),
+                _ => UnknownTool(request.Name),
             };
         }
 
@@ -338,6 +338,13 @@ internal static class Program
         }, isError: true);
 
         private static CallToolResult Error(string kind, string error) => Result(new { kind, error }, isError: true);
+        private static CallToolResult UnknownTool(string tool) => new()
+        {
+            ResultType = "complete",
+            IsError = true,
+            Content = [new TextContentBlock { Text = $"Unknown tool: {tool}" }],
+        };
+
 
         private static CallToolResult Result<T>(T content, bool isError) => new()
         {

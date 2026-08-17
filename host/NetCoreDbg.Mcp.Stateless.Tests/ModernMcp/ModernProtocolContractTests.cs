@@ -119,6 +119,27 @@ public sealed class ModernProtocolContractTests
     }
 
     [Fact]
+    public async Task UnknownTool_ReturnsCompleteTextErrorWithoutApplicationStructuredContent()
+    {
+        const string unknownTool = "pr242-unknown-tool-schema";
+        await using var driver = await ModernMcpProcessDriver.StartAsync();
+
+        var response = await driver.CallToolRawAsync(
+            unknownTool,
+            new JsonObject(),
+            ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("unknown-tool"));
+        var result = ModernMcpProcessDriver.RequireResult(response);
+
+        Assert.Equal("complete", result["resultType"]?.GetValue<string>());
+        Assert.True(result["isError"]?.GetValue<bool>() ?? false);
+        Assert.False(result.ContainsKey("structuredContent"));
+        var content = Assert.Single(Assert.IsType<JsonArray>(result["content"]));
+        Assert.Equal($"Unknown tool: {unknownTool}", Assert.IsType<string>(Assert.IsType<JsonObject>(content)["text"]?.GetValue<string>()));
+        await AssertNoNativeActionsAsync(driver);
+    }
+
+    [Fact]
     public async Task DelayedControlledStartup_ReturnsCompleteStartEnvelope()
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync(
