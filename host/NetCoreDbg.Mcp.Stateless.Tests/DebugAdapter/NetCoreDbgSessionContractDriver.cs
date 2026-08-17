@@ -120,6 +120,48 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             throw;
         }
     }
+    public static async Task<ConcurrentNetCoreDbgSessionContractDriver> StartConcurrentAsync(
+        FixtureConfiguration configuration,
+        string programPath,
+        TimeSpan initializeTimeout,
+        TimeSpan requestTimeout,
+        TimeSpan stopTimeout,
+        CancellationToken cancellationToken)
+    {
+        var fixture = FixtureProcess.Create(configuration);
+        try
+        {
+            var assembly = LoadProductionAssemblyOrAssert();
+            var sessionType = RequireType(assembly, SessionTypeName);
+            var startAsync = RequireStaticStartAsync(sessionType);
+            fixture.MarkAdapterStartAttempted();
+            using var startupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            startupCancellation.CancelAfter(initializeTimeout + requestTimeout + TimeSpan.FromMilliseconds(500));
+
+            async Task<object> StartOneAsync()
+            {
+                var started = startAsync.Invoke(null, [
+                    fixture.ExecutablePath,
+                    programPath,
+                    initializeTimeout,
+                    requestTimeout,
+                    stopTimeout,
+                    startupCancellation.Token,
+                ]);
+                return await AwaitAsyncResult(started, "StartAsync", startupCancellation.Token)
+                    ?? throw new InvalidOperationException("NetCoreDbgSession.StartAsync returned null.");
+            }
+
+            var sessions = await Task.WhenAll(Task.Run(StartOneAsync), Task.Run(StartOneAsync));
+            return new ConcurrentNetCoreDbgSessionContractDriver(fixture, sessions);
+        }
+        catch
+        {
+            await fixture.DisposeAsync();
+            throw;
+        }
+    }
+
 
     public async Task StopAsync(CancellationToken cancellationToken) =>
         _ = await AwaitAsyncResult(_stopAsync.Invoke(_session, [cancellationToken]), "StopAsync", cancellationToken);
@@ -374,6 +416,25 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
     }
 }
 
+internal sealed class ConcurrentNetCoreDbgSessionContractDriver(
+    FixtureProcess fixture,
+    object[] sessions) : IAsyncDisposable
+{
+    public async ValueTask DisposeAsync()
+    {
+        fixture.ReleaseGracefulShutdown();
+        try
+        {
+            await Task.WhenAll(sessions.Select(static session => ((IAsyncDisposable)session).DisposeAsync().AsTask()));
+        }
+        finally
+        {
+            await fixture.DisposeAsync();
+        }
+    }
+}
+
+
 internal sealed record DapSessionSnapshot(string? Event, string? StopReason, int? ExitCode);
 internal sealed record RegistryStateProbe(string? Kind, bool TokenRetained, bool AdapterAlive);
 
@@ -393,7 +454,8 @@ internal sealed record FixtureConfiguration(
     bool MalformedCapabilitiesEvent = false,
     bool SendMalformedDapFrameAfterStartup = false,
     bool DelayLaunchResponseForStartupTimeout = false,
-    bool EnableTerminateAfterInitialization = false)
+    bool EnableTerminateAfterInitialization = false,
+    bool ExitAfterLaunchResponse = false)
 {
     public string AsEnvironmentValue() => string.Join(
         ';',
@@ -414,6 +476,7 @@ internal sealed record FixtureConfiguration(
             SendMalformedDapFrameAfterStartup ? "--send-malformed-dap-frame-after-startup" : null,
             DelayLaunchResponseForStartupTimeout ? "--delay-launch-response-for-startup-timeout" : null,
             EnableTerminateAfterInitialization ? "--enable-terminate-after-initialization" : null,
+            ExitAfterLaunchResponse ? "--exit-after-launch-response" : null,
         }.Where(static value => value is not null));
 }
 
@@ -491,8 +554,10 @@ internal sealed class FixtureProcess : IAsyncDisposable
     internal async Task TerminateAdapterAsync(CancellationToken cancellationToken = default)
     {
         var processId = await GetProcessIdAsync(cancellationToken);
-        await KillAdapterTreeAsync(processId);
+        await TerminateProcessTreeAsync(processId);
     }
+
+    internal Task TerminateProcessTreeAsync(int processId) => KillAdapterTreeAsync(processId);
 
     public async ValueTask DisposeAsync()
     {

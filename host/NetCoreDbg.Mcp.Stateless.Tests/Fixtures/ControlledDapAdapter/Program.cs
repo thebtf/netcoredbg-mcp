@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
@@ -32,7 +33,8 @@ internal sealed record AdapterOptions(
     bool MalformedCapabilitiesEvent,
     bool SendMalformedDapFrameAfterStartup,
     bool DelayLaunchResponseForStartupTimeout,
-    bool EnableTerminateAfterInitialization)
+    bool EnableTerminateAfterInitialization,
+    bool ExitAfterLaunchResponse)
 {
     public static AdapterOptions Parse(string[] args, string? environmentOptions)
     {
@@ -51,6 +53,7 @@ internal sealed record AdapterOptions(
         var sendMalformedDapFrameAfterStartup = false;
         var delayLaunchResponseForStartupTimeout = false;
         var enableTerminateAfterInitialization = false;
+        var exitAfterLaunchResponse = false;
 
         foreach (var argument in args.Concat(SplitOptions(environmentOptions)))
         {
@@ -97,6 +100,9 @@ internal sealed record AdapterOptions(
                 case "--enable-terminate-after-initialization":
                     enableTerminateAfterInitialization = true;
                     break;
+                case "--exit-after-launch-response":
+                    exitAfterLaunchResponse = true;
+                    break;
                 case var _ when argument.StartsWith("--stop-reason=", StringComparison.Ordinal):
                     stopReason = argument["--stop-reason=".Length..];
                     break;
@@ -124,7 +130,8 @@ internal sealed record AdapterOptions(
             malformedCapabilitiesEvent,
             sendMalformedDapFrameAfterStartup,
             delayLaunchResponseForStartupTimeout,
-            enableTerminateAfterInitialization);
+            enableTerminateAfterInitialization,
+            exitAfterLaunchResponse);
     }
 
     private static IEnumerable<string> SplitOptions(string? options) =>
@@ -142,6 +149,7 @@ internal sealed class ControlledDapAdapter
 
     private readonly AdapterOptions _options;
     private readonly string _transcriptPath;
+    private readonly Mutex _transcriptWriteMutex;
     private readonly string[] _processArguments;
     private readonly Stream _input = Console.OpenStandardInput();
     private readonly Stream _output = Console.OpenStandardOutput();
@@ -164,6 +172,9 @@ internal sealed class ControlledDapAdapter
         _options = options;
         _transcriptPath = transcriptPath;
         _processArguments = processArguments;
+        _transcriptWriteMutex = new Mutex(
+            initiallyOwned: false,
+            $"Local\\NetCoreDbgMcpControlledDap-{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(transcriptPath)))}");
     }
 
     public async Task RunAsync(CancellationToken cancellationToken)
@@ -217,6 +228,7 @@ internal sealed class ControlledDapAdapter
             _descendant?.Dispose();
             _lifecycleEventsCancellation.Dispose();
             _writeGate.Dispose();
+            _transcriptWriteMutex.Dispose();
         }
     }
 
@@ -338,6 +350,12 @@ internal sealed class ControlledDapAdapter
 
         await WriteResponseAsync(launch.Document.RootElement.GetProperty("seq").GetInt32(), "launch", body: null, cancellationToken);
         await RecordAsync(new { kind = "launch-released" }, cancellationToken);
+        if (_options.ExitAfterLaunchResponse)
+        {
+            await RecordAsync(new { kind = "unexpected-root-exit" }, cancellationToken);
+            Environment.Exit(1);
+        }
+
         if (_options.SendMalformedDapFrameAfterStartup)
         {
             await WriteMalformedDapFrameAsync(cancellationToken);
@@ -550,10 +568,29 @@ internal sealed class ControlledDapAdapter
         }
     }
 
-    private async Task RecordAsync(object item, CancellationToken cancellationToken)
+    private Task RecordAsync(object item, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var line = JsonSerializer.Serialize(item) + Environment.NewLine;
-        await File.AppendAllTextAsync(_transcriptPath, line, BodyEncoding, cancellationToken);
+        try
+        {
+            _transcriptWriteMutex.WaitOne();
+        }
+        catch (AbandonedMutexException)
+        {
+            // The previous adapter exited while recording; this adapter now owns the mutex.
+        }
+
+        try
+        {
+            File.AppendAllText(_transcriptPath, line, BodyEncoding);
+        }
+        finally
+        {
+            _transcriptWriteMutex.ReleaseMutex();
+        }
+
+        return Task.CompletedTask;
     }
 
     private static async Task<int> ReadByteAsync(Stream stream, CancellationToken cancellationToken)

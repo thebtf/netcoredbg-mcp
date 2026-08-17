@@ -1,3 +1,6 @@
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 using System.Text;
 using System.Text.Json;
 using System.Diagnostics;
@@ -43,6 +46,29 @@ public sealed class NetCoreDbgSessionTests
         Assert.Equal(Encoding.UTF8.GetByteCount(rawPayload), payloadByteCount);
         Assert.Equal(payloadByteCount, contentLength);
         Assert.True(rawPayload.Length < payloadByteCount, "The non-ASCII raw payload must occupy more UTF-8 bytes than UTF-16 characters.");
+    }
+
+    [Fact]
+    public async Task StartAsync_ConcurrentSessionsInheritOnlyTheirStandardHandles()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var probe = InheritablePipeProbe.Create();
+        var endOfPipe = probe.ReadEndAsync();
+        await using (var sessions = await NetCoreDbgSessionContractDriver.StartConcurrentAsync(
+            new FixtureConfiguration(),
+            "D:\\fixtures\\program.dll",
+            InitializeTimeout,
+            RequestTimeout,
+            StopTimeout,
+            CancellationToken.None))
+        {
+            probe.CloseWriter();
+            Assert.Equal(0, await endOfPipe.WaitAsync(TimeSpan.FromSeconds(1)));
+        }
     }
 
     [Fact]
@@ -340,6 +366,37 @@ public sealed class NetCoreDbgSessionTests
         Assert.True(HasExited(descendant.Value), "The owned adapter descendant must be killed with the controlled adapter tree.");
     }
 
+    [Fact]
+    public async Task StopAsync_AndDisposeAsync_TerminateDescendantAfterUnexpectedAdapterRootExit()
+    {
+        await using var session = await StartAsync(new FixtureConfiguration(
+            SpawnDescendant: true,
+            SuppressLifecycleEvents: true,
+            ExitAfterLaunchResponse: true));
+        var fixture = session.Fixture;
+        int? descendant = null;
+
+        try
+        {
+            descendant = Assert.Single(await fixture.ReadTranscriptAsync(), entry => entry.Kind == "descendant").ProcessId;
+            Assert.NotNull(descendant);
+            var adapterProcessId = await fixture.GetProcessIdAsync(CancellationToken.None);
+            await WaitUntilAsync(() => Task.FromResult(HasExited(adapterProcessId)), TimeSpan.FromSeconds(2));
+            Assert.Contains(await fixture.ReadTranscriptAsync(), entry => entry.Kind == "unexpected-root-exit");
+            Assert.False(HasExited(descendant.Value), "The controlled descendant must still be alive after its adapter root exits unexpectedly.");
+
+            await Task.WhenAll(session.StopAsync(CancellationToken.None), session.DisposeSessionAsync());
+            Assert.True(HasExited(descendant.Value), "StopAsync and DisposeAsync must terminate the owned descendant after its adapter root has exited unexpectedly.");
+        }
+        finally
+        {
+            if (descendant is { } processId)
+            {
+                await fixture.TerminateProcessTreeAsync(processId);
+            }
+        }
+    }
+
     private static string?[] Requests(IReadOnlyList<FixtureTranscriptEntry> transcript) =>
         transcript.Where(entry => entry.Kind == "request").Select(entry => entry.Command).ToArray();
 
@@ -377,4 +434,84 @@ public sealed class NetCoreDbgSessionTests
             return true;
         }
     }
+    private sealed class InheritablePipeProbe : IDisposable
+    {
+        private const uint HandleFlagInherit = 0x00000001;
+
+        private readonly FileStream _reader;
+        private SafeFileHandle? _writer;
+
+        private InheritablePipeProbe(SafeFileHandle reader, SafeFileHandle writer)
+        {
+            _reader = new FileStream(reader, FileAccess.Read, bufferSize: 1, isAsync: false);
+            _writer = writer;
+        }
+
+        public static InheritablePipeProbe Create()
+        {
+            var attributes = new SecurityAttributes
+            {
+                Length = Marshal.SizeOf<SecurityAttributes>(),
+                InheritHandle = true,
+            };
+            if (!CreatePipe(out var readerHandle, out var writerHandle, ref attributes, 0))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not create the inheritable handle probe.");
+            }
+
+            var reader = new SafeFileHandle(readerHandle, ownsHandle: true);
+            var writer = new SafeFileHandle(writerHandle, ownsHandle: true);
+            try
+            {
+                if (!SetHandleInformation(reader.DangerousGetHandle(), HandleFlagInherit, 0))
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not configure the inheritable handle probe.");
+                }
+
+                return new InheritablePipeProbe(reader, writer);
+            }
+            catch
+            {
+                reader.Dispose();
+                writer.Dispose();
+                throw;
+            }
+        }
+
+        public void CloseWriter()
+        {
+            _writer?.Dispose();
+            _writer = null;
+        }
+
+        public Task<int> ReadEndAsync() => _reader.ReadAsync(new byte[1]).AsTask();
+
+        public void Dispose()
+        {
+            CloseWriter();
+            _reader.Dispose();
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CreatePipe(
+            out IntPtr readPipe,
+            out IntPtr writePipe,
+            ref SecurityAttributes pipeAttributes,
+            uint size);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SecurityAttributes
+        {
+            public int Length;
+            public IntPtr SecurityDescriptor;
+            [MarshalAs(UnmanagedType.Bool)]
+            public bool InheritHandle;
+        }
+    }
+
 }

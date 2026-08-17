@@ -1,10 +1,13 @@
 using System.Collections.Concurrent;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Unicode;
 using System.Text.Json;
+using Microsoft.Win32.SafeHandles;
 
 namespace NetCoreDbg.Mcp.Stateless.DebugAdapter;
 
@@ -21,6 +24,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private readonly Process _process;
     private readonly Stream _input;
     private readonly Stream _output;
+    private readonly Stream _error;
+    private readonly WindowsProcessTreeOwnership? _processTreeOwnership;
     private readonly TimeSpan _requestTimeout;
     private readonly TimeSpan _stopTimeout;
     private readonly SemaphoreSlim _writeGate = new(1, 1);
@@ -39,11 +44,20 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private bool _supportsTerminate;
     private bool _initializeResponseObserved;
     private bool CapabilitiesObserved { get; set; }
-    private NetCoreDbgSession(Process process, TimeSpan requestTimeout, TimeSpan stopTimeout)
+    private NetCoreDbgSession(
+        Process process,
+        Stream input,
+        Stream output,
+        Stream error,
+        TimeSpan requestTimeout,
+        TimeSpan stopTimeout,
+        WindowsProcessTreeOwnership? processTreeOwnership)
     {
         _process = process;
-        _input = process.StandardInput.BaseStream;
-        _output = process.StandardOutput.BaseStream;
+        _input = input;
+        _output = output;
+        _error = error;
+        _processTreeOwnership = processTreeOwnership;
         _requestTimeout = RequirePositiveTimeout(requestTimeout, nameof(requestTimeout));
         _stopTimeout = RequirePositiveTimeout(stopTimeout, nameof(stopTimeout));
         _readerTask = ReadMessagesAsync();
@@ -77,23 +91,49 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         RequirePositiveTimeout(stopTimeout, nameof(stopTimeout));
 
         Process? process = null;
+        WindowsProcessTreeLaunch? windowsLaunch = null;
         NetCoreDbgSession? session = null;
         try
         {
-            var startInfo = new ProcessStartInfo
+            if (OperatingSystem.IsWindows())
             {
-                FileName = debuggerPath,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardInput = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-            };
-            startInfo.ArgumentList.Add("--interpreter=vscode");
+                windowsLaunch = WindowsProcessTreeOwnership.Start(debuggerPath);
+                process = windowsLaunch.Process;
+                session = new NetCoreDbgSession(
+                    process,
+                    windowsLaunch.Input,
+                    windowsLaunch.Output,
+                    windowsLaunch.Error,
+                    requestTimeout,
+                    stopTimeout,
+                    windowsLaunch.Ownership);
+                windowsLaunch = null;
+            }
+            else
+            {
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = debuggerPath,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardInput = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                };
+                startInfo.ArgumentList.Add("--interpreter=vscode");
 
-            process = Process.Start(startInfo)
-                ?? throw new InvalidOperationException($"Could not start debugger '{debuggerPath}'.");
-            session = new NetCoreDbgSession(process, requestTimeout, stopTimeout);
+                process = Process.Start(startInfo)
+                    ?? throw new InvalidOperationException($"Could not start debugger '{debuggerPath}'.");
+                session = new NetCoreDbgSession(
+                    process,
+                    process.StandardInput.BaseStream,
+                    process.StandardOutput.BaseStream,
+                    process.StandardError.BaseStream,
+                    requestTimeout,
+                    stopTimeout,
+                    processTreeOwnership: null);
+            }
+
             await session.StartProtocolAsync(programPath, initializeTimeout, cancellationToken).ConfigureAwait(false);
             return session;
         }
@@ -102,6 +142,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             if (session is not null)
             {
                 await session.EnsureCleanupAsync().ConfigureAwait(false);
+            }
+            else if (windowsLaunch is not null)
+            {
+                windowsLaunch.Dispose();
             }
             else if (process is not null)
             {
@@ -428,10 +472,43 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
         finally
         {
-            _input.Dispose();
-            await ObserveBackgroundTasksAsync().ConfigureAwait(false);
-            _writeGate.Dispose();
-            _process.Dispose();
+            try
+            {
+                _input.Dispose();
+            }
+            finally
+            {
+                try
+                {
+                    await ObserveBackgroundTasksAsync().ConfigureAwait(false);
+                }
+                finally
+                {
+                    try
+                    {
+                        _output.Dispose();
+                        _error.Dispose();
+                    }
+                    finally
+                    {
+                        try
+                        {
+                            _writeGate.Dispose();
+                        }
+                        finally
+                        {
+                            try
+                            {
+                                _process.Dispose();
+                            }
+                            finally
+                            {
+                                _processTreeOwnership?.Dispose();
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -496,7 +573,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private async Task DrainStandardErrorAsync()
     {
         var buffer = new byte[8192];
-        while (await _process.StandardError.BaseStream.ReadAsync(buffer).ConfigureAwait(false) != 0)
+        while (await _error.ReadAsync(buffer).ConfigureAwait(false) != 0)
         {
         }
     }
@@ -685,6 +762,528 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         finally
         {
             process.Dispose();
+        }
+    }
+
+    private sealed class WindowsProcessTreeOwnership : IDisposable
+    {
+        private const uint CreateNoWindow = 0x08000000;
+        private const uint CreateSuspended = 0x00000004;
+        private const uint ExtendedStartupInfoPresent = 0x00080000;
+        private const uint HandleFlagInherit = 0x00000001;
+        private const uint JobObjectExtendedLimitInformationClass = 9;
+        private const uint JobObjectLimitKillOnJobClose = 0x00002000;
+        private const uint StartfUseStdHandles = 0x00000100;
+
+        private readonly SafeKernelHandle _job;
+
+        private WindowsProcessTreeOwnership(SafeKernelHandle job) => _job = job;
+
+        public static WindowsProcessTreeLaunch Start(string debuggerPath)
+        {
+            SafeFileHandle? standardInput = null;
+            SafeFileHandle? standardOutput = null;
+            SafeFileHandle? standardError = null;
+            SafeKernelHandle? childInput = null;
+            SafeKernelHandle? childOutput = null;
+            SafeKernelHandle? childError = null;
+            SafeKernelHandle? job = null;
+            IntPtr processHandle = IntPtr.Zero;
+            IntPtr threadHandle = IntPtr.Zero;
+            Process? process = null;
+            Stream? input = null;
+            Stream? output = null;
+            Stream? error = null;
+
+            try
+            {
+                CreatePipe(out standardInput, out childInput, parentReads: false);
+                CreatePipe(out standardOutput, out childOutput, parentReads: true);
+                CreatePipe(out standardError, out childError, parentReads: true);
+
+                job = CreateKillOnCloseJob();
+                var commandLine = new StringBuilder($"{QuoteCommandLineArgument(debuggerPath)} --interpreter=vscode");
+                var processInformation = CreateProcessWithStandardHandles(
+                    debuggerPath,
+                    commandLine,
+                    childInput.DangerousGetHandle(),
+                    childOutput.DangerousGetHandle(),
+                    childError.DangerousGetHandle());
+
+                processHandle = processInformation.Process;
+                threadHandle = processInformation.Thread;
+                childInput.Dispose();
+                childInput = null;
+                childOutput.Dispose();
+                childOutput = null;
+                childError.Dispose();
+                childError = null;
+
+                if (!AssignProcessToJobObject(job.DangerousGetHandle(), processHandle))
+                {
+                    throw LastWin32Error("Could not assign the debugger process to its job object.");
+                }
+
+                process = Process.GetProcessById(checked((int)processInformation.ProcessId));
+                if (ResumeThread(threadHandle) == uint.MaxValue)
+                {
+                    throw LastWin32Error("Could not resume the debugger process.");
+                }
+
+                CloseHandle(threadHandle);
+                threadHandle = IntPtr.Zero;
+                input = new FileStream(standardInput!, FileAccess.Write, bufferSize: 4096, isAsync: false);
+                standardInput = null;
+                output = new FileStream(standardOutput!, FileAccess.Read, bufferSize: 4096, isAsync: false);
+                standardOutput = null;
+                error = new FileStream(standardError!, FileAccess.Read, bufferSize: 4096, isAsync: false);
+                standardError = null;
+                CloseHandle(processHandle);
+                processHandle = IntPtr.Zero;
+                var ownership = new WindowsProcessTreeOwnership(job!);
+                job = null;
+                return new WindowsProcessTreeLaunch(process!, input!, output!, error!, ownership);
+            }
+            catch
+            {
+                if (processHandle != IntPtr.Zero)
+                {
+                    TerminateProcess(processHandle, 1);
+                }
+
+                input?.Dispose();
+                output?.Dispose();
+                error?.Dispose();
+                process?.Dispose();
+                job?.Dispose();
+                throw;
+            }
+            finally
+            {
+                if (processHandle != IntPtr.Zero)
+                {
+                    CloseHandle(processHandle);
+                }
+
+                if (threadHandle != IntPtr.Zero)
+                {
+                    CloseHandle(threadHandle);
+                }
+
+                standardInput?.Dispose();
+                standardOutput?.Dispose();
+                standardError?.Dispose();
+                childInput?.Dispose();
+                childOutput?.Dispose();
+                childError?.Dispose();
+            }
+        }
+
+        public void Dispose() => _job.Dispose();
+
+        private static SafeKernelHandle CreateKillOnCloseJob()
+        {
+            var job = new SafeKernelHandle(CreateJobObject(IntPtr.Zero, null));
+            if (job.IsInvalid)
+            {
+                var error = Marshal.GetLastWin32Error();
+                job.Dispose();
+                throw new Win32Exception(error, "Could not create the debugger process job object.");
+            }
+
+            var limits = new JobObjectExtendedLimitInformation
+            {
+                BasicLimitInformation = new JobObjectBasicLimitInformation
+                {
+                    LimitFlags = JobObjectLimitKillOnJobClose,
+                },
+            };
+            if (!SetInformationJobObject(
+                    job.DangerousGetHandle(),
+                    JobObjectExtendedLimitInformationClass,
+                    ref limits,
+                    (uint)Marshal.SizeOf<JobObjectExtendedLimitInformation>()))
+            {
+                var exception = LastWin32Error("Could not configure the debugger process job object.");
+                job.Dispose();
+                throw exception;
+            }
+
+            return job;
+        }
+
+        private static void CreatePipe(
+            out SafeFileHandle parent,
+            out SafeKernelHandle child,
+            bool parentReads)
+        {
+            var attributes = new SecurityAttributes
+            {
+                Length = Marshal.SizeOf<SecurityAttributes>(),
+                InheritHandle = true,
+            };
+            if (!CreatePipe(out var read, out var write, ref attributes, 0))
+            {
+                throw LastWin32Error("Could not create a debugger standard I/O pipe.");
+            }
+
+            parent = new SafeFileHandle(parentReads ? read : write, ownsHandle: true);
+            child = new SafeKernelHandle(parentReads ? write : read);
+            try
+            {
+                if (!SetHandleInformation(parent.DangerousGetHandle(), HandleFlagInherit, 0))
+                {
+                    throw LastWin32Error("Could not configure a debugger standard I/O pipe.");
+                }
+            }
+            catch
+            {
+                parent.Dispose();
+                child.Dispose();
+                throw;
+            }
+        }
+
+        private static ProcessInformation CreateProcessWithStandardHandles(
+            string debuggerPath,
+            StringBuilder commandLine,
+            IntPtr standardInput,
+            IntPtr standardOutput,
+            IntPtr standardError)
+        {
+            IntPtr attributeList = IntPtr.Zero;
+            IntPtr inheritedHandleList = IntPtr.Zero;
+            var attributeListInitialized = false;
+            try
+            {
+                var attributeListSize = IntPtr.Zero;
+                _ = InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref attributeListSize);
+                if (attributeListSize == IntPtr.Zero)
+                {
+                    throw LastWin32Error("Could not allocate debugger handle inheritance attributes.");
+                }
+
+                attributeList = Marshal.AllocHGlobal(attributeListSize);
+                if (!InitializeProcThreadAttributeList(attributeList, 1, 0, ref attributeListSize))
+                {
+                    throw LastWin32Error("Could not initialize debugger handle inheritance attributes.");
+                }
+
+                attributeListInitialized = true;
+                inheritedHandleList = Marshal.AllocHGlobal(IntPtr.Size * 3);
+                Marshal.WriteIntPtr(inheritedHandleList, 0, standardInput);
+                Marshal.WriteIntPtr(inheritedHandleList, IntPtr.Size, standardOutput);
+                Marshal.WriteIntPtr(inheritedHandleList, IntPtr.Size * 2, standardError);
+                if (!UpdateProcThreadAttribute(
+                        attributeList,
+                        0,
+                        new UIntPtr(0x00020002),
+                        inheritedHandleList,
+                        new UIntPtr((uint)(IntPtr.Size * 3)),
+                        IntPtr.Zero,
+                        IntPtr.Zero))
+                {
+                    throw LastWin32Error("Could not restrict debugger handle inheritance.");
+                }
+
+                var startupInfo = new StartupInfoEx
+                {
+                    StartupInfo = new StartupInfo
+                    {
+                        Size = (uint)Marshal.SizeOf<StartupInfoEx>(),
+                        Flags = StartfUseStdHandles,
+                        StandardInput = standardInput,
+                        StandardOutput = standardOutput,
+                        StandardError = standardError,
+                    },
+                    AttributeList = attributeList,
+                };
+                if (!CreateProcess(
+                        debuggerPath,
+                        commandLine,
+                        IntPtr.Zero,
+                        IntPtr.Zero,
+                        inheritHandles: true,
+                        CreateNoWindow | CreateSuspended | ExtendedStartupInfoPresent,
+                        IntPtr.Zero,
+                        currentDirectory: null,
+                        ref startupInfo,
+                        out var processInformation))
+                {
+                    throw LastWin32Error($"Could not start debugger '{debuggerPath}'.");
+                }
+
+                return processInformation;
+            }
+            finally
+            {
+                if (attributeListInitialized)
+                {
+                    DeleteProcThreadAttributeList(attributeList);
+                }
+
+                if (inheritedHandleList != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(inheritedHandleList);
+                }
+
+                if (attributeList != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(attributeList);
+                }
+            }
+        }
+
+        private static string QuoteCommandLineArgument(string argument)
+        {
+            if (argument.Length != 0 && !argument.Any(char.IsWhiteSpace) && !argument.Contains('"'))
+            {
+                return argument;
+            }
+
+            var quoted = new StringBuilder();
+            quoted.Append('"');
+            var backslashes = 0;
+            foreach (var character in argument)
+            {
+                if (character == '\\')
+                {
+                    backslashes++;
+                }
+                else if (character == '"')
+                {
+                    quoted.Append('\\', (backslashes * 2) + 1);
+                    quoted.Append(character);
+                    backslashes = 0;
+                }
+                else
+                {
+                    quoted.Append('\\', backslashes);
+                    quoted.Append(character);
+                    backslashes = 0;
+                }
+            }
+
+            quoted.Append('\\', backslashes * 2);
+            quoted.Append('"');
+            return quoted.ToString();
+        }
+
+        private static Win32Exception LastWin32Error(string message) =>
+            new(Marshal.GetLastWin32Error(), message);
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CreateProcess(
+            string applicationName,
+            StringBuilder commandLine,
+            IntPtr processAttributes,
+            IntPtr threadAttributes,
+            [MarshalAs(UnmanagedType.Bool)] bool inheritHandles,
+            uint creationFlags,
+            IntPtr environment,
+            string? currentDirectory,
+            ref StartupInfoEx startupInfo,
+            out ProcessInformation processInformation);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool InitializeProcThreadAttributeList(
+            IntPtr attributeList,
+            uint attributeCount,
+            uint flags,
+            ref IntPtr size);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool UpdateProcThreadAttribute(
+            IntPtr attributeList,
+            uint flags,
+            UIntPtr attribute,
+            IntPtr value,
+            UIntPtr size,
+            IntPtr previousValue,
+            IntPtr returnSize);
+
+        [DllImport("kernel32.dll")]
+        private static extern void DeleteProcThreadAttributeList(IntPtr attributeList);
+
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CreatePipe(
+            out IntPtr readPipe,
+            out IntPtr writePipe,
+            ref SecurityAttributes pipeAttributes,
+            uint size);
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern IntPtr CreateJobObject(IntPtr jobAttributes, string? name);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetInformationJobObject(
+            IntPtr job,
+            uint informationClass,
+            ref JobObjectExtendedLimitInformation jobObjectInformation,
+            uint jobObjectInformationLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint ResumeThread(IntPtr thread);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool TerminateProcess(IntPtr process, uint exitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SecurityAttributes
+        {
+            public int Length;
+            public IntPtr SecurityDescriptor;
+            [MarshalAs(UnmanagedType.Bool)]
+            public bool InheritHandle;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct StartupInfo
+        {
+            public uint Size;
+            public string? Reserved;
+            public string? Desktop;
+            public string? Title;
+            public uint X;
+            public uint Y;
+            public uint XSize;
+            public uint YSize;
+            public uint XCountChars;
+            public uint YCountChars;
+            public uint FillAttribute;
+            public uint Flags;
+            public ushort ShowWindow;
+            public ushort Reserved2Count;
+            public IntPtr Reserved2;
+            public IntPtr StandardInput;
+            public IntPtr StandardOutput;
+            public IntPtr StandardError;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct StartupInfoEx
+        {
+            public StartupInfo StartupInfo;
+            public IntPtr AttributeList;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ProcessInformation
+        {
+            public IntPtr Process;
+            public IntPtr Thread;
+            public uint ProcessId;
+            public uint ThreadId;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JobObjectExtendedLimitInformation
+        {
+            public JobObjectBasicLimitInformation BasicLimitInformation;
+            public IoCounters IoInfo;
+            public UIntPtr ProcessMemoryLimit;
+            public UIntPtr JobMemoryLimit;
+            public UIntPtr PeakProcessMemoryUsed;
+            public UIntPtr PeakJobMemoryUsed;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JobObjectBasicLimitInformation
+        {
+            public long PerProcessUserTimeLimit;
+            public long PerJobUserTimeLimit;
+            public uint LimitFlags;
+            public UIntPtr MinimumWorkingSetSize;
+            public UIntPtr MaximumWorkingSetSize;
+            public uint ActiveProcessLimit;
+            public UIntPtr Affinity;
+            public uint PriorityClass;
+            public uint SchedulingClass;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct IoCounters
+        {
+            public ulong ReadOperationCount;
+            public ulong WriteOperationCount;
+            public ulong OtherOperationCount;
+            public ulong ReadTransferCount;
+            public ulong WriteTransferCount;
+            public ulong OtherTransferCount;
+        }
+
+        private sealed class SafeKernelHandle : SafeHandleZeroOrMinusOneIsInvalid
+        {
+            public SafeKernelHandle(IntPtr handle)
+                : base(ownsHandle: true) => SetHandle(handle);
+
+            protected override bool ReleaseHandle() => CloseHandle(handle);
+        }
+    }
+
+    private sealed class WindowsProcessTreeLaunch(
+        Process process,
+        Stream input,
+        Stream output,
+        Stream error,
+        WindowsProcessTreeOwnership ownership) : IDisposable
+    {
+        public Process Process { get; } = process;
+        public Stream Input { get; } = input;
+        public Stream Output { get; } = output;
+        public Stream Error { get; } = error;
+        public WindowsProcessTreeOwnership Ownership { get; } = ownership;
+
+        public void Dispose()
+        {
+            try
+            {
+                Input.Dispose();
+            }
+            finally
+            {
+                try
+                {
+                    Output.Dispose();
+                }
+                finally
+                {
+                    try
+                    {
+                        Error.Dispose();
+                    }
+                    finally
+                    {
+                        try
+                        {
+                            Process.Dispose();
+                        }
+                        finally
+                        {
+                            Ownership.Dispose();
+                        }
+                    }
+                }
+            }
         }
     }
 
