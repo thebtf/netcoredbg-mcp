@@ -1,7 +1,7 @@
 ---
 feature_id: 001
 slug: mcp-stateless-strangler
-status: READY_FOR_EXPLORATION
+status: IMPLEMENTED
 baseline: main@f74a8439a58ab65c69b947e97efb36716d54ab24
 release_intent: none
 ---
@@ -20,6 +20,10 @@ cases RED against frozen production, then the same final 11-case T-008 harness g
 GREEN with a lifecycle-only receipt. T-003/T-004 then create modern MCP RED suites;
 T-005 implements the front door and mechanically materializes the candidate command receipt. No task claims an
 existing seam or candidate command before its owning work makes it real.
+
+## Current delivery state
+
+The T-001 through T-009 implementation sequence is historical: the .NET candidate and its recorded lifecycle, modern, retained-Python, and rollback evidence exist on PR #242. Independent native/source review of exact head `2ef00bf0d49a067a35dc301729890a06c56260f7` continues as nonblocking evidence: its availability does not block development, merge, or an otherwise consumer-proven release, and any non-critical later finding is scheduled to a named next patch. This task history does not itself authorize package publication, public-entrypoint cutover, or legacy-route change.
 
 ```mermaid
 flowchart TD

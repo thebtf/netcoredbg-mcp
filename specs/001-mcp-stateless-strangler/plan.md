@@ -13,14 +13,7 @@ The repository has no native C# DAP lifecycle seam. M1 therefore owns a narrow
 BCL-only `NetCoreDbgSession` in the new internal candidate, not an existing
 relay extension and not a generic DAP framework. The component owns
 `netcoredbg --interpreter=vscode`, UTF-8 Content-Length frames, `request_seq`
-correlation, lifecycle events, and bounded idempotent cleanup. T-008 owns the
-runnable 11-case sibling test project, controlled executable adapter fixture, and
-complete reflection/process contract driver that makes its boundary RED; T-009
-creates the production component. Independent T-009 acceptance hardened incomplete
-discriminators, proved the corrected cases RED against frozen production, then the
-same final 11-case T-008 suite went GREEN with a lifecycle-only receipt. T-003/T-004
-then create modern RED suites; T-005 materializes verified
-candidate commands after it implements the complete MCP front door.
+The lifecycle and modern front-door sequence below has been implemented. Recorded source-tree receipts cover the 49-case lifecycle suite and 33-case modern suite; retained-Python and rollback receipts remain separate. Independent native/source review of PR #242 head `2ef00bf0d49a067a35dc301729890a06c56260f7` may continue in parallel, but review availability and non-critical later findings do not block continued development, merge, or an otherwise consumer-proven release; deferred findings belong to a named next patch. These receipts do not themselves extend M1 to publication or public cutover.
 
 ## M1 boundary
 
@@ -52,52 +45,33 @@ configurationDone. Its coarse state is event-backed by stopped, continued,
 exited, and terminated. `StopAsync`/`DisposeAsync` share one asynchronous,
 idempotent cleanup: capability-gated terminate, disconnect, bounded exit wait,
 then kill the owned process tree only if still necessary.
-## TDD and exploration order
+## Historical implementation order and current gate
 
+1. T-001 characterized unchanged Python parity/rollback behavior and materialized its commands.
+2. T-002 established the owned-lifecycle boundary and T-008 created the runnable lifecycle RED harness.
+3. T-009 created the owned lifecycle component; the lifecycle suite then went GREEN.
+4. T-003/T-004 created the modern RED suites and T-005 materialized the complete M1 candidate.
+5. Recorded re-derivation and consumer/rollback evidence completed the historical T-006/T-007 sequence.
+6. Independent native/source review of the exact current PR head may continue in parallel. Its availability is nonblocking; non-critical later findings are scheduled to a named next patch, and no release-prep work is part of M1.
 
-1. Characterize unchanged Python parity/rollback behavior and materialize its
-   commands (T-001), independently.
-2. Establish the D1 owned-lifecycle boundary and record that candidate commands
-   are not yet claimable (T-002).
-3. Create the runnable lifecycle RED harness: its sibling test project, controlled
-   executable adapter fixture, complete reflection/process driver, and lifecycle cases
-   (T-008). `dotnet test host/NetCoreDbg.Mcp.Stateless.Tests/NetCoreDbg.Mcp.Stateless.Tests.csproj`
-   runs all cases and reports absent future assembly/type behavior as contract failures,
-   not compilation failures.
-4. Create the owned narrow production DAP lifecycle component and its minimal
-   discovery/reference wiring. Independent T-009 acceptance hardens incomplete
-   discriminators, proves the corrected cases RED against frozen production, then the
-   same final 11-case T-008 suite goes GREEN; record the lifecycle-only project
-   build/test, readiness, and cleanup receipt (T-009).
-5. Write modern front-door and capability RED tests (T-003/T-004).
-6. Implement the one complete M1 candidate only after both modern RED suites,
-   then mechanically verify and materialize its launch, C# v2.1.0 client,
-   environment, cleanup, and seven-step `PRODUCT_WORKS` commands (T-005).
-7. Run the one independent re-derivation and consumer/rollback evidence
-   (T-006/T-007).
-
-T-002 never invents command lines. T-008 owns its executable RED test command;
-T-009 owns the post-seam lifecycle build/test receipt only. T-003/T-004's sole
-`Blocked by: T-009` relation has no hidden modern-command prerequisite; T-005
-owns candidate-command verification and materialization.
+The historical task dependencies remain traceability evidence. They are not instructions to recreate already-implemented work.
 
 ## Requirements-to-file map
 
 | Requirement | Tasks | Verified anchor or constrained location |
 |---|---|---|
-| FR-001–FR-007, NFR-001 | T-003, T-005, T-006 | Authorized future candidate `host/NetCoreDbg.Mcp.Stateless/` and sibling tests; exact front-door files and commands after T-005; legacy host is not modified. |
-| FR-008–FR-010, FR-014, NFR-003 | T-003, T-004, T-005, T-006 | Future candidate/capability registry and sibling tests after lifecycle Code; T-005 owns final candidate commands. |
-| FR-011, NFR-005 | T-002, T-008, T-009, T-006 | Authorized future `DebugAdapter/NetCoreDbgSession.cs`, `DapSessionState.cs`, and `NetCoreDbgSessionTests.cs`; DAP protocol sources document framing/lifecycle facts. |
+| FR-001–FR-007, NFR-001 | T-003, T-005, T-006 | Implemented candidate `host/NetCoreDbg.Mcp.Stateless/` and sibling tests; external exact-head review is nonblocking evidence, and legacy host is unmodified. |
+| FR-008–FR-010, FR-014, NFR-003 | T-003, T-004, T-005, T-006 | Implemented capability registry and sibling tests; external review findings are scheduled to a named next patch when non-critical. |
+| FR-011, NFR-005 | T-002, T-008, T-009, T-006 | Implemented `DebugAdapter/NetCoreDbgSession.cs`, `DapSessionState.cs`, and `NetCoreDbgSessionTests.cs`; DAP protocol sources document framing/lifecycle facts. |
 | FR-012–FR-013, NFR-002, NFR-004 | T-001, T-005, T-006, T-007 | `quickstart.md` receipt blocks; retained `tests/test_host_proxy.py`, `tests/critical/test_host_proxy_critical.py`, `tests/test_mcp_compliance.py`, `pyproject.toml`, and `uv.lock` remain unmodified. |
 
 ## Milestone map
 
-| Milestone | Tasks | Internal shipping sentence | Binding constraints |
-|---|---|---|---|
-| M1 — Modern stateless walking skeleton | T-001 through T-009 | The current .NET path could not perform a conforming discover/tools/MRTR/native start-state-stop journey; the mergeable internal candidate can, while installed Python remains intact. | No publication/entrypoint/package/legacy-relay change; lifecycle is owned narrowly with BCL; public route/catalog migration is absent. |
+| Milestone | Tasks | Internal shipping sentence | Current delivery state | Binding constraints |
+|---|---|---|---|---|
+| M1 — Modern stateless walking skeleton | T-001 through T-009 | The current .NET path could not perform a conforming discover/tools/MRTR/native start-state-stop journey; the internal candidate can, while installed Python remains intact. | Implemented on PR #242. External review runs as nonblocking evidence; any non-critical later finding belongs to a named next patch. | No publication/entrypoint/package/legacy-relay change; lifecycle is owned narrowly with BCL; public route/catalog migration is absent. |
 
-M1 is not a public release. A later separately authorized release-prep slice
-owns packaging, public installed-surface changes, and publication.
+M1 is not a public release. A later separately authorized release-prep slice owns packaging, public installed-surface changes, and publication.
 
 ## Additive strangler and rollback
 

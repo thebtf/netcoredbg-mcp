@@ -16,13 +16,11 @@
 
 ## Owned native lifecycle facts
 
-The authorized future ownership is new internal executable
-`host/NetCoreDbg.Mcp.Stateless/`, namespace `NetCoreDbg.Mcp.Stateless`, narrow
-`DebugAdapter/NetCoreDbgSession.cs` and `DebugAdapter/DapSessionState.cs`, with
-sibling tests in
+The implemented ownership is the internal executable
+`host/NetCoreDbg.Mcp.Stateless/`, namespace `NetCoreDbg.Mcp.Stateless`, with
+`DebugAdapter/NetCoreDbgSession.cs` and `DebugAdapter/DapSessionState.cs`, plus sibling tests in
 `host/NetCoreDbg.Mcp.Stateless.Tests/DebugAdapter/NetCoreDbgSessionTests.cs`.
-These are target paths, not existing-file claims. The legacy
-`host/NetCoreDbg.Mcp.Host` MCP 1.4.1 relay remains unchanged.
+The legacy `host/NetCoreDbg.Mcp.Host` MCP 1.4.1 relay remains unchanged.
 
 The session owns `netcoredbg --interpreter=vscode` via BCL `Process` with
 redirected stdin/stdout/stderr. DAP frames are ASCII `Content-Length: N\r\n\r\n`
@@ -86,11 +84,4 @@ not claim remote safety; remote transport and authentication are excluded.
 
 ## Factual uncertainty
 
-T-009's lifecycle receipt is limited to the project build, the final 11-case
-T-008-owned suite after independent discriminator hardening/frozen-production
-RED proof, controlled-adapter readiness, and cleanup. Candidate launch, official
-C# v2.1.0 client, environment, cleanup, and `PRODUCT_WORKS` command lines remain
-unmaterialized until T-005 implements the full M1 front door after T-003/T-004
-modern RED suites. The DAP launch argument schema is adapter-specific, so this
-package claims only the process invocation and lifecycle—not guessed launch
-arguments or a public state vocabulary.
+The recorded 49-case lifecycle and 33-case modern source-tree receipts establish implementation evidence, while retained-Python and rollback receipts establish the additive boundary. An independent native/source review of PR #242 head `2ef00bf0d49a067a35dc301729890a06c56260f7` may supply follow-up evidence, but review availability and non-critical later findings do not block continued development or an otherwise consumer-proven release; they are recorded for a named next patch. The DAP launch argument schema remains adapter-specific, so this package claims only the process invocation and lifecycle—not guessed launch arguments or a public state vocabulary.

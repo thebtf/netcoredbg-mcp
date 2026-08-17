@@ -2,7 +2,7 @@
 feature_id: 001
 slug: mcp-stateless-strangler
 title: "MCP 2026-07-28 Stateless .NET Strangler Milestone M1"
-status: READY_FOR_EXPLORATION
+status: IMPLEMENTED
 created: 2026-08-13
 baseline: main@f74a8439a58ab65c69b947e97efb36716d54ab24
 design_rung: D2
@@ -23,6 +23,9 @@ The frozen baseline is `main@f74a8439a58ab65c69b947e97efb36716d54ab24`; its
 audit shows the current Python-backed path and installed SDKs are legacy-era.
 M1 closes the precise gap: **the current .NET path cannot perform a conforming
 discover/tools/MRTR/native start-state-stop journey.**
+
+The candidate implementation is present on PR #242 at `2ef00bf0d49a067a35dc301729890a06c56260f7`. Its recorded source-tree and retained-Python receipts describe the M1 evidence boundary. External PR review may proceed independently, but its availability, delay, or non-critical later findings do not block continued development, merge, or an otherwise consumer-proven release; such findings belong to a named next patch.
+
 
 ## Native lifecycle ownership
 

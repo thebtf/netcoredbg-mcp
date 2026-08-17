@@ -1,4 +1,4 @@
-# Architecture — D2 Decision Record and D1 Native-Lifecycle Amendment for M1
+# Architecture — M1 Stateless .NET Strangler Decision Record
 
 ## Design-depth decision
 
@@ -18,13 +18,11 @@ unchanged. It is not the attach point for M1's modern candidate.
 | Native debugger lifecycle | **OWN** a narrow internal DAP component with BCL `Process`, redirected streams, and `System.Text.Json` | No repository seam owns process lifetime, DAP framing, correlation, and atomic teardown. OmniSharp.Extensions.DebugAdapter.Client 0.19.9 is stale/DI-heavy and lacks that ownership; StreamJsonRpc still leaves DAP framing, DTO, and lifecycle ownership to M1. |
 | Legacy Python relay | **RETAIN** unchanged | It remains the published consumer path and comparative parity evidence. |
 
-This is a parent ADOPT-vs-OWN disposition, not a new ADR. It supersedes the
-failed premise that an existing native seam must be found.
+This is the parent ADOPT-vs-OWN disposition recorded by [ADR-001](../../docs/adr/ADR-001-stateless-dotnet-strangler.md). It replaced the failed premise that an existing native seam must be found.
 
 ## D1 amendment packet — owned native DAP lifecycle
 
-**Status:** Contract-test ready. The paths below are authorized target
-ownership, not files that exist today.
+**Status:** Implemented on PR #242. Independent native/source review remains useful evidence, not an integration or development gate; the paths below are current ownership, not proposed target paths.
 
 ### Boundary contract
 
@@ -93,10 +91,7 @@ against frozen production, then the same final 11-case T-008 suite went GREEN wi
 lifecycle-only receipt. T-003 and T-004 add modern MCP RED cases after completed T-009;
 T-005 materializes final candidate commands.
 
-**Only checker commitment:** T-006 is an independent re-derivation of this
-amended boundary packet, every `Blocked by` relation, and its Mermaid edge
-after the maker's work; the parent owns that pass. T-007 remains blocked on
-T-001 and this final review.
+**Checker record:** T-006 historically re-derived this amended boundary packet, every `Blocked by` relation, and its Mermaid edge after the maker's work. T-007 consumed that evidence alongside T-001; any subsequent external review is nonblocking evidence and does not block continued development, merge, or an otherwise consumer-proven release. Non-critical later findings are scheduled to a named next patch.
 ### D1 challenger LITE record
 
 **GO.** M1 needs this boundary because neither legacy relay process ownership

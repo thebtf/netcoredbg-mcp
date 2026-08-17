@@ -198,24 +198,11 @@ cleanup removes task scratch only; it does not remove the built controlled fixtu
 the debugger installation. The 2026-08-13 replay yielded `PRODUCT_WORKS` with the same
 5/5 denominator before cleanup.
 
-## 4. T-007 closure and M1 merge decision
+## 4. Recorded M1 evidence and current integration gate
 
-On 2026-08-13, after the fresh independent T-006 **PASS**, T-007 ran the
-materialized candidate command and received **28/28** passed with **6/6**
-application-schema variants. The complete integrated candidate project then
-passed **39/39** tests with 0 failed and 0 skipped in 2 m 5 s. The unchanged
-installed public Python consumer
-then reached **PRODUCT_WORKS (5/5)** with 135 tools and an entry stop. With the
-internal candidate left unselected, the exact retained-Python rollback replay
-again reached **PRODUCT_WORKS (5/5)** with the same 135-tool and entry-stop
-observations.
+On 2026-08-13, the recorded T-006/T-007 evidence covered a materialized candidate command, **28/28** passed with **6/6** application-schema variants, a complete integrated candidate project with **39/39** tests, and separate retained-Python and rollback `PRODUCT_WORKS (5/5)` journeys. Later source-tree receipts in sections 1.1 and 1.2 supersede the candidate-suite denominators with **49/49** lifecycle and **33/33** modern tests.
 
-Final cleanup measured 0 candidate processes, 0 controlled-adapter processes,
-0 installed-debugger processes, no retained disposable environment or consumer
-driver, and 0 owned modern scratch directories. **Decision: M1 is merge-ready.**
-This decision authorizes no publication, package change, public-entrypoint
-selection, legacy-relay cutover, or release; those remain a separately
-authorized later slice.
+These are implementation and consumer-boundary receipts, not public-cutover authorization. Independent native/source review of exact PR #242 head `2ef00bf0d49a067a35dc301729890a06c56260f7` remains useful evidence but is nonblocking: review availability and non-critical later findings do not delay development, merge, or an otherwise consumer-proven release; deferred findings are recorded for a named next patch. This decision authorizes no package change, public-entrypoint selection, legacy-relay cutover, or release beyond separately accepted scope.
 
 ## Failure interpretation
 
