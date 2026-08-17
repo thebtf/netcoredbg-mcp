@@ -12,9 +12,20 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <!-- Header -->
-        <TextBlock Grid.Row="0" Text="WPF Smoke Test App" FontSize="18" FontWeight="Bold"
-                   Margin="10" AutomationProperties.AutomationId="lblHeader"/>
+        <!-- Header and popup submenu fixture -->
+        <DockPanel Grid.Row="0" Margin="10">
+            <Menu DockPanel.Dock="Left" Margin="0,0,10,0">
+                <MenuItem Header="Actions"
+                          AutomationProperties.AutomationId="submenuParent"
+                          PreviewKeyDown="SubmenuParent_PreviewKeyDown">
+                    <MenuItem Header="Run submenu action"
+                              AutomationProperties.AutomationId="submenuChild"
+                              Click="SubmenuChild_Click"/>
+                </MenuItem>
+            </Menu>
+            <TextBlock Text="WPF Smoke Test App" FontSize="18" FontWeight="Bold"
+                       AutomationProperties.AutomationId="lblHeader"/>
+        </DockPanel>
 
         <!-- Settings Panel (for root_id scoping) -->
         <GroupBox Grid.Row="1" Header="Settings Panel" Margin="10"

@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
+import pytest
+
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "WpfSmokeApp"
+SUBMENU_CONSUMER_PROOF = Path(__file__).with_name("wpf_submenu_consumer.py")
 
 
 def test_wpf_fixture_exposes_cue_grid_character_list_and_undo_contract() -> None:
@@ -131,3 +137,79 @@ def test_wpf_fixture_hover_status_arms_post_focus_measurement_and_delayed_close(
     assert 'SetHoverState("open_flyout", surfaceVisible: true)' in code
     assert 'SetHoverState("close_pending", surfaceVisible: true)' in code
     assert 'SetHoverState("closed", surfaceVisible: false)' in code
+
+
+def test_wpf_submenu_parent_enter_rediscovers_popup_child_and_invokes_it(tmp_path: Path) -> None:
+    """Exercise the built wheel through its installed CLI and MCP tools/call route."""
+
+    if sys.platform != "win32":
+        pytest.skip("WPF submenu consumer proof requires Windows")
+
+    debugger_path = os.environ.get("NETCOREDBG_PATH")
+    if not debugger_path or not Path(debugger_path).is_file():
+        pytest.skip("WPF submenu consumer proof requires NETCOREDBG_PATH")
+
+    fixture_build = subprocess.run(
+        ["dotnet", "build", str(FIXTURE_ROOT), "-c", "Debug"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert fixture_build.returncode == 0, fixture_build.stdout + fixture_build.stderr
+
+    wheel_dir = tmp_path / "wheel"
+    wheel_build = subprocess.run(
+        ["uv", "build", "--wheel", "--out-dir", str(wheel_dir)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert wheel_build.returncode == 0, wheel_build.stdout + wheel_build.stderr
+    wheels = sorted(wheel_dir.glob("netcoredbg_mcp-*.whl"))
+    assert len(wheels) == 1, f"expected one wheel, found: {wheels}"
+
+    consumer_root = tmp_path / "consumer"
+    create_consumer = subprocess.run(
+        ["uv", "venv", "--python", sys.executable, str(consumer_root)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert create_consumer.returncode == 0, create_consumer.stdout + create_consumer.stderr
+
+    scripts_dir = consumer_root / "Scripts"
+    consumer_python = scripts_dir / "python.exe"
+    consumer_cli = scripts_dir / "netcoredbg-mcp.exe"
+    install_wheel = subprocess.run(
+        ["uv", "pip", "install", "--python", str(consumer_python), str(wheels[0])],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert install_wheel.returncode == 0, install_wheel.stdout + install_wheel.stderr
+    assert consumer_cli.is_file(), f"wheel did not install CLI: {consumer_cli}"
+
+    consumer_env = dict(os.environ)
+    consumer_env.pop("PYTHONPATH", None)
+    consumer_env.update(
+        {
+            "NETCOREDBG_MCP_CONSUMER_CLI": str(consumer_cli),
+            "NETCOREDBG_MCP_WPF_ROOT": str(FIXTURE_ROOT),
+        }
+    )
+    consumer = subprocess.run(
+        [str(consumer_python), str(SUBMENU_CONSUMER_PROOF)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        env=consumer_env,
+        timeout=120,
+        check=False,
+    )
+    print(consumer.stdout, end="")
+    assert consumer.returncode == 0, consumer.stdout + consumer.stderr
+    assert "WPF installed submenu evidence:" in consumer.stdout
