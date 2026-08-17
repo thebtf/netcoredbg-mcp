@@ -1127,6 +1127,13 @@ def register_ui_tools(
         it works reliably even when the element is off-screen or partially obscured.
         Falls back to Click() if InvokePattern is not supported.
 
+        WPF top-level MenuItem headers: scope the native ENTER key to the parent,
+        then rediscover the popup child and call ui_invoke separately for that exact
+        child. Do not add a fixture-specific key handler. Invoking the parent alone
+        does not guarantee submenu peers materialize. Use pre/post UI oracles; a
+        child missing after verified expansion is a harness observation, not
+        automatically a product defect.
+
         Args:
             automation_id: AutomationId property
             name: Element's Name/Title property

@@ -14,7 +14,7 @@ set breakpoints, step through code, inspect variables, evaluate expressions, rea
 debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
 and Avalonia windows without opening an IDE.
 
-**135 MCP tools · 8 prompts · 4 resources · 2101 collected tests · release v0.23.3**
+**135 MCP tools · 8 prompts · 4 resources · 2105 collected tests · release v0.23.4**
 
 ## Quick Links
 
@@ -23,19 +23,12 @@ and Avalonia windows without opening an IDE.
 - **Reference:** [Available Tools](#available-tools) · [Resources](#mcp-resources) · [Prompts](#mcp-prompts) · [Architecture](#architecture-overview)
 - **Project:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## What's New in v0.23.3
+## What's New in v0.23.4
 
-- **Fail-closed near-black screenshot evidence** — screenshots that are
-  overwhelmingly near-black now return `PROBABLE_BLACK_FRAME` with luminance
-  metrics, foreground-mutation provenance, and explicit recovery through
-  `ui_bring_to_front`. Annotated screenshots also invalidate their cached
-  annotation data before returning that result.
-- **Reliable foreground recovery** — `ui_bring_to_front` now uses the
-  pywinauto HWND foreground-restoration fallback when needed and clears stealth
-  mode only after successful activation.
-- **Safer startup temp cleanup** — stale-session GC rejects unrelated temp
-  names before probing directory metadata, avoiding filesystem checks outside
-  its managed prefix.
+- **Reliable WPF submenu interaction guidance** — `ui_key_sequence` and
+  `ui_invoke` now describe the required sequence: send scoped `ENTER` to the
+  parent `MenuItem`, rediscover the popup child, then invoke that exact child.
+  Invoking the parent alone does not guarantee that submenu peers materialize.
 
 ## Highlights
 

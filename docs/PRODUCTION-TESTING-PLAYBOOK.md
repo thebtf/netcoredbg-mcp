@@ -172,7 +172,9 @@ Expected result:
   workstation and record whether each scenario returned `PASS`, `BLOCKED`, or
   `FAIL`.
 
-### 5. Supporting WPF One-Call Fixture Workflow
+### 5. Supporting WPF Fixture Workflows
+
+#### One-Call Runtime-Smoke Workflow
 
 Command:
 
@@ -189,6 +191,41 @@ Expected result:
 - The one `run_runtime_smoke` plan returns `PASS` with cleanup evidence, or an
   honest `BLOCKED` / `FAIL` result that names the failing operation and cleanup
   state.
+
+#### Installed WPF Submenu Consumer Journey
+
+This journey uses the real WPF fixture as its debuggee, but it is consumer
+evidence: `$ConsumerPython` runs the official MCP client SDK installed with the
+built wheel and starts `$ConsumerCli`. The helper imports no repository package
+code; every server operation below crosses the installed MCP `tools/call`
+surface. The fixture build is preparation, not the proof itself.
+
+Commands:
+
+```powershell
+dotnet build tests/fixtures/WpfSmokeApp -c Debug
+$env:NETCOREDBG_MCP_CONSUMER_CLI = $ConsumerCli
+$env:NETCOREDBG_MCP_WPF_ROOT = (Resolve-Path tests/fixtures/WpfSmokeApp).Path
+Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+& $ConsumerPython tests/wpf_submenu_consumer.py
+```
+
+Expected result:
+
+- Both commands exit `0`.
+- Output starts with `WPF installed submenu evidence:` and reports the installed
+  CLI, public `start_debug`, `ui_find_element`, `ui_key_sequence`,
+  `ui_get_window_tree`, `ui_invoke`, and `ui_text` calls.
+- The bounded polling records each discovery operation and, on a deadline,
+  prints `terminal_event=timeout_no_response` for no response or
+  `terminal_event=deadline_elapsed_after_response` after a received response.
+  Both retain the last received public response, attempt count, and deadline.
+- Before native `ENTER` expansion, the public tree omits `submenuChild`; after
+  it, the popup-tree oracle and independently rediscovered element both identify
+  `submenuChild`. The fixture has no submenu-specific key handler.
+- The separate child invocation reports `invoked=true` and exactly
+  `method=InvokePattern`; `WpfWorkflow Submenu child invoked` is the observable
+  result.
 
 ### 6. Supporting Avalonia Fixture Compatibility
 

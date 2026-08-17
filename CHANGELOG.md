@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.23.4] - 2026-08-17
+
+### Fixed
+- The `ui_key_sequence` and `ui_invoke` tool descriptions now document the
+  required WPF submenu flow: send scoped `ENTER` to the parent, rediscover the
+  popup child, then invoke that exact child separately.
+
 
 ## [0.23.3] - 2026-08-13
 

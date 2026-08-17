@@ -234,6 +234,12 @@ public partial class MainWindow : Window
         _viewModel.StatusText = "Scoped button clicked";
     }
 
+
+    private void SubmenuChild_Click(object sender, RoutedEventArgs e)
+    {
+        _viewModel.StatusText = "WpfWorkflow Submenu child invoked";
+    }
+
     private void ButtonCharlistRemove_Click(object sender, RoutedEventArgs e)
     {
         _viewModel.SelectorSafetyCount++;
