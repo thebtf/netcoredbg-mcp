@@ -204,6 +204,7 @@ Commands:
 
 ```powershell
 dotnet build tests/fixtures/WpfSmokeApp -c Debug
+& $ConsumerCli --setup
 $env:NETCOREDBG_MCP_CONSUMER_CLI = $ConsumerCli
 $env:NETCOREDBG_MCP_WPF_ROOT = (Resolve-Path tests/fixtures/WpfSmokeApp).Path
 Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
@@ -212,7 +213,7 @@ Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
 
 Expected result:
 
-- Both commands exit `0`.
+- All commands exit `0`.
 - Output starts with `WPF installed submenu evidence:` and reports the installed
   CLI, public `start_debug`, `ui_find_element`, `ui_key_sequence`,
   `ui_get_window_tree`, `ui_invoke`, and `ui_text` calls.

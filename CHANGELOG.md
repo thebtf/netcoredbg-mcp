@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.23.5] - 2026-08-17
+
+### Fixed
+- `ui_key_sequence` now fails closed unless the native FlaUI bridge verifies
+  both foreground ownership and focus for the selector-scoped target before
+  sending keys, preventing a false successful delivery claim.
+
 ## [0.23.4] - 2026-08-17
 
 ### Fixed
