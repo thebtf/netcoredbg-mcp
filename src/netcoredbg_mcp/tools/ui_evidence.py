@@ -156,7 +156,14 @@ def register_ui_evidence_tools(
         root_id: str | None = None,
         xpath: str | None = None,
     ) -> dict:
-        """Send keys while holding modifiers and report cleanup evidence."""
+        """Send keys while holding modifiers and report cleanup evidence.
+
+        For WPF submenus, scope ``ENTER`` to the parent ``MenuItem``, then rediscover
+        the popup child after expansion and invoke its exact child through a separate
+        ``ui_invoke``. Invoking the parent menu alone does not ensure submenu peers
+        materialize. Use pre/post UI oracles; a missing child after verified expansion
+        is a harness observation, not automatically a product defect.
+        """
         try:
             access_error = check_session_access(ctx)
             if access_error:
