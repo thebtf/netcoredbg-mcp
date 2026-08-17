@@ -64,6 +64,18 @@ async def run_scoped_key_sequence(
         }
 
     status = result.get("status") or "PASS"
+    focused = result.get("focused")
+    if status == "PASS" and (
+        not isinstance(focused, dict)
+        or focused.get("foreground_verified") is not True
+        or focused.get("target_focus_verified") is not True
+    ):
+        return {
+            **result,
+            "status": "FAIL",
+            "reason": "scoped key delivery was not verified",
+            "final_held_modifiers": final_held,
+        }
     return {"status": status, **result, "final_held_modifiers": final_held}
 
 
