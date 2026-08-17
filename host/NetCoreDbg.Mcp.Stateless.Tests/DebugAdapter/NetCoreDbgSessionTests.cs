@@ -217,7 +217,7 @@ public sealed class NetCoreDbgSessionTests
     }
 
     [Fact]
-    public async Task IsUsable_FalseAfterMalformedDapFrameEndsReaderWhileAdapterRemainsAlive()
+    public async Task StopAsync_ReaderFailureSkipsGracefulRequestTimeouts()
     {
         await using var session = await StartAsync(new FixtureConfiguration(SendMalformedDapFrameAfterStartup: true));
         var adapterProcessId = await session.Fixture.GetProcessIdAsync(CancellationToken.None);
@@ -230,8 +230,9 @@ public sealed class NetCoreDbgSessionTests
         using var readerCompletion = new CancellationTokenSource(TimeSpan.FromSeconds(2));
         await session.WaitForReaderCompletionAsync(readerCompletion.Token);
 
-        Assert.False(HasExited(adapterProcessId), "DAP reader completion must not depend on the adapter process exiting.");
         Assert.False(session.IsUsable, "A session whose DAP reader ended after a malformed frame must not remain usable while its adapter process is alive.");
+        await session.StopAsync(CancellationToken.None).WaitAsync(StopTimeout + TimeSpan.FromSeconds(1));
+        Assert.True(HasExited(adapterProcessId), "Reader failure cleanup must kill the owned adapter without waiting for graceful request timeouts.");
     }
 
     [Fact]
@@ -372,11 +373,6 @@ public sealed class NetCoreDbgSessionTests
     [Fact]
     public async Task StopAsync_AndDisposeAsync_TerminateDescendantAfterUnexpectedAdapterRootExit()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         await using var session = await StartAsync(new FixtureConfiguration(
             SpawnDescendant: true,
             SuppressLifecycleEvents: true,
@@ -406,19 +402,22 @@ public sealed class NetCoreDbgSessionTests
     }
 
     [Fact]
-    public async Task HostedStop_UsesCancellationTokenWithoutAbandoningCleanup()
+    public async Task HostedStop_CancellationForcesTreeCleanupBeforeShutdownReturns()
     {
         await using var session = await StartAsync(new FixtureConfiguration(
             SupportsTerminate: true,
-            BlockGracefulShutdown: true));
+            BlockGracefulShutdown: true,
+            SpawnDescendant: true));
+        var adapterProcessId = await session.Fixture.GetProcessIdAsync(CancellationToken.None);
+        var descendantProcessId = Assert.Single(await session.Fixture.ReadTranscriptAsync(), entry => entry.Kind == "descendant").ProcessId;
+        Assert.NotNull(descendantProcessId);
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => session.StopHostedRegistryAsync(cancellation.Token).WaitAsync(StopTimeout));
-        await WaitUntilAsync(
-            async () => (await session.Fixture.ReadTranscriptAsync()).Any(entry => entry.Command == "terminate"),
-            TimeSpan.FromSeconds(2));
+            () => session.StopHostedRegistryAsync(cancellation.Token).WaitAsync(StopTimeout + TimeSpan.FromSeconds(2)));
+        Assert.True(HasExited(adapterProcessId), "Host cancellation must not return before the adapter process is gone.");
+        Assert.True(HasExited(descendantProcessId.Value), "Host cancellation must not return before the owned adapter descendant is gone.");
     }
 
     private static string?[] Requests(IReadOnlyList<FixtureTranscriptEntry> transcript) =>

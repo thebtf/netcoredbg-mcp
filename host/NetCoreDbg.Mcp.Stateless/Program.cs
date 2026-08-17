@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -14,10 +15,20 @@ namespace NetCoreDbg.Mcp.Stateless;
 internal static class Program
 {
     private const string ProtocolVersion = "2026-07-28";
+    private const string UnixProcessGroupProxy = "--unix-process-group-proxy";
     private static readonly TimeSpan CacheLifetime = TimeSpan.FromMinutes(5);
 
-    private static async Task Main()
+    private static async Task Main(string[] arguments)
     {
+        if (!OperatingSystem.IsWindows()
+            && arguments.Length == 2
+            && string.Equals(arguments[0], UnixProcessGroupProxy, StringComparison.Ordinal)
+            && !string.IsNullOrWhiteSpace(arguments[1]))
+        {
+            await RunUnixProcessGroupProxyAsync(arguments[1]).ConfigureAwait(false);
+            return;
+        }
+
         var sessions = new DebugSessionRegistry(Environment.GetEnvironmentVariable("NETCOREDBG_PATH"));
         var builder = Host.CreateApplicationBuilder();
         builder.Logging.ClearProviders();
@@ -52,6 +63,21 @@ internal static class Program
         using var host = builder.Build();
         await host.RunAsync().ConfigureAwait(false);
     }
+
+    private static async Task RunUnixProcessGroupProxyAsync(string debuggerPath)
+    {
+        UnixProcessGroup.BecomeOwnProcessGroup();
+        using var debugger = Process.Start(new ProcessStartInfo
+        {
+            FileName = debuggerPath,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            ArgumentList = { "--interpreter=vscode" },
+        }) ?? throw new InvalidOperationException($"Could not start debugger '{debuggerPath}'.");
+        await debugger.WaitForExitAsync().ConfigureAwait(false);
+        Environment.ExitCode = debugger.ExitCode;
+    }
+
 
     private sealed class DebugSessionRegistry : IAsyncDisposable
     {

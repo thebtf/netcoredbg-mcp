@@ -25,7 +25,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private readonly Stream _input;
     private readonly Stream _output;
     private readonly Stream _error;
-    private readonly WindowsProcessTreeOwnership? _processTreeOwnership;
+    private readonly IProcessTreeOwnership? _processTreeOwnership;
     private readonly TimeSpan _requestTimeout;
     private readonly TimeSpan _stopTimeout;
     private readonly SemaphoreSlim _writeGate = new(1, 1);
@@ -34,11 +34,13 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private readonly object _stateGate = new();
     private readonly object _cleanupGate = new();
     private readonly Task _readerTask;
+    private readonly CancellationTokenSource _forceCleanup = new();
     private readonly Task _stderrTask;
     private readonly byte[] _headerByte = new byte[1];
 
     private DapSessionState _state = new(null, null, null);
     private Task? _cleanupTask;
+    private Exception? _readerFailure;
     private int _outgoingSequence;
     private bool _supportsConfigurationDone;
     private bool _supportsTerminate;
@@ -51,7 +53,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         Stream error,
         TimeSpan requestTimeout,
         TimeSpan stopTimeout,
-        WindowsProcessTreeOwnership? processTreeOwnership)
+        IProcessTreeOwnership? processTreeOwnership)
     {
         _process = process;
         _input = input;
@@ -91,6 +93,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         RequirePositiveTimeout(stopTimeout, nameof(stopTimeout));
 
         Process? process = null;
+        IProcessTreeOwnership? processTreeOwnership = null;
         WindowsProcessTreeLaunch? windowsLaunch = null;
         NetCoreDbgSession? session = null;
         try
@@ -111,19 +114,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             }
             else
             {
-                var startInfo = new ProcessStartInfo
-                {
-                    FileName = debuggerPath,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardInput = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                };
-                startInfo.ArgumentList.Add("--interpreter=vscode");
-
-                process = Process.Start(startInfo)
-                    ?? throw new InvalidOperationException($"Could not start debugger '{debuggerPath}'.");
+                process = UnixProcessGroupOwnership.StartProxy(debuggerPath);
+                processTreeOwnership = new UnixProcessGroupOwnership(process.Id);
                 session = new NetCoreDbgSession(
                     process,
                     process.StandardInput.BaseStream,
@@ -131,7 +123,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     process.StandardError.BaseStream,
                     requestTimeout,
                     stopTimeout,
-                    processTreeOwnership: null);
+                    processTreeOwnership);
             }
 
             await session.StartProtocolAsync(programPath, initializeTimeout, cancellationToken).ConfigureAwait(false);
@@ -149,15 +141,27 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             }
             else if (process is not null)
             {
-                await StopUnmanagedProcessAsync(process, stopTimeout).ConfigureAwait(false);
+                await StopUnmanagedProcessAsync(process, stopTimeout, processTreeOwnership).ConfigureAwait(false);
             }
 
             throw;
         }
     }
 
-    internal async Task StopAsync(CancellationToken cancellationToken) =>
-        await EnsureCleanupAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
+    internal async Task StopAsync(CancellationToken cancellationToken)
+    {
+        var cleanup = EnsureCleanupAsync();
+        try
+        {
+            await cleanup.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            _forceCleanup.Cancel();
+            await cleanup.ConfigureAwait(false);
+            throw;
+        }
+    }
 
     public ValueTask DisposeAsync() => new(EnsureCleanupAsync());
 
@@ -228,6 +232,11 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         TimeSpan timeout,
         CancellationToken cancellationToken)
     {
+        if (Volatile.Read(ref _readerFailure) is { } readerFailure)
+        {
+            throw new IOException("The debugger DAP reader is no longer available.", readerFailure);
+        }
+
         var sequence = Interlocked.Increment(ref _outgoingSequence);
         var request = new PendingRequest(sequence, command);
         if (!_pending.TryAdd(sequence, request))
@@ -301,6 +310,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             if (failure is not null)
             {
+                Volatile.Write(ref _readerFailure, failure);
                 _initialized.TrySetException(failure);
                 FailPending(failure);
             }
@@ -448,18 +458,32 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     {
         try
         {
-            if (!HasExited())
+            if (!HasExited() && !_forceCleanup.IsCancellationRequested)
             {
                 if (_supportsTerminate)
                 {
                     await TrySendCleanupRequestAsync("terminate", new { restart = false }).ConfigureAwait(false);
                 }
 
-                await TrySendCleanupRequestAsync(
-                    "disconnect",
-                    new { restart = false, terminateDebuggee = true }).ConfigureAwait(false);
-                _input.Dispose();
+                if (!_forceCleanup.IsCancellationRequested)
+                {
+                    await TrySendCleanupRequestAsync(
+                        "disconnect",
+                        new { restart = false, terminateDebuggee = true }).ConfigureAwait(false);
+                }
+            }
 
+            _input.Dispose();
+            if (_forceCleanup.IsCancellationRequested)
+            {
+                KillProcessTree();
+                if (!await WaitForProcessExitAsync().ConfigureAwait(false))
+                {
+                    throw new InvalidOperationException("The owned debugger process did not exit after forced process tree cleanup.");
+                }
+            }
+            else if (!HasExited())
+            {
                 if (!await WaitForProcessExitAsync().ConfigureAwait(false))
                 {
                     KillProcessTree();
@@ -469,6 +493,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     }
                 }
             }
+
             if (HasExited())
             {
                 _processTreeOwnership?.Terminate();
@@ -520,7 +545,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     {
         try
         {
-            _ = await SendRequestAsync(command, arguments, _requestTimeout, CancellationToken.None).ConfigureAwait(false);
+            using var requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(_forceCleanup.Token);
+            _ = await SendRequestAsync(command, arguments, _requestTimeout, requestCancellation.Token).ConfigureAwait(false);
         }
         catch (Exception)
         {
@@ -753,7 +779,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
 
-    private static async Task StopUnmanagedProcessAsync(Process process, TimeSpan stopTimeout)
+    private static async Task StopUnmanagedProcessAsync(
+        Process process,
+        TimeSpan stopTimeout,
+        IProcessTreeOwnership? processTreeOwnership)
     {
         try
         {
@@ -765,11 +794,57 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
         finally
         {
-            process.Dispose();
+            try
+            {
+                processTreeOwnership?.Terminate();
+            }
+            finally
+            {
+                process.Dispose();
+                processTreeOwnership?.Dispose();
+            }
         }
     }
 
-    private sealed class WindowsProcessTreeOwnership : IDisposable
+    private interface IProcessTreeOwnership : IDisposable
+    {
+        void Terminate();
+    }
+
+    private sealed class UnixProcessGroupOwnership(int processGroupId) : IProcessTreeOwnership
+    {
+        public static Process StartProxy(string debuggerPath)
+        {
+            var processPath = Environment.ProcessPath
+                ?? throw new InvalidOperationException("The current process path is unavailable.");
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = processPath,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            if (Path.GetFileNameWithoutExtension(processPath).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
+            {
+                startInfo.ArgumentList.Add(Environment.GetCommandLineArgs()[0]);
+            }
+
+            startInfo.ArgumentList.Add("--unix-process-group-proxy");
+            startInfo.ArgumentList.Add(debuggerPath);
+            return Process.Start(startInfo)
+                ?? throw new InvalidOperationException($"Could not start debugger '{debuggerPath}'.");
+        }
+
+        public void Terminate() => UnixProcessGroup.Terminate(processGroupId);
+
+        public void Dispose()
+        {
+        }
+    }
+
+    private sealed class WindowsProcessTreeOwnership : IProcessTreeOwnership
     {
         private const uint CreateNoWindow = 0x08000000;
         private const uint CreateSuspended = 0x00000004;

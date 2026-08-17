@@ -4,8 +4,8 @@ This is an execution contract for a future internal candidate, not a public
 release claim. T-008 owns a runnable RED suite, its test project, controlled
 executable DAP adapter fixture, and reflection/process driver. T-009 owns only
 the lifecycle build/test receipt below; T-005 owns materializing the actual
-candidate launch, C# v2.1.0 client, environment, cleanup, and modern
-`PRODUCT_WORKS` receipt. T-001 owns retained-Python and rollback blocks.
+candidate launch, C# v2.1.0 client, environment, cleanup, and modern source-tree
+candidate test receipt. T-001 owns retained-Python and rollback blocks.
 T-007 MUST refuse consumer evidence if a required final receipt is absent,
 stale, or traceable to no accepted receipt.
 
@@ -15,7 +15,7 @@ stale, or traceable to no accepted receipt.
 
 T-009 creates only the owned BCL lifecycle project. Independent T-009 acceptance
 hardens incomplete discriminators, proves the corrected cases RED against frozen
-production, then the same final 11-case T-008 lifecycle suite goes GREEN. Run from the
+production, then the current 49-case candidate test suite goes GREEN. Run from the
 repository root with .NET 8:
 
 ```powershell
@@ -25,18 +25,15 @@ dotnet test host/NetCoreDbg.Mcp.Stateless.Tests/NetCoreDbg.Mcp.Stateless.Tests.c
 
 The test command builds the controlled adapter as test infrastructure. This
 receipt uses no `NETCOREDBG_PATH`, MCP SDK/client, candidate launch command, or
-network. It records the final 11-case denominator, actual GREEN result,
-controlled-adapter readiness, and cleanup counts from the final T-009 terminal rerun.
-It proves lifecycle only: no candidate MCP launch command exists yet.
+network. It records the current 49-case denominator and actual GREEN result. It
+proves test execution only: no installed or public consumer proof exists here.
 
-**Receipt:** The final T-009 terminal rerun ran the exact commands above: build
-succeeded with 0 warnings and 0 errors; the exact test command succeeded in
-24 s with 11 passed, 0 failed, and 0 skipped. Controlled-adapter
-readiness/cleanup evidence: exact-path `ControlledDapAdapter.exe` process count
-0 and `controlled-dap-*` scratch entries 0. This remains lifecycle evidence
-only, not an MCP client, front-door, candidate-launch, or `PRODUCT_WORKS` receipt.
+**Receipt:** On 2026-08-18 the exact commands above succeeded: build completed
+with 0 warnings and 0 errors; the exact test command completed in 1 m 58 s with
+**49 passed, 0 failed, and 0 skipped**. This remains source-tree candidate test
+evidence only, not an MCP client, public entrypoint, or consumer proof.
 
-### 1.2 T-005 modern candidate command block — `PRODUCT_WORKS`
+### 1.2 T-005 modern candidate command block — source-tree test receipt
 
 Run from the repository root with .NET 8:
 
@@ -51,7 +48,7 @@ The test command launches that built artifact through the official
 `ModelContextProtocol` v2.1.0 stdio transport/client and uses the controlled DAP
 adapter as `NETCOREDBG_PATH`; it requires no installed debugger or network.
 
-The 28-case denominator executes the seven-step journey:
+The 33-case denominator executes the seven-step journey:
 
 1. `server/discover` is a literal first request and returns tools capability,
    positive `ttlMs`, and public cache scope.
@@ -71,15 +68,12 @@ The 28-case denominator executes the seven-step journey:
 7. The official stdio client observes bounded candidate completion, while MCP
    stdout remains parseable protocol frames throughout every process exchange.
 
-**Receipt:** On 2026-08-13 the exact build command succeeded with 0 warnings
-and 0 errors. The exact filtered test command succeeded with **28 passed, 0
-failed, and 0 skipped** in 1 m 40 s, including executable parity for all **6/6**
-application-schema variants. Post-run cleanup was measured by exact executable
-path and owned scratch prefix: candidate process count 0,
-`ControlledDapAdapter.exe` process count 0, and `modern-mcp-*` /
-`controlled-dap-*` scratch directory count 0. Result: **PRODUCT_WORKS (7/7
-journey categories; 28/28 executable cases).** This is an internal candidate
-receipt only; it does not select a public entrypoint or publish a package.
+**Receipt:** On 2026-08-18 the exact commands above succeeded: build completed
+with 0 warnings and 0 errors; the exact filtered test command completed in 1 m
+31 s with **33 passed, 0 failed, and 0 skipped**, including executable parity for
+all **6/6** application-schema variants. This is source-tree candidate test
+evidence only; it does not select a public entrypoint, install a package, or
+establish consumer proof.
 
 ## 2. Retained Python command block — owned by T-001
 
