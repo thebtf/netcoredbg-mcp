@@ -214,14 +214,13 @@ internal static class Program
             }
         }
 
-        public async ValueTask DisposeAsync()
+        public ValueTask DisposeAsync() => DisposeAsync(CancellationToken.None);
+
+        public async ValueTask DisposeAsync(CancellationToken cancellationToken)
         {
             var sessions = _sessions.ToArray();
             _sessions.Clear();
-            foreach (var (_, session) in sessions)
-            {
-                await session.DisposeAsync().ConfigureAwait(false);
-            }
+            await Task.WhenAll(sessions.Select(session => session.Value.StopAsync(cancellationToken))).ConfigureAwait(false);
         }
 
 
@@ -381,6 +380,6 @@ internal static class Program
     {
         public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
-        public Task StopAsync(CancellationToken cancellationToken) => sessions.DisposeAsync().AsTask();
+        public Task StopAsync(CancellationToken cancellationToken) => sessions.DisposeAsync(cancellationToken).AsTask();
     }
 }

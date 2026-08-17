@@ -266,10 +266,13 @@ public sealed class NetCoreDbgSessionTests
     {
         await using var session = await StartAsync(new FixtureConfiguration(
             SupportsConfigurationDone: true,
-            SupportsTerminate: false,
+            SupportsTerminate: true,
             EnableTerminateAfterInitialization: true,
             HoldExitAfterDisconnectResponse: true));
-        Assert.Contains(await session.Fixture.ReadTranscriptAsync(), entry => entry.Kind == "capabilities-delta-event");
+        var transcript = await session.Fixture.ReadTranscriptAsync();
+        var initializeResponse = Assert.Single(transcript, entry => entry.Kind == "initialize-response");
+        Assert.False(initializeResponse.SupportsTerminateRequest ?? true, "The initial response must not advertise terminate before the capability delta.");
+        Assert.Contains(transcript, entry => entry.Kind == "capabilities-delta-event");
 
         var stop = session.StopAsync(CancellationToken.None);
         try
@@ -369,6 +372,11 @@ public sealed class NetCoreDbgSessionTests
     [Fact]
     public async Task StopAsync_AndDisposeAsync_TerminateDescendantAfterUnexpectedAdapterRootExit()
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         await using var session = await StartAsync(new FixtureConfiguration(
             SpawnDescendant: true,
             SuppressLifecycleEvents: true,
@@ -395,6 +403,22 @@ public sealed class NetCoreDbgSessionTests
                 await fixture.TerminateProcessTreeAsync(processId);
             }
         }
+    }
+
+    [Fact]
+    public async Task HostedStop_UsesCancellationTokenWithoutAbandoningCleanup()
+    {
+        await using var session = await StartAsync(new FixtureConfiguration(
+            SupportsTerminate: true,
+            BlockGracefulShutdown: true));
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => session.StopHostedRegistryAsync(cancellation.Token).WaitAsync(StopTimeout));
+        await WaitUntilAsync(
+            async () => (await session.Fixture.ReadTranscriptAsync()).Any(entry => entry.Command == "terminate"),
+            TimeSpan.FromSeconds(2));
     }
 
     private static string?[] Requests(IReadOnlyList<FixtureTranscriptEntry> transcript) =>

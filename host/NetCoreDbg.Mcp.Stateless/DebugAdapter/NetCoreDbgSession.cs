@@ -469,6 +469,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     }
                 }
             }
+            if (HasExited())
+            {
+                _processTreeOwnership?.Terminate();
+            }
         }
         finally
         {
@@ -881,6 +885,14 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         public void Dispose() => _job.Dispose();
 
+        public void Terminate()
+        {
+            if (!TerminateJobObject(_job.DangerousGetHandle(), 1))
+            {
+                throw LastWin32Error("Could not terminate the debugger process job object.");
+            }
+        }
+
         private static SafeKernelHandle CreateKillOnCloseJob()
         {
             var job = new SafeKernelHandle(CreateJobObject(IntPtr.Zero, null));
@@ -1138,6 +1150,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool TerminateProcess(IntPtr process, uint exitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool TerminateJobObject(IntPtr job, uint exitCode);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]

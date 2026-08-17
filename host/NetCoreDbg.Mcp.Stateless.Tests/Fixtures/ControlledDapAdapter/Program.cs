@@ -275,12 +275,15 @@ internal sealed class ControlledDapAdapter
                 }
 
                 await DeferGateRequestAsync("before-initialize-response", cancellationToken);
+                var supportsTerminate = _options.EnableTerminateAfterInitialization
+                    ? false
+                    : _options.SupportsTerminate;
                 await WriteResponseAsync(sequence, command, new
                 {
                     supportsConfigurationDoneRequest = _options.SupportsConfigurationDone,
-                    supportsTerminateRequest = _options.SupportsTerminate,
+                    supportsTerminateRequest = supportsTerminate,
                 }, cancellationToken);
-                await RecordAsync(new { kind = "initialize-response", requestSequence = sequence }, cancellationToken);
+                await RecordAsync(new { kind = "initialize-response", requestSequence = sequence, supportsTerminateRequest = supportsTerminate }, cancellationToken);
                 await ProcessDeferredRequestsAsync(cancellationToken);
                 await DeferGateRequestAsync("before-initialized-event", cancellationToken);
                 if (_options.EnableTerminateAfterInitialization)

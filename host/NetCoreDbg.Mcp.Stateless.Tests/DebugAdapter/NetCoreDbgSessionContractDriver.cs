@@ -168,6 +168,43 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
 
     public async Task DisposeSessionAsync() =>
         _ = await AwaitAsyncResult(_disposeAsync.Invoke(_session, []), "DisposeAsync", CancellationToken.None);
+
+    public Task StopHostedRegistryAsync(CancellationToken cancellationToken)
+    {
+        const string sessionId = "host-stop-session";
+        var registryType = RequireType(_session.GetType().Assembly, "NetCoreDbg.Mcp.Stateless.Program+DebugSessionRegistry");
+        var registryConstructor = registryType.GetConstructor(
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            types: [typeof(string)],
+            modifiers: null);
+        Assert.NotNull(registryConstructor);
+        var registry = registryConstructor!.Invoke([null]);
+        var sessionsField = registryType.GetField("_sessions", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(sessionsField);
+        var sessions = sessionsField!.GetValue(registry)
+            ?? throw new InvalidOperationException("DebugSessionRegistry._sessions returned null.");
+        var tryAdd = sessions.GetType().GetMethod("TryAdd", [typeof(string), _session.GetType()]);
+        Assert.NotNull(tryAdd);
+        Assert.True((bool)tryAdd!.Invoke(sessions, [sessionId, _session])!);
+
+        var disposerType = RequireType(_session.GetType().Assembly, "NetCoreDbg.Mcp.Stateless.Program+SessionDisposer");
+        var disposerConstructor = disposerType.GetConstructor(
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+            binder: null,
+            types: [registryType],
+            modifiers: null);
+        Assert.NotNull(disposerConstructor);
+        var disposer = disposerConstructor!.Invoke([registry]);
+        var stopAsync = disposerType.GetMethod(
+            "StopAsync",
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+            binder: null,
+            types: [typeof(CancellationToken)],
+            modifiers: null);
+        Assert.NotNull(stopAsync);
+        return Assert.IsAssignableFrom<Task>(stopAsync!.Invoke(disposer, [cancellationToken]));
+    }
     public async Task<RegistryStateProbe> GetStateThroughRegistryAsync(Func<object, bool> isUsable)
     {
         const string sessionId = "test-session";
@@ -771,7 +808,8 @@ internal sealed record FixtureTranscriptEntry(
     int? ContentLength,
     int? PayloadByteCount,
     string? Stage,
-    string? Event)
+    string? Event,
+    bool? SupportsTerminateRequest)
 {
     public static FixtureTranscriptEntry Parse(string json)
     {
@@ -787,7 +825,8 @@ internal sealed record FixtureTranscriptEntry(
             root.TryGetProperty("contentLength", out var contentLength) ? contentLength.GetInt32() : null,
             root.TryGetProperty("payloadByteCount", out var payloadByteCount) ? payloadByteCount.GetInt32() : null,
             root.TryGetProperty("stage", out var stage) ? stage.GetString() : null,
-            root.TryGetProperty("event", out var eventName) ? eventName.GetString() : null);
+            root.TryGetProperty("event", out var eventName) ? eventName.GetString() : null,
+            root.TryGetProperty("supportsTerminateRequest", out var supportsTerminateRequest) ? supportsTerminateRequest.GetBoolean() : null);
     }
 }
 

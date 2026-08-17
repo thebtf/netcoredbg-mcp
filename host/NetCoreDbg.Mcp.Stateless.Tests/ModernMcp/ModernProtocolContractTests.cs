@@ -135,6 +135,7 @@ public sealed class ModernProtocolContractTests
         Assert.True(result["isError"]?.GetValue<bool>() ?? false);
         Assert.False(result.ContainsKey("structuredContent"));
         var content = Assert.Single(Assert.IsType<JsonArray>(result["content"]));
+        Assert.Equal("text", Assert.IsType<JsonObject>(content)["type"]?.GetValue<string>());
         Assert.Equal($"Unknown tool: {unknownTool}", Assert.IsType<string>(Assert.IsType<JsonObject>(content)["text"]?.GetValue<string>()));
         await AssertNoNativeActionsAsync(driver);
     }
