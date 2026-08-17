@@ -14,7 +14,7 @@ set breakpoints, step through code, inspect variables, evaluate expressions, rea
 debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
 and Avalonia windows without opening an IDE.
 
-**135 MCP tools · 8 prompts · 4 resources · 2105 collected tests · release v0.23.4**
+**135 MCP tools · 8 prompts · 4 resources · 2106 collected tests · release v0.23.5**
 
 ## Quick Links
 
@@ -23,12 +23,12 @@ and Avalonia windows without opening an IDE.
 - **Reference:** [Available Tools](#available-tools) · [Resources](#mcp-resources) · [Prompts](#mcp-prompts) · [Architecture](#architecture-overview)
 - **Project:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## What's New in v0.23.4
+## What's New in v0.23.5
 
-- **Reliable WPF submenu interaction guidance** — `ui_key_sequence` and
-  `ui_invoke` now describe the required sequence: send scoped `ENTER` to the
-  parent `MenuItem`, rediscover the popup child, then invoke that exact child.
-  Invoking the parent alone does not guarantee that submenu peers materialize.
+- **Verified WPF scoped-key delivery** — `ui_key_sequence` now returns `PASS`
+  only after the native FlaUI bridge verifies both foreground ownership and
+  focus on the requested target before sending the sequence. Missing focus
+  proof fails closed instead of claiming key delivery.
 
 ## Highlights
 

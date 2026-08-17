@@ -51,7 +51,12 @@ async def test_scoped_key_sequence_reports_shift_held_for_two_down_keys() -> Non
     backend = FakeKeySequenceBackend(
         {
             "status": "PASS",
-            "focused": {"focused": True, "automationId": "CueGrid"},
+            "focused": {
+                "focused": True,
+                "foreground_verified": True,
+                "target_focus_verified": True,
+                "automationId": "CueGrid",
+            },
             "sent_count": 2,
             "held_modifiers_during_sequence": ["shift"],
             "release_result": {"released": True, "modifiers": []},
@@ -77,6 +82,29 @@ async def test_scoped_key_sequence_reports_shift_held_for_two_down_keys() -> Non
             "keys": ["DOWN", "DOWN"],
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_scoped_key_sequence_rejects_pass_without_verified_target_delivery() -> None:
+    backend = FakeKeySequenceBackend(
+        {
+            "status": "PASS",
+            "focused": {"focused": True, "automationId": "submenuParent"},
+            "sent_count": 1,
+            "final_held_modifiers": [],
+        }
+    )
+
+    result = await run_scoped_key_sequence(
+        backend,
+        {"automation_id": "submenuParent"},
+        modifiers=[],
+        keys=["enter"],
+    )
+
+    assert result["status"] == "FAIL"
+    assert result["reason"] == "scoped key delivery was not verified"
+    assert result["sent_count"] == 1
 
 
 @pytest.mark.asyncio

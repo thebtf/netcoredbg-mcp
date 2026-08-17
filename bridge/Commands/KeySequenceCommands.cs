@@ -11,11 +11,10 @@ namespace FlaUIBridge.Commands;
 
 public static class KeySequenceCommands
 {
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool SetForegroundWindow(IntPtr hWnd);
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
@@ -23,7 +22,6 @@ public static class KeySequenceCommands
     [DllImport("user32.dll")]
     private static extern uint MapVirtualKey(uint uCode, uint uMapType);
 
-    private const int SW_RESTORE = 9;
     private const int INPUT_SETTLE_MS = 30;
     private const int MODIFIER_OBSERVATION_MS = 100;
     private const uint INPUT_KEYBOARD = 1;
@@ -147,27 +145,33 @@ public static class KeySequenceCommands
         JsonNode finalHeld = new JsonArray();
         var sent = new JsonArray();
         var scopedHeld = new List<(string Name, VirtualKeyShort Key)>();
-        var status = "PASS";
-        string? failureReason = null;
+        var focusVerified = focusResult["focused"]?.GetValue<bool>() == true;
+        var status = focusVerified ? "PASS" : "FAIL";
+        string? failureReason = focusVerified
+            ? null
+            : focusResult["reason"]?.GetValue<string>() ?? "scoped key delivery was not verified";
 
         try
         {
-            foreach (var modifier in modifierKeys)
+            if (focusVerified)
             {
-                if (TryAcquireScopedModifier(modifier))
-                    scopedHeld.Add(modifier);
-            }
-            if (scopedHeld.Count > 0)
-                Thread.Sleep(INPUT_SETTLE_MS);
+                foreach (var modifier in modifierKeys)
+                {
+                    if (TryAcquireScopedModifier(modifier))
+                        scopedHeld.Add(modifier);
+                }
+                if (scopedHeld.Count > 0)
+                    Thread.Sleep(INPUT_SETTLE_MS);
 
-            foreach (var key in parsedKeys)
-            {
-                SendSignedKeyDown(key.Key);
-                SendSignedKeyUp(key.Key);
-                sent.Add(key.Name);
+                foreach (var key in parsedKeys)
+                {
+                    SendSignedKeyDown(key.Key);
+                    SendSignedKeyUp(key.Key);
+                    sent.Add(key.Name);
+                }
+                if (scopedHeld.Count > 0 && sent.Count > 0)
+                    Thread.Sleep(MODIFIER_OBSERVATION_MS);
             }
-            if (scopedHeld.Count > 0 && sent.Count > 0)
-                Thread.Sleep(MODIFIER_OBSERVATION_MS);
         }
         catch (Exception ex)
         {
@@ -225,16 +229,55 @@ public static class KeySequenceCommands
         UIA3Automation automation,
         AutomationElement mainWindow)
     {
-        BringToForeground(mainWindow);
         var target = FindTarget(selector, automation, mainWindow);
-        target.Focus();
-        return new JsonObject
+        var hwnd = mainWindow.Properties.NativeWindowHandle.ValueOrDefault;
+        var foregroundVerified = false;
+        var targetFocusVerified = false;
+        string? failureReason = null;
+
+        if (hwnd == IntPtr.Zero)
         {
-            ["focused"] = true,
+            failureReason = "connected window has no native HWND";
+        }
+        else
+        {
+            try
+            {
+                ClickCommands.EnsureForeground(mainWindow);
+                foregroundVerified = !JsonRpcHandler.Stealth && GetForegroundWindow() == hwnd;
+                if (!foregroundVerified)
+                {
+                    failureReason = "scoped key foreground activation was not verified";
+                }
+                else
+                {
+                    target.Focus();
+                    targetFocusVerified = target.Properties.HasKeyboardFocus.ValueOrDefault;
+                    foregroundVerified = GetForegroundWindow() == hwnd;
+                    if (!targetFocusVerified)
+                        failureReason = "scoped key target focus was not verified";
+                    else if (!foregroundVerified)
+                        failureReason = "scoped key foreground activation was lost";
+                }
+            }
+            catch (Exception ex)
+            {
+                failureReason = $"scoped key foreground activation was not verified: {ex.Message}";
+            }
+        }
+
+        var result = new JsonObject
+        {
+            ["focused"] = foregroundVerified && targetFocusVerified,
+            ["foreground_verified"] = foregroundVerified,
+            ["target_focus_verified"] = targetFocusVerified,
             ["automationId"] = SafeString(() => target.AutomationId),
             ["name"] = SafeString(() => target.Name),
             ["method"] = target.Equals(mainWindow) ? "Window.Focus" : "UIA.Focus"
         };
+        if (failureReason is not null)
+            result["reason"] = failureReason;
+        return result;
     }
 
     private static AutomationElement FindTarget(
@@ -272,14 +315,6 @@ public static class KeySequenceCommands
             ?? throw new InvalidOperationException("Key sequence target not found.");
     }
 
-    private static void BringToForeground(AutomationElement mainWindow)
-    {
-        var hwnd = mainWindow.Properties.NativeWindowHandle.ValueOrDefault;
-        if (hwnd == IntPtr.Zero)
-            return;
-        ShowWindow(hwnd, SW_RESTORE);
-        SetForegroundWindow(hwnd);
-    }
 
     private static (string Name, VirtualKeyShort Key) ParseKey(string key)
     {

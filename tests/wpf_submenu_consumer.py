@@ -190,9 +190,14 @@ async def main() -> None:
                 )
                 assert native_enter.get("status") == "PASS", native_enter
                 assert native_enter.get("sent_count") == 1, native_enter
+                focus_receipt = native_enter.get("focused")
+                assert isinstance(focus_receipt, dict), native_enter
+                assert focus_receipt.get("foreground_verified") is True, native_enter
+                assert focus_receipt.get("target_focus_verified") is True, native_enter
                 evidence["native_parent_enter"] = {
                     "status": native_enter["status"],
                     "sent_count": native_enter["sent_count"],
+                    "focus_receipt": focus_receipt,
                 }
 
                 tree, tree_poll = await _poll_discovery(
