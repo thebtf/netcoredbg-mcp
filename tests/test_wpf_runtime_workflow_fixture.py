@@ -139,7 +139,19 @@ def test_wpf_fixture_hover_status_arms_post_focus_measurement_and_delayed_close(
     assert 'SetHoverState("closed", surfaceVisible: false)' in code
 
 
-def test_wpf_submenu_parent_enter_rediscovers_popup_child_and_invokes_it(tmp_path: Path) -> None:
+def test_wpf_submenu_fixture_uses_native_menu_keyboard_behavior() -> None:
+    xaml = (FIXTURE_ROOT / "MainWindow.xaml").read_text(encoding="utf-8")
+    code = (FIXTURE_ROOT / "MainWindow.xaml.cs").read_text(encoding="utf-8")
+
+    assert 'AutomationProperties.AutomationId="submenuParent"' in xaml
+    assert 'AutomationProperties.AutomationId="submenuChild"' in xaml
+    assert 'PreviewKeyDown="SubmenuParent_PreviewKeyDown"' not in xaml
+    assert "SubmenuParent_PreviewKeyDown" not in code
+
+
+def test_wpf_submenu_parent_native_enter_rediscovers_popup_child_and_invokes_it(
+    tmp_path: Path,
+) -> None:
     """Exercise the built wheel through its installed CLI and MCP tools/call route."""
 
     if sys.platform != "win32":

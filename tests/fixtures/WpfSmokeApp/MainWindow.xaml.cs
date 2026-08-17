@@ -234,14 +234,6 @@ public partial class MainWindow : Window
         _viewModel.StatusText = "Scoped button clicked";
     }
 
-    private void SubmenuParent_PreviewKeyDown(object sender, KeyEventArgs e)
-    {
-        if (e.Key == Key.Enter && sender is MenuItem menuItem)
-        {
-            menuItem.IsSubmenuOpen = true;
-            e.Handled = true;
-        }
-    }
 
     private void SubmenuChild_Click(object sender, RoutedEventArgs e)
     {

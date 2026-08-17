@@ -164,7 +164,19 @@ async def main() -> None:
                 )
                 evidence["parent_automation_id"] = parent["automationId"]
 
-                enter = _data(
+                pre_expansion_tree = _data(
+                    await _call(
+                        session,
+                        "ui_get_window_tree",
+                        {"max_depth": 6, "max_children": 100},
+                    )
+                )
+                assert not _tree_contains_automation_id(pre_expansion_tree, "submenuChild"), (
+                    pre_expansion_tree
+                )
+                evidence["pre_expansion"] = {"popup_tree_child_present": False}
+
+                native_enter = _data(
                     await _call(
                         session,
                         "ui_key_sequence",
@@ -176,11 +188,11 @@ async def main() -> None:
                         },
                     )
                 )
-                assert enter.get("status") == "PASS", enter
-                assert enter.get("sent_count") == 1, enter
-                evidence["parent_enter"] = {
-                    "status": enter["status"],
-                    "sent_count": enter["sent_count"],
+                assert native_enter.get("status") == "PASS", native_enter
+                assert native_enter.get("sent_count") == 1, native_enter
+                evidence["native_parent_enter"] = {
+                    "status": native_enter["status"],
+                    "sent_count": native_enter["sent_count"],
                 }
 
                 tree, tree_poll = await _poll_discovery(
@@ -190,7 +202,7 @@ async def main() -> None:
                     matches=lambda data: _tree_contains_automation_id(data, "submenuChild"),
                 )
                 assert _tree_contains_automation_id(tree, "submenuChild"), tree
-                evidence["popup_tree_child_automation_id"] = "submenuChild"
+                evidence["post_expansion"] = {"popup_tree_child_present": True}
 
                 child, child_poll = await _poll_discovery(
                     session,

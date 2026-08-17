@@ -220,8 +220,9 @@ Expected result:
   prints `terminal_event=timeout_no_response` for no response or
   `terminal_event=deadline_elapsed_after_response` after a received response.
   Both retain the last received public response, attempt count, and deadline.
-- After one `ENTER`, the popup-tree oracle and the independently rediscovered
-  element both identify `submenuChild`.
+- Before native `ENTER` expansion, the public tree omits `submenuChild`; after
+  it, the popup-tree oracle and independently rediscovered element both identify
+  `submenuChild`. The fixture has no submenu-specific key handler.
 - The separate child invocation reports `invoked=true` and exactly
   `method=InvokePattern`; `WpfWorkflow Submenu child invoked` is the observable
   result.

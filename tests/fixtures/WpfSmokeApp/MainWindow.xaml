@@ -16,8 +16,7 @@
         <DockPanel Grid.Row="0" Margin="10">
             <Menu DockPanel.Dock="Left" Margin="0,0,10,0">
                 <MenuItem Header="Actions"
-                          AutomationProperties.AutomationId="submenuParent"
-                          PreviewKeyDown="SubmenuParent_PreviewKeyDown">
+                          AutomationProperties.AutomationId="submenuParent">
                     <MenuItem Header="Run submenu action"
                               AutomationProperties.AutomationId="submenuChild"
                               Click="SubmenuChild_Click"/>
