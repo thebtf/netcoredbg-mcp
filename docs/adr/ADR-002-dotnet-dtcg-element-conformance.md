@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted
+Superseded by ADR-003 before implementation.
+
+ADR-003 makes native-scene observation the implementation authority and defers `check_element_tokens` until a shared Design Contract Factory comparator exists.
 
 ## Context
 

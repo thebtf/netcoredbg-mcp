@@ -2,7 +2,8 @@
 feature_id: 002
 slug: dtcg-element-conformance
 title: ".NET-native DTCG element conformance"
-status: IN_PROGRESS
+status: SUPERSEDED
+superseded_by: 003-native-scene-observation
 created: 2026-08-18
 baseline: main@258c132ef436c4bc75383080533fc64bc767ece0
 design_rung: D2
@@ -10,6 +11,8 @@ release_intent: none
 ---
 
 # PRD: .NET-native DTCG element conformance
+
+> Superseded before implementation by [Spec 003](../003-native-scene-observation/spec.md); retained as a historical record.
 
 ## Problem
 
