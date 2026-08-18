@@ -8,26 +8,26 @@ using ModelContextProtocol.Server;
 namespace NetCoreDbg.Mcp.Host;
 
 /// <summary>
-/// Extraction of the current <c>tools/list</c> and <c>tools/call</c> handlers: the
-/// canonical downstream-to-upstream relay module. Forward the exact protocol request and
-/// result objects; no schema reconstruction, no local tool registration, no result
-/// translation. Python remains the sole implementation of every tool.
+/// Composite owner for the one public <c>tools/list</c> and <c>tools/call</c> handlers.
+/// It forwards Python's complete catalog, replaces only the three deterministic code-search
+/// definitions in place, and dispatches only those names locally; <c>search_source</c> and
+/// every other tool remain unchanged Python relays.
 ///
-/// This is the convention every additive downstream-to-upstream relay module follows: one
-/// static <c>Register</c> method, called only from <c>RelayComposition.cs</c>, that records
-/// its method(s) in the shared <see cref="RelayRouteCatalog"/> for duplicate-ownership
-/// checking and wires typed handlers (via the same <c>With...Handler</c> builder surface
-/// the pre-FD-000 composition already used) through
-/// <see cref="RelaySession.ForwardApplicationRequestAsync"/>. That seam marks the leg before
-/// the SDK allocates its upstream request ID, then normalizes a genuine upstream JSON-RPC
-/// protocol error's doubled "Request failed (remote): " prefix while preserving <c>Data</c>.
-/// The behavior is shared rather than tools-specific; the tools-family regression lives in
-/// host/NetCoreDbg.Mcp.Host.Tests/ToolsCatalogContractTests.cs.
+/// Keeping this composition in one handler is intentional: registering a second tool
+/// handler would split MCP route ownership and make handler order observable. The shared
+/// <see cref="RelayRouteCatalog"/> still records the two public routes exactly once.
 /// </summary>
 internal static class ToolsRelay
 {
-    public static void Register(IMcpServerBuilder builder, RelayRouteCatalog catalog, RelaySession session)
+    public static void Register(
+        IMcpServerBuilder builder,
+        RelayRouteCatalog catalog,
+        RelaySession session,
+        NativeCodeSearch? nativeCodeSearch = null)
     {
+        nativeCodeSearch ??= new NativeCodeSearch(
+            ProjectRootResolver.FromHostArguments(Array.Empty<string>(), Environment.CurrentDirectory),
+            session);
         catalog.Add(new RelayRoute(RequestMethods.ToolsList, RelayDirection.DownstreamToUpstream, RelayRouteKind.Request));
         catalog.Add(new RelayRoute(RequestMethods.ToolsCall, RelayDirection.DownstreamToUpstream, RelayRouteKind.Request));
 
@@ -53,10 +53,17 @@ internal static class ToolsRelay
                 var response = await session
                     .ForwardApplicationRequestAsync(upstream, request, cancellationToken)
                     .ConfigureAwait(false);
-                return response.Result.Deserialize<ListToolsResult>(McpJsonUtilities.DefaultOptions)!;
+                var result = response.Result.Deserialize<ListToolsResult>(McpJsonUtilities.DefaultOptions)!;
+                NativeCodeSearchCatalog.ReplaceInCatalog(result.Tools);
+                return result;
             })
             .WithCallToolHandler(async (context, cancellationToken) =>
             {
+                if (NativeCodeSearch.IsNativeTool(context.Params.Name))
+                {
+                    return await nativeCodeSearch.CallAsync(context, cancellationToken).ConfigureAwait(false);
+                }
+
                 var upstream = await session.UpstreamAsync(cancellationToken).ConfigureAwait(false);
                 var response = await session
                     .ForwardApplicationRequestAsync(upstream, context.JsonRpcRequest, cancellationToken)

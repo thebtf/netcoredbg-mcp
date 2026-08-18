@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import fnmatch
-import multiprocessing
+import json
 import os
-import queue
 import re
+import subprocess
+import sys
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -120,8 +121,7 @@ class _GitIgnoreRule:
             return relative_path == self.pattern or relative_path.startswith(f"{self.pattern}/")
 
         return any(
-            fnmatch.fnmatchcase(part, self.pattern)
-            for part in relative_path.split("/")[:-1]
+            fnmatch.fnmatchcase(part, self.pattern) for part in relative_path.split("/")[:-1]
         )
 
 
@@ -287,28 +287,36 @@ class CodeSearchEngine:
             return []
 
         limit = min(max_results, MAX_SEARCH_RESULTS)
-        context = multiprocessing.get_context("spawn")
-        output = context.Queue(maxsize=1)
-        process = context.Process(
-            target=_search_source_worker,
-            args=(str(self.project_root), file_paths, pattern, limit, output),
-            daemon=True,
+        request = json.dumps(
+            {
+                "project_root": str(self.project_root),
+                "file_paths": file_paths,
+                "pattern": pattern,
+                "max_results": limit,
+            }
         )
-        process.start()
-        process.join(timeout_seconds)
-        if process.is_alive():
-            process.terminate()
-            process.join(timeout=1)
-            raise TimeoutError(f"search_source exceeded {timeout_seconds:.2f}s timeout")
-
         try:
-            payload = output.get_nowait()
-        except queue.Empty as exc:
-            raise RuntimeError(f"search_source worker exited with code {process.exitcode}") from exc
-        finally:
-            output.close()
-            output.join_thread()
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from netcoredbg_mcp.code_search import _search_source_subprocess; "
+                    "_search_source_subprocess()",
+                ],
+                input=request,
+                text=True,
+                capture_output=True,
+                timeout=timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError(f"search_source exceeded {timeout_seconds:.2f}s timeout") from exc
 
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or f"exit code {completed.returncode}"
+            raise RuntimeError(f"search_source worker exited with {detail}")
+
+        payload = json.loads(completed.stdout)
         if not payload["ok"]:
             raise RuntimeError(payload["error"])
         return payload["results"]
@@ -367,9 +375,7 @@ class CodeSearchEngine:
     def _resolve_project_file(self, file_path: str | os.PathLike[str]) -> Path:
         raw_path = Path(file_path)
         candidate = (
-            raw_path.expanduser()
-            if raw_path.is_absolute()
-            else self.project_root / raw_path
+            raw_path.expanduser() if raw_path.is_absolute() else self.project_root / raw_path
         )
         resolved = candidate.resolve(strict=False)
         if not _is_relative_to(resolved, self.project_root):
@@ -430,18 +436,14 @@ def _is_relative_to(path: Path, root: Path) -> bool:
     return True
 
 
-def _search_source_worker(
-    project_root: str,
-    file_paths: list[str],
-    pattern: str,
-    max_results: int,
-    output: multiprocessing.Queue,
-) -> None:
+def _search_source_subprocess() -> None:
+    """Read one bounded search request from stdin and write one JSON result."""
+    request = json.load(sys.stdin)
     try:
-        root = Path(project_root)
-        compiled = re.compile(pattern)
+        root = Path(request["project_root"])
+        compiled = re.compile(request["pattern"])
         results: list[CodeSearchResult] = []
-        for file_path in file_paths:
+        for file_path in request["file_paths"]:
             path = Path(file_path)
             relative_file = path.relative_to(root).as_posix()
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -455,10 +457,10 @@ def _search_source_worker(
                         "context": line.strip(),
                     }
                 )
-                if len(results) >= max_results:
-                    output.put({"ok": True, "results": results})
+                if len(results) >= request["max_results"]:
+                    json.dump({"ok": True, "results": results}, sys.stdout)
                     return
 
-        output.put({"ok": True, "results": results})
+        json.dump({"ok": True, "results": results}, sys.stdout)
     except Exception as exc:
-        output.put({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+        json.dump({"ok": False, "error": f"{type(exc).__name__}: {exc}"}, sys.stdout)

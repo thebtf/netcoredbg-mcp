@@ -43,9 +43,15 @@ internal static class RelayComposition
     public static async Task RunAsync(
         RelaySession session,
         Func<ClientCapabilities?, ClientCapabilities> projectReverseRouteCapabilities,
-        ProgressLoggingRelay.NotificationState? progressNotificationState = null)
+        ProgressLoggingRelay.NotificationState? progressNotificationState = null,
+        ProjectRootResolver? projectRootResolver = null)
     {
-        using var host = Build(session, static builder => builder.WithStdioServerTransport(), projectReverseRouteCapabilities, progressNotificationState);
+        using var host = Build(
+            session,
+            static builder => builder.WithStdioServerTransport(),
+            projectReverseRouteCapabilities,
+            progressNotificationState,
+            projectRootResolver);
         await RunPairedAsync(host, session).ConfigureAwait(false);
     }
 
@@ -109,10 +115,14 @@ internal static class RelayComposition
         RelaySession session,
         Action<IMcpServerBuilder> configureTransport,
         Func<ClientCapabilities?, ClientCapabilities> projectReverseRouteCapabilities,
-        ProgressLoggingRelay.NotificationState? progressNotificationState = null)
+        ProgressLoggingRelay.NotificationState? progressNotificationState = null,
+        ProjectRootResolver? projectRootResolver = null)
     {
         var catalog = new RelayRouteCatalog();
         var notificationState = progressNotificationState ?? new ProgressLoggingRelay.NotificationState();
+        var nativeCodeSearch = new NativeCodeSearch(
+            projectRootResolver ?? ProjectRootResolver.FromHostArguments(Array.Empty<string>(), Environment.CurrentDirectory),
+            session);
 
         var builder = global::Microsoft.Extensions.Hosting.Host.CreateApplicationBuilder(Array.Empty<string>());
 
@@ -139,7 +149,7 @@ internal static class RelayComposition
             options.Filters.Message.IncomingFilters.Add(session.CreateBootstrapFilter(projectReverseRouteCapabilities));
         });
 
-        ToolsRelay.Register(mcpBuilder, catalog, session);
+        ToolsRelay.Register(mcpBuilder, catalog, session, nativeCodeSearch);
         ProgressLoggingRelay.Register(mcpBuilder, catalog, session);
         RootsRelay.Register(mcpBuilder, catalog, session);
         ResourcesRelay.Register(mcpBuilder, catalog, session);

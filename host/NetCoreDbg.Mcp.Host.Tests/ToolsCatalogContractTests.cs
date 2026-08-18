@@ -51,6 +51,28 @@ public sealed class ToolsCatalogContractTests
     }
 
     [Fact]
+    public void ToolsRelay_IsTheSinglePublicToolsListAndCallOwner()
+    {
+        var catalog = new RelayRouteCatalog();
+        var upstream = new DuplexChannel();
+        var session = new RelaySession(upstream.CreateClientTransport, RelayComposition.RequiredUpstreamCapabilityChecks);
+        var hostBuilder = global::Microsoft.Extensions.Hosting.Host.CreateApplicationBuilder(Array.Empty<string>());
+        var mcpBuilder = hostBuilder.Services.AddMcpServer(options =>
+        {
+            options.ServerInfo = new Implementation { Name = "tools-owner-contract", Version = "1.0.0" };
+        });
+
+        ToolsRelay.Register(mcpBuilder, catalog, session);
+
+        Assert.Single(catalog.Routes, route => route.Method == RequestMethods.ToolsList);
+        Assert.Single(catalog.Routes, route => route.Method == RequestMethods.ToolsCall);
+
+        var duplicate = Assert.Throws<InvalidOperationException>(() =>
+            ToolsRelay.Register(mcpBuilder, catalog, session));
+        Assert.Contains("Duplicate relay route ownership", duplicate.Message);
+    }
+
+    [Fact]
     public async Task ToolsCapability_NeverAdvertisesListChanged()
     {
         var (session, upstreamChannel, downstreamChannel) = BuildSession();
