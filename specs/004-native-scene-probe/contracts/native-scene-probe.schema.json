@@ -968,25 +968,101 @@
       ],
       "properties": {
         "name": {
-          "enum": [
-            "get_ui_probe_capabilities",
-            "capture_visual_evidence",
-            "read_capture_artifact",
-            "wait_for_ui_stable",
-            "capture_element_snapshot",
-            "capture_native_scene"
-          ]
+          "type": "string"
         },
         "milestone": {
-          "enum": [
-            "M0",
-            "M1"
-          ]
+          "type": "string"
         },
         "availability": {
           "$ref": "#/definitions/capabilityState"
         }
       },
+      "oneOf": [
+        {
+          "properties": {
+            "name": {
+              "enum": [
+                "get_ui_probe_capabilities"
+              ]
+            },
+            "milestone": {
+              "enum": [
+                "M0"
+              ]
+            }
+          }
+        },
+        {
+          "properties": {
+            "name": {
+              "enum": [
+                "capture_visual_evidence"
+              ]
+            },
+            "milestone": {
+              "enum": [
+                "M0"
+              ]
+            }
+          }
+        },
+        {
+          "properties": {
+            "name": {
+              "enum": [
+                "read_capture_artifact"
+              ]
+            },
+            "milestone": {
+              "enum": [
+                "M0"
+              ]
+            }
+          }
+        },
+        {
+          "properties": {
+            "name": {
+              "enum": [
+                "wait_for_ui_stable"
+              ]
+            },
+            "milestone": {
+              "enum": [
+                "M1"
+              ]
+            }
+          }
+        },
+        {
+          "properties": {
+            "name": {
+              "enum": [
+                "capture_element_snapshot"
+              ]
+            },
+            "milestone": {
+              "enum": [
+                "M1"
+              ]
+            }
+          }
+        },
+        {
+          "properties": {
+            "name": {
+              "enum": [
+                "capture_native_scene"
+              ]
+            },
+            "milestone": {
+              "enum": [
+                "M1"
+              ]
+            }
+          }
+        }
+      ],
       "additionalProperties": false
     },
     "contextCapabilities": {
@@ -1940,6 +2016,50 @@
               ]
             }
           }
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "COMPLETE"
+                  ]
+                },
+                "artifacts": {
+                  "contains": {
+                    "type": "object",
+                    "required": [
+                      "mediaType",
+                      "evidenceGrade"
+                    ],
+                    "properties": {
+                      "mediaType": {
+                        "enum": [
+                          "image/png"
+                        ]
+                      },
+                      "evidenceGrade": {
+                        "enum": [
+                          "lossless_visual"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "PARTIAL",
+                    "UNOBSERVABLE"
+                  ]
+                }
+              }
+            }
+          ]
         }
       ]
     },
@@ -2069,6 +2189,27 @@
                 },
                 "issues": {
                   "maxItems": 0
+                },
+                "artifacts": {
+                  "contains": {
+                    "type": "object",
+                    "required": [
+                      "mediaType",
+                      "evidenceGrade"
+                    ],
+                    "properties": {
+                      "mediaType": {
+                        "enum": [
+                          "application/vnd.netcoredbg.native-scene+json"
+                        ]
+                      },
+                      "evidenceGrade": {
+                        "enum": [
+                          "observed_facts"
+                        ]
+                      }
+                    }
+                  }
                 }
               }
             },

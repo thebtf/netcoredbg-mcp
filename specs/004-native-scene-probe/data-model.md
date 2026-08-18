@@ -30,13 +30,13 @@ retrieval authority.
 |---|---|---|---|
 | Versioned request base | `requestBase` | — | Every primitive carries `debugSessionId`, `protocolVersion`, and `schemaVersion`. |
 | Six primitive arguments | `getUiProbeCapabilitiesArguments`, `captureVisualEvidenceArguments`, `readCaptureArtifactArguments`, `waitForUiStableArguments`, `captureElementSnapshotArguments`, `captureNativeSceneArguments` | — | Closed roots; no compatibility aliases. |
-| Capability declaration | `uiProbeCapabilities`, `probeCapabilities`, `primitiveCapability`, `contextCapabilities`, `settleConditionCapabilities`, `negotiatedLimits` | — | The six-entry primitive array is closed structurally and at runtime; capability lookup does not enumerate artifact capabilities. |
+| Capability declaration | `uiProbeCapabilities`, `probeCapabilities`, `primitiveCapability`, `contextCapabilities`, `settleConditionCapabilities`, `negotiatedLimits` | — | The six-entry primitive array is closed structurally: `primitiveCapability.oneOf` fixes each name/milestone pair, so exactly three named primitives are M0 and exactly three are M1; capability lookup does not enumerate artifact capabilities. |
 | Scene request context | `sceneRequest`, `sceneScope`, `viewportConstraint`, `dpiPolicy`, `settlePolicy`, `requestStateValue`, `candidateExpectation` | `sceneRequest`, `requestStateValue` | Each context member is required and is a constrained value or `null`; each selected/current state has an independent pre-materialization UTF-8 ceiling. |
 | Canonical/fallback identity | `canonicalIdentity`, `elementSelector` | `canonicalIdentity`, `accessibilityIdentity` | `contractId` is canonical; `automationId` remains fallback/accessibility identity. |
 | Candidate provenance | `candidateProvenance`, `candidateSource`, `observerVersion` | same | Candidate source is an explicit verified launch/probe manifest; no source-control inference exists. |
 | Stability receipt | `stabilityReceipt`, `stabilityEvidence`, `conditionObservation` | `stabilityEvidence`, `conditionObservation` | A standalone receipt is evidence, never capture authorization. |
 | Atomicity evidence | `atomicityEvidence`, `inProcessAtomicity`, `uiaGuardedAtomicity`, `notApplicableAtomicity` | `atomicityEvidence`, `inProcessAtomicity`, `uiaGuardedAtomicity` | Equal revisions for a complete atomic scene are a runtime invariant in addition to structural validation. |
-| Capture results | `visualEvidenceCapture`, `elementSnapshotCapture`, `nativeSceneCapture`, `captureManifestBase`, `captureIssue` | `sceneArtifact` | Every element snapshot, every native-scene result branch that returns or commits evidence, and every persisted scene artifact requires capture-time `revalidatedByCapture: true`; completeness remains exactly `COMPLETE`, `PARTIAL`, or `UNOBSERVABLE`. |
+| Capture results | `visualEvidenceCapture`, `elementSnapshotCapture`, `nativeSceneCapture`, `captureManifestBase`, `captureIssue` | `sceneArtifact` | Every element snapshot, every native-scene result branch that returns or commits evidence, and every persisted scene artifact requires capture-time `revalidatedByCapture: true`; a `COMPLETE` visual manifest structurally contains a lossless PNG descriptor and a `COMPLETE` native-scene manifest structurally contains an observed-facts native-scene JSON descriptor, while `PARTIAL`/`UNOBSERVABLE` captures may have no committed artifacts. |
 | Typed failure | `toolError`, `artifactNotFoundError`, `errorCode` | — | `ARTIFACT_NOT_FOUND` has one fixed disclosure-free envelope; other error payloads contain no invented evidence or artifact bytes. |
 | Artifact capability/descriptor | `publicCapabilityId`, `artifactDescriptor`, `artifactRetention`, `captureArtifactChunk` | `publicCapabilityId` | Public artifact/capture/probe capabilities are base64url, 22–86 characters, CSPRNG-minted with at least 128 bits, session- and capture-bound, and non-enumerable. |
 | Scene record | — | `sceneArtifact`, `sceneGraph`, `sceneNode`, `geometry`, `relation` | Stored JSON contains observed facts, stated authority, and typed opaque adapter facts. |
@@ -68,8 +68,7 @@ all six runtime primitives:
    is authorized.
 2. **approved** — the operator has recorded approval of the exact artifact
    bytes; this authorizes only M0-G0 T002–T007.
-3. **M0-G0 GREEN** — only a GREEN T007 parity/negative-exchange result
-   authorizes T008, the first M0 primitive task.
+3. **M0-G0 GREEN** — only a GREEN T007 exact-byte Draft-7 schema load, request/result validator-parity pass over the concrete corpus fixtures, internal-reference check, corpus syntax/integrity check, expected-classification-vocabulary check, and negative structural/version-case check authorizes T008, the first M0 primitive task. T007 does not claim observer, artifact-lifecycle, stability, atomicity, or other runtime behavior.
 4. **superseded** — a later candidate replaces it; it cannot authorize a new
    implementation.
 
@@ -103,10 +102,12 @@ custom namespaces, and negotiated ceilings. It does not list, probe, test, or
 reveal any `artifactId`.
 
 `capabilities.primitives` remains an array for declaration order, but has
-`minItems: 6`, `maxItems: 6`, and six Draft-7 `allOf`/`contains` clauses—one
-for each named primitive. Together those rules reject an omission or duplicate;
-the runtime repeats an exactly-once name assertion before it publishes the
-declaration. `capabilities.settleConditions` declares `supported`,
+`minItems: 6`, `maxItems: 6`, and six Draft-7 `allOf`/`contains` clauses. Its
+`primitiveCapability.oneOf` branches bind the only legal name/milestone pairs:
+the three M0 names and the three M1 names. Together those rules structurally
+require every pair exactly once; runtime preserves that declaration in the
+published result.
+`capabilities.settleConditions` declares `supported`,
 `unsupported`, or `unobservable` for dispatcher-idle, stable-layout,
 animation-state, window-geometry, context-materialization, and async-load
 settlement. The negotiated sample-count bounds use
@@ -202,19 +203,26 @@ length. These calculated relationships, plus authorization and file checks,
 are runtime invariants because Draft 7 cannot compare decoded byte counts or
 arithmetic across fields.
 
-Lossless PNG artifacts have their own `rasterCaptureId` and `capturedAt` and
-are bounded independently from scene artifacts. Preview artifacts are
-`preview_only`: they can never determine completeness or an external
-comparison, and their timing is not silently assigned to a scene epoch.
+A `COMPLETE` visual manifest structurally contains at least one descriptor
+whose `mediaType` is `image/png` and whose `evidenceGrade` is
+`lossless_visual`. Lossless PNG artifacts have their own `rasterCaptureId` and
+`capturedAt` and are bounded independently from scene artifacts. Preview
+artifacts are `preview_only`: they can never determine completeness or an
+external comparison, and their timing is not silently assigned to a scene
+epoch. `PARTIAL` and `UNOBSERVABLE` visual captures may have no artifacts when
+evidence cannot be committed.
 
 ### Atomicity and Scene Record
 
 A `capture_native_scene` result is `COMPLETE` only when an
 `in_process_framework_probe` performs one dispatcher-affine, non-yielding
-transaction, materializes the whole graph as an immutable DTO, and records
-equal valid probe-owned revisions immediately before and after materialization.
-The equality and transaction behavior are runtime invariants; the schema
-requires the fields and authority but cannot compare two dynamic values.
+transaction, materializes the whole graph as an immutable DTO, records equal
+valid probe-owned revisions immediately before and after materialization, and
+structurally contains at least one descriptor whose `mediaType` is
+`application/vnd.netcoredbg.native-scene+json` and whose `evidenceGrade` is
+`observed_facts`. The equality and transaction behavior are runtime invariants;
+the schema requires the fields, authority, and committed scene descriptor but
+cannot compare two dynamic revisions.
 
 A `uia_guarded` traversal is independently timed. Matching window, client,
 DPI, and visual-tree-fingerprint guards yield `PARTIAL` with
@@ -288,15 +296,16 @@ not relaxed by this candidate schema.
 
 `contracts/parity-corpus.json` binds C001–C024 to exactly one expected
 classification per case: a complete/qualified observation, capability
-declaration, artifact chunk, typed error, or schema rejection. It covers valid
-and malformed versions; unavailable capability; one fixed, complete
-`ARTIFACT_NOT_FOUND` envelope for unknown/foreign/expired/deleted/unavailable
-artifact capabilities; integrity containment; atomic equal-revision capture;
-changed revisions; UIA guarded traversal; stale wait rejection; preview
-non-authority; observation-only results; too-short public capabilities;
-sample-count overflow; depth-17 JSON input; observer-output containment before
-DTO/artifact commit; capability omission; duplicate capability name; false
-capture revalidation on `PARTIAL` after a prior wait; and oversized selected or
-current request state. The corpus is a planning gate: recorded approval starts
-only M0-G0 T002–T007, and only a GREEN T007 authorizes T008. It has no other
+declaration, artifact chunk, typed error, or schema rejection. Every case
+declares its `contractGateExpectation` and `runtimeBehaviorRequired` stage.
+
+T007 validates exact-byte loading of both Draft-7 schemas, request/result
+validator parity for concrete fixtures present, internal references, corpus
+syntax and integrity, expected classification vocabulary, and the declared
+negative structural/version cases. It does not execute or claim observer,
+artifact-lifecycle, stability, atomicity, or other runtime behavior; the
+runtime-marked C005–C016 and C020 cases are explicitly deferred from that
+claim. T032 runs every C001–C024 behaviorally after implementation and records
+the complete case-to-result mapping. Recorded approval starts only M0-G0
+T002–T007, and only a GREEN T007 authorizes T008; the corpus has no other
 authority to start product implementation.

@@ -5,6 +5,31 @@
     "schemaVersion": "native-scene-probe.schema/1",
     "artifactSchemaVersion": "native-scene-artifact/1"
   },
+  "gateStages": {
+    "M0-G0": {
+      "task": "T007",
+      "validates": [
+        "exact-byte Draft-7 schema loading",
+        "request/result validator parity for concrete fixtures present",
+        "internal reference resolution",
+        "corpus syntax and integrity",
+        "expected classification vocabulary",
+        "negative structural and version cases"
+      ],
+      "doesNotProve": [
+        "observer behavior",
+        "artifact lifecycle behavior",
+        "stability behavior",
+        "atomicity behavior"
+      ]
+    },
+    "postImplementation": {
+      "task": "T032",
+      "executesBehaviorally": "C001-C024",
+      "records": "complete case-to-result mapping"
+    },
+    "runtimeBehaviorRequiredMeaning": "true identifies a case whose central observable needs runtime mechanisms unavailable at M0-G0; false does not exempt the case from T032's complete behavioral mapping."
+  },
   "fixtures": {
     "sessionId": "session_A1b2C3d4E5",
     "sceneRequest": {
@@ -55,6 +80,8 @@
   "cases": [
     {
       "id": "C001-valid-capability-declaration",
+      "contractGateExpectation": "schema_fixture_and_expected_classification_vocabulary_only",
+      "runtimeBehaviorRequired": true,
       "primitive": "get_ui_probe_capabilities",
       "request": {
         "debugSessionId": "session_A1b2C3d4E5",
@@ -81,6 +108,8 @@
     },
     {
       "id": "C002-malformed-version-is-invalid",
+      "contractGateExpectation": "negative_version_fixture_and_expected_classification_vocabulary",
+      "runtimeBehaviorRequired": false,
       "primitive": "get_ui_probe_capabilities",
       "request": {
         "debugSessionId": "session_A1b2C3d4E5",
@@ -99,6 +128,8 @@
     },
     {
       "id": "C003-well-formed-unsupported-version",
+      "contractGateExpectation": "schema_fixture_and_expected_classification_vocabulary_only",
+      "runtimeBehaviorRequired": true,
       "primitive": "get_ui_probe_capabilities",
       "request": {
         "debugSessionId": "session_A1b2C3d4E5",
@@ -117,6 +148,8 @@
     },
     {
       "id": "C004-unavailable-m1-capability",
+      "contractGateExpectation": "schema_fixture_and_expected_classification_vocabulary_only",
+      "runtimeBehaviorRequired": true,
       "primitive": "capture_native_scene",
       "precondition": "The capability declaration marks capture_native_scene as unsupported.",
       "request": {
@@ -180,6 +213,8 @@
     },
     {
       "id": "C005-valid-lossless-visual-capture",
+      "contractGateExpectation": "schema_fixture_and_expected_classification_vocabulary_only",
+      "runtimeBehaviorRequired": true,
       "primitive": "capture_visual_evidence",
       "precondition": "The session and candidate are positively bound and losslessVisualEvidence is supported.",
       "request": {
@@ -234,6 +269,74 @@
           "kind": "window"
         }
       },
+      "schemaInvalidVariants": [
+        {
+          "name": "complete_without_lossless_png",
+          "responseSchema": "#/definitions/visualEvidenceCapture",
+          "response": {
+            "kind": "visual_evidence_capture",
+            "status": "COMPLETE",
+            "captureId": "capture_visual_case_00001",
+            "protocolVersion": "native-scene-probe/1",
+            "schemaVersion": "native-scene-probe.schema/1",
+            "capturedAt": "2026-08-18T00:00:00Z",
+            "candidate": {
+              "processId": 4242,
+              "processIdentity": "process_4242_start_1",
+              "hwnd": null,
+              "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "assemblyVersion": "1.0.0",
+              "probeVersion": "1.0.0",
+              "observerVersions": [],
+              "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "storyHash": null,
+              "capturedAt": "2026-08-18T00:00:00Z",
+              "source": {
+                "kind": "probe_manifest",
+                "verification": "verified"
+              }
+            },
+            "stability": {
+              "status": "STABLE",
+              "revalidatedByCapture": true,
+              "conditions": {
+                "dispatcherIdle": {
+                  "state": "met"
+                },
+                "stableLayout": {
+                  "state": "met"
+                },
+                "animationState": {
+                  "state": "met"
+                },
+                "windowGeometry": {
+                  "state": "met"
+                },
+                "contextMaterialization": {
+                  "state": "met"
+                },
+                "asyncLoadSettled": {
+                  "state": "met"
+                }
+              },
+              "settleDurationMs": 100,
+              "observedAt": "2026-08-18T00:00:00Z",
+              "sceneEpoch": 41,
+              "sequence": 1
+            },
+            "atomicity": {
+              "authority": "not_applicable"
+            },
+            "element": null,
+            "artifacts": [],
+            "issues": []
+          },
+          "expected": {
+            "classification": "schema_rejection",
+            "reason": "a COMPLETE visual capture requires an image/png lossless_visual descriptor"
+          }
+        }
+      ],
       "expected": {
         "classification": "complete_observation",
         "status": "COMPLETE",
@@ -251,6 +354,8 @@
     },
     {
       "id": "C006-bounded-raw-read-at-ceiling",
+      "contractGateExpectation": "schema_fixture_and_expected_classification_vocabulary_only",
+      "runtimeBehaviorRequired": true,
       "primitive": "read_capture_artifact",
       "precondition": "artifact_visual_capability_0001 is an authorized 131072-byte lossless artifact.",
       "request": {
@@ -271,6 +376,8 @@
     },
     {
       "id": "C007-artifact-read-at-end",
+      "contractGateExpectation": "schema_fixture_and_expected_classification_vocabulary_only",
+      "runtimeBehaviorRequired": true,
       "primitive": "read_capture_artifact",
       "precondition": "artifact_empty_capability_0001 is an authorized zero-byte artifact.",
       "request": {
@@ -291,6 +398,8 @@
     },
     {
       "id": "C008-foreign-artifact-is-not-found",
+      "contractGateExpectation": "schema_fixture_and_expected_classification_vocabulary_only",
+      "runtimeBehaviorRequired": true,
       "primitive": "read_capture_artifact",
       "precondition": "artifact_foreign_capability_0001 is not available to this session because it is either unknown to it or bound to a foreign session or capture.",
       "request": {
@@ -322,6 +431,8 @@
     },
     {
       "id": "C009-expired-artifact-is-not-found",
+      "contractGateExpectation": "schema_fixture_and_expected_classification_vocabulary_only",
+      "runtimeBehaviorRequired": true,
       "primitive": "read_capture_artifact",
       "precondition": "artifact_expired_capability_0001 is otherwise unavailable because it expired, was deleted, or its committed content is unavailable.",
       "request": {
@@ -353,6 +464,8 @@
     },
     {
       "id": "C010-authorized-integrity-failure-contains-no-bytes",
+      "contractGateExpectation": "schema_fixture_and_expected_classification_vocabulary_only",
+      "runtimeBehaviorRequired": true,
       "primitive": "read_capture_artifact",
       "precondition": "artifact_tampered_capability_0001 is owned by the session but its committed hash, identity, or length no longer matches the manifest.",
       "request": {
@@ -379,6 +492,8 @@
     },
     {
       "id": "C011-atomic-in-process-scene",
+      "contractGateExpectation": "schema_fixture_and_expected_classification_vocabulary_only",
+      "runtimeBehaviorRequired": true,
       "primitive": "capture_native_scene",
       "precondition": "An authorized in-process framework probe completes one dispatcher-affine, non-yielding immutable-DTO transaction.",
       "request": {
@@ -430,6 +545,78 @@
           }
         }
       },
+      "schemaInvalidVariants": [
+        {
+          "name": "complete_without_native_scene_artifact",
+          "responseSchema": "#/definitions/nativeSceneCapture",
+          "response": {
+            "kind": "native_scene_capture",
+            "status": "COMPLETE",
+            "captureId": "capture_scene_case_000001",
+            "protocolVersion": "native-scene-probe/1",
+            "schemaVersion": "native-scene-probe.schema/1",
+            "capturedAt": "2026-08-18T00:00:00Z",
+            "candidate": {
+              "processId": 4242,
+              "processIdentity": "process_4242_start_1",
+              "hwnd": null,
+              "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "assemblyVersion": "1.0.0",
+              "probeVersion": "1.0.0",
+              "observerVersions": [],
+              "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "storyHash": null,
+              "capturedAt": "2026-08-18T00:00:00Z",
+              "source": {
+                "kind": "probe_manifest",
+                "verification": "verified"
+              }
+            },
+            "stability": {
+              "status": "STABLE",
+              "revalidatedByCapture": true,
+              "conditions": {
+                "dispatcherIdle": {
+                  "state": "met"
+                },
+                "stableLayout": {
+                  "state": "met"
+                },
+                "animationState": {
+                  "state": "met"
+                },
+                "windowGeometry": {
+                  "state": "met"
+                },
+                "contextMaterialization": {
+                  "state": "met"
+                },
+                "asyncLoadSettled": {
+                  "state": "met"
+                }
+              },
+              "settleDurationMs": 100,
+              "observedAt": "2026-08-18T00:00:00Z",
+              "sceneEpoch": 41,
+              "sequence": 1
+            },
+            "atomicity": {
+              "authority": "in_process_framework_probe",
+              "transaction": "dispatcher_affine_non_yielding",
+              "immutableDto": true,
+              "layoutStateRevisionBefore": 77,
+              "layoutStateRevisionAfter": 77
+            },
+            "element": null,
+            "artifacts": [],
+            "issues": []
+          },
+          "expected": {
+            "classification": "schema_rejection",
+            "reason": "a COMPLETE native-scene capture requires an application/vnd.netcoredbg.native-scene+json observed_facts descriptor"
+          }
+        }
+      ],
       "expected": {
         "classification": "complete_observation",
         "status": "COMPLETE",
@@ -446,6 +633,8 @@
     },
     {
       "id": "C012-changed-probe-revision-is-qualified",
+      "contractGateExpectation": "schema_fixture_and_expected_classification_vocabulary_only",
+      "runtimeBehaviorRequired": true,
       "primitive": "capture_native_scene",
       "precondition": "The in-process probe observes a changed revision during graph materialization.",
       "request": {
@@ -511,6 +700,8 @@
     },
     {
       "id": "C013-uia-guarded-scene-is-qualified",
+      "contractGateExpectation": "schema_fixture_and_expected_classification_vocabulary_only",
+      "runtimeBehaviorRequired": true,
       "primitive": "capture_native_scene",
       "precondition": "Only UIA/FlaUI guarded traversal is available and all before/after guards are unchanged.",
       "request": {
@@ -575,6 +766,8 @@
     },
     {
       "id": "C014-stale-wait-receipt-cannot-authorize-capture",
+      "contractGateExpectation": "schema_fixture_and_expected_classification_vocabulary_only",
+      "runtimeBehaviorRequired": true,
       "primitive": "capture_native_scene",
       "precondition": "wait_for_ui_stable previously returned STABLE at epoch 41; the required layout condition changes before this capture begins.",
       "request": {
@@ -642,6 +835,8 @@
     },
     {
       "id": "C015-preview-is-independent-and-non-authoritative",
+      "contractGateExpectation": "schema_fixture_and_expected_classification_vocabulary_only",
+      "runtimeBehaviorRequired": true,
       "primitive": "capture_visual_evidence",
       "precondition": "Lossless evidence and an optional preview are both retained after fresh stabilization.",
       "request": {
@@ -718,6 +913,8 @@
     },
     {
       "id": "C016-observation-only-result",
+      "contractGateExpectation": "schema_fixture_and_expected_classification_vocabulary_only",
+      "runtimeBehaviorRequired": true,
       "primitive": "capture_element_snapshot",
       "precondition": "The selected element resolves uniquely, but one supported fact remains unobservable.",
       "request": {
@@ -792,6 +989,8 @@
     },
     {
       "id": "C017-short-artifact-capability-is-invalid",
+      "contractGateExpectation": "negative_request_schema_fixture_and_expected_classification_vocabulary",
+      "runtimeBehaviorRequired": false,
       "primitive": "read_capture_artifact",
       "request": {
         "debugSessionId": "session_A1b2C3d4E5",
@@ -816,6 +1015,8 @@
     },
     {
       "id": "C018-sample-count-above-bound-is-invalid",
+      "contractGateExpectation": "negative_request_schema_fixture_and_expected_classification_vocabulary",
+      "runtimeBehaviorRequired": false,
       "primitive": "wait_for_ui_stable",
       "request": {
         "debugSessionId": "session_A1b2C3d4E5",
@@ -881,6 +1082,8 @@
     },
     {
       "id": "C019-depth-seventeen-json-input-is-invalid",
+      "contractGateExpectation": "schema_fixture_and_expected_classification_vocabulary_only",
+      "runtimeBehaviorRequired": true,
       "primitive": "capture_native_scene",
       "request": {
         "debugSessionId": "session_A1b2C3d4E5",
@@ -981,6 +1184,8 @@
     },
     {
       "id": "C020-oversized-observer-output-is-contained-before-commit",
+      "contractGateExpectation": "schema_fixture_and_expected_classification_vocabulary_only",
+      "runtimeBehaviorRequired": true,
       "primitive": "capture_native_scene",
       "precondition": "The authorized probe emits the declared oversized custom fact as observer output; containment rejects it before DTO materialization or artifact commit. This is not absent-observer handling or request-input validation.",
       "adapterPayloadFixture": {
@@ -1062,6 +1267,8 @@
     },
     {
       "id": "C021-capability-omission-is-schema-rejected",
+      "contractGateExpectation": "negative_response_schema_fixture_and_expected_classification_vocabulary",
+      "runtimeBehaviorRequired": false,
       "primitive": "get_ui_probe_capabilities",
       "responseSchema": "#/definitions/probeCapabilities",
       "response": {
@@ -1141,6 +1348,97 @@
           "settleSampleCountMax": 16
         }
       },
+      "schemaInvalidVariants": [
+        {
+          "name": "capture_native_scene_with_m0_milestone",
+          "response": {
+            "supportedProtocolVersions": [
+              "native-scene-probe/1"
+            ],
+            "supportedSchemaVersions": [
+              "native-scene-probe.schema/1"
+            ],
+            "primitives": [
+              {
+                "name": "get_ui_probe_capabilities",
+                "milestone": "M0",
+                "availability": "supported"
+              },
+              {
+                "name": "capture_visual_evidence",
+                "milestone": "M0",
+                "availability": "supported"
+              },
+              {
+                "name": "read_capture_artifact",
+                "milestone": "M0",
+                "availability": "supported"
+              },
+              {
+                "name": "wait_for_ui_stable",
+                "milestone": "M1",
+                "availability": "unsupported"
+              },
+              {
+                "name": "capture_element_snapshot",
+                "milestone": "M1",
+                "availability": "unsupported"
+              },
+              {
+                "name": "capture_native_scene",
+                "milestone": "M0",
+                "availability": "unsupported"
+              }
+            ],
+            "context": {
+              "storyId": "supported",
+              "sceneId": "supported",
+              "fixtureId": "supported",
+              "scope": "supported",
+              "appearance": "supported",
+              "theme": "supported",
+              "density": "supported",
+              "contrast": "supported",
+              "viewport": "supported",
+              "expectedDpiPolicy": "supported",
+              "focusTarget": "supported",
+              "selectedState": "supported",
+              "currentState": "supported",
+              "scrollOffsets": "supported",
+              "animationPolicy": "supported"
+            },
+            "settleConditions": {
+              "dispatcherIdle": "supported",
+              "stableLayout": "supported",
+              "animationState": "supported",
+              "windowGeometry": "supported",
+              "contextMaterialization": "supported",
+              "asyncLoadSettled": "supported"
+            },
+            "atomicSceneAuthority": "unsupported",
+            "uiaGuardedTraversal": "unsupported",
+            "losslessVisualEvidence": "supported",
+            "customAdapterNamespaces": [],
+            "limits": {
+              "artifactReadMaxBytes": 65536,
+              "losslessArtifactMaxBytes": 67108864,
+              "sceneArtifactMaxBytes": 16777216,
+              "structuredResponseMaxBytes": 262144,
+              "sceneGraphMaxNodes": 4096,
+              "issuesMaxCount": 256,
+              "artifactRefsMaxCount": 4,
+              "retentionMaxSeconds": 14400,
+              "settleTimeoutMaxMs": 30000,
+              "settleSampleCountMin": 2,
+              "settleSampleCountMax": 16
+            }
+          },
+          "expected": {
+            "classification": "schema_rejection",
+            "reason": "capture_native_scene is structurally paired only with M1"
+          }
+        }
+      ],
       "expected": {
         "classification": "schema_rejection",
         "reason": "primitives omits capture_native_scene and has fewer than six entries"
@@ -1148,6 +1446,8 @@
     },
     {
       "id": "C022-duplicate-capability-name-is-schema-rejected",
+      "contractGateExpectation": "negative_response_schema_fixture_and_expected_classification_vocabulary",
+      "runtimeBehaviorRequired": false,
       "primitive": "get_ui_probe_capabilities",
       "responseSchema": "#/definitions/probeCapabilities",
       "response": {
@@ -1239,6 +1539,8 @@
     },
     {
       "id": "C023-partial-capture-without-revalidation-is-schema-rejected",
+      "contractGateExpectation": "negative_response_schema_fixture_and_expected_classification_vocabulary",
+      "runtimeBehaviorRequired": false,
       "primitive": "capture_native_scene",
       "precondition": "wait_for_ui_stable previously returned a historical receipt with revalidatedByCapture false; this later PARTIAL native-scene result attempts to reuse it without capture-time revalidation.",
       "responseSchema": "#/definitions/nativeSceneCapture",
@@ -1326,6 +1628,8 @@
     },
     {
       "id": "C024-oversized-selected-or-current-state-is-invalid",
+      "contractGateExpectation": "schema_fixture_and_expected_classification_vocabulary_only",
+      "runtimeBehaviorRequired": true,
       "primitive": "capture_native_scene",
       "requestStateVariants": [
         {

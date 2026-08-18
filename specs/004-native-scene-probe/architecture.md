@@ -1,6 +1,6 @@
 # Architecture — Native Scene Probe
 
-**Status**: Phase 1 design only. T001 operator approval authorizes only M0-G0 T002–T007; no component described here exists because of this document, and no M0 implementation is authorized until T007 has produced GREEN M0-G0 evidence.
+**Status**: Phase 1 design only. T001 operator approval authorizes only M0-G0 T002–T007; no component described here exists because of this document, and no M0 implementation is authorized until T007 has produced GREEN contract/runtime-validator and corpus-integrity evidence. T007 does not claim observer, artifact, stability, or atomicity behavior; T032/T034 own the full behavioral C001–C024 execution after M0/M1 implementation.
 
 ## 1. Architectural intent
 
@@ -77,18 +77,22 @@ flowchart LR
 
 | Milestone | Primitive | Inputs beyond MCP envelope | Successful result | Compatibility |
 |---|---|---|---|---|
-| M0 | `get_ui_probe_capabilities` | None | Supported protocol/schema versions, an exact six-name primitive declaration, explicit settle-condition states, negotiated limits including `sampleCount` 2–16, namespaces, candidate provenance | **ADDITIVE**; must not enumerate artifact IDs. |
-| M0 | `capture_visual_evidence` | Explicit `sceneRequest`, bounded window/element scope | Compact manifest with a separately retrievable lossless PNG descriptor and optional `preview_only` descriptor | **ADDITIVE**; no PNG bytes in result. |
+| M0 | `get_ui_probe_capabilities` | None | Supported protocol/schema versions, an exact six-entry fixed name/milestone primitive declaration, explicit settle-condition states, negotiated limits including `sampleCount` 2–16, namespaces, candidate provenance | **ADDITIVE**; must not enumerate artifact IDs. |
+| M0 | `capture_visual_evidence` | Explicit `sceneRequest`, bounded window/element scope | Compact manifest with a separately retrievable lossless PNG descriptor and optional `preview_only` descriptor | **ADDITIVE**; no PNG bytes in result. A `COMPLETE` result requires at least one descriptor with `mediaType: image/png` and `evidenceGrade: lossless_visual`; `PARTIAL`/`UNOBSERVABLE` may contain zero artifacts only when evidence could not be committed. |
 | M0 | `read_capture_artifact` | Opaque `artifactId`, zero-based `offset`, bounded `maxBytes` | Padded standard-base64 chunk, byte count, terminal flag, manifest-bound metadata | **ADDITIVE**; no paths, roots, or full artifact. |
 | M1 | `wait_for_ui_stable` | Explicit `sceneRequest` | Bounded historical stability receipt with `revalidatedByCapture: false` | **ADDITIVE**; receipt is historical evidence only. |
 | M1 | `capture_element_snapshot` | Explicit `sceneRequest`, unique element selector | Compact manifest with one element's facts and `not_applicable` scene atomicity | **ADDITIVE**; every evidence-returning/committing branch is capture-revalidated. |
-| M1 | `capture_native_scene` | Explicit `sceneRequest` | Compact manifest and separately retrievable bounded scene artifact | **ADDITIVE**; every evidence-returning/committing branch is capture-revalidated; atomic status remains limited by the authority rules below. |
+| M1 | `capture_native_scene` | Explicit `sceneRequest` | Compact manifest and separately retrievable bounded scene artifact | **ADDITIVE**; every evidence-returning/committing branch is capture-revalidated; atomic status remains limited by the authority rules below. A `COMPLETE` result requires at least one descriptor with `mediaType: application/vnd.netcoredbg.native-scene+json` and `evidenceGrade: observed_facts`; `PARTIAL`/`UNOBSERVABLE` may contain zero artifacts only when evidence could not be committed. |
 
 Every request includes `debugSessionId`, `protocolVersion`, and `schemaVersion`. Every root and `sceneRequest` is closed. A malformed request, malformed version syntax, invalid type, or exceeded limit receives `INVALID_TOOL_ARGUMENTS` before lookup. A syntactically valid known version absent from the negotiated declaration receives `UNSUPPORTED_PROTOCOL`. A valid request for an unavailable declared primitive or condition receives `UNSUPPORTED_CAPABILITY`.
 
-The `primitives` capability member remains an array but is exactly six entries: Draft-7 `minItems: 6` and `maxItems: 6`, plus one `allOf`/`contains` rule for each approved name, require all six. Runtime asserts the exact set and rejects omission or duplication. The declaration separately states the availability of `dispatcherIdle`, `stableLayout`, `animationState`, `windowGeometry`, `contextMaterialization`, and `asyncLoadSettled`; it never infers a condition's capability from caller input. `sampleCount` is negotiated as an inclusive 2–16 range.
+The `primitives` capability member remains an array but is exactly six entries: Draft-7 `minItems: 6` and `maxItems: 6`, plus one `allOf`/`contains` rule for each approved name, require all six. Each `primitiveCapability` is structurally constrained by `oneOf` fixed `{name, milestone}` pairs: `get_ui_probe_capabilities`, `capture_visual_evidence`, and `read_capture_artifact` pair only with M0; `wait_for_ui_stable`, `capture_element_snapshot`, and `capture_native_scene` pair only with M1. Runtime asserts the exact paired set and rejects an omission, duplicate, or cross-milestone pairing. The declaration separately states the availability of `dispatcherIdle`, `stableLayout`, `animationState`, `windowGeometry`, `contextMaterialization`, and `asyncLoadSettled`; it never infers a condition's capability from caller input. `sampleCount` is negotiated as an inclusive 2–16 range.
 
 Current existing tools retain their contracts. The new names are registered only at their milestone, have no aliases, and do not implement `check_element_tokens`.
+
+### M0-G0 contract-validation boundary
+
+T004–T007 load the approved schema/corpus bytes and exercise only request/result contract validators against concrete fixtures. Their acceptance is exact-byte loading, validator agreement, corpus syntax and internal-reference integrity, expected classification vocabulary, fixed primitive-name/milestone pairs, and negative structural/version cases. Corpus metadata distinguishes `contractGateExpectation` from `runtimeBehaviorRequired`; T007 validates the metadata and contract-gate fixtures but does not execute observer, artifact, stability, or atomicity behavior. T032 and T034 run every C001–C024 behaviorally after the M0/M1 components exist and record the complete mapping.
 
 ### Identity and authorization rules
 
