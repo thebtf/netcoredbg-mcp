@@ -77,11 +77,11 @@ flowchart LR
 
 | Milestone | Primitive | Inputs beyond MCP envelope | Successful result | Compatibility |
 |---|---|---|---|---|
-| M0 | `get_ui_probe_capabilities` | None | Supported protocol/schema versions, an exact six-entry fixed name/milestone primitive declaration, explicit settle-condition states, negotiated limits including `sampleCount` 2–16, namespaces, candidate provenance | **ADDITIVE**; must not enumerate artifact IDs. |
+| M0 | `get_ui_probe_capabilities` | None | Supported protocol/schema versions, an exact six-entry fixed name/milestone primitive declaration, explicit settle-condition states, structurally fixed `sampleCount` limits 2/16, namespaces, candidate provenance | **ADDITIVE**; must not enumerate artifact IDs. |
 | M0 | `capture_visual_evidence` | Explicit `sceneRequest`, bounded window/element scope | Compact manifest with a separately retrievable lossless PNG descriptor and optional `preview_only` descriptor | **ADDITIVE**; no PNG bytes in result. A `COMPLETE` result requires at least one descriptor with `mediaType: image/png` and `evidenceGrade: lossless_visual`; `PARTIAL`/`UNOBSERVABLE` may contain zero artifacts only when evidence could not be committed. |
-| M0 | `read_capture_artifact` | Opaque `artifactId`, zero-based `offset`, bounded `maxBytes` | Padded standard-base64 chunk, byte count, terminal flag, manifest-bound metadata | **ADDITIVE**; no paths, roots, or full artifact. |
+| M0 | `read_capture_artifact` | Opaque `artifactId`, zero-based `offset`, bounded `maxBytes` | Padded standard-base64 chunk, byte count, terminal flag, manifest-bound metadata | **ADDITIVE**; every authorized read verifies identity/length and each touched internal 65,536-byte chunk hash before any byte release; no paths, roots, or full artifact. |
 | M1 | `wait_for_ui_stable` | Explicit `sceneRequest` | Bounded historical stability receipt with `revalidatedByCapture: false` | **ADDITIVE**; receipt is historical evidence only. |
-| M1 | `capture_element_snapshot` | Explicit `sceneRequest`, unique element selector | Compact manifest with one element's facts and `not_applicable` scene atomicity | **ADDITIVE**; every evidence-returning/committing branch is capture-revalidated. |
+| M1 | `capture_element_snapshot` | Explicit `sceneRequest`, unique element selector | Compact manifest with one element's facts and `not_applicable` scene atomicity | **ADDITIVE**; `COMPLETE` requires an `application/vnd.netcoredbg.native-scene+json`/`observed_facts` descriptor for a one-node `element_snapshot` artifact; `PARTIAL` may retain qualified facts; `UNOBSERVABLE` has no artifacts. |
 | M1 | `capture_native_scene` | Explicit `sceneRequest` | Compact manifest and separately retrievable bounded scene artifact | **ADDITIVE**; every evidence-returning/committing branch is capture-revalidated; atomic status remains limited by the authority rules below. A `COMPLETE` result requires at least one descriptor with `mediaType: application/vnd.netcoredbg.native-scene+json` and `evidenceGrade: observed_facts`; `PARTIAL`/`UNOBSERVABLE` may contain zero artifacts only when evidence could not be committed. |
 
 Every request includes `debugSessionId`, `protocolVersion`, and `schemaVersion`. Every root and `sceneRequest` is closed. A malformed request, malformed version syntax, invalid type, or exceeded limit receives `INVALID_TOOL_ARGUMENTS` before lookup. A syntactically valid known version absent from the negotiated declaration receives `UNSUPPORTED_PROTOCOL`. A valid request for an unavailable declared primitive or condition receives `UNSUPPORTED_CAPABILITY`.
@@ -205,17 +205,15 @@ sequenceDiagram
     alt unknown, foreign, expired, deleted, unavailable
         A-->>H: Unavailable without metadata
         H-->>C: {kind: "tool_error", tool: "read_capture_artifact", code: "ARTIFACT_NOT_FOUND", message: "Artifact is not available."}
-    else first authorized read
-        A->>A: Verify complete SHA-256; record immutable identity + length
-        A-->>H: Exact bounded raw range
-        H-->>C: Padded standard base64 chunk
-    else later authorized read
-        A->>A: Verify immutable identity + length
-        A-->>H: Exact bounded raw range
-        H-->>C: Padded standard base64 chunk
-    else authorized integrity mismatch
-        A-->>H: No data
-        H-->>C: ARTIFACT_INTEGRITY_FAILED, zero bytes
+    else authorized artifact read
+        A->>A: Verify identity + length; re-hash every touched 65,536-byte chunk
+        alt all touched chunks match their internal commit hashes
+            A-->>H: Exact bounded raw range
+            H-->>C: Padded standard base64 chunk
+        else identity, length, or touched chunk mismatch
+            A-->>H: No data
+            H-->>C: ARTIFACT_INTEGRITY_FAILED, zero bytes
+        end
     end
 ```
 
@@ -230,10 +228,10 @@ stateDiagram-v2
     [*] --> Staged: host opens private staging file
     Staged --> Committed: flush/close and atomic commit succeeds
     Staged --> WriteFailed: write/commit fails
-    Committed --> Verified: first authorized read passes SHA-256
+    Committed --> Verified: every authorized read passes identity/length plus touched-chunk hashes
     Committed --> Expired: session stops or four-hour deadline
-    Verified --> Verified: later authorized read passes identity/length
-    Verified --> Contained: hash, identity, or length mismatch
+    Verified --> Verified: every later authorized read passes identity/length plus touched-chunk hashes
+    Verified --> Contained: identity, length, or touched-chunk hash mismatch
     Verified --> Expired: session stops or four-hour deadline
     Contained --> Expired: cleanup deadline
     WriteFailed --> [*]
@@ -243,8 +241,8 @@ stateDiagram-v2
 | State | Public visibility | Required invariant |
 |---|---|---|
 | `staged` | None | Path is private; no descriptor, capability, or read exists. |
-| `committed` | Descriptor only | Artifact is atomically committed under the host session root and immutable; descriptor is session/capture-bound. |
-| `verified` | Authorized bounded reads | First authorized read verified complete SHA-256 and recorded immutable identity/length. |
+| `committed` | Descriptor only | Artifact is atomically committed under the host session root; commit records public full SHA-256 and an internal 65,536-byte chunk-hash table. |
+| `verified` | Authorized bounded reads | Every read verifies file identity/length and re-hashes every touched internal chunk before release. |
 | `contained` | Integrity error only | Authorized mismatch emitted no artifact bytes; operator may inspect local diagnostics outside MCP. |
 | `expired`/`deleted` | None | Public read is indistinguishable from foreign/unknown: exactly `{kind: "tool_error", tool: "read_capture_artifact", code: "ARTIFACT_NOT_FOUND", message: "Artifact is not available."}`; no additional member, metadata, or free-text variation. |
 
@@ -261,7 +259,7 @@ stateDiagram-v2
 | Custom JSON nesting | 16 levels | Host rejects deeper input before DTO materialization. |
 | Custom JSON UTF-8 payload | 262,144 bytes per payload | Host measures serialized payload before accepting it. |
 | `selectedState` / `currentState` | 262,144 serialized UTF-8 bytes each | Host measures each independently before DTO materialization and rejects an oversized value. |
-| Settle samples | 2–16 | Capability declaration negotiates the inclusive range; host rejects a count outside it before observer work. |
+| Settle samples | Request 2–16; capability constants 2 / 16 | Request is rejected outside the fixed range before observer work. |
 
 ## 7. Atomicity and evidence authorities
 
@@ -290,7 +288,7 @@ flowchart TD
 | Raster/preview | Adjacent corroboration with independent capture identity/time; `preview_only` as applicable | Same scene epoch by implication, completeness authority, or external conformance authority |
 | Factory | DTCG/token interpretation and conclusions after consuming observed artifacts | Debug-session target selection, filesystem/root retrieval, or claims that the host returned a verdict |
 
-For `capture_element_snapshot`, atomicity is `not_applicable`; one element cannot confer a complete scene epoch. For `uia_guarded`, host `sceneEpoch`/`sequence` identify the host operation only and never imply dispatcher consistency.
+For `capture_element_snapshot`, atomicity is `not_applicable`; a `COMPLETE` response has a retrievable one-node `element_snapshot` artifact while a `PARTIAL` response may retain qualified facts and an `UNOBSERVABLE` response has no artifacts. One element cannot confer a complete scene epoch. For `uia_guarded`, host `sceneEpoch`/`sequence` identify the host operation only and never imply dispatcher consistency.
 
 ## 8. Operational lifecycle and cleanup
 

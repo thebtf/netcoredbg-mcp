@@ -110,10 +110,9 @@ published result.
 `capabilities.settleConditions` declares `supported`,
 `unsupported`, or `unobservable` for dispatcher-idle, stable-layout,
 animation-state, window-geometry, context-materialization, and async-load
-settlement. The negotiated sample-count bounds use
-`settleSampleCountMin` and `settleSampleCountMax`, each structurally within
-2–16; runtime also requires the minimum not to exceed the maximum and every
-request to lie within the declared interval.
+settlement. The negotiated sample-count bounds are structurally fixed as
+`settleSampleCountMin: 2` and `settleSampleCountMax: 16`; every request still
+uses an explicit integer `sampleCount` from 2 through 16.
 
 A version that does not match the version syntax is invalid input. A
 syntactically valid version which the declaration does not support is
@@ -177,32 +176,16 @@ Every capture manifest structurally includes an immutable `sceneRequest` binding
 Artifacts pass through this state machine:
 
 1. **staged** — private, not returnable, and not readable;
-2. **committed** — atomically written beneath the server-owned per-session
-   root and described by the CSPRNG-minted, unguessable `artifactId`;
-3. **verified** — first authorized read verified full SHA-256, immutable file
-   identity, and length;
+2. **committed** — atomically written beneath the server-owned per-session root, described by the CSPRNG-minted, unguessable `artifactId`, and recorded with its public full SHA-256 plus a server-internal SHA-256 table for fixed 65,536-byte storage chunks;
+3. **verified** — every authorized read verifies immutable file identity and length, then re-hashes every storage chunk touched by its requested range before releasing any bytes;
 4. **expired/deleted** — no read is possible; and
 5. **contained** — an authorized integrity mismatch releases no bytes.
 
-An artifact descriptor has immutable media type, byte length, SHA-256, schema
-version, capture ID, retention, evidence grade, capture time, and optional
-relative provenance label. The label is diagnostic only and must never be
-accepted by any primitive, dereferenced, or used to locate storage.
+An artifact descriptor has immutable media type, byte length, full public SHA-256, schema version, capture ID, retention, evidence grade, capture time, and optional relative provenance label. The chunk-hash table remains server-internal: it is not in the descriptor and does not grant caller authority. The label is diagnostic only and must never be accepted by any primitive, dereferenced, or used to locate storage.
 
-Unknown, foreign-session, foreign-capture, expired, deleted, and otherwise
-unavailable capabilities return exactly this complete, fixed, disclosure-free
-`ARTIFACT_NOT_FOUND` envelope, with no artifact metadata or free-text detail:
-`{"kind":"tool_error","tool":"read_capture_artifact","code":"ARTIFACT_NOT_FOUND","message":"Artifact is not available."}`.
-After authorization, SHA-256, immutable-identity, or length mismatch returns
-`ARTIFACT_INTEGRITY_FAILED` with no bytes.
+Unknown, foreign-session, foreign-capture, expired, deleted, and otherwise unavailable capabilities return exactly this complete, fixed, disclosure-free `ARTIFACT_NOT_FOUND` envelope, with no artifact metadata or free-text detail: `{"kind":"tool_error","tool":"read_capture_artifact","code":"ARTIFACT_NOT_FOUND","message":"Artifact is not available."}`. After authorization, an identity, length, full-hash, or touched-chunk-hash mismatch returns `ARTIFACT_INTEGRITY_FAILED` with no bytes.
 
-`read_capture_artifact` reads exactly one raw byte range by zero-based offset
-and returns padded standard base64. `dataBase64` decodes to exactly
-`bytesRead`; `bytesRead` does not exceed the requested `maxBytes`; and
-`endOfArtifact` is true exactly when the returned range ends at the committed
-length. These calculated relationships, plus authorization and file checks,
-are runtime invariants because Draft 7 cannot compare decoded byte counts or
-arithmetic across fields.
+`read_capture_artifact` reads exactly one raw byte range by zero-based offset and returns padded standard base64. Before every release it verifies identity, length, and all touched fixed 65,536-byte chunks—including both chunks for an unaligned crossing range. `dataBase64` decodes to exactly `bytesRead`; `bytesRead` does not exceed the requested `maxBytes`; and `endOfArtifact` is true exactly when the returned range ends at the committed length. These calculated relationships, authorization, and file/chunk checks are runtime invariants because Draft 7 cannot compare decoded byte counts or arithmetic across fields.
 
 A `COMPLETE` visual manifest structurally contains at least one descriptor
 whose `mediaType` is `image/png` and whose `evidenceGrade` is
@@ -215,19 +198,13 @@ evidence cannot be committed.
 
 ### Atomicity and Scene Record
 
-A `capture_native_scene` result is `COMPLETE` only when an
-`in_process_framework_probe` performs one dispatcher-affine, non-yielding
-transaction, materializes the whole graph as an immutable DTO, records equal
-valid probe-owned revisions immediately before and after materialization, and
-structurally contains at least one descriptor whose `mediaType` is
-`application/vnd.netcoredbg.native-scene+json` and whose `evidenceGrade` is
-`observed_facts`. The equality and transaction behavior are runtime invariants;
-the schema requires the fields, authority, and committed scene descriptor but
-cannot compare two dynamic revisions.
+A `capture_native_scene` result is `COMPLETE` only when an `in_process_framework_probe` performs one dispatcher-affine, non-yielding transaction, materializes the whole graph as an immutable DTO, records equal valid probe-owned revisions immediately before and after materialization, and structurally contains at least one descriptor whose `mediaType` is `application/vnd.netcoredbg.native-scene+json` and whose `evidenceGrade` is `observed_facts`. The equality and transaction behavior are runtime invariants; the schema requires the fields, authority, and committed scene descriptor but cannot compare two dynamic revisions.
 
-A `uia_guarded` traversal is independently timed. A `PARTIAL` result under that authority structurally requires all four window, client, DPI, and visual-tree-fingerprint guards to be `unchanged` and an `ATOMICITY_UNPROVEN_UIA_GUARDED` issue. A changed or unobservable guard yields `UNOBSERVABLE`, commits no scene artifact, and returns no scene-artifact descriptor. UIA-guarded traversal can never be `COMPLETE` for an atomic-scene claim. An element snapshot uses `not_applicable` atomicity and cannot claim a complete scene epoch.
+A `capture_element_snapshot` uses `not_applicable` atomicity. Its `COMPLETE` manifest structurally requires at least one retrievable `application/vnd.netcoredbg.native-scene+json`/`observed_facts` descriptor; the capture-bound artifact has `observationKind: element_snapshot` and exactly one graph node and root. `PARTIAL` element snapshots may retain committed qualified facts. `UNOBSERVABLE` element snapshots have `artifacts.maxItems: 0`.
 
-A persisted scene artifact has status `COMPLETE` or `PARTIAL` and therefore contains at least one observed graph node and root. An `UNOBSERVABLE` capture result commits no scene artifact and returns no scene-artifact descriptor; its uncertainty remains in the compact capture manifest.
+A `uia_guarded` traversal is independently timed. A `PARTIAL` result under that authority structurally requires all four window, client, DPI, and visual-tree-fingerprint guards to be `unchanged` and an `ATOMICITY_UNPROVEN_UIA_GUARDED` issue. A changed or unobservable guard yields `UNOBSERVABLE`, commits no scene artifact, and returns no scene-artifact descriptor. UIA-guarded traversal can never be `COMPLETE` for an atomic-scene claim.
+
+A persisted scene artifact has status `COMPLETE` or `PARTIAL` and therefore contains at least one observed graph node and root. `observationKind: element_snapshot` structurally caps both node and root arrays at one; `native_scene` remains bounded at 4,096. An `UNOBSERVABLE` capture result commits no scene artifact and returns no scene-artifact descriptor; its uncertainty remains in the compact capture manifest.
 
 A scene artifact is a bounded immutable graph of at most 4,096 nodes. A node
 has an ID, an optional parent relation, optional slot relation, canonical
@@ -271,7 +248,7 @@ semantics.
 | Artifact references | 4 entries | `artifacts.maxItems` | None beyond structural count. |
 | Retention | 14,400 seconds or session stop | `artifactRetention.maximumAgeSeconds` | Earlier session-stop expiry. |
 | Settle timeout | 30,000 ms | `settlePolicy.timeoutMs`, `settleDurationMs`, `negotiatedLimits.settleTimeoutMaxMs` | Cross-field stable-duration relation. |
-| Settle samples | 2–16 | `settlePolicy.sampleCount`, `negotiatedLimits.settleSampleCountMin`, `negotiatedLimits.settleSampleCountMax` | Negotiated minimum is not greater than the maximum; each request lies within that interval. |
+| Settle samples | Request 2–16; capability constants 2 / 16 | `settlePolicy.sampleCount`, `negotiatedLimits.settleSampleCountMin`, `negotiatedLimits.settleSampleCountMax` | Request is within the fixed declared interval. |
 | Debug-session handle | 16–256 base64url characters | `debugSessionId` | Existing compatibility resolution and non-enumerability. |
 | Public artifact/capture/probe capability | 22–86 base64url characters | `publicCapabilityId` | At least 128 CSPRNG bits at minting; session/capture binding and non-enumerability. |
 | Recursive JSON | depth 16; 256 array items or object properties | `jsonValue.maxItems`, `jsonValue.maxProperties` | Depth check before DTO materialization. |

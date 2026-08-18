@@ -812,6 +812,18 @@
       },
       "additionalProperties": false
     },
+    "notApplicableAtomicity": {
+      "type": "object",
+      "required": [
+        "authority"
+      ],
+      "properties": {
+        "authority": {
+          "const": "not_applicable"
+        }
+      },
+      "additionalProperties": false
+    },
     "atomicityEvidence": {
       "oneOf": [
         {
@@ -819,6 +831,9 @@
         },
         {
           "$ref": "#/definitions/uiaGuardedAtomicity"
+        },
+        {
+          "$ref": "#/definitions/notApplicableAtomicity"
         }
       ]
     },
@@ -1186,6 +1201,7 @@
         "captureId",
         "capturedAt",
         "status",
+        "observationKind",
         "sceneRequest",
         "candidate",
         "stability",
@@ -1215,6 +1231,12 @@
           "enum": [
             "COMPLETE",
             "PARTIAL"
+          ]
+        },
+        "observationKind": {
+          "enum": [
+            "element_snapshot",
+            "native_scene"
           ]
         },
         "sceneRequest": {
@@ -1262,53 +1284,94 @@
           }
         },
         {
-          "oneOf": [
-            {
-              "properties": {
-                "status": {
-                  "enum": [
-                    "COMPLETE"
-                  ]
-                },
-                "atomicity": {
-                  "$ref": "#/definitions/inProcessAtomicity"
-                },
-                "stability": {
-                  "allOf": [
-                    {
-                      "$ref": "#/definitions/stabilityEvidence"
-                    },
-                    {
-                      "properties": {
-                        "status": {
-                          "enum": [
-                            "STABLE"
-                          ]
-                        },
-                        "revalidatedByCapture": {
-                          "enum": [
-                            true
-                          ]
+          "if": {
+            "required": [
+              "observationKind"
+            ],
+            "properties": {
+              "observationKind": {
+                "const": "native_scene"
+              }
+            }
+          },
+          "then": {
+            "oneOf": [
+              {
+                "properties": {
+                  "status": {
+                    "enum": [
+                      "COMPLETE"
+                    ]
+                  },
+                  "atomicity": {
+                    "$ref": "#/definitions/inProcessAtomicity"
+                  },
+                  "stability": {
+                    "allOf": [
+                      {
+                        "$ref": "#/definitions/stabilityEvidence"
+                      },
+                      {
+                        "properties": {
+                          "status": {
+                            "enum": [
+                              "STABLE"
+                            ]
+                          },
+                          "revalidatedByCapture": {
+                            "enum": [
+                              true
+                            ]
+                          }
                         }
                       }
-                    }
-                  ]
-                },
-                "issues": {
-                  "maxItems": 0
+                    ]
+                  },
+                  "issues": {
+                    "maxItems": 0
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "status": {
+                    "enum": [
+                      "PARTIAL"
+                    ]
+                  }
                 }
               }
-            },
-            {
-              "properties": {
-                "status": {
-                  "enum": [
-                    "PARTIAL"
-                  ]
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "observationKind"
+            ],
+            "properties": {
+              "observationKind": {
+                "const": "element_snapshot"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "atomicity": {
+                "$ref": "#/definitions/notApplicableAtomicity"
+              },
+              "graph": {
+                "properties": {
+                  "nodes": {
+                    "maxItems": 1
+                  },
+                  "rootNodeIds": {
+                    "maxItems": 1
+                  }
                 }
               }
             }
-          ]
+          }
         },
         {
           "if": {

@@ -1227,14 +1227,10 @@
           "maximum": 30000
         },
         "settleSampleCountMin": {
-          "type": "integer",
-          "minimum": 2,
-          "maximum": 16
+          "const": 2
         },
         "settleSampleCountMax": {
-          "type": "integer",
-          "minimum": 2,
-          "maximum": 16
+          "const": 16
         }
       },
       "additionalProperties": false
@@ -2106,6 +2102,61 @@
               ]
             }
           }
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "COMPLETE"
+                  ]
+                },
+                "artifacts": {
+                  "contains": {
+                    "type": "object",
+                    "required": [
+                      "mediaType",
+                      "evidenceGrade"
+                    ],
+                    "properties": {
+                      "mediaType": {
+                        "enum": [
+                          "application/vnd.netcoredbg.native-scene+json"
+                        ]
+                      },
+                      "evidenceGrade": {
+                        "enum": [
+                          "observed_facts"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "PARTIAL"
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "UNOBSERVABLE"
+                  ]
+                },
+                "artifacts": {
+                  "maxItems": 0
+                }
+              }
+            }
+          ]
         }
       ]
     },

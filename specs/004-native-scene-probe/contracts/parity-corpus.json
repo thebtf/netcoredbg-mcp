@@ -577,14 +577,14 @@
       "contractGateExpectation": "schema_fixture_and_expected_classification_vocabulary_only",
       "runtimeBehaviorRequired": true,
       "primitive": "read_capture_artifact",
-      "precondition": "artifact_tampered_capability_0001 is owned by the session but its committed hash, identity, or length no longer matches the manifest.",
+      "precondition": "artifact_tampered_capability_0001 is owned by the session and has already completed one successful authorized read. Its committed bytes are then modified in place without changing immutable file identity or length, including a byte in each of storage chunks 0 and 1; its public manifest SHA-256 remains the commit value and its internal 65,536-byte chunk-hash table remains server-internal.",
       "request": {
         "debugSessionId": "session_A1b2C3d4E5",
         "protocolVersion": "native-scene-probe/1",
         "schemaVersion": "native-scene-probe.schema/1",
         "artifactId": "artifact_tampered_capability_0001",
-        "offset": 0,
-        "maxBytes": 65536
+        "offset": 65535,
+        "maxBytes": 2
       },
       "expected": {
         "classification": "typed_error",
@@ -1512,6 +1512,265 @@
           "automationId": "SaveButton"
         }
       },
+      "schemaInvalidVariants": [
+        {
+          "name": "complete_without_one_node_observed_scene_artifact",
+          "responseSchema": "#/definitions/elementSnapshotCapture",
+          "response": {
+            "kind": "element_snapshot_capture",
+            "status": "COMPLETE",
+            "captureId": "capture_element_case_00001",
+            "protocolVersion": "native-scene-probe/1",
+            "schemaVersion": "native-scene-probe.schema/1",
+            "sceneRequest": {
+              "storyId": "Button.Primary",
+              "sceneId": "Default",
+              "fixtureId": "Gallery",
+              "scope": {
+                "kind": "scene"
+              },
+              "appearance": "light",
+              "theme": "baseline",
+              "density": "regular",
+              "contrast": "standard",
+              "viewport": {
+                "policy": "exact",
+                "width": 1280,
+                "height": 720
+              },
+              "expectedDpiPolicy": {
+                "mode": "exact",
+                "x": 96,
+                "y": 96
+              },
+              "focusTarget": null,
+              "selectedState": null,
+              "currentState": null,
+              "scrollOffsets": null,
+              "animationPolicy": "finished",
+              "settlePolicy": {
+                "timeoutMs": 30000,
+                "sampleCount": 2,
+                "stableForMs": 100,
+                "requireDispatcherIdle": true,
+                "requireStableLayout": true,
+                "requireAnimationState": true,
+                "requireWindowGeometry": true,
+                "requireContextMaterialization": true,
+                "requireAsyncLoadSettled": true
+              },
+              "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "expectedCandidateIdentity": {
+                "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "assemblyVersion": "1.0.0",
+                "probeVersion": "1.0.0"
+              }
+            },
+            "capturedAt": "2026-08-18T00:00:00Z",
+            "candidate": {
+              "processId": 4242,
+              "processIdentity": "process_4242_start_1",
+              "hwnd": null,
+              "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "assemblyVersion": "1.0.0",
+              "probeVersion": "1.0.0",
+              "observerVersions": [],
+              "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "storyHash": null,
+              "capturedAt": "2026-08-18T00:00:00Z",
+              "source": {
+                "kind": "probe_manifest",
+                "verification": "verified"
+              }
+            },
+            "stability": {
+              "status": "STABLE",
+              "revalidatedByCapture": true,
+              "conditions": {
+                "dispatcherIdle": {
+                  "state": "met"
+                },
+                "stableLayout": {
+                  "state": "met"
+                },
+                "animationState": {
+                  "state": "met"
+                },
+                "windowGeometry": {
+                  "state": "met"
+                },
+                "contextMaterialization": {
+                  "state": "met"
+                },
+                "asyncLoadSettled": {
+                  "state": "met"
+                }
+              },
+              "settleDurationMs": 100,
+              "observedAt": "2026-08-18T00:00:00Z",
+              "sceneEpoch": 41,
+              "sequence": 1
+            },
+            "atomicity": {
+              "authority": "not_applicable"
+            },
+            "element": {
+              "contractId": "Button.Primary",
+              "instanceKey": "save",
+              "templatePart": null,
+              "storyScope": "Button.Primary.Default",
+              "componentSlot": "content",
+              "automationId": "SaveButton"
+            },
+            "artifacts": [],
+            "issues": []
+          },
+          "expected": {
+            "classification": "schema_rejection",
+            "reason": "a COMPLETE element snapshot requires an application/vnd.netcoredbg.native-scene+json observed_facts descriptor for a one-node element_snapshot artifact"
+          }
+        },
+        {
+          "name": "unobservable_with_committed_artifact",
+          "responseSchema": "#/definitions/elementSnapshotCapture",
+          "response": {
+            "kind": "element_snapshot_capture",
+            "status": "UNOBSERVABLE",
+            "captureId": "capture_element_case_00002",
+            "protocolVersion": "native-scene-probe/1",
+            "schemaVersion": "native-scene-probe.schema/1",
+            "sceneRequest": {
+              "storyId": "Button.Primary",
+              "sceneId": "Default",
+              "fixtureId": "Gallery",
+              "scope": {
+                "kind": "scene"
+              },
+              "appearance": "light",
+              "theme": "baseline",
+              "density": "regular",
+              "contrast": "standard",
+              "viewport": {
+                "policy": "exact",
+                "width": 1280,
+                "height": 720
+              },
+              "expectedDpiPolicy": {
+                "mode": "exact",
+                "x": 96,
+                "y": 96
+              },
+              "focusTarget": null,
+              "selectedState": null,
+              "currentState": null,
+              "scrollOffsets": null,
+              "animationPolicy": "finished",
+              "settlePolicy": {
+                "timeoutMs": 30000,
+                "sampleCount": 2,
+                "stableForMs": 100,
+                "requireDispatcherIdle": true,
+                "requireStableLayout": true,
+                "requireAnimationState": true,
+                "requireWindowGeometry": true,
+                "requireContextMaterialization": true,
+                "requireAsyncLoadSettled": true
+              },
+              "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "expectedCandidateIdentity": {
+                "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "assemblyVersion": "1.0.0",
+                "probeVersion": "1.0.0"
+              }
+            },
+            "capturedAt": "2026-08-18T00:00:00Z",
+            "candidate": {
+              "processId": 4242,
+              "processIdentity": "process_4242_start_1",
+              "hwnd": null,
+              "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "assemblyVersion": "1.0.0",
+              "probeVersion": "1.0.0",
+              "observerVersions": [],
+              "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "storyHash": null,
+              "capturedAt": "2026-08-18T00:00:00Z",
+              "source": {
+                "kind": "probe_manifest",
+                "verification": "verified"
+              }
+            },
+            "stability": {
+              "status": "UNOBSERVABLE",
+              "revalidatedByCapture": true,
+              "conditions": {
+                "dispatcherIdle": {
+                  "state": "unobservable"
+                },
+                "stableLayout": {
+                  "state": "unobservable"
+                },
+                "animationState": {
+                  "state": "unobservable"
+                },
+                "windowGeometry": {
+                  "state": "unobservable"
+                },
+                "contextMaterialization": {
+                  "state": "unobservable"
+                },
+                "asyncLoadSettled": {
+                  "state": "unobservable"
+                }
+              },
+              "settleDurationMs": 100,
+              "observedAt": "2026-08-18T00:00:00Z",
+              "sceneEpoch": 41,
+              "sequence": 1
+            },
+            "atomicity": {
+              "authority": "not_applicable"
+            },
+            "element": {
+              "contractId": "Button.Primary",
+              "instanceKey": "save",
+              "templatePart": null,
+              "storyScope": "Button.Primary.Default",
+              "componentSlot": "content",
+              "automationId": "SaveButton"
+            },
+            "artifacts": [
+              {
+                "artifactId": "artifact_element_case_00002",
+                "mediaType": "application/vnd.netcoredbg.native-scene+json",
+                "byteLength": 1024,
+                "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "artifactSchemaVersion": "native-scene-artifact/1",
+                "captureId": "capture_element_case_00002",
+                "retention": {
+                  "endsOn": "session_stop_or_expiry",
+                  "maximumAgeSeconds": 14400,
+                  "expiresAt": "2026-08-18T04:00:00Z"
+                },
+                "evidenceGrade": "observed_facts",
+                "capturedAt": "2026-08-18T00:00:00Z",
+                "rasterCaptureId": null,
+                "adjacentToCaptureId": null
+              }
+            ],
+            "issues": [
+              {
+                "code": "ADAPTER_FACT_UNOBSERVABLE",
+                "message": "No qualified element fact could be committed."
+              }
+            ]
+          },
+          "expected": {
+            "classification": "schema_rejection",
+            "reason": "an UNOBSERVABLE element snapshot has no committed artifacts"
+          }
+        }
+      ],
       "expected": {
         "classification": "qualified_observation",
         "status": "PARTIAL",
