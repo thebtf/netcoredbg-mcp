@@ -2232,6 +2232,9 @@
                   "enum": [
                     "UNOBSERVABLE"
                   ]
+                },
+                "artifacts": {
+                  "maxItems": 0
                 }
               }
             }
