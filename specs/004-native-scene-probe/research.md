@@ -115,4 +115,4 @@ Spec 003/ADR-003 are authoritative for semantics and explicitly require the firs
 
 ## Approval gate
 
-**T001 operator approval is required after this planning packet and authorizes only M0-G0 T002–T007.** T007 must turn the exact checked-in Draft-7 schema artifact, its production validation approach, runtime/schema parity tests, and negative C001–C024 wire tests GREEN before T008+ M0 implementation. Until then, no product code, test project edit, package change, build, test run, formatter, commit, push, PR, or external agent CLI is in scope.
+**Publishing or merging this planning packet is allowed and does not constitute T001 approval. T001 operator approval applies to the exact merged candidate bytes and authorizes only M0-G0 T002–T007.** T007 must turn the approved Draft-7 schema artifact, its production validation approach, runtime/schema parity tests, and negative C001–C024 wire tests GREEN before T008+ M0 implementation. Until then, no product code, test-project edit, package change, implementation command, build, test run, formatter, implementation PR, product publication, or external agent CLI is in scope.

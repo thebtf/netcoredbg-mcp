@@ -10,7 +10,7 @@ description: "Dependency-ordered implementation tasks for Native Scene Probe M0-
 
 ## NOT AUTHORIZED — operator approval is a hard gate
 
-This is a future execution checklist, not execution authorization. **T001 is the first and absolute blocking task.** Until a durable operator Approval Record approves the exact bytes and SHA-256 hashes of all three candidate files below, no source, test, package, build, formatter, workflow, external-agent invocation, commit, push, PR, release, publication, or public-route action may occur:
+This is a future execution checklist, not execution authorization. Publishing or merging this planning packet is allowed and does not constitute T001 approval. **T001 is the first and absolute blocking implementation task.** Until a durable operator Approval Record approves the exact merged bytes and SHA-256 hashes of all three candidate files below, no product source, test-project, package, build, formatter, SpecKit workflow, external-agent invocation, implementation commit/push/PR, release, product publication, or public-route action may occur:
 
 - `specs/004-native-scene-probe/contracts/native-scene-probe.schema.json`
 - `specs/004-native-scene-probe/contracts/native-scene-artifact.schema.json`

@@ -2,7 +2,7 @@
 
 ## Status: NOT EXECUTED
 
-This is a future acceptance playbook, not an execution receipt. The M0/M1 source files, test classes, WPF fixture, bridge mode, package changes, and registration described below do not exist in this documentation-only delivery. No command in this file has been run, and no build, test, formatter, package restore, commit, push, PR, release, publication, or public-route cutover is authorized now.
+This is a future acceptance playbook, not an execution receipt. The planning packet may be committed, reviewed, and merged without constituting T001 approval. The M0/M1 source files, test classes, WPF fixture, bridge mode, package changes, and registration described below do not exist in this documentation-only delivery. No command in this file has been run, and no product build, test, formatter, package restore, implementation PR, release, product publication, or public-route cutover is authorized now.
 
 T001 operator approval authorizes only M0-G0 T002–T007. M0/M1 primitive implementation and acceptance remain blocked until T007 has produced GREEN M0-G0 evidence:
 
