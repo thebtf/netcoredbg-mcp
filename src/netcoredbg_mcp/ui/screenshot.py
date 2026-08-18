@@ -257,16 +257,15 @@ def crop_png(image_data: bytes, x: int, y: int, width: int, height: int) -> tupl
             cropped.close()
 
 
-def capture_window_evidence(hwnd: int) -> tuple[bytes, int, int, dict[str, Any]]:
-    """Capture a window and include the exact capture provenance."""
+def _capture_window_raster(
+    hwnd: int,
+    width: int,
+    height: int,
+    printwindow_flags: int,
+) -> tuple[bytes, str]:
+    """Capture client-local pixels through PrintWindow with a BitBlt fallback."""
     user32 = ctypes.windll.user32
     gdi32 = ctypes.windll.gdi32
-
-    before = _read_direct_capture_snapshot(hwnd)
-    width = before.raster_width
-    height = before.raster_height
-
-    # Create compatible DC and bitmap
     wdc = user32.GetDC(hwnd)
     if not wdc:
         raise RuntimeError("Failed to get window DC")
@@ -283,23 +282,17 @@ def capture_window_evidence(hwnd: int) -> tuple[bytes, int, int, dict[str, Any]]
 
             try:
                 old_bitmap = gdi32.SelectObject(cdc, bitmap)
-
                 try:
-                    # PrintWindow with PW_RENDERFULLCONTENT for best results
-                    pw_renderfullcontent = 0x00000002
-                    if user32.PrintWindow(hwnd, cdc, pw_renderfullcontent):
+                    if user32.PrintWindow(hwnd, cdc, printwindow_flags):
                         method = "PrintWindow"
                     else:
-                        # Fallback: try BitBlt
                         gdi32.BitBlt(cdc, 0, 0, width, height, wdc, 0, 0, 0x00CC0020)
                         method = "BitBlt"
 
-                    # Extract bitmap bits
                     from PIL import Image
 
                     bmi = _create_bitmapinfo(width, height)
                     buffer = ctypes.create_string_buffer(width * height * 4)
-
                     gdi32.GetDIBits(
                         cdc,
                         bitmap,
@@ -309,8 +302,6 @@ def capture_window_evidence(hwnd: int) -> tuple[bytes, int, int, dict[str, Any]]
                         ctypes.byref(bmi),
                         0,  # DIB_RGB_COLORS
                     )
-
-                    # Convert BGRA → RGBA
                     image = Image.frombuffer(
                         "RGBA",
                         (width, height),
@@ -320,36 +311,12 @@ def capture_window_evidence(hwnd: int) -> tuple[bytes, int, int, dict[str, Any]]
                         0,
                         1,
                     )
-
-                    # Encode to PNG
                     png_buffer = io.BytesIO()
                     image.save(png_buffer, format="PNG", optimize=True)
-                    after = _read_direct_capture_snapshot(hwnd)
-                    if after != before:
-                        raise RuntimeError(
-                            "Evidence capture invalidated because window changed "
-                            "during rasterization"
-                        )
-                    return (
-                        png_buffer.getvalue(),
-                        width,
-                        height,
-                        build_capture_metadata(
-                            hwnd,
-                            width,
-                            height,
-                            method,
-                            client_rect=dict(
-                                zip(("left", "top", "right", "bottom"), before.client_rect)
-                            ),
-                            dpi=before.dpi,
-                        ),
-                    )
-
+                    return png_buffer.getvalue(), method
                 finally:
                     # Always deselect before DeleteObject to prevent GDI leak
                     gdi32.SelectObject(cdc, old_bitmap)
-
             finally:
                 gdi32.DeleteObject(bitmap)
         finally:
@@ -358,9 +325,48 @@ def capture_window_evidence(hwnd: int) -> tuple[bytes, int, int, dict[str, Any]]
         user32.ReleaseDC(hwnd, wdc)
 
 
+def capture_window_evidence(hwnd: int) -> tuple[bytes, int, int, dict[str, Any]]:
+    """Capture client-local pixels and include strict temporal provenance."""
+    before = _read_direct_capture_snapshot(hwnd)
+    width = before.raster_width
+    height = before.raster_height
+    png_bytes, method = _capture_window_raster(
+        hwnd,
+        width,
+        height,
+        0x00000001 | 0x00000002,  # PW_CLIENTONLY | PW_RENDERFULLCONTENT
+    )
+    after = _read_direct_capture_snapshot(hwnd)
+    if after != before:
+        raise RuntimeError(
+            "Evidence capture invalidated because window changed during rasterization"
+        )
+    return (
+        png_bytes,
+        width,
+        height,
+        build_capture_metadata(
+            hwnd,
+            width,
+            height,
+            method,
+            client_rect=dict(zip(("left", "top", "right", "bottom"), before.client_rect)),
+            dpi=before.dpi,
+        ),
+    )
+
+
 def capture_window(hwnd: int) -> tuple[bytes, int, int]:
-    """Capture a window screenshot via Win32 while preserving the legacy tuple."""
-    png_bytes, width, height, _metadata = capture_window_evidence(hwnd)
+    """Capture a window screenshot via the legacy DPI-independent Win32 path."""
+    client_rect = _get_client_rect(hwnd)
+    width = client_rect["right"] - client_rect["left"]
+    height = client_rect["bottom"] - client_rect["top"]
+    png_bytes, _method = _capture_window_raster(
+        hwnd,
+        width,
+        height,
+        0x00000002,  # PW_RENDERFULLCONTENT
+    )
     return png_bytes, width, height
 
 

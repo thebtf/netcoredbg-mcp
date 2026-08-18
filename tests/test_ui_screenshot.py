@@ -497,8 +497,10 @@ def test_capture_window_evidence_rejects_an_unstable_direct_capture_snapshot(
     assert dpi_reads == expected_dpi_reads
 
 
-def test_capture_window_evidence_decodes_top_down_dib_and_preserves_legacy_tuple(
+@pytest.mark.parametrize("dpi_case", ["absent", "raises"])
+def test_capture_window_evidence_uses_client_pixels_and_legacy_capture_ignores_dpi(
     monkeypatch,
+    dpi_case: str,
 ) -> None:
     from netcoredbg_mcp.ui import screenshot
 
@@ -514,6 +516,9 @@ def test_capture_window_evidence_decodes_top_down_dib_and_preserves_legacy_tuple
     )
 
     class FakeUser32:
+        def __init__(self) -> None:
+            self.printwindow_flags: list[int] = []
+
         def GetClientRect(self, _hwnd, rect_ptr):  # noqa: N802 - Win32 API shape
             rect = rect_ptr._obj
             rect.left = 0
@@ -525,7 +530,8 @@ def test_capture_window_evidence_decodes_top_down_dib_and_preserves_legacy_tuple
         def GetDC(self, _hwnd):  # noqa: N802 - Win32 API shape
             return 100
 
-        def PrintWindow(self, _hwnd, _hdc, _flags):  # noqa: N802 - Win32 API shape
+        def PrintWindow(self, _hwnd, _hdc, flags):  # noqa: N802 - Win32 API shape
+            self.printwindow_flags.append(flags)
             return True
 
         def GetDpiForWindow(self, _hwnd):  # noqa: N802 - Win32 API shape
@@ -535,10 +541,14 @@ def test_capture_window_evidence_decodes_top_down_dib_and_preserves_legacy_tuple
             return 1
 
     class FakeGdi32:
+        def __init__(self) -> None:
+            self.bitmap_sizes: list[tuple[int, int]] = []
+
         def CreateCompatibleDC(self, _wdc):  # noqa: N802 - Win32 API shape
             return 200
 
-        def CreateCompatibleBitmap(self, _wdc, _width, _height):  # noqa: N802 - Win32 API shape
+        def CreateCompatibleBitmap(self, _wdc, bitmap_width, bitmap_height):  # noqa: N802
+            self.bitmap_sizes.append((bitmap_width, bitmap_height))
             return 300
 
         def SelectObject(self, _cdc, _bitmap):  # noqa: N802 - Win32 API shape
@@ -547,7 +557,7 @@ def test_capture_window_evidence_decodes_top_down_dib_and_preserves_legacy_tuple
         def BitBlt(self, *_args):  # noqa: N802 - Win32 API shape
             return True
 
-        def GetDIBits(self, _cdc, _bitmap, _start, _lines, buffer, _bmi, _usage):  # noqa: N802 - Win32 API shape
+        def GetDIBits(self, _cdc, _bitmap, _start, _lines, buffer, _bmi, _usage):  # noqa: N802
             ctypes.memmove(buffer, top_down_bgra, len(top_down_bgra))
             return height
 
@@ -557,10 +567,12 @@ def test_capture_window_evidence_decodes_top_down_dib_and_preserves_legacy_tuple
         def DeleteDC(self, _cdc):  # noqa: N802 - Win32 API shape
             return True
 
+    fake_user32 = FakeUser32()
+    fake_gdi32 = FakeGdi32()
     monkeypatch.setattr(
         screenshot.ctypes,
         "windll",
-        SimpleNamespace(user32=FakeUser32(), gdi32=FakeGdi32()),
+        SimpleNamespace(user32=fake_user32, gdi32=fake_gdi32),
         raising=False,
     )
 
@@ -583,10 +595,23 @@ def test_capture_window_evidence_decodes_top_down_dib_and_preserves_legacy_tuple
         "logical_width": 2.0,
         "logical_height": 2.0,
     }
+    assert fake_user32.printwindow_flags == [0x00000003]
+    assert fake_gdi32.bitmap_sizes == [(width, height)]
+
+    if dpi_case == "absent":
+        monkeypatch.delattr(FakeUser32, "GetDpiForWindow")
+    else:
+
+        def unavailable_dpi(_hwnd):  # noqa: N802 - Win32 API shape
+            raise OSError("GetDpiForWindow unavailable")
+
+        monkeypatch.setattr(fake_user32, "GetDpiForWindow", unavailable_dpi)
 
     legacy_capture = screenshot.capture_window(123)
     assert len(legacy_capture) == 3
     assert legacy_capture[1:] == (width, height)
+    assert fake_user32.printwindow_flags == [0x00000003, 0x00000002]
+    assert fake_gdi32.bitmap_sizes == [(width, height), (width, height)]
 
 
 def test_build_capture_metadata_uses_actual_client_rect_and_window_dpi_scaling(monkeypatch) -> None:
@@ -718,7 +743,8 @@ def test_capture_window_evidence_reports_bitblt_fallback(monkeypatch) -> None:
             return 1
 
     class FakeGdi32:
-        bitblt_calls = 0
+        def __init__(self) -> None:
+            self.bitblt_calls: list[tuple[int, ...]] = []
 
         def CreateCompatibleDC(self, _wdc):  # noqa: N802 - Win32 API shape
             return 200
@@ -729,8 +755,8 @@ def test_capture_window_evidence_reports_bitblt_fallback(monkeypatch) -> None:
         def SelectObject(self, _cdc, _bitmap):  # noqa: N802 - Win32 API shape
             return 400
 
-        def BitBlt(self, *_args):  # noqa: N802 - Win32 API shape
-            self.bitblt_calls += 1
+        def BitBlt(self, *args):  # noqa: N802 - Win32 API shape
+            self.bitblt_calls.append(args)
             return True
 
         def GetDIBits(self, _cdc, _bitmap, _start, _lines, buffer, _bmi, _usage):  # noqa: N802 - Win32 API shape
@@ -754,7 +780,7 @@ def test_capture_window_evidence_reports_bitblt_fallback(monkeypatch) -> None:
     _png_bytes, width, height, metadata = screenshot.capture_window_evidence(123)
 
     assert (width, height) == (1, 1)
-    assert fake_gdi32.bitblt_calls == 1
+    assert fake_gdi32.bitblt_calls == [(200, 0, 0, 1, 1, 100, 0, 0, 0x00CC0020)]
     assert metadata["method"] == "BitBlt"
 
 
