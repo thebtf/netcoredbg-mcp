@@ -370,6 +370,9 @@ def test_capture_window_evidence_decodes_top_down_dib_and_preserves_legacy_tuple
         def PrintWindow(self, _hwnd, _hdc, _flags):  # noqa: N802 - Win32 API shape
             return True
 
+        def GetDpiForWindow(self, _hwnd):  # noqa: N802 - Win32 API shape
+            return 96
+
         def ReleaseDC(self, _hwnd, _hdc):  # noqa: N802 - Win32 API shape
             return 1
 
@@ -462,6 +465,49 @@ def test_build_capture_metadata_uses_actual_client_rect_and_window_dpi_scaling(m
 
 
 @pytest.mark.parametrize(
+    "dpi_case",
+    [
+        pytest.param("unavailable", id="unavailable"),
+        pytest.param("zero", id="zero"),
+        pytest.param("raises", id="raises"),
+    ],
+)
+def test_build_capture_metadata_fails_closed_without_a_positive_window_dpi(
+    monkeypatch,
+    dpi_case: str,
+) -> None:
+    from netcoredbg_mcp.ui import screenshot
+
+    def get_client_rect(_hwnd, rect_ptr):  # noqa: N802 - Win32 API shape
+        rect = rect_ptr._obj
+        rect.left = 0
+        rect.top = 0
+        rect.right = 180
+        rect.bottom = 90
+        return True
+
+    user32 = SimpleNamespace(GetClientRect=get_client_rect)
+    if dpi_case == "zero":
+        user32.GetDpiForWindow = lambda _hwnd: 0
+    elif dpi_case == "raises":
+
+        def get_dpi_for_window(_hwnd):  # noqa: N802 - Win32 API shape
+            raise OSError("GetDpiForWindow unavailable")
+
+        user32.GetDpiForWindow = get_dpi_for_window
+
+    monkeypatch.setattr(
+        screenshot.ctypes,
+        "windll",
+        SimpleNamespace(user32=user32),
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="actual window DPI"):
+        screenshot.build_capture_metadata(123, 300, 150, "PrintWindow")
+
+
+@pytest.mark.parametrize(
     ("result", "right", "bottom"),
     [(False, 10, 10), (True, 0, 10), (True, 10, 0)],
 )
@@ -506,6 +552,9 @@ def test_capture_window_evidence_reports_bitblt_fallback(monkeypatch) -> None:
 
         def PrintWindow(self, _hwnd, _hdc, _flags):  # noqa: N802 - Win32 API shape
             return False
+
+        def GetDpiForWindow(self, _hwnd):  # noqa: N802 - Win32 API shape
+            return 96
 
         def ReleaseDC(self, _hwnd, _hdc):  # noqa: N802 - Win32 API shape
             return 1

@@ -167,6 +167,17 @@ def _get_client_rect(hwnd: int) -> dict[str, int]:
     return client_rect
 
 
+def _get_window_dpi(hwnd: int) -> int:
+    """Read a positive DPI from the captured window or reject the evidence."""
+    try:
+        dpi = int(ctypes.windll.user32.GetDpiForWindow(hwnd))
+    except Exception as error:
+        raise RuntimeError("Evidence capture requires actual window DPI") from error
+    if dpi <= 0:
+        raise RuntimeError("Evidence capture requires actual window DPI")
+    return dpi
+
+
 def build_capture_metadata(
     hwnd: int,
     width: int,
@@ -179,18 +190,9 @@ def build_capture_metadata(
     """Build capture provenance using raw pixels and actual client geometry."""
     client_rect = client_rect if client_rect is not None else _get_client_rect(hwnd)
     if dpi is None:
-        dpi = 96
-        get_dpi_for_window = getattr(ctypes.windll.user32, "GetDpiForWindow", None)
-        if get_dpi_for_window is not None:
-            try:
-                reported_dpi = int(get_dpi_for_window(hwnd))
-                if reported_dpi > 0:
-                    dpi = reported_dpi
-            except (OSError, ValueError):
-                pass
+        dpi = _get_window_dpi(hwnd)
     elif type(dpi) is not int or dpi <= 0:
         raise ValueError("Evidence capture requires a positive DPI")
-
     dpi_scale = dpi / 96
     return {
         "method": method,

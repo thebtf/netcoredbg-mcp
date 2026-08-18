@@ -194,7 +194,7 @@ def test_bridge_stealth_screenshot_returns_capture_provenance() -> None:
     assert "GetDpiForWindow(hwnd)" in command
     assert '["hwnd"] = hwnd.ToInt64()' in command
     assert '["client_rect"] = new JsonObject' in command
-    assert '["dpi"] = (int)dpi' in command
+    assert '["dpi"] = (int)snapshot.Dpi' in command
 
 
 def test_bridge_screenshot_falls_back_to_flash_focus_bitblt_when_blank() -> None:
@@ -204,12 +204,46 @@ def test_bridge_screenshot_falls_back_to_flash_focus_bitblt_when_blank() -> None
 
     assert "private const double BlankFrameVarianceThreshold = 0.01;" in command
     assert "private static bool IsBlankFrame(Bitmap bitmap)" in command
-    assert "CaptureWithFlashFocusBitBlt(hwnd, width, height)" in command
+    assert "CaptureWithFlashFocusBitBlt(hwnd)" in command
     assert "GetForegroundWindow()" in command
     assert "SetForegroundWindow(hwnd)" in command
     assert "BitBlt(" in command
     assert 'result["fallback"] = "flash-focus";' in command
     assert "SetForegroundWindow(savedForeground)" in command
+
+
+def test_bridge_valid_printwindow_provenance_failure_cannot_flash_focus() -> None:
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCommands.cs").read_text(
+        encoding="utf-8"
+    )
+
+    capture_start = command.index("private static JsonObject CaptureWithPrintWindow")
+    stable_check = command.index("EnsureStableCaptureSnapshot", capture_start)
+    blank_check = command.index("if (!IsBlankFrame(printWindowBitmap))", capture_start)
+    fallback = command.index("CaptureWithFlashFocusBitBlt", capture_start)
+
+    assert "if (printWindowBitmap is not null)" in command[capture_start:stable_check]
+    assert stable_check < blank_check < fallback
+
+
+def test_bridge_printwindow_rejects_mismatched_capture_snapshots() -> None:
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCommands.cs").read_text(
+        encoding="utf-8"
+    )
+
+    assert "var printWindowBefore = ReadCaptureSnapshot(hwnd);" in command
+    assert "var printWindowAfter = ReadCaptureSnapshot(hwnd);" in command
+    assert "EnsureStableCaptureSnapshot(printWindowBefore, printWindowAfter);" in command
+
+
+def test_bridge_bitblt_rejects_mismatched_capture_snapshots() -> None:
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCommands.cs").read_text(
+        encoding="utf-8"
+    )
+
+    assert "var bitBltBefore = ReadCaptureSnapshot(hwnd);" in command
+    assert "var bitBltAfter = ReadCaptureSnapshot(hwnd);" in command
+    assert "EnsureStableCaptureSnapshot(bitBltBefore, bitBltAfter);" in command
 
 
 def test_bridge_connect_stores_stealth_state_and_exposes_get_state() -> None:
