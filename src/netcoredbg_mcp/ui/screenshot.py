@@ -144,31 +144,95 @@ def get_hwnd_for_pid(pid: int) -> int | None:
     return result_hwnd
 
 
-def capture_window(hwnd: int) -> tuple[bytes, int, int]:
-    """Capture a window screenshot via Win32 PrintWindow.
+def _get_client_rect(hwnd: int) -> dict[str, int]:
+    """Read validated client geometry from the captured window."""
+    rect = wintypes.RECT()
+    try:
+        captured = ctypes.windll.user32.GetClientRect(hwnd, ctypes.byref(rect))
+    except (AttributeError, OSError) as error:
+        raise RuntimeError("Evidence capture requires actual client geometry") from error
 
-    Works even if the window is partially obscured by other windows.
+    client_rect = {
+        "left": int(rect.left),
+        "top": int(rect.top),
+        "right": int(rect.right),
+        "bottom": int(rect.bottom),
+    }
+    if (
+        not captured
+        or client_rect["right"] <= client_rect["left"]
+        or client_rect["bottom"] <= client_rect["top"]
+    ):
+        raise RuntimeError("Evidence capture requires actual client geometry")
+    return client_rect
 
-    Args:
-        hwnd: Window handle (HWND)
 
-    Returns:
-        Tuple of (png_bytes, width, height)
+def build_capture_metadata(
+    hwnd: int,
+    width: int,
+    height: int,
+    method: str,
+    *,
+    client_rect: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    """Build capture provenance using raw pixels and actual client geometry."""
+    client_rect = client_rect if client_rect is not None else _get_client_rect(hwnd)
+    dpi = 96
+    get_dpi_for_window = getattr(ctypes.windll.user32, "GetDpiForWindow", None)
+    if get_dpi_for_window is not None:
+        try:
+            reported_dpi = int(get_dpi_for_window(hwnd))
+            if reported_dpi > 0:
+                dpi = reported_dpi
+        except (OSError, ValueError):
+            pass
 
-    Raises:
-        RuntimeError: If capture fails
-    """
+    dpi_scale = dpi / 96
+    return {
+        "method": method,
+        "hwnd": hwnd,
+        "client_rect": client_rect,
+        "dpi": dpi,
+        "dpi_scale": dpi_scale,
+        "physical_width": width,
+        "physical_height": height,
+        "logical_width": width / dpi_scale,
+        "logical_height": height / dpi_scale,
+    }
+
+
+def crop_png(image_data: bytes, x: int, y: int, width: int, height: int) -> tuple[bytes, int, int]:
+    """Crop a rectangle from raw PNG data without resizing or lossy conversion."""
+    from PIL import Image
+
+    with Image.open(io.BytesIO(image_data)) as image:
+        if (
+            x < 0
+            or y < 0
+            or width <= 0
+            or height <= 0
+            or x + width > image.width
+            or y + height > image.height
+        ):
+            raise ValueError("Crop rectangle must be positive and within image bounds")
+
+        cropped = image.crop((x, y, x + width, y + height))
+        try:
+            buffer = io.BytesIO()
+            cropped.save(buffer, format="PNG", optimize=True)
+            return buffer.getvalue(), width, height
+        finally:
+            cropped.close()
+
+
+def capture_window_evidence(hwnd: int) -> tuple[bytes, int, int, dict[str, Any]]:
+    """Capture a window and include the exact capture provenance."""
     user32 = ctypes.windll.user32
     gdi32 = ctypes.windll.gdi32
 
-    # Get window dimensions (client area for content, full rect for chrome)
-    rect = wintypes.RECT()
-    user32.GetClientRect(hwnd, ctypes.byref(rect))
-    width = rect.right - rect.left
-    height = rect.bottom - rect.top
-
-    if width <= 0 or height <= 0:
-        raise RuntimeError(f"Window has invalid dimensions: {width}x{height}")
+    client_rect = _get_client_rect(hwnd)
+    width = client_rect["right"] - client_rect["left"]
+    height = client_rect["bottom"] - client_rect["top"]
 
     # Create compatible DC and bitmap
     wdc = user32.GetDC(hwnd)
@@ -191,10 +255,12 @@ def capture_window(hwnd: int) -> tuple[bytes, int, int]:
                 try:
                     # PrintWindow with PW_RENDERFULLCONTENT for best results
                     pw_renderfullcontent = 0x00000002
-                    success = user32.PrintWindow(hwnd, cdc, pw_renderfullcontent)
-                    if not success:
+                    if user32.PrintWindow(hwnd, cdc, pw_renderfullcontent):
+                        method = "PrintWindow"
+                    else:
                         # Fallback: try BitBlt
                         gdi32.BitBlt(cdc, 0, 0, width, height, wdc, 0, 0, 0x00CC0020)
+                        method = "BitBlt"
 
                     # Extract bitmap bits
                     from PIL import Image
@@ -226,7 +292,14 @@ def capture_window(hwnd: int) -> tuple[bytes, int, int]:
                     # Encode to PNG
                     png_buffer = io.BytesIO()
                     image.save(png_buffer, format="PNG", optimize=True)
-                    return png_buffer.getvalue(), width, height
+                    return (
+                        png_buffer.getvalue(),
+                        width,
+                        height,
+                        build_capture_metadata(
+                            hwnd, width, height, method, client_rect=client_rect
+                        ),
+                    )
 
                 finally:
                     # Always deselect before DeleteObject to prevent GDI leak
@@ -238,6 +311,12 @@ def capture_window(hwnd: int) -> tuple[bytes, int, int]:
             gdi32.DeleteDC(cdc)
     finally:
         user32.ReleaseDC(hwnd, wdc)
+
+
+def capture_window(hwnd: int) -> tuple[bytes, int, int]:
+    """Capture a window screenshot via Win32 while preserving the legacy tuple."""
+    png_bytes, width, height, _metadata = capture_window_evidence(hwnd)
+    return png_bytes, width, height
 
 
 def _create_bitmapinfo(width: int, height: int) -> ctypes.Structure:

@@ -64,6 +64,62 @@ async def test_ui_take_screenshot_rejects_probable_black_without_foreground_muta
     assert "ui_bring_to_front" in response["data"]["next_step"]
 
 
+@pytest.mark.asyncio
+async def test_ui_take_screenshot_rejects_black_evidence_before_persistence(
+    capturing_mcp,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    black_png = _png((0, 0, 0))
+    saved_names: list[str] = []
+
+    def save_screenshot(_sid: str, data: bytes, name: str):
+        saved_names.append(name)
+        path = tmp_path / name
+        path.write_bytes(data)
+        return path
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.screenshot.get_hwnd_for_pid", lambda _pid: 123)
+    monkeypatch.setattr(
+        "netcoredbg_mcp.ui.screenshot.capture_window_evidence",
+        lambda _hwnd: (
+            black_png,
+            64,
+            64,
+            {
+                "method": "PrintWindow",
+                "hwnd": 123,
+                "client_rect": {"left": 0, "top": 0, "right": 64, "bottom": 64},
+                "dpi": 96,
+                "dpi_scale": 1.0,
+                "physical_width": 64,
+                "physical_height": 64,
+                "logical_width": 64.0,
+                "logical_height": 64.0,
+            },
+        ),
+    )
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+        session_id="evidence-session",
+        temp_manager=SimpleNamespace(save_screenshot=save_screenshot),
+    )
+    register_ui_tools(capturing_mcp, session, check_session_access=lambda _ctx: None)
+
+    response = await capturing_mcp.tools["ui_take_screenshot"](
+        SimpleNamespace(), evidence=True, format="png"
+    )
+
+    assert response["classification"] == "PROBABLE_BLACK_FRAME"
+    assert saved_names == []
+    assert list(tmp_path.iterdir()) == []
+
+
 @pytest.mark.parametrize(
     "bridge_result",
     [
@@ -283,7 +339,9 @@ async def test_ui_bring_to_front_supports_pywinauto_fallback(
     assert restore_calls == [123]
 
 
-def test_capture_window_decodes_top_down_dib_without_vertical_flip(monkeypatch) -> None:
+def test_capture_window_evidence_decodes_top_down_dib_and_preserves_legacy_tuple(
+    monkeypatch,
+) -> None:
     from netcoredbg_mcp.ui import screenshot
 
     width = 2
@@ -345,7 +403,7 @@ def test_capture_window_decodes_top_down_dib_without_vertical_flip(monkeypatch) 
         raising=False,
     )
 
-    png_bytes, captured_width, captured_height = screenshot.capture_window(123)
+    png_bytes, captured_width, captured_height, metadata = screenshot.capture_window_evidence(123)
 
     image = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
     assert (captured_width, captured_height) == (width, height)
@@ -353,3 +411,184 @@ def test_capture_window_decodes_top_down_dib_without_vertical_flip(monkeypatch) 
     assert image.getpixel((1, 0)) == (0, 255, 0, 255)
     assert image.getpixel((0, 1)) == (0, 0, 255, 255)
     assert image.getpixel((1, 1)) == (255, 255, 255, 255)
+    assert metadata == {
+        "method": "PrintWindow",
+        "hwnd": 123,
+        "client_rect": {"left": 0, "top": 0, "right": 2, "bottom": 2},
+        "dpi": 96,
+        "dpi_scale": 1.0,
+        "physical_width": 2,
+        "physical_height": 2,
+        "logical_width": 2.0,
+        "logical_height": 2.0,
+    }
+
+    legacy_capture = screenshot.capture_window(123)
+    assert len(legacy_capture) == 3
+    assert legacy_capture[1:] == (width, height)
+
+
+def test_build_capture_metadata_uses_actual_client_rect_and_window_dpi_scaling(monkeypatch) -> None:
+    from netcoredbg_mcp.ui import screenshot
+
+    class FakeUser32:
+        def GetClientRect(self, _hwnd, rect_ptr):  # noqa: N802 - Win32 API shape
+            rect = rect_ptr._obj
+            rect.left = 0
+            rect.top = 0
+            rect.right = 180
+            rect.bottom = 90
+            return True
+
+        def GetDpiForWindow(self, _hwnd):  # noqa: N802 - Win32 API shape
+            return 144
+
+    monkeypatch.setattr(
+        screenshot.ctypes,
+        "windll",
+        SimpleNamespace(user32=FakeUser32()),
+        raising=False,
+    )
+
+    metadata = screenshot.build_capture_metadata(123, 300, 150, "PrintWindow")
+
+    assert metadata["dpi"] == 144
+    assert metadata["dpi_scale"] == 1.5
+    assert metadata["client_rect"] == {"left": 0, "top": 0, "right": 180, "bottom": 90}
+    assert metadata["physical_width"] == 300
+    assert metadata["physical_height"] == 150
+    assert metadata["logical_width"] == 200.0
+    assert metadata["logical_height"] == 100.0
+
+
+@pytest.mark.parametrize(
+    ("result", "right", "bottom"),
+    [(False, 10, 10), (True, 0, 10), (True, 10, 0)],
+)
+def test_build_capture_metadata_rejects_unavailable_or_invalid_client_geometry(
+    monkeypatch,
+    result: bool,
+    right: int,
+    bottom: int,
+) -> None:
+    from netcoredbg_mcp.ui import screenshot
+
+    class FakeUser32:
+        def GetClientRect(self, _hwnd, rect_ptr):  # noqa: N802 - Win32 API shape
+            rect = rect_ptr._obj
+            rect.right = right
+            rect.bottom = bottom
+            return result
+
+    monkeypatch.setattr(
+        screenshot.ctypes,
+        "windll",
+        SimpleNamespace(user32=FakeUser32()),
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="actual client geometry"):
+        screenshot.build_capture_metadata(123, 300, 150, "PrintWindow")
+
+
+def test_capture_window_evidence_reports_bitblt_fallback(monkeypatch) -> None:
+    from netcoredbg_mcp.ui import screenshot
+
+    class FakeUser32:
+        def GetClientRect(self, _hwnd, rect_ptr):  # noqa: N802 - Win32 API shape
+            rect = rect_ptr._obj
+            rect.right = 1
+            rect.bottom = 1
+            return True
+
+        def GetDC(self, _hwnd):  # noqa: N802 - Win32 API shape
+            return 100
+
+        def PrintWindow(self, _hwnd, _hdc, _flags):  # noqa: N802 - Win32 API shape
+            return False
+
+        def ReleaseDC(self, _hwnd, _hdc):  # noqa: N802 - Win32 API shape
+            return 1
+
+    class FakeGdi32:
+        bitblt_calls = 0
+
+        def CreateCompatibleDC(self, _wdc):  # noqa: N802 - Win32 API shape
+            return 200
+
+        def CreateCompatibleBitmap(self, _wdc, _width, _height):  # noqa: N802 - Win32 API shape
+            return 300
+
+        def SelectObject(self, _cdc, _bitmap):  # noqa: N802 - Win32 API shape
+            return 400
+
+        def BitBlt(self, *_args):  # noqa: N802 - Win32 API shape
+            self.bitblt_calls += 1
+            return True
+
+        def GetDIBits(self, _cdc, _bitmap, _start, _lines, buffer, _bmi, _usage):  # noqa: N802 - Win32 API shape
+            ctypes.memmove(buffer, _bgra(255, 0, 0), 4)
+            return 1
+
+        def DeleteObject(self, _bitmap):  # noqa: N802 - Win32 API shape
+            return True
+
+        def DeleteDC(self, _cdc):  # noqa: N802 - Win32 API shape
+            return True
+
+    fake_gdi32 = FakeGdi32()
+    monkeypatch.setattr(
+        screenshot.ctypes,
+        "windll",
+        SimpleNamespace(user32=FakeUser32(), gdi32=fake_gdi32),
+        raising=False,
+    )
+
+    _png_bytes, width, height, metadata = screenshot.capture_window_evidence(123)
+
+    assert (width, height) == (1, 1)
+    assert fake_gdi32.bitblt_calls == 1
+    assert metadata["method"] == "BitBlt"
+
+
+def test_crop_png_preserves_selected_pixels_and_dimensions() -> None:
+    from netcoredbg_mcp.ui.screenshot import crop_png
+
+    source = Image.new("RGB", (3, 2))
+    source.putdata(
+        [
+            (255, 0, 0),
+            (0, 255, 0),
+            (0, 0, 255),
+            (255, 255, 0),
+            (255, 0, 255),
+            (0, 255, 255),
+        ]
+    )
+    buffer = io.BytesIO()
+    source.save(buffer, format="PNG")
+
+    cropped_bytes, width, height = crop_png(buffer.getvalue(), 1, 0, 2, 2)
+
+    cropped = Image.open(io.BytesIO(cropped_bytes))
+    assert (width, height) == (2, 2)
+    assert cropped.size == (2, 2)
+    assert [cropped.getpixel((x, y)) for y in range(2) for x in range(2)] == [
+        (0, 255, 0),
+        (0, 0, 255),
+        (255, 0, 255),
+        (0, 255, 255),
+    ]
+
+
+@pytest.mark.parametrize(
+    "rectangle",
+    [(-1, 0, 1, 1), (0, 0, 0, 1), (0, 0, 1, 0), (2, 0, 2, 1), (0, 1, 1, 2)],
+)
+def test_crop_png_rejects_invalid_rectangles(rectangle: tuple[int, int, int, int]) -> None:
+    from netcoredbg_mcp.ui.screenshot import crop_png
+
+    with pytest.raises(
+        ValueError, match="^Crop rectangle must be positive and within image bounds$"
+    ):
+        crop_png(_png((255, 0, 0), (2, 2)), *rectangle)

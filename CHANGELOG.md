@@ -6,13 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.23.6] - 2026-08-18
+
+### Added
+- `ui_take_screenshot` retains its default navigation preview and adds an
+  optional session-scoped lossless evidence mode with the original PNG,
+  SHA-256, capture/DPI/geometry metadata, and an optional raw-derived crop.
+  Inline preview is navigation-only and is not acceptance evidence.
+
+### Compatibility
+- The public catalog remains 135 tools, 8 prompts, and 4 resources. No DOM/WPF
+  metrics, pixel diff, model calibration, or operator sign-off are added.
+
 ## [0.23.5] - 2026-08-17
 
 ### Fixed
 - `ui_key_sequence` now fails closed unless the native FlaUI bridge verifies
   both foreground ownership and focus for the selector-scoped target before
   sending keys, preventing a false successful delivery claim.
-
 ## [0.23.4] - 2026-08-17
 
 ### Fixed

@@ -14,7 +14,7 @@ set breakpoints, step through code, inspect variables, evaluate expressions, rea
 debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
 and Avalonia windows without opening an IDE.
 
-**135 MCP tools · 8 prompts · 4 resources · 2106 collected tests · release v0.23.5**
+**135 MCP tools · 8 prompts · 4 resources · 2106 collected tests · release v0.23.6**
 
 ## Quick Links
 
@@ -23,12 +23,14 @@ and Avalonia windows without opening an IDE.
 - **Reference:** [Available Tools](#available-tools) · [Resources](#mcp-resources) · [Prompts](#mcp-prompts) · [Architecture](#architecture-overview)
 - **Project:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## What's New in v0.23.5
+## What's New in v0.23.6
 
-- **Verified WPF scoped-key delivery** — `ui_key_sequence` now returns `PASS`
-  only after the native FlaUI bridge verifies both foreground ownership and
-  focus on the requested target before sending the sequence. Missing focus
-  proof fails closed instead of claiming key delivery.
+- **Lossless screenshot evidence (opt-in)** — `ui_take_screenshot` keeps its
+  default navigation preview and adds a session-scoped evidence mode with the
+  original PNG, SHA-256, capture/DPI/geometry metadata, and an optional
+  raw-derived crop. The inline preview remains navigation-only; it is not
+  acceptance evidence. This release adds no DOM/WPF metrics, pixel diff, model
+  calibration, or operator sign-off.
 
 ## Highlights
 

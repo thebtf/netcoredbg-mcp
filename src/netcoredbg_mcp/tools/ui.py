@@ -1397,53 +1397,87 @@ def register_ui_tools(
         ctx: Context,
         max_width: int = 1568,
         format: str = "webp",
+        evidence: bool = False,
+        crop_x: int | None = None,
+        crop_y: int | None = None,
+        crop_width: int | None = None,
+        crop_height: int | None = None,
     ) -> Any:
         """Take a screenshot of the debugged application's window.
 
         Returns inline ImageContent (WebP at max_width resolution) directly
         to your vision pipeline, plus TextContent with metadata and HD file path.
 
-        Use this to see the actual UI state — what the user would see.
-
-        Useful for:
-        - Verifying UI rendered correctly after a debug step
-        - Finding elements that don't appear in the automation tree
-        - Understanding visual layout and spacing
-        - Debugging rendering issues
-
-        Note: If app is STOPPED at breakpoint, resume with continue_execution() first.
+        Set evidence to retain the raw lossless PNG for the active debug session.
+        Crop coordinates require evidence mode and are applied to that raw PNG.
 
         Args:
             max_width: Maximum image width. Default 1280; max useful is 1568.
             format: Image format: "webp" (smallest), "jpeg", "png"
+            evidence: Persist the raw PNG as session-scoped lossless evidence.
+            crop_x: Raw-image crop origin X; requires all crop arguments.
+            crop_y: Raw-image crop origin Y; requires all crop arguments.
+            crop_width: Raw-image crop width; requires all crop arguments.
+            crop_height: Raw-image crop height; requires all crop arguments.
         """
         valid_formats = {"webp", "jpeg", "png"}
+        crop_values = (crop_x, crop_y, crop_width, crop_height)
+        crop_requested = any(value is not None for value in crop_values)
+        crop_rect: tuple[int, int, int, int] | None = None
 
         try:
             import base64
+            import hashlib
             import json
             import time as _time
+            import uuid
 
             from mcp.types import ImageContent, TextContent
 
             from ..ui.screenshot import (
                 _process_screenshot,
                 analyze_screenshot_frame,
+                build_capture_metadata,
                 capture_window,
+                capture_window_evidence,
                 create_preview,
+                crop_png,
                 get_hwnd_for_pid,
             )
+
+            if crop_requested and not evidence:
+                raise ValueError("crop arguments require evidence=True")
+            if crop_requested and not all(value is not None for value in crop_values):
+                raise ValueError(
+                    "crop_x, crop_y, crop_width, and crop_height must be supplied together"
+                )
+            if crop_requested:
+                assert crop_x is not None
+                assert crop_y is not None
+                assert crop_width is not None
+                assert crop_height is not None
+                crop_rect = (crop_x, crop_y, crop_width, crop_height)
 
             # Validate format against allow-list
             safe_format = format if format in valid_formats else "webp"
             bridge_screenshot: dict[str, Any] | None = None
+            capture_metadata: dict[str, Any] | None = None
             foreground_mutation_attempted = False
-            png_bytes: bytes
+            png_bytes = b""
+            raw_width = 0
+            raw_height = 0
 
             pid = session.state.process_id
             if not pid:
                 return build_error_response(
                     "No debug process. Start debugging first.", state=session.state.state
+                )
+
+            sid = getattr(session, "session_id", None)
+            temp_manager = getattr(session, "temp_manager", None)
+            if evidence and (not sid or temp_manager is None):
+                raise ValueError(
+                    "Evidence capture requires an active session with temporary storage"
                 )
 
             loop = asyncio.get_running_loop()
@@ -1463,12 +1497,36 @@ def register_ui_tools(
                             "screenshot: bridge returned invalid screenshot response; "
                             "falling back to HWND capture"
                         )
-                        bridge_screenshot = None
                     else:
                         bridge_screenshot = bridge_result
                         png_bytes = base64.b64decode(bridge_result["base64"])
-                else:
-                    bridge_screenshot = None
+                        bridge_width = bridge_result.get("width")
+                        bridge_height = bridge_result.get("height")
+                        if type(bridge_width) is not int or type(bridge_height) is not int:
+                            raise ValueError(
+                                "Bridge screenshot response requires integer width and height"
+                            )
+                        raw_width = bridge_width
+                        raw_height = bridge_height
+                        if evidence:
+                            method = bridge_result.get("method")
+                            if not isinstance(method, str) or not method:
+                                raise ValueError(
+                                    "Bridge screenshot response requires capture method "
+                                    "for evidence"
+                                )
+                            hwnd = get_hwnd_for_pid(pid)
+                            if not hwnd:
+                                raise ValueError(
+                                    "Evidence capture requires a visible window handle"
+                                )
+                            evidence_hwnd: int = hwnd
+                            capture_metadata = await loop.run_in_executor(
+                                None,
+                                lambda: build_capture_metadata(
+                                    evidence_hwnd, raw_width, raw_height, method
+                                ),
+                            )
 
             if bridge_screenshot is None:
                 hwnd = get_hwnd_for_pid(pid)
@@ -1479,10 +1537,34 @@ def register_ui_tools(
                         state=session.state.state,
                     )
 
-                png_bytes, _, _ = await loop.run_in_executor(
-                    None,
-                    lambda: capture_window(hwnd),
-                )
+                if evidence:
+                    png_bytes, raw_width, raw_height, capture_metadata = await loop.run_in_executor(
+                        None,
+                        lambda: capture_window_evidence(hwnd),
+                    )
+                else:
+                    png_bytes, raw_width, raw_height = await loop.run_in_executor(
+                        None,
+                        lambda: capture_window(hwnd),
+                    )
+
+            if evidence and (
+                raw_width <= 0
+                or raw_height <= 0
+                or not isinstance(capture_metadata, dict)
+                or not {
+                    "method",
+                    "hwnd",
+                    "client_rect",
+                    "dpi",
+                    "dpi_scale",
+                    "physical_width",
+                    "physical_height",
+                    "logical_width",
+                    "logical_height",
+                }.issubset(capture_metadata)
+            ):
+                raise ValueError("Evidence capture requires complete capture metadata")
 
             frame_analysis = await loop.run_in_executor(
                 None,
@@ -1495,6 +1577,18 @@ def register_ui_tools(
                     foreground_mutation_attempted=foreground_mutation_attempted,
                 )
 
+            raw_path = None
+            crop_path = None
+            crop_bytes = None
+            crop_size: tuple[int, int] | None = None
+            if evidence and crop_rect is not None:
+                crop_left, crop_top, crop_w, crop_h = crop_rect
+                crop_bytes, cropped_width, cropped_height = await loop.run_in_executor(
+                    None,
+                    lambda: crop_png(png_bytes, crop_left, crop_top, crop_w, crop_h),
+                )
+                crop_size = (cropped_width, cropped_height)
+
             # Create HD version in requested format
             hd_bytes, hd_w, hd_h, _ = await loop.run_in_executor(
                 None,
@@ -1506,13 +1600,35 @@ def register_ui_tools(
                 None,
                 lambda: create_preview(png_bytes, max_width=max_width, quality=80),
             )
+            if evidence:
+                assert sid is not None
+                assert temp_manager is not None
+                capture_id = uuid.uuid4().hex
+                raw_path = await loop.run_in_executor(
+                    None,
+                    lambda: temp_manager.save_screenshot(
+                        sid, png_bytes, f"evidence_{capture_id}.png"
+                    ),
+                )
+                if raw_path is None:
+                    raise ValueError("Failed to persist raw screenshot evidence")
+                if crop_bytes is not None:
+                    crop_path = await loop.run_in_executor(
+                        None,
+                        lambda: temp_manager.save_screenshot(
+                            sid, crop_bytes, f"evidence_crop_{capture_id}.png"
+                        ),
+                    )
+                    if crop_path is None:
+                        await loop.run_in_executor(None, lambda: raw_path.unlink(missing_ok=True))
+                        raise ValueError("Failed to persist cropped screenshot evidence")
 
-            # Save HD to session temp dir
             metadata: dict[str, Any] = {
                 "width": hd_w,
                 "height": hd_h,
                 "preview_width": preview_w,
                 "format": safe_format,
+                "evidence_grade": "lossless_raster" if evidence else "preview_only",
                 "state": session.state.state.value
                 if hasattr(session.state.state, "value")
                 else str(session.state.state),
@@ -1531,11 +1647,37 @@ def register_ui_tools(
                 ):
                     if key in bridge_screenshot:
                         metadata[key] = bridge_screenshot[key]
+            if evidence:
+                metadata.update(
+                    {
+                        "retention": "session_temp_until_stop",
+                        "raw_path": str(raw_path),
+                        "raw_sha256": hashlib.sha256(png_bytes).hexdigest(),
+                        "raw_mime": "image/png",
+                        "raw_width": raw_width,
+                        "raw_height": raw_height,
+                        "capture_metadata": capture_metadata,
+                    }
+                )
+                if crop_bytes is not None and crop_path is not None and crop_size is not None:
+                    metadata.update(
+                        {
+                            "crop_path": str(crop_path),
+                            "crop_sha256": hashlib.sha256(crop_bytes).hexdigest(),
+                            "crop_rect": {
+                                "x": crop_x,
+                                "y": crop_y,
+                                "width": crop_width,
+                                "height": crop_height,
+                            },
+                            "crop_width": crop_size[0],
+                            "crop_height": crop_size[1],
+                        }
+                    )
 
-            sid = getattr(session, "session_id", None)
-            if sid:
+            if sid and temp_manager is not None:
                 ts = int(_time.time() * 1000) & 0xFFFFFFFF
-                hd_path = session.temp_manager.save_screenshot(
+                hd_path = temp_manager.save_screenshot(
                     sid,
                     hd_bytes,
                     f"screenshot_{ts:08x}.{safe_format}",
@@ -1543,7 +1685,7 @@ def register_ui_tools(
                 if hd_path:
                     metadata["hd_path"] = str(hd_path)
 
-            content: list = [
+            return [
                 ImageContent(
                     type="image",
                     data=base64.b64encode(preview_bytes).decode("ascii"),
@@ -1554,7 +1696,6 @@ def register_ui_tools(
                     text=json.dumps(metadata),
                 ),
             ]
-            return content
         except Exception as e:
             return build_error_response(str(e), state=session.state.state)
 
