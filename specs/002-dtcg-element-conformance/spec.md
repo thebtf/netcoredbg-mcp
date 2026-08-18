@@ -68,7 +68,7 @@ First-milestone limits:
 - maximum inline token document: 262,144 bytes after the canonical UTF-8 serialization defined by FR-009;
 - no additional input properties.
 
-The input schema is closed: root keys are exactly `debugSessionId`, `selector`, `tokens`, and `assertions`; `selector` contains only required `automationId`; every assertion contains only required `property` and `token`. Any additional, missing, empty, wrong-typed, over-limit, or non-finite value is `INVALID_TOOL_ARGUMENTS`.
+The input schema is closed: root keys are exactly `debugSessionId`, `selector`, `tokens`, and `assertions`; `selector` contains only required `automationId`; every assertion contains only required `property` and `token`, and `property` is exactly `width` or `height`. Any other property or additional, missing, empty, wrong-typed, over-limit, or non-finite value is `INVALID_TOOL_ARGUMENTS`.
 
 ### Complete success result
 
@@ -206,7 +206,7 @@ Every matrix row has an independent RED/GREEN classification test. Type resoluti
 
 - **AC-001:** A real candidate process advertises `check_element_tokens` after the existing three tools without changing their schemas.
 - **AC-002:** A controlled live WPF fixture returns PASS/FAIL under `wpf-dip-quantized`; cases cover DPI 120 (125%), DPI 144 (150%), exact integral values, fractional normalized values inside half-pixel tolerance, and values outside tolerance.
-- **AC-003:** Missing/ambiguous element, missing/remote/unknown-locality process event, non-Windows host, unavailable bridge, unknown framework, absent/out-of-range DPI, unsupported unit/property, invalid DTCG input, and valid-but-unsupported DTCG features return their exact typed outcomes. UNOBSERVABLE pre-observation cases assert the exact `element: null` example shape.
+- **AC-003:** Missing/ambiguous element, missing/remote/unknown-locality process event, non-Windows host, unavailable bridge, unknown framework, absent/out-of-range DPI, invalid input property, unsupported DTCG unit, invalid DTCG input, and valid-but-unsupported DTCG features return their exact typed outcomes. A property other than width/height is `INVALID_TOOL_ARGUMENTS`; valid DTCG features outside the profile, including `rem`, are `DTCG_FEATURE_UNSUPPORTED`. UNOBSERVABLE pre-observation cases assert the exact `element: null` example shape.
 - **AC-004:** Alias resolution, inherited dimension type, unresolved alias, circular alias, non-finite number, wrong token type, `$extends`, and JSON Pointer `$ref` have RED/GREEN contract tests proving invalid versus unsupported classification.
 - **AC-005:** No Python source or Python public tool contract changes in the diff.
 - **AC-006:** The full existing stateless .NET suite remains green.
