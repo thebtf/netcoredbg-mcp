@@ -1,8 +1,8 @@
 # Native Scene Probe — Future Acceptance Playbook
 
-## Status: NOT EXECUTED
+## Status: M0-G0 EXECUTED; M0 AND M1 NOT EXECUTED
 
-This is a future acceptance playbook, not an execution receipt. The planning packet may be committed, reviewed, and merged without constituting T001 approval. The M0/M1 source files, test classes, WPF fixture, bridge mode, package changes, and registration described below do not exist in this documentation-only delivery. No command in this file has been run, and no product build, test, formatter, package restore, implementation PR, release, product publication, or public-route cutover is authorized now.
+The operator approved the exact merged contract bytes and M0-G0 T001–T007 have executed. The focused contract gate is GREEN at 39/39 after independent review corrections for RFC3339 date-time validation and immutable catalog-byte exposure. No native-scene primitive is registered or callable; M0/M1 observer, artifact, stability, atomicity, WPF fixture/probe, bridge, route, package, release, and publication work remains unexecuted.
 
 T001 operator approval authorizes only M0-G0 T002–T007. M0/M1 primitive implementation and acceptance remain blocked until T007 has produced GREEN M0-G0 contract/runtime-validator evidence:
 
@@ -29,12 +29,12 @@ Use the repository's existing focused-host pattern: `ModernMcpProcessDriver` sta
 
 ## 2. Planned focused commands
 
-The commands below are exact future commands. They are intentionally marked **NOT EXECUTED** because their named test classes are planned source paths in [plan.md](plan.md).
+The M0-G0 command below was executed after T001 approval. Later M0/M1 commands remain future commands and must not run before their dependency gates.
 
 ### M0-G0 — freeze and prove the wire
 
 ```powershell
-# NOT EXECUTED — run only after recorded operator approval and M0-G0 implementation.
+# EXECUTED after T001 approval — terminal result: 39 passed, 0 failed, 0 skipped.
 dotnet test host/NetCoreDbg.Mcp.Stateless.Tests/NetCoreDbg.Mcp.Stateless.Tests.csproj -c Debug --filter "FullyQualifiedName~NativeSceneSchemaParityTests|FullyQualifiedName~NativeSceneNegativeWireTests" -v minimal
 ```
 
