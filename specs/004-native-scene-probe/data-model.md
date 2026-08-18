@@ -36,7 +36,7 @@ retrieval authority.
 | Candidate provenance | `candidateProvenance`, `candidateSource`, `observerVersion` | same | Candidate source is an explicit verified launch/probe manifest; no source-control inference exists. |
 | Stability receipt | `stabilityReceipt`, `stabilityEvidence`, `conditionObservation` | `stabilityEvidence`, `conditionObservation` | A standalone receipt is evidence, never capture authorization. |
 | Atomicity evidence | `atomicityEvidence`, `inProcessAtomicity`, `uiaGuardedAtomicity`, `notApplicableAtomicity` | `atomicityEvidence`, `inProcessAtomicity`, `uiaGuardedAtomicity` | Equal revisions for a complete atomic scene are a runtime invariant in addition to structural validation. |
-| Capture results | `visualEvidenceCapture`, `elementSnapshotCapture`, `nativeSceneCapture`, `captureManifestBase`, `captureIssue` | `sceneArtifact` | Every element snapshot, every native-scene result branch that returns or commits evidence, and every persisted scene artifact requires capture-time `revalidatedByCapture: true`; a `COMPLETE` visual manifest structurally contains a lossless PNG descriptor and a `COMPLETE` native-scene manifest structurally contains an observed-facts native-scene JSON descriptor, while `PARTIAL`/`UNOBSERVABLE` captures may have no committed artifacts. |
+| Capture results | `visualEvidenceCapture`, `elementSnapshotCapture`, `nativeSceneCapture`, `captureManifestBase`, `captureIssue` | `sceneArtifact` | Every capture manifest and persisted scene artifact carries an immutable `sceneRequest` binding equal to the supplied request context. Every element snapshot, every native-scene result branch that returns or commits evidence, and every persisted scene artifact requires capture-time `revalidatedByCapture: true`; a `COMPLETE` visual manifest structurally contains a lossless PNG descriptor and a `COMPLETE` native-scene manifest structurally contains an observed-facts native-scene JSON descriptor, while `PARTIAL`/`UNOBSERVABLE` captures may have no committed artifacts. |
 | Typed failure | `toolError`, `artifactNotFoundError`, `errorCode` | — | `ARTIFACT_NOT_FOUND` has one fixed disclosure-free envelope; other error payloads contain no invented evidence or artifact bytes. |
 | Artifact capability/descriptor | `publicCapabilityId`, `artifactDescriptor`, `artifactRetention`, `captureArtifactChunk` | `publicCapabilityId` | Public artifact/capture/probe capabilities are base64url, 22–86 characters, CSPRNG-minted with at least 128 bits, session- and capture-bound, and non-enumerable. |
 | Scene record | — | `sceneArtifact`, `sceneGraph`, `sceneNode`, `geometry`, `relation` | Stored JSON contains observed facts, stated authority, and typed opaque adapter facts. |
@@ -172,6 +172,7 @@ is not a substitute for an artifact or capture capability. A successful or
 qualified capture returns a compact manifest rather than embedding PNG or scene
 bytes. The manifest has at most four immutable `artifactDescriptor` values and
 at most 256 typed `issues`.
+Every capture manifest structurally includes an immutable `sceneRequest` binding. Its closed request context must equal the supplied primitive request context before the manifest is returned or committed; Draft 7 validates the manifest member's shape, while that cross-document equality is a runtime binding invariant.
 
 Artifacts pass through this state machine:
 
@@ -224,12 +225,7 @@ structurally contains at least one descriptor whose `mediaType` is
 the schema requires the fields, authority, and committed scene descriptor but
 cannot compare two dynamic revisions.
 
-A `uia_guarded` traversal is independently timed. Matching window, client,
-DPI, and visual-tree-fingerprint guards yield `PARTIAL` with
-`ATOMICITY_UNPROVEN_UIA_GUARDED`; changed or unusable guards yield
-`UNOBSERVABLE`. It can never be `COMPLETE` for an atomic-scene claim. An
-element snapshot uses `not_applicable` atomicity and cannot claim a complete
-scene epoch.
+A `uia_guarded` traversal is independently timed. A `PARTIAL` result under that authority structurally requires all four window, client, DPI, and visual-tree-fingerprint guards to be `unchanged` and an `ATOMICITY_UNPROVEN_UIA_GUARDED` issue. A changed or unobservable guard yields `UNOBSERVABLE`, commits no scene artifact, and returns no scene-artifact descriptor. UIA-guarded traversal can never be `COMPLETE` for an atomic-scene claim. An element snapshot uses `not_applicable` atomicity and cannot claim a complete scene epoch.
 
 A persisted scene artifact has status `COMPLETE` or `PARTIAL` and therefore contains at least one observed graph node and root. An `UNOBSERVABLE` capture result commits no scene artifact and returns no scene-artifact descriptor; its uncertainty remains in the compact capture manifest.
 

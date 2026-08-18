@@ -1924,6 +1924,7 @@
         "captureId",
         "protocolVersion",
         "schemaVersion",
+        "sceneRequest",
         "capturedAt",
         "candidate",
         "stability",
@@ -1955,6 +1956,9 @@
         },
         "schemaVersion": {
           "$ref": "#/definitions/currentSchemaVersion"
+        },
+        "sceneRequest": {
+          "$ref": "#/definitions/sceneRequest"
         },
         "capturedAt": {
           "$ref": "#/definitions/dateTime"
@@ -2232,6 +2236,103 @@
               }
             }
           ]
+        },
+        {
+          "if": {
+            "required": [
+              "status",
+              "atomicity"
+            ],
+            "properties": {
+              "status": {
+                "enum": [
+                  "PARTIAL"
+                ]
+              },
+              "atomicity": {
+                "required": [
+                  "authority"
+                ],
+                "properties": {
+                  "authority": {
+                    "enum": [
+                      "uia_guarded"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "atomicity": {
+                "allOf": [
+                  {
+                    "$ref": "#/definitions/uiaGuardedAtomicity"
+                  },
+                  {
+                    "properties": {
+                      "guards": {
+                        "properties": {
+                          "window": {
+                            "properties": {
+                              "state": {
+                                "enum": [
+                                  "unchanged"
+                                ]
+                              }
+                            }
+                          },
+                          "client": {
+                            "properties": {
+                              "state": {
+                                "enum": [
+                                  "unchanged"
+                                ]
+                              }
+                            }
+                          },
+                          "dpi": {
+                            "properties": {
+                              "state": {
+                                "enum": [
+                                  "unchanged"
+                                ]
+                              }
+                            }
+                          },
+                          "visualTreeFingerprint": {
+                            "properties": {
+                              "state": {
+                                "enum": [
+                                  "unchanged"
+                                ]
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                ]
+              },
+              "issues": {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "code"
+                  ],
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "ATOMICITY_UNPROVEN_UIA_GUARDED"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       ]
     },

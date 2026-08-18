@@ -279,6 +279,50 @@
             "captureId": "capture_visual_case_00001",
             "protocolVersion": "native-scene-probe/1",
             "schemaVersion": "native-scene-probe.schema/1",
+            "sceneRequest": {
+              "storyId": "Button.Primary",
+              "sceneId": "Default",
+              "fixtureId": "Gallery",
+              "scope": {
+                "kind": "scene"
+              },
+              "appearance": "light",
+              "theme": "baseline",
+              "density": "regular",
+              "contrast": "standard",
+              "viewport": {
+                "policy": "exact",
+                "width": 1280,
+                "height": 720
+              },
+              "expectedDpiPolicy": {
+                "mode": "exact",
+                "x": 96,
+                "y": 96
+              },
+              "focusTarget": null,
+              "selectedState": null,
+              "currentState": null,
+              "scrollOffsets": null,
+              "animationPolicy": "finished",
+              "settlePolicy": {
+                "timeoutMs": 30000,
+                "sampleCount": 2,
+                "stableForMs": 100,
+                "requireDispatcherIdle": true,
+                "requireStableLayout": true,
+                "requireAnimationState": true,
+                "requireWindowGeometry": true,
+                "requireContextMaterialization": true,
+                "requireAsyncLoadSettled": true
+              },
+              "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "expectedCandidateIdentity": {
+                "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "assemblyVersion": "1.0.0",
+                "probeVersion": "1.0.0"
+              }
+            },
             "capturedAt": "2026-08-18T00:00:00Z",
             "candidate": {
               "processId": 4242,
@@ -334,6 +378,72 @@
           "expected": {
             "classification": "schema_rejection",
             "reason": "a COMPLETE visual capture requires an image/png lossless_visual descriptor"
+          }
+        },
+        {
+          "name": "capture_manifest_without_scene_request",
+          "responseSchema": "#/definitions/visualEvidenceCapture",
+          "response": {
+            "kind": "visual_evidence_capture",
+            "status": "PARTIAL",
+            "captureId": "capture_visual_case_00002",
+            "protocolVersion": "native-scene-probe/1",
+            "schemaVersion": "native-scene-probe.schema/1",
+            "capturedAt": "2026-08-18T00:00:00Z",
+            "candidate": {
+              "processId": 4242,
+              "processIdentity": "process_4242_start_1",
+              "hwnd": null,
+              "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "assemblyVersion": "1.0.0",
+              "probeVersion": "1.0.0",
+              "observerVersions": [],
+              "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "storyHash": null,
+              "capturedAt": "2026-08-18T00:00:00Z",
+              "source": {
+                "kind": "probe_manifest",
+                "verification": "verified"
+              }
+            },
+            "stability": {
+              "status": "STABLE",
+              "revalidatedByCapture": true,
+              "conditions": {
+                "dispatcherIdle": {
+                  "state": "met"
+                },
+                "stableLayout": {
+                  "state": "met"
+                },
+                "animationState": {
+                  "state": "met"
+                },
+                "windowGeometry": {
+                  "state": "met"
+                },
+                "contextMaterialization": {
+                  "state": "met"
+                },
+                "asyncLoadSettled": {
+                  "state": "met"
+                }
+              },
+              "settleDurationMs": 100,
+              "observedAt": "2026-08-18T00:00:00Z",
+              "sceneEpoch": 41,
+              "sequence": 1
+            },
+            "atomicity": {
+              "authority": "not_applicable"
+            },
+            "element": null,
+            "artifacts": [],
+            "issues": []
+          },
+          "expected": {
+            "classification": "schema_rejection",
+            "reason": "every capture manifest requires sceneRequest"
           }
         }
       ],
@@ -555,6 +665,50 @@
             "captureId": "capture_scene_case_000001",
             "protocolVersion": "native-scene-probe/1",
             "schemaVersion": "native-scene-probe.schema/1",
+            "sceneRequest": {
+              "storyId": "Button.Primary",
+              "sceneId": "Default",
+              "fixtureId": "Gallery",
+              "scope": {
+                "kind": "scene"
+              },
+              "appearance": "light",
+              "theme": "baseline",
+              "density": "regular",
+              "contrast": "standard",
+              "viewport": {
+                "policy": "exact",
+                "width": 1280,
+                "height": 720
+              },
+              "expectedDpiPolicy": {
+                "mode": "exact",
+                "x": 96,
+                "y": 96
+              },
+              "focusTarget": null,
+              "selectedState": null,
+              "currentState": null,
+              "scrollOffsets": null,
+              "animationPolicy": "finished",
+              "settlePolicy": {
+                "timeoutMs": 30000,
+                "sampleCount": 2,
+                "stableForMs": 100,
+                "requireDispatcherIdle": true,
+                "requireStableLayout": true,
+                "requireAnimationState": true,
+                "requireWindowGeometry": true,
+                "requireContextMaterialization": true,
+                "requireAsyncLoadSettled": true
+              },
+              "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "expectedCandidateIdentity": {
+                "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "assemblyVersion": "1.0.0",
+                "probeVersion": "1.0.0"
+              }
+            },
             "capturedAt": "2026-08-18T00:00:00Z",
             "candidate": {
               "processId": 4242,
@@ -753,6 +907,390 @@
           }
         }
       },
+      "schemaInvalidVariants": [
+        {
+          "name": "uia_partial_with_changed_guard",
+          "responseSchema": "#/definitions/nativeSceneCapture",
+          "response": {
+            "kind": "native_scene_capture",
+            "status": "PARTIAL",
+            "captureId": "capture_scene_case_000013",
+            "protocolVersion": "native-scene-probe/1",
+            "schemaVersion": "native-scene-probe.schema/1",
+            "sceneRequest": {
+              "storyId": "Button.Primary",
+              "sceneId": "Default",
+              "fixtureId": "Gallery",
+              "scope": {
+                "kind": "scene"
+              },
+              "appearance": "light",
+              "theme": "baseline",
+              "density": "regular",
+              "contrast": "standard",
+              "viewport": {
+                "policy": "exact",
+                "width": 1280,
+                "height": 720
+              },
+              "expectedDpiPolicy": {
+                "mode": "exact",
+                "x": 96,
+                "y": 96
+              },
+              "focusTarget": null,
+              "selectedState": null,
+              "currentState": null,
+              "scrollOffsets": null,
+              "animationPolicy": "finished",
+              "settlePolicy": {
+                "timeoutMs": 30000,
+                "sampleCount": 2,
+                "stableForMs": 100,
+                "requireDispatcherIdle": true,
+                "requireStableLayout": true,
+                "requireAnimationState": true,
+                "requireWindowGeometry": true,
+                "requireContextMaterialization": true,
+                "requireAsyncLoadSettled": true
+              },
+              "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "expectedCandidateIdentity": {
+                "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "assemblyVersion": "1.0.0",
+                "probeVersion": "1.0.0"
+              }
+            },
+            "capturedAt": "2026-08-18T00:00:00Z",
+            "candidate": {
+              "processId": 4242,
+              "processIdentity": "process_4242_start_1",
+              "hwnd": null,
+              "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "assemblyVersion": "1.0.0",
+              "probeVersion": "1.0.0",
+              "observerVersions": [],
+              "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "storyHash": null,
+              "capturedAt": "2026-08-18T00:00:00Z",
+              "source": {
+                "kind": "probe_manifest",
+                "verification": "verified"
+              }
+            },
+            "stability": {
+              "status": "STABLE",
+              "revalidatedByCapture": true,
+              "conditions": {
+                "dispatcherIdle": {
+                  "state": "met"
+                },
+                "stableLayout": {
+                  "state": "met"
+                },
+                "animationState": {
+                  "state": "met"
+                },
+                "windowGeometry": {
+                  "state": "met"
+                },
+                "contextMaterialization": {
+                  "state": "met"
+                },
+                "asyncLoadSettled": {
+                  "state": "met"
+                }
+              },
+              "settleDurationMs": 100,
+              "observedAt": "2026-08-18T00:00:00Z",
+              "sceneEpoch": 41,
+              "sequence": 1
+            },
+            "atomicity": {
+              "authority": "uia_guarded",
+              "guards": {
+                "window": {
+                  "state": "changed"
+                },
+                "client": {
+                  "state": "unchanged"
+                },
+                "dpi": {
+                  "state": "unchanged"
+                },
+                "visualTreeFingerprint": {
+                  "state": "unchanged"
+                }
+              }
+            },
+            "element": null,
+            "artifacts": [],
+            "issues": [
+              {
+                "code": "ATOMICITY_UNPROVEN_UIA_GUARDED",
+                "message": "UIA guarded traversal cannot prove atomicity."
+              }
+            ]
+          },
+          "expected": {
+            "classification": "schema_rejection",
+            "reason": "a UIA-guarded PARTIAL result requires every guard to be unchanged"
+          }
+        },
+        {
+          "name": "uia_partial_with_unobservable_guard",
+          "responseSchema": "#/definitions/nativeSceneCapture",
+          "response": {
+            "kind": "native_scene_capture",
+            "status": "PARTIAL",
+            "captureId": "capture_scene_case_000014",
+            "protocolVersion": "native-scene-probe/1",
+            "schemaVersion": "native-scene-probe.schema/1",
+            "sceneRequest": {
+              "storyId": "Button.Primary",
+              "sceneId": "Default",
+              "fixtureId": "Gallery",
+              "scope": {
+                "kind": "scene"
+              },
+              "appearance": "light",
+              "theme": "baseline",
+              "density": "regular",
+              "contrast": "standard",
+              "viewport": {
+                "policy": "exact",
+                "width": 1280,
+                "height": 720
+              },
+              "expectedDpiPolicy": {
+                "mode": "exact",
+                "x": 96,
+                "y": 96
+              },
+              "focusTarget": null,
+              "selectedState": null,
+              "currentState": null,
+              "scrollOffsets": null,
+              "animationPolicy": "finished",
+              "settlePolicy": {
+                "timeoutMs": 30000,
+                "sampleCount": 2,
+                "stableForMs": 100,
+                "requireDispatcherIdle": true,
+                "requireStableLayout": true,
+                "requireAnimationState": true,
+                "requireWindowGeometry": true,
+                "requireContextMaterialization": true,
+                "requireAsyncLoadSettled": true
+              },
+              "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "expectedCandidateIdentity": {
+                "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "assemblyVersion": "1.0.0",
+                "probeVersion": "1.0.0"
+              }
+            },
+            "capturedAt": "2026-08-18T00:00:00Z",
+            "candidate": {
+              "processId": 4242,
+              "processIdentity": "process_4242_start_1",
+              "hwnd": null,
+              "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "assemblyVersion": "1.0.0",
+              "probeVersion": "1.0.0",
+              "observerVersions": [],
+              "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "storyHash": null,
+              "capturedAt": "2026-08-18T00:00:00Z",
+              "source": {
+                "kind": "probe_manifest",
+                "verification": "verified"
+              }
+            },
+            "stability": {
+              "status": "STABLE",
+              "revalidatedByCapture": true,
+              "conditions": {
+                "dispatcherIdle": {
+                  "state": "met"
+                },
+                "stableLayout": {
+                  "state": "met"
+                },
+                "animationState": {
+                  "state": "met"
+                },
+                "windowGeometry": {
+                  "state": "met"
+                },
+                "contextMaterialization": {
+                  "state": "met"
+                },
+                "asyncLoadSettled": {
+                  "state": "met"
+                }
+              },
+              "settleDurationMs": 100,
+              "observedAt": "2026-08-18T00:00:00Z",
+              "sceneEpoch": 41,
+              "sequence": 1
+            },
+            "atomicity": {
+              "authority": "uia_guarded",
+              "guards": {
+                "window": {
+                  "state": "unchanged"
+                },
+                "client": {
+                  "state": "unchanged"
+                },
+                "dpi": {
+                  "state": "unobservable"
+                },
+                "visualTreeFingerprint": {
+                  "state": "unchanged"
+                }
+              }
+            },
+            "element": null,
+            "artifacts": [],
+            "issues": [
+              {
+                "code": "ATOMICITY_UNPROVEN_UIA_GUARDED",
+                "message": "UIA guarded traversal cannot prove atomicity."
+              }
+            ]
+          },
+          "expected": {
+            "classification": "schema_rejection",
+            "reason": "a UIA-guarded PARTIAL result requires every guard to be unchanged"
+          }
+        },
+        {
+          "name": "uia_partial_without_atomicity_issue",
+          "responseSchema": "#/definitions/nativeSceneCapture",
+          "response": {
+            "kind": "native_scene_capture",
+            "status": "PARTIAL",
+            "captureId": "capture_scene_case_000015",
+            "protocolVersion": "native-scene-probe/1",
+            "schemaVersion": "native-scene-probe.schema/1",
+            "sceneRequest": {
+              "storyId": "Button.Primary",
+              "sceneId": "Default",
+              "fixtureId": "Gallery",
+              "scope": {
+                "kind": "scene"
+              },
+              "appearance": "light",
+              "theme": "baseline",
+              "density": "regular",
+              "contrast": "standard",
+              "viewport": {
+                "policy": "exact",
+                "width": 1280,
+                "height": 720
+              },
+              "expectedDpiPolicy": {
+                "mode": "exact",
+                "x": 96,
+                "y": 96
+              },
+              "focusTarget": null,
+              "selectedState": null,
+              "currentState": null,
+              "scrollOffsets": null,
+              "animationPolicy": "finished",
+              "settlePolicy": {
+                "timeoutMs": 30000,
+                "sampleCount": 2,
+                "stableForMs": 100,
+                "requireDispatcherIdle": true,
+                "requireStableLayout": true,
+                "requireAnimationState": true,
+                "requireWindowGeometry": true,
+                "requireContextMaterialization": true,
+                "requireAsyncLoadSettled": true
+              },
+              "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "expectedCandidateIdentity": {
+                "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "assemblyVersion": "1.0.0",
+                "probeVersion": "1.0.0"
+              }
+            },
+            "capturedAt": "2026-08-18T00:00:00Z",
+            "candidate": {
+              "processId": 4242,
+              "processIdentity": "process_4242_start_1",
+              "hwnd": null,
+              "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "assemblyVersion": "1.0.0",
+              "probeVersion": "1.0.0",
+              "observerVersions": [],
+              "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "storyHash": null,
+              "capturedAt": "2026-08-18T00:00:00Z",
+              "source": {
+                "kind": "probe_manifest",
+                "verification": "verified"
+              }
+            },
+            "stability": {
+              "status": "STABLE",
+              "revalidatedByCapture": true,
+              "conditions": {
+                "dispatcherIdle": {
+                  "state": "met"
+                },
+                "stableLayout": {
+                  "state": "met"
+                },
+                "animationState": {
+                  "state": "met"
+                },
+                "windowGeometry": {
+                  "state": "met"
+                },
+                "contextMaterialization": {
+                  "state": "met"
+                },
+                "asyncLoadSettled": {
+                  "state": "met"
+                }
+              },
+              "settleDurationMs": 100,
+              "observedAt": "2026-08-18T00:00:00Z",
+              "sceneEpoch": 41,
+              "sequence": 1
+            },
+            "atomicity": {
+              "authority": "uia_guarded",
+              "guards": {
+                "window": {
+                  "state": "unchanged"
+                },
+                "client": {
+                  "state": "unchanged"
+                },
+                "dpi": {
+                  "state": "unchanged"
+                },
+                "visualTreeFingerprint": {
+                  "state": "unchanged"
+                }
+              }
+            },
+            "element": null,
+            "artifacts": [],
+            "issues": []
+          },
+          "expected": {
+            "classification": "schema_rejection",
+            "reason": "a UIA-guarded PARTIAL result requires ATOMICITY_UNPROVEN_UIA_GUARDED"
+          }
+        }
+      ],
       "expected": {
         "classification": "qualified_observation",
         "status": "PARTIAL",
@@ -1550,6 +2088,50 @@
         "captureId": "capture_scene_case_000001",
         "protocolVersion": "native-scene-probe/1",
         "schemaVersion": "native-scene-probe.schema/1",
+        "sceneRequest": {
+          "storyId": "Button.Primary",
+          "sceneId": "Default",
+          "fixtureId": "Gallery",
+          "scope": {
+            "kind": "scene"
+          },
+          "appearance": "light",
+          "theme": "baseline",
+          "density": "regular",
+          "contrast": "standard",
+          "viewport": {
+            "policy": "exact",
+            "width": 1280,
+            "height": 720
+          },
+          "expectedDpiPolicy": {
+            "mode": "exact",
+            "x": 96,
+            "y": 96
+          },
+          "focusTarget": null,
+          "selectedState": null,
+          "currentState": null,
+          "scrollOffsets": null,
+          "animationPolicy": "finished",
+          "settlePolicy": {
+            "timeoutMs": 30000,
+            "sampleCount": 2,
+            "stableForMs": 100,
+            "requireDispatcherIdle": true,
+            "requireStableLayout": true,
+            "requireAnimationState": true,
+            "requireWindowGeometry": true,
+            "requireContextMaterialization": true,
+            "requireAsyncLoadSettled": true
+          },
+          "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expectedCandidateIdentity": {
+            "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "assemblyVersion": "1.0.0",
+            "probeVersion": "1.0.0"
+          }
+        },
         "capturedAt": "2026-08-18T00:00:00Z",
         "candidate": {
           "processId": 4242,
@@ -1615,6 +2197,10 @@
         "element": null,
         "artifacts": [],
         "issues": [
+          {
+            "code": "ATOMICITY_UNPROVEN_UIA_GUARDED",
+            "message": "UIA guarded traversal cannot prove atomicity."
+          },
           {
             "code": "CAPTURE_REVALIDATION_FAILED",
             "message": "Capture-time revalidation was not performed."
