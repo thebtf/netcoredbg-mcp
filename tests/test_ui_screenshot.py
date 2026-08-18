@@ -720,7 +720,7 @@ def test_build_capture_metadata_rejects_unavailable_or_invalid_client_geometry(
         screenshot.build_capture_metadata(123, 300, 150, "PrintWindow")
 
 
-def test_capture_window_evidence_reports_bitblt_fallback(monkeypatch) -> None:
+def test_capture_window_evidence_rejects_printwindow_failure_without_bitblt(monkeypatch) -> None:
     from netcoredbg_mcp.ui import screenshot
 
     class FakeUser32:
@@ -759,7 +759,7 @@ def test_capture_window_evidence_reports_bitblt_fallback(monkeypatch) -> None:
             self.bitblt_calls.append(args)
             return True
 
-        def GetDIBits(self, _cdc, _bitmap, _start, _lines, buffer, _bmi, _usage):  # noqa: N802 - Win32 API shape
+        def GetDIBits(self, _cdc, _bitmap, _start, _lines, buffer, _bmi, _usage):  # noqa: N802
             ctypes.memmove(buffer, _bgra(255, 0, 0), 4)
             return 1
 
@@ -777,11 +777,16 @@ def test_capture_window_evidence_reports_bitblt_fallback(monkeypatch) -> None:
         raising=False,
     )
 
-    _png_bytes, width, height, metadata = screenshot.capture_window_evidence(123)
+    _png_bytes, width, height = screenshot.capture_window(123)
 
     assert (width, height) == (1, 1)
     assert fake_gdi32.bitblt_calls == [(200, 0, 0, 1, 1, 100, 0, 0, 0x00CC0020)]
-    assert metadata["method"] == "BitBlt"
+    fake_gdi32.bitblt_calls.clear()
+
+    with pytest.raises(RuntimeError, match="Evidence capture requires a PrintWindow raster"):
+        screenshot.capture_window_evidence(123)
+
+    assert fake_gdi32.bitblt_calls == []
 
 
 @pytest.mark.parametrize(
@@ -802,15 +807,6 @@ def test_capture_window_evidence_reports_bitblt_fallback(monkeypatch) -> None:
             "BitBlt fallback failed",
             False,
             id="legacy-bitblt-failure",
-        ),
-        pytest.param(
-            "capture_window_evidence",
-            False,
-            False,
-            2,
-            "BitBlt fallback failed",
-            False,
-            id="evidence-bitblt-failure",
         ),
         pytest.param(
             "capture_window",

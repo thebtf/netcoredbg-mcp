@@ -2,8 +2,8 @@
 
 import asyncio
 import base64
-import hashlib
 import contextlib
+import hashlib
 import io
 import json
 import threading
@@ -43,6 +43,28 @@ def _capture_metadata(method: str, width: int, height: int) -> dict[str, Any]:
         "logical_width": float(width),
         "logical_height": float(height),
     }
+
+
+def _save_evidence_bundle(tmp_path, calls: list[tuple[str, str, str | None, int]]) -> Any:
+    def save_screenshot_bundle(
+        session_id: str,
+        raw_data: bytes,
+        raw_name: str,
+        crop_data: bytes | None = None,
+        crop_name: str | None = None,
+    ):
+        calls.append((session_id, raw_name, crop_name, threading.get_ident()))
+        raw_path = tmp_path / raw_name
+        raw_path.write_bytes(raw_data)
+        if crop_data is None:
+            assert crop_name is None
+            return raw_path, None
+        assert crop_name is not None
+        crop_path = tmp_path / crop_name
+        crop_path.write_bytes(crop_data)
+        return raw_path, crop_path
+
+    return save_screenshot_bundle
 
 
 def test_bridge_registers_save_restore_foreground_commands() -> None:
@@ -194,9 +216,12 @@ def test_bridge_stealth_screenshot_limits_provenance_to_evidence() -> None:
     resolve_start = command.index("private static IntPtr ResolveTargetHwnd")
     preview_start = command.index("private static JsonObject CaptureWithPrintWindow")
     evidence_start = command.index("private static JsonObject CaptureEvidenceWithPrintWindow")
+    evidence_end = command.index(
+        "private static (int width, int height) GetWindowSize", evidence_start
+    )
     screenshot = command[screenshot_start:resolve_start]
     preview_capture = command[preview_start:evidence_start]
-    evidence_capture = command[evidence_start:]
+    evidence_capture = command[evidence_start:evidence_end]
 
     assert 'var evidence = @params?["evidence"]?.GetValue<bool>() ?? false;' in screenshot
     assert (
@@ -209,9 +234,8 @@ def test_bridge_stealth_screenshot_limits_provenance_to_evidence() -> None:
     assert "var printWindowBefore = ReadCaptureSnapshot(hwnd);" in evidence_capture
     assert "var printWindowAfter = ReadCaptureSnapshot(hwnd);" in evidence_capture
     assert "EnsureStableCaptureSnapshot(printWindowBefore, printWindowAfter);" in evidence_capture
-    assert "var bitBltBefore = ReadCaptureSnapshot(hwnd);" in evidence_capture
-    assert "var bitBltAfter = ReadCaptureSnapshot(hwnd);" in evidence_capture
-    assert "EnsureStableCaptureSnapshot(bitBltBefore, bitBltAfter);" in evidence_capture
+    assert "CaptureEvidenceWithFlashFocusBitBlt" not in evidence_capture
+    assert "BitBlt(" not in evidence_capture
 
 
 def test_bridge_screenshot_falls_back_to_flash_focus_bitblt_when_blank() -> None:
@@ -229,44 +253,41 @@ def test_bridge_screenshot_falls_back_to_flash_focus_bitblt_when_blank() -> None
     assert "SetForegroundWindow(savedForeground)" in command
 
 
-def test_bridge_evidence_flash_focus_requires_verified_activation_but_preview_remains_best_effort() -> (
-    None
-):
+def test_bridge_evidence_requires_printwindow_while_preview_remains_best_effort() -> None:
     command = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCommands.cs").read_text(
         encoding="utf-8"
     )
 
     preview_start = command.index("private static Bitmap CaptureWithFlashFocusBitBlt")
-    evidence_start = command.index(
-        "private static (Bitmap bitmap, CaptureSnapshot snapshot) CaptureEvidenceWithFlashFocusBitBlt"
-    )
     raster_start = command.index("private static Bitmap CaptureBitmapWithBitBlt")
-    preview_capture = command[preview_start:evidence_start]
-    evidence_capture = command[evidence_start:raster_start]
+    preview_capture = command[preview_start:raster_start]
+    evidence_start = command.index("private static JsonObject CaptureEvidenceWithPrintWindow")
+    evidence_end = command.index(
+        "private static (int width, int height) GetWindowSize", evidence_start
+    )
+    evidence_capture = command[evidence_start:evidence_end]
 
     assert "SetForegroundWindow(hwnd);" in preview_capture
     assert "foregroundSet" not in preview_capture
     assert "GetForegroundWindow() != hwnd" not in preview_capture
-
-    activation = evidence_capture.index("var foregroundSet = SetForegroundWindow(hwnd);")
-    verification = evidence_capture.index("if (!foregroundSet || GetForegroundWindow() != hwnd)")
-    snapshot = evidence_capture.index("var bitBltBefore = ReadCaptureSnapshot(hwnd);")
-    assert activation < verification < snapshot
-    assert "Evidence capture could not activate the debuggee window safely" in evidence_capture
+    assert "CaptureEvidenceWithFlashFocusBitBlt" not in evidence_capture
+    assert "Evidence capture requires a PrintWindow raster" in evidence_capture
 
 
-def test_bridge_valid_printwindow_provenance_failure_cannot_flash_focus() -> None:
+def test_bridge_stable_printwindow_evidence_skips_blank_frame_fallback() -> None:
     command = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCommands.cs").read_text(
         encoding="utf-8"
     )
 
     capture_start = command.index("private static JsonObject CaptureEvidenceWithPrintWindow")
-    stable_check = command.index("EnsureStableCaptureSnapshot", capture_start)
-    blank_check = command.index("if (!IsBlankFrame(printWindowBitmap))", capture_start)
-    fallback = command.index("CaptureEvidenceWithFlashFocusBitBlt", capture_start)
+    capture_end = command.index(
+        "private static (int width, int height) GetWindowSize", capture_start
+    )
+    evidence_capture = command[capture_start:capture_end]
 
-    assert "if (printWindowBitmap is not null)" in command[capture_start:stable_check]
-    assert stable_check < blank_check < fallback
+    assert "var printWindowResult = EncodeBitmap(printWindowBitmap);" in evidence_capture
+    assert "IsBlankFrame(printWindowBitmap)" not in evidence_capture
+    assert "CaptureEvidenceWithFlashFocusBitBlt" not in evidence_capture
 
 
 def test_bridge_printwindow_rejects_mismatched_capture_snapshots() -> None:
@@ -279,14 +300,19 @@ def test_bridge_printwindow_rejects_mismatched_capture_snapshots() -> None:
     assert "EnsureStableCaptureSnapshot(printWindowBefore, printWindowAfter);" in command
 
 
-def test_bridge_bitblt_rejects_mismatched_capture_snapshots() -> None:
+def test_bridge_evidence_does_not_capture_a_bitblt_snapshot() -> None:
     command = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCommands.cs").read_text(
         encoding="utf-8"
     )
 
-    assert "var bitBltBefore = ReadCaptureSnapshot(hwnd);" in command
-    assert "var bitBltAfter = ReadCaptureSnapshot(hwnd);" in command
-    assert "EnsureStableCaptureSnapshot(bitBltBefore, bitBltAfter);" in command
+    evidence_start = command.index("private static JsonObject CaptureEvidenceWithPrintWindow")
+    evidence_end = command.index(
+        "private static (int width, int height) GetWindowSize", evidence_start
+    )
+    evidence_capture = command[evidence_start:evidence_end]
+
+    assert "CaptureEvidenceWithFlashFocusBitBlt" not in evidence_capture
+    assert "CaptureBitmapWithBitBlt" not in evidence_capture
 
 
 def test_bridge_connect_stores_stealth_state_and_exposes_get_state() -> None:
@@ -1069,17 +1095,19 @@ async def test_ui_take_screenshot_evidence_persists_raw_png_with_hash(tmp_path) 
         "logical_height": 6.0,
     }
 
-    def save_screenshot(_sid: str, data: bytes, name: str):
-        path = tmp_path / name
-        path.write_bytes(data)
-        return path
+    bundle_calls: list[tuple[str, str, str | None, int]] = []
+    save_screenshot_bundle = _save_evidence_bundle(tmp_path, bundle_calls)
 
     session = SimpleNamespace(
         process_registry=None,
         state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
         stealth_mode=False,
         session_id="evidence-session",
-        temp_manager=SimpleNamespace(save_screenshot=save_screenshot),
+        temp_manager=SimpleNamespace(
+            save_screenshot_bundle=save_screenshot_bundle,
+            save_screenshot=lambda _sid, data, name: (tmp_path / name).write_bytes(data)
+            and tmp_path / name,
+        ),
     )
     registry = ToolRegistry()
     with (
@@ -1101,6 +1129,10 @@ async def test_ui_take_screenshot_evidence_persists_raw_png_with_hash(tmp_path) 
     assert Path(metadata["raw_path"]).read_bytes() == raw_png
     assert metadata["raw_sha256"] == hashlib.sha256(raw_png).hexdigest()
     assert Path(metadata["hd_path"]).exists()
+    assert len(bundle_calls) == 1
+    assert bundle_calls[0][0] == "evidence-session"
+    assert bundle_calls[0][1].startswith("evidence_")
+    assert bundle_calls[0][2] is None
 
 
 @pytest.mark.asyncio
@@ -1116,24 +1148,26 @@ async def test_ui_take_screenshot_evidence_persists_raw_derived_crop(tmp_path) -
     image.save(buffer, format="PNG")
     raw_png = buffer.getvalue()
 
-    def save_screenshot(_sid: str, data: bytes, name: str):
-        path = tmp_path / name
-        path.write_bytes(data)
-        return path
+    bundle_calls: list[tuple[str, str, str | None, int]] = []
+    save_screenshot_bundle = _save_evidence_bundle(tmp_path, bundle_calls)
 
     session = SimpleNamespace(
         process_registry=None,
         state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
         stealth_mode=False,
         session_id="crop-session",
-        temp_manager=SimpleNamespace(save_screenshot=save_screenshot),
+        temp_manager=SimpleNamespace(
+            save_screenshot_bundle=save_screenshot_bundle,
+            save_screenshot=lambda _sid, data, name: (tmp_path / name).write_bytes(data)
+            and tmp_path / name,
+        ),
     )
     registry = ToolRegistry()
     with (
         patch("netcoredbg_mcp.ui.screenshot.get_hwnd_for_pid", return_value=123),
         patch(
             "netcoredbg_mcp.ui.screenshot.capture_window_evidence",
-            return_value=(raw_png, 5, 4, _capture_metadata("BitBlt", 5, 4)),
+            return_value=(raw_png, 5, 4, _capture_metadata("PrintWindow", 5, 4)),
         ),
     ):
         register_ui_tools(registry, session, check_session_access=lambda ctx: None)
@@ -1154,6 +1188,11 @@ async def test_ui_take_screenshot_evidence_persists_raw_derived_crop(tmp_path) -
     with Image.open(crop_path) as crop:
         assert crop.size == (3, 2)
         assert crop.getpixel((0, 0)) == (12, 34, 56)
+    assert len(bundle_calls) == 1
+    assert bundle_calls[0][0] == "crop-session"
+    assert bundle_calls[0][1].startswith("evidence_")
+    assert bundle_calls[0][2] is not None
+    assert bundle_calls[0][2].startswith("evidence_crop_")
 
 
 @pytest.mark.asyncio
@@ -1249,17 +1288,19 @@ async def test_ui_take_screenshot_stealth_evidence_uses_bridge_capture_provenanc
         }
     )
 
-    def save_screenshot(_sid: str, data: bytes, name: str):
-        path = tmp_path / name
-        path.write_bytes(data)
-        return path
+    bundle_calls: list[tuple[str, str, str | None, int]] = []
+    save_screenshot_bundle = _save_evidence_bundle(tmp_path, bundle_calls)
 
     session = SimpleNamespace(
         process_registry=None,
         state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
         stealth_mode=True,
         session_id="stealth-evidence-session",
-        temp_manager=SimpleNamespace(save_screenshot=save_screenshot),
+        temp_manager=SimpleNamespace(
+            save_screenshot_bundle=save_screenshot_bundle,
+            save_screenshot=lambda _sid, data, name: (tmp_path / name).write_bytes(data)
+            and tmp_path / name,
+        ),
     )
     registry = ToolRegistry()
 
@@ -1288,6 +1329,9 @@ async def test_ui_take_screenshot_stealth_evidence_uses_bridge_capture_provenanc
         "logical_height": 8 / 1.5,
     }
     assert Path(metadata["raw_path"]).read_bytes() == raw_png
+    assert len(bundle_calls) == 1
+    assert bundle_calls[0][0] == "stealth-evidence-session"
+    assert bundle_calls[0][2] is None
 
 
 @pytest.mark.parametrize(
@@ -1366,21 +1410,20 @@ async def test_ui_take_screenshot_evidence_uses_unique_filenames_and_executor(tm
     buffer = io.BytesIO()
     Image.new("RGB", (8, 8), (255, 255, 255)).save(buffer, format="PNG")
     raw_png = buffer.getvalue()
-    saved: list[tuple[str, int]] = []
+    saved: list[tuple[str, str, str | None, int]] = []
     main_thread = threading.get_ident()
-
-    def save_screenshot(_sid: str, data: bytes, name: str):
-        saved.append((name, threading.get_ident()))
-        path = tmp_path / name
-        path.write_bytes(data)
-        return path
+    save_screenshot_bundle = _save_evidence_bundle(tmp_path, saved)
 
     session = SimpleNamespace(
         process_registry=None,
         state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
         stealth_mode=False,
         session_id="collision-session",
-        temp_manager=SimpleNamespace(save_screenshot=save_screenshot),
+        temp_manager=SimpleNamespace(
+            save_screenshot_bundle=save_screenshot_bundle,
+            save_screenshot=lambda _sid, data, name: (tmp_path / name).write_bytes(data)
+            and tmp_path / name,
+        ),
     )
     registry = ToolRegistry()
     with (
@@ -1413,10 +1456,11 @@ async def test_ui_take_screenshot_evidence_uses_unique_filenames_and_executor(tm
     second_metadata = json.loads(second[1].text)
     assert first_metadata["raw_path"] != second_metadata["raw_path"]
     assert first_metadata["crop_path"] != second_metadata["crop_path"]
-    evidence_saves = [entry for entry in saved if entry[0].startswith("evidence_")]
-    assert len(evidence_saves) == 4
-    assert len({name for name, _thread_id in evidence_saves}) == 4
-    assert all(thread_id != main_thread for _name, thread_id in evidence_saves)
+    assert len(saved) == 2
+    assert len({raw_name for _sid, raw_name, _crop_name, _thread_id in saved}) == 2
+    assert len({crop_name for _sid, _raw_name, crop_name, _thread_id in saved}) == 2
+    assert all(crop_name is not None for _sid, _raw_name, crop_name, _thread_id in saved)
+    assert all(thread_id != main_thread for _sid, _raw_name, _crop_name, thread_id in saved)
 
 
 @pytest.mark.asyncio

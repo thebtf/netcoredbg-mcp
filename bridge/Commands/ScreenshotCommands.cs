@@ -161,40 +161,24 @@ public static class ScreenshotCommands
         if (hwnd == IntPtr.Zero)
             throw new ArgumentException("Target HWND must be non-zero.", nameof(hwnd));
 
-        double? printWindowVariance = null;
         var printWindowBefore = ReadCaptureSnapshot(hwnd);
         var printWindowBitmap = CaptureBitmapWithPrintWindow(
             hwnd,
             printWindowBefore.RasterWidth,
             printWindowBefore.RasterHeight);
-        if (printWindowBitmap is not null)
-        {
-            using (printWindowBitmap)
-            {
-                var printWindowAfter = ReadCaptureSnapshot(hwnd);
-                EnsureStableCaptureSnapshot(printWindowBefore, printWindowAfter);
-                printWindowVariance = NormalizedPixelVariance(printWindowBitmap);
-                if (!IsBlankFrame(printWindowBitmap))
-                {
-                    var printWindowResult = EncodeBitmap(printWindowBitmap);
-                    printWindowResult["method"] = "PrintWindow";
-                    printWindowResult["flags"] = (int)PW_RENDERFULLCONTENT;
-                    printWindowResult["variance"] = printWindowVariance.Value;
-                    return AddCaptureProvenance(printWindowResult, hwnd, printWindowAfter);
-                }
-            }
-        }
+        if (printWindowBitmap is null)
+            throw new InvalidOperationException("Evidence capture requires a PrintWindow raster");
 
-        var fallbackCapture = CaptureEvidenceWithFlashFocusBitBlt(hwnd);
-        using var fallbackBitmap = fallbackCapture.bitmap;
-        var result = EncodeBitmap(fallbackBitmap);
-        result["method"] = "BitBlt";
-        result["fallback"] = "flash-focus";
-        if (printWindowVariance is not null)
+        using (printWindowBitmap)
         {
-            result["printwindow_variance"] = printWindowVariance.Value;
+            var printWindowAfter = ReadCaptureSnapshot(hwnd);
+            EnsureStableCaptureSnapshot(printWindowBefore, printWindowAfter);
+            var printWindowResult = EncodeBitmap(printWindowBitmap);
+            printWindowResult["method"] = "PrintWindow";
+            printWindowResult["flags"] = (int)PW_RENDERFULLCONTENT;
+            printWindowResult["variance"] = NormalizedPixelVariance(printWindowBitmap);
+            return AddCaptureProvenance(printWindowResult, hwnd, printWindowAfter);
         }
-        return AddCaptureProvenance(result, hwnd, fallbackCapture.snapshot);
     }
 
     private static (int width, int height) GetWindowSize(IntPtr hwnd)
@@ -307,43 +291,6 @@ public static class ScreenshotCommands
         }
     }
 
-    private static (Bitmap bitmap, CaptureSnapshot snapshot) CaptureEvidenceWithFlashFocusBitBlt(IntPtr hwnd)
-    {
-        var savedForeground = GetForegroundWindow();
-        try
-        {
-            ShowWindow(hwnd, SW_RESTORE);
-            var foregroundSet = SetForegroundWindow(hwnd);
-            if (!foregroundSet || GetForegroundWindow() != hwnd)
-            {
-                throw new InvalidOperationException(
-                    "Evidence capture could not activate the debuggee window safely");
-            }
-            var bitBltBefore = ReadCaptureSnapshot(hwnd);
-            var bitmap = CaptureBitmapWithBitBlt(
-                hwnd,
-                bitBltBefore.RasterWidth,
-                bitBltBefore.RasterHeight);
-            try
-            {
-                var bitBltAfter = ReadCaptureSnapshot(hwnd);
-                EnsureStableCaptureSnapshot(bitBltBefore, bitBltAfter);
-                return (bitmap, bitBltAfter);
-            }
-            catch
-            {
-                bitmap.Dispose();
-                throw;
-            }
-        }
-        finally
-        {
-            if (savedForeground != IntPtr.Zero)
-            {
-                SetForegroundWindow(savedForeground);
-            }
-        }
-    }
 
     private static Bitmap CaptureBitmapWithBitBlt(IntPtr hwnd, int width, int height)
     {

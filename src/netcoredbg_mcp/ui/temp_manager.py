@@ -28,7 +28,34 @@ class SessionTempManager:
 
     def __init__(self) -> None:
         self._sessions: dict[str, Path] = {}
+        self._closed_sessions: set[str] = set()
         self._lock = threading.Lock()
+
+    def _get_session_dir_locked(self, session_id: str) -> Path | None:
+        if session_id in self._closed_sessions:
+            logger.warning("Session temp directory is closed: %s", session_id)
+            return None
+
+        existing = self._sessions.get(session_id)
+        if existing is not None and existing.exists():
+            return existing
+
+        try:
+            dir_path = Path(tempfile.mkdtemp(prefix=f"{TEMP_PREFIX}{session_id}-"))
+            self._sessions[session_id] = dir_path
+            logger.info("Created session temp dir: %s", dir_path)
+            return dir_path
+        except OSError as error:
+            logger.warning("Failed to create session temp dir: %s", error)
+            return None
+
+    @staticmethod
+    def _safe_name(name: str) -> str | None:
+        safe_name = Path(name).name
+        if not safe_name or safe_name in (".", ".."):
+            logger.warning("Invalid screenshot name rejected: %s", name)
+            return None
+        return safe_name
 
     def get_session_dir(self, session_id: str | None = None) -> Path | None:
         """Get or create a temp directory for the given session.
@@ -43,19 +70,61 @@ class SessionTempManager:
             session_id = uuid.uuid4().hex[:12]
 
         with self._lock:
-            existing = self._sessions.get(session_id)
-            if existing is not None and existing.exists():
-                return existing
+            return self._get_session_dir_locked(session_id)
 
-            # Create under lock to prevent duplicate dirs for same session_id
-            try:
-                dir_path = Path(tempfile.mkdtemp(prefix=f"{TEMP_PREFIX}{session_id}-"))
-                self._sessions[session_id] = dir_path
-                logger.info("Created session temp dir: %s", dir_path)
-                return dir_path
-            except OSError as e:
-                logger.warning("Failed to create session temp dir: %s", e)
+    def save_screenshot_bundle(
+        self,
+        session_id: str,
+        raw_data: bytes,
+        raw_name: str,
+        crop_data: bytes | None = None,
+        crop_name: str | None = None,
+    ) -> tuple[Path, Path | None] | None:
+        """Persist raw evidence and its optional crop without exposing a partial bundle."""
+        if (crop_data is None) != (crop_name is None):
+            logger.warning("Evidence crop data and name must be supplied together")
+            return None
+
+        raw_safe_name = self._safe_name(raw_name)
+        crop_safe_name = self._safe_name(crop_name) if crop_name is not None else None
+        if raw_safe_name is None or (crop_name is not None and crop_safe_name is None):
+            return None
+        if raw_safe_name == crop_safe_name:
+            logger.warning("Evidence bundle names must be distinct: %s", raw_safe_name)
+            return None
+
+        with self._lock:
+            session_dir = self._get_session_dir_locked(session_id)
+            if session_dir is None:
                 return None
+
+            files: list[tuple[Path, bytes]] = [(session_dir / raw_safe_name, raw_data)]
+            if crop_data is not None and crop_safe_name is not None:
+                files.append((session_dir / crop_safe_name, crop_data))
+            if any(path.exists() for path, _data in files):
+                logger.warning("Evidence bundle destination already exists")
+                return None
+
+            staged: list[tuple[Path, Path]] = []
+            written: list[Path] = []
+            try:
+                for destination, data in files:
+                    temporary = session_dir / f".{destination.name}.{uuid.uuid4().hex}.tmp"
+                    staged.append((temporary, destination))
+                    temporary.write_bytes(data)
+                for temporary, destination in staged:
+                    temporary.replace(destination)
+                    written.append(destination)
+            except OSError as error:
+                for temporary, _destination in staged:
+                    temporary.unlink(missing_ok=True)
+                for destination in written:
+                    destination.unlink(missing_ok=True)
+                logger.warning("Failed to save screenshot evidence bundle: %s", error)
+                return None
+
+            crop_path = files[1][0] if len(files) == 2 else None
+            return files[0][0], crop_path
 
     def save_screenshot(self, session_id: str, data: bytes, name: str) -> Path | None:
         """Save screenshot data to the session temp directory.
@@ -72,10 +141,8 @@ class SessionTempManager:
         if session_dir is None:
             return None
 
-        # Sanitize filename: strip path separators to prevent traversal
-        safe_name = Path(name).name
-        if not safe_name or safe_name in (".", ".."):
-            logger.warning("Invalid screenshot name rejected: %s", name)
+        safe_name = self._safe_name(name)
+        if safe_name is None:
             return None
 
         file_path = session_dir / safe_name
@@ -93,21 +160,21 @@ class SessionTempManager:
             session_id: Session identifier to clean up.
         """
         with self._lock:
+            self._closed_sessions.add(session_id)
             dir_path = self._sessions.pop(session_id, None)
-
-        if dir_path is not None:
-            shutil.rmtree(dir_path, ignore_errors=True)
-            logger.info("Cleaned up session temp dir: %s", dir_path)
+            if dir_path is not None:
+                shutil.rmtree(dir_path, ignore_errors=True)
+                logger.info("Cleaned up session temp dir: %s", dir_path)
 
     def cleanup_all(self) -> None:
-        """Remove all managed temp directories. Suitable for atexit handler."""
         with self._lock:
             sessions_copy = dict(self._sessions)
+            self._closed_sessions.update(sessions_copy)
             self._sessions.clear()
 
-        for session_id, dir_path in sessions_copy.items():
-            shutil.rmtree(dir_path, ignore_errors=True)
-            logger.debug("Cleaned up temp dir for session %s", session_id)
+            for session_id, dir_path in sessions_copy.items():
+                shutil.rmtree(dir_path, ignore_errors=True)
+                logger.debug("Cleaned up temp dir for session %s", session_id)
 
         if sessions_copy:
             logger.info("Cleaned up %d session temp directories", len(sessions_copy))

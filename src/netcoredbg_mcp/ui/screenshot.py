@@ -262,8 +262,10 @@ def _capture_window_raster(
     width: int,
     height: int,
     printwindow_flags: int,
+    *,
+    require_printwindow: bool = False,
 ) -> tuple[bytes, str]:
-    """Capture client-local pixels through PrintWindow with a BitBlt fallback."""
+    """Capture client-local pixels through PrintWindow, optionally requiring it."""
     user32 = ctypes.windll.user32
     gdi32 = ctypes.windll.gdi32
     wdc = user32.GetDC(hwnd)
@@ -285,6 +287,8 @@ def _capture_window_raster(
                 try:
                     if user32.PrintWindow(hwnd, cdc, printwindow_flags):
                         method = "PrintWindow"
+                    elif require_printwindow:
+                        raise RuntimeError("Evidence capture requires a PrintWindow raster")
                     else:
                         if not gdi32.BitBlt(cdc, 0, 0, width, height, wdc, 0, 0, 0x00CC0020):
                             raise RuntimeError("BitBlt fallback failed")
@@ -341,6 +345,7 @@ def capture_window_evidence(hwnd: int) -> tuple[bytes, int, int, dict[str, Any]]
         width,
         height,
         0x00000001 | 0x00000002,  # PW_CLIENTONLY | PW_RENDERFULLCONTENT
+        require_printwindow=True,
     )
     after = _read_direct_capture_snapshot(hwnd)
     if after != before:

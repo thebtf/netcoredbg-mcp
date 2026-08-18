@@ -1511,7 +1511,8 @@ def register_ui_tools(
                             or bridge_height <= 0
                         ):
                             raise ValueError(
-                                "Bridge screenshot response requires positive integer width and height"
+                                "Bridge screenshot response requires positive integer "
+                                "width and height"
                             )
                         raw_width = bridge_width
                         raw_height = bridge_height
@@ -1522,8 +1523,7 @@ def register_ui_tools(
                             bridge_dpi = bridge_result.get("dpi")
                             client_rect_keys = ("left", "top", "right", "bottom")
                             if (
-                                not isinstance(method, str)
-                                or not method
+                                method != "PrintWindow"
                                 or type(bridge_hwnd) is not int
                                 or bridge_hwnd == 0
                                 or not isinstance(bridge_client_rect, dict)
@@ -1575,6 +1575,7 @@ def register_ui_tools(
                 raw_width <= 0
                 or raw_height <= 0
                 or not isinstance(capture_metadata, dict)
+                or capture_metadata.get("method") != "PrintWindow"
                 or not {
                     "method",
                     "hwnd",
@@ -1627,24 +1628,21 @@ def register_ui_tools(
                 assert sid is not None
                 assert temp_manager is not None
                 capture_id = uuid.uuid4().hex
-                raw_path = await loop.run_in_executor(
+                bundle = await loop.run_in_executor(
                     None,
-                    lambda: temp_manager.save_screenshot(
-                        sid, png_bytes, f"evidence_{capture_id}.png"
+                    lambda: temp_manager.save_screenshot_bundle(
+                        sid,
+                        png_bytes,
+                        f"evidence_{capture_id}.png",
+                        crop_bytes,
+                        f"evidence_crop_{capture_id}.png" if crop_bytes is not None else None,
                     ),
                 )
-                if raw_path is None:
-                    raise ValueError("Failed to persist raw screenshot evidence")
-                if crop_bytes is not None:
-                    crop_path = await loop.run_in_executor(
-                        None,
-                        lambda: temp_manager.save_screenshot(
-                            sid, crop_bytes, f"evidence_crop_{capture_id}.png"
-                        ),
-                    )
-                    if crop_path is None:
-                        await loop.run_in_executor(None, lambda: raw_path.unlink(missing_ok=True))
-                        raise ValueError("Failed to persist cropped screenshot evidence")
+                if bundle is None:
+                    raise ValueError("Failed to persist screenshot evidence bundle")
+                raw_path, crop_path = bundle
+                if crop_bytes is not None and crop_path is None:
+                    raise ValueError("Failed to persist cropped screenshot evidence")
 
             metadata: dict[str, Any] = {
                 "width": hd_w,

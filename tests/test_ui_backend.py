@@ -509,7 +509,7 @@ class TestFlaUIBridgeClient:
             await client.start()
 
         assert create_subprocess.await_args is not None
-        assert create_subprocess.await_args.kwargs["limit"] == 16 * 1024 * 1024
+        assert create_subprocess.await_args.kwargs["limit"] == 256 * 1024 * 1024
 
 
 class TestPywinautoBackend:
