@@ -65,7 +65,7 @@ First-milestone limits:
 - supported token type: `dimension`;
 - supported DTCG unit: `px`;
 - maximum assertions: 16;
-- maximum inline token document: 256 KiB serialized JSON;
+- maximum inline token document: 262,144 bytes after the canonical UTF-8 serialization defined by FR-009;
 - no additional input properties.
 
 The input schema is closed: root keys are exactly `debugSessionId`, `selector`, `tokens`, and `assertions`; `selector` contains only required `automationId`; every assertion contains only required `property` and `token`. Any additional, missing, empty, wrong-typed, over-limit, or non-finite value is `INVALID_TOOL_ARGUMENTS`.
@@ -95,12 +95,13 @@ The input schema is closed: root keys are exactly `debugSessionId`, `selector`, 
       "token": "control.button.width",
       "expected": { "value": 120, "unit": "px" },
       "actual": { "value": 120, "unit": "px" },
-      "comparator": "wpf-dip-exact",
+      "comparator": "wpf-dip-quantized",
+      "tolerance": { "value": 0.3333333333, "unit": "px" },
       "provenance": {
         "tokenProfile": "dtcg-format-2025.10-m1-dimension-profile",
         "tokenPath": "control.button.width",
         "observation": "UIA.BoundingRectangle.width",
-        "normalization": "physicalPixels*96/dpi"
+        "normalization": "physicalPixels*96/GetDpiForWindow(topLevelHwnd)"
       },
       "status": "PASS"
     }
@@ -108,7 +109,41 @@ The input schema is closed: root keys are exactly `debugSessionId`, `selector`, 
 }
 ```
 
-Aggregate status is `FAIL` when any observable assertion fails, `UNOBSERVABLE` when none fail and at least one cannot be observed, otherwise `PASS`. The structured-content schema is closed: the root has exactly `kind`, `mode`, `status`, `observer`, `element`, and `checks`; `observer` has exactly `name`, `framework`, `frameworkMapping`, and `dpi`; `element` has exactly `automationId`, `controlType`, `className`, and `rectPhysicalPixels`; every check has exactly `property`, `token`, `expected`, `actual`, `comparator`, `provenance`, and `status`; provenance has exactly `tokenProfile`, `tokenPath`, `observation`, and `normalization`. For PASS/FAIL every observer and provenance leaf is non-null and positively verified. For UNOBSERVABLE the same keys remain required, but unavailable `framework`, `frameworkMapping`, `dpi`, `actual`, or `comparator` leaves are explicitly `null`; provenance strings name the attempted observation and missing evidence. No undeclared fields are legal.
+Aggregate status is `FAIL` when any observable assertion fails, `UNOBSERVABLE` when none fail and at least one cannot be observed, otherwise `PASS`. The structured-content schema is closed: the root has exactly `kind`, `mode`, `status`, `observer`, `element`, and `checks`; `observer` has exactly `name`, `framework`, `frameworkMapping`, and `dpi`; `element` is either `null` or an object with exactly `automationId`, `controlType`, `className`, and `rectPhysicalPixels`; every check has exactly `property`, `token`, `expected`, `actual`, `comparator`, `tolerance`, `provenance`, and `status`; provenance has exactly `tokenProfile`, `tokenPath`, `observation`, and `normalization`. For PASS/FAIL every observer, element, and provenance leaf is non-null and positively verified. For UNOBSERVABLE the keys remain required, but `element` may be `null`; unavailable `framework`, `frameworkMapping`, `dpi`, `actual`, `comparator`, or `tolerance` leaves are explicitly `null`, while provenance names the attempted observation and missing evidence. No undeclared fields are legal.
+
+Example before any element snapshot can be acquired:
+
+```json
+{
+  "kind": "element_token_conformance",
+  "mode": "value",
+  "status": "UNOBSERVABLE",
+  "observer": {
+    "name": "FlaUIBridge",
+    "framework": null,
+    "frameworkMapping": null,
+    "dpi": null
+  },
+  "element": null,
+  "checks": [
+    {
+      "property": "width",
+      "token": "control.button.width",
+      "expected": { "value": 120, "unit": "px" },
+      "actual": null,
+      "comparator": null,
+      "tolerance": null,
+      "provenance": {
+        "tokenProfile": "dtcg-format-2025.10-m1-dimension-profile",
+        "tokenPath": "control.button.width",
+        "observation": "DAP.process",
+        "normalization": "missing isLocalProcess/systemProcessId"
+      },
+      "status": "UNOBSERVABLE"
+    }
+  ]
+}
+```
 
 Every result is an official complete `CallToolResult`; text content serializes the same object as `structuredContent`. `PASS`, `FAIL`, and `UNOBSERVABLE` use the closed non-error schema above with `isError: false`. Errors use these exact closed variants:
 
@@ -122,19 +157,38 @@ Every result is an official complete `CallToolResult`; text content serializes t
 | Malformed/invalid supported-profile token data | true | `{ "kind": "token_document_invalid", "error": "TOKEN_DOCUMENT_INVALID" }` |
 | Valid DTCG feature outside M1 profile | true | `{ "kind": "dtcg_feature_unsupported", "error": "DTCG_FEATURE_UNSUPPORTED" }` |
 
-Implementation MUST extend `contracts/modern-front-door.schema.json` with these closed variants and add them to `toolStructuredContent`; `StructuredContentSchemaParityTests` MUST prove the runtime objects and frozen schema remain identical. `ELEMENT_UNOBSERVABLE` is not an error code: property/framework/DPI evidence gaps after a valid live observation use the non-error `status: UNOBSERVABLE` envelope.
+Implementation MUST extend `specs/001-mcp-stateless-strangler/contracts/modern-front-door.schema.json` with these closed variants and add them to `toolStructuredContent`; `StructuredContentSchemaParityTests` MUST prove the runtime objects and frozen schema remain identical. `ELEMENT_UNOBSERVABLE` is not an error code: property/framework/DPI evidence gaps after a valid request use the non-error `status: UNOBSERVABLE` envelope, with `element: null` when observation never reached an element snapshot.
 
 ## Functional requirements
 
 - **FR-001 Stable specification:** M1 implements a named `dtcg-format-2025.10-m1-dimension-profile`, not full Format conformance. The stable DTCG Format Module 2025.10 defines valid input; preview drafts are not authority. Valid standard features outside the profile are reported as unsupported, not invalid.
 - **FR-002 Explicit mapping:** Every assertion names both an element property and a token path. Group names or equal values do not imply mapping.
-- **FR-003 Token resolution:** The M1 profile supports explicit or nearest inherited `$type`, curly-brace aliases, and chained aliases. Unresolved, circular, malformed, or type-mismatched values are invalid. Valid `$extends`, JSON Pointer `$ref`, resolver documents, modifiers, sets, and context permutations return `DTCG_FEATURE_UNSUPPORTED` until implemented.
-- **FR-004 Live identity:** Resolve the element from the debuggee process associated with the explicit `debugSessionId`. The DAP `process` event MUST positively report `isLocalProcess: true` and a positive `systemProcessId`; absent, false, or unknown locality is `UNOBSERVABLE`. No process scan or connection-global element exists.
-- **FR-005 Unique selector:** Zero or multiple selector matches cannot produce conformance `PASS`.
-- **FR-006 Normalization:** M1 accepts only an observer that positively identifies WPF and reports window DPI. Its explicit platform policy maps WPF device-independent units to DTCG `px` by `physicalPixels*96/dpi`; this is a WPF mapping, not a universal DTCG rule. Unknown framework or missing DPI is `UNOBSERVABLE`.
+- **FR-003 Token resolution:** The M1 profile supports explicit or nearest inherited `$type`, `$root` tokens, curly-brace aliases, and chained aliases according to the matrix below. Unresolved, circular, malformed, or type-mismatched values are invalid. Valid `$extends`, JSON Pointer `$ref`, resolver documents, modifiers, sets, and context permutations return `DTCG_FEATURE_UNSUPPORTED` until implemented.
+- **FR-004 Live identity:** Resolve the element from the debuggee process associated with the explicit `debugSessionId`. The DAP `process` event MUST positively report `isLocalProcess: true` and a positive `systemProcessId`; absent, false, or unknown locality yields the closed UNOBSERVABLE result with `element: null`. No process scan or connection-global element exists.
+- **FR-005 Unique selector:** Zero or multiple selector matches cannot produce conformance `PASS` and use the closed `ELEMENT_NOT_FOUND` or `ELEMENT_AMBIGUOUS` errors.
+- **FR-006 Normalization:** M1 accepts only a WPF observer. DPI comes from `GetDpiForWindow` on the top-level HWND containing the selected element and MUST be an integer in `96..768`; otherwise the result is UNOBSERVABLE. Normalize with `actual = physicalPixels*96/dpi`. The `wpf-dip-quantized` comparator passes when `abs(actual-expected) <= 48/dpi`, one half physical pixel expressed in WPF/DTCG units; it fails only outside that tolerance. This is a named WPF platform policy, not universal DTCG semantics.
+
+### M1 DTCG classification matrix
+
+| Construct | M1 classification | Deterministic rule |
+|---|---|---|
+| Token explicit `$type: dimension` | allowed | Explicit token type has highest precedence. |
+| Closest parent group `$type: dimension` | allowed | Used only when the token has no explicit `$type`; walk to the nearest parent. |
+| Explicit token type plus different inherited type | allowed or invalid | Explicit type wins; the resolved explicit type MUST be `dimension`, otherwise `TOKEN_DOCUMENT_INVALID`. |
+| No resolvable type | `TOKEN_DOCUMENT_INVALID` | M1 never infers type from names or groups. |
+| `$root` token | allowed | Addressed explicitly as `group.$root`; it follows the same value/type rules as any token. |
+| `$description` | ignored | Valid metadata preserved by input but irrelevant to comparison. |
+| `$deprecated` | ignored | Valid metadata preserved by input but irrelevant to comparison. |
+| `$extensions` | ignored | Valid extension data is not interpreted by M1 and cannot change comparison. |
+| Curly-brace token alias | allowed | Resolve complete-token values transitively; cycles/unresolved targets are invalid. |
+| `$extends` | `DTCG_FEATURE_UNSUPPORTED` | Valid Format feature outside the named M1 profile. |
+| JSON Pointer `$ref` | `DTCG_FEATURE_UNSUPPORTED` | Valid Format feature outside the named M1 profile. |
+| Resolver document/set/modifier/context | `DTCG_FEATURE_UNSUPPORTED` | Resolver Module is outside M1. |
+
+Every matrix row has an independent RED/GREEN classification test. Type resolution order is: explicit token `$type` → resolved group `$type` (when `$extends` becomes supported) → closest parent group `$type` → invalid.
 - **FR-007 Typed outcomes:** Distinguish invalid arguments, invalid token document, valid-but-unsupported DTCG feature, debug session not found, observer unavailable, element not found/ambiguous, `PASS`, `FAIL`, and `UNOBSERVABLE` through the closed envelopes above.
 - **FR-008 Evidence authority:** Screenshots may be attached later as corroboration but never determine the conformance verdict.
-- **FR-009 Bounded processing:** The 256 KiB token-document and 16-assertion limits apply immediately after the MCP SDK has deserialized `CallToolRequestParams`, before cloning, token traversal, alias resolution, or bridge launch. A separate host-level pre-deserialization MCP frame limit is required before public exposure but is not falsely claimed by M1. `FlaUiBridgeClient` MUST reject a response line exceeding 1,048,576 bytes, including its newline, before JSON deserialization and return the closed `ELEMENT_OBSERVER_UNAVAILABLE` error; the bridge contract test fixes this exact value and outcome.
+- **FR-009 Bounded processing:** The assertion limit is 16. After MCP SDK deserialization, M1 canonically serializes only the `tokens` value by recursively sorting object keys with ordinal comparison, preserving array order, emitting RFC 8259 primitives with no insignificant whitespace or BOM, then measuring the resulting UTF-8 bytes; more than 262,144 bytes is `INVALID_TOOL_ARGUMENTS`. This check occurs before cloning, token traversal, alias resolution, or bridge launch. A separate host-level pre-deserialization MCP frame limit is required before public exposure but is not falsely claimed by M1. `FlaUiBridgeClient` MUST reject a response line exceeding 1,048,576 bytes, including its newline, before JSON deserialization and return `ELEMENT_OBSERVER_UNAVAILABLE`.
 - **FR-010 .NET-only growth:** Do not add, edit, or route new behavior through Python. The legacy Python path remains unchanged while the native route expands.
 - **FR-011 Cross-platform honesty:** Non-Windows hosts return observer-unavailable without breaking the existing cross-platform debugger tools.
 - **FR-012 Provenance:** Every PASS/FAIL result names observer, positively verified framework mapping, DPI, token profile/path, resolved and actual values, comparator, normalization source, and conformance mode. UNOBSERVABLE retains the same closed keys with explicit nulls for unavailable leaves and provenance that names the attempted observation and missing evidence.
@@ -151,8 +205,8 @@ Implementation MUST extend `contracts/modern-front-door.schema.json` with these 
 ## Acceptance criteria
 
 - **AC-001:** A real candidate process advertises `check_element_tokens` after the existing three tools without changing their schemas.
-- **AC-002:** A controlled live WPF fixture with a unique AutomationId returns PASS for matching width and FAIL for a mismatching token under the declared WPF/DPI mapping.
-- **AC-003:** Missing/ambiguous element, missing/remote/unknown-locality process event, non-Windows host, unavailable bridge, unknown framework, absent DPI, unsupported unit/property, invalid DTCG input, and valid-but-unsupported DTCG features return their exact typed outcomes.
+- **AC-002:** A controlled live WPF fixture returns PASS/FAIL under `wpf-dip-quantized`; cases cover DPI 120 (125%), DPI 144 (150%), exact integral values, fractional normalized values inside half-pixel tolerance, and values outside tolerance.
+- **AC-003:** Missing/ambiguous element, missing/remote/unknown-locality process event, non-Windows host, unavailable bridge, unknown framework, absent/out-of-range DPI, unsupported unit/property, invalid DTCG input, and valid-but-unsupported DTCG features return their exact typed outcomes. UNOBSERVABLE pre-observation cases assert the exact `element: null` example shape.
 - **AC-004:** Alias resolution, inherited dimension type, unresolved alias, circular alias, non-finite number, wrong token type, `$extends`, and JSON Pointer `$ref` have RED/GREEN contract tests proving invalid versus unsupported classification.
 - **AC-005:** No Python source or Python public tool contract changes in the diff.
 - **AC-006:** The full existing stateless .NET suite remains green.
