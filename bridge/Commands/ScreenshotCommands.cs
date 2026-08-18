@@ -79,11 +79,12 @@ public static class ScreenshotCommands
             throw new InvalidOperationException("Not connected. Call 'connect' first.");
 
         var hwndValue = @params?["hwnd"]?.GetValue<long>();
+        var evidence = @params?["evidence"]?.GetValue<bool>() ?? false;
 
         if (JsonRpcHandler.Stealth)
         {
             var hwnd = ResolveTargetHwnd(hwndValue, mainWindow);
-            return CaptureWithPrintWindow(hwnd);
+            return evidence ? CaptureEvidenceWithPrintWindow(hwnd) : CaptureWithPrintWindow(hwnd);
         }
 
         CaptureImage capture;
@@ -125,6 +126,41 @@ public static class ScreenshotCommands
         if (hwnd == IntPtr.Zero)
             throw new ArgumentException("Target HWND must be non-zero.", nameof(hwnd));
 
+        var (width, height) = GetWindowSize(hwnd);
+        double? printWindowVariance = null;
+        var printWindowBitmap = CaptureBitmapWithPrintWindow(hwnd, width, height);
+        if (printWindowBitmap is not null)
+        {
+            using (printWindowBitmap)
+            {
+                printWindowVariance = NormalizedPixelVariance(printWindowBitmap);
+                if (!IsBlankFrame(printWindowBitmap))
+                {
+                    var printWindowResult = EncodeBitmap(printWindowBitmap);
+                    printWindowResult["method"] = "PrintWindow";
+                    printWindowResult["flags"] = (int)PW_RENDERFULLCONTENT;
+                    printWindowResult["variance"] = printWindowVariance.Value;
+                    return printWindowResult;
+                }
+            }
+        }
+
+        using var fallbackBitmap = CaptureWithFlashFocusBitBlt(hwnd, width, height);
+        var result = EncodeBitmap(fallbackBitmap);
+        result["method"] = "BitBlt";
+        result["fallback"] = "flash-focus";
+        if (printWindowVariance is not null)
+        {
+            result["printwindow_variance"] = printWindowVariance.Value;
+        }
+        return result;
+    }
+
+    private static JsonObject CaptureEvidenceWithPrintWindow(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero)
+            throw new ArgumentException("Target HWND must be non-zero.", nameof(hwnd));
+
         double? printWindowVariance = null;
         var printWindowBefore = ReadCaptureSnapshot(hwnd);
         var printWindowBitmap = CaptureBitmapWithPrintWindow(
@@ -149,7 +185,7 @@ public static class ScreenshotCommands
             }
         }
 
-        var fallbackCapture = CaptureWithFlashFocusBitBlt(hwnd);
+        var fallbackCapture = CaptureEvidenceWithFlashFocusBitBlt(hwnd);
         using var fallbackBitmap = fallbackCapture.bitmap;
         var result = EncodeBitmap(fallbackBitmap);
         result["method"] = "BitBlt";
@@ -253,7 +289,25 @@ public static class ScreenshotCommands
         }
     }
 
-    private static (Bitmap bitmap, CaptureSnapshot snapshot) CaptureWithFlashFocusBitBlt(IntPtr hwnd)
+    private static Bitmap CaptureWithFlashFocusBitBlt(IntPtr hwnd, int width, int height)
+    {
+        var savedForeground = GetForegroundWindow();
+        try
+        {
+            ShowWindow(hwnd, SW_RESTORE);
+            SetForegroundWindow(hwnd);
+            return CaptureBitmapWithBitBlt(hwnd, width, height);
+        }
+        finally
+        {
+            if (savedForeground != IntPtr.Zero)
+            {
+                SetForegroundWindow(savedForeground);
+            }
+        }
+    }
+
+    private static (Bitmap bitmap, CaptureSnapshot snapshot) CaptureEvidenceWithFlashFocusBitBlt(IntPtr hwnd)
     {
         var savedForeground = GetForegroundWindow();
         try

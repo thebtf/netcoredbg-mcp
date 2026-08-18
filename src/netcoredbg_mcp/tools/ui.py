@@ -1488,7 +1488,9 @@ def register_ui_tools(
                 from ..ui.flaui_client import FlaUIBackend
 
                 if isinstance(ui, FlaUIBackend):
-                    bridge_result = await ui.client.call("screenshot", {})
+                    bridge_result = await ui.client.call(
+                        "screenshot", {"evidence": True} if evidence else {}
+                    )
                     foreground_mutation_attempted = (
                         _stealth_response_mode(bridge_result) == "flash-focus"
                     )

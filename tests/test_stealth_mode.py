@@ -185,16 +185,33 @@ def test_bridge_screenshot_uses_printwindow_in_stealth_mode() -> None:
     assert command.index("if (JsonRpcHandler.Stealth)") < command.index("Capture.Rectangle(rect)")
 
 
-def test_bridge_stealth_screenshot_returns_capture_provenance() -> None:
+def test_bridge_stealth_screenshot_limits_provenance_to_evidence() -> None:
     command = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCommands.cs").read_text(
         encoding="utf-8"
     )
 
-    assert "GetClientRect(hwnd, out var clientRect)" in command
-    assert "GetDpiForWindow(hwnd)" in command
-    assert '["hwnd"] = hwnd.ToInt64()' in command
-    assert '["client_rect"] = new JsonObject' in command
-    assert '["dpi"] = (int)snapshot.Dpi' in command
+    screenshot_start = command.index("public static JsonNode Screenshot(")
+    resolve_start = command.index("private static IntPtr ResolveTargetHwnd")
+    preview_start = command.index("private static JsonObject CaptureWithPrintWindow")
+    evidence_start = command.index("private static JsonObject CaptureEvidenceWithPrintWindow")
+    screenshot = command[screenshot_start:resolve_start]
+    preview_capture = command[preview_start:evidence_start]
+    evidence_capture = command[evidence_start:]
+
+    assert 'var evidence = @params?["evidence"]?.GetValue<bool>() ?? false;' in screenshot
+    assert (
+        "return evidence ? CaptureEvidenceWithPrintWindow(hwnd) : CaptureWithPrintWindow(hwnd);"
+        in screenshot
+    )
+    assert "ReadCaptureSnapshot" not in preview_capture
+    assert "GetDpiForWindow" not in preview_capture
+    assert "CaptureWithFlashFocusBitBlt(hwnd, width, height)" in preview_capture
+    assert "var printWindowBefore = ReadCaptureSnapshot(hwnd);" in evidence_capture
+    assert "var printWindowAfter = ReadCaptureSnapshot(hwnd);" in evidence_capture
+    assert "EnsureStableCaptureSnapshot(printWindowBefore, printWindowAfter);" in evidence_capture
+    assert "var bitBltBefore = ReadCaptureSnapshot(hwnd);" in evidence_capture
+    assert "var bitBltAfter = ReadCaptureSnapshot(hwnd);" in evidence_capture
+    assert "EnsureStableCaptureSnapshot(bitBltBefore, bitBltAfter);" in evidence_capture
 
 
 def test_bridge_screenshot_falls_back_to_flash_focus_bitblt_when_blank() -> None:
@@ -204,7 +221,7 @@ def test_bridge_screenshot_falls_back_to_flash_focus_bitblt_when_blank() -> None
 
     assert "private const double BlankFrameVarianceThreshold = 0.01;" in command
     assert "private static bool IsBlankFrame(Bitmap bitmap)" in command
-    assert "CaptureWithFlashFocusBitBlt(hwnd)" in command
+    assert "CaptureWithFlashFocusBitBlt(hwnd, width, height)" in command
     assert "GetForegroundWindow()" in command
     assert "SetForegroundWindow(hwnd)" in command
     assert "BitBlt(" in command
@@ -217,10 +234,10 @@ def test_bridge_valid_printwindow_provenance_failure_cannot_flash_focus() -> Non
         encoding="utf-8"
     )
 
-    capture_start = command.index("private static JsonObject CaptureWithPrintWindow")
+    capture_start = command.index("private static JsonObject CaptureEvidenceWithPrintWindow")
     stable_check = command.index("EnsureStableCaptureSnapshot", capture_start)
     blank_check = command.index("if (!IsBlankFrame(printWindowBitmap))", capture_start)
-    fallback = command.index("CaptureWithFlashFocusBitBlt", capture_start)
+    fallback = command.index("CaptureEvidenceWithFlashFocusBitBlt", capture_start)
 
     assert "if (printWindowBitmap is not null)" in command[capture_start:stable_check]
     assert stable_check < blank_check < fallback
@@ -1232,7 +1249,7 @@ async def test_ui_take_screenshot_stealth_evidence_uses_bridge_capture_provenanc
 
     assert isinstance(content, list), content
     metadata = json.loads(content[1].text)
-    backend._client.call.assert_awaited_once_with("screenshot", {})
+    backend._client.call.assert_awaited_once_with("screenshot", {"evidence": True})
     assert metadata["capture_metadata"] == {
         "method": "PrintWindow",
         "hwnd": 777,
@@ -1428,3 +1445,45 @@ async def test_wpf_fixture_stealth_foundation_read_only_ui_path() -> None:
     backend.connect.assert_awaited_once_with(4242, stealth=True)
     backend.get_window_tree.assert_awaited_once_with(3, 50)
     assert response["data"]["windows"][0]["automationId"] == "mainWindow"
+
+
+@pytest.mark.asyncio
+async def test_ui_take_screenshot_evidence_requests_strict_bridge_provenance(tmp_path) -> None:
+    from PIL import Image
+
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    png = io.BytesIO()
+    Image.new("RGB", (8, 8), (255, 255, 255)).save(png, format="PNG")
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._process_id = 42
+    backend._client = MagicMock()
+    backend._client.call = AsyncMock(
+        return_value={
+            "base64": base64.b64encode(png.getvalue()).decode("ascii"),
+            "width": 8,
+            "height": 8,
+            "method": "PrintWindow",
+            "hwnd": 123,
+            "client_rect": {"left": 0, "top": 0, "right": 8, "bottom": 8},
+        }
+    )
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=True,
+        session_id="evidence-session",
+        temp_manager=SimpleNamespace(
+            save_screenshot=lambda _sid, _data, name: tmp_path / name,
+        ),
+    )
+    registry = ToolRegistry()
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(registry, session, check_session_access=lambda ctx: None)
+        response = await registry.tools["ui_take_screenshot"](SimpleNamespace(), evidence=True)
+
+    backend._client.call.assert_awaited_once_with("screenshot", {"evidence": True})
+    assert response["error"] == "Evidence capture requires valid bridge screenshot provenance"
