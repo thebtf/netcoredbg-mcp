@@ -229,6 +229,32 @@ def test_bridge_screenshot_falls_back_to_flash_focus_bitblt_when_blank() -> None
     assert "SetForegroundWindow(savedForeground)" in command
 
 
+def test_bridge_evidence_flash_focus_requires_verified_activation_but_preview_remains_best_effort() -> (
+    None
+):
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCommands.cs").read_text(
+        encoding="utf-8"
+    )
+
+    preview_start = command.index("private static Bitmap CaptureWithFlashFocusBitBlt")
+    evidence_start = command.index(
+        "private static (Bitmap bitmap, CaptureSnapshot snapshot) CaptureEvidenceWithFlashFocusBitBlt"
+    )
+    raster_start = command.index("private static Bitmap CaptureBitmapWithBitBlt")
+    preview_capture = command[preview_start:evidence_start]
+    evidence_capture = command[evidence_start:raster_start]
+
+    assert "SetForegroundWindow(hwnd);" in preview_capture
+    assert "foregroundSet" not in preview_capture
+    assert "GetForegroundWindow() != hwnd" not in preview_capture
+
+    activation = evidence_capture.index("var foregroundSet = SetForegroundWindow(hwnd);")
+    verification = evidence_capture.index("if (!foregroundSet || GetForegroundWindow() != hwnd)")
+    snapshot = evidence_capture.index("var bitBltBefore = ReadCaptureSnapshot(hwnd);")
+    assert activation < verification < snapshot
+    assert "Evidence capture could not activate the debuggee window safely" in evidence_capture
+
+
 def test_bridge_valid_printwindow_provenance_failure_cannot_flash_focus() -> None:
     command = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCommands.cs").read_text(
         encoding="utf-8"
@@ -1068,7 +1094,7 @@ async def test_ui_take_screenshot_evidence_persists_raw_png_with_hash(tmp_path) 
     assert isinstance(content, list), content
     metadata = json.loads(content[1].text)
     assert metadata["evidence_grade"] == "lossless_raster"
-    assert metadata["retention"] == "session_temp_until_stop"
+    assert metadata["retention"] == "stop_cleanup_or_stale_gc_after_4h"
     assert metadata["capture_metadata"] == capture_metadata
     assert metadata["raw_mime"] == "image/png"
     assert (metadata["raw_width"], metadata["raw_height"]) == (8, 6)

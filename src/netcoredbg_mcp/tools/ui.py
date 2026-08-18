@@ -1673,7 +1673,7 @@ def register_ui_tools(
             if evidence:
                 metadata.update(
                     {
-                        "retention": "session_temp_until_stop",
+                        "retention": "stop_cleanup_or_stale_gc_after_4h",
                         "raw_path": str(raw_path),
                         "raw_sha256": hashlib.sha256(png_bytes).hexdigest(),
                         "raw_mime": "image/png",

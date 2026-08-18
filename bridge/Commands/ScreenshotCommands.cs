@@ -313,7 +313,12 @@ public static class ScreenshotCommands
         try
         {
             ShowWindow(hwnd, SW_RESTORE);
-            SetForegroundWindow(hwnd);
+            var foregroundSet = SetForegroundWindow(hwnd);
+            if (!foregroundSet || GetForegroundWindow() != hwnd)
+            {
+                throw new InvalidOperationException(
+                    "Evidence capture could not activate the debuggee window safely");
+            }
             var bitBltBefore = ReadCaptureSnapshot(hwnd);
             var bitmap = CaptureBitmapWithBitBlt(
                 hwnd,

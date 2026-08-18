@@ -286,14 +286,13 @@ def _capture_window_raster(
                     if user32.PrintWindow(hwnd, cdc, printwindow_flags):
                         method = "PrintWindow"
                     else:
-                        gdi32.BitBlt(cdc, 0, 0, width, height, wdc, 0, 0, 0x00CC0020)
+                        if not gdi32.BitBlt(cdc, 0, 0, width, height, wdc, 0, 0, 0x00CC0020):
+                            raise RuntimeError("BitBlt fallback failed")
                         method = "BitBlt"
-
-                    from PIL import Image
 
                     bmi = _create_bitmapinfo(width, height)
                     buffer = ctypes.create_string_buffer(width * height * 4)
-                    gdi32.GetDIBits(
+                    scan_lines = gdi32.GetDIBits(
                         cdc,
                         bitmap,
                         0,
@@ -302,6 +301,13 @@ def _capture_window_raster(
                         ctypes.byref(bmi),
                         0,  # DIB_RGB_COLORS
                     )
+                    if scan_lines != height:
+                        raise RuntimeError(
+                            f"GetDIBits returned {scan_lines} scan lines; expected {height}"
+                        )
+
+                    from PIL import Image
+
                     image = Image.frombuffer(
                         "RGBA",
                         (width, height),

@@ -784,6 +784,154 @@ def test_capture_window_evidence_reports_bitblt_fallback(monkeypatch) -> None:
     assert metadata["method"] == "BitBlt"
 
 
+@pytest.mark.parametrize(
+    (
+        "capture_name",
+        "printwindow_success",
+        "bitblt_success",
+        "scan_lines",
+        "error",
+        "expect_getdibits",
+    ),
+    [
+        pytest.param(
+            "capture_window",
+            False,
+            False,
+            2,
+            "BitBlt fallback failed",
+            False,
+            id="legacy-bitblt-failure",
+        ),
+        pytest.param(
+            "capture_window_evidence",
+            False,
+            False,
+            2,
+            "BitBlt fallback failed",
+            False,
+            id="evidence-bitblt-failure",
+        ),
+        pytest.param(
+            "capture_window",
+            True,
+            True,
+            0,
+            "GetDIBits returned 0 scan lines; expected 2",
+            True,
+            id="legacy-getdibits-zero",
+        ),
+        pytest.param(
+            "capture_window_evidence",
+            True,
+            True,
+            0,
+            "GetDIBits returned 0 scan lines; expected 2",
+            True,
+            id="evidence-getdibits-zero",
+        ),
+        pytest.param(
+            "capture_window",
+            True,
+            True,
+            1,
+            "GetDIBits returned 1 scan lines; expected 2",
+            True,
+            id="legacy-getdibits-short",
+        ),
+        pytest.param(
+            "capture_window_evidence",
+            True,
+            True,
+            1,
+            "GetDIBits returned 1 scan lines; expected 2",
+            True,
+            id="evidence-getdibits-short",
+        ),
+    ],
+)
+def test_capture_window_rejects_incomplete_gdi_raster(
+    monkeypatch,
+    capture_name: str,
+    printwindow_success: bool,
+    bitblt_success: bool,
+    scan_lines: int,
+    error: str,
+    expect_getdibits: bool,
+) -> None:
+    from netcoredbg_mcp.ui import screenshot
+
+    class FakeUser32:
+        def GetClientRect(self, _hwnd, rect_ptr):  # noqa: N802 - Win32 API shape
+            rect = rect_ptr._obj
+            rect.right = 1
+            rect.bottom = 2
+            return True
+
+        def GetDpiForWindow(self, _hwnd):  # noqa: N802 - Win32 API shape
+            return 96
+
+        def GetDC(self, _hwnd):  # noqa: N802 - Win32 API shape
+            return 100
+
+        def PrintWindow(self, _hwnd, _hdc, _flags):  # noqa: N802 - Win32 API shape
+            return printwindow_success
+
+        def ReleaseDC(self, _hwnd, _hdc):  # noqa: N802 - Win32 API shape
+            return 1
+
+    class FakeGdi32:
+        def __init__(self) -> None:
+            self.bitblt_calls = 0
+            self.getdibits_calls = 0
+
+        def CreateCompatibleDC(self, _wdc):  # noqa: N802 - Win32 API shape
+            return 200
+
+        def CreateCompatibleBitmap(self, _wdc, _width, _height):  # noqa: N802 - Win32 API shape
+            return 300
+
+        def SelectObject(self, _cdc, _bitmap):  # noqa: N802 - Win32 API shape
+            return 400
+
+        def BitBlt(self, *_args):  # noqa: N802 - Win32 API shape
+            self.bitblt_calls += 1
+            return bitblt_success
+
+        def GetDIBits(self, _cdc, _bitmap, _start, _lines, buffer, _bmi, _usage):  # noqa: N802 - Win32 API shape
+            self.getdibits_calls += 1
+            ctypes.memmove(buffer, _bgra(255, 0, 0) * 2, 8)
+            return scan_lines
+
+        def DeleteObject(self, _bitmap):  # noqa: N802 - Win32 API shape
+            return True
+
+        def DeleteDC(self, _cdc):  # noqa: N802 - Win32 API shape
+            return True
+
+    fake_gdi32 = FakeGdi32()
+    monkeypatch.setattr(
+        screenshot.ctypes,
+        "windll",
+        SimpleNamespace(user32=FakeUser32(), gdi32=fake_gdi32),
+        raising=False,
+    )
+    if expect_getdibits:
+        monkeypatch.setattr(
+            Image,
+            "frombuffer",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("incomplete GDI raster must not reach PNG creation")
+            ),
+        )
+
+    with pytest.raises(RuntimeError, match=error):
+        getattr(screenshot, capture_name)(123)
+
+    assert fake_gdi32.bitblt_calls == int(not printwindow_success)
+    assert fake_gdi32.getdibits_calls == int(expect_getdibits)
+
+
 def test_crop_png_preserves_selected_pixels_and_dimensions() -> None:
     from netcoredbg_mcp.ui.screenshot import crop_png
 
