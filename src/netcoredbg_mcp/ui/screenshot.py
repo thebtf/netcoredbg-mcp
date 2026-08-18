@@ -14,6 +14,7 @@ import io
 import logging
 import os
 from ctypes import wintypes
+from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,14 @@ SCREENSHOT_QUALITY = int(os.environ.get("NETCOREDBG_SCREENSHOT_QUALITY", "80"))
 PROBABLE_BLACK_DARK_LUMINANCE = 16
 PROBABLE_BLACK_MAX_MEAN_LUMINANCE = 8.0
 PROBABLE_BLACK_MIN_DARK_PIXEL_FRACTION = 0.995
+
+
+@dataclass(frozen=True, slots=True)
+class _DirectCaptureSnapshot:
+    client_rect: tuple[int, int, int, int]
+    dpi: int
+    raster_width: int
+    raster_height: int
 
 
 def analyze_screenshot_frame(image_data: bytes) -> dict[str, Any]:
@@ -178,6 +187,23 @@ def _get_window_dpi(hwnd: int) -> int:
     return dpi
 
 
+def _read_direct_capture_snapshot(hwnd: int) -> _DirectCaptureSnapshot:
+    """Read the geometry, DPI, and raster dimensions for one direct capture instant."""
+    client_rect = _get_client_rect(hwnd)
+    left, top, right, bottom = (
+        client_rect["left"],
+        client_rect["top"],
+        client_rect["right"],
+        client_rect["bottom"],
+    )
+    return _DirectCaptureSnapshot(
+        client_rect=(left, top, right, bottom),
+        dpi=_get_window_dpi(hwnd),
+        raster_width=right - left,
+        raster_height=bottom - top,
+    )
+
+
 def build_capture_metadata(
     hwnd: int,
     width: int,
@@ -236,9 +262,9 @@ def capture_window_evidence(hwnd: int) -> tuple[bytes, int, int, dict[str, Any]]
     user32 = ctypes.windll.user32
     gdi32 = ctypes.windll.gdi32
 
-    client_rect = _get_client_rect(hwnd)
-    width = client_rect["right"] - client_rect["left"]
-    height = client_rect["bottom"] - client_rect["top"]
+    before = _read_direct_capture_snapshot(hwnd)
+    width = before.raster_width
+    height = before.raster_height
 
     # Create compatible DC and bitmap
     wdc = user32.GetDC(hwnd)
@@ -298,12 +324,25 @@ def capture_window_evidence(hwnd: int) -> tuple[bytes, int, int, dict[str, Any]]
                     # Encode to PNG
                     png_buffer = io.BytesIO()
                     image.save(png_buffer, format="PNG", optimize=True)
+                    after = _read_direct_capture_snapshot(hwnd)
+                    if after != before:
+                        raise RuntimeError(
+                            "Evidence capture invalidated because window changed "
+                            "during rasterization"
+                        )
                     return (
                         png_buffer.getvalue(),
                         width,
                         height,
                         build_capture_metadata(
-                            hwnd, width, height, method, client_rect=client_rect
+                            hwnd,
+                            width,
+                            height,
+                            method,
+                            client_rect=dict(
+                                zip(("left", "top", "right", "bottom"), before.client_rect)
+                            ),
+                            dpi=before.dpi,
                         ),
                     )
 
