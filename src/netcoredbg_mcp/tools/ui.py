@@ -1502,29 +1502,50 @@ def register_ui_tools(
                         png_bytes = base64.b64decode(bridge_result["base64"])
                         bridge_width = bridge_result.get("width")
                         bridge_height = bridge_result.get("height")
-                        if type(bridge_width) is not int or type(bridge_height) is not int:
+                        if (
+                            type(bridge_width) is not int
+                            or type(bridge_height) is not int
+                            or bridge_width <= 0
+                            or bridge_height <= 0
+                        ):
                             raise ValueError(
-                                "Bridge screenshot response requires integer width and height"
+                                "Bridge screenshot response requires positive integer width and height"
                             )
                         raw_width = bridge_width
                         raw_height = bridge_height
                         if evidence:
                             method = bridge_result.get("method")
-                            if not isinstance(method, str) or not method:
-                                raise ValueError(
-                                    "Bridge screenshot response requires capture method "
-                                    "for evidence"
+                            bridge_hwnd = bridge_result.get("hwnd")
+                            bridge_client_rect = bridge_result.get("client_rect")
+                            bridge_dpi = bridge_result.get("dpi")
+                            client_rect_keys = ("left", "top", "right", "bottom")
+                            if (
+                                not isinstance(method, str)
+                                or not method
+                                or type(bridge_hwnd) is not int
+                                or bridge_hwnd == 0
+                                or not isinstance(bridge_client_rect, dict)
+                                or any(
+                                    type(bridge_client_rect.get(key)) is not int
+                                    for key in client_rect_keys
                                 )
-                            hwnd = get_hwnd_for_pid(pid)
-                            if not hwnd:
+                                or bridge_client_rect["right"] <= bridge_client_rect["left"]
+                                or bridge_client_rect["bottom"] <= bridge_client_rect["top"]
+                                or type(bridge_dpi) is not int
+                                or bridge_dpi <= 0
+                            ):
                                 raise ValueError(
-                                    "Evidence capture requires a visible window handle"
+                                    "Evidence capture requires valid bridge screenshot provenance"
                                 )
-                            evidence_hwnd: int = hwnd
                             capture_metadata = await loop.run_in_executor(
                                 None,
                                 lambda: build_capture_metadata(
-                                    evidence_hwnd, raw_width, raw_height, method
+                                    bridge_hwnd,
+                                    raw_width,
+                                    raw_height,
+                                    method,
+                                    client_rect=bridge_client_rect,
+                                    dpi=bridge_dpi,
                                 ),
                             )
 

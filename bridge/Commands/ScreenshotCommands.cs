@@ -17,6 +17,12 @@ public static class ScreenshotCommands
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint GetDpiForWindow(IntPtr hWnd);
+
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
 
@@ -124,7 +130,7 @@ public static class ScreenshotCommands
                 printWindowResult["method"] = "PrintWindow";
                 printWindowResult["flags"] = (int)PW_RENDERFULLCONTENT;
                 printWindowResult["variance"] = printWindowVariance.Value;
-                return printWindowResult;
+                return AddCaptureProvenance(printWindowResult, hwnd);
             }
         }
         catch (InvalidOperationException ex)
@@ -144,7 +150,7 @@ public static class ScreenshotCommands
         {
             result["printwindow_error"] = printWindowError;
         }
-        return result;
+        return AddCaptureProvenance(result, hwnd);
     }
 
     private static (int width, int height) GetWindowSize(IntPtr hwnd)
@@ -159,6 +165,33 @@ public static class ScreenshotCommands
             throw new InvalidOperationException($"Window has invalid dimensions: {width}x{height}");
 
         return (width, height);
+    }
+
+    private static JsonObject AddCaptureProvenance(JsonObject result, IntPtr hwnd)
+    {
+        if (!GetClientRect(hwnd, out var clientRect))
+            throw new InvalidOperationException(
+                $"GetClientRect failed for HWND {hwnd.ToInt64()}: {Marshal.GetLastWin32Error()}");
+
+        if (clientRect.Right <= clientRect.Left || clientRect.Bottom <= clientRect.Top)
+            throw new InvalidOperationException(
+                $"Client rectangle has invalid dimensions for HWND {hwnd.ToInt64()}");
+
+        var dpi = GetDpiForWindow(hwnd);
+        if (dpi == 0)
+            throw new InvalidOperationException(
+                $"GetDpiForWindow failed for HWND {hwnd.ToInt64()}: {Marshal.GetLastWin32Error()}");
+
+        result["hwnd"] = hwnd.ToInt64();
+        result["client_rect"] = new JsonObject
+        {
+            ["left"] = clientRect.Left,
+            ["top"] = clientRect.Top,
+            ["right"] = clientRect.Right,
+            ["bottom"] = clientRect.Bottom
+        };
+        result["dpi"] = (int)dpi;
+        return result;
     }
 
     private static Bitmap CaptureBitmapWithPrintWindow(IntPtr hwnd, int width, int height)

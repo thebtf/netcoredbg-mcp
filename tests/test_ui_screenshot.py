@@ -589,6 +589,6 @@ def test_crop_png_rejects_invalid_rectangles(rectangle: tuple[int, int, int, int
     from netcoredbg_mcp.ui.screenshot import crop_png
 
     with pytest.raises(
-        ValueError, match="^Crop rectangle must be positive and within image bounds$"
+        ValueError, match=r"^Crop rectangle must be positive and within image bounds$"
     ):
         crop_png(_png((255, 0, 0), (2, 2)), *rectangle)

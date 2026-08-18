@@ -174,18 +174,22 @@ def build_capture_metadata(
     method: str,
     *,
     client_rect: dict[str, int] | None = None,
+    dpi: int | None = None,
 ) -> dict[str, Any]:
     """Build capture provenance using raw pixels and actual client geometry."""
     client_rect = client_rect if client_rect is not None else _get_client_rect(hwnd)
-    dpi = 96
-    get_dpi_for_window = getattr(ctypes.windll.user32, "GetDpiForWindow", None)
-    if get_dpi_for_window is not None:
-        try:
-            reported_dpi = int(get_dpi_for_window(hwnd))
-            if reported_dpi > 0:
-                dpi = reported_dpi
-        except (OSError, ValueError):
-            pass
+    if dpi is None:
+        dpi = 96
+        get_dpi_for_window = getattr(ctypes.windll.user32, "GetDpiForWindow", None)
+        if get_dpi_for_window is not None:
+            try:
+                reported_dpi = int(get_dpi_for_window(hwnd))
+                if reported_dpi > 0:
+                    dpi = reported_dpi
+            except (OSError, ValueError):
+                pass
+    elif type(dpi) is not int or dpi <= 0:
+        raise ValueError("Evidence capture requires a positive DPI")
 
     dpi_scale = dpi / 96
     return {

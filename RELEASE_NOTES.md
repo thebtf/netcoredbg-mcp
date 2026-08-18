@@ -4,7 +4,7 @@ Planned release: 2026-08-18
 
 ## Summary
 
-`v0.23.6` is a PATCH hotfix for optional lossless screenshot evidence. The
+`v0.23.6` is a PATCH release for optional lossless screenshot evidence. The
 existing `ui_take_screenshot` navigation preview remains the default; the
 session-scoped evidence mode additionally provides the original PNG, SHA-256,
 capture/DPI/geometry metadata, and an optional raw-derived crop.
