@@ -179,6 +179,48 @@ public sealed class NetCoreDbgSessionTests
     }
 
     [Fact]
+    public async Task StartAsync_TreatsOmittedInitializeResponseBodyAsEmptyCapabilities()
+    {
+        await using var session = await StartAsync(new FixtureConfiguration(
+            SupportsConfigurationDone: false,
+            OmitInitializeResponseBody: true));
+
+        var transcript = await session.Fixture.ReadTranscriptAsync();
+        var initializeResponse = Assert.Single(transcript, entry => entry.Kind == "initialize-response");
+        Assert.True(initializeResponse.BodyOmitted is true, "The controlled adapter must omit, not null-serialize, the initialize response body.");
+        Assert.DoesNotContain(transcript, entry => entry.Command == "configurationDone");
+    }
+
+    [Fact]
+    public async Task StartAsync_AppliesInitializeBaselineBeforeConfigurationDoneCapabilityDelta()
+    {
+        await using var session = await NetCoreDbgSessionContractDriver.StartWithInitializeContinuationGateAsync(
+            new FixtureConfiguration(
+                SupportsConfigurationDone: false,
+                EnableConfigurationDoneAfterInitialization: true,
+                HoldConfigurationDoneCapabilityDeltaUntilRelease: true),
+            "D:\\fixtures\\program.dll",
+            InitializeTimeout,
+            RequestTimeout,
+            StopTimeout,
+            CancellationToken.None);
+
+        var transcript = await session.Fixture.ReadTranscriptAsync();
+        var initializeResponse = Assert.Single(transcript, entry => entry.Kind == "initialize-response");
+        var delta = Assert.Single(transcript, entry => entry.Kind == "configuration-done-capabilities-delta-event");
+        var initializeResponseIndex = Array.FindIndex(transcript.ToArray(), entry => entry == initializeResponse);
+        var deltaIndex = Array.FindIndex(transcript.ToArray(), entry => entry == delta);
+        var initialized = Array.FindIndex(transcript.ToArray(), entry => entry.Kind == "initialized-event");
+        var configurationDone = Array.FindIndex(transcript.ToArray(), entry => entry.Kind == "configuration-done");
+
+        Assert.False(initializeResponse.SupportsConfigurationDoneRequest ?? true, "The initialize baseline must disable configurationDone before the delta.");
+        Assert.True(delta.SupportsConfigurationDoneRequest is true, "The capability delta must enable configurationDone before startup continues.");
+        Assert.True(initializeResponseIndex >= 0 && initializeResponseIndex < deltaIndex && deltaIndex < initialized && initialized < configurationDone,
+            "The reader must apply the response baseline, then the delta, before releasing the held caller continuation.");
+        Assert.Equal(1, Requests(transcript).Count(command => command == "configurationDone"));
+    }
+
+    [Fact]
     public async Task State_TracksStoppedContinuedExitedAndTerminatedEvents()
     {
         await using (var quiet = await StartAsync(new FixtureConfiguration(SuppressLifecycleEvents: true)))

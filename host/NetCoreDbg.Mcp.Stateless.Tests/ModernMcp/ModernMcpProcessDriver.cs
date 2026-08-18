@@ -1,4 +1,8 @@
 using System.Diagnostics;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Runtime.Loader;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using ModelContextProtocol;
 using ModelContextProtocol.Client;
@@ -407,6 +411,122 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         }
     }
 }
+
+internal static class ModernMcpRegistryContractDriver
+{
+    private const string ProductionAssemblyName = "NetCoreDbg.Mcp.Stateless";
+    private const string RegistryTypeName = "NetCoreDbg.Mcp.Stateless.Program+DebugSessionRegistry";
+    private const string SessionTypeName = "NetCoreDbg.Mcp.Stateless.DebugAdapter.NetCoreDbgSession";
+
+    internal static async Task<RegistryCleanupFailureObservation> ObserveUnusableSessionCleanupFailureAsync()
+    {
+        var productionAssembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(
+            TestOutputPathResolver.ResolveManagedAssembly(
+                RepositoryLayout.Root,
+                Path.Combine("host", ProductionAssemblyName),
+                ProductionAssemblyName));
+        var registryType = productionAssembly.GetType(RegistryTypeName, throwOnError: false);
+        var sessionType = productionAssembly.GetType(SessionTypeName, throwOnError: false);
+        Assert.NotNull(registryType);
+        Assert.NotNull(sessionType);
+
+        var isUsableType = typeof(Func<,>).MakeGenericType(sessionType!, typeof(bool));
+        var disposeType = typeof(Func<,>).MakeGenericType(sessionType, typeof(ValueTask));
+        var constructor = registryType!.GetConstructor(
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            types: [typeof(string), isUsableType, disposeType],
+            modifiers: null);
+        Assert.NotNull(constructor);
+
+        var cleanupAttempts = 0;
+        Func<object, ValueTask> failingCleanup = _ =>
+        {
+            cleanupAttempts++;
+            return new ValueTask(Task.FromException(new InvalidOperationException("Injected cleanup failure.")));
+        };
+        var registry = constructor!.Invoke([
+            null,
+            CreateIsUsableDelegate(sessionType, static _ => false),
+            CreateDisposerDelegate(sessionType, failingCleanup),
+        ]);
+        var sessionsField = registryType.GetField("_sessions", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(sessionsField);
+        var sessions = sessionsField!.GetValue(registry);
+        Assert.NotNull(sessions);
+
+        const string sessionId = "unusable-session";
+        var session = RuntimeHelpers.GetUninitializedObject(sessionType);
+        var tryAdd = sessions!.GetType().GetMethod("TryAdd", [typeof(string), sessionType]);
+        var containsKey = sessions.GetType().GetMethod("ContainsKey", [typeof(string)]);
+        Assert.NotNull(tryAdd);
+        Assert.NotNull(containsKey);
+        Assert.True((bool)tryAdd!.Invoke(sessions, [sessionId, session])!);
+
+        var getStateAsync = registryType.GetMethod(
+            "GetStateAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            types: [typeof(CallToolRequestParams), typeof(CancellationToken)],
+            modifiers: null);
+        Assert.NotNull(getStateAsync);
+
+        var unusable = await GetStateAsync(getStateAsync!, registry, sessionId);
+        var missing = await GetStateAsync(getStateAsync, registry, "missing-session");
+        return new RegistryCleanupFailureObservation(
+            cleanupAttempts,
+            (bool)containsKey!.Invoke(sessions, [sessionId])!,
+            unusable.ResultType,
+            unusable.IsError == true,
+            Assert.IsType<JsonElement>(unusable.StructuredContent),
+            Assert.IsType<JsonElement>(missing.StructuredContent));
+    }
+
+    private static Delegate CreateIsUsableDelegate(Type sessionType, Func<object, bool> isUsable) =>
+        (Delegate)typeof(ModernMcpRegistryContractDriver)
+            .GetMethod(nameof(CreateIsUsableDelegateCore), BindingFlags.Static | BindingFlags.NonPublic)!
+            .MakeGenericMethod(sessionType)
+            .Invoke(null, [isUsable])!;
+
+    private static Delegate CreateDisposerDelegate(Type sessionType, Func<object, ValueTask> disposer) =>
+        (Delegate)typeof(ModernMcpRegistryContractDriver)
+            .GetMethod(nameof(CreateDisposerDelegateCore), BindingFlags.Static | BindingFlags.NonPublic)!
+            .MakeGenericMethod(sessionType)
+            .Invoke(null, [disposer])!;
+
+    private static Func<TSession, bool> CreateIsUsableDelegateCore<TSession>(Func<object, bool> isUsable) =>
+        session => isUsable(session!);
+
+    private static Func<TSession, ValueTask> CreateDisposerDelegateCore<TSession>(Func<object, ValueTask> disposer) =>
+        session => disposer(session!);
+
+    private static async Task<CallToolResult> GetStateAsync(MethodInfo method, object registry, string sessionId)
+    {
+        var request = new CallToolRequestParams
+        {
+            Name = "get_debug_state",
+            Arguments = new Dictionary<string, JsonElement>
+            {
+                ["debugSessionId"] = JsonSerializer.SerializeToElement(sessionId),
+            },
+        };
+        var pending = method.Invoke(registry, [request, CancellationToken.None]);
+        Assert.NotNull(pending);
+        var asTask = pending!.GetType().GetMethod("AsTask", BindingFlags.Instance | BindingFlags.Public, Type.EmptyTypes);
+        Assert.NotNull(asTask);
+        var task = Assert.IsAssignableFrom<Task>(asTask!.Invoke(pending, []));
+        await task.ConfigureAwait(false);
+        return Assert.IsType<CallToolResult>(task.GetType().GetProperty("Result")!.GetValue(task));
+    }
+}
+
+internal sealed record RegistryCleanupFailureObservation(
+    int CleanupAttempts,
+    bool TokenRetained,
+    string? ResultType,
+    bool IsError,
+    JsonElement UnusableContent,
+    JsonElement MissingContent);
 
 internal sealed record ModernMcpStartOptions(
     JsonObject? InitialMeta = null,

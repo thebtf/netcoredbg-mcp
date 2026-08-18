@@ -111,6 +111,7 @@ internal static class Program
         private readonly ConcurrentDictionary<string, NetCoreDbgSession> _sessions = new(StringComparer.Ordinal);
         private readonly string? _debuggerPath;
         private readonly Func<NetCoreDbgSession, bool> _isUsable;
+        private readonly Func<NetCoreDbgSession, ValueTask> _dispose;
 
         internal DebugSessionRegistry(string? debuggerPath)
             : this(debuggerPath, static session => session.IsUsable)
@@ -118,9 +119,18 @@ internal static class Program
         }
 
         private DebugSessionRegistry(string? debuggerPath, Func<NetCoreDbgSession, bool> isUsable)
+            : this(debuggerPath, isUsable, static session => session.DisposeAsync())
+        {
+        }
+
+        private DebugSessionRegistry(
+            string? debuggerPath,
+            Func<NetCoreDbgSession, bool> isUsable,
+            Func<NetCoreDbgSession, ValueTask> dispose)
         {
             _debuggerPath = debuggerPath;
             _isUsable = isUsable;
+            _dispose = dispose;
         }
 
         internal async ValueTask<CallToolResult> CallAsync(
@@ -225,7 +235,15 @@ internal static class Program
 
             if (!isUsable && _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(sessionId!, session)))
             {
-                await session.DisposeAsync().ConfigureAwait(false);
+                try
+                {
+                    await _dispose(session).ConfigureAwait(false);
+                }
+                catch (Exception)
+                {
+                    // Removal is authoritative: cleanup failure must not disclose handle state.
+                }
+
                 return NotFound();
             }
 

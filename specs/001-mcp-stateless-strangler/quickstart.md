@@ -80,17 +80,19 @@ establish consumer proof.
 ### Receipt: retained Python consumer — `PRODUCT_WORKS`
 
 Run from the repository root in PowerShell. The first command constructs the controlled
-program. The block then creates a disposable MCP stdio consumer driver and isolated provider
-environment; it does not install globally or publish a package. Set `NETCOREDBG_PATH` to an
-already-installed debugger; do not invoke `--setup`, which can download or change managed
-debugger state.
+program. The block then builds the retained package wheel, installs that exact artifact
+non-editably into a disposable environment, and creates an MCP stdio consumer driver. It
+does not install globally or publish a package. Set `NETCOREDBG_PATH` to an already-installed
+debugger; do not invoke `--setup`, which can download or change managed debugger state.
 Before the block, set `NETCOREDBG_PATH` to the existing local `netcoredbg.exe` by the
 operator's normal environment convention; do not hardcode a workstation path in this receipt.
 
 ```powershell
 dotnet build tests/fixtures/SmokeTestApp -c Debug --nologo
-$env:UV_PROJECT_ENVIRONMENT = '.agent/tmp/t001-retained-python'
 $env:T001_REPO_ROOT = (Get-Location).Path
+$wheelDirectory = '.agent/tmp/t001-retained-python-wheel'
+$consumerEnvironment = '.agent/tmp/t001-retained-python'
+$consumerPython = Join-Path $consumerEnvironment 'Scripts/python.exe'
 New-Item -ItemType Directory -Force .agent/tmp | Out-Null
 @'
 import asyncio
@@ -158,21 +160,28 @@ async def main() -> None:
 
 asyncio.run(main())
 '@ | Set-Content -NoNewline .agent/tmp/t001-retained-python-consumer.py
-uv sync --locked --project .
-uv run --no-sync --project . python .agent/tmp/t001-retained-python-consumer.py
+uv build --wheel --clear --out-dir $wheelDirectory
+$wheels = @(Get-ChildItem -File -Path $wheelDirectory -Filter 'netcoredbg_mcp-*.whl')
+if ($wheels.Count -ne 1) { throw "Expected exactly one netcoredbg-mcp wheel; found $($wheels.Count)." }
+$wheel = $wheels[0].FullName
+uv venv --clear --no-project $consumerEnvironment
+uv pip install --python $consumerPython $wheel
+& $consumerPython .agent/tmp/t001-retained-python-consumer.py
 ```
 
 The disposable consumer driver launches the retained public console script
-`netcoredbg-mcp --project-from-cwd` from the isolated environment with the controlled
-`tests/fixtures/SmokeTestApp/bin/Debug/net8.0-windows/SmokeTestApp.dll` program. It uses
-an MCP stdio client to initialize, list tools, start the fixture stopped at entry, observe
-the stopped state, and stop it: **5/5** checks. On this receipt it reported
-`{"product_works": true, "tool_count": 135, "stopped_at_entry": true}`.
+`netcoredbg-mcp --project-from-cwd` from the disposable environment after it installs the
+built `netcoredbg_mcp-*.whl` artifact non-editably. Its `PATH` is derived from that
+environment's `sys.executable`, so `netcoredbg-mcp` cannot resolve from the source tree or a
+global installation. The controlled
+`tests/fixtures/SmokeTestApp/bin/Debug/net8.0-windows/SmokeTestApp.dll` program initializes,
+lists tools, starts stopped at entry, observes the stopped state, and stops: **5/5** checks.
+On this receipt it reported `{"product_works": true, "tool_count": 135, "stopped_at_entry": true}`.
 
 Environment and cleanup: `NETCOREDBG_PATH` must name an existing executable, and `dotnet`
-and `uv` must be on `PATH`. Section 3 removes the generated driver and environment. This
-proves the retained installed console-script consumer path and controlled debugger lifecycle
-only; it makes no claim about the proposed modern candidate or its MCP conformance.
+and `uv` must be on `PATH`. Section 3 removes the generated driver, wheel, and environment.
+This proves the retained installed console-script consumer path and controlled debugger
+lifecycle only; it makes no claim about the proposed modern candidate or its MCP conformance.
 
 ## 3. Rollback command block — owned by T-001
 
@@ -185,10 +194,11 @@ client-configuration cutover to reverse. With the same environment, fixture buil
 generated driver from section 2, execute this exact replay and cleanup:
 
 ```powershell
-uv run --no-sync --project . python .agent/tmp/t001-retained-python-consumer.py
-Remove-Item -Recurse -Force .agent/tmp/t001-retained-python
+& $consumerPython .agent/tmp/t001-retained-python-consumer.py
+Remove-Item -Recurse -Force $consumerEnvironment
+Remove-Item -Recurse -Force $wheelDirectory
 Remove-Item -Force .agent/tmp/t001-retained-python-consumer.py
-Remove-Item Env:T001_REPO_ROOT, Env:UV_PROJECT_ENVIRONMENT
+Remove-Item Env:T001_REPO_ROOT
 ```
 
 The replay is the rollback proof: it re-runs the unchanged public `netcoredbg-mcp`

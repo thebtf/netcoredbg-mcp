@@ -46,6 +46,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private bool _supportsTerminate;
     private bool _initializeResponseObserved;
     private bool CapabilitiesObserved { get; set; }
+    private readonly TaskCompletionSource<bool>? _initializeResponseContinuationReached;
+    private readonly Task? _initializeResponseContinuationRelease;
     private NetCoreDbgSession(
         Process process,
         Stream input,
@@ -53,7 +55,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         Stream error,
         TimeSpan requestTimeout,
         TimeSpan stopTimeout,
-        IProcessTreeOwnership? processTreeOwnership)
+        IProcessTreeOwnership? processTreeOwnership,
+        TaskCompletionSource<bool>? initializeResponseContinuationReached = null,
+        Task? initializeResponseContinuationRelease = null)
     {
         _process = process;
         _input = input;
@@ -62,6 +66,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         _processTreeOwnership = processTreeOwnership;
         _requestTimeout = RequirePositiveTimeout(requestTimeout, nameof(requestTimeout));
         _stopTimeout = RequirePositiveTimeout(stopTimeout, nameof(stopTimeout));
+        _initializeResponseContinuationReached = initializeResponseContinuationReached;
+        _initializeResponseContinuationRelease = initializeResponseContinuationRelease;
         _readerTask = ReadMessagesAsync();
         _stderrTask = DrainStandardErrorAsync();
     }
@@ -169,7 +175,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private async Task StartProtocolAsync(string programPath, TimeSpan initializeTimeout, CancellationToken cancellationToken)
     {
-        var initialize = await SendRequestAsync(
+        _ = await SendRequestAsync(
             "initialize",
             new
             {
@@ -184,7 +190,6 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             initializeTimeout,
             cancellationToken).ConfigureAwait(false);
 
-        ReadInitializeCapabilities(initialize.Body);
         await _initialized.Task.WaitAsync(initializeTimeout, cancellationToken).ConfigureAwait(false);
 
         var launch = await BeginRequestAsync(
@@ -220,7 +225,15 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         var request = await BeginRequestAsync(command, arguments, timeout, cancellationToken).ConfigureAwait(false);
         try
         {
-            return await WaitForResponseAsync(request, timeout, cancellationToken).ConfigureAwait(false);
+            var response = await WaitForResponseAsync(request, timeout, cancellationToken).ConfigureAwait(false);
+            if (string.Equals(command, "initialize", StringComparison.Ordinal)
+                && _initializeResponseContinuationReached is { } continuationReached)
+            {
+                continuationReached.TrySetResult(true);
+                await (_initializeResponseContinuationRelease ?? Task.CompletedTask).ConfigureAwait(false);
+            }
+
+            return response;
         }
         finally
         {
@@ -366,6 +379,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             : default;
         if (request.Command == "initialize")
         {
+            ReadInitializeCapabilities(body);
             _initializeResponseObserved = true;
         }
 
@@ -431,6 +445,13 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private void ReadInitializeCapabilities(JsonElement body)
     {
+        if (body.ValueKind == JsonValueKind.Undefined)
+        {
+            _supportsConfigurationDone = false;
+            _supportsTerminate = false;
+            return;
+        }
+
         if (body.ValueKind != JsonValueKind.Object)
         {
             throw new InvalidDataException("The initialize response body must be a JSON object.");

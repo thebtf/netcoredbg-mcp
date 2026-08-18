@@ -1,5 +1,7 @@
 using System.Text.Json.Nodes;
+using System.Text.Json;
 using ModelContextProtocol.Protocol;
+using NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter;
 using Xunit;
 
 namespace NetCoreDbg.Mcp.Stateless.Tests.ModernMcp;
@@ -188,6 +190,37 @@ public sealed class CapabilityLifecycleContractTests
             new JsonObject { ["debugSessionId"] = token },
             Meta(),
             new RequestId("prior-process")))));
+    }
+
+    [Fact]
+    public async Task GetDebugState_UnusableSessionCleanupFailure_ReturnsUniformCompleteNotFound()
+    {
+        var observation = await ModernMcpRegistryContractDriver.ObserveUnusableSessionCleanupFailureAsync();
+
+        Assert.Equal(1, observation.CleanupAttempts);
+        Assert.False(observation.TokenRetained);
+        Assert.Equal("complete", observation.ResultType);
+        Assert.True(observation.IsError);
+        Assert.Equal("debug_session_not_found", observation.UnusableContent.GetProperty("kind").GetString());
+        Assert.Equal("DEBUG_SESSION_NOT_FOUND", observation.UnusableContent.GetProperty("error").GetString());
+        Assert.Equal(observation.MissingContent.GetRawText(), observation.UnusableContent.GetRawText());
+    }
+
+    [Fact]
+    public void Quickstart_RetainedPythonConsumerUsesBuiltWheelInDisposableEnvironment()
+    {
+        var quickstart = File.ReadAllText(Path.Combine(
+            RepositoryLayout.Root,
+            "specs",
+            "001-mcp-stateless-strangler",
+            "quickstart.md"));
+
+        Assert.Contains("uv build --wheel --clear --out-dir $wheelDirectory", quickstart, StringComparison.Ordinal);
+        Assert.Contains("uv venv --clear --no-project $consumerEnvironment", quickstart, StringComparison.Ordinal);
+        Assert.Contains("uv pip install --python $consumerPython $wheel", quickstart, StringComparison.Ordinal);
+        Assert.Contains("& $consumerPython .agent/tmp/t001-retained-python-consumer.py", quickstart, StringComparison.Ordinal);
+        Assert.DoesNotContain("uv sync --locked --project .", quickstart, StringComparison.Ordinal);
+        Assert.DoesNotContain("uv run --no-sync --project . python .agent/tmp/t001-retained-python-consumer.py", quickstart, StringComparison.Ordinal);
     }
 
     [Fact]

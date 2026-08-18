@@ -22,6 +22,12 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
     private readonly Task _readerTask;
     private readonly MethodInfo _disposeAsync;
 
+    private sealed class InitializeResponseContinuationGate
+    {
+        public TaskCompletionSource<bool> Reached { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
     private NetCoreDbgSessionContractDriver(
         FixtureProcess fixture,
         object session,
@@ -127,6 +133,110 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
                 foreach (var entry in await fixture.ReadTranscriptAsync())
                 {
                     failedTranscript.Add(entry);
+                }
+            }
+
+            await fixture.DisposeAsync();
+            throw;
+        }
+    }
+
+    public static async Task<NetCoreDbgSessionContractDriver> StartWithInitializeContinuationGateAsync(
+        FixtureConfiguration configuration,
+        string programPath,
+        TimeSpan initializeTimeout,
+        TimeSpan requestTimeout,
+        TimeSpan stopTimeout,
+        CancellationToken cancellationToken)
+    {
+        Assert.True(configuration.EnableConfigurationDoneAfterInitialization);
+        Assert.True(configuration.HoldConfigurationDoneCapabilityDeltaUntilRelease);
+
+        var fixture = FixtureProcess.Create(configuration);
+        object? session = null;
+        var gate = new InitializeResponseContinuationGate();
+        try
+        {
+            var assembly = LoadProductionAssemblyOrAssert();
+            var sessionType = RequireType(assembly, SessionTypeName);
+            var stateType = RequireType(assembly, StateTypeName);
+            var constructor = sessionType.GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic)
+                .SingleOrDefault(candidate =>
+                {
+                    var parameters = candidate.GetParameters();
+                    return parameters.Length == 9
+                        && parameters[0].ParameterType == typeof(Process)
+                        && parameters[1].ParameterType == typeof(Stream)
+                        && parameters[2].ParameterType == typeof(Stream)
+                        && parameters[3].ParameterType == typeof(Stream)
+                        && parameters[4].ParameterType == typeof(TimeSpan)
+                        && parameters[5].ParameterType == typeof(TimeSpan)
+                        && parameters[7].ParameterType == typeof(TaskCompletionSource<bool>)
+                        && parameters[8].ParameterType == typeof(Task);
+                });
+            Assert.NotNull(constructor);
+            var startProtocolAsync = RequireTaskMethod(sessionType, "StartProtocolAsync", typeof(string), typeof(TimeSpan), typeof(CancellationToken));
+            var state = RequireProperty(sessionType, "State", stateType);
+            var isUsable = RequireInternalProperty(sessionType, "IsUsable", typeof(bool));
+            var readerTask = RequirePrivateTaskField(sessionType, "_readerTask");
+            var supportsConfigurationDone = RequirePrivateField(sessionType, "_supportsConfigurationDone", typeof(bool));
+            var stopAsync = RequireTaskMethod(sessionType, "StopAsync", typeof(CancellationToken));
+            var disposeAsync = RequireAsyncDisposable(sessionType);
+            RequireNarrowSessionSurface(sessionType);
+            RequireStateShape(stateType);
+            fixture.MarkAdapterStartAttempted();
+
+            using var startupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            startupCancellation.CancelAfter(initializeTimeout + requestTimeout + TimeSpan.FromMilliseconds(500));
+            var startInfo = new ProcessStartInfo(fixture.ExecutablePath)
+            {
+                UseShellExecute = false,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+            startInfo.ArgumentList.Add("--interpreter=vscode");
+            var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start the controlled adapter.");
+            session = constructor!.Invoke([
+                process,
+                process.StandardInput.BaseStream,
+                process.StandardOutput.BaseStream,
+                process.StandardError.BaseStream,
+                requestTimeout,
+                stopTimeout,
+                null,
+                gate.Reached,
+                gate.Release.Task,
+            ]);
+            var started = startProtocolAsync.Invoke(session, [programPath, initializeTimeout, startupCancellation.Token]);
+            await gate.Reached.Task.WaitAsync(startupCancellation.Token);
+            fixture.ReleaseConfigurationDoneCapabilityDelta();
+            while (!(bool)(supportsConfigurationDone.GetValue(session) ?? false))
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(10), startupCancellation.Token);
+            }
+
+            gate.Release.TrySetResult(true);
+            await AwaitAsyncResult(started, "StartProtocolAsync", startupCancellation.Token);
+            var activeReaderTask = readerTask.GetValue(session) as Task
+                ?? throw new InvalidOperationException("NetCoreDbgSession._readerTask returned null.");
+            await fixture.WaitForStartupAsync(startupCancellation.Token);
+            return new NetCoreDbgSessionContractDriver(fixture, session, stopAsync, state, isUsable, activeReaderTask, disposeAsync);
+        }
+        catch
+        {
+            gate.Release.TrySetResult(true);
+            if (session is not null)
+            {
+                try
+                {
+                    var disposeAsync = RequireAsyncDisposable(session.GetType());
+                    _ = await AwaitAsyncResult(disposeAsync.Invoke(session, []), "DisposeAsync", CancellationToken.None);
+                }
+                catch
+                {
+                    // Fixture cleanup below owns recovery after a failed deterministic probe.
                 }
             }
 
@@ -390,6 +500,15 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         return field;
     }
 
+    private static FieldInfo RequirePrivateField(Type type, string name, Type expectedType)
+    {
+        var field = type.GetField(name, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+        Assert.NotNull(field);
+        Assert.True(field!.IsPrivate, $"Missing production contract: {type.FullName}.{name} must be private.");
+        Assert.Equal(expectedType, field.FieldType);
+        return field;
+    }
+
     private static void RequireStateShape(Type stateType)
     {
         Assert.True(stateType.IsValueType || stateType.IsSealed, "Missing production contract: DapSessionState must be immutable.");
@@ -514,6 +633,9 @@ internal sealed record FixtureConfiguration(
     bool MalformedCapabilitiesEvent = false,
     bool SendMalformedDapFrameAfterStartup = false,
     bool DelayLaunchResponseForStartupTimeout = false,
+    bool OmitInitializeResponseBody = false,
+    bool EnableConfigurationDoneAfterInitialization = false,
+    bool HoldConfigurationDoneCapabilityDeltaUntilRelease = false,
     bool EnableTerminateAfterInitialization = false,
     bool ExitAfterLaunchResponse = false)
 {
@@ -535,6 +657,9 @@ internal sealed record FixtureConfiguration(
             MalformedCapabilitiesEvent ? "--malformed-capabilities-event" : null,
             SendMalformedDapFrameAfterStartup ? "--send-malformed-dap-frame-after-startup" : null,
             DelayLaunchResponseForStartupTimeout ? "--delay-launch-response-for-startup-timeout" : null,
+            OmitInitializeResponseBody ? "--omit-initialize-response-body" : null,
+            EnableConfigurationDoneAfterInitialization ? "--enable-configuration-done-after-initialization" : null,
+            HoldConfigurationDoneCapabilityDeltaUntilRelease ? "--hold-configuration-done-capabilities-delta-until-release" : null,
             EnableTerminateAfterInitialization ? "--enable-terminate-after-initialization" : null,
             ExitAfterLaunchResponse ? "--exit-after-launch-response" : null,
         }.Where(static value => value is not null));
@@ -545,9 +670,11 @@ internal sealed class FixtureProcess : IAsyncDisposable
     private readonly string _scratchDirectory;
     private readonly string _transcriptPath;
     private readonly string _releasePath;
+    private readonly string _configurationDoneCapabilityDeltaReleasePath;
     private readonly string? _previousTranscript;
     private readonly string? _previousOptions;
     private readonly string? _previousRelease;
+    private readonly string? _previousConfigurationDoneCapabilityDeltaRelease;
     private readonly HashSet<int> _preExistingAdapterPids;
     private readonly string _executablePath;
     private const int StartupPollAttempts = 20;
@@ -555,15 +682,17 @@ internal sealed class FixtureProcess : IAsyncDisposable
     private bool _adapterStartAttempted;
     private bool _disposed;
 
-    private FixtureProcess(string scratchDirectory, string transcriptPath, string releasePath, string executablePath, string? previousTranscript, string? previousOptions, string? previousRelease, HashSet<int> preExistingAdapterPids)
+    private FixtureProcess(string scratchDirectory, string transcriptPath, string releasePath, string configurationDoneCapabilityDeltaReleasePath, string executablePath, string? previousTranscript, string? previousOptions, string? previousRelease, string? previousConfigurationDoneCapabilityDeltaRelease, HashSet<int> preExistingAdapterPids)
     {
         _scratchDirectory = scratchDirectory;
         _transcriptPath = transcriptPath;
         _releasePath = releasePath;
+        _configurationDoneCapabilityDeltaReleasePath = configurationDoneCapabilityDeltaReleasePath;
         _executablePath = executablePath;
         _previousTranscript = previousTranscript;
         _previousOptions = previousOptions;
         _previousRelease = previousRelease;
+        _previousConfigurationDoneCapabilityDeltaRelease = previousConfigurationDoneCapabilityDeltaRelease;
         _preExistingAdapterPids = preExistingAdapterPids;
     }
 
@@ -578,20 +707,24 @@ internal sealed class FixtureProcess : IAsyncDisposable
         Directory.CreateDirectory(scratchDirectory);
         var transcriptPath = Path.Combine(scratchDirectory, "transcript.jsonl");
         var releasePath = Path.Combine(scratchDirectory, "graceful-shutdown.release");
+        var configurationDoneCapabilityDeltaReleasePath = Path.Combine(scratchDirectory, "configuration-done-capabilities-delta.release");
         File.WriteAllText(transcriptPath, string.Empty, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
 
         var previousTranscript = Environment.GetEnvironmentVariable("CONTROLLED_DAP_TRANSCRIPT");
         var previousOptions = Environment.GetEnvironmentVariable("CONTROLLED_DAP_OPTIONS");
         var previousRelease = Environment.GetEnvironmentVariable("CONTROLLED_DAP_GRACEFUL_RELEASE");
+        var previousConfigurationDoneCapabilityDeltaRelease = Environment.GetEnvironmentVariable("CONTROLLED_DAP_CONFIGURATION_DONE_CAPABILITY_DELTA_RELEASE");
         var preExistingAdapterPids = ExactAdapterProcessIds(executable);
         Environment.SetEnvironmentVariable("CONTROLLED_DAP_TRANSCRIPT", transcriptPath);
         Environment.SetEnvironmentVariable("CONTROLLED_DAP_OPTIONS", configuration.AsEnvironmentValue());
         Environment.SetEnvironmentVariable("CONTROLLED_DAP_GRACEFUL_RELEASE", releasePath);
-        return new FixtureProcess(scratchDirectory, transcriptPath, releasePath, executable, previousTranscript, previousOptions, previousRelease, preExistingAdapterPids);
+        Environment.SetEnvironmentVariable("CONTROLLED_DAP_CONFIGURATION_DONE_CAPABILITY_DELTA_RELEASE", configurationDoneCapabilityDeltaReleasePath);
+        return new FixtureProcess(scratchDirectory, transcriptPath, releasePath, configurationDoneCapabilityDeltaReleasePath, executable, previousTranscript, previousOptions, previousRelease, previousConfigurationDoneCapabilityDeltaRelease, preExistingAdapterPids);
     }
     public void MarkAdapterStartAttempted() => _adapterStartAttempted = true;
 
     public void ReleaseGracefulShutdown() => File.WriteAllText(_releasePath, string.Empty);
+    public void ReleaseConfigurationDoneCapabilityDelta() => File.WriteAllText(_configurationDoneCapabilityDeltaReleasePath, string.Empty);
 
     public async Task WaitForStartupAsync(CancellationToken cancellationToken)
     {
@@ -631,6 +764,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
         try
         {
             ReleaseGracefulShutdown();
+            ReleaseConfigurationDoneCapabilityDelta();
         }
         catch (Exception exception)
         {
@@ -663,6 +797,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
                 Environment.SetEnvironmentVariable("CONTROLLED_DAP_TRANSCRIPT", _previousTranscript);
                 Environment.SetEnvironmentVariable("CONTROLLED_DAP_OPTIONS", _previousOptions);
                 Environment.SetEnvironmentVariable("CONTROLLED_DAP_GRACEFUL_RELEASE", _previousRelease);
+                Environment.SetEnvironmentVariable("CONTROLLED_DAP_CONFIGURATION_DONE_CAPABILITY_DELTA_RELEASE", _previousConfigurationDoneCapabilityDeltaRelease);
             }
         }
 
@@ -832,6 +967,8 @@ internal sealed record FixtureTranscriptEntry(
     int? PayloadByteCount,
     string? Stage,
     string? Event,
+    bool? BodyOmitted,
+    bool? SupportsConfigurationDoneRequest,
     bool? SupportsTerminateRequest)
 {
     public static FixtureTranscriptEntry Parse(string json)
@@ -849,6 +986,8 @@ internal sealed record FixtureTranscriptEntry(
             root.TryGetProperty("payloadByteCount", out var payloadByteCount) ? payloadByteCount.GetInt32() : null,
             root.TryGetProperty("stage", out var stage) ? stage.GetString() : null,
             root.TryGetProperty("event", out var eventName) ? eventName.GetString() : null,
+            root.TryGetProperty("bodyOmitted", out var bodyOmitted) ? bodyOmitted.GetBoolean() : null,
+            root.TryGetProperty("supportsConfigurationDoneRequest", out var supportsConfigurationDoneRequest) ? supportsConfigurationDoneRequest.GetBoolean() : null,
             root.TryGetProperty("supportsTerminateRequest", out var supportsTerminateRequest) ? supportsTerminateRequest.GetBoolean() : null);
     }
 }

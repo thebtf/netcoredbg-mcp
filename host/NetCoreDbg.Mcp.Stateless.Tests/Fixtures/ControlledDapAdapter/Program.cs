@@ -33,6 +33,9 @@ internal sealed record AdapterOptions(
     bool MalformedCapabilitiesEvent,
     bool SendMalformedDapFrameAfterStartup,
     bool DelayLaunchResponseForStartupTimeout,
+    bool OmitInitializeResponseBody,
+    bool EnableConfigurationDoneAfterInitialization,
+    bool HoldConfigurationDoneCapabilityDeltaUntilRelease,
     bool EnableTerminateAfterInitialization,
     bool ExitAfterLaunchResponse)
 {
@@ -52,6 +55,9 @@ internal sealed record AdapterOptions(
         var malformedCapabilitiesEvent = false;
         var sendMalformedDapFrameAfterStartup = false;
         var delayLaunchResponseForStartupTimeout = false;
+        var omitInitializeResponseBody = false;
+        var enableConfigurationDoneAfterInitialization = false;
+        var holdConfigurationDoneCapabilityDeltaUntilRelease = false;
         var enableTerminateAfterInitialization = false;
         var exitAfterLaunchResponse = false;
 
@@ -97,6 +103,15 @@ internal sealed record AdapterOptions(
                 case "--delay-launch-response-for-startup-timeout":
                     delayLaunchResponseForStartupTimeout = true;
                     break;
+                case "--omit-initialize-response-body":
+                    omitInitializeResponseBody = true;
+                    break;
+                case "--enable-configuration-done-after-initialization":
+                    enableConfigurationDoneAfterInitialization = true;
+                    break;
+                case "--hold-configuration-done-capabilities-delta-until-release":
+                    holdConfigurationDoneCapabilityDeltaUntilRelease = true;
+                    break;
                 case "--enable-terminate-after-initialization":
                     enableTerminateAfterInitialization = true;
                     break;
@@ -130,6 +145,9 @@ internal sealed record AdapterOptions(
             malformedCapabilitiesEvent,
             sendMalformedDapFrameAfterStartup,
             delayLaunchResponseForStartupTimeout,
+            omitInitializeResponseBody,
+            enableConfigurationDoneAfterInitialization,
+            holdConfigurationDoneCapabilityDeltaUntilRelease,
             enableTerminateAfterInitialization,
             exitAfterLaunchResponse);
     }
@@ -157,11 +175,13 @@ internal sealed class ControlledDapAdapter
     private DapFrame? _pendingLaunch;
     private readonly Queue<DapFrame> _deferredRequests = new();
     private readonly string? _gracefulReleasePath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_GRACEFUL_RELEASE");
+    private readonly string? _configurationDoneCapabilityDeltaReleasePath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_CONFIGURATION_DONE_CAPABILITY_DELTA_RELEASE");
     private Process? _descendant;
     private Task? _lifecycleEvents;
     private readonly CancellationTokenSource _lifecycleEventsCancellation = new();
     private static readonly TimeSpan InitializeGateWindow = TimeSpan.FromMilliseconds(75);
     private static readonly TimeSpan GracefulReleaseTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan ConfigurationDoneCapabilityDeltaReleaseTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DescendantCleanupTimeout = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan LifecycleEventsCompletionTimeout = TimeSpan.FromSeconds(1);
     private Task<DapFrame?>? _nextRequest;
@@ -275,15 +295,32 @@ internal sealed class ControlledDapAdapter
                 }
 
                 await DeferGateRequestAsync("before-initialize-response", cancellationToken);
+                var supportsConfigurationDone = _options.EnableConfigurationDoneAfterInitialization
+                    ? false
+                    : _options.SupportsConfigurationDone;
                 var supportsTerminate = _options.EnableTerminateAfterInitialization
                     ? false
                     : _options.SupportsTerminate;
                 await WriteResponseAsync(sequence, command, new
                 {
-                    supportsConfigurationDoneRequest = _options.SupportsConfigurationDone,
+                    supportsConfigurationDoneRequest = supportsConfigurationDone,
+                    supportsTerminateRequest = supportsTerminate,
+                }, cancellationToken, omitBody: _options.OmitInitializeResponseBody);
+                await RecordAsync(new
+                {
+                    kind = "initialize-response",
+                    requestSequence = sequence,
+                    bodyOmitted = _options.OmitInitializeResponseBody,
+                    supportsConfigurationDoneRequest = supportsConfigurationDone,
                     supportsTerminateRequest = supportsTerminate,
                 }, cancellationToken);
-                await RecordAsync(new { kind = "initialize-response", requestSequence = sequence, supportsTerminateRequest = supportsTerminate }, cancellationToken);
+                if (_options.EnableConfigurationDoneAfterInitialization)
+                {
+                    await WaitForConfigurationDoneCapabilityDeltaReleaseAsync(cancellationToken);
+                    await WriteEventAsync("capabilities", new { capabilities = new { supportsConfigurationDoneRequest = true } }, cancellationToken);
+                    await RecordAsync(new { kind = "configuration-done-capabilities-delta-event", supportsConfigurationDoneRequest = true }, cancellationToken);
+                }
+
                 await ProcessDeferredRequestsAsync(cancellationToken);
                 await DeferGateRequestAsync("before-initialized-event", cancellationToken);
                 if (_options.EnableTerminateAfterInitialization)
@@ -473,6 +510,26 @@ internal sealed class ControlledDapAdapter
         }
     }
 
+    private async Task WaitForConfigurationDoneCapabilityDeltaReleaseAsync(CancellationToken cancellationToken)
+    {
+        if (!_options.HoldConfigurationDoneCapabilityDeltaUntilRelease)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(_configurationDoneCapabilityDeltaReleasePath))
+        {
+            throw new InvalidOperationException("CONTROLLED_DAP_CONFIGURATION_DONE_CAPABILITY_DELTA_RELEASE is required when the capability delta is held.");
+        }
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(ConfigurationDoneCapabilityDeltaReleaseTimeout);
+        while (!File.Exists(_configurationDoneCapabilityDeltaReleasePath))
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(25), timeout.Token);
+        }
+    }
+
     private async Task<DapFrame?> ReadFrameAsync(CancellationToken cancellationToken)
     {
         var header = await ReadHeaderAsync(cancellationToken);
@@ -517,7 +574,21 @@ internal sealed class ControlledDapAdapter
             }
         }
     }
-    private async Task WriteResponseAsync(int requestSequence, string command, object? body, CancellationToken cancellationToken) =>
+    private async Task WriteResponseAsync(int requestSequence, string command, object? body, CancellationToken cancellationToken, bool omitBody = false)
+    {
+        if (omitBody)
+        {
+            await WriteMessageAsync(new
+            {
+                seq = _outgoingSequence++,
+                type = "response",
+                request_seq = requestSequence,
+                success = true,
+                command,
+            }, cancellationToken);
+            return;
+        }
+
         await WriteMessageAsync(new
         {
             seq = _outgoingSequence++,
@@ -527,6 +598,7 @@ internal sealed class ControlledDapAdapter
             command,
             body,
         }, cancellationToken);
+    }
 
     private async Task WriteEventAsync(string eventName, object? body, CancellationToken cancellationToken)
     {
