@@ -1,5 +1,7 @@
 """Tests for UI backend abstraction layer."""
 
+import os
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -8,6 +10,40 @@ import pytest
 from netcoredbg_mcp.ui.backend import create_backend, find_flaui_bridge
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+LARGE_JSON_RESPONSE_BYTES = 64 * 1024 + 1
+
+
+def _write_large_response_bridge(tmp_path: Path) -> Path:
+    script = tmp_path / "large_response_bridge.py"
+    script.write_text(
+        "\n".join(
+            (
+                f"#!{sys.executable}",
+                "import json",
+                "import sys",
+                "for line in sys.stdin:",
+                "    request = json.loads(line)",
+                "    response = {",
+                '        "jsonrpc": "2.0",',
+                '        "id": request["id"],',
+                f'        "result": {{"png_base64": "A" * {LARGE_JSON_RESPONSE_BYTES}}},',
+                "    }",
+                "    print(json.dumps(response), flush=True)",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    if os.name == "nt":
+        launcher = tmp_path / "large_response_bridge.cmd"
+        launcher.write_text(f'@"{sys.executable}" -u "{script}"\r\n', encoding="utf-8")
+        return launcher
+
+    script.chmod(0o700)
+    return script
 
 
 class TestFindFlauiBridge:
@@ -446,6 +482,34 @@ class TestFlaUIBridgeClient:
 
         assert "JsonNode? id = null;" in program
         assert "return CreateErrorResponse(id, -32603" in program
+
+    @pytest.mark.asyncio
+    async def test_reads_large_json_line_through_bridge_client(self, tmp_path: Path) -> None:
+        from netcoredbg_mcp.ui.flaui_client import FlaUIBridgeClient
+
+        client = FlaUIBridgeClient(str(_write_large_response_bridge(tmp_path)))
+        await client.start()
+        try:
+            response = await client.call("capture_screenshot", timeout=5.0)
+        finally:
+            await client.stop()
+
+        assert len(response["png_base64"]) == LARGE_JSON_RESPONSE_BYTES
+
+    @pytest.mark.asyncio
+    async def test_start_passes_bounded_response_limit_to_subprocess(self) -> None:
+        from netcoredbg_mcp.ui.flaui_client import FlaUIBridgeClient
+
+        client = FlaUIBridgeClient("C:/fake/FlaUIBridge.exe")
+        process = MagicMock(pid=123)
+        with patch(
+            "netcoredbg_mcp.ui.flaui_client.asyncio.create_subprocess_exec",
+            return_value=process,
+        ) as create_subprocess:
+            await client.start()
+
+        assert create_subprocess.await_args is not None
+        assert create_subprocess.await_args.kwargs["limit"] == 256 * 1024 * 1024
 
 
 class TestPywinautoBackend:

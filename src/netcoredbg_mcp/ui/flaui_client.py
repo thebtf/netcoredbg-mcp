@@ -25,6 +25,9 @@ CONNECT_CALL_TIMEOUT_SECONDS = 30.0
 CONNECT_RETRY_INTERVAL_SECONDS = 0.2
 WINDOW_NOT_READY_ERROR = "No window found for process"
 BRIDGE_DEFAULT_CALL_TIMEOUT_SECONDS = 10.0
+# 8K RGBA is 7_680 * 4_320 * 4 = 132_710_400 bytes; Base64 expands it to
+# 176_947_200 bytes, leaving JSON framing headroom within this finite 256 MiB limit.
+BRIDGE_RESPONSE_LINE_LIMIT = 256 * 1024 * 1024
 HOVER_TRANSPORT_TIMEOUT_MARGIN_SECONDS = 1.0
 DRAG_PATH_POINTER_DOWN_SETTLE_MS = 100
 DRAG_PATH_FINAL_DROP_SETTLE_MS = 180
@@ -171,6 +174,7 @@ class FlaUIBridgeClient:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
+            limit=BRIDGE_RESPONSE_LINE_LIMIT,
         )
         logger.info("FlaUI bridge started (PID %d)", self._process.pid)
 

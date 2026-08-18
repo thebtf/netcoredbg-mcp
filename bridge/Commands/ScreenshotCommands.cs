@@ -17,6 +17,12 @@ public static class ScreenshotCommands
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint GetDpiForWindow(IntPtr hWnd);
+
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
 
@@ -58,17 +64,27 @@ public static class ScreenshotCommands
         public int Bottom;
     }
 
+    private readonly record struct CaptureSnapshot(
+        int RasterWidth,
+        int RasterHeight,
+        int ClientLeft,
+        int ClientTop,
+        int ClientRight,
+        int ClientBottom,
+        uint Dpi);
+
     public static JsonNode Screenshot(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
         if (mainWindow is null)
             throw new InvalidOperationException("Not connected. Call 'connect' first.");
 
         var hwndValue = @params?["hwnd"]?.GetValue<long>();
+        var evidence = @params?["evidence"]?.GetValue<bool>() ?? false;
 
         if (JsonRpcHandler.Stealth)
         {
             var hwnd = ResolveTargetHwnd(hwndValue, mainWindow);
-            return CaptureWithPrintWindow(hwnd);
+            return evidence ? CaptureEvidenceWithPrintWindow(hwnd) : CaptureWithPrintWindow(hwnd);
         }
 
         CaptureImage capture;
@@ -111,25 +127,22 @@ public static class ScreenshotCommands
             throw new ArgumentException("Target HWND must be non-zero.", nameof(hwnd));
 
         var (width, height) = GetWindowSize(hwnd);
-
         double? printWindowVariance = null;
-        string? printWindowError = null;
-        try
+        var printWindowBitmap = CaptureBitmapWithPrintWindow(hwnd, width, height);
+        if (printWindowBitmap is not null)
         {
-            using var bitmap = CaptureBitmapWithPrintWindow(hwnd, width, height);
-            printWindowVariance = NormalizedPixelVariance(bitmap);
-            if (!IsBlankFrame(bitmap))
+            using (printWindowBitmap)
             {
-                var printWindowResult = EncodeBitmap(bitmap);
-                printWindowResult["method"] = "PrintWindow";
-                printWindowResult["flags"] = (int)PW_RENDERFULLCONTENT;
-                printWindowResult["variance"] = printWindowVariance.Value;
-                return printWindowResult;
+                printWindowVariance = NormalizedPixelVariance(printWindowBitmap);
+                if (!IsBlankFrame(printWindowBitmap))
+                {
+                    var printWindowResult = EncodeBitmap(printWindowBitmap);
+                    printWindowResult["method"] = "PrintWindow";
+                    printWindowResult["flags"] = (int)PW_RENDERFULLCONTENT;
+                    printWindowResult["variance"] = printWindowVariance.Value;
+                    return printWindowResult;
+                }
             }
-        }
-        catch (InvalidOperationException ex)
-        {
-            printWindowError = ex.Message;
         }
 
         using var fallbackBitmap = CaptureWithFlashFocusBitBlt(hwnd, width, height);
@@ -140,11 +153,32 @@ public static class ScreenshotCommands
         {
             result["printwindow_variance"] = printWindowVariance.Value;
         }
-        if (printWindowError is not null)
-        {
-            result["printwindow_error"] = printWindowError;
-        }
         return result;
+    }
+
+    private static JsonObject CaptureEvidenceWithPrintWindow(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero)
+            throw new ArgumentException("Target HWND must be non-zero.", nameof(hwnd));
+
+        var printWindowBefore = ReadCaptureSnapshot(hwnd);
+        var printWindowBitmap = CaptureBitmapWithPrintWindow(
+            hwnd,
+            printWindowBefore.RasterWidth,
+            printWindowBefore.RasterHeight);
+        if (printWindowBitmap is null)
+            throw new InvalidOperationException("Evidence capture requires a PrintWindow raster");
+
+        using (printWindowBitmap)
+        {
+            var printWindowAfter = ReadCaptureSnapshot(hwnd);
+            EnsureStableCaptureSnapshot(printWindowBefore, printWindowAfter);
+            var printWindowResult = EncodeBitmap(printWindowBitmap);
+            printWindowResult["method"] = "PrintWindow";
+            printWindowResult["flags"] = (int)PW_RENDERFULLCONTENT;
+            printWindowResult["variance"] = NormalizedPixelVariance(printWindowBitmap);
+            return AddCaptureProvenance(printWindowResult, hwnd, printWindowAfter);
+        }
     }
 
     private static (int width, int height) GetWindowSize(IntPtr hwnd)
@@ -161,26 +195,74 @@ public static class ScreenshotCommands
         return (width, height);
     }
 
-    private static Bitmap CaptureBitmapWithPrintWindow(IntPtr hwnd, int width, int height)
+    private static CaptureSnapshot ReadCaptureSnapshot(IntPtr hwnd)
+    {
+        var (rasterWidth, rasterHeight) = GetWindowSize(hwnd);
+        if (!GetClientRect(hwnd, out var clientRect))
+            throw new InvalidOperationException(
+                $"GetClientRect failed for HWND {hwnd.ToInt64()}: {Marshal.GetLastWin32Error()}");
+
+        if (clientRect.Right <= clientRect.Left || clientRect.Bottom <= clientRect.Top)
+            throw new InvalidOperationException(
+                $"Client rectangle has invalid dimensions for HWND {hwnd.ToInt64()}");
+
+        var dpi = GetDpiForWindow(hwnd);
+        if (dpi == 0)
+            throw new InvalidOperationException(
+                $"GetDpiForWindow failed for HWND {hwnd.ToInt64()}: {Marshal.GetLastWin32Error()}");
+
+        return new CaptureSnapshot(
+            rasterWidth,
+            rasterHeight,
+            clientRect.Left,
+            clientRect.Top,
+            clientRect.Right,
+            clientRect.Bottom,
+            dpi);
+    }
+
+    private static void EnsureStableCaptureSnapshot(CaptureSnapshot before, CaptureSnapshot after)
+    {
+        if (before != after)
+            throw new InvalidOperationException("Capture target changed during raster capture.");
+    }
+
+    private static JsonObject AddCaptureProvenance(JsonObject result, IntPtr hwnd, CaptureSnapshot snapshot)
+    {
+        result["hwnd"] = hwnd.ToInt64();
+        result["client_rect"] = new JsonObject
+        {
+            ["left"] = snapshot.ClientLeft,
+            ["top"] = snapshot.ClientTop,
+            ["right"] = snapshot.ClientRight,
+            ["bottom"] = snapshot.ClientBottom
+        };
+        result["dpi"] = (int)snapshot.Dpi;
+        return result;
+    }
+
+    private static Bitmap? CaptureBitmapWithPrintWindow(IntPtr hwnd, int width, int height)
     {
         var bitmap = new Bitmap(width, height);
         try
         {
+            var printed = false;
             using (var graphics = Graphics.FromImage(bitmap))
             {
                 var hdc = graphics.GetHdc();
                 try
                 {
-                    if (!PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT))
-                    {
-                        throw new InvalidOperationException(
-                            $"PrintWindow failed for HWND {hwnd.ToInt64()}: {Marshal.GetLastWin32Error()}");
-                    }
+                    printed = PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT);
                 }
                 finally
                 {
                     graphics.ReleaseHdc(hdc);
                 }
+            }
+            if (!printed)
+            {
+                bitmap.Dispose();
+                return null;
             }
             return bitmap;
         }
@@ -208,6 +290,7 @@ public static class ScreenshotCommands
             }
         }
     }
+
 
     private static Bitmap CaptureBitmapWithBitBlt(IntPtr hwnd, int width, int height)
     {

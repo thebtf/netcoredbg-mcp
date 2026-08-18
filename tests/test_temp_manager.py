@@ -1,6 +1,7 @@
 """Tests for SessionTempManager."""
 
 import time
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from netcoredbg_mcp.ui.temp_manager import TEMP_PREFIX, SessionTempManager
@@ -76,6 +77,64 @@ class TestSessionTempManager:
             mock_tf.mkdtemp.side_effect = OSError("no space")
             result = mgr.save_screenshot("s1", b"data", "shot.webp")
             assert result is None
+
+    def test_closed_session_never_recreates_its_directory(self, tmp_path):
+        mgr = SessionTempManager()
+        session_dir = tmp_path / "closed-session"
+        session_dir.mkdir()
+
+        with patch("netcoredbg_mcp.ui.temp_manager.tempfile") as mock_tf:
+            mock_tf.mkdtemp.return_value = str(session_dir)
+            assert mgr.get_session_dir("closed") == session_dir
+
+        mgr.cleanup_session("closed")
+
+        with patch("netcoredbg_mcp.ui.temp_manager.tempfile") as mock_tf:
+            assert mgr.get_session_dir("closed") is None
+            assert mgr.save_screenshot_bundle("closed", b"raw", "raw.png") is None
+            mock_tf.mkdtemp.assert_not_called()
+
+        assert not session_dir.exists()
+
+    def test_save_screenshot_bundle_persists_raw_and_crop_together(self, tmp_path):
+        mgr = SessionTempManager()
+        session_dir = tmp_path / "bundle-session"
+        session_dir.mkdir()
+
+        with patch("netcoredbg_mcp.ui.temp_manager.tempfile") as mock_tf:
+            mock_tf.mkdtemp.return_value = str(session_dir)
+            bundle = mgr.save_screenshot_bundle(
+                "bundle", b"raw-png", "raw.png", b"crop-png", "crop.png"
+            )
+
+        assert bundle is not None
+        raw_path, crop_path = bundle
+        assert raw_path.read_bytes() == b"raw-png"
+        assert crop_path is not None
+        assert crop_path.read_bytes() == b"crop-png"
+
+    def test_save_screenshot_bundle_removes_partial_raw_when_crop_staging_fails(
+        self, tmp_path, monkeypatch
+    ):
+        mgr = SessionTempManager()
+        session_dir = tmp_path / "partial-bundle-session"
+        session_dir.mkdir()
+        write_bytes = Path.write_bytes
+
+        def fail_crop_staging(path, data):
+            if "crop.png" in path.name:
+                raise OSError("disk full")
+            return write_bytes(path, data)
+
+        monkeypatch.setattr(Path, "write_bytes", fail_crop_staging)
+        with patch("netcoredbg_mcp.ui.temp_manager.tempfile") as mock_tf:
+            mock_tf.mkdtemp.return_value = str(session_dir)
+            bundle = mgr.save_screenshot_bundle(
+                "bundle", b"raw-png", "raw.png", b"crop-png", "crop.png"
+            )
+
+        assert bundle is None
+        assert list(session_dir.iterdir()) == []
 
     def test_cleanup_session(self, tmp_path):
         mgr = SessionTempManager()

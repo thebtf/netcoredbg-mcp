@@ -3,8 +3,10 @@
 import asyncio
 import base64
 import contextlib
+import hashlib
 import io
 import json
+import threading
 from itertools import chain, repeat
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,6 +29,42 @@ class ToolRegistry:
             return func
 
         return decorator
+
+
+def _capture_metadata(method: str, width: int, height: int) -> dict[str, Any]:
+    return {
+        "method": method,
+        "hwnd": 123,
+        "client_rect": {"left": 0, "top": 0, "right": width, "bottom": height},
+        "dpi": 96,
+        "dpi_scale": 1.0,
+        "physical_width": width,
+        "physical_height": height,
+        "logical_width": float(width),
+        "logical_height": float(height),
+    }
+
+
+def _save_evidence_bundle(tmp_path, calls: list[tuple[str, str, str | None, int]]) -> Any:
+    def save_screenshot_bundle(
+        session_id: str,
+        raw_data: bytes,
+        raw_name: str,
+        crop_data: bytes | None = None,
+        crop_name: str | None = None,
+    ):
+        calls.append((session_id, raw_name, crop_name, threading.get_ident()))
+        raw_path = tmp_path / raw_name
+        raw_path.write_bytes(raw_data)
+        if crop_data is None:
+            assert crop_name is None
+            return raw_path, None
+        assert crop_name is not None
+        crop_path = tmp_path / crop_name
+        crop_path.write_bytes(crop_data)
+        return raw_path, crop_path
+
+    return save_screenshot_bundle
 
 
 def test_bridge_registers_save_restore_foreground_commands() -> None:
@@ -169,6 +207,37 @@ def test_bridge_screenshot_uses_printwindow_in_stealth_mode() -> None:
     assert command.index("if (JsonRpcHandler.Stealth)") < command.index("Capture.Rectangle(rect)")
 
 
+def test_bridge_stealth_screenshot_limits_provenance_to_evidence() -> None:
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCommands.cs").read_text(
+        encoding="utf-8"
+    )
+
+    screenshot_start = command.index("public static JsonNode Screenshot(")
+    resolve_start = command.index("private static IntPtr ResolveTargetHwnd")
+    preview_start = command.index("private static JsonObject CaptureWithPrintWindow")
+    evidence_start = command.index("private static JsonObject CaptureEvidenceWithPrintWindow")
+    evidence_end = command.index(
+        "private static (int width, int height) GetWindowSize", evidence_start
+    )
+    screenshot = command[screenshot_start:resolve_start]
+    preview_capture = command[preview_start:evidence_start]
+    evidence_capture = command[evidence_start:evidence_end]
+
+    assert 'var evidence = @params?["evidence"]?.GetValue<bool>() ?? false;' in screenshot
+    assert (
+        "return evidence ? CaptureEvidenceWithPrintWindow(hwnd) : CaptureWithPrintWindow(hwnd);"
+        in screenshot
+    )
+    assert "ReadCaptureSnapshot" not in preview_capture
+    assert "GetDpiForWindow" not in preview_capture
+    assert "CaptureWithFlashFocusBitBlt(hwnd, width, height)" in preview_capture
+    assert "var printWindowBefore = ReadCaptureSnapshot(hwnd);" in evidence_capture
+    assert "var printWindowAfter = ReadCaptureSnapshot(hwnd);" in evidence_capture
+    assert "EnsureStableCaptureSnapshot(printWindowBefore, printWindowAfter);" in evidence_capture
+    assert "CaptureEvidenceWithFlashFocusBitBlt" not in evidence_capture
+    assert "BitBlt(" not in evidence_capture
+
+
 def test_bridge_screenshot_falls_back_to_flash_focus_bitblt_when_blank() -> None:
     command = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCommands.cs").read_text(
         encoding="utf-8"
@@ -182,6 +251,68 @@ def test_bridge_screenshot_falls_back_to_flash_focus_bitblt_when_blank() -> None
     assert "BitBlt(" in command
     assert 'result["fallback"] = "flash-focus";' in command
     assert "SetForegroundWindow(savedForeground)" in command
+
+
+def test_bridge_evidence_requires_printwindow_while_preview_remains_best_effort() -> None:
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCommands.cs").read_text(
+        encoding="utf-8"
+    )
+
+    preview_start = command.index("private static Bitmap CaptureWithFlashFocusBitBlt")
+    raster_start = command.index("private static Bitmap CaptureBitmapWithBitBlt")
+    preview_capture = command[preview_start:raster_start]
+    evidence_start = command.index("private static JsonObject CaptureEvidenceWithPrintWindow")
+    evidence_end = command.index(
+        "private static (int width, int height) GetWindowSize", evidence_start
+    )
+    evidence_capture = command[evidence_start:evidence_end]
+
+    assert "SetForegroundWindow(hwnd);" in preview_capture
+    assert "foregroundSet" not in preview_capture
+    assert "GetForegroundWindow() != hwnd" not in preview_capture
+    assert "CaptureEvidenceWithFlashFocusBitBlt" not in evidence_capture
+    assert "Evidence capture requires a PrintWindow raster" in evidence_capture
+
+
+def test_bridge_stable_printwindow_evidence_skips_blank_frame_fallback() -> None:
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCommands.cs").read_text(
+        encoding="utf-8"
+    )
+
+    capture_start = command.index("private static JsonObject CaptureEvidenceWithPrintWindow")
+    capture_end = command.index(
+        "private static (int width, int height) GetWindowSize", capture_start
+    )
+    evidence_capture = command[capture_start:capture_end]
+
+    assert "var printWindowResult = EncodeBitmap(printWindowBitmap);" in evidence_capture
+    assert "IsBlankFrame(printWindowBitmap)" not in evidence_capture
+    assert "CaptureEvidenceWithFlashFocusBitBlt" not in evidence_capture
+
+
+def test_bridge_printwindow_rejects_mismatched_capture_snapshots() -> None:
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCommands.cs").read_text(
+        encoding="utf-8"
+    )
+
+    assert "var printWindowBefore = ReadCaptureSnapshot(hwnd);" in command
+    assert "var printWindowAfter = ReadCaptureSnapshot(hwnd);" in command
+    assert "EnsureStableCaptureSnapshot(printWindowBefore, printWindowAfter);" in command
+
+
+def test_bridge_evidence_does_not_capture_a_bitblt_snapshot() -> None:
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "ScreenshotCommands.cs").read_text(
+        encoding="utf-8"
+    )
+
+    evidence_start = command.index("private static JsonObject CaptureEvidenceWithPrintWindow")
+    evidence_end = command.index(
+        "private static (int width, int height) GetWindowSize", evidence_start
+    )
+    evidence_capture = command[evidence_start:evidence_end]
+
+    assert "CaptureEvidenceWithFlashFocusBitBlt" not in evidence_capture
+    assert "CaptureBitmapWithBitBlt" not in evidence_capture
 
 
 def test_bridge_connect_stores_stealth_state_and_exposes_get_state() -> None:
@@ -939,6 +1070,397 @@ async def test_ui_take_screenshot_stealth_uses_bridge_screenshot_metadata() -> N
     metadata = json.loads(content[1].text)
     assert metadata["mode"] == "stealth"
     assert metadata["method"] == "PrintWindow"
+    assert metadata["evidence_grade"] == "preview_only"
+
+
+@pytest.mark.asyncio
+async def test_ui_take_screenshot_evidence_persists_raw_png_with_hash(tmp_path) -> None:
+    from PIL import Image
+
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 6), (255, 255, 255)).save(buffer, format="PNG")
+    raw_png = buffer.getvalue()
+    capture_metadata = {
+        "method": "PrintWindow",
+        "hwnd": 123,
+        "client_rect": {"left": 0, "top": 0, "right": 8, "bottom": 6},
+        "dpi": 96,
+        "dpi_scale": 1.0,
+        "physical_width": 8,
+        "physical_height": 6,
+        "logical_width": 8.0,
+        "logical_height": 6.0,
+    }
+
+    bundle_calls: list[tuple[str, str, str | None, int]] = []
+    save_screenshot_bundle = _save_evidence_bundle(tmp_path, bundle_calls)
+
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+        session_id="evidence-session",
+        temp_manager=SimpleNamespace(
+            save_screenshot_bundle=save_screenshot_bundle,
+            save_screenshot=lambda _sid, data, name: (tmp_path / name).write_bytes(data)
+            and tmp_path / name,
+        ),
+    )
+    registry = ToolRegistry()
+    with (
+        patch("netcoredbg_mcp.ui.screenshot.get_hwnd_for_pid", return_value=123),
+        patch(
+            "netcoredbg_mcp.ui.screenshot.capture_window_evidence",
+            return_value=(raw_png, 8, 6, capture_metadata),
+        ),
+    ):
+        register_ui_tools(registry, session, check_session_access=lambda ctx: None)
+        content = await registry.tools["ui_take_screenshot"](SimpleNamespace(), evidence=True)
+    assert isinstance(content, list), content
+    metadata = json.loads(content[1].text)
+    assert metadata["evidence_grade"] == "lossless_raster"
+    assert metadata["retention"] == "stop_cleanup_or_stale_gc_after_4h"
+    assert metadata["capture_metadata"] == capture_metadata
+    assert metadata["raw_mime"] == "image/png"
+    assert (metadata["raw_width"], metadata["raw_height"]) == (8, 6)
+    assert Path(metadata["raw_path"]).read_bytes() == raw_png
+    assert metadata["raw_sha256"] == hashlib.sha256(raw_png).hexdigest()
+    assert Path(metadata["hd_path"]).exists()
+    assert len(bundle_calls) == 1
+    assert bundle_calls[0][0] == "evidence-session"
+    assert bundle_calls[0][1].startswith("evidence_")
+    assert bundle_calls[0][2] is None
+
+
+@pytest.mark.asyncio
+async def test_ui_take_screenshot_evidence_persists_raw_derived_crop(tmp_path) -> None:
+    from PIL import Image
+
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    image = Image.new("RGB", (5, 4))
+    image.putpixel((1, 1), (12, 34, 56))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    raw_png = buffer.getvalue()
+
+    bundle_calls: list[tuple[str, str, str | None, int]] = []
+    save_screenshot_bundle = _save_evidence_bundle(tmp_path, bundle_calls)
+
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+        session_id="crop-session",
+        temp_manager=SimpleNamespace(
+            save_screenshot_bundle=save_screenshot_bundle,
+            save_screenshot=lambda _sid, data, name: (tmp_path / name).write_bytes(data)
+            and tmp_path / name,
+        ),
+    )
+    registry = ToolRegistry()
+    with (
+        patch("netcoredbg_mcp.ui.screenshot.get_hwnd_for_pid", return_value=123),
+        patch(
+            "netcoredbg_mcp.ui.screenshot.capture_window_evidence",
+            return_value=(raw_png, 5, 4, _capture_metadata("PrintWindow", 5, 4)),
+        ),
+    ):
+        register_ui_tools(registry, session, check_session_access=lambda ctx: None)
+        content = await registry.tools["ui_take_screenshot"](
+            SimpleNamespace(),
+            evidence=True,
+            crop_x=1,
+            crop_y=1,
+            crop_width=3,
+            crop_height=2,
+        )
+    assert isinstance(content, list), content
+    metadata = json.loads(content[1].text)
+    crop_path = Path(metadata["crop_path"])
+    assert metadata["crop_rect"] == {"x": 1, "y": 1, "width": 3, "height": 2}
+    assert (metadata["crop_width"], metadata["crop_height"]) == (3, 2)
+    assert metadata["crop_sha256"] == hashlib.sha256(crop_path.read_bytes()).hexdigest()
+    with Image.open(crop_path) as crop:
+        assert crop.size == (3, 2)
+        assert crop.getpixel((0, 0)) == (12, 34, 56)
+    assert len(bundle_calls) == 1
+    assert bundle_calls[0][0] == "crop-session"
+    assert bundle_calls[0][1].startswith("evidence_")
+    assert bundle_calls[0][2] is not None
+    assert bundle_calls[0][2].startswith("evidence_crop_")
+
+
+@pytest.mark.asyncio
+async def test_ui_take_screenshot_rejects_incomplete_evidence_crop() -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+        session_id="crop-session",
+        temp_manager=SimpleNamespace(),
+    )
+    registry = ToolRegistry()
+    register_ui_tools(registry, session, check_session_access=lambda ctx: None)
+
+    response = await registry.tools["ui_take_screenshot"](
+        SimpleNamespace(), evidence=True, crop_x=0, crop_y=0, crop_width=1
+    )
+
+    assert (
+        response["error"] == "crop_x, crop_y, crop_width, and crop_height must be supplied together"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ui_take_screenshot_rejects_out_of_bounds_evidence_crop(tmp_path) -> None:
+    from PIL import Image
+
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (2, 2), (255, 255, 255)).save(buffer, format="PNG")
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+        session_id="bounds-session",
+        temp_manager=SimpleNamespace(
+            save_screenshot=lambda _sid, data, name: (tmp_path / name).write_bytes(data)
+            and tmp_path / name
+        ),
+    )
+    registry = ToolRegistry()
+    with (
+        patch("netcoredbg_mcp.ui.screenshot.get_hwnd_for_pid", return_value=123),
+        patch(
+            "netcoredbg_mcp.ui.screenshot.capture_window_evidence",
+            return_value=(buffer.getvalue(), 2, 2, _capture_metadata("PrintWindow", 2, 2)),
+        ),
+    ):
+        register_ui_tools(registry, session, check_session_access=lambda ctx: None)
+        response = await registry.tools["ui_take_screenshot"](
+            SimpleNamespace(),
+            evidence=True,
+            crop_x=1,
+            crop_y=0,
+            crop_width=2,
+            crop_height=1,
+        )
+
+    assert response["error"] == "Crop rectangle must be positive and within image bounds"
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_ui_take_screenshot_stealth_evidence_uses_bridge_capture_provenance_not_pid_window(
+    tmp_path,
+) -> None:
+    from PIL import Image
+
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), (255, 255, 255)).save(buffer, format="PNG")
+    raw_png = buffer.getvalue()
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._process_id = 42
+    backend._client = MagicMock()
+    backend._client.call = AsyncMock(
+        return_value={
+            "base64": base64.b64encode(raw_png).decode("ascii"),
+            "width": 8,
+            "height": 8,
+            "method": "PrintWindow",
+            "hwnd": 777,
+            "client_rect": {"left": 0, "top": 0, "right": 6, "bottom": 4},
+            "dpi": 144,
+        }
+    )
+
+    bundle_calls: list[tuple[str, str, str | None, int]] = []
+    save_screenshot_bundle = _save_evidence_bundle(tmp_path, bundle_calls)
+
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=True,
+        session_id="stealth-evidence-session",
+        temp_manager=SimpleNamespace(
+            save_screenshot_bundle=save_screenshot_bundle,
+            save_screenshot=lambda _sid, data, name: (tmp_path / name).write_bytes(data)
+            and tmp_path / name,
+        ),
+    )
+    registry = ToolRegistry()
+
+    with (
+        patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend),
+        patch(
+            "netcoredbg_mcp.ui.screenshot.get_hwnd_for_pid",
+            side_effect=AssertionError("bridge evidence must not rediscover a PID window"),
+        ),
+    ):
+        register_ui_tools(registry, session, check_session_access=lambda ctx: None)
+        content = await registry.tools["ui_take_screenshot"](SimpleNamespace(), evidence=True)
+
+    assert isinstance(content, list), content
+    metadata = json.loads(content[1].text)
+    backend._client.call.assert_awaited_once_with("screenshot", {"evidence": True})
+    assert metadata["capture_metadata"] == {
+        "method": "PrintWindow",
+        "hwnd": 777,
+        "client_rect": {"left": 0, "top": 0, "right": 6, "bottom": 4},
+        "dpi": 144,
+        "dpi_scale": 1.5,
+        "physical_width": 8,
+        "physical_height": 8,
+        "logical_width": 8 / 1.5,
+        "logical_height": 8 / 1.5,
+    }
+    assert Path(metadata["raw_path"]).read_bytes() == raw_png
+    assert len(bundle_calls) == 1
+    assert bundle_calls[0][0] == "stealth-evidence-session"
+    assert bundle_calls[0][2] is None
+
+
+@pytest.mark.parametrize(
+    ("missing_key", "provenance"),
+    [
+        pytest.param("hwnd", {}, id="missing-hwnd"),
+        pytest.param(None, {"hwnd": True}, id="non-integer-hwnd"),
+        pytest.param(
+            None,
+            {"client_rect": {"left": 0, "top": 0, "right": 0, "bottom": 4}},
+            id="empty-client-rect",
+        ),
+        pytest.param(None, {"dpi": 0}, id="zero-dpi"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_ui_take_screenshot_stealth_evidence_rejects_missing_or_invalid_bridge_provenance(
+    tmp_path,
+    missing_key: str | None,
+    provenance: dict[str, object],
+) -> None:
+    from PIL import Image
+
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), (255, 255, 255)).save(buffer, format="PNG")
+    bridge_result: dict[str, object] = {
+        "base64": base64.b64encode(buffer.getvalue()).decode("ascii"),
+        "width": 8,
+        "height": 8,
+        "method": "PrintWindow",
+        "hwnd": 777,
+        "client_rect": {"left": 0, "top": 0, "right": 6, "bottom": 4},
+        "dpi": 144,
+    }
+    if missing_key is not None:
+        del bridge_result[missing_key]
+    bridge_result.update(provenance)
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._process_id = 42
+    backend._client = MagicMock()
+    backend._client.call = AsyncMock(return_value=bridge_result)
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=True,
+        session_id="stealth-evidence-session",
+        temp_manager=SimpleNamespace(save_screenshot=lambda *_args: tmp_path / "unexpected.png"),
+    )
+    registry = ToolRegistry()
+
+    with (
+        patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend),
+        patch(
+            "netcoredbg_mcp.ui.screenshot.get_hwnd_for_pid",
+            side_effect=AssertionError("bridge evidence must not rediscover a PID window"),
+        ),
+    ):
+        register_ui_tools(registry, session, check_session_access=lambda ctx: None)
+        response = await registry.tools["ui_take_screenshot"](SimpleNamespace(), evidence=True)
+
+    assert response["error"] == "Evidence capture requires valid bridge screenshot provenance"
+    assert not (tmp_path / "unexpected.png").exists()
+
+
+@pytest.mark.asyncio
+async def test_ui_take_screenshot_evidence_uses_unique_filenames_and_executor(tmp_path) -> None:
+    from PIL import Image
+
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), (255, 255, 255)).save(buffer, format="PNG")
+    raw_png = buffer.getvalue()
+    saved: list[tuple[str, str, str | None, int]] = []
+    main_thread = threading.get_ident()
+    save_screenshot_bundle = _save_evidence_bundle(tmp_path, saved)
+
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+        session_id="collision-session",
+        temp_manager=SimpleNamespace(
+            save_screenshot_bundle=save_screenshot_bundle,
+            save_screenshot=lambda _sid, data, name: (tmp_path / name).write_bytes(data)
+            and tmp_path / name,
+        ),
+    )
+    registry = ToolRegistry()
+    with (
+        patch("netcoredbg_mcp.ui.screenshot.get_hwnd_for_pid", return_value=123),
+        patch(
+            "netcoredbg_mcp.ui.screenshot.capture_window_evidence",
+            return_value=(raw_png, 8, 8, _capture_metadata("PrintWindow", 8, 8)),
+        ),
+        patch("time.time", return_value=1_000.0),
+    ):
+        register_ui_tools(registry, session, check_session_access=lambda ctx: None)
+        first = await registry.tools["ui_take_screenshot"](
+            SimpleNamespace(),
+            evidence=True,
+            crop_x=0,
+            crop_y=0,
+            crop_width=2,
+            crop_height=2,
+        )
+        second = await registry.tools["ui_take_screenshot"](
+            SimpleNamespace(),
+            evidence=True,
+            crop_x=0,
+            crop_y=0,
+            crop_width=2,
+            crop_height=2,
+        )
+
+    first_metadata = json.loads(first[1].text)
+    second_metadata = json.loads(second[1].text)
+    assert first_metadata["raw_path"] != second_metadata["raw_path"]
+    assert first_metadata["crop_path"] != second_metadata["crop_path"]
+    assert len(saved) == 2
+    assert len({raw_name for _sid, raw_name, _crop_name, _thread_id in saved}) == 2
+    assert len({crop_name for _sid, _raw_name, crop_name, _thread_id in saved}) == 2
+    assert all(crop_name is not None for _sid, _raw_name, crop_name, _thread_id in saved)
+    assert all(thread_id != main_thread for _sid, _raw_name, _crop_name, thread_id in saved)
 
 
 @pytest.mark.asyncio
@@ -993,3 +1515,45 @@ async def test_wpf_fixture_stealth_foundation_read_only_ui_path() -> None:
     backend.connect.assert_awaited_once_with(4242, stealth=True)
     backend.get_window_tree.assert_awaited_once_with(3, 50)
     assert response["data"]["windows"][0]["automationId"] == "mainWindow"
+
+
+@pytest.mark.asyncio
+async def test_ui_take_screenshot_evidence_requests_strict_bridge_provenance(tmp_path) -> None:
+    from PIL import Image
+
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    png = io.BytesIO()
+    Image.new("RGB", (8, 8), (255, 255, 255)).save(png, format="PNG")
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._process_id = 42
+    backend._client = MagicMock()
+    backend._client.call = AsyncMock(
+        return_value={
+            "base64": base64.b64encode(png.getvalue()).decode("ascii"),
+            "width": 8,
+            "height": 8,
+            "method": "PrintWindow",
+            "hwnd": 123,
+            "client_rect": {"left": 0, "top": 0, "right": 8, "bottom": 8},
+        }
+    )
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=True,
+        session_id="evidence-session",
+        temp_manager=SimpleNamespace(
+            save_screenshot=lambda _sid, _data, name: tmp_path / name,
+        ),
+    )
+    registry = ToolRegistry()
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(registry, session, check_session_access=lambda ctx: None)
+        response = await registry.tools["ui_take_screenshot"](SimpleNamespace(), evidence=True)
+
+    backend._client.call.assert_awaited_once_with("screenshot", {"evidence": True})
+    assert response["error"] == "Evidence capture requires valid bridge screenshot provenance"
