@@ -25,6 +25,7 @@ CONNECT_CALL_TIMEOUT_SECONDS = 30.0
 CONNECT_RETRY_INTERVAL_SECONDS = 0.2
 WINDOW_NOT_READY_ERROR = "No window found for process"
 BRIDGE_DEFAULT_CALL_TIMEOUT_SECONDS = 10.0
+BRIDGE_RESPONSE_LINE_LIMIT = 16 * 1024 * 1024
 HOVER_TRANSPORT_TIMEOUT_MARGIN_SECONDS = 1.0
 DRAG_PATH_POINTER_DOWN_SETTLE_MS = 100
 DRAG_PATH_FINAL_DROP_SETTLE_MS = 180
@@ -171,6 +172,7 @@ class FlaUIBridgeClient:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
+            limit=BRIDGE_RESPONSE_LINE_LIMIT,
         )
         logger.info("FlaUI bridge started (PID %d)", self._process.pid)
 
