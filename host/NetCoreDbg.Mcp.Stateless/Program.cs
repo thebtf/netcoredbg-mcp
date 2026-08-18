@@ -21,11 +21,12 @@ internal static class Program
     private static async Task Main(string[] arguments)
     {
         if (!OperatingSystem.IsWindows()
-            && arguments.Length == 2
+            && arguments.Length == 3
             && string.Equals(arguments[0], UnixProcessGroupProxy, StringComparison.Ordinal)
-            && !string.IsNullOrWhiteSpace(arguments[1]))
+            && !string.IsNullOrWhiteSpace(arguments[1])
+            && !string.IsNullOrWhiteSpace(arguments[2]))
         {
-            await RunUnixProcessGroupProxyAsync(arguments[1]).ConfigureAwait(false);
+            await RunUnixProcessGroupProxyAsync(arguments[1], arguments[2]).ConfigureAwait(false);
             return;
         }
 
@@ -64,9 +65,12 @@ internal static class Program
         await host.RunAsync().ConfigureAwait(false);
     }
 
-    private static async Task RunUnixProcessGroupProxyAsync(string debuggerPath)
+    private static async Task RunUnixProcessGroupProxyAsync(string debuggerPath, string terminationControlHandle)
     {
         UnixProcessGroup.BecomeOwnProcessGroup();
+        using var terminationControl = new System.IO.Pipes.AnonymousPipeClientStream(
+            System.IO.Pipes.PipeDirection.In,
+            terminationControlHandle);
         using var debugger = Process.Start(new ProcessStartInfo
         {
             FileName = debuggerPath,
@@ -74,8 +78,17 @@ internal static class Program
             CreateNoWindow = true,
             ArgumentList = { "--interpreter=vscode" },
         }) ?? throw new InvalidOperationException($"Could not start debugger '{debuggerPath}'.");
-        await debugger.WaitForExitAsync().ConfigureAwait(false);
-        Environment.ExitCode = debugger.ExitCode;
+        var debuggerExit = debugger.WaitForExitAsync();
+        var terminationRequested = terminationControl.ReadAsync(new byte[1]).AsTask();
+        if (await Task.WhenAny(debuggerExit, terminationRequested).ConfigureAwait(false) == terminationRequested)
+        {
+            UnixProcessGroup.TerminateOwnProcessGroup();
+            return;
+        }
+
+        await debuggerExit.ConfigureAwait(false);
+        await terminationRequested.ConfigureAwait(false);
+        UnixProcessGroup.TerminateOwnProcessGroup();
     }
 
 

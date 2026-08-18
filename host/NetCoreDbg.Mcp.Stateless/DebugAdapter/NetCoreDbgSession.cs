@@ -114,8 +114,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             }
             else
             {
-                process = UnixProcessGroupOwnership.StartProxy(debuggerPath);
-                processTreeOwnership = new UnixProcessGroupOwnership(process.Id);
+                var unixLaunch = UnixProcessGroupOwnership.Start(debuggerPath);
+                process = unixLaunch.Process;
+                processTreeOwnership = unixLaunch.Ownership;
                 session = new NetCoreDbgSession(
                     process,
                     process.StandardInput.BaseStream,
@@ -474,12 +475,21 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             }
 
             _input.Dispose();
+            var guardianSignaled = _processTreeOwnership is UnixProcessGroupOwnership unixOwnership;
+            if (guardianSignaled)
+            {
+                unixOwnership!.SignalTermination();
+            }
+
             if (_forceCleanup.IsCancellationRequested)
             {
-                KillProcessTree();
-                if (!await WaitForProcessExitAsync().ConfigureAwait(false))
+                if (!guardianSignaled || !await WaitForProcessExitAsync().ConfigureAwait(false))
                 {
-                    throw new InvalidOperationException("The owned debugger process did not exit after forced process tree cleanup.");
+                    KillProcessTree();
+                    if (!await WaitForProcessExitAsync().ConfigureAwait(false))
+                    {
+                        throw new InvalidOperationException("The owned debugger process did not exit after forced process tree cleanup.");
+                    }
                 }
             }
             else if (!HasExited())
@@ -786,6 +796,22 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     {
         try
         {
+            if (processTreeOwnership is UnixProcessGroupOwnership unixOwnership)
+            {
+                unixOwnership.SignalTermination();
+                if (!process.HasExited)
+                {
+                    try
+                    {
+                        await process.WaitForExitAsync().WaitAsync(RequirePositiveTimeout(stopTimeout, nameof(stopTimeout))).ConfigureAwait(false);
+                    }
+                    catch (TimeoutException)
+                    {
+                        // Fall through to the bounded process-tree fallback when the guardian does not exit.
+                    }
+                }
+            }
+
             if (!process.HasExited)
             {
                 process.Kill(entireProcessTree: true);
@@ -811,38 +837,59 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         void Terminate();
     }
 
-    private sealed class UnixProcessGroupOwnership(int processGroupId) : IProcessTreeOwnership
+    private sealed class UnixProcessGroupOwnership : IProcessTreeOwnership
     {
-        public static Process StartProxy(string debuggerPath)
+        private readonly System.IO.Pipes.AnonymousPipeServerStream _terminationControl;
+
+        private UnixProcessGroupOwnership(System.IO.Pipes.AnonymousPipeServerStream terminationControl) =>
+            _terminationControl = terminationControl;
+
+        public static UnixProcessGroupLaunch Start(string debuggerPath)
         {
-            var processPath = Environment.ProcessPath
-                ?? throw new InvalidOperationException("The current process path is unavailable.");
-            var startInfo = new ProcessStartInfo
+            var terminationControl = new System.IO.Pipes.AnonymousPipeServerStream(
+                System.IO.Pipes.PipeDirection.Out,
+                System.IO.HandleInheritability.Inheritable);
+            try
             {
-                FileName = processPath,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardInput = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-            };
-            if (Path.GetFileNameWithoutExtension(processPath).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
-            {
-                startInfo.ArgumentList.Add(Environment.GetCommandLineArgs()[0]);
+                var processPath = Environment.ProcessPath
+                    ?? throw new InvalidOperationException("The current process path is unavailable.");
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = processPath,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardInput = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                };
+                if (Path.GetFileNameWithoutExtension(processPath).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
+                {
+                    startInfo.ArgumentList.Add(Environment.GetCommandLineArgs()[0]);
+                }
+
+                startInfo.ArgumentList.Add("--unix-process-group-proxy");
+                startInfo.ArgumentList.Add(debuggerPath);
+                startInfo.ArgumentList.Add(terminationControl.GetClientHandleAsString());
+                var process = Process.Start(startInfo)
+                    ?? throw new InvalidOperationException($"Could not start debugger '{debuggerPath}'.");
+                terminationControl.DisposeLocalCopyOfClientHandle();
+                return new UnixProcessGroupLaunch(process, new UnixProcessGroupOwnership(terminationControl));
             }
-
-            startInfo.ArgumentList.Add("--unix-process-group-proxy");
-            startInfo.ArgumentList.Add(debuggerPath);
-            return Process.Start(startInfo)
-                ?? throw new InvalidOperationException($"Could not start debugger '{debuggerPath}'.");
+            catch
+            {
+                terminationControl.Dispose();
+                throw;
+            }
         }
 
-        public void Terminate() => UnixProcessGroup.Terminate(processGroupId);
+        public void SignalTermination() => _terminationControl.Dispose();
 
-        public void Dispose()
-        {
-        }
+        public void Terminate() => SignalTermination();
+
+        public void Dispose() => _terminationControl.Dispose();
     }
+
+    private sealed record UnixProcessGroupLaunch(Process Process, UnixProcessGroupOwnership Ownership);
 
     private sealed class WindowsProcessTreeOwnership : IProcessTreeOwnership
     {

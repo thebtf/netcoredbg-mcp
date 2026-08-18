@@ -41,6 +41,20 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
     }
 
     public FixtureProcess Fixture => _fixture;
+    public int OwnedProcessId => (RequirePrivateProcessField(_session.GetType(), "_process").GetValue(_session)
+        ?? throw new InvalidOperationException("NetCoreDbgSession._process returned null.")) is Process process
+            ? process.Id
+            : throw new InvalidOperationException("NetCoreDbgSession._process has an unexpected type.");
+
+    public static void AssertUnixGuardianOwnershipContract()
+    {
+        var sessionType = RequireType(LoadProductionAssemblyOrAssert(), SessionTypeName);
+        var ownershipType = sessionType.GetNestedType("UnixProcessGroupOwnership", BindingFlags.NonPublic);
+        Assert.NotNull(ownershipType);
+        var fields = ownershipType!.GetFields(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+        Assert.DoesNotContain(fields, static field => field.FieldType == typeof(int));
+        Assert.Contains(fields, static field => field.FieldType == typeof(System.IO.Pipes.AnonymousPipeServerStream));
+    }
 
     public DapSessionSnapshot State
     {
@@ -364,6 +378,15 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         Assert.NotNull(field);
         Assert.True(field!.IsPrivate, $"Missing production contract: {type.FullName}.{name} must be private.");
         Assert.Equal(typeof(Task), field.FieldType);
+        return field;
+    }
+
+    private static FieldInfo RequirePrivateProcessField(Type type, string name)
+    {
+        var field = type.GetField(name, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+        Assert.NotNull(field);
+        Assert.True(field!.IsPrivate, $"Missing production contract: {type.FullName}.{name} must be private.");
+        Assert.Equal(typeof(Process), field.FieldType);
         return field;
     }
 

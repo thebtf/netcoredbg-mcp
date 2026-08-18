@@ -16,9 +16,9 @@ internal static class UnixProcessGroup
         }
     }
 
-    public static void Terminate(int processGroupId)
+    public static void TerminateOwnProcessGroup()
     {
-        if (Kill(-processGroupId, SigKill) != 0 && Marshal.GetLastWin32Error() != NoSuchProcess)
+        if (Kill(-Environment.ProcessId, SigKill) != 0 && Marshal.GetLastWin32Error() != NoSuchProcess)
         {
             throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not terminate the debugger process group.");
         }

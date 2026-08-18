@@ -22,6 +22,10 @@ public sealed class NetCoreDbgSessionTests
     private static readonly TimeSpan StopTimeout = TimeSpan.FromMilliseconds(300);
 
     [Fact]
+    public void UnixProcessGroupOwnership_UsesLiveGuardianTerminationControl() =>
+        NetCoreDbgSessionContractDriver.AssertUnixGuardianOwnershipContract();
+
+    [Fact]
     public async Task StartAsync_StartsDebuggerWithExactVscodeInterpreterArgument()
     {
         await using var session = await StartAsync(new FixtureConfiguration());
@@ -371,13 +375,14 @@ public sealed class NetCoreDbgSessionTests
     }
 
     [Fact]
-    public async Task StopAsync_AndDisposeAsync_TerminateDescendantAfterUnexpectedAdapterRootExit()
+    public async Task StopAsync_AndDisposeAsync_KeepUnixGuardianAliveUntilDescendantCleanup()
     {
         await using var session = await StartAsync(new FixtureConfiguration(
             SpawnDescendant: true,
             SuppressLifecycleEvents: true,
             ExitAfterLaunchResponse: true));
         var fixture = session.Fixture;
+        var guardianProcessId = session.OwnedProcessId;
         int? descendant = null;
 
         try
@@ -388,9 +393,17 @@ public sealed class NetCoreDbgSessionTests
             await WaitUntilAsync(() => Task.FromResult(HasExited(adapterProcessId)), TimeSpan.FromSeconds(2));
             Assert.Contains(await fixture.ReadTranscriptAsync(), entry => entry.Kind == "unexpected-root-exit");
             Assert.False(HasExited(descendant.Value), "The controlled descendant must still be alive after its adapter root exits unexpectedly.");
+            if (!OperatingSystem.IsWindows())
+            {
+                Assert.False(HasExited(guardianProcessId), "The Unix guardian must remain alive after the debugger root exits and before cleanup is requested.");
+            }
 
             await Task.WhenAll(session.StopAsync(CancellationToken.None), session.DisposeSessionAsync());
             Assert.True(HasExited(descendant.Value), "StopAsync and DisposeAsync must terminate the owned descendant after its adapter root has exited unexpectedly.");
+            if (!OperatingSystem.IsWindows())
+            {
+                Assert.True(HasExited(guardianProcessId), "The Unix guardian must exit only after it terminates the owned process group during cleanup.");
+            }
         }
         finally
         {
