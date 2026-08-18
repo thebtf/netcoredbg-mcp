@@ -1214,8 +1214,7 @@
         "status": {
           "enum": [
             "COMPLETE",
-            "PARTIAL",
-            "UNOBSERVABLE"
+            "PARTIAL"
           ]
         },
         "sceneRequest": {
@@ -1305,15 +1304,6 @@
                 "status": {
                   "enum": [
                     "PARTIAL"
-                  ]
-                }
-              }
-            },
-            {
-              "properties": {
-                "status": {
-                  "enum": [
-                    "UNOBSERVABLE"
                   ]
                 }
               }

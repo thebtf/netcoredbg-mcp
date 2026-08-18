@@ -1723,9 +1723,9 @@
           ]
         },
         "maximumAgeSeconds": {
-          "enum": [
-            14400
-          ]
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 14400
         },
         "expiresAt": {
           "$ref": "#/definitions/dateTime"

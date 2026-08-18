@@ -231,6 +231,8 @@ DPI, and visual-tree-fingerprint guards yield `PARTIAL` with
 element snapshot uses `not_applicable` atomicity and cannot claim a complete
 scene epoch.
 
+A persisted scene artifact has status `COMPLETE` or `PARTIAL` and therefore contains at least one observed graph node and root. An `UNOBSERVABLE` capture result commits no scene artifact and returns no scene-artifact descriptor; its uncertainty remains in the compact capture manifest.
+
 A scene artifact is a bounded immutable graph of at most 4,096 nodes. A node
 has an ID, an optional parent relation, optional slot relation, canonical
 identity when available, fallback accessibility identity, logical and physical
