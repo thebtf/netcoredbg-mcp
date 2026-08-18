@@ -1,0 +1,1424 @@
+{
+  "$comment": "CANDIDATE parity corpus for operator review and M0-G0 runtime/schema proof. Recorded approval authorizes only M0-G0 T002–T007; only a GREEN T007 authorizes T008. This corpus authorizes no product implementation by itself.",
+  "contract": {
+    "protocolVersion": "native-scene-probe/1",
+    "schemaVersion": "native-scene-probe.schema/1",
+    "artifactSchemaVersion": "native-scene-artifact/1"
+  },
+  "fixtures": {
+    "sessionId": "session_A1b2C3d4E5",
+    "sceneRequest": {
+      "storyId": "Button.Primary",
+      "sceneId": "Default",
+      "fixtureId": "Gallery",
+      "scope": {
+        "kind": "scene"
+      },
+      "appearance": "light",
+      "theme": "baseline",
+      "density": "regular",
+      "contrast": "standard",
+      "viewport": {
+        "policy": "exact",
+        "width": 1280,
+        "height": 720
+      },
+      "expectedDpiPolicy": {
+        "mode": "exact",
+        "x": 96,
+        "y": 96
+      },
+      "focusTarget": null,
+      "selectedState": null,
+      "currentState": null,
+      "scrollOffsets": null,
+      "animationPolicy": "finished",
+      "settlePolicy": {
+        "timeoutMs": 30000,
+        "sampleCount": 2,
+        "stableForMs": 100,
+        "requireDispatcherIdle": true,
+        "requireStableLayout": true,
+        "requireAnimationState": true,
+        "requireWindowGeometry": true,
+        "requireContextMaterialization": true,
+        "requireAsyncLoadSettled": true
+      },
+      "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expectedCandidateIdentity": {
+        "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "assemblyVersion": "1.0.0",
+        "probeVersion": "1.0.0"
+      }
+    }
+  },
+  "cases": [
+    {
+      "id": "C001-valid-capability-declaration",
+      "primitive": "get_ui_probe_capabilities",
+      "request": {
+        "debugSessionId": "session_A1b2C3d4E5",
+        "protocolVersion": "native-scene-probe/1",
+        "schemaVersion": "native-scene-probe.schema/1"
+      },
+      "expected": {
+        "classification": "capability_declaration",
+        "responseKind": "ui_probe_capabilities",
+        "required": [
+          "candidate",
+          "capabilities.supportedProtocolVersions",
+          "capabilities.supportedSchemaVersions",
+          "capabilities.primitives[6 distinct names]",
+          "capabilities.context",
+          "capabilities.settleConditions",
+          "capabilities.limits.settleSampleCountMin",
+          "capabilities.limits.settleSampleCountMax"
+        ],
+        "mustNotEnumerate": [
+          "artifactId"
+        ]
+      }
+    },
+    {
+      "id": "C002-malformed-version-is-invalid",
+      "primitive": "get_ui_probe_capabilities",
+      "request": {
+        "debugSessionId": "session_A1b2C3d4E5",
+        "protocolVersion": "not-a-native-scene-version",
+        "schemaVersion": "native-scene-probe.schema/1"
+      },
+      "expected": {
+        "classification": "typed_error",
+        "errorCode": "INVALID_TOOL_ARGUMENTS",
+        "requiredResponse": {
+          "kind": "tool_error",
+          "tool": "get_ui_probe_capabilities",
+          "code": "INVALID_TOOL_ARGUMENTS"
+        }
+      }
+    },
+    {
+      "id": "C003-well-formed-unsupported-version",
+      "primitive": "get_ui_probe_capabilities",
+      "request": {
+        "debugSessionId": "session_A1b2C3d4E5",
+        "protocolVersion": "native-scene-probe/2",
+        "schemaVersion": "native-scene-probe.schema/2"
+      },
+      "expected": {
+        "classification": "typed_error",
+        "errorCode": "UNSUPPORTED_PROTOCOL",
+        "requiredResponse": {
+          "kind": "tool_error",
+          "tool": "get_ui_probe_capabilities",
+          "code": "UNSUPPORTED_PROTOCOL"
+        }
+      }
+    },
+    {
+      "id": "C004-unavailable-m1-capability",
+      "primitive": "capture_native_scene",
+      "precondition": "The capability declaration marks capture_native_scene as unsupported.",
+      "request": {
+        "debugSessionId": "session_A1b2C3d4E5",
+        "protocolVersion": "native-scene-probe/1",
+        "schemaVersion": "native-scene-probe.schema/1",
+        "sceneRequest": {
+          "storyId": "Button.Primary",
+          "sceneId": "Default",
+          "fixtureId": "Gallery",
+          "scope": {
+            "kind": "scene"
+          },
+          "appearance": "light",
+          "theme": "baseline",
+          "density": "regular",
+          "contrast": "standard",
+          "viewport": {
+            "policy": "exact",
+            "width": 1280,
+            "height": 720
+          },
+          "expectedDpiPolicy": {
+            "mode": "exact",
+            "x": 96,
+            "y": 96
+          },
+          "focusTarget": null,
+          "selectedState": null,
+          "currentState": null,
+          "scrollOffsets": null,
+          "animationPolicy": "finished",
+          "settlePolicy": {
+            "timeoutMs": 30000,
+            "sampleCount": 2,
+            "stableForMs": 100,
+            "requireDispatcherIdle": true,
+            "requireStableLayout": true,
+            "requireAnimationState": true,
+            "requireWindowGeometry": true,
+            "requireContextMaterialization": true,
+            "requireAsyncLoadSettled": true
+          },
+          "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expectedCandidateIdentity": {
+            "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "assemblyVersion": "1.0.0",
+            "probeVersion": "1.0.0"
+          }
+        }
+      },
+      "expected": {
+        "classification": "typed_error",
+        "errorCode": "UNSUPPORTED_CAPABILITY",
+        "requiredResponse": {
+          "kind": "tool_error",
+          "tool": "capture_native_scene",
+          "code": "UNSUPPORTED_CAPABILITY"
+        }
+      }
+    },
+    {
+      "id": "C005-valid-lossless-visual-capture",
+      "primitive": "capture_visual_evidence",
+      "precondition": "The session and candidate are positively bound and losslessVisualEvidence is supported.",
+      "request": {
+        "debugSessionId": "session_A1b2C3d4E5",
+        "protocolVersion": "native-scene-probe/1",
+        "schemaVersion": "native-scene-probe.schema/1",
+        "sceneRequest": {
+          "storyId": "Button.Primary",
+          "sceneId": "Default",
+          "fixtureId": "Gallery",
+          "scope": {
+            "kind": "scene"
+          },
+          "appearance": "light",
+          "theme": "baseline",
+          "density": "regular",
+          "contrast": "standard",
+          "viewport": {
+            "policy": "exact",
+            "width": 1280,
+            "height": 720
+          },
+          "expectedDpiPolicy": {
+            "mode": "exact",
+            "x": 96,
+            "y": 96
+          },
+          "focusTarget": null,
+          "selectedState": null,
+          "currentState": null,
+          "scrollOffsets": null,
+          "animationPolicy": "finished",
+          "settlePolicy": {
+            "timeoutMs": 30000,
+            "sampleCount": 2,
+            "stableForMs": 100,
+            "requireDispatcherIdle": true,
+            "requireStableLayout": true,
+            "requireAnimationState": true,
+            "requireWindowGeometry": true,
+            "requireContextMaterialization": true,
+            "requireAsyncLoadSettled": true
+          },
+          "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expectedCandidateIdentity": {
+            "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "assemblyVersion": "1.0.0",
+            "probeVersion": "1.0.0"
+          }
+        },
+        "evidenceScope": {
+          "kind": "window"
+        }
+      },
+      "expected": {
+        "classification": "complete_observation",
+        "status": "COMPLETE",
+        "responseKind": "visual_evidence_capture",
+        "requiredArtifact": {
+          "mediaType": "image/png",
+          "evidenceGrade": "lossless_visual",
+          "maximumByteLength": 67108864,
+          "independentRasterCaptureId": true
+        },
+        "mustNotEmbed": [
+          "losslessBytes"
+        ]
+      }
+    },
+    {
+      "id": "C006-bounded-raw-read-at-ceiling",
+      "primitive": "read_capture_artifact",
+      "precondition": "artifact_visual_capability_0001 is an authorized 131072-byte lossless artifact.",
+      "request": {
+        "debugSessionId": "session_A1b2C3d4E5",
+        "protocolVersion": "native-scene-probe/1",
+        "schemaVersion": "native-scene-probe.schema/1",
+        "artifactId": "artifact_visual_capability_0001",
+        "offset": 0,
+        "maxBytes": 65536
+      },
+      "expected": {
+        "classification": "artifact_chunk",
+        "responseKind": "capture_artifact_chunk",
+        "bytesRead": 65536,
+        "endOfArtifact": false,
+        "encoding": "padded_standard_base64"
+      }
+    },
+    {
+      "id": "C007-artifact-read-at-end",
+      "primitive": "read_capture_artifact",
+      "precondition": "artifact_empty_capability_0001 is an authorized zero-byte artifact.",
+      "request": {
+        "debugSessionId": "session_A1b2C3d4E5",
+        "protocolVersion": "native-scene-probe/1",
+        "schemaVersion": "native-scene-probe.schema/1",
+        "artifactId": "artifact_empty_capability_0001",
+        "offset": 0,
+        "maxBytes": 1
+      },
+      "expected": {
+        "classification": "artifact_chunk",
+        "responseKind": "capture_artifact_chunk",
+        "bytesRead": 0,
+        "dataBase64": "",
+        "endOfArtifact": true
+      }
+    },
+    {
+      "id": "C008-foreign-artifact-is-not-found",
+      "primitive": "read_capture_artifact",
+      "precondition": "artifact_foreign_capability_0001 is not available to this session because it is either unknown to it or bound to a foreign session or capture.",
+      "request": {
+        "debugSessionId": "session_A1b2C3d4E5",
+        "protocolVersion": "native-scene-probe/1",
+        "schemaVersion": "native-scene-probe.schema/1",
+        "artifactId": "artifact_foreign_capability_0001",
+        "offset": 0,
+        "maxBytes": 1
+      },
+      "expected": {
+        "classification": "typed_error",
+        "errorCode": "ARTIFACT_NOT_FOUND",
+        "requiredResponse": {
+          "kind": "tool_error",
+          "tool": "read_capture_artifact",
+          "code": "ARTIFACT_NOT_FOUND",
+          "message": "Artifact is not available."
+        },
+        "forbiddenResponseMembers": [
+          "artifactId",
+          "byteLength",
+          "sha256",
+          "mediaType",
+          "retention",
+          "relativeProvenance"
+        ]
+      }
+    },
+    {
+      "id": "C009-expired-artifact-is-not-found",
+      "primitive": "read_capture_artifact",
+      "precondition": "artifact_expired_capability_0001 is otherwise unavailable because it expired, was deleted, or its committed content is unavailable.",
+      "request": {
+        "debugSessionId": "session_A1b2C3d4E5",
+        "protocolVersion": "native-scene-probe/1",
+        "schemaVersion": "native-scene-probe.schema/1",
+        "artifactId": "artifact_expired_capability_0001",
+        "offset": 0,
+        "maxBytes": 1
+      },
+      "expected": {
+        "classification": "typed_error",
+        "errorCode": "ARTIFACT_NOT_FOUND",
+        "requiredResponse": {
+          "kind": "tool_error",
+          "tool": "read_capture_artifact",
+          "code": "ARTIFACT_NOT_FOUND",
+          "message": "Artifact is not available."
+        },
+        "forbiddenResponseMembers": [
+          "artifactId",
+          "byteLength",
+          "sha256",
+          "mediaType",
+          "retention",
+          "relativeProvenance"
+        ]
+      }
+    },
+    {
+      "id": "C010-authorized-integrity-failure-contains-no-bytes",
+      "primitive": "read_capture_artifact",
+      "precondition": "artifact_tampered_capability_0001 is owned by the session but its committed hash, identity, or length no longer matches the manifest.",
+      "request": {
+        "debugSessionId": "session_A1b2C3d4E5",
+        "protocolVersion": "native-scene-probe/1",
+        "schemaVersion": "native-scene-probe.schema/1",
+        "artifactId": "artifact_tampered_capability_0001",
+        "offset": 0,
+        "maxBytes": 65536
+      },
+      "expected": {
+        "classification": "typed_error",
+        "errorCode": "ARTIFACT_INTEGRITY_FAILED",
+        "requiredResponse": {
+          "kind": "tool_error",
+          "tool": "read_capture_artifact",
+          "code": "ARTIFACT_INTEGRITY_FAILED"
+        },
+        "forbiddenResponseMembers": [
+          "bytesRead",
+          "dataBase64"
+        ]
+      }
+    },
+    {
+      "id": "C011-atomic-in-process-scene",
+      "primitive": "capture_native_scene",
+      "precondition": "An authorized in-process framework probe completes one dispatcher-affine, non-yielding immutable-DTO transaction.",
+      "request": {
+        "debugSessionId": "session_A1b2C3d4E5",
+        "protocolVersion": "native-scene-probe/1",
+        "schemaVersion": "native-scene-probe.schema/1",
+        "sceneRequest": {
+          "storyId": "Button.Primary",
+          "sceneId": "Default",
+          "fixtureId": "Gallery",
+          "scope": {
+            "kind": "scene"
+          },
+          "appearance": "light",
+          "theme": "baseline",
+          "density": "regular",
+          "contrast": "standard",
+          "viewport": {
+            "policy": "exact",
+            "width": 1280,
+            "height": 720
+          },
+          "expectedDpiPolicy": {
+            "mode": "exact",
+            "x": 96,
+            "y": 96
+          },
+          "focusTarget": null,
+          "selectedState": null,
+          "currentState": null,
+          "scrollOffsets": null,
+          "animationPolicy": "finished",
+          "settlePolicy": {
+            "timeoutMs": 30000,
+            "sampleCount": 2,
+            "stableForMs": 100,
+            "requireDispatcherIdle": true,
+            "requireStableLayout": true,
+            "requireAnimationState": true,
+            "requireWindowGeometry": true,
+            "requireContextMaterialization": true,
+            "requireAsyncLoadSettled": true
+          },
+          "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expectedCandidateIdentity": {
+            "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "assemblyVersion": "1.0.0",
+            "probeVersion": "1.0.0"
+          }
+        }
+      },
+      "expected": {
+        "classification": "complete_observation",
+        "status": "COMPLETE",
+        "responseKind": "native_scene_capture",
+        "atomicity": {
+          "authority": "in_process_framework_probe",
+          "transaction": "dispatcher_affine_non_yielding",
+          "immutableDto": true,
+          "layoutStateRevisionBefore": 77,
+          "layoutStateRevisionAfter": 77
+        },
+        "issues": []
+      }
+    },
+    {
+      "id": "C012-changed-probe-revision-is-qualified",
+      "primitive": "capture_native_scene",
+      "precondition": "The in-process probe observes a changed revision during graph materialization.",
+      "request": {
+        "debugSessionId": "session_A1b2C3d4E5",
+        "protocolVersion": "native-scene-probe/1",
+        "schemaVersion": "native-scene-probe.schema/1",
+        "sceneRequest": {
+          "storyId": "Button.Primary",
+          "sceneId": "Default",
+          "fixtureId": "Gallery",
+          "scope": {
+            "kind": "scene"
+          },
+          "appearance": "light",
+          "theme": "baseline",
+          "density": "regular",
+          "contrast": "standard",
+          "viewport": {
+            "policy": "exact",
+            "width": 1280,
+            "height": 720
+          },
+          "expectedDpiPolicy": {
+            "mode": "exact",
+            "x": 96,
+            "y": 96
+          },
+          "focusTarget": null,
+          "selectedState": null,
+          "currentState": null,
+          "scrollOffsets": null,
+          "animationPolicy": "finished",
+          "settlePolicy": {
+            "timeoutMs": 30000,
+            "sampleCount": 2,
+            "stableForMs": 100,
+            "requireDispatcherIdle": true,
+            "requireStableLayout": true,
+            "requireAnimationState": true,
+            "requireWindowGeometry": true,
+            "requireContextMaterialization": true,
+            "requireAsyncLoadSettled": true
+          },
+          "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expectedCandidateIdentity": {
+            "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "assemblyVersion": "1.0.0",
+            "probeVersion": "1.0.0"
+          }
+        }
+      },
+      "expected": {
+        "classification": "qualified_observation",
+        "status": "PARTIAL",
+        "responseKind": "native_scene_capture",
+        "atomicity": {
+          "authority": "in_process_framework_probe",
+          "layoutStateRevisionBefore": 77,
+          "layoutStateRevisionAfter": 78
+        },
+        "requiredIssue": "ATOMICITY_REVISION_CHANGED"
+      }
+    },
+    {
+      "id": "C013-uia-guarded-scene-is-qualified",
+      "primitive": "capture_native_scene",
+      "precondition": "Only UIA/FlaUI guarded traversal is available and all before/after guards are unchanged.",
+      "request": {
+        "debugSessionId": "session_A1b2C3d4E5",
+        "protocolVersion": "native-scene-probe/1",
+        "schemaVersion": "native-scene-probe.schema/1",
+        "sceneRequest": {
+          "storyId": "Button.Primary",
+          "sceneId": "Default",
+          "fixtureId": "Gallery",
+          "scope": {
+            "kind": "scene"
+          },
+          "appearance": "light",
+          "theme": "baseline",
+          "density": "regular",
+          "contrast": "standard",
+          "viewport": {
+            "policy": "exact",
+            "width": 1280,
+            "height": 720
+          },
+          "expectedDpiPolicy": {
+            "mode": "exact",
+            "x": 96,
+            "y": 96
+          },
+          "focusTarget": null,
+          "selectedState": null,
+          "currentState": null,
+          "scrollOffsets": null,
+          "animationPolicy": "finished",
+          "settlePolicy": {
+            "timeoutMs": 30000,
+            "sampleCount": 2,
+            "stableForMs": 100,
+            "requireDispatcherIdle": true,
+            "requireStableLayout": true,
+            "requireAnimationState": true,
+            "requireWindowGeometry": true,
+            "requireContextMaterialization": true,
+            "requireAsyncLoadSettled": true
+          },
+          "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expectedCandidateIdentity": {
+            "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "assemblyVersion": "1.0.0",
+            "probeVersion": "1.0.0"
+          }
+        }
+      },
+      "expected": {
+        "classification": "qualified_observation",
+        "status": "PARTIAL",
+        "responseKind": "native_scene_capture",
+        "atomicity": {
+          "authority": "uia_guarded",
+          "allGuards": "unchanged"
+        },
+        "requiredIssue": "ATOMICITY_UNPROVEN_UIA_GUARDED"
+      }
+    },
+    {
+      "id": "C014-stale-wait-receipt-cannot-authorize-capture",
+      "primitive": "capture_native_scene",
+      "precondition": "wait_for_ui_stable previously returned STABLE at epoch 41; the required layout condition changes before this capture begins.",
+      "request": {
+        "debugSessionId": "session_A1b2C3d4E5",
+        "protocolVersion": "native-scene-probe/1",
+        "schemaVersion": "native-scene-probe.schema/1",
+        "sceneRequest": {
+          "storyId": "Button.Primary",
+          "sceneId": "Default",
+          "fixtureId": "Gallery",
+          "scope": {
+            "kind": "scene"
+          },
+          "appearance": "light",
+          "theme": "baseline",
+          "density": "regular",
+          "contrast": "standard",
+          "viewport": {
+            "policy": "exact",
+            "width": 1280,
+            "height": 720
+          },
+          "expectedDpiPolicy": {
+            "mode": "exact",
+            "x": 96,
+            "y": 96
+          },
+          "focusTarget": null,
+          "selectedState": null,
+          "currentState": null,
+          "scrollOffsets": null,
+          "animationPolicy": "finished",
+          "settlePolicy": {
+            "timeoutMs": 30000,
+            "sampleCount": 2,
+            "stableForMs": 100,
+            "requireDispatcherIdle": true,
+            "requireStableLayout": true,
+            "requireAnimationState": true,
+            "requireWindowGeometry": true,
+            "requireContextMaterialization": true,
+            "requireAsyncLoadSettled": true
+          },
+          "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expectedCandidateIdentity": {
+            "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "assemblyVersion": "1.0.0",
+            "probeVersion": "1.0.0"
+          }
+        }
+      },
+      "expected": {
+        "classification": "typed_error",
+        "errorCode": "UI_NOT_STABLE",
+        "requiredResponse": {
+          "kind": "tool_error",
+          "tool": "capture_native_scene",
+          "code": "UI_NOT_STABLE"
+        },
+        "mustNotReuse": [
+          "epoch:41",
+          "priorWaitReceipt"
+        ]
+      }
+    },
+    {
+      "id": "C015-preview-is-independent-and-non-authoritative",
+      "primitive": "capture_visual_evidence",
+      "precondition": "Lossless evidence and an optional preview are both retained after fresh stabilization.",
+      "request": {
+        "debugSessionId": "session_A1b2C3d4E5",
+        "protocolVersion": "native-scene-probe/1",
+        "schemaVersion": "native-scene-probe.schema/1",
+        "sceneRequest": {
+          "storyId": "Button.Primary",
+          "sceneId": "Default",
+          "fixtureId": "Gallery",
+          "scope": {
+            "kind": "scene"
+          },
+          "appearance": "light",
+          "theme": "baseline",
+          "density": "regular",
+          "contrast": "standard",
+          "viewport": {
+            "policy": "exact",
+            "width": 1280,
+            "height": 720
+          },
+          "expectedDpiPolicy": {
+            "mode": "exact",
+            "x": 96,
+            "y": 96
+          },
+          "focusTarget": null,
+          "selectedState": null,
+          "currentState": null,
+          "scrollOffsets": null,
+          "animationPolicy": "finished",
+          "settlePolicy": {
+            "timeoutMs": 30000,
+            "sampleCount": 2,
+            "stableForMs": 100,
+            "requireDispatcherIdle": true,
+            "requireStableLayout": true,
+            "requireAnimationState": true,
+            "requireWindowGeometry": true,
+            "requireContextMaterialization": true,
+            "requireAsyncLoadSettled": true
+          },
+          "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expectedCandidateIdentity": {
+            "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "assemblyVersion": "1.0.0",
+            "probeVersion": "1.0.0"
+          }
+        },
+        "evidenceScope": {
+          "kind": "window"
+        }
+      },
+      "expected": {
+        "classification": "complete_observation",
+        "status": "COMPLETE",
+        "responseKind": "visual_evidence_capture",
+        "requiredArtifacts": [
+          {
+            "evidenceGrade": "lossless_visual",
+            "independentRasterCaptureId": true
+          },
+          {
+            "evidenceGrade": "preview_only",
+            "independentRasterCaptureId": true
+          }
+        ],
+        "mustNotClaim": [
+          "sceneEpoch",
+          "comparisonAuthority"
+        ]
+      }
+    },
+    {
+      "id": "C016-observation-only-result",
+      "primitive": "capture_element_snapshot",
+      "precondition": "The selected element resolves uniquely, but one supported fact remains unobservable.",
+      "request": {
+        "debugSessionId": "session_A1b2C3d4E5",
+        "protocolVersion": "native-scene-probe/1",
+        "schemaVersion": "native-scene-probe.schema/1",
+        "sceneRequest": {
+          "storyId": "Button.Primary",
+          "sceneId": "Default",
+          "fixtureId": "Gallery",
+          "scope": {
+            "kind": "scene"
+          },
+          "appearance": "light",
+          "theme": "baseline",
+          "density": "regular",
+          "contrast": "standard",
+          "viewport": {
+            "policy": "exact",
+            "width": 1280,
+            "height": 720
+          },
+          "expectedDpiPolicy": {
+            "mode": "exact",
+            "x": 96,
+            "y": 96
+          },
+          "focusTarget": null,
+          "selectedState": null,
+          "currentState": null,
+          "scrollOffsets": null,
+          "animationPolicy": "finished",
+          "settlePolicy": {
+            "timeoutMs": 30000,
+            "sampleCount": 2,
+            "stableForMs": 100,
+            "requireDispatcherIdle": true,
+            "requireStableLayout": true,
+            "requireAnimationState": true,
+            "requireWindowGeometry": true,
+            "requireContextMaterialization": true,
+            "requireAsyncLoadSettled": true
+          },
+          "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expectedCandidateIdentity": {
+            "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "assemblyVersion": "1.0.0",
+            "probeVersion": "1.0.0"
+          }
+        },
+        "element": {
+          "contractId": "Button.Primary",
+          "instanceKey": "save",
+          "templatePart": null,
+          "storyScope": "Button.Primary.Default",
+          "componentSlot": "content",
+          "automationId": "SaveButton"
+        }
+      },
+      "expected": {
+        "classification": "qualified_observation",
+        "status": "PARTIAL",
+        "responseKind": "element_snapshot_capture",
+        "requiredIssue": "ADAPTER_FACT_UNOBSERVABLE",
+        "forbiddenResponseMembers": [
+          "designComparison",
+          "tokenResolution",
+          "diagnosis",
+          "repairAdvice"
+        ]
+      }
+    },
+    {
+      "id": "C017-short-artifact-capability-is-invalid",
+      "primitive": "read_capture_artifact",
+      "request": {
+        "debugSessionId": "session_A1b2C3d4E5",
+        "protocolVersion": "native-scene-probe/1",
+        "schemaVersion": "native-scene-probe.schema/1",
+        "artifactId": "short_artifact_id",
+        "offset": 0,
+        "maxBytes": 1
+      },
+      "expected": {
+        "classification": "typed_error",
+        "errorCode": "INVALID_TOOL_ARGUMENTS",
+        "requiredResponse": {
+          "kind": "tool_error",
+          "tool": "read_capture_artifact",
+          "code": "INVALID_TOOL_ARGUMENTS"
+        },
+        "mustNotPerform": [
+          "artifactLookup"
+        ]
+      }
+    },
+    {
+      "id": "C018-sample-count-above-bound-is-invalid",
+      "primitive": "wait_for_ui_stable",
+      "request": {
+        "debugSessionId": "session_A1b2C3d4E5",
+        "protocolVersion": "native-scene-probe/1",
+        "schemaVersion": "native-scene-probe.schema/1",
+        "sceneRequest": {
+          "storyId": "Button.Primary",
+          "sceneId": "Default",
+          "fixtureId": "Gallery",
+          "scope": {
+            "kind": "scene"
+          },
+          "appearance": "light",
+          "theme": "baseline",
+          "density": "regular",
+          "contrast": "standard",
+          "viewport": {
+            "policy": "exact",
+            "width": 1280,
+            "height": 720
+          },
+          "expectedDpiPolicy": {
+            "mode": "exact",
+            "x": 96,
+            "y": 96
+          },
+          "focusTarget": null,
+          "selectedState": null,
+          "currentState": null,
+          "scrollOffsets": null,
+          "animationPolicy": "finished",
+          "settlePolicy": {
+            "timeoutMs": 30000,
+            "sampleCount": 17,
+            "stableForMs": 100,
+            "requireDispatcherIdle": true,
+            "requireStableLayout": true,
+            "requireAnimationState": true,
+            "requireWindowGeometry": true,
+            "requireContextMaterialization": true,
+            "requireAsyncLoadSettled": true
+          },
+          "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expectedCandidateIdentity": {
+            "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "assemblyVersion": "1.0.0",
+            "probeVersion": "1.0.0"
+          }
+        }
+      },
+      "expected": {
+        "classification": "typed_error",
+        "errorCode": "INVALID_TOOL_ARGUMENTS",
+        "requiredResponse": {
+          "kind": "tool_error",
+          "tool": "wait_for_ui_stable",
+          "code": "INVALID_TOOL_ARGUMENTS"
+        },
+        "mustNotPerform": [
+          "observerWork"
+        ]
+      }
+    },
+    {
+      "id": "C019-depth-seventeen-json-input-is-invalid",
+      "primitive": "capture_native_scene",
+      "request": {
+        "debugSessionId": "session_A1b2C3d4E5",
+        "protocolVersion": "native-scene-probe/1",
+        "schemaVersion": "native-scene-probe.schema/1",
+        "sceneRequest": {
+          "storyId": "Button.Primary",
+          "sceneId": "Default",
+          "fixtureId": "Gallery",
+          "scope": {
+            "kind": "scene"
+          },
+          "appearance": "light",
+          "theme": "baseline",
+          "density": "regular",
+          "contrast": "standard",
+          "viewport": {
+            "policy": "exact",
+            "width": 1280,
+            "height": 720
+          },
+          "expectedDpiPolicy": {
+            "mode": "exact",
+            "x": 96,
+            "y": 96
+          },
+          "focusTarget": null,
+          "selectedState": null,
+          "currentState": {
+            "d01": {
+              "d02": {
+                "d03": {
+                  "d04": {
+                    "d05": {
+                      "d06": {
+                        "d07": {
+                          "d08": {
+                            "d09": {
+                              "d10": {
+                                "d11": {
+                                  "d12": {
+                                    "d13": {
+                                      "d14": {
+                                        "d15": {
+                                          "d16": {
+                                            "d17": "leaf"
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "scrollOffsets": null,
+          "animationPolicy": "finished",
+          "settlePolicy": {
+            "timeoutMs": 30000,
+            "sampleCount": 2,
+            "stableForMs": 100,
+            "requireDispatcherIdle": true,
+            "requireStableLayout": true,
+            "requireAnimationState": true,
+            "requireWindowGeometry": true,
+            "requireContextMaterialization": true,
+            "requireAsyncLoadSettled": true
+          },
+          "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expectedCandidateIdentity": {
+            "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "assemblyVersion": "1.0.0",
+            "probeVersion": "1.0.0"
+          }
+        }
+      },
+      "expected": {
+        "classification": "typed_error",
+        "errorCode": "INVALID_TOOL_ARGUMENTS",
+        "requiredResponse": {
+          "kind": "tool_error",
+          "tool": "capture_native_scene",
+          "code": "INVALID_TOOL_ARGUMENTS"
+        },
+        "mustNotPerform": [
+          "dtoMaterialization",
+          "observerWork"
+        ]
+      }
+    },
+    {
+      "id": "C020-oversized-observer-output-is-contained-before-commit",
+      "primitive": "capture_native_scene",
+      "precondition": "The authorized probe emits the declared oversized custom fact as observer output; containment rejects it before DTO materialization or artifact commit. This is not absent-observer handling or request-input validation.",
+      "adapterPayloadFixture": {
+        "namespace": "example.waveform",
+        "schemaVersion": "1",
+        "authority": "adapter_reported",
+        "encoding": "UTF-8",
+        "scalar": "x",
+        "repeatCount": 262145,
+        "serializedUtf8Bytes": 262145
+      },
+      "request": {
+        "debugSessionId": "session_A1b2C3d4E5",
+        "protocolVersion": "native-scene-probe/1",
+        "schemaVersion": "native-scene-probe.schema/1",
+        "sceneRequest": {
+          "storyId": "Button.Primary",
+          "sceneId": "Default",
+          "fixtureId": "Gallery",
+          "scope": {
+            "kind": "scene"
+          },
+          "appearance": "light",
+          "theme": "baseline",
+          "density": "regular",
+          "contrast": "standard",
+          "viewport": {
+            "policy": "exact",
+            "width": 1280,
+            "height": 720
+          },
+          "expectedDpiPolicy": {
+            "mode": "exact",
+            "x": 96,
+            "y": 96
+          },
+          "focusTarget": null,
+          "selectedState": null,
+          "currentState": null,
+          "scrollOffsets": null,
+          "animationPolicy": "finished",
+          "settlePolicy": {
+            "timeoutMs": 30000,
+            "sampleCount": 2,
+            "stableForMs": 100,
+            "requireDispatcherIdle": true,
+            "requireStableLayout": true,
+            "requireAnimationState": true,
+            "requireWindowGeometry": true,
+            "requireContextMaterialization": true,
+            "requireAsyncLoadSettled": true
+          },
+          "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expectedCandidateIdentity": {
+            "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "assemblyVersion": "1.0.0",
+            "probeVersion": "1.0.0"
+          }
+        }
+      },
+      "expected": {
+        "classification": "typed_error",
+        "errorCode": "OBSERVER_UNAVAILABLE",
+        "requiredResponse": {
+          "kind": "tool_error",
+          "tool": "capture_native_scene",
+          "code": "OBSERVER_UNAVAILABLE"
+        },
+        "containmentBoundary": "observer_output_before_dto_or_artifact_commit",
+        "mustNotTreatAs": [
+          "requestInputValidation",
+          "noObserver"
+        ],
+        "mustNotPerform": [
+          "dtoMaterialization",
+          "artifactCommit"
+        ]
+      }
+    },
+    {
+      "id": "C021-capability-omission-is-schema-rejected",
+      "primitive": "get_ui_probe_capabilities",
+      "responseSchema": "#/definitions/probeCapabilities",
+      "response": {
+        "supportedProtocolVersions": [
+          "native-scene-probe/1"
+        ],
+        "supportedSchemaVersions": [
+          "native-scene-probe.schema/1"
+        ],
+        "primitives": [
+          {
+            "name": "get_ui_probe_capabilities",
+            "milestone": "M0",
+            "availability": "supported"
+          },
+          {
+            "name": "capture_visual_evidence",
+            "milestone": "M0",
+            "availability": "supported"
+          },
+          {
+            "name": "read_capture_artifact",
+            "milestone": "M0",
+            "availability": "supported"
+          },
+          {
+            "name": "wait_for_ui_stable",
+            "milestone": "M1",
+            "availability": "unsupported"
+          },
+          {
+            "name": "capture_element_snapshot",
+            "milestone": "M1",
+            "availability": "unsupported"
+          }
+        ],
+        "context": {
+          "storyId": "supported",
+          "sceneId": "supported",
+          "fixtureId": "supported",
+          "scope": "supported",
+          "appearance": "supported",
+          "theme": "supported",
+          "density": "supported",
+          "contrast": "supported",
+          "viewport": "supported",
+          "expectedDpiPolicy": "supported",
+          "focusTarget": "supported",
+          "selectedState": "supported",
+          "currentState": "supported",
+          "scrollOffsets": "supported",
+          "animationPolicy": "supported"
+        },
+        "settleConditions": {
+          "dispatcherIdle": "supported",
+          "stableLayout": "supported",
+          "animationState": "supported",
+          "windowGeometry": "supported",
+          "contextMaterialization": "supported",
+          "asyncLoadSettled": "supported"
+        },
+        "atomicSceneAuthority": "unsupported",
+        "uiaGuardedTraversal": "unsupported",
+        "losslessVisualEvidence": "supported",
+        "customAdapterNamespaces": [],
+        "limits": {
+          "artifactReadMaxBytes": 65536,
+          "losslessArtifactMaxBytes": 67108864,
+          "sceneArtifactMaxBytes": 16777216,
+          "structuredResponseMaxBytes": 262144,
+          "sceneGraphMaxNodes": 4096,
+          "issuesMaxCount": 256,
+          "artifactRefsMaxCount": 4,
+          "retentionMaxSeconds": 14400,
+          "settleTimeoutMaxMs": 30000,
+          "settleSampleCountMin": 2,
+          "settleSampleCountMax": 16
+        }
+      },
+      "expected": {
+        "classification": "schema_rejection",
+        "reason": "primitives omits capture_native_scene and has fewer than six entries"
+      }
+    },
+    {
+      "id": "C022-duplicate-capability-name-is-schema-rejected",
+      "primitive": "get_ui_probe_capabilities",
+      "responseSchema": "#/definitions/probeCapabilities",
+      "response": {
+        "supportedProtocolVersions": [
+          "native-scene-probe/1"
+        ],
+        "supportedSchemaVersions": [
+          "native-scene-probe.schema/1"
+        ],
+        "primitives": [
+          {
+            "name": "get_ui_probe_capabilities",
+            "milestone": "M0",
+            "availability": "supported"
+          },
+          {
+            "name": "capture_visual_evidence",
+            "milestone": "M0",
+            "availability": "supported"
+          },
+          {
+            "name": "read_capture_artifact",
+            "milestone": "M0",
+            "availability": "supported"
+          },
+          {
+            "name": "wait_for_ui_stable",
+            "milestone": "M1",
+            "availability": "unsupported"
+          },
+          {
+            "name": "wait_for_ui_stable",
+            "milestone": "M1",
+            "availability": "unsupported"
+          },
+          {
+            "name": "capture_element_snapshot",
+            "milestone": "M1",
+            "availability": "unsupported"
+          }
+        ],
+        "context": {
+          "storyId": "supported",
+          "sceneId": "supported",
+          "fixtureId": "supported",
+          "scope": "supported",
+          "appearance": "supported",
+          "theme": "supported",
+          "density": "supported",
+          "contrast": "supported",
+          "viewport": "supported",
+          "expectedDpiPolicy": "supported",
+          "focusTarget": "supported",
+          "selectedState": "supported",
+          "currentState": "supported",
+          "scrollOffsets": "supported",
+          "animationPolicy": "supported"
+        },
+        "settleConditions": {
+          "dispatcherIdle": "supported",
+          "stableLayout": "supported",
+          "animationState": "supported",
+          "windowGeometry": "supported",
+          "contextMaterialization": "supported",
+          "asyncLoadSettled": "supported"
+        },
+        "atomicSceneAuthority": "unsupported",
+        "uiaGuardedTraversal": "unsupported",
+        "losslessVisualEvidence": "supported",
+        "customAdapterNamespaces": [],
+        "limits": {
+          "artifactReadMaxBytes": 65536,
+          "losslessArtifactMaxBytes": 67108864,
+          "sceneArtifactMaxBytes": 16777216,
+          "structuredResponseMaxBytes": 262144,
+          "sceneGraphMaxNodes": 4096,
+          "issuesMaxCount": 256,
+          "artifactRefsMaxCount": 4,
+          "retentionMaxSeconds": 14400,
+          "settleTimeoutMaxMs": 30000,
+          "settleSampleCountMin": 2,
+          "settleSampleCountMax": 16
+        }
+      },
+      "expected": {
+        "classification": "schema_rejection",
+        "reason": "primitives duplicates wait_for_ui_stable and omits capture_native_scene despite six entries"
+      }
+    },
+    {
+      "id": "C023-partial-capture-without-revalidation-is-schema-rejected",
+      "primitive": "capture_native_scene",
+      "precondition": "wait_for_ui_stable previously returned a historical receipt with revalidatedByCapture false; this later PARTIAL native-scene result attempts to reuse it without capture-time revalidation.",
+      "responseSchema": "#/definitions/nativeSceneCapture",
+      "response": {
+        "kind": "native_scene_capture",
+        "status": "PARTIAL",
+        "captureId": "capture_scene_case_000001",
+        "protocolVersion": "native-scene-probe/1",
+        "schemaVersion": "native-scene-probe.schema/1",
+        "capturedAt": "2026-08-18T00:00:00Z",
+        "candidate": {
+          "processId": 4242,
+          "processIdentity": "process_4242_start_1",
+          "hwnd": null,
+          "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "assemblyVersion": "1.0.0",
+          "probeVersion": "1.0.0",
+          "observerVersions": [],
+          "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "storyHash": null,
+          "capturedAt": "2026-08-18T00:00:00Z",
+          "source": {
+            "kind": "probe_manifest",
+            "verification": "verified"
+          }
+        },
+        "stability": {
+          "status": "PARTIAL",
+          "revalidatedByCapture": false,
+          "conditions": {
+            "dispatcherIdle": {
+              "state": "met"
+            },
+            "stableLayout": {
+              "state": "met"
+            },
+            "animationState": {
+              "state": "met"
+            },
+            "windowGeometry": {
+              "state": "met"
+            },
+            "contextMaterialization": {
+              "state": "met"
+            },
+            "asyncLoadSettled": {
+              "state": "met"
+            }
+          },
+          "settleDurationMs": 100,
+          "observedAt": "2026-08-18T00:00:00Z",
+          "sceneEpoch": 41,
+          "sequence": 1
+        },
+        "atomicity": {
+          "authority": "uia_guarded",
+          "guards": {
+            "window": {
+              "state": "unchanged"
+            },
+            "client": {
+              "state": "unchanged"
+            },
+            "dpi": {
+              "state": "unchanged"
+            },
+            "visualTreeFingerprint": {
+              "state": "unchanged"
+            }
+          }
+        },
+        "element": null,
+        "artifacts": [],
+        "issues": [
+          {
+            "code": "CAPTURE_REVALIDATION_FAILED",
+            "message": "Capture-time revalidation was not performed."
+          }
+        ]
+      },
+      "expected": {
+        "classification": "schema_rejection",
+        "reason": "every PARTIAL native-scene capture result requires revalidatedByCapture true"
+      }
+    },
+    {
+      "id": "C024-oversized-selected-or-current-state-is-invalid",
+      "primitive": "capture_native_scene",
+      "requestStateVariants": [
+        {
+          "member": "selectedState",
+          "valueShape": {
+            "type": "array",
+            "depth": 2,
+            "outerItems": 4,
+            "innerItems": 256,
+            "stringLengths": {
+              "256": 254,
+              "252": 770
+            },
+            "serializedUtf8Bytes": 262145
+          }
+        },
+        {
+          "member": "currentState",
+          "valueShape": {
+            "type": "array",
+            "depth": 2,
+            "outerItems": 4,
+            "innerItems": 256,
+            "stringLengths": {
+              "256": 254,
+              "252": 770
+            },
+            "serializedUtf8Bytes": 262145
+          }
+        }
+      ],
+      "request": {
+        "debugSessionId": "session_A1b2C3d4E5",
+        "protocolVersion": "native-scene-probe/1",
+        "schemaVersion": "native-scene-probe.schema/1",
+        "sceneRequest": {
+          "storyId": "Button.Primary",
+          "sceneId": "Default",
+          "fixtureId": "Gallery",
+          "scope": {
+            "kind": "scene"
+          },
+          "appearance": "light",
+          "theme": "baseline",
+          "density": "regular",
+          "contrast": "standard",
+          "viewport": {
+            "policy": "exact",
+            "width": 1280,
+            "height": 720
+          },
+          "expectedDpiPolicy": {
+            "mode": "exact",
+            "x": 96,
+            "y": 96
+          },
+          "focusTarget": null,
+          "selectedState": null,
+          "currentState": null,
+          "scrollOffsets": null,
+          "animationPolicy": "finished",
+          "settlePolicy": {
+            "timeoutMs": 30000,
+            "sampleCount": 2,
+            "stableForMs": 100,
+            "requireDispatcherIdle": true,
+            "requireStableLayout": true,
+            "requireAnimationState": true,
+            "requireWindowGeometry": true,
+            "requireContextMaterialization": true,
+            "requireAsyncLoadSettled": true
+          },
+          "contractSetHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expectedCandidateIdentity": {
+            "executableSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "assemblyVersion": "1.0.0",
+            "probeVersion": "1.0.0"
+          }
+        }
+      },
+      "expected": {
+        "classification": "typed_error",
+        "errorCode": "INVALID_TOOL_ARGUMENTS",
+        "requiredResponse": {
+          "kind": "tool_error",
+          "tool": "capture_native_scene",
+          "code": "INVALID_TOOL_ARGUMENTS"
+        },
+        "mustNotPerform": [
+          "dtoMaterialization",
+          "observerWork"
+        ]
+      }
+    }
+  ]
+}

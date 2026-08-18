@@ -1,0 +1,2267 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://netcoredbg-mcp.dev/schemas/native-scene-probe/1/native-scene-probe.schema.json",
+  "$comment": "CANDIDATE ONLY: this Draft-7 contract awaits recorded operator approval and M0-G0 parity proof before any product implementation.",
+  "title": "Native Scene Probe application payloads",
+  "description": "Closed application payloads for the six additive native-scene primitives. MCP transport envelopes remain host-owned.",
+  "anyOf": [
+    {
+      "$ref": "#/definitions/getUiProbeCapabilitiesArguments"
+    },
+    {
+      "$ref": "#/definitions/captureVisualEvidenceArguments"
+    },
+    {
+      "$ref": "#/definitions/readCaptureArtifactArguments"
+    },
+    {
+      "$ref": "#/definitions/waitForUiStableArguments"
+    },
+    {
+      "$ref": "#/definitions/captureElementSnapshotArguments"
+    },
+    {
+      "$ref": "#/definitions/captureNativeSceneArguments"
+    },
+    {
+      "$ref": "#/definitions/toolResult"
+    }
+  ],
+  "definitions": {
+    "shortString": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "prose": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "shortStringOrNull": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "opaqueLabel": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "debugSessionId": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "publicCapabilityId": {
+      "$comment": "Server-minted public artifact, capture, or probe capability. Runtime generation MUST use at least 128 bits from a CSPRNG.",
+      "type": "string",
+      "minLength": 22,
+      "maxLength": 86,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "publicCapabilityIdOrNull": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 22,
+      "maxLength": 86,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "dateTime": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "format": "date-time"
+    },
+    "protocolVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^native-scene-probe/[1-9][0-9]*$"
+    },
+    "currentProtocolVersion": {
+      "type": "string",
+      "enum": [
+        "native-scene-probe/1"
+      ]
+    },
+    "schemaVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^native-scene-probe\\.schema/[1-9][0-9]*$"
+    },
+    "currentSchemaVersion": {
+      "type": "string",
+      "enum": [
+        "native-scene-probe.schema/1"
+      ]
+    },
+    "artifactSchemaVersion": {
+      "type": "string",
+      "enum": [
+        "native-scene-artifact/1"
+      ]
+    },
+    "byteOffset": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "byteCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65536
+    },
+    "requestBase": {
+      "type": "object",
+      "required": [
+        "debugSessionId",
+        "protocolVersion",
+        "schemaVersion"
+      ],
+      "properties": {
+        "debugSessionId": {
+          "$ref": "#/definitions/debugSessionId"
+        },
+        "protocolVersion": {
+          "$ref": "#/definitions/protocolVersion"
+        },
+        "schemaVersion": {
+          "$ref": "#/definitions/schemaVersion"
+        }
+      },
+      "description": "Shared request members. Each public request repeats these properties to retain a closed root under Draft 7."
+    },
+    "canonicalIdentity": {
+      "type": "object",
+      "required": [
+        "contractId"
+      ],
+      "properties": {
+        "contractId": {
+          "$ref": "#/definitions/shortString"
+        },
+        "instanceKey": {
+          "$ref": "#/definitions/shortString"
+        },
+        "templatePart": {
+          "$ref": "#/definitions/shortString"
+        },
+        "storyScope": {
+          "$ref": "#/definitions/shortString"
+        },
+        "componentSlot": {
+          "$ref": "#/definitions/shortString"
+        }
+      },
+      "additionalProperties": false
+    },
+    "elementSelector": {
+      "type": "object",
+      "required": [
+        "contractId",
+        "instanceKey",
+        "templatePart",
+        "storyScope",
+        "componentSlot",
+        "automationId"
+      ],
+      "properties": {
+        "contractId": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "instanceKey": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "templatePart": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "storyScope": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "componentSlot": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "automationId": {
+          "$ref": "#/definitions/shortStringOrNull"
+        }
+      },
+      "anyOf": [
+        {
+          "properties": {
+            "contractId": {
+              "$ref": "#/definitions/shortString"
+            }
+          }
+        },
+        {
+          "properties": {
+            "automationId": {
+              "$ref": "#/definitions/shortString"
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "sceneScope": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "scene"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "slotName"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "slot"
+              ]
+            },
+            "slotName": {
+              "$ref": "#/definitions/shortString"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "identity"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "element"
+              ]
+            },
+            "identity": {
+              "$ref": "#/definitions/canonicalIdentity"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "viewportConstraint": {
+      "type": "object",
+      "required": [
+        "policy",
+        "width",
+        "height"
+      ],
+      "properties": {
+        "policy": {
+          "enum": [
+            "exact",
+            "minimum",
+            "maximum"
+          ]
+        },
+        "width": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "height": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "dpiPolicy": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "mode",
+            "x",
+            "y"
+          ],
+          "properties": {
+            "mode": {
+              "enum": [
+                "exact"
+              ]
+            },
+            "x": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "y": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "mode",
+            "minimumX",
+            "maximumX",
+            "minimumY",
+            "maximumY"
+          ],
+          "properties": {
+            "mode": {
+              "enum": [
+                "range"
+              ]
+            },
+            "minimumX": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "maximumX": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "minimumY": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "maximumY": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "scrollOffset": {
+      "type": "object",
+      "required": [
+        "x",
+        "y"
+      ],
+      "properties": {
+        "x": {
+          "type": "number",
+          "minimum": 0
+        },
+        "y": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "scrollOffsets": {
+      "type": "object",
+      "minProperties": 1,
+      "patternProperties": {
+        "^.{1,256}$": {
+          "$ref": "#/definitions/scrollOffset"
+        }
+      },
+      "additionalProperties": false
+    },
+    "settlePolicy": {
+      "type": "object",
+      "required": [
+        "timeoutMs",
+        "sampleCount",
+        "stableForMs",
+        "requireDispatcherIdle",
+        "requireStableLayout",
+        "requireAnimationState",
+        "requireWindowGeometry",
+        "requireContextMaterialization",
+        "requireAsyncLoadSettled"
+      ],
+      "properties": {
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30000
+        },
+        "sampleCount": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 16
+        },
+        "stableForMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 30000
+        },
+        "requireDispatcherIdle": {
+          "type": "boolean"
+        },
+        "requireStableLayout": {
+          "type": "boolean"
+        },
+        "requireAnimationState": {
+          "type": "boolean"
+        },
+        "requireWindowGeometry": {
+          "type": "boolean"
+        },
+        "requireContextMaterialization": {
+          "type": "boolean"
+        },
+        "requireAsyncLoadSettled": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "candidateExpectation": {
+      "type": "object",
+      "required": [
+        "executableSha256",
+        "assemblyVersion",
+        "probeVersion"
+      ],
+      "properties": {
+        "executableSha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "assemblyVersion": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "probeVersion": {
+          "$ref": "#/definitions/shortStringOrNull"
+        }
+      },
+      "anyOf": [
+        {
+          "properties": {
+            "executableSha256": {
+              "$ref": "#/definitions/sha256"
+            }
+          }
+        },
+        {
+          "properties": {
+            "assemblyVersion": {
+              "$ref": "#/definitions/shortString"
+            }
+          }
+        },
+        {
+          "properties": {
+            "probeVersion": {
+              "$ref": "#/definitions/shortString"
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "jsonValue": {
+      "$comment": "Before DTO materialization, runtime rejects JSON nesting deeper than 16. Each array and object is structurally capped at 256 members; the containing public request, response, or artifact remains subject to its applicable byte ceiling.",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "$ref": "#/definitions/shortString"
+        },
+        {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/definitions/jsonValue"
+          }
+        },
+        {
+          "type": "object",
+          "maxProperties": 256,
+          "patternProperties": {
+            "^.{1,256}$": {
+              "$ref": "#/definitions/jsonValue"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "requestStateValue": {
+      "$comment": "Before DTO materialization, runtime rejects each selectedState or currentState value whose serialized UTF-8 representation exceeds 262,144 bytes. This is independent of jsonValue depth and collection-member bounds and of the enclosing request byte ceiling.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/jsonValue"
+        }
+      ]
+    },
+    "sceneRequest": {
+      "type": "object",
+      "required": [
+        "storyId",
+        "sceneId",
+        "fixtureId",
+        "scope",
+        "appearance",
+        "theme",
+        "density",
+        "contrast",
+        "viewport",
+        "expectedDpiPolicy",
+        "focusTarget",
+        "selectedState",
+        "currentState",
+        "scrollOffsets",
+        "animationPolicy",
+        "settlePolicy",
+        "contractSetHash",
+        "expectedCandidateIdentity"
+      ],
+      "properties": {
+        "storyId": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "sceneId": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "fixtureId": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "scope": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/sceneScope"
+            }
+          ]
+        },
+        "appearance": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "theme": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "density": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "contrast": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "viewport": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/viewportConstraint"
+            }
+          ]
+        },
+        "expectedDpiPolicy": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/dpiPolicy"
+            }
+          ]
+        },
+        "focusTarget": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/canonicalIdentity"
+            }
+          ]
+        },
+        "selectedState": {
+          "$ref": "#/definitions/requestStateValue"
+        },
+        "currentState": {
+          "$ref": "#/definitions/requestStateValue"
+        },
+        "scrollOffsets": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/scrollOffsets"
+            }
+          ]
+        },
+        "animationPolicy": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "disabled",
+            "finished",
+            "observed",
+            null
+          ]
+        },
+        "settlePolicy": {
+          "$ref": "#/definitions/settlePolicy"
+        },
+        "contractSetHash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "expectedCandidateIdentity": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/candidateExpectation"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "getUiProbeCapabilitiesArguments": {
+      "type": "object",
+      "required": [
+        "debugSessionId",
+        "protocolVersion",
+        "schemaVersion"
+      ],
+      "properties": {
+        "debugSessionId": {
+          "$ref": "#/definitions/debugSessionId"
+        },
+        "protocolVersion": {
+          "$ref": "#/definitions/protocolVersion"
+        },
+        "schemaVersion": {
+          "$ref": "#/definitions/schemaVersion"
+        }
+      },
+      "additionalProperties": false
+    },
+    "captureVisualEvidenceArguments": {
+      "type": "object",
+      "required": [
+        "debugSessionId",
+        "protocolVersion",
+        "schemaVersion",
+        "sceneRequest",
+        "evidenceScope"
+      ],
+      "properties": {
+        "debugSessionId": {
+          "$ref": "#/definitions/debugSessionId"
+        },
+        "protocolVersion": {
+          "$ref": "#/definitions/protocolVersion"
+        },
+        "schemaVersion": {
+          "$ref": "#/definitions/schemaVersion"
+        },
+        "sceneRequest": {
+          "$ref": "#/definitions/sceneRequest"
+        },
+        "evidenceScope": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "window"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "element"
+              ],
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "element"
+                  ]
+                },
+                "element": {
+                  "$ref": "#/definitions/elementSelector"
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "readCaptureArtifactArguments": {
+      "type": "object",
+      "required": [
+        "debugSessionId",
+        "protocolVersion",
+        "schemaVersion",
+        "artifactId",
+        "offset",
+        "maxBytes"
+      ],
+      "properties": {
+        "debugSessionId": {
+          "$ref": "#/definitions/debugSessionId"
+        },
+        "protocolVersion": {
+          "$ref": "#/definitions/protocolVersion"
+        },
+        "schemaVersion": {
+          "$ref": "#/definitions/schemaVersion"
+        },
+        "artifactId": {
+          "$ref": "#/definitions/publicCapabilityId"
+        },
+        "offset": {
+          "$ref": "#/definitions/byteOffset"
+        },
+        "maxBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        }
+      },
+      "additionalProperties": false
+    },
+    "waitForUiStableArguments": {
+      "type": "object",
+      "required": [
+        "debugSessionId",
+        "protocolVersion",
+        "schemaVersion",
+        "sceneRequest"
+      ],
+      "properties": {
+        "debugSessionId": {
+          "$ref": "#/definitions/debugSessionId"
+        },
+        "protocolVersion": {
+          "$ref": "#/definitions/protocolVersion"
+        },
+        "schemaVersion": {
+          "$ref": "#/definitions/schemaVersion"
+        },
+        "sceneRequest": {
+          "$ref": "#/definitions/sceneRequest"
+        }
+      },
+      "additionalProperties": false
+    },
+    "captureElementSnapshotArguments": {
+      "type": "object",
+      "required": [
+        "debugSessionId",
+        "protocolVersion",
+        "schemaVersion",
+        "sceneRequest",
+        "element"
+      ],
+      "properties": {
+        "debugSessionId": {
+          "$ref": "#/definitions/debugSessionId"
+        },
+        "protocolVersion": {
+          "$ref": "#/definitions/protocolVersion"
+        },
+        "schemaVersion": {
+          "$ref": "#/definitions/schemaVersion"
+        },
+        "sceneRequest": {
+          "$ref": "#/definitions/sceneRequest"
+        },
+        "element": {
+          "$ref": "#/definitions/elementSelector"
+        }
+      },
+      "additionalProperties": false
+    },
+    "captureNativeSceneArguments": {
+      "type": "object",
+      "required": [
+        "debugSessionId",
+        "protocolVersion",
+        "schemaVersion",
+        "sceneRequest"
+      ],
+      "properties": {
+        "debugSessionId": {
+          "$ref": "#/definitions/debugSessionId"
+        },
+        "protocolVersion": {
+          "$ref": "#/definitions/protocolVersion"
+        },
+        "schemaVersion": {
+          "$ref": "#/definitions/schemaVersion"
+        },
+        "sceneRequest": {
+          "$ref": "#/definitions/sceneRequest"
+        }
+      },
+      "additionalProperties": false
+    },
+    "observerVersion": {
+      "type": "object",
+      "required": [
+        "name",
+        "version"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/definitions/shortString"
+        },
+        "version": {
+          "$ref": "#/definitions/shortString"
+        }
+      },
+      "additionalProperties": false
+    },
+    "candidateSource": {
+      "type": "object",
+      "required": [
+        "kind",
+        "verification"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "launch_manifest",
+            "probe_manifest"
+          ]
+        },
+        "verification": {
+          "enum": [
+            "verified"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "candidateProvenance": {
+      "type": "object",
+      "required": [
+        "processId",
+        "processIdentity",
+        "hwnd",
+        "executableSha256",
+        "assemblyVersion",
+        "probeVersion",
+        "observerVersions",
+        "contractSetHash",
+        "storyHash",
+        "capturedAt",
+        "source"
+      ],
+      "properties": {
+        "processId": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "processIdentity": {
+          "$ref": "#/definitions/shortString"
+        },
+        "hwnd": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "executableSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "assemblyVersion": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "probeVersion": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "observerVersions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/observerVersion"
+          }
+        },
+        "contractSetHash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "storyHash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "capturedAt": {
+          "$ref": "#/definitions/dateTime"
+        },
+        "source": {
+          "$ref": "#/definitions/candidateSource"
+        }
+      },
+      "additionalProperties": false
+    },
+    "capabilityState": {
+      "enum": [
+        "supported",
+        "unsupported",
+        "unobservable"
+      ]
+    },
+    "primitiveCapability": {
+      "type": "object",
+      "required": [
+        "name",
+        "milestone",
+        "availability"
+      ],
+      "properties": {
+        "name": {
+          "enum": [
+            "get_ui_probe_capabilities",
+            "capture_visual_evidence",
+            "read_capture_artifact",
+            "wait_for_ui_stable",
+            "capture_element_snapshot",
+            "capture_native_scene"
+          ]
+        },
+        "milestone": {
+          "enum": [
+            "M0",
+            "M1"
+          ]
+        },
+        "availability": {
+          "$ref": "#/definitions/capabilityState"
+        }
+      },
+      "additionalProperties": false
+    },
+    "contextCapabilities": {
+      "type": "object",
+      "required": [
+        "storyId",
+        "sceneId",
+        "fixtureId",
+        "scope",
+        "appearance",
+        "theme",
+        "density",
+        "contrast",
+        "viewport",
+        "expectedDpiPolicy",
+        "focusTarget",
+        "selectedState",
+        "currentState",
+        "scrollOffsets",
+        "animationPolicy"
+      ],
+      "properties": {
+        "storyId": {
+          "$ref": "#/definitions/capabilityState"
+        },
+        "sceneId": {
+          "$ref": "#/definitions/capabilityState"
+        },
+        "fixtureId": {
+          "$ref": "#/definitions/capabilityState"
+        },
+        "scope": {
+          "$ref": "#/definitions/capabilityState"
+        },
+        "appearance": {
+          "$ref": "#/definitions/capabilityState"
+        },
+        "theme": {
+          "$ref": "#/definitions/capabilityState"
+        },
+        "density": {
+          "$ref": "#/definitions/capabilityState"
+        },
+        "contrast": {
+          "$ref": "#/definitions/capabilityState"
+        },
+        "viewport": {
+          "$ref": "#/definitions/capabilityState"
+        },
+        "expectedDpiPolicy": {
+          "$ref": "#/definitions/capabilityState"
+        },
+        "focusTarget": {
+          "$ref": "#/definitions/capabilityState"
+        },
+        "selectedState": {
+          "$ref": "#/definitions/capabilityState"
+        },
+        "currentState": {
+          "$ref": "#/definitions/capabilityState"
+        },
+        "scrollOffsets": {
+          "$ref": "#/definitions/capabilityState"
+        },
+        "animationPolicy": {
+          "$ref": "#/definitions/capabilityState"
+        }
+      },
+      "additionalProperties": false
+    },
+    "settleConditionCapabilities": {
+      "type": "object",
+      "required": [
+        "dispatcherIdle",
+        "stableLayout",
+        "animationState",
+        "windowGeometry",
+        "contextMaterialization",
+        "asyncLoadSettled"
+      ],
+      "properties": {
+        "dispatcherIdle": {
+          "$ref": "#/definitions/capabilityState"
+        },
+        "stableLayout": {
+          "$ref": "#/definitions/capabilityState"
+        },
+        "animationState": {
+          "$ref": "#/definitions/capabilityState"
+        },
+        "windowGeometry": {
+          "$ref": "#/definitions/capabilityState"
+        },
+        "contextMaterialization": {
+          "$ref": "#/definitions/capabilityState"
+        },
+        "asyncLoadSettled": {
+          "$ref": "#/definitions/capabilityState"
+        }
+      },
+      "additionalProperties": false
+    },
+    "negotiatedLimits": {
+      "type": "object",
+      "required": [
+        "artifactReadMaxBytes",
+        "losslessArtifactMaxBytes",
+        "sceneArtifactMaxBytes",
+        "structuredResponseMaxBytes",
+        "sceneGraphMaxNodes",
+        "issuesMaxCount",
+        "artifactRefsMaxCount",
+        "retentionMaxSeconds",
+        "settleTimeoutMaxMs",
+        "settleSampleCountMin",
+        "settleSampleCountMax"
+      ],
+      "properties": {
+        "artifactReadMaxBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "losslessArtifactMaxBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 67108864
+        },
+        "sceneArtifactMaxBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16777216
+        },
+        "structuredResponseMaxBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        },
+        "sceneGraphMaxNodes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "issuesMaxCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256
+        },
+        "artifactRefsMaxCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4
+        },
+        "retentionMaxSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 14400
+        },
+        "settleTimeoutMaxMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30000
+        },
+        "settleSampleCountMin": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 16
+        },
+        "settleSampleCountMax": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 16
+        }
+      },
+      "additionalProperties": false
+    },
+    "customAdapterNamespace": {
+      "type": "object",
+      "required": [
+        "namespace",
+        "schemaVersion",
+        "availability"
+      ],
+      "properties": {
+        "namespace": {
+          "$ref": "#/definitions/shortString"
+        },
+        "schemaVersion": {
+          "$ref": "#/definitions/shortString"
+        },
+        "availability": {
+          "$ref": "#/definitions/capabilityState"
+        }
+      },
+      "additionalProperties": false
+    },
+    "probeCapabilities": {
+      "type": "object",
+      "required": [
+        "supportedProtocolVersions",
+        "supportedSchemaVersions",
+        "primitives",
+        "context",
+        "settleConditions",
+        "atomicSceneAuthority",
+        "uiaGuardedTraversal",
+        "losslessVisualEvidence",
+        "customAdapterNamespaces",
+        "limits"
+      ],
+      "properties": {
+        "supportedProtocolVersions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/protocolVersion"
+          }
+        },
+        "supportedSchemaVersions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/schemaVersion"
+          }
+        },
+        "primitives": {
+          "$comment": "Draft 7 minItems/maxItems and all six contains clauses require one entry for every named primitive. Runtime MUST assert that all six names occur exactly once before publishing the declaration.",
+          "type": "array",
+          "minItems": 6,
+          "maxItems": 6,
+          "items": {
+            "$ref": "#/definitions/primitiveCapability"
+          },
+          "allOf": [
+            {
+              "contains": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "enum": [
+                      "get_ui_probe_capabilities"
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "contains": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "enum": [
+                      "capture_visual_evidence"
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "contains": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "enum": [
+                      "read_capture_artifact"
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "contains": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "enum": [
+                      "wait_for_ui_stable"
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "contains": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "enum": [
+                      "capture_element_snapshot"
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "contains": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "enum": [
+                      "capture_native_scene"
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "context": {
+          "$ref": "#/definitions/contextCapabilities"
+        },
+        "settleConditions": {
+          "$ref": "#/definitions/settleConditionCapabilities"
+        },
+        "atomicSceneAuthority": {
+          "$ref": "#/definitions/capabilityState"
+        },
+        "uiaGuardedTraversal": {
+          "$ref": "#/definitions/capabilityState"
+        },
+        "losslessVisualEvidence": {
+          "$ref": "#/definitions/capabilityState"
+        },
+        "customAdapterNamespaces": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/customAdapterNamespace"
+          }
+        },
+        "limits": {
+          "$ref": "#/definitions/negotiatedLimits"
+        }
+      },
+      "additionalProperties": false
+    },
+    "uiProbeCapabilities": {
+      "type": "object",
+      "required": [
+        "kind",
+        "protocolVersion",
+        "schemaVersion",
+        "candidate",
+        "capabilities"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "ui_probe_capabilities"
+          ]
+        },
+        "protocolVersion": {
+          "$ref": "#/definitions/currentProtocolVersion"
+        },
+        "schemaVersion": {
+          "$ref": "#/definitions/currentSchemaVersion"
+        },
+        "candidate": {
+          "$ref": "#/definitions/candidateProvenance"
+        },
+        "capabilities": {
+          "$ref": "#/definitions/probeCapabilities"
+        }
+      },
+      "additionalProperties": false
+    },
+    "conditionObservation": {
+      "type": "object",
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "met",
+            "not_met",
+            "unsupported",
+            "unobservable"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "observedConditions": {
+      "type": "object",
+      "required": [
+        "dispatcherIdle",
+        "stableLayout",
+        "animationState",
+        "windowGeometry",
+        "contextMaterialization",
+        "asyncLoadSettled"
+      ],
+      "properties": {
+        "dispatcherIdle": {
+          "$ref": "#/definitions/conditionObservation"
+        },
+        "stableLayout": {
+          "$ref": "#/definitions/conditionObservation"
+        },
+        "animationState": {
+          "$ref": "#/definitions/conditionObservation"
+        },
+        "windowGeometry": {
+          "$ref": "#/definitions/conditionObservation"
+        },
+        "contextMaterialization": {
+          "$ref": "#/definitions/conditionObservation"
+        },
+        "asyncLoadSettled": {
+          "$ref": "#/definitions/conditionObservation"
+        }
+      },
+      "additionalProperties": false
+    },
+    "stabilityEvidence": {
+      "type": "object",
+      "required": [
+        "status",
+        "revalidatedByCapture",
+        "conditions",
+        "settleDurationMs",
+        "observedAt",
+        "sceneEpoch",
+        "sequence"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "STABLE",
+            "PARTIAL",
+            "UNOBSERVABLE"
+          ]
+        },
+        "revalidatedByCapture": {
+          "type": "boolean"
+        },
+        "conditions": {
+          "$ref": "#/definitions/observedConditions"
+        },
+        "settleDurationMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 30000
+        },
+        "observedAt": {
+          "$ref": "#/definitions/dateTime"
+        },
+        "sceneEpoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "stabilityReceipt": {
+      "allOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "protocolVersion",
+            "schemaVersion",
+            "candidate",
+            "stability"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "ui_stability_receipt"
+              ]
+            },
+            "protocolVersion": {
+              "$ref": "#/definitions/currentProtocolVersion"
+            },
+            "schemaVersion": {
+              "$ref": "#/definitions/currentSchemaVersion"
+            },
+            "candidate": {
+              "$ref": "#/definitions/candidateProvenance"
+            },
+            "stability": {
+              "$ref": "#/definitions/stabilityEvidence"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "properties": {
+            "stability": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/stabilityEvidence"
+                },
+                {
+                  "properties": {
+                    "revalidatedByCapture": {
+                      "enum": [
+                        false
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "guardObservation": {
+      "type": "object",
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "unchanged",
+            "changed",
+            "unobservable"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "inProcessAtomicity": {
+      "type": "object",
+      "required": [
+        "authority",
+        "transaction",
+        "immutableDto",
+        "layoutStateRevisionBefore",
+        "layoutStateRevisionAfter"
+      ],
+      "properties": {
+        "authority": {
+          "enum": [
+            "in_process_framework_probe"
+          ]
+        },
+        "transaction": {
+          "enum": [
+            "dispatcher_affine_non_yielding"
+          ]
+        },
+        "immutableDto": {
+          "enum": [
+            true
+          ]
+        },
+        "layoutStateRevisionBefore": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "layoutStateRevisionAfter": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "uiaGuardedAtomicity": {
+      "type": "object",
+      "required": [
+        "authority",
+        "guards"
+      ],
+      "properties": {
+        "authority": {
+          "enum": [
+            "uia_guarded"
+          ]
+        },
+        "guards": {
+          "type": "object",
+          "required": [
+            "window",
+            "client",
+            "dpi",
+            "visualTreeFingerprint"
+          ],
+          "properties": {
+            "window": {
+              "$ref": "#/definitions/guardObservation"
+            },
+            "client": {
+              "$ref": "#/definitions/guardObservation"
+            },
+            "dpi": {
+              "$ref": "#/definitions/guardObservation"
+            },
+            "visualTreeFingerprint": {
+              "$ref": "#/definitions/guardObservation"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "notApplicableAtomicity": {
+      "type": "object",
+      "required": [
+        "authority"
+      ],
+      "properties": {
+        "authority": {
+          "enum": [
+            "not_applicable"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "atomicityEvidence": {
+      "oneOf": [
+        {
+          "$ref": "#/definitions/inProcessAtomicity"
+        },
+        {
+          "$ref": "#/definitions/uiaGuardedAtomicity"
+        },
+        {
+          "$ref": "#/definitions/notApplicableAtomicity"
+        }
+      ]
+    },
+    "artifactRetention": {
+      "type": "object",
+      "required": [
+        "endsOn",
+        "maximumAgeSeconds",
+        "expiresAt"
+      ],
+      "properties": {
+        "endsOn": {
+          "enum": [
+            "session_stop_or_expiry"
+          ]
+        },
+        "maximumAgeSeconds": {
+          "enum": [
+            14400
+          ]
+        },
+        "expiresAt": {
+          "$ref": "#/definitions/dateTime"
+        }
+      },
+      "additionalProperties": false
+    },
+    "artifactDescriptorBase": {
+      "type": "object",
+      "required": [
+        "artifactId",
+        "mediaType",
+        "byteLength",
+        "sha256",
+        "artifactSchemaVersion",
+        "captureId",
+        "retention",
+        "evidenceGrade",
+        "capturedAt",
+        "rasterCaptureId",
+        "adjacentToCaptureId"
+      ],
+      "properties": {
+        "artifactId": {
+          "$ref": "#/definitions/publicCapabilityId"
+        },
+        "mediaType": {
+          "enum": [
+            "application/vnd.netcoredbg.native-scene+json",
+            "image/png",
+            "image/webp"
+          ]
+        },
+        "byteLength": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 67108864
+        },
+        "sha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "artifactSchemaVersion": {
+          "$ref": "#/definitions/artifactSchemaVersion"
+        },
+        "captureId": {
+          "$ref": "#/definitions/publicCapabilityId"
+        },
+        "retention": {
+          "$ref": "#/definitions/artifactRetention"
+        },
+        "evidenceGrade": {
+          "enum": [
+            "observed_facts",
+            "lossless_visual",
+            "preview_only"
+          ]
+        },
+        "capturedAt": {
+          "$ref": "#/definitions/dateTime"
+        },
+        "rasterCaptureId": {
+          "$ref": "#/definitions/publicCapabilityIdOrNull"
+        },
+        "adjacentToCaptureId": {
+          "$ref": "#/definitions/publicCapabilityIdOrNull"
+        },
+        "relativeProvenance": {
+          "$ref": "#/definitions/shortString"
+        }
+      },
+      "additionalProperties": false
+    },
+    "artifactDescriptor": {
+      "oneOf": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/artifactDescriptorBase"
+            },
+            {
+              "properties": {
+                "mediaType": {
+                  "enum": [
+                    "application/vnd.netcoredbg.native-scene+json"
+                  ]
+                },
+                "byteLength": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 16777216
+                },
+                "evidenceGrade": {
+                  "enum": [
+                    "observed_facts"
+                  ]
+                },
+                "rasterCaptureId": {
+                  "enum": [
+                    null
+                  ]
+                },
+                "adjacentToCaptureId": {
+                  "enum": [
+                    null
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/artifactDescriptorBase"
+            },
+            {
+              "properties": {
+                "mediaType": {
+                  "enum": [
+                    "image/png"
+                  ]
+                },
+                "evidenceGrade": {
+                  "enum": [
+                    "lossless_visual"
+                  ]
+                },
+                "rasterCaptureId": {
+                  "$ref": "#/definitions/publicCapabilityId"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/artifactDescriptorBase"
+            },
+            {
+              "properties": {
+                "mediaType": {
+                  "enum": [
+                    "image/webp"
+                  ]
+                },
+                "evidenceGrade": {
+                  "enum": [
+                    "preview_only"
+                  ]
+                },
+                "rasterCaptureId": {
+                  "$ref": "#/definitions/publicCapabilityId"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "captureIssue": {
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "enum": [
+            "CONDITION_UNSUPPORTED",
+            "CONDITION_UNOBSERVABLE",
+            "ATOMICITY_UNPROVEN_UIA_GUARDED",
+            "ATOMICITY_REVISION_CHANGED",
+            "CAPTURE_REVALIDATION_FAILED",
+            "ADAPTER_NAMESPACE_UNSUPPORTED",
+            "ADAPTER_FACT_UNOBSERVABLE",
+            "PREVIEW_NON_AUTHORITATIVE",
+            "CANDIDATE_IDENTITY_UNOBSERVABLE",
+            "SCENE_GRAPH_INCOMPLETE"
+          ]
+        },
+        "message": {
+          "$ref": "#/definitions/prose"
+        },
+        "subject": {
+          "$ref": "#/definitions/shortString"
+        }
+      },
+      "additionalProperties": false
+    },
+    "captureManifestBase": {
+      "type": "object",
+      "required": [
+        "kind",
+        "status",
+        "captureId",
+        "protocolVersion",
+        "schemaVersion",
+        "capturedAt",
+        "candidate",
+        "stability",
+        "atomicity",
+        "element",
+        "artifacts",
+        "issues"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "visual_evidence_capture",
+            "element_snapshot_capture",
+            "native_scene_capture"
+          ]
+        },
+        "status": {
+          "enum": [
+            "COMPLETE",
+            "PARTIAL",
+            "UNOBSERVABLE"
+          ]
+        },
+        "captureId": {
+          "$ref": "#/definitions/publicCapabilityId"
+        },
+        "protocolVersion": {
+          "$ref": "#/definitions/currentProtocolVersion"
+        },
+        "schemaVersion": {
+          "$ref": "#/definitions/currentSchemaVersion"
+        },
+        "capturedAt": {
+          "$ref": "#/definitions/dateTime"
+        },
+        "candidate": {
+          "$ref": "#/definitions/candidateProvenance"
+        },
+        "stability": {
+          "$ref": "#/definitions/stabilityEvidence"
+        },
+        "atomicity": {
+          "$ref": "#/definitions/atomicityEvidence"
+        },
+        "element": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/elementSelector"
+            }
+          ]
+        },
+        "artifacts": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/definitions/artifactDescriptor"
+          }
+        },
+        "issues": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/definitions/captureIssue"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "visualEvidenceCapture": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/captureManifestBase"
+        },
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "visual_evidence_capture"
+              ]
+            },
+            "atomicity": {
+              "$ref": "#/definitions/notApplicableAtomicity"
+            },
+            "element": {
+              "enum": [
+                null
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "elementSnapshotCapture": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/captureManifestBase"
+        },
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "element_snapshot_capture"
+              ]
+            },
+            "atomicity": {
+              "$ref": "#/definitions/notApplicableAtomicity"
+            },
+            "element": {
+              "$ref": "#/definitions/elementSelector"
+            }
+          }
+        },
+        {
+          "properties": {
+            "stability": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/stabilityEvidence"
+                },
+                {
+                  "properties": {
+                    "revalidatedByCapture": {
+                      "enum": [
+                        true
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "nativeSceneCapture": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/captureManifestBase"
+        },
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "native_scene_capture"
+              ]
+            },
+            "atomicity": {
+              "oneOf": [
+                {
+                  "$ref": "#/definitions/inProcessAtomicity"
+                },
+                {
+                  "$ref": "#/definitions/uiaGuardedAtomicity"
+                }
+              ]
+            },
+            "element": {
+              "enum": [
+                null
+              ]
+            }
+          }
+        },
+        {
+          "properties": {
+            "stability": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/stabilityEvidence"
+                },
+                {
+                  "properties": {
+                    "revalidatedByCapture": {
+                      "enum": [
+                        true
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "COMPLETE"
+                  ]
+                },
+                "atomicity": {
+                  "$ref": "#/definitions/inProcessAtomicity"
+                },
+                "stability": {
+                  "allOf": [
+                    {
+                      "$ref": "#/definitions/stabilityEvidence"
+                    },
+                    {
+                      "properties": {
+                        "status": {
+                          "enum": [
+                            "STABLE"
+                          ]
+                        },
+                        "revalidatedByCapture": {
+                          "enum": [
+                            true
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                },
+                "issues": {
+                  "maxItems": 0
+                }
+              }
+            },
+            {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "PARTIAL"
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "UNOBSERVABLE"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "captureArtifactChunk": {
+      "type": "object",
+      "required": [
+        "kind",
+        "artifactId",
+        "offset",
+        "bytesRead",
+        "dataBase64",
+        "endOfArtifact",
+        "mediaType",
+        "byteLength",
+        "sha256",
+        "artifactSchemaVersion"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "capture_artifact_chunk"
+          ]
+        },
+        "artifactId": {
+          "$ref": "#/definitions/publicCapabilityId"
+        },
+        "offset": {
+          "$ref": "#/definitions/byteOffset"
+        },
+        "bytesRead": {
+          "$ref": "#/definitions/byteCount"
+        },
+        "dataBase64": {
+          "type": "string",
+          "maxLength": 87384,
+          "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+        },
+        "endOfArtifact": {
+          "type": "boolean"
+        },
+        "mediaType": {
+          "enum": [
+            "application/vnd.netcoredbg.native-scene+json",
+            "image/png",
+            "image/webp"
+          ]
+        },
+        "byteLength": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 67108864
+        },
+        "sha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "artifactSchemaVersion": {
+          "$ref": "#/definitions/artifactSchemaVersion"
+        }
+      },
+      "additionalProperties": false
+    },
+    "errorCode": {
+      "enum": [
+        "INVALID_TOOL_ARGUMENTS",
+        "DEBUG_SESSION_NOT_FOUND",
+        "UNSUPPORTED_PROTOCOL",
+        "OBSERVER_UNAVAILABLE",
+        "UNSUPPORTED_CAPABILITY",
+        "SCENE_NOT_FOUND",
+        "SCENE_AMBIGUOUS",
+        "ELEMENT_NOT_FOUND",
+        "ELEMENT_AMBIGUOUS",
+        "UI_NOT_STABLE",
+        "ARTIFACT_WRITE_FAILED",
+        "ARTIFACT_INTEGRITY_FAILED",
+        "CANDIDATE_MISMATCH"
+      ]
+    },
+    "toolError": {
+      "type": "object",
+      "required": [
+        "kind",
+        "tool",
+        "code",
+        "message"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "tool_error"
+          ]
+        },
+        "tool": {
+          "enum": [
+            "get_ui_probe_capabilities",
+            "capture_visual_evidence",
+            "read_capture_artifact",
+            "wait_for_ui_stable",
+            "capture_element_snapshot",
+            "capture_native_scene"
+          ]
+        },
+        "code": {
+          "$ref": "#/definitions/errorCode"
+        },
+        "message": {
+          "$ref": "#/definitions/prose"
+        }
+      },
+      "additionalProperties": false
+    },
+    "artifactNotFoundError": {
+      "description": "The exact disclosure-free envelope for every unknown, foreign, expired, deleted, or otherwise unavailable artifact capability.",
+      "type": "object",
+      "required": [
+        "kind",
+        "tool",
+        "code",
+        "message"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "tool_error"
+          ]
+        },
+        "tool": {
+          "enum": [
+            "read_capture_artifact"
+          ]
+        },
+        "code": {
+          "enum": [
+            "ARTIFACT_NOT_FOUND"
+          ]
+        },
+        "message": {
+          "enum": [
+            "Artifact is not available."
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "toolResult": {
+      "oneOf": [
+        {
+          "$ref": "#/definitions/uiProbeCapabilities"
+        },
+        {
+          "$ref": "#/definitions/visualEvidenceCapture"
+        },
+        {
+          "$ref": "#/definitions/captureArtifactChunk"
+        },
+        {
+          "$ref": "#/definitions/stabilityReceipt"
+        },
+        {
+          "$ref": "#/definitions/elementSnapshotCapture"
+        },
+        {
+          "$ref": "#/definitions/nativeSceneCapture"
+        },
+        {
+          "$ref": "#/definitions/toolError"
+        },
+        {
+          "$ref": "#/definitions/artifactNotFoundError"
+        }
+      ]
+    }
+  }
+}
