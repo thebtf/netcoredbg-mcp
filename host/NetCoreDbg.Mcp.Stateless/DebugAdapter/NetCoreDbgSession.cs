@@ -134,6 +134,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             if (session is not null)
             {
+                session._forceCleanup.Cancel();
                 await session.EnsureCleanupAsync().ConfigureAwait(false);
             }
             else if (windowsLaunch is not null)
@@ -475,14 +476,12 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             }
 
             _input.Dispose();
-            var guardianSignaled = _processTreeOwnership is UnixProcessGroupOwnership unixOwnership;
-            if (guardianSignaled)
-            {
-                unixOwnership!.SignalTermination();
-            }
+            var unixOwnership = _processTreeOwnership as UnixProcessGroupOwnership;
+            var guardianSignaled = unixOwnership is not null;
 
             if (_forceCleanup.IsCancellationRequested)
             {
+                unixOwnership?.Terminate();
                 if (!guardianSignaled || !await WaitForProcessExitAsync().ConfigureAwait(false))
                 {
                     KillProcessTree();
@@ -492,9 +491,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     }
                 }
             }
-            else if (!HasExited())
+            else
             {
-                if (!await WaitForProcessExitAsync().ConfigureAwait(false))
+                unixOwnership?.SignalGracefulShutdown();
+                if (!HasExited() && !await WaitForProcessExitAsync().ConfigureAwait(false))
                 {
                     KillProcessTree();
                     if (!await WaitForProcessExitAsync().ConfigureAwait(false))
@@ -798,7 +798,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             if (processTreeOwnership is UnixProcessGroupOwnership unixOwnership)
             {
-                unixOwnership.SignalTermination();
+                unixOwnership.Terminate();
                 if (!process.HasExited)
                 {
                     try
@@ -851,20 +851,29 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 System.IO.HandleInheritability.Inheritable);
             try
             {
-                var processPath = Environment.ProcessPath
-                    ?? throw new InvalidOperationException("The current process path is unavailable.");
+                var proxyAssemblyPath = typeof(NetCoreDbgSession).Assembly.Location;
+                if (string.IsNullOrWhiteSpace(proxyAssemblyPath))
+                {
+                    throw new InvalidOperationException("The stateless proxy assembly path is unavailable.");
+                }
+
+                var proxyAppHostPath = Path.ChangeExtension(proxyAssemblyPath, extension: null);
+                var useAppHost = File.Exists(proxyAppHostPath);
+                var dotnetHostPath = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH");
                 var startInfo = new ProcessStartInfo
                 {
-                    FileName = processPath,
+                    FileName = useAppHost
+                        ? proxyAppHostPath
+                        : string.IsNullOrWhiteSpace(dotnetHostPath) ? "dotnet" : dotnetHostPath,
                     UseShellExecute = false,
                     CreateNoWindow = true,
                     RedirectStandardInput = true,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                 };
-                if (Path.GetFileNameWithoutExtension(processPath).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
+                if (!useAppHost)
                 {
-                    startInfo.ArgumentList.Add(Environment.GetCommandLineArgs()[0]);
+                    startInfo.ArgumentList.Add(proxyAssemblyPath);
                 }
 
                 startInfo.ArgumentList.Add("--unix-process-group-proxy");
@@ -882,11 +891,21 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             }
         }
 
-        public void SignalTermination() => _terminationControl.Dispose();
+        public void SignalGracefulShutdown()
+        {
+            try
+            {
+                _terminationControl.WriteByte(1);
+            }
+            finally
+            {
+                _terminationControl.Dispose();
+            }
+        }
 
-        public void Terminate() => SignalTermination();
+        public void Terminate() => _terminationControl.Dispose();
 
-        public void Dispose() => _terminationControl.Dispose();
+        public void Dispose() => Terminate();
     }
 
     private sealed record UnixProcessGroupLaunch(Process Process, UnixProcessGroupOwnership Ownership);

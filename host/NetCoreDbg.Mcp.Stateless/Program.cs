@@ -79,9 +79,15 @@ internal static class Program
             ArgumentList = { "--interpreter=vscode" },
         }) ?? throw new InvalidOperationException($"Could not start debugger '{debuggerPath}'.");
         var debuggerExit = debugger.WaitForExitAsync();
-        var terminationRequested = terminationControl.ReadAsync(new byte[1]).AsTask();
+        var terminationControlBuffer = new byte[1];
+        var terminationRequested = terminationControl.ReadAsync(terminationControlBuffer).AsTask();
         if (await Task.WhenAny(debuggerExit, terminationRequested).ConfigureAwait(false) == terminationRequested)
         {
+            if (await terminationRequested.ConfigureAwait(false) != 0)
+            {
+                await debuggerExit.ConfigureAwait(false);
+            }
+
             UnixProcessGroup.TerminateOwnProcessGroup();
             return;
         }
