@@ -1,0 +1,1487 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://netcoredbg-mcp.dev/schemas/native-scene-probe/1/native-scene-artifact.schema.json",
+  "$comment": "CANDIDATE ONLY: this Draft-7 scene-artifact contract awaits recorded operator approval and M0-G0 parity proof before any product implementation.",
+  "title": "Native Scene Artifact",
+  "description": "Immutable observed scene facts. The committed serialized artifact must not exceed 16,777,216 bytes; that byte-total check is performed against the manifest descriptor at commit time.",
+  "$ref": "#/definitions/sceneArtifact",
+  "definitions": {
+    "shortString": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "shortStringOrNull": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "prose": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "opaqueLabel": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "publicCapabilityId": {
+      "$comment": "Server-minted public capture capability. Runtime generation MUST use at least 128 bits from a CSPRNG.",
+      "type": "string",
+      "minLength": 22,
+      "maxLength": 86,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "dateTime": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "format": "date-time"
+    },
+    "currentProtocolVersion": {
+      "type": "string",
+      "enum": [
+        "native-scene-probe/1"
+      ]
+    },
+    "currentArtifactSchemaVersion": {
+      "type": "string",
+      "enum": [
+        "native-scene-artifact/1"
+      ]
+    },
+    "jsonValue": {
+      "$comment": "Before DTO materialization, runtime rejects JSON nesting deeper than 16. Each array and object is structurally capped at 256 members; the containing scene artifact remains capped at 16,777,216 serialized bytes.",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "$ref": "#/definitions/shortString"
+        },
+        {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/definitions/jsonValue"
+          }
+        },
+        {
+          "type": "object",
+          "maxProperties": 256,
+          "patternProperties": {
+            "^.{1,256}$": {
+              "$ref": "#/definitions/jsonValue"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "requestStateValue": {
+      "$comment": "Before DTO materialization, runtime rejects each selectedState or currentState value whose serialized UTF-8 representation exceeds 262,144 bytes. This is independent of jsonValue depth and collection-member bounds and of the enclosing scene-artifact byte ceiling.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/jsonValue"
+        }
+      ]
+    },
+    "canonicalIdentity": {
+      "type": "object",
+      "required": [
+        "contractId"
+      ],
+      "properties": {
+        "contractId": {
+          "$ref": "#/definitions/shortString"
+        },
+        "instanceKey": {
+          "$ref": "#/definitions/shortString"
+        },
+        "templatePart": {
+          "$ref": "#/definitions/shortString"
+        },
+        "storyScope": {
+          "$ref": "#/definitions/shortString"
+        },
+        "componentSlot": {
+          "$ref": "#/definitions/shortString"
+        }
+      },
+      "additionalProperties": false
+    },
+    "sceneScope": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "scene"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "slotName"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "slot"
+              ]
+            },
+            "slotName": {
+              "$ref": "#/definitions/shortString"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "identity"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "element"
+              ]
+            },
+            "identity": {
+              "$ref": "#/definitions/canonicalIdentity"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "viewportConstraint": {
+      "type": "object",
+      "required": [
+        "policy",
+        "width",
+        "height"
+      ],
+      "properties": {
+        "policy": {
+          "enum": [
+            "exact",
+            "minimum",
+            "maximum"
+          ]
+        },
+        "width": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "height": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "dpiPolicy": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "mode",
+            "x",
+            "y"
+          ],
+          "properties": {
+            "mode": {
+              "enum": [
+                "exact"
+              ]
+            },
+            "x": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "y": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "mode",
+            "minimumX",
+            "maximumX",
+            "minimumY",
+            "maximumY"
+          ],
+          "properties": {
+            "mode": {
+              "enum": [
+                "range"
+              ]
+            },
+            "minimumX": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "maximumX": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "minimumY": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "maximumY": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "scrollOffset": {
+      "type": "object",
+      "required": [
+        "x",
+        "y"
+      ],
+      "properties": {
+        "x": {
+          "type": "number",
+          "minimum": 0
+        },
+        "y": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "scrollOffsets": {
+      "type": "object",
+      "minProperties": 1,
+      "patternProperties": {
+        "^.{1,256}$": {
+          "$ref": "#/definitions/scrollOffset"
+        }
+      },
+      "additionalProperties": false
+    },
+    "settlePolicy": {
+      "type": "object",
+      "required": [
+        "timeoutMs",
+        "sampleCount",
+        "stableForMs",
+        "requireDispatcherIdle",
+        "requireStableLayout",
+        "requireAnimationState",
+        "requireWindowGeometry",
+        "requireContextMaterialization",
+        "requireAsyncLoadSettled"
+      ],
+      "properties": {
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30000
+        },
+        "sampleCount": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 16
+        },
+        "stableForMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 30000
+        },
+        "requireDispatcherIdle": {
+          "type": "boolean"
+        },
+        "requireStableLayout": {
+          "type": "boolean"
+        },
+        "requireAnimationState": {
+          "type": "boolean"
+        },
+        "requireWindowGeometry": {
+          "type": "boolean"
+        },
+        "requireContextMaterialization": {
+          "type": "boolean"
+        },
+        "requireAsyncLoadSettled": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "candidateExpectation": {
+      "type": "object",
+      "required": [
+        "executableSha256",
+        "assemblyVersion",
+        "probeVersion"
+      ],
+      "properties": {
+        "executableSha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "assemblyVersion": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "probeVersion": {
+          "$ref": "#/definitions/shortStringOrNull"
+        }
+      },
+      "anyOf": [
+        {
+          "properties": {
+            "executableSha256": {
+              "$ref": "#/definitions/sha256"
+            }
+          }
+        },
+        {
+          "properties": {
+            "assemblyVersion": {
+              "$ref": "#/definitions/shortString"
+            }
+          }
+        },
+        {
+          "properties": {
+            "probeVersion": {
+              "$ref": "#/definitions/shortString"
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "sceneRequest": {
+      "type": "object",
+      "required": [
+        "storyId",
+        "sceneId",
+        "fixtureId",
+        "scope",
+        "appearance",
+        "theme",
+        "density",
+        "contrast",
+        "viewport",
+        "expectedDpiPolicy",
+        "focusTarget",
+        "selectedState",
+        "currentState",
+        "scrollOffsets",
+        "animationPolicy",
+        "settlePolicy",
+        "contractSetHash",
+        "expectedCandidateIdentity"
+      ],
+      "properties": {
+        "storyId": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "sceneId": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "fixtureId": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "scope": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/sceneScope"
+            }
+          ]
+        },
+        "appearance": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "theme": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "density": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "contrast": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "viewport": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/viewportConstraint"
+            }
+          ]
+        },
+        "expectedDpiPolicy": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/dpiPolicy"
+            }
+          ]
+        },
+        "focusTarget": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/canonicalIdentity"
+            }
+          ]
+        },
+        "selectedState": {
+          "$ref": "#/definitions/requestStateValue"
+        },
+        "currentState": {
+          "$ref": "#/definitions/requestStateValue"
+        },
+        "scrollOffsets": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/scrollOffsets"
+            }
+          ]
+        },
+        "animationPolicy": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "disabled",
+            "finished",
+            "observed",
+            null
+          ]
+        },
+        "settlePolicy": {
+          "$ref": "#/definitions/settlePolicy"
+        },
+        "contractSetHash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "expectedCandidateIdentity": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/candidateExpectation"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "observerVersion": {
+      "type": "object",
+      "required": [
+        "name",
+        "version"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/definitions/shortString"
+        },
+        "version": {
+          "$ref": "#/definitions/shortString"
+        }
+      },
+      "additionalProperties": false
+    },
+    "candidateSource": {
+      "type": "object",
+      "required": [
+        "kind",
+        "verification"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "launch_manifest",
+            "probe_manifest"
+          ]
+        },
+        "verification": {
+          "enum": [
+            "verified"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "candidateProvenance": {
+      "type": "object",
+      "required": [
+        "processId",
+        "processIdentity",
+        "hwnd",
+        "executableSha256",
+        "assemblyVersion",
+        "probeVersion",
+        "observerVersions",
+        "contractSetHash",
+        "storyHash",
+        "capturedAt",
+        "source"
+      ],
+      "properties": {
+        "processId": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "processIdentity": {
+          "$ref": "#/definitions/shortString"
+        },
+        "hwnd": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "executableSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "assemblyVersion": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "probeVersion": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "observerVersions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/observerVersion"
+          }
+        },
+        "contractSetHash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "storyHash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "capturedAt": {
+          "$ref": "#/definitions/dateTime"
+        },
+        "source": {
+          "$ref": "#/definitions/candidateSource"
+        }
+      },
+      "additionalProperties": false
+    },
+    "conditionObservation": {
+      "type": "object",
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "met",
+            "not_met",
+            "unsupported",
+            "unobservable"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "observedConditions": {
+      "type": "object",
+      "required": [
+        "dispatcherIdle",
+        "stableLayout",
+        "animationState",
+        "windowGeometry",
+        "contextMaterialization",
+        "asyncLoadSettled"
+      ],
+      "properties": {
+        "dispatcherIdle": {
+          "$ref": "#/definitions/conditionObservation"
+        },
+        "stableLayout": {
+          "$ref": "#/definitions/conditionObservation"
+        },
+        "animationState": {
+          "$ref": "#/definitions/conditionObservation"
+        },
+        "windowGeometry": {
+          "$ref": "#/definitions/conditionObservation"
+        },
+        "contextMaterialization": {
+          "$ref": "#/definitions/conditionObservation"
+        },
+        "asyncLoadSettled": {
+          "$ref": "#/definitions/conditionObservation"
+        }
+      },
+      "additionalProperties": false
+    },
+    "stabilityEvidence": {
+      "type": "object",
+      "required": [
+        "status",
+        "revalidatedByCapture",
+        "conditions",
+        "settleDurationMs",
+        "observedAt",
+        "sceneEpoch",
+        "sequence"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "STABLE",
+            "PARTIAL",
+            "UNOBSERVABLE"
+          ]
+        },
+        "revalidatedByCapture": {
+          "type": "boolean"
+        },
+        "conditions": {
+          "$ref": "#/definitions/observedConditions"
+        },
+        "settleDurationMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 30000
+        },
+        "observedAt": {
+          "$ref": "#/definitions/dateTime"
+        },
+        "sceneEpoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "guardObservation": {
+      "type": "object",
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "unchanged",
+            "changed",
+            "unobservable"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "inProcessAtomicity": {
+      "type": "object",
+      "required": [
+        "authority",
+        "transaction",
+        "immutableDto",
+        "layoutStateRevisionBefore",
+        "layoutStateRevisionAfter"
+      ],
+      "properties": {
+        "authority": {
+          "enum": [
+            "in_process_framework_probe"
+          ]
+        },
+        "transaction": {
+          "enum": [
+            "dispatcher_affine_non_yielding"
+          ]
+        },
+        "immutableDto": {
+          "enum": [
+            true
+          ]
+        },
+        "layoutStateRevisionBefore": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "layoutStateRevisionAfter": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "uiaGuardedAtomicity": {
+      "type": "object",
+      "required": [
+        "authority",
+        "guards"
+      ],
+      "properties": {
+        "authority": {
+          "enum": [
+            "uia_guarded"
+          ]
+        },
+        "guards": {
+          "type": "object",
+          "required": [
+            "window",
+            "client",
+            "dpi",
+            "visualTreeFingerprint"
+          ],
+          "properties": {
+            "window": {
+              "$ref": "#/definitions/guardObservation"
+            },
+            "client": {
+              "$ref": "#/definitions/guardObservation"
+            },
+            "dpi": {
+              "$ref": "#/definitions/guardObservation"
+            },
+            "visualTreeFingerprint": {
+              "$ref": "#/definitions/guardObservation"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "notApplicableAtomicity": {
+      "type": "object",
+      "required": [
+        "authority"
+      ],
+      "properties": {
+        "authority": {
+          "const": "not_applicable"
+        }
+      },
+      "additionalProperties": false
+    },
+    "atomicityEvidence": {
+      "oneOf": [
+        {
+          "$ref": "#/definitions/inProcessAtomicity"
+        },
+        {
+          "$ref": "#/definitions/uiaGuardedAtomicity"
+        },
+        {
+          "$ref": "#/definitions/notApplicableAtomicity"
+        }
+      ]
+    },
+    "rect": {
+      "type": "object",
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ],
+      "properties": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "width": {
+          "type": "number",
+          "minimum": 0
+        },
+        "height": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "dpi": {
+      "type": "object",
+      "required": [
+        "x",
+        "y"
+      ],
+      "properties": {
+        "x": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "y": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "transform": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "items": {
+        "type": "number"
+      }
+    },
+    "geometry": {
+      "type": "object",
+      "required": [
+        "logicalBounds",
+        "physicalBounds",
+        "dpi",
+        "transform",
+        "clip"
+      ],
+      "properties": {
+        "logicalBounds": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/rect"
+            }
+          ]
+        },
+        "physicalBounds": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/rect"
+            }
+          ]
+        },
+        "dpi": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/dpi"
+            }
+          ]
+        },
+        "transform": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/transform"
+            }
+          ]
+        },
+        "clip": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/rect"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "accessibilityIdentity": {
+      "type": "object",
+      "required": [
+        "automationId",
+        "name",
+        "controlType",
+        "visibility"
+      ],
+      "properties": {
+        "automationId": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "name": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "controlType": {
+          "$ref": "#/definitions/shortStringOrNull"
+        },
+        "visibility": {
+          "enum": [
+            "visible",
+            "hidden",
+            "unobservable"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "relation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "targetNodeId"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "parent"
+              ]
+            },
+            "targetNodeId": {
+              "$ref": "#/definitions/opaqueLabel"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "targetNodeId",
+            "slotName"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "slot"
+              ]
+            },
+            "targetNodeId": {
+              "$ref": "#/definitions/opaqueLabel"
+            },
+            "slotName": {
+              "$ref": "#/definitions/shortString"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "customAdapterEvidence": {
+      "type": "object",
+      "required": [
+        "namespace",
+        "schemaVersion",
+        "authority",
+        "payload"
+      ],
+      "properties": {
+        "namespace": {
+          "$ref": "#/definitions/shortString"
+        },
+        "schemaVersion": {
+          "$ref": "#/definitions/shortString"
+        },
+        "authority": {
+          "enum": [
+            "in_process_framework_probe",
+            "uia_guarded",
+            "adapter_reported"
+          ]
+        },
+        "payload": {
+          "$comment": "Runtime rejects a serialized UTF-8 custom payload larger than 262,144 bytes before materialization.",
+          "$ref": "#/definitions/jsonValue"
+        }
+      },
+      "additionalProperties": false
+    },
+    "sceneNode": {
+      "type": "object",
+      "required": [
+        "nodeId",
+        "relations",
+        "identity",
+        "accessibility",
+        "geometry",
+        "adapterEvidence"
+      ],
+      "properties": {
+        "nodeId": {
+          "$ref": "#/definitions/opaqueLabel"
+        },
+        "relations": {
+          "type": "array",
+          "maxItems": 2,
+          "items": {
+            "$ref": "#/definitions/relation"
+          }
+        },
+        "identity": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/canonicalIdentity"
+            }
+          ]
+        },
+        "accessibility": {
+          "$ref": "#/definitions/accessibilityIdentity"
+        },
+        "geometry": {
+          "$ref": "#/definitions/geometry"
+        },
+        "adapterEvidence": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/definitions/customAdapterEvidence"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "sceneDependency": {
+      "type": "object",
+      "required": [
+        "kind",
+        "identifier",
+        "state"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "fixture",
+            "theme",
+            "state",
+            "adapter",
+            "external_contract"
+          ]
+        },
+        "identifier": {
+          "$ref": "#/definitions/shortString"
+        },
+        "state": {
+          "enum": [
+            "observed",
+            "unobservable",
+            "unsupported"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "sceneGraph": {
+      "type": "object",
+      "required": [
+        "nodes",
+        "rootNodeIds",
+        "dependencies"
+      ],
+      "properties": {
+        "nodes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": {
+            "$ref": "#/definitions/sceneNode"
+          }
+        },
+        "rootNodeIds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": {
+            "$ref": "#/definitions/opaqueLabel"
+          }
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/sceneDependency"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "captureIssue": {
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "enum": [
+            "CONDITION_UNSUPPORTED",
+            "CONDITION_UNOBSERVABLE",
+            "ATOMICITY_UNPROVEN_UIA_GUARDED",
+            "ATOMICITY_REVISION_CHANGED",
+            "CAPTURE_REVALIDATION_FAILED",
+            "ADAPTER_NAMESPACE_UNSUPPORTED",
+            "ADAPTER_FACT_UNOBSERVABLE",
+            "CANDIDATE_IDENTITY_UNOBSERVABLE",
+            "SCENE_GRAPH_INCOMPLETE"
+          ]
+        },
+        "message": {
+          "$ref": "#/definitions/prose"
+        },
+        "subject": {
+          "$ref": "#/definitions/shortString"
+        }
+      },
+      "additionalProperties": false
+    },
+    "sceneArtifact": {
+      "type": "object",
+      "required": [
+        "kind",
+        "schemaVersion",
+        "protocolVersion",
+        "captureId",
+        "capturedAt",
+        "status",
+        "observationKind",
+        "sceneRequest",
+        "candidate",
+        "stability",
+        "atomicity",
+        "graph",
+        "issues"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "native_scene_artifact"
+          ]
+        },
+        "schemaVersion": {
+          "$ref": "#/definitions/currentArtifactSchemaVersion"
+        },
+        "protocolVersion": {
+          "$ref": "#/definitions/currentProtocolVersion"
+        },
+        "captureId": {
+          "$ref": "#/definitions/publicCapabilityId"
+        },
+        "capturedAt": {
+          "$ref": "#/definitions/dateTime"
+        },
+        "status": {
+          "enum": [
+            "COMPLETE",
+            "PARTIAL"
+          ]
+        },
+        "observationKind": {
+          "enum": [
+            "element_snapshot",
+            "native_scene"
+          ]
+        },
+        "sceneRequest": {
+          "$ref": "#/definitions/sceneRequest"
+        },
+        "candidate": {
+          "$ref": "#/definitions/candidateProvenance"
+        },
+        "stability": {
+          "$ref": "#/definitions/stabilityEvidence"
+        },
+        "atomicity": {
+          "$ref": "#/definitions/atomicityEvidence"
+        },
+        "graph": {
+          "$ref": "#/definitions/sceneGraph"
+        },
+        "issues": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/definitions/captureIssue"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "properties": {
+            "stability": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/stabilityEvidence"
+                },
+                {
+                  "properties": {
+                    "revalidatedByCapture": {
+                      "enum": [
+                        true
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "observationKind"
+            ],
+            "properties": {
+              "observationKind": {
+                "const": "native_scene"
+              }
+            }
+          },
+          "then": {
+            "oneOf": [
+              {
+                "properties": {
+                  "status": {
+                    "enum": [
+                      "COMPLETE"
+                    ]
+                  },
+                  "atomicity": {
+                    "$ref": "#/definitions/inProcessAtomicity"
+                  },
+                  "stability": {
+                    "allOf": [
+                      {
+                        "$ref": "#/definitions/stabilityEvidence"
+                      },
+                      {
+                        "properties": {
+                          "status": {
+                            "enum": [
+                              "STABLE"
+                            ]
+                          },
+                          "revalidatedByCapture": {
+                            "enum": [
+                              true
+                            ]
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  "issues": {
+                    "maxItems": 0
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "status": {
+                    "enum": [
+                      "PARTIAL"
+                    ]
+                  },
+                  "atomicity": {
+                    "oneOf": [
+                      {
+                        "$ref": "#/definitions/inProcessAtomicity"
+                      },
+                      {
+                        "$ref": "#/definitions/uiaGuardedAtomicity"
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "observationKind"
+            ],
+            "properties": {
+              "observationKind": {
+                "const": "element_snapshot"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "atomicity": {
+                "$ref": "#/definitions/notApplicableAtomicity"
+              },
+              "graph": {
+                "properties": {
+                  "nodes": {
+                    "maxItems": 1
+                  },
+                  "rootNodeIds": {
+                    "maxItems": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "status",
+              "atomicity"
+            ],
+            "properties": {
+              "status": {
+                "enum": [
+                  "PARTIAL"
+                ]
+              },
+              "atomicity": {
+                "required": [
+                  "authority"
+                ],
+                "properties": {
+                  "authority": {
+                    "enum": [
+                      "uia_guarded"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "atomicity": {
+                "allOf": [
+                  {
+                    "$ref": "#/definitions/uiaGuardedAtomicity"
+                  },
+                  {
+                    "properties": {
+                      "guards": {
+                        "properties": {
+                          "window": {
+                            "properties": {
+                              "state": {
+                                "enum": [
+                                  "unchanged"
+                                ]
+                              }
+                            }
+                          },
+                          "client": {
+                            "properties": {
+                              "state": {
+                                "enum": [
+                                  "unchanged"
+                                ]
+                              }
+                            }
+                          },
+                          "dpi": {
+                            "properties": {
+                              "state": {
+                                "enum": [
+                                  "unchanged"
+                                ]
+                              }
+                            }
+                          },
+                          "visualTreeFingerprint": {
+                            "properties": {
+                              "state": {
+                                "enum": [
+                                  "unchanged"
+                                ]
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                ]
+              },
+              "issues": {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "code"
+                  ],
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "ATOMICITY_UNPROVEN_UIA_GUARDED"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    }
+  }
+}
