@@ -80,7 +80,8 @@ public sealed class RootsRelayRealPythonTests
         var host = RelayComposition.Build(
             session,
             builder => builder.WithStreamServerTransport(downstreamChannel.ServerInputStream, downstreamChannel.ServerOutputStream),
-            downstreamCapabilities => rootsRelay.ProjectCapabilities(downstreamCapabilities, new ClientCapabilities()));
+            downstreamCapabilities => rootsRelay.ProjectCapabilities(downstreamCapabilities, new ClientCapabilities()),
+            projectRootResolver: ProjectRootResolver.FromHostArguments(pythonArgs, Environment.CurrentDirectory));
         _ = host.RunAsync();
 
         return (session, python, downstreamChannel);

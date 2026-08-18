@@ -4,15 +4,15 @@ namespace NetCoreDbg.Mcp.Host;
 
 /// <summary>
 /// Entry point for the .NET MCP compatibility host. Starts the existing Python
-/// netcoredbg-mcp server as an upstream MCP session over stdio, then forwards the routes
-/// <see cref="RelayComposition"/> registers to it for whatever downstream MCP client
-/// launches this process. Python remains the sole implementation of every tool; this host
-/// does not reconstruct or translate tool schemas or results.
+/// netcoredbg-mcp server as an upstream MCP session over stdio, then composes its relay
+/// routes with the native project-scoped code-search replacements. Python remains the
+/// implementation of every other tool.
 ///
 /// This file owns only top-level composition and exit-code reporting; every other concern
-/// - process lifecycle, paired-session bootstrap, route registration, and handler wiring -
-/// lives in <see cref="PythonBackendProcess"/>, <see cref="RelaySession"/>,
-/// <see cref="RelayRouteCatalog"/>, <see cref="RelayComposition"/>, and the accepted relay modules.
+/// - process lifecycle, paired-session bootstrap, route registration, handler wiring, and
+/// native source navigation - lives in <see cref="PythonBackendProcess"/>,
+/// <see cref="RelaySession"/>, <see cref="RelayRouteCatalog"/>,
+/// <see cref="RelayComposition"/>, <see cref="ProjectRootResolver"/>, and their modules.
 /// </summary>
 public static class Program
 {
@@ -20,6 +20,7 @@ public static class Program
 
     public static async Task<int> Main(string[] args)
     {
+        var projectRootResolver = ProjectRootResolver.FromHostArguments(args, Environment.CurrentDirectory);
         PythonBackendProcess pythonBackend;
         try
         {
@@ -56,7 +57,8 @@ public static class Program
                         downstreamCapabilities => rootsRelay.ProjectCapabilities(
                             downstreamCapabilities,
                             new ClientCapabilities()),
-                        progressNotificationState);
+                        progressNotificationState,
+                        projectRootResolver);
                 }
             }
             catch (Exception ex)

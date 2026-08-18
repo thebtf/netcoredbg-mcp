@@ -46,18 +46,23 @@ already required by the project.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
+import os
 import shutil
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 from typing import Any
 
+import mcp.types as types
 import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import get_default_environment, stdio_client
 from mcp.shared.exceptions import McpError
 from mcp.types import CallToolResult, PaginatedRequestParams, TextContent
+from pydantic import FileUrl
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = REPO_ROOT / "src"
@@ -423,8 +428,7 @@ async def test_host_tools_catalog_is_complete_and_schema_identical_to_direct_pyt
                 assert cursor_probed.nextCursor is None
 
     host_catalog = [
-        tool.model_dump(mode="json", by_alias=True, exclude_none=True)
-        for tool in baseline.tools
+        tool.model_dump(mode="json", by_alias=True, exclude_none=True) for tool in baseline.tools
     ]
     host_catalog_after_cursor = [
         tool.model_dump(mode="json", by_alias=True, exclude_none=True)
@@ -662,9 +666,9 @@ async def test_host_malformed_tools_call_envelope_is_rejected_and_session_stays_
     assert "result" not in direct_malformed, (
         f"direct Python must reject a nameless tools/call as an error: {direct_malformed}"
     )
-    assert (
-        direct_malformed["error"]["code"] == DIRECT_PYTHON_INVALID_PARAMS_ERROR_CODE
-    ), direct_malformed
+    assert direct_malformed["error"]["code"] == DIRECT_PYTHON_INVALID_PARAMS_ERROR_CODE, (
+        direct_malformed
+    )
     assert direct_health["result"]["isError"] is True, direct_health
 
     (tmp_path / "host").mkdir(exist_ok=True)
@@ -729,3 +733,628 @@ def test_host_fails_before_serving_when_python_executable_is_missing(
     assert result.returncode == 1, result.stderr
     assert result.stdout == b"", "a failed backend launch must not expose a partial MCP server"
     assert b"Failed to start the Python backend" in result.stderr
+
+
+# Three deterministic tools move native in this slice. search_source stays Python-owned
+# because its public contract is Python `re`, including grammar and timeout behavior.
+CODE_SEARCH_ACTIONS = (
+    "find_code_symbol",
+    "find_code_references",
+    "get_source_context",
+    "search_source",
+)
+NATIVE_CODE_SEARCH_TOOLS = CODE_SEARCH_ACTIONS[:3]
+_CODE_SEARCH_NEXT_ACTIONS = list(CODE_SEARCH_ACTIONS)
+_CODE_SEARCH_SUCCESS_CALLS = (
+    ("symbol", "find_code_symbol", {"name": FIND_SYMBOL_NAME}),
+    ("references", "find_code_references", {"name": "CueInputPanel"}),
+    (
+        "context",
+        "get_source_context",
+        {"file": "MainViewModel.cs", "line": 10, "radius": 2},
+    ),
+    (
+        "search",
+        "search_source",
+        {"pattern": "textBoxCue|Phrase", "file_glob": "*.xaml", "timeout_seconds": 30.0},
+    ),
+)
+_CODE_SEARCH_ERROR_CALLS = (
+    ("empty_symbol", "find_code_symbol", {"name": " "}),
+    ("zero_references", "find_code_references", {"name": "CueInputPanel", "max_results": 0}),
+    ("outside_path", "get_source_context", {"file": "../outside.cs", "line": 1}),
+    ("invalid_regex", "search_source", {"pattern": "("}),
+)
+
+
+def _clean_code_search_environment() -> dict[str, str]:
+    """Start each root-precedence process without an inherited operator pin."""
+    environment = _backend_env()
+    environment.pop("NETCOREDBG_PROJECT_ROOT", None)
+    environment.pop("MCP_PROJECT_ROOT", None)
+    return environment
+
+
+def _host_python_environment() -> dict[str, str]:
+    environment = _clean_code_search_environment()
+    environment["NETCOREDBG_MCP_PYTHON_EXECUTABLE"] = sys.executable
+    return environment
+
+
+def _assert_code_search_envelope(payload: dict[str, Any], *, error: bool) -> None:
+    expected_keys = (
+        {"error", "state", "next_actions", "message"}
+        if error
+        else {
+            "state",
+            "next_actions",
+            "message",
+            "data",
+        }
+    )
+    assert set(payload) == expected_keys, payload
+    assert payload["state"] == "idle", payload
+    assert payload["next_actions"] == _CODE_SEARCH_NEXT_ACTIONS, payload
+    assert isinstance(payload["message"], str) and payload["message"], payload
+    if error:
+        assert isinstance(payload["error"], str) and payload["error"], payload
+        assert payload["message"] == (
+            f"Error: {payload['error']}. Try one of the suggested next_actions."
+        ), payload
+    else:
+        assert isinstance(payload["data"], dict), payload
+        assert isinstance(payload["data"].get("project_root"), str), payload
+
+
+async def _collect_code_search_calls(
+    params: StdioServerParameters,
+    errlog_path: Path,
+    calls: tuple[tuple[str, str, dict[str, Any]], ...],
+    *,
+    list_roots_callback: Any | None = None,
+) -> dict[str, Any]:
+    """Run one initialized session so each result is serialized exactly once."""
+    session_kwargs = (
+        {"list_roots_callback": list_roots_callback} if list_roots_callback is not None else {}
+    )
+    with open(errlog_path, "w+", encoding="utf-8") as errlog:
+        async with stdio_client(params, errlog=errlog) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream, **session_kwargs) as session:
+                await session.initialize()
+                catalog = [
+                    tool.model_dump(mode="json", by_alias=True, exclude_none=True)
+                    for tool in (await session.list_tools()).tools
+                ]
+                serialized: dict[str, dict[str, Any]] = {}
+                payloads: dict[str, dict[str, Any]] = {}
+                for label, tool_name, arguments in calls:
+                    result = await session.call_tool(tool_name, arguments)
+                    serialized[label] = result.model_dump(
+                        mode="json", by_alias=True, exclude_none=True
+                    )
+                    payload = result.structuredContent
+                    assert isinstance(payload, dict), result
+                    payloads[label] = payload
+
+    return {"catalog": catalog, "serialized": serialized, "payloads": payloads}
+
+
+def _write_native_route_trap(fake_root: Path) -> dict[str, str]:
+    """Put a minimal Python MCP backend ahead of the real package on PYTHONPATH.
+
+    It deliberately answers native tool calls with an invalid sentinel. A legacy
+    relay therefore fails this test, while a native host must answer locally;
+    `relay_probe` proves that the other public tools still travel to Python.
+    """
+    package = fake_root / "netcoredbg_mcp"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "__main__.py").write_text(
+        textwrap.dedent(
+            """
+            import json
+            import sys
+
+            NATIVE = {
+                "find_code_symbol",
+                "find_code_references",
+                "get_source_context",
+            }
+            TOOLS = [
+                {
+                    "name": name,
+                    "description": "route trap: native entries must be replaced locally",
+                    "inputSchema": {"type": "object"},
+                }
+                for name in sorted(NATIVE)
+            ] + [
+                {
+                    "name": "search_source",
+                    "description": "must remain Python-owned in this slice",
+                    "inputSchema": {"type": "object"},
+                },
+                {
+                    "name": "relay_probe",
+                    "description": "must remain Python-owned",
+                    "inputSchema": {"type": "object"},
+                },
+            ]
+
+            def respond(request_id, result):
+                payload = {"jsonrpc": "2.0", "id": request_id, "result": result}
+                print(json.dumps(payload), flush=True)
+
+            for raw in sys.stdin:
+                request = json.loads(raw)
+                method = request.get("method")
+                request_id = request.get("id")
+                if method == "initialize":
+                    respond(request_id, {
+                        "protocolVersion": request["params"]["protocolVersion"],
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "native-route-trap", "version": "1.0.0"},
+                    })
+                elif method == "tools/list":
+                    respond(request_id, {"tools": TOOLS})
+                elif method == "tools/call":
+                    name = request.get("params", {}).get("name", "")
+                    if name == "relay_probe":
+                        text = "PYTHON_RELAY_PROBE"
+                    elif name == "search_source":
+                        text = "PYTHON_SEARCH_RELAY"
+                    else:
+                        text = "PYTHON_NATIVE_ROUTE_LEAK:" + name
+                    respond(request_id, {"content": [{"type": "text", "text": text}]})
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    environment = _clean_code_search_environment()
+    environment["NETCOREDBG_MCP_PYTHON_EXECUTABLE"] = sys.executable
+    environment["PYTHONPATH"] = os.pathsep.join((str(fake_root), environment["PYTHONPATH"]))
+    return environment
+
+
+def _native_catalog(tools: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    by_name = _by_name(tools)
+    assert set(NATIVE_CODE_SEARCH_TOOLS).issubset(by_name), sorted(by_name)
+    return {name: by_name[name] for name in NATIVE_CODE_SEARCH_TOOLS}
+
+
+@pytest.mark.asyncio
+async def test_host_native_code_search_has_exact_python_catalog_and_call_parity(
+    tmp_path: Path,
+    host_dll: Path,
+) -> None:
+    """The three deterministic native replacements preserve exact public serialization.
+
+    search_source remains Python-owned and is checked through the same host session. The
+    route-trap test separately proves the three selected calls are no longer relayed.
+    """
+    direct_params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "netcoredbg_mcp", "--project", str(SEARCH_FIXTURE_ROOT)],
+        env=_clean_code_search_environment(),
+        cwd=str(tmp_path),
+    )
+    direct = await _collect_code_search_calls(
+        direct_params,
+        tmp_path / "direct-code-search-stderr.log",
+        _CODE_SEARCH_SUCCESS_CALLS + _CODE_SEARCH_ERROR_CALLS,
+    )
+
+    host_env = _clean_code_search_environment()
+    host_env["NETCOREDBG_MCP_PYTHON_EXECUTABLE"] = sys.executable
+    host_params = StdioServerParameters(
+        command="dotnet",
+        args=[str(host_dll), "--project", str(SEARCH_FIXTURE_ROOT)],
+        env=host_env,
+        cwd=str(tmp_path),
+    )
+    host = await _collect_code_search_calls(
+        host_params,
+        tmp_path / "host-code-search-stderr.log",
+        _CODE_SEARCH_SUCCESS_CALLS + _CODE_SEARCH_ERROR_CALLS,
+    )
+
+    assert [tool["name"] for tool in host["catalog"]] == [
+        tool["name"] for tool in direct["catalog"]
+    ], "the native substitutions must not reorder Python's public catalog"
+    assert _native_catalog(host["catalog"]) == _native_catalog(direct["catalog"])
+    assert host["serialized"] == direct["serialized"]
+
+    for label, _, _ in _CODE_SEARCH_SUCCESS_CALLS:
+        _assert_code_search_envelope(direct["payloads"][label], error=False)
+    for label, _, _ in _CODE_SEARCH_ERROR_CALLS:
+        _assert_code_search_envelope(direct["payloads"][label], error=True)
+
+    assert direct["payloads"]["symbol"]["data"]["results"] == [FIND_SYMBOL_EXPECTED_RESULT]
+    assert direct["payloads"]["references"]["data"]["count"] >= 2
+    assert direct["payloads"]["context"]["data"]["lines"][2]["line"] == 10
+    assert direct["payloads"]["search"]["data"]["results"][0]["file"] == "Views/MainWindow.xaml"
+    assert "Symbol name must not be empty" in direct["payloads"]["empty_symbol"]["error"]
+    assert "max_results must be at least 1" in direct["payloads"]["zero_references"]["error"]
+    assert "outside project root" in direct["payloads"]["outside_path"]["error"]
+    assert "unterminated subpattern" in direct["payloads"]["invalid_regex"]["error"]
+
+
+@pytest.mark.asyncio
+async def test_host_publicly_owns_only_native_code_search_calls_and_retains_python_rollback(
+    tmp_path: Path,
+    host_dll: Path,
+) -> None:
+    """A Python route trap makes accidental relay of any native name observable."""
+    direct_params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "netcoredbg_mcp", "--project", str(SEARCH_FIXTURE_ROOT)],
+        env=_clean_code_search_environment(),
+        cwd=str(tmp_path),
+    )
+    direct = await _collect_code_search_calls(
+        direct_params,
+        tmp_path / "direct-native-ownership-stderr.log",
+        _CODE_SEARCH_SUCCESS_CALLS,
+    )
+
+    host_params = StdioServerParameters(
+        command="dotnet",
+        args=[str(host_dll), "--project", str(SEARCH_FIXTURE_ROOT)],
+        env=_write_native_route_trap(tmp_path / "native-route-trap"),
+        cwd=str(tmp_path),
+    )
+    session_kwargs: dict[str, Any] = {}
+    with open(tmp_path / "host-native-ownership-stderr.log", "w+", encoding="utf-8") as errlog:
+        async with stdio_client(host_params, errlog=errlog) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream, **session_kwargs) as session:
+                await session.initialize()
+                host_catalog = [
+                    tool.model_dump(mode="json", by_alias=True, exclude_none=True)
+                    for tool in (await session.list_tools()).tools
+                ]
+                host_results: dict[str, dict[str, Any]] = {}
+                for label, tool_name, arguments in _CODE_SEARCH_SUCCESS_CALLS:
+                    host_results[label] = (
+                        await session.call_tool(tool_name, arguments)
+                    ).model_dump(mode="json", by_alias=True, exclude_none=True)
+                relay = await session.call_tool("relay_probe", {})
+
+    # The backend lied about the three native entries. Exact substitution proves
+    # local ownership; search_source and relay_probe must still reach Python.
+    assert _native_catalog(host_catalog) == _native_catalog(direct["catalog"])
+    for label in ("symbol", "references", "context"):
+        assert host_results[label] == direct["serialized"][label]
+    search_content = host_results["search"]["content"][0]
+    assert search_content["text"] == "PYTHON_SEARCH_RELAY"
+    relay_content = relay.content[0]
+    assert isinstance(relay_content, TextContent)
+    assert relay_content.text == "PYTHON_RELAY_PROBE", relay
+
+
+def _write_marker_project(root: Path, marker: str, *, project_marker: str | None = None) -> None:
+    root.mkdir(parents=True)
+    (root / "Marker.cs").write_text(
+        f"public sealed class {marker} {{ }}\n",
+        encoding="utf-8",
+    )
+    if project_marker is not None:
+        (root / project_marker).write_text("", encoding="utf-8")
+
+
+async def _assert_native_root_parity(
+    *,
+    tmp_path: Path,
+    host_dll: Path,
+    project_args: list[str],
+    cwd: Path,
+    environment: dict[str, str],
+    marker: str | None,
+    expected_root: Path | None,
+    list_roots_callback: Any | None = None,
+) -> None:
+    direct_params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "netcoredbg_mcp", *project_args],
+        env=environment,
+        cwd=str(cwd),
+    )
+    call = (
+        (("root", "find_code_symbol", {"name": marker}),)
+        if marker is not None
+        else (("root", "find_code_symbol", {"name": FIND_SYMBOL_NAME}),)
+    )
+    direct = await _collect_code_search_calls(
+        direct_params,
+        tmp_path / f"direct-root-{marker or 'invalid'}.log",
+        call,
+        list_roots_callback=list_roots_callback,
+    )
+
+    trap_env = _write_native_route_trap(tmp_path / f"root-trap-{marker or 'invalid'}")
+    trap_env.update(environment)
+    trap_env["PYTHONPATH"] = os.pathsep.join(
+        (str(tmp_path / f"root-trap-{marker or 'invalid'}"), _backend_env()["PYTHONPATH"])
+    )
+    host_params = StdioServerParameters(
+        command="dotnet",
+        args=[str(host_dll), *project_args],
+        env=trap_env,
+        cwd=str(cwd),
+    )
+    host = await _collect_code_search_calls(
+        host_params,
+        tmp_path / f"host-root-{marker or 'invalid'}.log",
+        call,
+        list_roots_callback=list_roots_callback,
+    )
+
+    assert host["serialized"]["root"] == direct["serialized"]["root"]
+    payload = direct["payloads"]["root"]
+    if expected_root is None:
+        _assert_code_search_envelope(payload, error=True)
+        assert "Project root is not configured" in payload["error"]
+        return
+
+    _assert_code_search_envelope(payload, error=False)
+    assert Path(payload["data"]["project_root"]).resolve() == expected_root.resolve()
+    assert payload["data"]["results"][0]["name"] == marker
+
+
+@pytest.mark.asyncio
+async def test_host_native_code_search_resolves_operator_client_and_cwd_roots_like_python(
+    tmp_path: Path,
+    host_dll: Path,
+) -> None:
+    """Exercise every local root authority source through native dispatch, not Python."""
+    assert "list_roots_callback" in inspect.signature(ClientSession.__init__).parameters
+    roots = tmp_path / "roots"
+    netcore_root = roots / "netcore"
+    mcp_root = roots / "mcp"
+    explicit_root = roots / "explicit"
+    client_root = roots / "client"
+    cwd_root = roots / "cwd"
+    marker_root = cwd_root / "nested"
+    fallback_root = roots / "fallback"
+    for root, marker in (
+        (netcore_root, "NetcorePrecedenceMarker"),
+        (mcp_root, "McpPrecedenceMarker"),
+        (explicit_root, "ExplicitPrecedenceMarker"),
+        (client_root, "ClientRootMarker"),
+        (fallback_root, "StartupCwdMarker"),
+    ):
+        _write_marker_project(root, marker)
+    _write_marker_project(cwd_root, "CwdMarker", project_marker="NativeSearch.sln")
+    marker_root.mkdir()
+
+    async def local_roots_callback(_context: object) -> types.ListRootsResult:
+        return types.ListRootsResult(
+            roots=[
+                types.Root(uri=FileUrl("file://attacker.invalid/share"), name="rejected-network"),
+                types.Root(uri=FileUrl(client_root.resolve().as_uri()), name="local-client-root"),
+            ]
+        )
+
+    netcore_env = _clean_code_search_environment()
+    netcore_env.update(
+        {
+            "NETCOREDBG_PROJECT_ROOT": str(netcore_root),
+            "MCP_PROJECT_ROOT": str(mcp_root),
+        }
+    )
+    await _assert_native_root_parity(
+        tmp_path=tmp_path,
+        host_dll=host_dll,
+        project_args=["--project", str(explicit_root)],
+        cwd=fallback_root,
+        environment=netcore_env,
+        marker="NetcorePrecedenceMarker",
+        expected_root=netcore_root,
+        list_roots_callback=local_roots_callback,
+    )
+
+    mcp_env = _clean_code_search_environment()
+    mcp_env["MCP_PROJECT_ROOT"] = str(mcp_root)
+    await _assert_native_root_parity(
+        tmp_path=tmp_path,
+        host_dll=host_dll,
+        project_args=["--project", str(explicit_root)],
+        cwd=fallback_root,
+        environment=mcp_env,
+        marker="McpPrecedenceMarker",
+        expected_root=mcp_root,
+        list_roots_callback=local_roots_callback,
+    )
+
+    await _assert_native_root_parity(
+        tmp_path=tmp_path,
+        host_dll=host_dll,
+        project_args=["--project", str(explicit_root)],
+        cwd=fallback_root,
+        environment=_clean_code_search_environment(),
+        marker="ExplicitPrecedenceMarker",
+        expected_root=explicit_root,
+        list_roots_callback=local_roots_callback,
+    )
+
+    await _assert_native_root_parity(
+        tmp_path=tmp_path,
+        host_dll=host_dll,
+        project_args=[],
+        cwd=fallback_root,
+        environment=_clean_code_search_environment(),
+        marker="ClientRootMarker",
+        expected_root=client_root,
+        list_roots_callback=local_roots_callback,
+    )
+
+    await _assert_native_root_parity(
+        tmp_path=tmp_path,
+        host_dll=host_dll,
+        project_args=["--project-from-cwd"],
+        cwd=marker_root,
+        environment=_clean_code_search_environment(),
+        marker="CwdMarker",
+        expected_root=cwd_root,
+    )
+
+    await _assert_native_root_parity(
+        tmp_path=tmp_path,
+        host_dll=host_dll,
+        project_args=[],
+        cwd=fallback_root,
+        environment=_clean_code_search_environment(),
+        marker="StartupCwdMarker",
+        expected_root=fallback_root,
+    )
+
+    invalid_scope = _clean_code_search_environment()
+    invalid_scope["NETCOREDBG_PROJECT_ROOT"] = str(roots / "missing-operator-root")
+    await _assert_native_root_parity(
+        tmp_path=tmp_path,
+        host_dll=host_dll,
+        project_args=[],
+        cwd=fallback_root,
+        environment=invalid_scope,
+        marker=None,
+        expected_root=None,
+        list_roots_callback=local_roots_callback,
+    )
+
+
+@pytest.mark.asyncio
+async def test_host_native_code_search_preserves_python_order_ignore_and_symlink_boundary(
+    tmp_path: Path,
+    host_dll: Path,
+) -> None:
+    """Search order is stable and project authority never crosses ignored or linked paths."""
+    root = tmp_path / "traversal-root"
+    (root / "A").mkdir(parents=True)
+    (root / "B").mkdir()
+    (root / "Z").mkdir()
+    (root / "ignored").mkdir()
+    (root / ".gitignore").write_text("ignored/\n*.generated.cs\n", encoding="utf-8")
+    (root / "A" / "First.cs").write_text(
+        "public sealed class TraversalOrderMarker { }\n",
+        encoding="utf-8",
+    )
+    (root / "Z" / "Last.cs").write_text(
+        "public sealed class TraversalOrderMarker { }\n",
+        encoding="utf-8",
+    )
+    (root / "ignored" / "Ignored.cs").write_text(
+        "public sealed class TraversalOrderMarker { }\n",
+        encoding="utf-8",
+    )
+    (root / "Generated.generated.cs").write_text(
+        "public sealed class TraversalOrderMarker { }\n",
+        encoding="utf-8",
+    )
+    (root / "B" / "Bom.cs").write_bytes(b"\xef\xbb\xbfpublic sealed class BomMarker { }\n")
+    (root / "B" / "UnicodeLines.cs").write_text(
+        "first\u2028second\n",
+        encoding="utf-8",
+    )
+    external = tmp_path / "external"
+    external.mkdir()
+    external_file = external / "External.cs"
+    external_file.write_text("public sealed class TraversalOrderMarker { }\n", encoding="utf-8")
+    try:
+        (root / "LinkedExternal.cs").symlink_to(external_file)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"file symlinks are unavailable in this environment: {exc}")
+
+    calls = (
+        ("symbols", "find_code_symbol", {"name": "TraversalOrderMarker", "kind": "class"}),
+        (
+            "search",
+            "search_source",
+            {
+                "pattern": "TraversalOrderMarker",
+                "file_glob": "*.cs",
+                "timeout_seconds": 30.0,
+            },
+        ),
+        (
+            "bom_context",
+            "get_source_context",
+            {"file": "B/Bom.cs", "line": 1, "radius": 0},
+        ),
+        (
+            "unicode_context",
+            "get_source_context",
+            {"file": "B/UnicodeLines.cs", "line": 2, "radius": 0},
+        ),
+    )
+    direct_params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "netcoredbg_mcp", "--project", str(root)],
+        env=_clean_code_search_environment(),
+        cwd=str(tmp_path),
+    )
+    direct = await _collect_code_search_calls(
+        direct_params,
+        tmp_path / "direct-traversal-stderr.log",
+        calls,
+    )
+    host_params = StdioServerParameters(
+        command="dotnet",
+        args=[str(host_dll), "--project", str(root)],
+        env=_host_python_environment(),
+        cwd=str(tmp_path),
+    )
+    host = await _collect_code_search_calls(
+        host_params,
+        tmp_path / "host-traversal-stderr.log",
+        calls,
+    )
+
+    assert host["serialized"] == direct["serialized"]
+    expected_files = ["A/First.cs", "Z/Last.cs"]
+    assert [
+        result["file"] for result in direct["payloads"]["symbols"]["data"]["results"]
+    ] == expected_files
+    assert [
+        result["file"] for result in direct["payloads"]["search"]["data"]["results"]
+    ] == expected_files
+
+
+@pytest.mark.asyncio
+async def test_host_forwarded_search_timeout_is_structured_and_session_stays_usable(
+    tmp_path: Path,
+    host_dll: Path,
+) -> None:
+    """The still-Python-owned regex route preserves timeout and follow-up behavior."""
+    timeout_root = tmp_path / "timeout-root"
+    timeout_root.mkdir()
+    (timeout_root / "Slow.cs").write_text("a" * 200_000, encoding="utf-8")
+    calls = (
+        ("timeout", "search_source", {"pattern": "^(a+)+b", "timeout_seconds": 0.01}),
+        ("follow_up", "find_code_symbol", {"name": "Slow"}),
+    )
+    direct_params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "netcoredbg_mcp", "--project", str(timeout_root)],
+        env=_clean_code_search_environment(),
+        cwd=str(tmp_path),
+    )
+    direct = await _collect_code_search_calls(
+        direct_params,
+        tmp_path / "direct-timeout-stderr.log",
+        calls,
+    )
+    host_params = StdioServerParameters(
+        command="dotnet",
+        args=[str(host_dll), "--project", str(timeout_root)],
+        env=_host_python_environment(),
+        cwd=str(tmp_path),
+    )
+    host = await _collect_code_search_calls(
+        host_params,
+        tmp_path / "host-timeout-stderr.log",
+        calls,
+    )
+
+    _assert_code_search_envelope(direct["payloads"]["timeout"], error=True)
+    assert "timeout" in direct["payloads"]["timeout"]["error"].lower()
+    assert host["serialized"] == direct["serialized"]
+    _assert_code_search_envelope(direct["payloads"]["follow_up"], error=False)
