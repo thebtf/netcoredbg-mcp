@@ -660,6 +660,42 @@
       },
       "additionalProperties": false
     },
+    "evidenceScope": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "window"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "element"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "element"
+              ]
+            },
+            "element": {
+              "$ref": "#/definitions/elementSelector"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
     "getUiProbeCapabilitiesArguments": {
       "type": "object",
       "required": [
@@ -703,40 +739,7 @@
           "$ref": "#/definitions/sceneRequest"
         },
         "evidenceScope": {
-          "oneOf": [
-            {
-              "type": "object",
-              "required": [
-                "kind"
-              ],
-              "properties": {
-                "kind": {
-                  "enum": [
-                    "window"
-                  ]
-                }
-              },
-              "additionalProperties": false
-            },
-            {
-              "type": "object",
-              "required": [
-                "kind",
-                "element"
-              ],
-              "properties": {
-                "kind": {
-                  "enum": [
-                    "element"
-                  ]
-                },
-                "element": {
-                  "$ref": "#/definitions/elementSelector"
-                }
-              },
-              "additionalProperties": false
-            }
-          ]
+          "$ref": "#/definitions/evidenceScope"
         }
       },
       "additionalProperties": false
@@ -1272,14 +1275,24 @@
       "properties": {
         "supportedProtocolVersions": {
           "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
           "items": {
             "$ref": "#/definitions/protocolVersion"
+          },
+          "contains": {
+            "const": "native-scene-probe/1"
           }
         },
         "supportedSchemaVersions": {
           "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
           "items": {
             "$ref": "#/definitions/schemaVersion"
+          },
+          "contains": {
+            "const": "native-scene-probe.schema/1"
           }
         },
         "primitives": {
@@ -1921,6 +1934,7 @@
         "protocolVersion",
         "schemaVersion",
         "sceneRequest",
+        "evidenceScope",
         "capturedAt",
         "candidate",
         "stability",
@@ -1955,6 +1969,16 @@
         },
         "sceneRequest": {
           "$ref": "#/definitions/sceneRequest"
+        },
+        "evidenceScope": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/evidenceScope"
+            }
+          ]
         },
         "capturedAt": {
           "$ref": "#/definitions/dateTime"
@@ -2006,6 +2030,9 @@
               "enum": [
                 "visual_evidence_capture"
               ]
+            },
+            "evidenceScope": {
+              "$ref": "#/definitions/evidenceScope"
             },
             "atomicity": {
               "$ref": "#/definitions/notApplicableAtomicity"
@@ -2073,6 +2100,11 @@
             "kind": {
               "enum": [
                 "element_snapshot_capture"
+              ]
+            },
+            "evidenceScope": {
+              "enum": [
+                null
               ]
             },
             "atomicity": {
@@ -2170,6 +2202,11 @@
             "kind": {
               "enum": [
                 "native_scene_capture"
+              ]
+            },
+            "evidenceScope": {
+              "enum": [
+                null
               ]
             },
             "atomicity": {
@@ -2446,6 +2483,27 @@
           "$ref": "#/definitions/artifactSchemaVersion"
         }
       },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "mediaType"
+            ],
+            "properties": {
+              "mediaType": {
+                "const": "application/vnd.netcoredbg.native-scene+json"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "byteLength": {
+                "maximum": 16777216
+              }
+            }
+          }
+        }
+      ],
       "additionalProperties": false
     },
     "errorCode": {
@@ -2465,7 +2523,7 @@
         "CANDIDATE_MISMATCH"
       ]
     },
-    "toolError": {
+    "toolErrorBase": {
       "type": "object",
       "required": [
         "kind",
@@ -2475,19 +2533,10 @@
       ],
       "properties": {
         "kind": {
-          "enum": [
-            "tool_error"
-          ]
+          "const": "tool_error"
         },
         "tool": {
-          "enum": [
-            "get_ui_probe_capabilities",
-            "capture_visual_evidence",
-            "read_capture_artifact",
-            "wait_for_ui_stable",
-            "capture_element_snapshot",
-            "capture_native_scene"
-          ]
+          "type": "string"
         },
         "code": {
           "$ref": "#/definitions/errorCode"
@@ -2497,6 +2546,187 @@
         }
       },
       "additionalProperties": false
+    },
+    "getUiProbeCapabilitiesToolError": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/toolErrorBase"
+        },
+        {
+          "properties": {
+            "tool": {
+              "const": "get_ui_probe_capabilities"
+            },
+            "code": {
+              "enum": [
+                "INVALID_TOOL_ARGUMENTS",
+                "DEBUG_SESSION_NOT_FOUND",
+                "UNSUPPORTED_PROTOCOL",
+                "CANDIDATE_MISMATCH"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "captureVisualEvidenceToolError": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/toolErrorBase"
+        },
+        {
+          "properties": {
+            "tool": {
+              "const": "capture_visual_evidence"
+            },
+            "code": {
+              "enum": [
+                "INVALID_TOOL_ARGUMENTS",
+                "DEBUG_SESSION_NOT_FOUND",
+                "UNSUPPORTED_PROTOCOL",
+                "UNSUPPORTED_CAPABILITY",
+                "SCENE_NOT_FOUND",
+                "SCENE_AMBIGUOUS",
+                "ELEMENT_NOT_FOUND",
+                "ELEMENT_AMBIGUOUS",
+                "OBSERVER_UNAVAILABLE",
+                "ARTIFACT_WRITE_FAILED",
+                "CANDIDATE_MISMATCH"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "readCaptureArtifactToolError": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/toolErrorBase"
+        },
+        {
+          "properties": {
+            "tool": {
+              "const": "read_capture_artifact"
+            },
+            "code": {
+              "enum": [
+                "INVALID_TOOL_ARGUMENTS",
+                "DEBUG_SESSION_NOT_FOUND",
+                "UNSUPPORTED_PROTOCOL",
+                "UNSUPPORTED_CAPABILITY",
+                "ARTIFACT_INTEGRITY_FAILED",
+                "CANDIDATE_MISMATCH"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "waitForUiStableToolError": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/toolErrorBase"
+        },
+        {
+          "properties": {
+            "tool": {
+              "const": "wait_for_ui_stable"
+            },
+            "code": {
+              "enum": [
+                "INVALID_TOOL_ARGUMENTS",
+                "DEBUG_SESSION_NOT_FOUND",
+                "UNSUPPORTED_PROTOCOL",
+                "UNSUPPORTED_CAPABILITY",
+                "SCENE_NOT_FOUND",
+                "SCENE_AMBIGUOUS",
+                "OBSERVER_UNAVAILABLE",
+                "CANDIDATE_MISMATCH"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "captureElementSnapshotToolError": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/toolErrorBase"
+        },
+        {
+          "properties": {
+            "tool": {
+              "const": "capture_element_snapshot"
+            },
+            "code": {
+              "enum": [
+                "INVALID_TOOL_ARGUMENTS",
+                "DEBUG_SESSION_NOT_FOUND",
+                "UNSUPPORTED_PROTOCOL",
+                "UNSUPPORTED_CAPABILITY",
+                "SCENE_NOT_FOUND",
+                "SCENE_AMBIGUOUS",
+                "ELEMENT_NOT_FOUND",
+                "ELEMENT_AMBIGUOUS",
+                "UI_NOT_STABLE",
+                "OBSERVER_UNAVAILABLE",
+                "ARTIFACT_WRITE_FAILED",
+                "CANDIDATE_MISMATCH"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "captureNativeSceneToolError": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/toolErrorBase"
+        },
+        {
+          "properties": {
+            "tool": {
+              "const": "capture_native_scene"
+            },
+            "code": {
+              "enum": [
+                "INVALID_TOOL_ARGUMENTS",
+                "DEBUG_SESSION_NOT_FOUND",
+                "UNSUPPORTED_PROTOCOL",
+                "UNSUPPORTED_CAPABILITY",
+                "SCENE_NOT_FOUND",
+                "SCENE_AMBIGUOUS",
+                "UI_NOT_STABLE",
+                "OBSERVER_UNAVAILABLE",
+                "ARTIFACT_WRITE_FAILED",
+                "CANDIDATE_MISMATCH"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "toolError": {
+      "oneOf": [
+        {
+          "$ref": "#/definitions/getUiProbeCapabilitiesToolError"
+        },
+        {
+          "$ref": "#/definitions/captureVisualEvidenceToolError"
+        },
+        {
+          "$ref": "#/definitions/readCaptureArtifactToolError"
+        },
+        {
+          "$ref": "#/definitions/waitForUiStableToolError"
+        },
+        {
+          "$ref": "#/definitions/captureElementSnapshotToolError"
+        },
+        {
+          "$ref": "#/definitions/captureNativeSceneToolError"
+        }
+      ]
     },
     "artifactNotFoundError": {
       "description": "The exact disclosure-free envelope for every unknown, foreign, expired, deleted, or otherwise unavailable artifact capability.",

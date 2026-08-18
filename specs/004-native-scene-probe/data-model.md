@@ -30,15 +30,15 @@ retrieval authority.
 |---|---|---|---|
 | Versioned request base | `requestBase` | — | Every primitive carries `debugSessionId`, `protocolVersion`, and `schemaVersion`. |
 | Six primitive arguments | `getUiProbeCapabilitiesArguments`, `captureVisualEvidenceArguments`, `readCaptureArtifactArguments`, `waitForUiStableArguments`, `captureElementSnapshotArguments`, `captureNativeSceneArguments` | — | Closed roots; no compatibility aliases. |
-| Capability declaration | `uiProbeCapabilities`, `probeCapabilities`, `primitiveCapability`, `contextCapabilities`, `settleConditionCapabilities`, `negotiatedLimits` | — | The six-entry primitive array is closed structurally: `primitiveCapability.oneOf` fixes each name/milestone pair, so exactly three named primitives are M0 and exactly three are M1; capability lookup does not enumerate artifact capabilities. |
+| Capability declaration | `uiProbeCapabilities`, `probeCapabilities`, `primitiveCapability`, `contextCapabilities`, `settleConditionCapabilities`, `negotiatedLimits` | — | The six-entry primitive array is closed structurally: `primitiveCapability.oneOf` fixes each name/milestone pair, so exactly three named primitives are M0 and exactly three are M1. `supportedProtocolVersions` and `supportedSchemaVersions` are non-empty, unique, and each contains its active `/1` value; capability lookup does not enumerate artifact capabilities. |
 | Scene request context | `sceneRequest`, `sceneScope`, `viewportConstraint`, `dpiPolicy`, `settlePolicy`, `requestStateValue`, `candidateExpectation` | `sceneRequest`, `requestStateValue` | Each context member is required and is a constrained value or `null`; each selected/current state has an independent pre-materialization UTF-8 ceiling. |
 | Canonical/fallback identity | `canonicalIdentity`, `elementSelector` | `canonicalIdentity`, `accessibilityIdentity` | `contractId` is canonical; `automationId` remains fallback/accessibility identity. |
 | Candidate provenance | `candidateProvenance`, `candidateSource`, `observerVersion` | same | Candidate source is an explicit verified launch/probe manifest; no source-control inference exists. |
 | Stability receipt | `stabilityReceipt`, `stabilityEvidence`, `conditionObservation` | `stabilityEvidence`, `conditionObservation` | A standalone receipt is evidence, never capture authorization. |
 | Atomicity evidence | `atomicityEvidence`, `inProcessAtomicity`, `uiaGuardedAtomicity`, `notApplicableAtomicity` | `atomicityEvidence`, `inProcessAtomicity`, `uiaGuardedAtomicity` | Equal revisions for a complete atomic scene are a runtime invariant in addition to structural validation. |
-| Capture results | `visualEvidenceCapture`, `elementSnapshotCapture`, `nativeSceneCapture`, `captureManifestBase`, `captureIssue` | `sceneArtifact` | Every capture manifest and persisted scene artifact carries an immutable `sceneRequest` binding equal to the supplied request context. Every element snapshot, every native-scene result branch that returns or commits evidence, and every persisted scene artifact requires capture-time `revalidatedByCapture: true`; a `COMPLETE` visual manifest structurally contains a lossless PNG descriptor and a `COMPLETE` native-scene manifest structurally contains an observed-facts native-scene JSON descriptor, while `PARTIAL`/`UNOBSERVABLE` captures may have no committed artifacts. |
-| Typed failure | `toolError`, `artifactNotFoundError`, `errorCode` | — | `ARTIFACT_NOT_FOUND` has one fixed disclosure-free envelope; other error payloads contain no invented evidence or artifact bytes. |
-| Artifact capability/descriptor | `publicCapabilityId`, `artifactDescriptor`, `artifactRetention`, `captureArtifactChunk` | `publicCapabilityId` | Public artifact/capture/probe capabilities are base64url, 22–86 characters, CSPRNG-minted with at least 128 bits, session- and capture-bound, and non-enumerable. |
+| Capture results | `visualEvidenceCapture`, `elementSnapshotCapture`, `nativeSceneCapture`, `captureManifestBase`, `captureIssue` | `sceneArtifact` | Every manifest binds the immutable `sceneRequest`; visual manifests also bind the non-null request `evidenceScope`, while element/native-scene manifests require `evidenceScope: null`. Every element snapshot, every native-scene result branch that returns or commits evidence, and every persisted scene artifact requires capture-time `revalidatedByCapture: true`; a `COMPLETE` visual manifest structurally contains a lossless PNG descriptor and a `COMPLETE` native-scene manifest structurally contains an observed-facts native-scene JSON descriptor, while `PARTIAL`/`UNOBSERVABLE` captures may have no committed artifacts. |
+| Typed failure | `toolErrorBase`, six tool-specific `toolError` branches, `artifactNotFoundError`, `errorCode` | — | A branch accepts only the outcome codes mapped below. `ARTIFACT_NOT_FOUND` remains one fixed disclosure-free `read_capture_artifact` envelope; other error payloads contain no invented evidence or artifact bytes. |
+| Artifact capability/descriptor | `publicCapabilityId`, `artifactDescriptor`, `artifactRetention`, `captureArtifactChunk` | `publicCapabilityId` | Public artifact/capture/probe capabilities are base64url, 22–86 characters, CSPRNG-minted with at least 128 bits, session- and capture-bound, and non-enumerable. Scene JSON chunks cap declared `byteLength` at 16,777,216; PNG/WebP chunks retain 67,108,864. |
 | Scene record | — | `sceneArtifact`, `sceneGraph`, `sceneNode`, `geometry`, `relation` | Stored JSON contains observed facts, stated authority, and typed opaque adapter facts. |
 | Custom adapter evidence | `jsonValue` | `customAdapterEvidence`, `jsonValue` | Unknown negotiated namespaces are retained without generic interpretation and are structurally/runtime bounded before materialization. |
 
@@ -171,7 +171,7 @@ is not a substitute for an artifact or capture capability. A successful or
 qualified capture returns a compact manifest rather than embedding PNG or scene
 bytes. The manifest has at most four immutable `artifactDescriptor` values and
 at most 256 typed `issues`.
-Every capture manifest structurally includes an immutable `sceneRequest` binding. Its closed request context must equal the supplied primitive request context before the manifest is returned or committed; Draft 7 validates the manifest member's shape, while that cross-document equality is a runtime binding invariant.
+Every capture manifest structurally includes an immutable `sceneRequest` binding. Its closed request context must equal the supplied primitive request context before the manifest is returned or committed; Draft 7 validates the manifest member's shape, while that cross-document equality is a runtime binding invariant. A visual manifest additionally has a non-null `evidenceScope` structurally equal at runtime to `capture_visual_evidence.evidenceScope`; element and native-scene manifests set `evidenceScope` to `null`.
 
 Artifacts pass through this state machine:
 
@@ -182,6 +182,7 @@ Artifacts pass through this state machine:
 5. **contained** — an authorized integrity mismatch releases no bytes.
 
 An artifact descriptor has immutable media type, byte length, full public SHA-256, schema version, capture ID, retention, evidence grade, capture time, and optional relative provenance label. The chunk-hash table remains server-internal: it is not in the descriptor and does not grant caller authority. The label is diagnostic only and must never be accepted by any primitive, dereferenced, or used to locate storage.
+`captureArtifactChunk.byteLength` retains the 67,108,864-byte raster ceiling but conditionally caps `application/vnd.netcoredbg.native-scene+json` at 16,777,216 bytes, matching a committed scene artifact's ceiling.
 
 Unknown, foreign-session, foreign-capture, expired, deleted, and otherwise unavailable capabilities return exactly this complete, fixed, disclosure-free `ARTIFACT_NOT_FOUND` envelope, with no artifact metadata or free-text detail: `{"kind":"tool_error","tool":"read_capture_artifact","code":"ARTIFACT_NOT_FOUND","message":"Artifact is not available."}`. After authorization, an identity, length, full-hash, or touched-chunk-hash mismatch returns `ARTIFACT_INTEGRITY_FAILED` with no bytes.
 
@@ -204,7 +205,7 @@ A `capture_element_snapshot` uses `not_applicable` atomicity. Its `COMPLETE` man
 
 A `uia_guarded` traversal is independently timed. A `PARTIAL` result under that authority structurally requires all four window, client, DPI, and visual-tree-fingerprint guards to be `unchanged` and an `ATOMICITY_UNPROVEN_UIA_GUARDED` issue. A changed or unobservable guard yields `UNOBSERVABLE`, commits no scene artifact, and returns no scene-artifact descriptor. UIA-guarded traversal can never be `COMPLETE` for an atomic-scene claim.
 
-A persisted scene artifact has status `COMPLETE` or `PARTIAL` and therefore contains at least one observed graph node and root. `observationKind: element_snapshot` structurally caps both node and root arrays at one; `native_scene` remains bounded at 4,096. An `UNOBSERVABLE` capture result commits no scene artifact and returns no scene-artifact descriptor; its uncertainty remains in the compact capture manifest.
+A persisted scene artifact has status `COMPLETE` or `PARTIAL` and therefore contains at least one observed graph node and root. A `native_scene` artifact with `PARTIAL` status structurally requires `inProcessAtomicity` or `uiaGuardedAtomicity`; the latter retains its unchanged-guard and `ATOMICITY_UNPROVEN_UIA_GUARDED` issue condition. `observationKind: element_snapshot` retains `not_applicable` atomicity and structurally caps both node and root arrays at one; `native_scene` remains bounded at 4,096. An `UNOBSERVABLE` capture result commits no scene artifact and returns no scene-artifact descriptor; its uncertainty remains in the compact capture manifest.
 
 A scene artifact is a bounded immutable graph of at most 4,096 nodes. A node
 has an ID, an optional parent relation, optional slot relation, canonical
@@ -235,11 +236,27 @@ semantics.
 | Observer/selection/stability | `OBSERVER_UNAVAILABLE`, `SCENE_NOT_FOUND`, `SCENE_AMBIGUOUS`, `ELEMENT_NOT_FOUND`, `ELEMENT_AMBIGUOUS`, `UI_NOT_STABLE` | No fabricated observation. |
 | Artifact lifecycle | `ARTIFACT_WRITE_FAILED`, `ARTIFACT_NOT_FOUND`, `ARTIFACT_INTEGRITY_FAILED` | Not-found is disclosure-free; integrity failure is authorized containment with no bytes. |
 
+### Tool-specific error envelopes
+
+Every `toolError` has the common boundary codes `INVALID_TOOL_ARGUMENTS`, `DEBUG_SESSION_NOT_FOUND`, `UNSUPPORTED_PROTOCOL`, and `CANDIDATE_MISMATCH`; the permitted additions are:
+
+| Primitive | Additional permitted `toolError.code` values |
+|---|---|
+| `get_ui_probe_capabilities` | None. |
+| `capture_visual_evidence` | `UNSUPPORTED_CAPABILITY`, `SCENE_NOT_FOUND`, `SCENE_AMBIGUOUS`, `ELEMENT_NOT_FOUND`, `ELEMENT_AMBIGUOUS`, `OBSERVER_UNAVAILABLE`, `ARTIFACT_WRITE_FAILED`. |
+| `read_capture_artifact` | `UNSUPPORTED_CAPABILITY`, `ARTIFACT_INTEGRITY_FAILED`; `ARTIFACT_NOT_FOUND` is instead the fixed special envelope. |
+| `wait_for_ui_stable` | `UNSUPPORTED_CAPABILITY`, `SCENE_NOT_FOUND`, `SCENE_AMBIGUOUS`, `OBSERVER_UNAVAILABLE`. |
+| `capture_element_snapshot` | `UNSUPPORTED_CAPABILITY`, `SCENE_NOT_FOUND`, `SCENE_AMBIGUOUS`, `ELEMENT_NOT_FOUND`, `ELEMENT_AMBIGUOUS`, `UI_NOT_STABLE`, `OBSERVER_UNAVAILABLE`, `ARTIFACT_WRITE_FAILED`. |
+| `capture_native_scene` | `UNSUPPORTED_CAPABILITY`, `SCENE_NOT_FOUND`, `SCENE_AMBIGUOUS`, `UI_NOT_STABLE`, `OBSERVER_UNAVAILABLE`, `ARTIFACT_WRITE_FAILED`. |
+
+The corpus contains a rejected cross-pair for each branch; a code permitted for one primitive is not interchangeable with another primitive's envelope.
+
 ## Exact limits and schema-enforcement boundary
 
 | Contract limit | Exact ceiling | Structural representation | Runtime check required |
 |---|---:|---|---|
 | Raw artifact read | 65,536 bytes | `maxBytes`, `bytesRead` | Decoded byte count and requested-range arithmetic. |
+| Returned native-scene chunk metadata | 16,777,216 bytes | Conditional `captureArtifactChunk.byteLength` by media type | Declared value matches authorized committed artifact. |
 | Lossless visual artifact | 67,108,864 bytes | Lossless/preview descriptor `byteLength` | Actual committed-file length. |
 | Scene artifact | 16,777,216 bytes | Scene descriptor `byteLength` | Actual serialized/committed scene-artifact length. |
 | Manifest or structured response | 262,144 bytes | `structuredResponseMaxBytes` capability | Serialized response byte size. |

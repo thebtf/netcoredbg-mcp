@@ -1338,6 +1338,16 @@
                     "enum": [
                       "PARTIAL"
                     ]
+                  },
+                  "atomicity": {
+                    "oneOf": [
+                      {
+                        "$ref": "#/definitions/inProcessAtomicity"
+                      },
+                      {
+                        "$ref": "#/definitions/uiaGuardedAtomicity"
+                      }
+                    ]
                   }
                 }
               }

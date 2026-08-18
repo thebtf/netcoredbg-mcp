@@ -116,6 +116,22 @@
         "protocolVersion": "not-a-native-scene-version",
         "schemaVersion": "native-scene-probe.schema/1"
       },
+      "schemaInvalidVariants": [
+        {
+          "name": "capabilities_must_not_emit_artifact_integrity_failure",
+          "responseSchema": "#/definitions/toolError",
+          "response": {
+            "kind": "tool_error",
+            "tool": "get_ui_probe_capabilities",
+            "code": "ARTIFACT_INTEGRITY_FAILED",
+            "message": "Not permitted for this primitive."
+          },
+          "expected": {
+            "classification": "schema_rejection",
+            "reason": "ARTIFACT_INTEGRITY_FAILED is permitted only for read_capture_artifact"
+          }
+        }
+      ],
       "expected": {
         "classification": "typed_error",
         "errorCode": "INVALID_TOOL_ARGUMENTS",
@@ -323,6 +339,9 @@
                 "probeVersion": "1.0.0"
               }
             },
+            "evidenceScope": {
+              "kind": "window"
+            },
             "capturedAt": "2026-08-18T00:00:00Z",
             "candidate": {
               "processId": 4242,
@@ -389,6 +408,9 @@
             "captureId": "capture_visual_case_00002",
             "protocolVersion": "native-scene-probe/1",
             "schemaVersion": "native-scene-probe.schema/1",
+            "evidenceScope": {
+              "kind": "window"
+            },
             "capturedAt": "2026-08-18T00:00:00Z",
             "candidate": {
               "processId": 4242,
@@ -444,6 +466,20 @@
           "expected": {
             "classification": "schema_rejection",
             "reason": "every capture manifest requires sceneRequest"
+          }
+        },
+        {
+          "name": "visual_capture_must_not_emit_ui_not_stable",
+          "responseSchema": "#/definitions/toolError",
+          "response": {
+            "kind": "tool_error",
+            "tool": "capture_visual_evidence",
+            "code": "UI_NOT_STABLE",
+            "message": "Not permitted for this primitive."
+          },
+          "expected": {
+            "classification": "schema_rejection",
+            "reason": "UI_NOT_STABLE is not permitted for capture_visual_evidence"
           }
         }
       ],
@@ -577,7 +613,7 @@
       "contractGateExpectation": "schema_fixture_and_expected_classification_vocabulary_only",
       "runtimeBehaviorRequired": true,
       "primitive": "read_capture_artifact",
-      "precondition": "artifact_tampered_capability_0001 is owned by the session and has already completed one successful authorized read. Its committed bytes are then modified in place without changing immutable file identity or length, including a byte in each of storage chunks 0 and 1; its public manifest SHA-256 remains the commit value and its internal 65,536-byte chunk-hash table remains server-internal.",
+      "precondition": "artifact_tampered_capability_0001 is a 131072-byte artifact owned by the session and has already completed one successful authorized read. Its committed bytes are then modified in place without changing immutable file identity or length, including a byte in each of storage chunks 0 and 1; its public manifest SHA-256 remains the commit value and its internal 65,536-byte chunk-hash table remains server-internal.",
       "request": {
         "debugSessionId": "session_A1b2C3d4E5",
         "protocolVersion": "native-scene-probe/1",
@@ -586,6 +622,22 @@
         "offset": 65535,
         "maxBytes": 2
       },
+      "schemaInvalidVariants": [
+        {
+          "name": "artifact_read_must_not_emit_observer_unavailable",
+          "responseSchema": "#/definitions/toolError",
+          "response": {
+            "kind": "tool_error",
+            "tool": "read_capture_artifact",
+            "code": "OBSERVER_UNAVAILABLE",
+            "message": "Not permitted for this primitive."
+          },
+          "expected": {
+            "classification": "schema_rejection",
+            "reason": "OBSERVER_UNAVAILABLE is not permitted for read_capture_artifact"
+          }
+        }
+      ],
       "expected": {
         "classification": "typed_error",
         "errorCode": "ARTIFACT_INTEGRITY_FAILED",
@@ -709,6 +761,7 @@
                 "probeVersion": "1.0.0"
               }
             },
+            "evidenceScope": null,
             "capturedAt": "2026-08-18T00:00:00Z",
             "candidate": {
               "processId": 4242,
@@ -961,6 +1014,7 @@
                 "probeVersion": "1.0.0"
               }
             },
+            "evidenceScope": null,
             "capturedAt": "2026-08-18T00:00:00Z",
             "candidate": {
               "processId": 4242,
@@ -1090,6 +1144,7 @@
                 "probeVersion": "1.0.0"
               }
             },
+            "evidenceScope": null,
             "capturedAt": "2026-08-18T00:00:00Z",
             "candidate": {
               "processId": 4242,
@@ -1219,6 +1274,7 @@
                 "probeVersion": "1.0.0"
               }
             },
+            "evidenceScope": null,
             "capturedAt": "2026-08-18T00:00:00Z",
             "candidate": {
               "processId": 4242,
@@ -1566,6 +1622,7 @@
                 "probeVersion": "1.0.0"
               }
             },
+            "evidenceScope": null,
             "capturedAt": "2026-08-18T00:00:00Z",
             "candidate": {
               "processId": 4242,
@@ -1683,6 +1740,7 @@
                 "probeVersion": "1.0.0"
               }
             },
+            "evidenceScope": null,
             "capturedAt": "2026-08-18T00:00:00Z",
             "candidate": {
               "processId": 4242,
@@ -1768,6 +1826,20 @@
           "expected": {
             "classification": "schema_rejection",
             "reason": "an UNOBSERVABLE element snapshot has no committed artifacts"
+          }
+        },
+        {
+          "name": "element_snapshot_must_not_emit_artifact_integrity_failure",
+          "responseSchema": "#/definitions/toolError",
+          "response": {
+            "kind": "tool_error",
+            "tool": "capture_element_snapshot",
+            "code": "ARTIFACT_INTEGRITY_FAILED",
+            "message": "Not permitted for this primitive."
+          },
+          "expected": {
+            "classification": "schema_rejection",
+            "reason": "ARTIFACT_INTEGRITY_FAILED is permitted only for read_capture_artifact"
           }
         }
       ],
@@ -1864,6 +1936,22 @@
           }
         }
       },
+      "schemaInvalidVariants": [
+        {
+          "name": "stability_wait_must_not_emit_artifact_write_failed",
+          "responseSchema": "#/definitions/toolError",
+          "response": {
+            "kind": "tool_error",
+            "tool": "wait_for_ui_stable",
+            "code": "ARTIFACT_WRITE_FAILED",
+            "message": "Not permitted for this primitive."
+          },
+          "expected": {
+            "classification": "schema_rejection",
+            "reason": "ARTIFACT_WRITE_FAILED is not permitted for wait_for_ui_stable"
+          }
+        }
+      ],
       "expected": {
         "classification": "typed_error",
         "errorCode": "INVALID_TOOL_ARGUMENTS",
@@ -1965,6 +2053,22 @@
           }
         }
       },
+      "schemaInvalidVariants": [
+        {
+          "name": "native_scene_must_not_emit_element_ambiguous",
+          "responseSchema": "#/definitions/toolError",
+          "response": {
+            "kind": "tool_error",
+            "tool": "capture_native_scene",
+            "code": "ELEMENT_AMBIGUOUS",
+            "message": "Not permitted for this primitive."
+          },
+          "expected": {
+            "classification": "schema_rejection",
+            "reason": "ELEMENT_AMBIGUOUS is not permitted for capture_native_scene"
+          }
+        }
+      ],
       "expected": {
         "classification": "typed_error",
         "errorCode": "INVALID_TOOL_ARGUMENTS",
@@ -2391,6 +2495,7 @@
             "probeVersion": "1.0.0"
           }
         },
+        "evidenceScope": null,
         "capturedAt": "2026-08-18T00:00:00Z",
         "candidate": {
           "processId": 4242,
