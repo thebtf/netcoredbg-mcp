@@ -15,11 +15,13 @@ public sealed class WpfProbeMaterialization
     public WpfProbeMaterialization(
         string rootId,
         bool requiredFactsComplete,
-        IReadOnlyList<WpfSceneNodeFactDto> nodes)
+        IReadOnlyList<WpfSceneNodeFactDto> nodes,
+        WpfProbeStabilityObservationDto stability)
     {
         RootId = rootId ?? throw new ArgumentNullException(nameof(rootId));
         RequiredFactsComplete = requiredFactsComplete;
         Nodes = nodes ?? throw new ArgumentNullException(nameof(nodes));
+        Stability = stability ?? throw new ArgumentNullException(nameof(stability));
     }
 
     public string RootId { get; }
@@ -27,6 +29,81 @@ public sealed class WpfProbeMaterialization
     public bool RequiredFactsComplete { get; }
 
     public IReadOnlyList<WpfSceneNodeFactDto> Nodes { get; }
+
+    public WpfProbeStabilityObservationDto Stability { get; }
+}
+
+public sealed class WpfProbeStabilityObservationDto
+{
+    public WpfProbeStabilityObservationDto(long sceneEpoch, WpfProbeStabilityConditionsDto conditions)
+    {
+        if (sceneEpoch < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(sceneEpoch));
+        }
+
+        SceneEpoch = sceneEpoch;
+        Conditions = conditions ?? throw new ArgumentNullException(nameof(conditions));
+    }
+
+    [JsonPropertyName("sceneEpoch")]
+    public long SceneEpoch { get; }
+
+    [JsonPropertyName("conditions")]
+    public WpfProbeStabilityConditionsDto Conditions { get; }
+}
+
+public sealed class WpfProbeStabilityConditionsDto
+{
+    public WpfProbeStabilityConditionsDto(
+        WpfProbeConditionObservationDto dispatcherIdle,
+        WpfProbeConditionObservationDto stableLayout,
+        WpfProbeConditionObservationDto animationState,
+        WpfProbeConditionObservationDto windowGeometry,
+        WpfProbeConditionObservationDto contextMaterialization,
+        WpfProbeConditionObservationDto asyncLoadSettled)
+    {
+        DispatcherIdle = dispatcherIdle ?? throw new ArgumentNullException(nameof(dispatcherIdle));
+        StableLayout = stableLayout ?? throw new ArgumentNullException(nameof(stableLayout));
+        AnimationState = animationState ?? throw new ArgumentNullException(nameof(animationState));
+        WindowGeometry = windowGeometry ?? throw new ArgumentNullException(nameof(windowGeometry));
+        ContextMaterialization = contextMaterialization ?? throw new ArgumentNullException(nameof(contextMaterialization));
+        AsyncLoadSettled = asyncLoadSettled ?? throw new ArgumentNullException(nameof(asyncLoadSettled));
+    }
+
+    [JsonPropertyName("dispatcherIdle")]
+    public WpfProbeConditionObservationDto DispatcherIdle { get; }
+
+    [JsonPropertyName("stableLayout")]
+    public WpfProbeConditionObservationDto StableLayout { get; }
+
+    [JsonPropertyName("animationState")]
+    public WpfProbeConditionObservationDto AnimationState { get; }
+
+    [JsonPropertyName("windowGeometry")]
+    public WpfProbeConditionObservationDto WindowGeometry { get; }
+
+    [JsonPropertyName("contextMaterialization")]
+    public WpfProbeConditionObservationDto ContextMaterialization { get; }
+
+    [JsonPropertyName("asyncLoadSettled")]
+    public WpfProbeConditionObservationDto AsyncLoadSettled { get; }
+}
+
+public sealed class WpfProbeConditionObservationDto
+{
+    public WpfProbeConditionObservationDto(string state)
+    {
+        if (state is not ("met" or "not_met" or "unsupported" or "unobservable"))
+        {
+            throw new ArgumentOutOfRangeException(nameof(state));
+        }
+
+        State = state;
+    }
+
+    [JsonPropertyName("state")]
+    public string State { get; }
 }
 
 public sealed class WpfSceneNodeFactDto
@@ -119,6 +196,7 @@ public sealed class WpfSceneSnapshotDto
         string rootId,
         WpfSceneCandidateFactsDto candidate,
         WpfSceneProcessFactsDto process,
+        WpfProbeStabilityObservationDto stability,
         WpfSceneNodeFactDto[] nodes)
     {
         RevisionBefore = revisionBefore;
@@ -127,6 +205,7 @@ public sealed class WpfSceneSnapshotDto
         RootId = rootId;
         Candidate = candidate;
         Process = process;
+        Stability = stability ?? throw new ArgumentNullException(nameof(stability));
         Nodes = Array.AsReadOnly(nodes);
     }
 
@@ -150,6 +229,9 @@ public sealed class WpfSceneSnapshotDto
 
     [JsonPropertyName("process")]
     public WpfSceneProcessFactsDto Process { get; }
+
+    [JsonPropertyName("stability")]
+    public WpfProbeStabilityObservationDto Stability { get; }
 
     [JsonPropertyName("authority")]
     public string Authority => "in_process_probe";

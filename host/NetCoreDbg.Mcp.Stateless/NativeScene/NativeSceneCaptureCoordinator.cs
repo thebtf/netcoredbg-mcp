@@ -1,5 +1,3 @@
-using System.Buffers.Binary;
-using System.IO.Pipes;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -18,6 +16,15 @@ internal sealed class NativeSceneCaptureCoordinator
     private const int MaximumNodes = 4_096;
     private const int MaximumArtifactBytes = 16 * 1024 * 1024;
     private static readonly TimeSpan ArtifactRetention = TimeSpan.FromHours(4);
+    private static readonly string[] StabilityConditionNames =
+    [
+        "dispatcherIdle",
+        "stableLayout",
+        "animationState",
+        "windowGeometry",
+        "contextMaterialization",
+        "asyncLoadSettled",
+    ];
 
     private readonly NativeSceneArtifactStore _artifactStore;
     private readonly string _debugSessionId;
@@ -66,10 +73,16 @@ internal sealed class NativeSceneCaptureCoordinator
             return ToolError(tool, "CANDIDATE_MISMATCH", "Candidate identity does not match.");
         }
 
+        var probe = await TryProduceAsync(_probeProducer, cancellationToken).ConfigureAwait(false);
+        if (NativeSceneProbeChannel.IsTransportFailure(probe, out var code))
+        {
+            return ToolError(tool, code, "Native-scene probe transport is unavailable.");
+        }
+
         var capturedAt = DateTimeOffset.UtcNow;
         var captureId = CreateOpaqueId();
         var candidate = _candidate();
-        var probe = await TryProduceAsync(_probeProducer, cancellationToken).ConfigureAwait(false);
+
         if (probe is not null && TryNormalizeProbe(probe, target, out var normalized))
         {
             return await CaptureQualifiedAsync(
@@ -171,8 +184,14 @@ internal sealed class NativeSceneCaptureCoordinator
             return ToolError(tool, "CANDIDATE_MISMATCH", "Candidate identity does not match.");
         }
 
+        if (normalized.Authority == CaptureAuthority.InProcess &&
+            !StringComparer.Ordinal.Equals(ReadString(stability, "status"), "STABLE"))
+        {
+            return ToolError(tool, "UI_NOT_STABLE", "Capture-time stability requirements are not met.");
+        }
+
         var status = ClassifyStatus(normalized, stability, isElement);
-        var issues = BuildIssues(normalized, stability);
+        var issues = BuildIssues(normalized, stability, isElement);
         if (status == "UNOBSERVABLE")
         {
             return CreateUnobservableManifest(
@@ -311,7 +330,7 @@ internal sealed class NativeSceneCaptureCoordinator
             : "PARTIAL";
     }
 
-    private static JsonArray BuildIssues(NormalizedCapture capture, JsonObject stability)
+    private static JsonArray BuildIssues(NormalizedCapture capture, JsonObject stability, bool isElement)
     {
         var issues = DeepClone(capture.Issues) as JsonArray ?? new JsonArray();
         if (!StringComparer.Ordinal.Equals(ReadString(stability, "status"), "STABLE"))
@@ -329,6 +348,12 @@ internal sealed class NativeSceneCaptureCoordinator
             if (!capture.Complete)
             {
                 AddIssueOnce(issues, "SCENE_GRAPH_INCOMPLETE", "The in-process probe did not report complete required facts.");
+            }
+            if (isElement &&
+                capture.RevisionBefore == capture.RevisionAfter &&
+                !capture.Complete)
+            {
+                AddIssueOnce(issues, "ADAPTER_FACT_UNOBSERVABLE", "No qualified element fact could be committed.");
             }
         }
 
@@ -489,7 +514,8 @@ internal sealed class NativeSceneCaptureCoordinator
             !TryReadBoolean(source, "complete", out var complete) ||
             !TryReadNodes(source["nodes"] as JsonArray, MaximumNodes, CaptureAuthority.InProcess, out var nodes) ||
             !TryReadLabel(source, "rootId", out var sourceRootId) ||
-            !TryFindNodeIdByContractId(nodes, sourceRootId, out var rootId))
+            !TryFindNodeIdByContractId(nodes, sourceRootId, out var rootId) ||
+            !TryCloneStabilityObservation(source["stability"] as JsonObject, out var stabilityObservation))
         {
             return false;
         }
@@ -510,7 +536,7 @@ internal sealed class NativeSceneCaptureCoordinator
                 ["layoutStateRevisionAfter"] = revisionAfter,
             },
             new JsonArray(),
-            MetStabilityObservation());
+            stabilityObservation);
         return true;
     }
 
@@ -526,7 +552,8 @@ internal sealed class NativeSceneCaptureCoordinator
             !TryReadLabel(source, "rootId", out var rootId) ||
             !TryReadGuardedNodes(source["nodes"] as JsonArray, rootId, out var nodes) ||
             !ContainsNode(nodes, rootId) ||
-            !HasUnchangedGuards(source["guards"] as JsonObject))
+            !HasUnchangedGuards(source["guards"] as JsonObject) ||
+            !TryCloneStabilityObservation(source["stability"] as JsonObject, out var stabilityObservation))
         {
             return false;
         }
@@ -543,7 +570,7 @@ internal sealed class NativeSceneCaptureCoordinator
             {
                 Issue("ATOMICITY_UNPROVEN_UIA_GUARDED", "UIA reads are independently timed and cannot prove an atomic framework scene."),
             },
-            StabilityObservation: MetStabilityObservation());
+            StabilityObservation: stabilityObservation);
         return true;
     }
 
@@ -582,8 +609,8 @@ internal sealed class NativeSceneCaptureCoordinator
                 ["identity"] = new JsonObject { ["contractId"] = id },
                 ["accessibility"] = new JsonObject
                 {
-                    ["automationId"] = node["automationId"]?.DeepClone(),
-                    ["name"] = node["accessibleName"]?.DeepClone(),
+                    ["automationId"] = CloneBoundedArtifactString(node["automationId"]),
+                    ["name"] = CloneBoundedArtifactString(node["accessibleName"]),
                     ["controlType"] = null,
                     ["visibility"] = "visible",
                 },
@@ -602,7 +629,7 @@ internal sealed class NativeSceneCaptureCoordinator
                         ["namespace"] = "netcoredbg.wpf.probe",
                         ["schemaVersion"] = "1",
                         ["authority"] = authority == CaptureAuthority.InProcess ? "in_process_framework_probe" : "uia_guarded",
-                        ["payload"] = new JsonObject { ["text"] = node["text"]?.DeepClone() },
+                        ["payload"] = CreateProbeAdapterPayload(node),
                     },
                 },
             });
@@ -610,6 +637,58 @@ internal sealed class NativeSceneCaptureCoordinator
 
         return true;
     }
+
+    private static JsonObject CreateProbeAdapterPayload(JsonObject node)
+    {
+        var payload = new JsonObject
+        {
+            ["text"] = CloneBoundedArtifactString(node["text"]),
+        };
+        AddStringChunks(payload, "automationIdChunks", node["automationId"]);
+        AddStringChunks(payload, "accessibleNameChunks", node["accessibleName"]);
+        AddStringChunks(payload, "textChunks", node["text"]);
+        return payload;
+    }
+
+    private static JsonNode? CloneBoundedArtifactString(JsonNode? source)
+    {
+        if (source is not JsonValue value || !value.TryGetValue<string>(out var text))
+        {
+            return null;
+        }
+
+        var end = FindUtf16SafeChunkEnd(text, 0, 256);
+        return end == text.Length ? text : text[..end];
+    }
+
+    private static void AddStringChunks(JsonObject payload, string propertyName, JsonNode? source)
+    {
+        if (source is not JsonValue value || !value.TryGetValue<string>(out var text) || text.Length <= 256)
+        {
+            return;
+        }
+        var chunks = new JsonArray();
+        for (var offset = 0; offset < text.Length;)
+        {
+            var end = FindUtf16SafeChunkEnd(text, offset, 256);
+            chunks.Add(text[offset..end]);
+            offset = end;
+        }
+
+        payload[propertyName] = chunks;
+    }
+
+    private static int FindUtf16SafeChunkEnd(string text, int start, int maximumCodeUnits)
+    {
+        var end = Math.Min(text.Length, start + maximumCodeUnits);
+        if (end < text.Length && end > start && char.IsHighSurrogate(text[end - 1]) && char.IsLowSurrogate(text[end]))
+        {
+            end--;
+        }
+
+        return end;
+    }
+
 
     private static bool TryReadGuardedNodes(JsonArray? source, string rootId, out JsonArray nodes)
     {
@@ -783,18 +862,44 @@ internal sealed class NativeSceneCaptureCoordinator
         ["visualTreeFingerprint"] = new JsonObject { ["state"] = state },
     };
 
-    private static JsonObject MetStabilityObservation() => new()
+    internal static bool TryCloneStabilityObservation(JsonObject? source, out JsonObject observation)
     {
-        ["conditions"] = new JsonObject
+        observation = default!;
+        if (source is null ||
+            source.Count != 2 ||
+            !TryReadSceneEpoch(source, out var sceneEpoch) ||
+            source["conditions"] is not JsonObject conditions ||
+            conditions.Count != StabilityConditionNames.Length)
         {
-            ["dispatcherIdle"] = new JsonObject { ["state"] = "met" },
-            ["stableLayout"] = new JsonObject { ["state"] = "met" },
-            ["animationState"] = new JsonObject { ["state"] = "met" },
-            ["windowGeometry"] = new JsonObject { ["state"] = "met" },
-            ["contextMaterialization"] = new JsonObject { ["state"] = "met" },
-            ["asyncLoadSettled"] = new JsonObject { ["state"] = "met" },
-        },
-    };
+            return false;
+        }
+
+        var clonedConditions = new JsonObject();
+        foreach (var name in StabilityConditionNames)
+        {
+            if (conditions[name] is not JsonObject condition ||
+                condition.Count != 1 ||
+                !TryReadStabilityState(condition, out var state))
+            {
+                return false;
+            }
+
+            clonedConditions[name] = new JsonObject { ["state"] = state };
+        }
+
+        observation = new JsonObject
+        {
+            ["sceneEpoch"] = sceneEpoch,
+            ["conditions"] = clonedConditions,
+        };
+        return true;
+    }
+
+    private static bool TryReadStabilityState(JsonObject source, out string state)
+    {
+        state = ReadString(source, "state") ?? string.Empty;
+        return state is "met" or "not_met" or "unsupported" or "unobservable";
+    }
 
     private static JsonObject CreateUnobservableStability() => new()
     {
@@ -811,7 +916,7 @@ internal sealed class NativeSceneCaptureCoordinator
         },
         ["settleDurationMs"] = 0,
         ["observedAt"] = Timestamp(DateTimeOffset.UtcNow),
-        ["sceneEpoch"] = 0,
+        ["sceneEpoch"] = 0L,
         ["sequence"] = 0,
     };
 
@@ -923,6 +1028,26 @@ internal sealed class NativeSceneCaptureCoordinator
         return source[name] is JsonValue node && node.TryGetValue(out value);
     }
 
+    private static bool TryReadSceneEpoch(JsonObject source, out long value)
+    {
+        if (source["sceneEpoch"] is JsonValue node)
+        {
+            if (node.TryGetValue<long>(out value) && value >= 0)
+            {
+                return true;
+            }
+
+            if (node.TryGetValue<int>(out var intValue) && intValue >= 0)
+            {
+                value = intValue;
+                return true;
+            }
+        }
+
+        value = 0;
+        return false;
+    }
+
     private static bool TryReadFiniteNumber(JsonObject source, string name, out double value)
     {
         value = 0;
@@ -961,210 +1086,4 @@ internal sealed class NativeSceneCaptureCoordinator
         JsonObject Atomicity,
         JsonArray Issues,
         JsonObject StabilityObservation);
-}
-
-/// <summary>
-/// A one-connection local endpoint created before DAP launch. The debuggee owns the outbound connection.
-/// </summary>
-internal sealed class NativeSceneProbeChannel : IAsyncDisposable
-{
-    private const int MaximumRequestBytes = 64 * 1024;
-    private const int MaximumResponseBytes = 1024 * 1024;
-    private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(5);
-
-    private readonly NamedPipeServerStream _pipe;
-    private readonly SemaphoreSlim _gate = new(1, 1);
-    private readonly CancellationTokenSource _stopping = new();
-    private int _disposed;
-
-    internal NativeSceneProbeChannel()
-    {
-        PipeName = "native-scene-probe-" + CreateToken();
-        Nonce = CreateToken();
-        _pipe = new NamedPipeServerStream(
-            PipeName,
-            PipeDirection.InOut,
-            maxNumberOfServerInstances: 1,
-            PipeTransmissionMode.Byte,
-            PipeOptions.Asynchronous);
-    }
-
-    internal string PipeName { get; }
-
-    internal string Nonce { get; }
-
-    internal bool IsConnected => Volatile.Read(ref _disposed) == 0 && _pipe.IsConnected;
-
-    internal IReadOnlyDictionary<string, string> LaunchEnvironment => new Dictionary<string, string>(StringComparer.Ordinal)
-    {
-        ["NETCOREDBG_MCP_NATIVE_SCENE_PROBE_PIPE"] = PipeName,
-        ["NETCOREDBG_MCP_NATIVE_SCENE_PROBE_NONCE"] = Nonce,
-    };
-
-    internal async Task<JsonObject?> CaptureAsync(CancellationToken cancellationToken)
-    {
-        try
-        {
-            await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-
-        try
-        {
-            if (Volatile.Read(ref _disposed) != 0)
-            {
-                return null;
-            }
-
-            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _stopping.Token);
-            deadline.CancelAfter(Timeout);
-            if (!_pipe.IsConnected)
-            {
-                await _pipe.WaitForConnectionAsync(deadline.Token).ConfigureAwait(false);
-            }
-
-            var correlationId = CreateToken();
-            var request = JsonSerializer.SerializeToUtf8Bytes(new
-            {
-                nonce = Nonce,
-                correlationId,
-                request = new { operation = "capture" },
-            });
-            if (request.Length is < 1 or > MaximumRequestBytes)
-            {
-                return null;
-            }
-
-            await WriteFrameAsync(_pipe, request, deadline.Token).ConfigureAwait(false);
-            var response = await ReadFrameAsync(_pipe, MaximumResponseBytes, deadline.Token).ConfigureAwait(false);
-            return TryReadResponse(response, correlationId, out var payload) ? payload : null;
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (OperationCanceledException)
-        {
-            return null;
-        }
-        catch (Exception)
-        {
-            return null;
-        }
-        finally
-        {
-            _gate.Release();
-        }
-    }
-
-    public ValueTask DisposeAsync()
-    {
-        if (Interlocked.Exchange(ref _disposed, 1) == 0)
-        {
-            _stopping.Cancel();
-            _pipe.Dispose();
-            _stopping.Dispose();
-        }
-
-        return ValueTask.CompletedTask;
-    }
-
-    private bool TryReadResponse(ReadOnlyMemory<byte> response, string correlationId, out JsonObject? payload)
-    {
-        payload = null;
-        try
-        {
-            using var document = JsonDocument.Parse(response, new JsonDocumentOptions
-            {
-                AllowTrailingCommas = false,
-                CommentHandling = JsonCommentHandling.Disallow,
-                MaxDepth = 16,
-            });
-            var envelope = document.RootElement;
-            if (envelope.ValueKind != JsonValueKind.Object ||
-                !TryReadToken(envelope, "nonce", out var nonce) || !FixedTimeEquals(Nonce, nonce) ||
-                !TryReadToken(envelope, "correlationId", out var receivedCorrelation) || !FixedTimeEquals(correlationId, receivedCorrelation) ||
-                !envelope.TryGetProperty("response", out var responsePayload) || responsePayload.ValueKind != JsonValueKind.Object)
-            {
-                return false;
-            }
-
-            payload = JsonNode.Parse(responsePayload.GetRawText()) as JsonObject;
-            return payload is not null;
-        }
-        catch (JsonException)
-        {
-            return false;
-        }
-    }
-
-    private static async Task WriteFrameAsync(Stream stream, ReadOnlyMemory<byte> payload, CancellationToken cancellationToken)
-    {
-        var header = new byte[sizeof(int)];
-        BinaryPrimitives.WriteInt32LittleEndian(header, payload.Length);
-        await stream.WriteAsync(header, cancellationToken).ConfigureAwait(false);
-        await stream.WriteAsync(payload, cancellationToken).ConfigureAwait(false);
-        await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
-    }
-
-    private static async Task<byte[]> ReadFrameAsync(Stream stream, int maximumBytes, CancellationToken cancellationToken)
-    {
-        var header = new byte[sizeof(int)];
-        await ReadExactlyAsync(stream, header, cancellationToken).ConfigureAwait(false);
-        var length = BinaryPrimitives.ReadInt32LittleEndian(header);
-        if (length is < 1 or > MaximumResponseBytes || length > maximumBytes)
-        {
-            throw new InvalidDataException("The native-scene probe frame is outside the negotiated bound.");
-        }
-
-        var frame = new byte[length];
-        await ReadExactlyAsync(stream, frame, cancellationToken).ConfigureAwait(false);
-        return frame;
-    }
-
-    private static async Task ReadExactlyAsync(Stream stream, Memory<byte> destination, CancellationToken cancellationToken)
-    {
-        var offset = 0;
-        while (offset < destination.Length)
-        {
-            var read = await stream.ReadAsync(destination[offset..], cancellationToken).ConfigureAwait(false);
-            if (read == 0)
-            {
-                throw new EndOfStreamException("The native-scene probe pipe closed before a complete frame arrived.");
-            }
-
-            offset += read;
-        }
-    }
-
-    private static bool TryReadToken(JsonElement source, string name, out string value)
-    {
-        value = string.Empty;
-        return source.TryGetProperty(name, out var property) &&
-               property.ValueKind == JsonValueKind.String &&
-               property.GetString() is { Length: 22 } parsed &&
-               parsed.All(static character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_') &&
-               (value = parsed).Length == 22;
-    }
-
-    private static bool FixedTimeEquals(string expected, string actual) =>
-        expected.Length == actual.Length &&
-        CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expected), Encoding.UTF8.GetBytes(actual));
-
-    private static string CreateToken()
-    {
-        Span<byte> bytes = stackalloc byte[16];
-        try
-        {
-            RandomNumberGenerator.Fill(bytes);
-            return Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(bytes);
-        }
-    }
 }

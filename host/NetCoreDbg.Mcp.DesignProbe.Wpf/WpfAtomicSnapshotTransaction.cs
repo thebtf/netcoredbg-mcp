@@ -50,6 +50,7 @@ public sealed class WpfAtomicSnapshotTransaction
             EnsureRequiredString(materialization.RootId, "rootId"),
             candidate,
             process,
+            materialization.Stability,
             nodes);
     }
 

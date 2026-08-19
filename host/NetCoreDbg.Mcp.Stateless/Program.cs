@@ -119,6 +119,9 @@ internal static class Program
         private readonly string? _artifactRoot;
         private readonly Func<NetCoreDbgSession, bool> _isUsable;
         private readonly Func<NetCoreDbgSession, ValueTask> _dispose;
+        private readonly bool _supportsNativeSceneCapture = !StringComparer.OrdinalIgnoreCase.Equals(
+            Environment.GetEnvironmentVariable("NETCOREDBG_MCP_NATIVE_SCENE_CAPTURE"),
+            "unsupported");
 
         internal DebugSessionRegistry(string? debuggerPath)
             : this(
@@ -241,7 +244,7 @@ internal static class Program
             try
             {
                 var token = CreateToken();
-                binding = new NativeSceneSessionBinding(token, _bridgePath, _artifactRoot);
+                binding = new NativeSceneSessionBinding(token, _bridgePath, _artifactRoot, _supportsNativeSceneCapture);
                 session = await NetCoreDbgSession.StartAsync(
                     _debuggerPath,
                     program!,

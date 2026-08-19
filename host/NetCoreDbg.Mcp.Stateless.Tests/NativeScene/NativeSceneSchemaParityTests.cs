@@ -20,7 +20,7 @@ public sealed class NativeSceneSchemaParityTests
     [
         new("native-scene-probe.schema.json", "f446166f9a1062d3e1a2190327d06c04905e76a1c1f81af16c87572394f90022"),
         new("native-scene-artifact.schema.json", "07c257c9b5f75c01aa4f4141968c789b045d7c831575343df429075c732f7668"),
-        new("parity-corpus.json", "9308da9c3807b4967b175525c9df4183593b4537a26be13cbe36bc8edd1faadf"),
+        new("parity-corpus.json", "90c24f8f9706c207ca3ecf8dee93d1937c16a6be45feac65d812e48853bc4621"),
     ];
 
     [Fact]

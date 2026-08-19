@@ -39,7 +39,7 @@ public sealed class NativeSceneStabilityTests
         Assert.False(Boolean(stability["revalidatedByCapture"]));
         Assert.Equal(0, Integer(stability["settleDurationMs"]));
         Assert.Equal(Start, Timestamp(stability["observedAt"]));
-        Assert.Equal(41, Integer(stability["sceneEpoch"]));
+        Assert.Equal(41L, Int64(stability["sceneEpoch"]));
         Assert.Equal(sampleCount, Integer(stability["sequence"]));
         AssertAllConditions(stability, "met");
     }
@@ -84,7 +84,7 @@ public sealed class NativeSceneStabilityTests
         var historical = await coordinator.WaitForStableAsync(request.RootElement);
         Assert.Equal("STABLE", Text(historical["status"]));
         Assert.False(Boolean(historical["revalidatedByCapture"]));
-        Assert.Equal(41, Integer(historical["sceneEpoch"]));
+        Assert.Equal(41L, Int64(historical["sceneEpoch"]));
 
         fixture.SetCondition("stableLayout", "not_met", sceneEpoch: 42);
         clock.Advance(TimeSpan.FromSeconds(1));
@@ -95,9 +95,136 @@ public sealed class NativeSceneStabilityTests
         Assert.Equal("PARTIAL", Text(captureTime["status"]));
         Assert.True(Boolean(captureTime["revalidatedByCapture"]));
         Assert.Equal("not_met", Text(Conditions(captureTime)["stableLayout"]!.AsObject()["state"]));
-        Assert.Equal(42, Integer(captureTime["sceneEpoch"]));
+        Assert.Equal(42L, Int64(captureTime["sceneEpoch"]));
         Assert.Equal(clock.GetUtcNow(), Timestamp(captureTime["observedAt"]));
         Assert.NotEqual(Integer(historical["sequence"]), Integer(captureTime["sequence"]));
+    }
+
+    [Fact]
+    public async Task C014_StaleWaitReceipt_CannotAuthorizeCaptureNativeScene()
+    {
+        var catalog = NativeSceneContractCatalogDriver.Load();
+        var corpus = JsonNode.Parse(System.Text.Encoding.UTF8.GetString(catalog.GetArtifactBytes("parity-corpus.json")))!.AsObject();
+        var c014 = corpus["cases"]!.AsArray()
+            .Single(@case => Text(@case!?.AsObject()["id"]) == "C014-stale-wait-receipt-cannot-authorize-capture")!
+            .AsObject();
+        var captureRequest = Object(c014["request"]!.DeepClone());
+        var sceneRequest = Object(captureRequest["sceneRequest"]);
+        var expectedResponse = Object(Object(c014["expected"])["requiredResponse"]);
+        var clock = new FakeTimeProvider(Start);
+        var fixture = new ControlledStabilityFixture(
+            clock,
+            Text(sceneRequest["fixtureId"]),
+            TimeSpan.FromMilliseconds(Integer(Object(sceneRequest["settlePolicy"])["stableForMs"])));
+        var stability = NativeSceneStabilityCoordinatorDriver.Create(clock, fixture.ObserveAsync);
+        await using var artifacts = ArtifactStoreTestScope.Create(clock);
+        var capture = NativeSceneCaptureCoordinatorDriver.Create(
+            artifacts.Store,
+            stability,
+            Object(sceneRequest["expectedCandidateIdentity"]));
+        using var request = JsonDocument.Parse(captureRequest.ToJsonString());
+
+        var historical = await stability.WaitForStableAsync(request.RootElement.GetProperty("sceneRequest"));
+        Assert.Equal("STABLE", Text(historical["status"]));
+        Assert.False(Boolean(historical["revalidatedByCapture"]));
+        Assert.Equal(41L, Int64(historical["sceneEpoch"]));
+
+        fixture.SetCondition("stableLayout", "not_met", sceneEpoch: 42);
+
+        var rejected = await capture.CaptureNativeSceneAsync(request.RootElement);
+
+        Assert.Equal(4, fixture.ObservationCount);
+        Assert.Equal(42L, fixture.LastObservedSceneEpoch);
+        AssertSchemaValid("capture_native_scene", rejected);
+        Assert.Equal(Text(expectedResponse["kind"]), Text(rejected["kind"]));
+        Assert.Equal(Text(expectedResponse["tool"]), Text(rejected["tool"]));
+        Assert.Equal(Text(expectedResponse["code"]), Text(rejected["code"]));
+        Assert.Equal(1, capture.CaptureObserverCallCount);
+        Assert.DoesNotContain(
+            EnumeratePropertyNames(rejected),
+            static name => name is "captureId" or "capturedAt" or "artifacts" or "artifactId" or "artifactSchemaVersion");
+        Assert.Equal(0, artifacts.Store.StagedArtifactMetadataCount);
+        Assert.Equal(0, artifacts.Store.CommittedArtifactMetadataCount);
+    }
+
+    [Fact]
+    public async Task Int64SceneEpoch_QualifiedProbeAndCaptureRevalidation_PreserveExactReceiptValue()
+    {
+        const long sceneEpoch = (long)int.MaxValue + 1;
+        var catalog = NativeSceneContractCatalogDriver.Load();
+        var corpus = JsonNode.Parse(System.Text.Encoding.UTF8.GetString(catalog.GetArtifactBytes("parity-corpus.json")))!.AsObject();
+        var c014 = corpus["cases"]!.AsArray()
+            .Single(@case => Text(@case!?.AsObject()["id"]) == "C014-stale-wait-receipt-cannot-authorize-capture")!
+            .AsObject();
+        var captureRequest = Object(c014["request"]!.DeepClone());
+        var sceneRequest = Object(captureRequest["sceneRequest"]);
+        var clock = new FakeTimeProvider(Start);
+        var fixture = new ControlledStabilityFixture(
+            clock,
+            Text(sceneRequest["fixtureId"]),
+            TimeSpan.FromMilliseconds(Integer(Object(sceneRequest["settlePolicy"])["stableForMs"])));
+        fixture.SetCondition("stableLayout", "met", sceneEpoch);
+        var stability = NativeSceneStabilityCoordinatorDriver.Create(clock, fixture.ObserveAsync);
+        await using var artifacts = ArtifactStoreTestScope.Create(clock);
+        var capture = NativeSceneCaptureCoordinatorDriver.Create(
+            artifacts.Store,
+            stability,
+            Object(sceneRequest["expectedCandidateIdentity"]),
+            sceneEpoch);
+        using var request = JsonDocument.Parse(captureRequest.ToJsonString());
+
+        var receipt = await stability.WaitForStableAsync(request.RootElement.GetProperty("sceneRequest"));
+
+        AssertSchemaValid("wait_for_ui_stable", StabilityReceipt(receipt));
+        Assert.Equal(sceneEpoch, Int64(receipt["sceneEpoch"]));
+
+        var captured = await capture.CaptureNativeSceneAsync(request.RootElement);
+
+        AssertSchemaValid("capture_native_scene", captured);
+        Assert.Equal("COMPLETE", Text(captured["status"]));
+        var captureStability = Object(captured["stability"]);
+        Assert.True(Boolean(captureStability["revalidatedByCapture"]));
+        Assert.Equal(sceneEpoch, Int64(captureStability["sceneEpoch"]));
+        Assert.Equal(1, capture.CaptureObserverCallCount);
+    }
+
+    [Fact]
+    public async Task C014_ProductionSessionBinding_StaleLayoutWaitCannotAuthorizeLaterCapture()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        await using var driver = await StartFixtureDriverAsync("stale-layout");
+        var session = await StartBoundFixtureSessionAsync(driver, "stability-c014-start");
+
+        var receipt = await CallToolAsync(
+            driver,
+            "wait_for_ui_stable",
+            SceneArguments(session.DebugSessionId, session.Candidate, sampleCount: 2),
+            "stability-c014-wait",
+            isError: false);
+        AssertSchemaValid("wait_for_ui_stable", receipt.StructuredContent);
+        var waitStability = Object(receipt.StructuredContent["stability"]);
+        Assert.Equal("STABLE", Text(waitStability["status"]));
+        Assert.False(Boolean(waitStability["revalidatedByCapture"]));
+        Assert.Equal(41L, Int64(waitStability["sceneEpoch"]));
+        AssertAllConditions(waitStability, "met");
+
+        var rejected = await CallToolAsync(
+            driver,
+            "capture_native_scene",
+            SceneArguments(session.DebugSessionId, session.Candidate, sampleCount: 2),
+            "stability-c014-capture",
+            isError: true);
+        AssertSchemaValid("capture_native_scene", rejected.StructuredContent);
+        Assert.Equal("tool_error", Text(rejected.StructuredContent["kind"]));
+        Assert.Equal("capture_native_scene", Text(rejected.StructuredContent["tool"]));
+        Assert.Equal("UI_NOT_STABLE", Text(rejected.StructuredContent["code"]));
+        Assert.DoesNotContain(
+            EnumeratePropertyNames(rejected.StructuredContent),
+            static name => name is "captureId" or "capturedAt" or "artifacts" or "artifactId" or "artifactSchemaVersion");
     }
 
     [Theory]
@@ -120,7 +247,7 @@ public sealed class NativeSceneStabilityTests
         Assert.Equal(expectedStatus, Text(stability["status"]));
         Assert.True(Boolean(stability["revalidatedByCapture"]));
         Assert.Equal(state, Text(Conditions(stability)[condition]!.AsObject()["state"]));
-        Assert.Equal(42, Integer(stability["sceneEpoch"]));
+        Assert.Equal(42L, Int64(stability["sceneEpoch"]));
         Assert.Equal(Start, Timestamp(stability["observedAt"]));
     }
 
@@ -251,6 +378,44 @@ public sealed class NativeSceneStabilityTests
                     ["FLAUI_BRIDGE_PATH"] = ResolveBridgeAssemblyPath(),
                 }));
 
+    private static Task<ModernMcpProcessDriver> StartFixtureDriverAsync(string mode) =>
+        ModernMcpProcessDriver.StartAsync(
+            new ModernMcpStartOptions(
+                FixtureConfiguration: new FixtureConfiguration(
+                    SpawnWindowedDescendant: true,
+                    WindowedDescendantExecutablePath: ResolveFixtureExecutablePath(),
+                    WindowedDescendantArguments:
+                    [
+                        "--native-scene-probe-test-harness",
+                        $"--native-scene-probe-mode={mode}",
+                    ])));
+
+    private static string ResolveFixtureExecutablePath()
+    {
+        var configuration = new DirectoryInfo(AppContext.BaseDirectory).Parent?.Name
+            ?? throw new InvalidOperationException("Test output configuration is absent.");
+        var path = Path.Combine(
+            RepositoryLayout.Root,
+            "host",
+            "NetCoreDbg.Mcp.Stateless.Tests",
+            "Fixtures",
+            "NativeSceneProbe.WpfFixture",
+            "bin",
+            configuration,
+            "net8.0-windows",
+            "NativeSceneProbe.WpfFixture.exe");
+        Assert.True(File.Exists(path), $"Built WPF fixture is absent: '{path}'.");
+        return path;
+    }
+
+    private static async Task<(string DebugSessionId, JsonObject Candidate)> StartBoundFixtureSessionAsync(
+        ModernMcpProcessDriver driver,
+        string requestId)
+    {
+        var debugSessionId = await StartDebugAsync(driver, requestId, ResolveFixtureExecutablePath());
+        return (debugSessionId, await GetCandidateAsync(driver, debugSessionId, $"{requestId}-capabilities"));
+    }
+
     private static string ResolveBridgeAssemblyPath()
     {
         var testOutputDirectory = new DirectoryInfo(AppContext.BaseDirectory);
@@ -266,12 +431,12 @@ public sealed class NativeSceneStabilityTests
             ?? throw new InvalidOperationException("Built FlaUI bridge assembly is absent.");
     }
 
-    private static async Task<string> StartDebugAsync(ModernMcpProcessDriver driver, string requestId)
+    private static async Task<string> StartDebugAsync(ModernMcpProcessDriver driver, string requestId, string? program = null)
     {
         var content = (await CallToolAsync(
             driver,
             "start_debug",
-            new JsonObject { ["program"] = driver.InertProgramPath },
+            new JsonObject { ["program"] = program ?? driver.InertProgramPath },
             requestId,
             isError: false)).StructuredContent;
         Assert.Equal("start_debug_success", Text(content["kind"]));
@@ -453,6 +618,8 @@ public sealed class NativeSceneStabilityTests
 
     private static int Integer(JsonNode? node) => Assert.IsAssignableFrom<JsonValue>(node).GetValue<int>();
 
+    private static long Int64(JsonNode? node) => Assert.IsAssignableFrom<JsonValue>(node).GetValue<long>();
+
     private static bool Boolean(JsonNode? node) => Assert.IsAssignableFrom<JsonValue>(node).GetValue<bool>();
 
     private static DateTimeOffset Timestamp(JsonNode? node) => DateTimeOffset.Parse(Text(node), System.Globalization.CultureInfo.InvariantCulture);
@@ -469,14 +636,25 @@ public sealed class NativeSceneStabilityTests
             ["asyncLoadSettled"] = "met",
         };
         private readonly FakeTimeProvider _clock;
-        private int _sceneEpoch = 41;
+        private readonly string _fixtureId;
+        private readonly TimeSpan _advanceClockAfterObservation;
+        private long _sceneEpoch = 41;
         private int _sequence;
 
-        public ControlledStabilityFixture(FakeTimeProvider clock) => _clock = clock;
+        public ControlledStabilityFixture(
+            FakeTimeProvider clock,
+            string fixtureId = "ControlledFixture",
+            TimeSpan? advanceClockAfterObservation = null)
+        {
+            _clock = clock;
+            _fixtureId = fixtureId;
+            _advanceClockAfterObservation = advanceClockAfterObservation ?? TimeSpan.Zero;
+        }
 
         public int ObservationCount { get; private set; }
+        public long LastObservedSceneEpoch { get; private set; }
 
-        public void SetCondition(string name, string state, int sceneEpoch)
+        public void SetCondition(string name, string state, long sceneEpoch)
         {
             Assert.Contains(name, _conditions.Keys);
             Assert.Contains(state, new[] { "met", "not_met", "unsupported", "unobservable" });
@@ -489,8 +667,9 @@ public sealed class NativeSceneStabilityTests
             cancellationToken.ThrowIfCancellationRequested();
             Assert.True(sceneRequest.TryGetProperty("settlePolicy", out var policy));
             Assert.Equal(JsonValueKind.Object, policy.ValueKind);
-            Assert.Equal("ControlledFixture", sceneRequest.GetProperty("fixtureId").GetString());
+            Assert.Equal(_fixtureId, sceneRequest.GetProperty("fixtureId").GetString());
             ObservationCount++;
+            LastObservedSceneEpoch = _sceneEpoch;
 
             var conditions = new JsonObject();
             foreach (var (name, state) in _conditions)
@@ -498,12 +677,16 @@ public sealed class NativeSceneStabilityTests
                 conditions[name] = new JsonObject { ["state"] = state };
             }
 
+            var observedAt = _clock.GetUtcNow();
+            _clock.Advance(_advanceClockAfterObservation);
             return Task.FromResult(new JsonObject
             {
                 ["conditions"] = conditions,
-                ["sceneEpoch"] = _sceneEpoch,
+                ["sceneEpoch"] = _sceneEpoch <= int.MaxValue
+                    ? JsonValue.Create((int)_sceneEpoch)
+                    : JsonValue.Create(_sceneEpoch),
                 ["sequence"] = _sequence = ObservationCount,
-                ["observedAt"] = _clock.GetUtcNow().ToString("O", System.Globalization.CultureInfo.InvariantCulture),
+                ["observedAt"] = observedAt.ToString("O", System.Globalization.CultureInfo.InvariantCulture),
             });
         }
     }
@@ -633,5 +816,211 @@ internal sealed class NativeSceneStabilityCoordinatorDriver
         Assert.False(method.IsPublic, $"{type.FullName}.{name} must remain an internal host operation.");
         Assert.Equal(typeof(Task<JsonObject>), method.ReturnType);
         return method;
+    }
+}
+
+/// <summary>
+/// Exact C014 reflection seam. The production capture coordinator is supplied
+/// the same stability coordinator instance used by the preceding standalone
+/// wait; a qualified probe observation may run, but fresh revalidation must
+/// reject the changed condition before artifact staging or commit.
+/// </summary>
+internal sealed class NativeSceneCaptureCoordinatorDriver
+{
+    private const string ProductionAssemblyName = "NetCoreDbg.Mcp.Stateless";
+    private const string CoordinatorTypeName = "NetCoreDbg.Mcp.Stateless.NativeScene.NativeSceneCaptureCoordinator";
+    private const string TargetIdentityTypeName = "NetCoreDbg.Mcp.Stateless.NativeScene.NativeSceneTargetIdentity";
+
+    private readonly object _coordinator;
+    private readonly MethodInfo _captureNativeSceneAsync;
+    private readonly CaptureObserverCounter _captureObserverCounter;
+
+    private NativeSceneCaptureCoordinatorDriver(
+        object coordinator,
+        MethodInfo captureNativeSceneAsync,
+        CaptureObserverCounter captureObserverCounter)
+    {
+        _coordinator = coordinator;
+        _captureNativeSceneAsync = captureNativeSceneAsync;
+        _captureObserverCounter = captureObserverCounter;
+    }
+
+    public int CaptureObserverCallCount => _captureObserverCounter.Count;
+
+    public static NativeSceneCaptureCoordinatorDriver Create(
+        NativeSceneArtifactStoreDriver artifactStore,
+        NativeSceneStabilityCoordinatorDriver stability,
+        JsonObject expectedCandidate,
+        long sceneEpoch = 41)
+    {
+        var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(TestOutputPathResolver.ResolveManagedAssembly(
+            RepositoryLayout.Root,
+            Path.Combine("host", ProductionAssemblyName),
+            ProductionAssemblyName));
+        var coordinatorType = assembly.GetType(CoordinatorTypeName, throwOnError: false)
+            ?? throw new InvalidOperationException($"Missing production contract: type '{CoordinatorTypeName}' is absent from '{assembly.Location}'.");
+        var targetType = assembly.GetType(TargetIdentityTypeName, throwOnError: false)
+            ?? throw new InvalidOperationException($"Missing native-scene target identity '{TargetIdentityTypeName}' in '{assembly.Location}'.");
+        Assert.False(coordinatorType.IsPublic, "NativeSceneCaptureCoordinator must remain an internal host authority.");
+        var targetConstructor = targetType.GetConstructor(
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+            binder: null,
+            types: [typeof(int), typeof(string), typeof(string), typeof(string), typeof(string), typeof(string)],
+            modifiers: null)
+            ?? throw new InvalidOperationException($"Missing native-scene target identity constructor on '{targetType.FullName}'.");
+        var target = targetConstructor.Invoke(
+        [
+            73,
+            "c014-target",
+            "gallery.exe",
+            Assert.IsAssignableFrom<JsonValue>(expectedCandidate["executableSha256"]).GetValue<string>(),
+            Assert.IsAssignableFrom<JsonValue>(expectedCandidate["assemblyVersion"]).GetValue<string>(),
+            Assert.IsAssignableFrom<JsonValue>(expectedCandidate["probeVersion"]).GetValue<string>(),
+        ]);
+        var targetSupplier = (Delegate)typeof(NativeSceneCaptureCoordinatorDriver)
+            .GetMethod(nameof(CreateTargetSupplier), BindingFlags.Static | BindingFlags.NonPublic)!
+            .MakeGenericMethod(targetType)
+            .Invoke(null, [target])!;
+        var captureObserverCounter = new CaptureObserverCounter();
+        Func<CancellationToken, Task<JsonObject?>> probeProducer = _ =>
+        {
+            captureObserverCounter.Count++;
+            return Task.FromResult<JsonObject?>(QualifiedProbe(sceneEpoch));
+        };
+        Func<string, JsonObject, CancellationToken, Task<JsonObject?>> guardedProducer = (_, _, _) =>
+        {
+            captureObserverCounter.Count++;
+            return Task.FromResult<JsonObject?>(null);
+        };
+        Func<JsonElement, CancellationToken, Task<JsonObject>> revalidate = stability.RevalidateForCaptureAsync;
+        var store = GetStore(artifactStore);
+        var constructor = coordinatorType.GetConstructor(
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+            binder: null,
+            types:
+            [
+                store.GetType(),
+                typeof(string),
+                typeof(Func<JsonObject>),
+                targetSupplier.GetType(),
+                typeof(Func<CancellationToken, Task<JsonObject?>>),
+                typeof(Func<string, JsonObject, CancellationToken, Task<JsonObject?>>),
+                typeof(Action<JsonObject?>),
+                typeof(Func<JsonElement, CancellationToken, Task<JsonObject>>),
+            ],
+            modifiers: null)
+            ?? throw new InvalidOperationException($"Missing C014 capture coordinator injection constructor on '{coordinatorType.FullName}'.");
+        Assert.False(constructor.IsPublic, "The controlled C014 producers must remain an internal host seam.");
+        var coordinator = constructor.Invoke(
+        [
+            store,
+            "c014-debug-session",
+            (Func<JsonObject>)(() => Candidate(expectedCandidate)),
+            targetSupplier,
+            probeProducer,
+            guardedProducer,
+            (Action<JsonObject?>)(static _ => { }),
+            revalidate,
+        ]);
+        Assert.NotNull(coordinator);
+        return new NativeSceneCaptureCoordinatorDriver(
+            coordinator!,
+            RequireTaskOfJsonObjectMethod(coordinatorType, "CaptureNativeSceneAsync", typeof(JsonElement), typeof(CancellationToken)),
+            captureObserverCounter);
+    }
+
+    public async Task<JsonObject> CaptureNativeSceneAsync(JsonElement request, CancellationToken cancellationToken = default)
+    {
+        var task = Assert.IsAssignableFrom<Task>(_captureNativeSceneAsync.Invoke(_coordinator, [request, cancellationToken]));
+        await task.ConfigureAwait(false);
+        return Assert.IsType<JsonObject>(task.GetType().GetProperty("Result", BindingFlags.Instance | BindingFlags.Public)?.GetValue(task));
+    }
+
+    private static JsonObject Candidate(JsonObject expectedCandidate) => new()
+    {
+        ["processId"] = 73,
+        ["processIdentity"] = "c014-target",
+        ["hwnd"] = "73",
+        ["executableSha256"] = expectedCandidate["executableSha256"]?.DeepClone(),
+        ["assemblyVersion"] = expectedCandidate["assemblyVersion"]?.DeepClone(),
+        ["probeVersion"] = expectedCandidate["probeVersion"]?.DeepClone(),
+        ["observerVersions"] = new JsonArray(),
+        ["contractSetHash"] = new string('a', 64),
+        ["storyHash"] = null,
+        ["capturedAt"] = "2026-08-19T00:00:00Z",
+        ["source"] = new JsonObject
+        {
+            ["kind"] = "probe_manifest",
+            ["verification"] = "verified",
+        },
+    };
+
+    private static JsonObject QualifiedProbe(long sceneEpoch) => new()
+    {
+        ["authority"] = "in_process_probe",
+        ["candidate"] = new JsonObject
+        {
+            ["processId"] = 73,
+            ["processIdentity"] = "c014-target",
+        },
+        ["process"] = new JsonObject { ["processId"] = 73 },
+        ["revisionBefore"] = 41L,
+        ["revisionAfter"] = 41L,
+        ["complete"] = true,
+        ["nodes"] = new JsonArray
+        {
+            new JsonObject
+            {
+                ["id"] = "c014-root",
+                ["x"] = 0.0,
+                ["y"] = 0.0,
+                ["width"] = 100.0,
+                ["height"] = 20.0,
+                ["automationId"] = "PrimaryButton",
+                ["accessibleName"] = "Primary action",
+                ["text"] = "Save",
+            },
+        },
+        ["rootId"] = "c014-root",
+        ["stability"] = StabilityObservation(sceneEpoch),
+    };
+
+    private static JsonObject StabilityObservation(long sceneEpoch) => new()
+    {
+        ["sceneEpoch"] = sceneEpoch,
+        ["conditions"] = new JsonObject
+        {
+            ["dispatcherIdle"] = new JsonObject { ["state"] = "met" },
+            ["stableLayout"] = new JsonObject { ["state"] = "met" },
+            ["animationState"] = new JsonObject { ["state"] = "met" },
+            ["windowGeometry"] = new JsonObject { ["state"] = "met" },
+            ["contextMaterialization"] = new JsonObject { ["state"] = "met" },
+            ["asyncLoadSettled"] = new JsonObject { ["state"] = "met" },
+        },
+    };
+
+    private static Func<T> CreateTargetSupplier<T>(object target) => () => (T)target;
+
+    private static object GetStore(NativeSceneArtifactStoreDriver artifactStore) =>
+        typeof(NativeSceneArtifactStoreDriver).GetField("_store", BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(artifactStore)
+        ?? throw new InvalidOperationException("NativeSceneArtifactStoreDriver must retain its internal store instance.");
+
+    private static MethodInfo RequireTaskOfJsonObjectMethod(Type type, string name, params Type[] parameterTypes)
+    {
+        var method = type.GetMethod(
+            name,
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+            binder: null,
+            types: parameterTypes,
+            modifiers: null)
+            ?? throw new InvalidOperationException($"{type.FullName} must expose {name}.");
+        Assert.False(method.IsPublic, $"{type.FullName}.{name} must remain an internal host operation.");
+        Assert.Equal(typeof(Task<JsonObject>), method.ReturnType);
+        return method;
+    }
+
+    private sealed class CaptureObserverCounter
+    {
+        public int Count { get; set; }
     }
 }

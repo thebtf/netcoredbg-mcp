@@ -132,6 +132,43 @@ public sealed class NativeSceneCapabilityTests
     }
 
     [Fact]
+    public async Task C004_InertLocalSessionWithCaptureConfiguredUnsupported_ReturnsSchemaValidUnsupportedCapabilityWithoutNativeActionsOrArtifactAuthority()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(
+            new ModernMcpStartOptions(
+                FixtureConfiguration: new FixtureConfiguration(SpawnDescendant: true),
+                AdditionalEnvironment: new Dictionary<string, string?>
+                {
+                    ["NETCOREDBG_MCP_NATIVE_SCENE_CAPTURE"] = "unsupported",
+                }));
+        var debugSessionId = await StartDebugAsync(driver, "c004-start");
+
+        var declaration = await AssertNoNativeActionsAsync(
+            driver,
+            () => GetCapabilitiesAsync(driver, debugSessionId, "c004-capabilities"));
+        var primitives = Array(Object(declaration["capabilities"])["primitives"]).Select(Object);
+        Assert.Equal(
+            "unsupported",
+            Text(primitives.Single(primitive => Text(primitive["name"]) == "capture_native_scene")["availability"]));
+
+        var request = CorpusRequest("C004-unavailable-m1-capability");
+        request["debugSessionId"] = debugSessionId;
+        var error = await AssertNoNativeActionsAsync(
+            driver,
+            () => AssertToolErrorAsync(
+                driver,
+                "capture_native_scene",
+                request,
+                "c004-capture",
+                "UNSUPPORTED_CAPABILITY"));
+
+        Assert.True(NativeSceneContractCatalogDriver.Load().ValidateResult("capture_native_scene", error.ToJsonString()).IsValid);
+        Assert.Equal(
+            ["code", "kind", "message", "tool"],
+            error.Select(static property => property.Key).OrderBy(static name => name, StringComparer.Ordinal));
+    }
+
+    [Fact]
     public async Task LiveLocalSession_WithoutBridge_ReturnsFixedNotFoundForUnknownOpaqueArtifactWithoutNativeActions()
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync(
@@ -330,6 +367,14 @@ public sealed class NativeSceneCapabilityTests
 
         return arguments;
     }
+
+    private static JsonObject CorpusRequest(string caseId) =>
+        JsonNode.Parse(System.Text.Encoding.UTF8.GetString(NativeSceneContractCatalogDriver.Load().GetArtifactBytes("parity-corpus.json")))!
+            .AsObject()["cases"]!
+            .AsArray()
+            .Single(@case => Text(@case!.AsObject()["id"]) == caseId)!["request"]!
+            .DeepClone()
+            .AsObject();
 
     private static JsonObject VisualCaptureArguments(
         string debugSessionId,

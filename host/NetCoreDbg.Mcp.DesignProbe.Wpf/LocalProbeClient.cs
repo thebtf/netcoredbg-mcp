@@ -18,7 +18,7 @@ public sealed class LocalProbeClientOptions
 
     public int MaximumRequestBytes { get; init; } = 64 * 1024;
 
-    public int MaximumResponseBytes { get; init; } = 1024 * 1024;
+    public int MaximumResponseBytes { get; init; } = LocalProbeClient.MaximumResponseFrameBytes;
 }
 
 public sealed class LocalProbeClient : IAsyncDisposable, IDisposable
@@ -26,11 +26,12 @@ public sealed class LocalProbeClient : IAsyncDisposable, IDisposable
     public const string PipeNameEnvironmentVariable = "NETCOREDBG_MCP_NATIVE_SCENE_PROBE_PIPE";
     public const string NonceEnvironmentVariable = "NETCOREDBG_MCP_NATIVE_SCENE_PROBE_NONCE";
     public const string CaptureOperation = "capture";
+    public const int MaximumResponseFrameBytes = 16 * 1024 * 1024;
 
     private const int MinimumAuthorizationTokenLength = 22;
     private const int MaximumAuthorizationTokenLength = 86;
     private const int MaximumPipeNameLength = 256;
-    private const int MaximumControlFrameBytes = 4 * 1024 * 1024;
+    private const int MaximumControlFrameBytes = MaximumResponseFrameBytes;
 
     private readonly WpfAtomicSnapshotTransaction _transaction;
     private readonly string _pipeName;

@@ -49,6 +49,11 @@ internal static class NativeSceneToolDispatcher
             return ToolError(tool, DebugSessionNotFound, "Debug session is not available.");
         }
 
+        if (tool is "capture_element_snapshot" or "capture_native_scene" && !binding.SupportsSceneCapture)
+        {
+            return ToolError(tool, UnsupportedCapability, "Native scene capability is unsupported.");
+        }
+
         if (!binding.TryGetCandidate(out var candidate))
         {
             return ToolError(tool, UnsupportedCapability, "Native scene capability is unsupported because debuggee identity is unavailable.");

@@ -11,6 +11,7 @@ public sealed class NativeSceneNegativeWireTests
     private const string ActiveSchemaVersion = "native-scene-probe.schema/1";
     private const string InvalidToolArguments = "INVALID_TOOL_ARGUMENTS";
     private const string UnsupportedProtocol = "UNSUPPORTED_PROTOCOL";
+    private const string C024 = "C024-oversized-selected-or-current-state-is-invalid";
 
     [Theory]
     [InlineData("native-scene-probe/0", ActiveSchemaVersion)]
@@ -206,6 +207,27 @@ public sealed class NativeSceneNegativeWireTests
 
         AssertInvalidRequest(catalog, "wait_for_ui_stable", request);
     }
+    [Theory]
+    [InlineData("selectedState")]
+    [InlineData("currentState")]
+    public void CaptureNativeSceneOversizedState_IsInvalidToolArgumentsWithoutObserverWork(string member)
+    {
+        var catalog = NativeSceneContractCatalogDriver.Load();
+        var @case = Case(catalog, C024);
+        var request = @case["request"]!.DeepClone().AsObject();
+        var state = C024StateValue(@case, member);
+        var expected = @case["expected"]!.AsObject();
+        request["sceneRequest"]!.AsObject()[member] = state;
+
+        Assert.Equal(262_145, Encoding.UTF8.GetByteCount(state.ToJsonString()));
+        Assert.Equal("typed_error", expected["classification"]!.GetValue<string>());
+        Assert.Equal("capture_native_scene", expected["requiredResponse"]!.AsObject()["tool"]!.GetValue<string>());
+        Assert.Equal(
+            ["dtoMaterialization", "observerWork"],
+            expected["mustNotPerform"]!.AsArray().Select(static value => value!.GetValue<string>()));
+        AssertSchemaAccepts(ProbeSchema(catalog), request);
+        AssertRejected(catalog.ValidateRequest("capture_native_scene", request.ToJsonString()), expected["errorCode"]!.GetValue<string>());
+    }
 
     [Fact]
     public void CustomPayloadOfTwoHundredSixtyTwoThousandOneHundredFortyFiveBytes_IsRecordedWithoutSchemaEscapeHatches()
@@ -354,6 +376,50 @@ public sealed class NativeSceneNegativeWireTests
             ["artifactSchemaVersion"] = "native-scene-artifact/1",
         };
 
+    private static JsonArray C024StateValue(JsonObject @case, string member)
+    {
+        var variant = Assert.IsType<JsonObject>(Assert.Single(@case["requestStateVariants"]!.AsArray(),
+            candidate => candidate?["member"]?.GetValue<string>() == member));
+        var valueShape = Assert.IsType<JsonObject>(variant["valueShape"]);
+        var outerItems = valueShape["outerItems"]!.GetValue<int>();
+        var innerItems = valueShape["innerItems"]!.GetValue<int>();
+        var stringLengths = valueShape["stringLengths"]!.AsObject();
+        var longStringCount = stringLengths["256"]!.GetValue<int>();
+        var shortStringCount = stringLengths["252"]!.GetValue<int>();
+        var remainingLongStrings = longStringCount;
+        var state = new JsonArray();
+
+        Assert.Equal("array", valueShape["type"]!.GetValue<string>());
+        Assert.Equal(2, valueShape["depth"]!.GetValue<int>());
+        Assert.Equal(outerItems * innerItems, longStringCount + shortStringCount);
+
+        for (var outer = 0; outer < outerItems; outer++)
+        {
+            var values = new JsonArray();
+            for (var inner = 0; inner < innerItems; inner++)
+            {
+                var useLongString = remainingLongStrings > 0;
+                if (useLongString)
+                {
+                    remainingLongStrings--;
+                }
+
+                values.Add(new string('x', useLongString ? 256 : 252));
+            }
+
+            state.Add(values);
+        }
+
+        Assert.Equal(0, remainingLongStrings);
+        Assert.Equal(valueShape["serializedUtf8Bytes"]!.GetValue<int>(), Encoding.UTF8.GetByteCount(state.ToJsonString()));
+        return state;
+    }
+
+    private static void AssertAccepted(NativeSceneContractCatalogValidationResult result)
+    {
+        Assert.True(result.IsValid);
+        Assert.Null(result.Code);
+    }
     private static JsonObject CustomPayload()
     {
         var payload = new JsonObject();

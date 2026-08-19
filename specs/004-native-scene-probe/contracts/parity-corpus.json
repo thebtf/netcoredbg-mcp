@@ -1432,7 +1432,7 @@
       "contractGateExpectation": "schema_fixture_and_expected_classification_vocabulary_only",
       "runtimeBehaviorRequired": true,
       "primitive": "capture_visual_evidence",
-      "precondition": "Lossless evidence and an optional preview are both retained after fresh stabilization.",
+      "precondition": "Lossless evidence is retained after fresh stabilization; a preview may also be retained.",
       "request": {
         "debugSessionId": "session_A1b2C3d4E5",
         "protocolVersion": "native-scene-probe/1",
@@ -1491,17 +1491,22 @@
         "responseKind": "visual_evidence_capture",
         "requiredArtifacts": [
           {
+            "mediaType": "image/png",
             "evidenceGrade": "lossless_visual",
-            "independentRasterCaptureId": true
-          },
-          {
-            "evidenceGrade": "preview_only",
             "independentRasterCaptureId": true
           }
         ],
         "mustNotClaim": [
           "sceneEpoch",
           "comparisonAuthority"
+        ],
+        "optionalArtifactsIfPresent": [
+          {
+            "mediaType": "image/webp",
+            "evidenceGrade": "preview_only",
+            "independentRasterCaptureId": true,
+            "nonAuthoritative": true
+          }
         ]
       }
     },

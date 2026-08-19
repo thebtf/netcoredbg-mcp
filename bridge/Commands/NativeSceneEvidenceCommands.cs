@@ -220,6 +220,7 @@ internal static class NativeSceneEvidenceCommands
                     ["hwnd"] = target.Hwnd.ToInt64(),
                 },
                 ["guards"] = ToGuardsPayload(beforeSnapshot, after.Snapshot),
+                ["stability"] = ToUnobservableGuardedStabilityPayload(),
                 ["selector"] = selectorPayload,
                 ["rootId"] = sceneCapture.RootId,
                 ["nodes"] = sceneCapture.Nodes,
@@ -476,10 +477,10 @@ internal static class NativeSceneEvidenceCommands
             var rect = element.BoundingRectangle;
             return new JsonObject
             {
-                ["x"] = rect.X,
-                ["y"] = rect.Y,
-                ["width"] = rect.Width,
-                ["height"] = rect.Height,
+                ["x"] = (double)rect.X,
+                ["y"] = (double)rect.Y,
+                ["width"] = (double)rect.Width,
+                ["height"] = (double)rect.Height,
             };
         }
         catch
@@ -607,6 +608,20 @@ internal static class NativeSceneEvidenceCommands
     {
         ["before"] = before?.ToJson(),
         ["after"] = after?.ToJson(),
+    };
+
+    private static JsonObject ToUnobservableGuardedStabilityPayload() => new()
+    {
+        ["sceneEpoch"] = 0,
+        ["conditions"] = new JsonObject
+        {
+            ["dispatcherIdle"] = new JsonObject { ["state"] = "unobservable" },
+            ["stableLayout"] = new JsonObject { ["state"] = "unobservable" },
+            ["animationState"] = new JsonObject { ["state"] = "unobservable" },
+            ["windowGeometry"] = new JsonObject { ["state"] = "unobservable" },
+            ["contextMaterialization"] = new JsonObject { ["state"] = "unobservable" },
+            ["asyncLoadSettled"] = new JsonObject { ["state"] = "unobservable" },
+        },
     };
 
     private static JsonObject ToSelectorPayload(GuardedSelectorResolution resolution) => new()

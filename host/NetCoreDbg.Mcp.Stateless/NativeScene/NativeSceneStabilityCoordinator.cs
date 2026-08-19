@@ -19,7 +19,7 @@ internal sealed class NativeSceneStabilityCoordinator
     private readonly TimeProvider _timeProvider;
     private readonly Func<JsonElement, CancellationToken, Task<JsonObject>> _observeAsync;
     private readonly SemaphoreSlim _gate = new(initialCount: 1, maxCount: 1);
-    private int _sceneEpoch;
+    private long _sceneEpoch;
     private int _sequence;
 
     internal NativeSceneStabilityCoordinator(
@@ -225,12 +225,23 @@ internal sealed class NativeSceneStabilityCoordinator
         return "unobservable";
     }
 
-    private static int ReadSceneEpoch(JsonObject observation) =>
-        observation["sceneEpoch"] is JsonValue value &&
-        value.TryGetValue<int>(out var sceneEpoch) &&
-        sceneEpoch >= 0
-            ? sceneEpoch
-            : 0;
+    private static long ReadSceneEpoch(JsonObject observation)
+    {
+        if (observation["sceneEpoch"] is JsonValue value)
+        {
+            if (value.TryGetValue<long>(out var sceneEpoch) && sceneEpoch >= 0)
+            {
+                return sceneEpoch;
+            }
+
+            if (value.TryGetValue<int>(out var intSceneEpoch) && intSceneEpoch >= 0)
+            {
+                return intSceneEpoch;
+            }
+        }
+
+        return 0;
+    }
 
     private static int ElapsedMilliseconds(DateTimeOffset startedAt, DateTimeOffset observedAt)
     {

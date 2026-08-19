@@ -54,6 +54,22 @@ public sealed class NativeSceneVisualEvidenceTests
             Array(manifest["artifacts"]).Select(Object).Where(descriptor => Text(descriptor["mediaType"]) == "image/webp"),
             descriptor => Assert.Equal("preview_only", Text(descriptor["evidenceGrade"])));
 
+        var c015 = CorpusExpected("C015-preview-is-independent-and-non-authoritative");
+        var requiredArtifact = Object(Assert.Single(Array(c015["requiredArtifacts"])));
+        Assert.Equal("image/png", Text(requiredArtifact["mediaType"]));
+        Assert.Equal("lossless_visual", Text(requiredArtifact["evidenceGrade"]));
+        Assert.True(Boolean(requiredArtifact["independentRasterCaptureId"]));
+        var optionalPreview = Object(Assert.Single(Array(c015["optionalArtifactsIfPresent"])));
+        Assert.Equal("image/webp", Text(optionalPreview["mediaType"]));
+        Assert.Equal("preview_only", Text(optionalPreview["evidenceGrade"]));
+        Assert.True(Boolean(optionalPreview["independentRasterCaptureId"]));
+        Assert.True(Boolean(optionalPreview["nonAuthoritative"]));
+        var forbiddenPreviewClaims = Array(c015["mustNotClaim"]).Select(Text).ToHashSet(StringComparer.Ordinal);
+        Assert.DoesNotContain(EnumeratePropertyNames(manifest), static name => name == "comparisonAuthority");
+        Assert.All(
+            Array(manifest["artifacts"]).Select(Object).Where(descriptor => Text(descriptor["mediaType"]) == "image/webp"),
+            descriptor => Assert.DoesNotContain(EnumeratePropertyNames(descriptor), forbiddenPreviewClaims.Contains));
+
         var chunks = await ReadArtifactAsync(driver, debugSessionId, losslessDescriptor);
         Assert.True(chunks.Count >= 3, "The controlled read must include beginning, middle, and ending chunks.");
         Assert.Equal(0, chunks[0].Offset);
@@ -116,6 +132,84 @@ public sealed class NativeSceneVisualEvidenceTests
     }
 
     [Fact]
+    public async Task PostStageIdentityChange_AbortsStagingAndAllowsLaterVisualCapture()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var artifactRoot = Path.Combine(RepositoryLayout.ScratchRoot, $"native-scene-visual-staging-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(artifactRoot);
+        try
+        {
+            await using (var driver = await StartWindowedDescendantDriverAsync(
+                             publishSecondWindowedDescendantAfterRelease: true,
+                             artifactRoot: artifactRoot))
+            {
+                var debugSessionId = await StartDebugAsync(driver, "visual-post-stage-identity-start");
+                var originalCandidate = Object((await CallToolAsync(
+                    driver,
+                    "get_ui_probe_capabilities",
+                    CapabilityArguments(debugSessionId),
+                    "visual-post-stage-identity-capabilities",
+                    isError: false)).StructuredContent["candidate"]);
+
+                var captureTask = CallToolAsync(
+                    driver,
+                    "capture_visual_evidence",
+                    VisualCaptureArguments(debugSessionId, originalCandidate),
+                    "visual-post-stage-identity-capture",
+                    isError: true);
+                await WaitForStagedArtifactAsync(artifactRoot);
+
+                _ = await driver.PublishSecondWindowedDescendantAsync();
+                var failedCapture = await captureTask;
+                var error = failedCapture.StructuredContent;
+
+                AssertSchemaValid("capture_visual_evidence", error);
+                Assert.Equal("tool_error", Text(error["kind"]));
+                Assert.Equal("CANDIDATE_MISMATCH", Text(error["code"]));
+                Assert.Empty(Directory.EnumerateFiles(artifactRoot, "*", SearchOption.AllDirectories));
+
+            }
+
+            await using (var retryDriver = await StartWindowedDescendantDriverAsync(artifactRoot: artifactRoot))
+            {
+                var retrySessionId = await StartDebugAsync(retryDriver, "visual-post-stage-retry-start");
+                var retryCandidate = Object((await CallToolAsync(
+                    retryDriver,
+                    "get_ui_probe_capabilities",
+                    CapabilityArguments(retrySessionId),
+                    "visual-post-stage-retry-capabilities",
+                    isError: false)).StructuredContent["candidate"]);
+                var retryArguments = VisualCaptureArguments(retrySessionId, retryCandidate);
+                var retry = await CallToolAsync(
+                    retryDriver,
+                    "capture_visual_evidence",
+                    retryArguments,
+                    "visual-post-stage-identity-retry",
+                    isError: false);
+                var manifest = retry.StructuredContent;
+
+                AssertSchemaValid("capture_visual_evidence", manifest);
+                AssertCompactManifest(retry.Result, manifest, retryArguments, retryCandidate);
+                AssertLosslessDescriptor(
+                    manifest,
+                    Assert.Single(Array(manifest["artifacts"]).Select(Object), artifact => Text(artifact["mediaType"]) == "image/png"));
+            }
+
+        }
+        finally
+        {
+            if (Directory.Exists(artifactRoot))
+            {
+                Directory.Delete(artifactRoot, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public void BuiltBridge_ScreenshotDimensionGuard_RejectsUnsafeRastersBeforeAllocation()
     {
         var bridgeAssembly = System.Reflection.Assembly.LoadFrom(ResolveBridgeAssemblyPath());
@@ -164,6 +258,22 @@ public sealed class NativeSceneVisualEvidenceTests
         Assert.DoesNotContain(EnumeratePropertyNames(error), name => name is
             "artifactId" or "artifacts" or "captureId" or "byteLength" or "dataBase64" or "path" or "root");
     }
+
+    private static async Task WaitForStagedArtifactAsync(string artifactRoot)
+    {
+        for (var attempt = 0; attempt < 80; attempt++)
+        {
+            if (Directory.EnumerateFiles(artifactRoot, "*", SearchOption.AllDirectories).Any())
+            {
+                return;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(25));
+        }
+
+        Assert.NotEmpty(Directory.EnumerateFiles(artifactRoot, "*", SearchOption.AllDirectories));
+    }
+
 
     private static async Task<IReadOnlyList<ArtifactChunk>> ReadArtifactAsync(
         ModernMcpProcessDriver driver,
@@ -258,7 +368,9 @@ public sealed class NativeSceneVisualEvidenceTests
         Assert.True(DateTimeOffset.TryParse(Text(retention["expiresAt"]), out _));
     }
 
-    private static Task<ModernMcpProcessDriver> StartWindowedDescendantDriverAsync(bool publishSecondWindowedDescendantAfterRelease = false) =>
+    private static Task<ModernMcpProcessDriver> StartWindowedDescendantDriverAsync(
+        bool publishSecondWindowedDescendantAfterRelease = false,
+        string? artifactRoot = null) =>
         ModernMcpProcessDriver.StartAsync(
             new ModernMcpStartOptions(
                 FixtureConfiguration: new FixtureConfiguration(
@@ -267,6 +379,7 @@ public sealed class NativeSceneVisualEvidenceTests
                 AdditionalEnvironment: new Dictionary<string, string?>
                 {
                     ["FLAUI_BRIDGE_PATH"] = ResolveBridgeAssemblyPath(),
+                    ["NETCOREDBG_MCP_ARTIFACT_ROOT"] = artifactRoot,
                 }));
 
 
@@ -383,7 +496,9 @@ public sealed class NativeSceneVisualEvidenceTests
             new RequestId(requestId));
         var result = ModernMcpProcessDriver.RequireResult(response);
         Assert.Equal("complete", Text(result["resultType"]));
-        Assert.Equal(isError, result["isError"]?.GetValue<bool>() ?? false);
+        Assert.True(
+            isError == (result["isError"]?.GetValue<bool>() ?? false),
+            $"{tool} returned an unexpected result: {result["structuredContent"]?.ToJsonString() ?? "<null>"}.");
         return new ToolCall(result, Object(result["structuredContent"]));
     }
 
@@ -392,6 +507,14 @@ public sealed class NativeSceneVisualEvidenceTests
         var validation = NativeSceneContractCatalogDriver.Load().ValidateResult(tool, content.ToJsonString());
         Assert.True(validation.IsValid, $"Expected schema-valid {tool} content, got {validation.Code ?? "<null>"}: {validation.Message ?? "<null>"}.");
     }
+    private static JsonObject CorpusExpected(string caseId) =>
+        JsonNode.Parse(Encoding.UTF8.GetString(NativeSceneContractCatalogDriver.Load().GetArtifactBytes("parity-corpus.json")))!
+            .AsObject()["cases"]!
+            .AsArray()
+            .Single(@case => Text(@case!.AsObject()["id"]) == caseId)!["expected"]!
+            .DeepClone()
+            .AsObject();
+
 
     private static IEnumerable<string> EnumeratePropertyNames(JsonNode? node)
     {

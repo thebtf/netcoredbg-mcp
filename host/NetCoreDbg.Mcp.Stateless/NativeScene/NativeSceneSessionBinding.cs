@@ -29,6 +29,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
     private readonly string _debugSessionId;
     private readonly string? _bridgePath;
     private readonly string? _artifactRoot;
+    private readonly bool _supportsSceneCapture;
     private readonly SemaphoreSlim _gate = new(initialCount: 1, maxCount: 1);
     private readonly NativeSceneProbeChannel _probeChannel = new();
 
@@ -43,12 +44,14 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
     internal NativeSceneSessionBinding(
         string debugSessionId,
         string? bridgePath,
-        string? artifactRoot)
+        string? artifactRoot,
+        bool supportsSceneCapture = true)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(debugSessionId);
         _debugSessionId = debugSessionId;
-        _bridgePath = bridgePath;
-        _artifactRoot = artifactRoot;
+        _bridgePath = string.IsNullOrWhiteSpace(bridgePath) ? null : bridgePath;
+        _artifactRoot = string.IsNullOrWhiteSpace(artifactRoot) ? null : artifactRoot;
+        _supportsSceneCapture = supportsSceneCapture;
         AuthorizationNonce = CreateOpaqueId();
         _stabilityCoordinator = new NativeSceneStabilityCoordinator(TimeProvider.System, ObserveStabilityAsync);
     }
@@ -57,8 +60,9 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
         NetCoreDbgSession session,
         string debugSessionId,
         string? bridgePath,
-        string? artifactRoot)
-        : this(debugSessionId, bridgePath, artifactRoot)
+        string? artifactRoot,
+        bool supportsSceneCapture = true)
+        : this(debugSessionId, bridgePath, artifactRoot, supportsSceneCapture)
     {
         AttachSession(session);
     }
@@ -81,7 +85,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
         OperatingSystem.IsWindows() &&
         TryGetBridgePath(out _);
 
-    internal bool SupportsSceneCapture => Volatile.Read(ref _disposed) == 0;
+    internal bool SupportsSceneCapture => _supportsSceneCapture && Volatile.Read(ref _disposed) == 0;
 
     internal bool TryGetCandidate(out JsonElement candidate)
     {
@@ -213,11 +217,13 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
                 return NativeSceneVisualEvidenceResult.CandidateMismatch();
             }
 
+            NativeSceneArtifactStaging? staged = null;
+            var committed = false;
             try
             {
                 var capturedAt = DateTimeOffset.UtcNow;
                 var captureId = CreateOpaqueId();
-                var staged = await GetOrCreateArtifactStore().StageAsync(
+                staged = await GetOrCreateArtifactStore().StageAsync(
                     _debugSessionId,
                     captureId,
                     "image/png",
@@ -243,6 +249,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
                     return NativeSceneVisualEvidenceResult.ArtifactWriteFailed();
                 }
 
+                committed = true;
                 return NativeSceneVisualEvidenceResult.Succeeded(CreateVisualEvidenceManifest(
                     sceneRequest,
                     evidenceScope,
@@ -255,6 +262,13 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
             catch (Exception)
             {
                 return NativeSceneVisualEvidenceResult.ArtifactWriteFailed();
+            }
+            finally
+            {
+                if (staged is not null && !committed)
+                {
+                    await staged.AbortAsync(CancellationToken.None).ConfigureAwait(false);
+                }
             }
         }
         catch (OperationCanceledException)
@@ -372,13 +386,20 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
     private async Task<JsonObject> ObserveStabilityAsync(JsonElement _, CancellationToken cancellationToken)
     {
         var observation = _captureStabilityObservation;
-        if (observation is null)
+        if (observation is not null)
         {
-            return await ObserveUnobservableStabilityAsync(default, cancellationToken).ConfigureAwait(false);
+            await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken).ConfigureAwait(false);
+            return observation.DeepClone().AsObject();
         }
 
-        await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken).ConfigureAwait(false);
-        return observation.DeepClone().AsObject();
+        var probe = await _probeChannel.CaptureAsync(cancellationToken).ConfigureAwait(false);
+        if (probe is not null &&
+            NativeSceneCaptureCoordinator.TryCloneStabilityObservation(probe["stability"] as JsonObject, out var stability))
+        {
+            return stability;
+        }
+
+        return await ObserveUnobservableStabilityAsync(default, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<JsonObject?> CaptureGuardedAsync(
