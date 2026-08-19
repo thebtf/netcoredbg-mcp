@@ -1,10 +1,10 @@
 # Native Scene Probe — Future Acceptance Playbook
 
-## Status: M0-G0 AND M0 EXECUTED; M1 NOT EXECUTED
+## Status: M0-G0, M0, AND M1 STABILITY EXECUTED; M1 ATOMICITY NOT EXECUTED
 
-The operator approved the exact merged contract bytes. M0-G0 T001–T007 is GREEN at 40/40. M0 foundation and evidence T008–T020 are GREEN: the exact M0 command is 38/38, the full NativeScene + ModernMcp affected set is 113/113, and the standalone Windows bridge build completed with zero warnings/errors. The six frozen names are session-bound and truthful: lossless capture is supported only when the exact bridge path and verified pinned local candidate are available, while retained artifact reads remain independent of later bridge availability. The native route produces a real bounded controlled PrintWindow PNG, server-owned budgeted opaque artifacts, single-pass bounded integrity-checked reads, timer-driven expiry, process/HWND identity revalidation, and typed unavailable failures. M1 stability, element/scene atomicity, WPF probe, route cutover, package, release, and publication work has not executed.
+The operator approved the exact merged contract bytes. M0-G0 T001–T007 remains GREEN at 40/40 and M0 T008–T020 at 38/38. M1 stability T021–T023 is GREEN at 10/10, with the full NativeScene + ModernMcp affected set GREEN at 123/123. `wait_for_ui_stable` now returns historical evidence with `revalidatedByCapture: false`; every visual evidence capture performs a fresh coordinator pass and records `revalidatedByCapture: true`, even when currently observable conditions remain honestly `UNOBSERVABLE`. The coordinator enforces the requested timeout against non-completing observers using the injected clock and releases its per-session gate after deadline. No prior wait receipt is reused as authorization. Element/scene capture, WPF atomic probe, guarded UIA scene qualification, route cutover, package, release, and publication work has not executed.
 
-GREEN T020 authorizes the internal M1 tasks T021+, but it does not authorize release, public-route selection, Factory/Gallery behavior, or a full behavioral C001–C024 acceptance claim. T032/T034 remain the later full behavior gates.
+GREEN T023 authorizes internal T024+, but it does not authorize an M1 acceptance claim, release, public-route selection, Factory/Gallery behavior, or full behavioral C001–C024 acceptance. T029, T032, and T034 remain later gates.
 
 M0-G0 authority remains pinned by:
 

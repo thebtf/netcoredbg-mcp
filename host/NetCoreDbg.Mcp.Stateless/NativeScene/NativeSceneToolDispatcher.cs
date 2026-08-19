@@ -65,7 +65,8 @@ internal static class NativeSceneToolDispatcher
             "get_ui_probe_capabilities" => Success(tool, CapabilityDeclaration(candidate, binding.SupportsVisualEvidence)),
             "capture_visual_evidence" => await CaptureVisualEvidenceAsync(binding, request, candidate, cancellationToken).ConfigureAwait(false),
             "read_capture_artifact" => await ReadCaptureArtifactAsync(binding, request, cancellationToken).ConfigureAwait(false),
-            "wait_for_ui_stable" or "capture_element_snapshot" or "capture_native_scene" =>
+            "wait_for_ui_stable" => await WaitForUiStableAsync(binding, request, candidate, cancellationToken).ConfigureAwait(false),
+            "capture_element_snapshot" or "capture_native_scene" =>
                 ToolError(tool, UnsupportedCapability, "Native scene capability is unsupported."),
             _ => throw new InvalidOperationException("Known native scene tool has no dispatch branch."),
         };
@@ -154,7 +155,7 @@ internal static class NativeSceneToolDispatcher
             ["supportedSchemaVersions"] = new JsonArray(JsonValue.Create(Contract.SchemaVersion)),
             ["primitives"] = PrimitiveCapabilities(supportsVisualEvidence),
             ["context"] = CapabilityStates(Contract.ContextNames),
-            ["settleConditions"] = CapabilityStates(Contract.SettleConditionNames),
+            ["settleConditions"] = CapabilityStates(Contract.SettleConditionNames, "unobservable"),
             ["atomicSceneAuthority"] = "unsupported",
             ["uiaGuardedTraversal"] = "unsupported",
             ["losslessVisualEvidence"] = supportsVisualEvidence ? "supported" : "unsupported",
@@ -178,6 +179,7 @@ internal static class NativeSceneToolDispatcher
                 ["milestone"] = primitive.Milestone,
                 ["availability"] = StringComparer.Ordinal.Equals(primitive.Name, "get_ui_probe_capabilities") ||
                                    StringComparer.Ordinal.Equals(primitive.Name, "read_capture_artifact") ||
+                                   StringComparer.Ordinal.Equals(primitive.Name, "wait_for_ui_stable") ||
                                    (supportsVisualEvidence && StringComparer.Ordinal.Equals(primitive.Name, "capture_visual_evidence"))
                     ? "supported"
                     : "unsupported",
@@ -187,12 +189,12 @@ internal static class NativeSceneToolDispatcher
         return capabilities;
     }
 
-    private static JsonObject CapabilityStates(IEnumerable<string> names)
+    private static JsonObject CapabilityStates(IEnumerable<string> names, string availability = "unsupported")
     {
         var states = new JsonObject();
         foreach (var name in names)
         {
-            states[name] = "unsupported";
+            states[name] = availability;
         }
 
         return states;
@@ -229,6 +231,25 @@ internal static class NativeSceneToolDispatcher
             ? Success("capture_visual_evidence", manifest)
             : ToolError("capture_visual_evidence", result.Code!, result.Message!);
     }
+    private static async Task<CallToolResult> WaitForUiStableAsync(
+        NativeSceneSessionBinding binding,
+        JsonElement request,
+        JsonElement candidate,
+        CancellationToken cancellationToken)
+    {
+        var stability = await binding.WaitForStableAsync(
+            request.GetProperty("sceneRequest"),
+            cancellationToken).ConfigureAwait(false);
+        return Success("wait_for_ui_stable", new JsonObject
+        {
+            ["kind"] = "ui_stability_receipt",
+            ["protocolVersion"] = Contract.ProtocolVersion,
+            ["schemaVersion"] = Contract.SchemaVersion,
+            ["candidate"] = CloneCandidate(candidate),
+            ["stability"] = stability,
+        });
+    }
+
 
     private static async Task<CallToolResult> ReadCaptureArtifactAsync(
         NativeSceneSessionBinding binding,

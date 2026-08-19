@@ -34,6 +34,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
     private NativeSceneBridgeClient? _bridgeClient;
     private Process? _bridgeProcess;
     private NativeSceneArtifactStore? _artifactStore;
+    private readonly NativeSceneStabilityCoordinator _stabilityCoordinator;
     private int _disposed;
 
     internal NativeSceneSessionBinding(
@@ -48,6 +49,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
         _bridgePath = bridgePath;
         _artifactRoot = artifactRoot;
         AuthorizationNonce = CreateOpaqueId();
+        _stabilityCoordinator = new NativeSceneStabilityCoordinator(TimeProvider.System, ObserveUnobservableStabilityAsync);
     }
 
     internal string AuthorizationNonce { get; }
@@ -95,6 +97,9 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
                  MatchesExpectedValue(expectedCandidateIdentity, "assemblyVersion", targetIdentity.AssemblyVersion) &&
                  MatchesExpectedValue(expectedCandidateIdentity, "probeVersion", targetIdentity.ProbeVersion)));
     }
+    internal Task<JsonObject> WaitForStableAsync(JsonElement sceneRequest, CancellationToken cancellationToken) =>
+        _stabilityCoordinator.WaitForStableAsync(sceneRequest, cancellationToken);
+
 
     internal async Task<NativeSceneVisualEvidenceResult> CaptureVisualEvidenceAsync(
         JsonElement sceneRequest,
@@ -165,6 +170,13 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
                     return NativeSceneVisualEvidenceResult.CandidateMismatch();
                 }
 
+                var stability = await _stabilityCoordinator.RevalidateForCaptureAsync(sceneRequest, cancellationToken).ConfigureAwait(false);
+                if (!_session.TryGetNativeSceneCaptureTargetIdentity(out recheckedTargetIdentity) ||
+                    !targetIdentity.Equals(recheckedTargetIdentity))
+                {
+                    return NativeSceneVisualEvidenceResult.CandidateMismatch();
+                }
+
                 var commit = await staged.CommitAsync(cancellationToken).ConfigureAwait(false);
                 if (commit.Descriptor is not { } descriptor)
                 {
@@ -175,6 +187,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
                     sceneRequest,
                     evidenceScope,
                     candidate,
+                    stability,
                     descriptor,
                     captureId,
                     capturedAt));
@@ -453,6 +466,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
         JsonElement sceneRequest,
         JsonElement evidenceScope,
         JsonElement candidate,
+        JsonObject stability,
         NativeSceneArtifactDescriptor descriptor,
         string captureId,
         DateTimeOffset capturedAt)
@@ -469,7 +483,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
             ["evidenceScope"] = CloneObject(evidenceScope),
             ["capturedAt"] = timestamp,
             ["candidate"] = CloneObject(candidate),
-            ["stability"] = CreateUnobservableStability(timestamp),
+            ["stability"] = stability.DeepClone(),
             ["atomicity"] = new JsonObject { ["authority"] = "not_applicable" },
             ["element"] = null,
             ["artifacts"] = new JsonArray
@@ -499,24 +513,22 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
         };
     }
 
-    private static JsonObject CreateUnobservableStability(string timestamp) => new()
+    private static Task<JsonObject> ObserveUnobservableStabilityAsync(JsonElement _, CancellationToken cancellationToken)
     {
-        ["status"] = "UNOBSERVABLE",
-        ["revalidatedByCapture"] = false,
-        ["conditions"] = new JsonObject
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(new JsonObject
         {
-            ["dispatcherIdle"] = ConditionUnobservable(),
-            ["stableLayout"] = ConditionUnobservable(),
-            ["animationState"] = ConditionUnobservable(),
-            ["windowGeometry"] = ConditionUnobservable(),
-            ["contextMaterialization"] = ConditionUnobservable(),
-            ["asyncLoadSettled"] = ConditionUnobservable(),
-        },
-        ["settleDurationMs"] = 0,
-        ["observedAt"] = timestamp,
-        ["sceneEpoch"] = 0,
-        ["sequence"] = 0,
-    };
+            ["conditions"] = new JsonObject
+            {
+                ["dispatcherIdle"] = ConditionUnobservable(),
+                ["stableLayout"] = ConditionUnobservable(),
+                ["animationState"] = ConditionUnobservable(),
+                ["windowGeometry"] = ConditionUnobservable(),
+                ["contextMaterialization"] = ConditionUnobservable(),
+                ["asyncLoadSettled"] = ConditionUnobservable(),
+            },
+        });
+    }
 
     private static JsonObject ConditionUnobservable() => new() { ["state"] = "unobservable" };
 

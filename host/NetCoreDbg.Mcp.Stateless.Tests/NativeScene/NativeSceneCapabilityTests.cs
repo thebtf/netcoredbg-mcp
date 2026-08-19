@@ -17,7 +17,7 @@ public sealed class NativeSceneCapabilityTests
         ("get_ui_probe_capabilities", "M0", "supported"),
         ("capture_visual_evidence", "M0", "unsupported"),
         ("read_capture_artifact", "M0", "supported"),
-        ("wait_for_ui_stable", "M1", "unsupported"),
+        ("wait_for_ui_stable", "M1", "supported"),
         ("capture_element_snapshot", "M1", "unsupported"),
         ("capture_native_scene", "M1", "unsupported"),
     ];
@@ -43,12 +43,12 @@ public sealed class NativeSceneCapabilityTests
 
     private static readonly (string Name, string Availability)[] ExpectedSettleConditionStates =
     [
-        ("dispatcherIdle", "unsupported"),
-        ("stableLayout", "unsupported"),
-        ("animationState", "unsupported"),
-        ("windowGeometry", "unsupported"),
-        ("contextMaterialization", "unsupported"),
-        ("asyncLoadSettled", "unsupported"),
+        ("dispatcherIdle", "unobservable"),
+        ("stableLayout", "unobservable"),
+        ("animationState", "unobservable"),
+        ("windowGeometry", "unobservable"),
+        ("contextMaterialization", "unobservable"),
+        ("asyncLoadSettled", "unobservable"),
     ];
 
     private static readonly (string Name, int Value)[] ExpectedLimits =
@@ -237,7 +237,7 @@ public sealed class NativeSceneCapabilityTests
     }
 
     [Fact]
-    public async Task EveryInRangeSampleCount_ReachesTheDeclaredUnsupportedM1CapabilityWithoutNativeTargetDiscovery()
+    public async Task EveryInRangeSampleCount_ReachesTheDeclaredWaitCapabilityWithoutNativeTargetDiscovery()
     {
         await using var driver = await StartDescendantDriverAsync();
         var debugSessionId = await StartDebugAsync(driver, "samples-start");
@@ -250,14 +250,16 @@ public sealed class NativeSceneCapabilityTests
         for (var sampleCount = 2; sampleCount <= 16; sampleCount++)
         {
             var currentSampleCount = sampleCount;
-            _ = await AssertNoNativeActionsAsync(
+            var receipt = await AssertNoNativeActionsAsync(
                 driver,
-                () => AssertToolErrorAsync(
+                () => CompleteContentAsync(
                     driver,
                     "wait_for_ui_stable",
                     SceneArguments(debugSessionId, candidate, currentSampleCount, mismatchCandidate: false),
                     $"sample-{currentSampleCount}",
-                    "UNSUPPORTED_CAPABILITY"));
+                    isError: false));
+            Assert.Equal("ui_stability_receipt", Text(receipt["kind"]));
+            Assert.Equal("UNOBSERVABLE", Text(Object(receipt["stability"])["status"]));
         }
     }
 
