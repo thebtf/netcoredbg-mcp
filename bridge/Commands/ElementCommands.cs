@@ -1,3 +1,4 @@
+using System.IO;
 using System.Text.Json.Nodes;
 using FlaUI.Core;
 using FlaUI.Core.AutomationElements;
@@ -585,6 +586,148 @@ public static class ElementCommands
             $"Element not found. Search: {DescribeSearch(@params)}");
     }
 
+    internal static GuardedSelectorResolution ResolveUniqueBoundElement(
+        AutomationElement root,
+        JsonObject selector,
+        int boundProcessId,
+        int maximumNodes)
+    {
+        if (maximumNodes is < 1 or > 4_096)
+            throw new ArgumentOutOfRangeException(nameof(maximumNodes));
+
+        var automationId = ReadGuardedSelectorText(selector, "automationId");
+        var name = ReadGuardedSelectorText(selector, "name");
+        var controlTypeText = ReadGuardedSelectorText(selector, "controlType");
+        if (automationId is null && name is null && controlTypeText is null)
+            throw new InvalidDataException("A guarded selector requires automationId, name, or controlType.");
+
+        var controlType = controlTypeText is null ? (ControlType?)null : ParseControlType(controlTypeText);
+        var queue = new Queue<AutomationElement>();
+        queue.Enqueue(root);
+        var visited = 0;
+        var matches = new List<AutomationElement>(2);
+        var truncated = false;
+
+        while (queue.Count > 0)
+        {
+            var element = queue.Dequeue();
+            visited++;
+            var processId = TryReadProcessId(element);
+            if (processId is null)
+            {
+                return new GuardedSelectorResolution(
+                    GuardedSelectorOutcome.Unobservable, null, matches.Count,
+                    "UIA process identity is unavailable while resolving the selector.");
+            }
+
+            if (processId == boundProcessId)
+            {
+                if (MatchesGuardedSelector(element, automationId, name, controlType))
+                {
+                    matches.Add(element);
+                    if (matches.Count == 2)
+                    {
+                        return new GuardedSelectorResolution(
+                            GuardedSelectorOutcome.Ambiguous, null, matches.Count,
+                            "The selector matches more than one bound-process element.");
+                    }
+                }
+
+                AutomationElement[] children;
+                try
+                {
+                    children = element.FindAllChildren();
+                }
+                catch (Exception ex)
+                {
+                    return new GuardedSelectorResolution(
+                        GuardedSelectorOutcome.Unobservable, null, matches.Count,
+                        $"UIA child enumeration failed: {ex.GetType().Name}.");
+                }
+
+                foreach (var child in children)
+                {
+                    if (visited + queue.Count >= maximumNodes)
+                    {
+                        truncated = true;
+                        break;
+                    }
+
+                    queue.Enqueue(child);
+                }
+            }
+        }
+
+        if (truncated)
+        {
+            return new GuardedSelectorResolution(
+                GuardedSelectorOutcome.Unobservable, null, matches.Count,
+                "The bounded selector traversal did not cover the complete bound window tree.");
+        }
+
+        return matches.Count switch
+        {
+            0 => new GuardedSelectorResolution(
+                GuardedSelectorOutcome.Missing, null, 0,
+                "The selector matches no bound-process element."),
+            1 => new GuardedSelectorResolution(
+                GuardedSelectorOutcome.Unique, matches[0], 1, null),
+            _ => throw new InvalidOperationException("Unexpected guarded-selector state."),
+        };
+    }
+
+    private static string? ReadGuardedSelectorText(JsonObject selector, string key)
+    {
+        foreach (var property in selector)
+        {
+            if (property.Key is not ("automationId" or "name" or "controlType"))
+                throw new InvalidDataException($"Unsupported guarded selector property: {property.Key}.");
+        }
+
+        if (!selector.TryGetPropertyValue(key, out var node) || node is null)
+            return null;
+        if (node is not JsonValue value || !value.TryGetValue<string>(out var text) ||
+            string.IsNullOrWhiteSpace(text) || text.Length > 256)
+        {
+            throw new InvalidDataException($"Guarded selector property '{key}' must be a non-empty string of at most 256 characters.");
+        }
+
+        return text;
+    }
+
+    private static bool MatchesGuardedSelector(
+        AutomationElement element,
+        string? automationId,
+        string? name,
+        ControlType? controlType)
+    {
+        return (automationId is null || string.Equals(SafeString(() => element.AutomationId), automationId, StringComparison.Ordinal)) &&
+               (name is null || string.Equals(SafeString(() => element.Name), name, StringComparison.Ordinal)) &&
+               (controlType is null || SafeControlType(element) == controlType);
+    }
+
+    private static ControlType? SafeControlType(AutomationElement element)
+    {
+        try { return element.ControlType; }
+        catch { return null; }
+    }
+
+    private static int? TryReadProcessId(AutomationElement element)
+    {
+        try
+        {
+            if (!element.Properties.ProcessId.IsSupported)
+                return null;
+
+            var processId = element.Properties.ProcessId.Value;
+            return processId > 0 ? processId : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     internal static string DescribeSearch(JsonNode? @params)
     {
         var parts = new List<string>();
@@ -1017,3 +1160,17 @@ internal sealed class ExactAutomationIdMismatchException : InvalidOperationExcep
 
     public JsonObject Payload { get; }
 }
+
+internal enum GuardedSelectorOutcome
+{
+    Unique,
+    Missing,
+    Ambiguous,
+    Unobservable,
+}
+
+internal sealed record GuardedSelectorResolution(
+    GuardedSelectorOutcome Outcome,
+    AutomationElement? Element,
+    int MatchCount,
+    string? Detail);

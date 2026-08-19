@@ -10,4 +10,9 @@
     <PackageReference Include="ModelContextProtocol" Version="2.1.0" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.10" />
   </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="../../specs/004-native-scene-probe/contracts/native-scene-probe.schema.json" Link="NativeScene/native-scene-probe.schema.json" LogicalName="NetCoreDbg.Mcp.Stateless.NativeScene.native-scene-probe.schema.json" />
+    <EmbeddedResource Include="../../specs/004-native-scene-probe/contracts/native-scene-artifact.schema.json" Link="NativeScene/native-scene-artifact.schema.json" LogicalName="NetCoreDbg.Mcp.Stateless.NativeScene.native-scene-artifact.schema.json" />
+    <EmbeddedResource Include="../../specs/004-native-scene-probe/contracts/parity-corpus.json" Link="NativeScene/parity-corpus.json" LogicalName="NetCoreDbg.Mcp.Stateless.NativeScene.parity-corpus.json" />
+  </ItemGroup>
 </Project>

@@ -1,10 +1,12 @@
 # Native Scene Probe — Future Acceptance Playbook
 
-## Status: NOT EXECUTED
+## Status: M0-G0, M0, AND INTERNAL M1 EXECUTED; EXTERNAL/FINAL ACCEPTANCE NOT EXECUTED
 
-This is a future acceptance playbook, not an execution receipt. The planning packet may be committed, reviewed, and merged without constituting T001 approval. The M0/M1 source files, test classes, WPF fixture, bridge mode, package changes, and registration described below do not exist in this documentation-only delivery. No command in this file has been run, and no product build, test, formatter, package restore, implementation PR, release, product publication, or public-route cutover is authorized now.
+The operator approved the exact merged contract bytes. M0-G0 T001–T007 remains GREEN at 40/40 and M0 T008–T020 at 38/38. Internal M1 T021–T029 is GREEN: stability 10/10, atomicity 11/11, exact M1 command 21/21, and the full NativeScene + ModernMcp affected set 135/135. The opt-in WPF probe performs one synchronous dispatcher-affine immutable-DTO transaction; equal revisions alone produce atomic `COMPLETE`, changed/incomplete revisions remain qualified. Element captures return bounded one-node artifacts, guarded UIA remains PARTIAL/UNOBSERVABLE only, guarded graphs reject cycles/disconnected roots, and post-stage failures explicitly abort private staging state. No prior wait receipt is reused as authorization. External consumption T030–T031, full focused acceptance T032–T035, Factory/Gallery/DTCG behavior, route cutover, package, release, and publication work has not executed.
 
-T001 operator approval authorizes only M0-G0 T002–T007. M0/M1 primitive implementation and acceptance remain blocked until T007 has produced GREEN M0-G0 contract/runtime-validator evidence:
+GREEN T029 authorizes internal T030+, but it does not itself authorize release, public-route selection, Factory/Gallery behavior, or a full behavioral C001–C024 acceptance claim. T032 and T034 remain the full behavior gates.
+
+M0-G0 authority remains pinned by:
 
 1. T001's Approval Record names the exact candidate bytes in `contracts/native-scene-probe.schema.json`, `contracts/native-scene-artifact.schema.json`, and `contracts/parity-corpus.json`; and
 2. T002–T007 prove exact-byte schema loading, request/result validator parity on concrete fixtures, corpus syntax/internal-reference integrity, expected classification vocabulary, fixed primitive-name/milestone pairing, and negative structural/version cases.
@@ -29,12 +31,12 @@ Use the repository's existing focused-host pattern: `ModernMcpProcessDriver` sta
 
 ## 2. Planned focused commands
 
-The commands below are exact future commands. They are intentionally marked **NOT EXECUTED** because their named test classes are planned source paths in [plan.md](plan.md).
+The M0-G0 and M0 commands below were executed after their dependency gates. M1 and the full M0/M1 acceptance commands remain future commands.
 
 ### M0-G0 — freeze and prove the wire
 
 ```powershell
-# NOT EXECUTED — run only after recorded operator approval and M0-G0 implementation.
+# EXECUTED after T001 approval — terminal result: 40 passed, 0 failed, 0 skipped.
 dotnet test host/NetCoreDbg.Mcp.Stateless.Tests/NetCoreDbg.Mcp.Stateless.Tests.csproj -c Debug --filter "FullyQualifiedName~NativeSceneSchemaParityTests|FullyQualifiedName~NativeSceneNegativeWireTests" -v minimal
 ```
 
@@ -51,7 +53,7 @@ Expected evidence:
 ### M0 — native capability, bridge, visual artifact, and bounded reads
 
 ```powershell
-# NOT EXECUTED — run only after M0-G0 is accepted and M0 implementation exists.
+# EXECUTED after GREEN T012 and bridge build — terminal result: 38 passed, 0 failed, 0 skipped.
 dotnet test host/NetCoreDbg.Mcp.Stateless.Tests/NetCoreDbg.Mcp.Stateless.Tests.csproj -c Debug --filter "FullyQualifiedName~NativeSceneCapabilityTests|FullyQualifiedName~NativeSceneArtifactStoreTests|FullyQualifiedName~NativeSceneBridgeLifecycleTests|FullyQualifiedName~NativeSceneVisualEvidenceTests" -v minimal
 ```
 
@@ -69,7 +71,7 @@ Expected evidence:
 ### M1 — settle/revalidate, element facts, and atomicity qualification
 
 ```powershell
-# NOT EXECUTED — run only after M0 acceptance and M1 implementation exists.
+# EXECUTED after GREEN T020 and producer builds — terminal result: 21 passed, 0 failed, 0 skipped.
 dotnet test host/NetCoreDbg.Mcp.Stateless.Tests/NetCoreDbg.Mcp.Stateless.Tests.csproj -c Debug --filter "FullyQualifiedName~NativeSceneStabilityTests|FullyQualifiedName~NativeSceneAtomicityTests" -v minimal
 ```
 

@@ -2,12 +2,15 @@ using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
+using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Unicode;
 using System.Text.Json;
 using Microsoft.Win32.SafeHandles;
+using NetCoreDbg.Mcp.Stateless.NativeScene;
 
 namespace NetCoreDbg.Mcp.Stateless.DebugAdapter;
 
@@ -41,6 +44,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private DapSessionState _state = new(null, null, null);
     private Task? _cleanupTask;
     private Exception? _readerFailure;
+    private NativeSceneTargetIdentity? _nativeSceneTargetIdentity;
+    private readonly object _nativeSceneTargetIdentityGate = new();
+    private int _nativeSceneCaptureAuthorityInvalidated;
     private int _outgoingSequence;
     private bool _supportsConfigurationDone;
     private bool _supportsTerminate;
@@ -83,6 +89,39 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
     internal bool IsUsable => !_readerTask.IsCompleted && !HasExited();
+    internal bool TryGetNativeSceneTargetIdentity(out NativeSceneTargetIdentity targetIdentity)
+    {
+        targetIdentity = Volatile.Read(ref _nativeSceneTargetIdentity)!;
+        return targetIdentity is not null;
+    }
+
+    internal bool TryGetNativeSceneCaptureTargetIdentity(out NativeSceneTargetIdentity targetIdentity)
+    {
+        if (Volatile.Read(ref _nativeSceneCaptureAuthorityInvalidated) != 0)
+        {
+            targetIdentity = null!;
+            return false;
+        }
+
+        targetIdentity = Volatile.Read(ref _nativeSceneTargetIdentity)!;
+        return targetIdentity is not null;
+    }
+
+    internal static Task<NetCoreDbgSession> StartAsync(
+        string debuggerPath,
+        string programPath,
+        TimeSpan initializeTimeout,
+        TimeSpan requestTimeout,
+        TimeSpan stopTimeout,
+        CancellationToken cancellationToken) =>
+        StartAsync(
+            debuggerPath,
+            programPath,
+            initializeTimeout,
+            requestTimeout,
+            stopTimeout,
+            launchEnvironment: null,
+            cancellationToken: cancellationToken);
 
     internal static async Task<NetCoreDbgSession> StartAsync(
         string debuggerPath,
@@ -90,6 +129,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         TimeSpan initializeTimeout,
         TimeSpan requestTimeout,
         TimeSpan stopTimeout,
+        IReadOnlyDictionary<string, string>? launchEnvironment,
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(debuggerPath);
@@ -133,7 +173,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     processTreeOwnership);
             }
 
-            await session.StartProtocolAsync(programPath, initializeTimeout, cancellationToken).ConfigureAwait(false);
+            await session.StartProtocolAsync(programPath, initializeTimeout, launchEnvironment, cancellationToken).ConfigureAwait(false);
             return session;
         }
         catch
@@ -173,7 +213,14 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     public ValueTask DisposeAsync() => new(EnsureCleanupAsync());
 
-    private async Task StartProtocolAsync(string programPath, TimeSpan initializeTimeout, CancellationToken cancellationToken)
+    private Task StartProtocolAsync(string programPath, TimeSpan initializeTimeout, CancellationToken cancellationToken) =>
+        StartProtocolAsync(programPath, initializeTimeout, launchEnvironment: null, cancellationToken: cancellationToken);
+
+    private async Task StartProtocolAsync(
+        string programPath,
+        TimeSpan initializeTimeout,
+        IReadOnlyDictionary<string, string>? launchEnvironment,
+        CancellationToken cancellationToken)
     {
         _ = await SendRequestAsync(
             "initialize",
@@ -192,9 +239,12 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         await _initialized.Task.WaitAsync(initializeTimeout, cancellationToken).ConfigureAwait(false);
 
+        object launchArguments = launchEnvironment is { Count: > 0 }
+            ? new { program = programPath, env = launchEnvironment }
+            : new { program = programPath };
         var launch = await BeginRequestAsync(
             "launch",
-            new { program = programPath },
+            launchArguments,
             _requestTimeout,
             cancellationToken).ConfigureAwait(false);
         try
@@ -395,6 +445,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         switch (eventName)
         {
+            case "process":
+                CaptureNativeSceneTargetIdentity(body);
+                break;
             case "initialized":
                 if (_initializeResponseObserved)
                 {
@@ -440,6 +493,97 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             case "terminated":
                 UpdateState(current => current with { Event = eventName });
                 break;
+        }
+    }
+
+    private void CaptureNativeSceneTargetIdentity(JsonElement body)
+    {
+        if (TryGetInt32(body, "systemProcessId") is not int processId
+            || processId <= 0
+            || !body.TryGetProperty("isLocalProcess", out var isLocalProcess)
+            || isLocalProcess.ValueKind != JsonValueKind.True)
+        {
+            return;
+        }
+
+        var pinned = Volatile.Read(ref _nativeSceneTargetIdentity);
+        if (pinned is not null && pinned.ProcessId != processId)
+        {
+            Interlocked.Exchange(ref _nativeSceneCaptureAuthorityInvalidated, 1);
+            return;
+        }
+
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            var executablePath = process.MainModule?.FileName;
+            if (string.IsNullOrWhiteSpace(executablePath))
+            {
+                return;
+            }
+
+            using var executable = File.OpenRead(executablePath);
+            var identity = new NativeSceneTargetIdentity(
+                processId,
+                string.Concat(
+                    "process_",
+                    processId.ToString(CultureInfo.InvariantCulture),
+                    "_start_",
+                    process.StartTime.ToUniversalTime().Ticks.ToString(CultureInfo.InvariantCulture)),
+                executablePath,
+                Convert.ToHexString(SHA256.HashData(executable)).ToLowerInvariant(),
+                TryGetAssemblyVersion(executablePath),
+                ProbeVersion: null);
+            lock (_nativeSceneTargetIdentityGate)
+            {
+                pinned = _nativeSceneTargetIdentity;
+                if (pinned is null)
+                {
+                    Volatile.Write(ref _nativeSceneTargetIdentity, identity);
+                }
+                else if (!pinned.Equals(identity))
+                {
+                    Interlocked.Exchange(ref _nativeSceneCaptureAuthorityInvalidated, 1);
+                }
+            }
+        }
+        catch (Exception exception) when (exception is ArgumentException
+                                         or InvalidOperationException
+                                         or NotSupportedException
+                                         or Win32Exception
+                                         or UnauthorizedAccessException
+                                         or IOException
+                                         or System.Security.SecurityException
+                                         or CryptographicException)
+        {
+        }
+    }
+
+    private static string? TryGetAssemblyVersion(string executablePath)
+    {
+        try
+        {
+            return AssemblyName.GetAssemblyName(executablePath).Version?.ToString();
+        }
+        catch (BadImageFormatException)
+        {
+            return null;
+        }
+        catch (FileLoadException)
+        {
+            return null;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
+        catch (System.Security.SecurityException)
+        {
+            return null;
         }
     }
 
