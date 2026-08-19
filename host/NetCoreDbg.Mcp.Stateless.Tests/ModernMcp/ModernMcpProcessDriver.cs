@@ -84,7 +84,7 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
                 Arguments = candidate.Arguments,
                 Name = "netcoredbg-mcp-stateless-modern-contract",
                 WorkingDirectory = RepositoryLayout.Root,
-                EnvironmentVariables = CandidateEnvironment(fixture, inertProgramPath),
+                EnvironmentVariables = CandidateEnvironment(fixture, inertProgramPath, options.AdditionalEnvironment),
                 ShutdownTimeout = TimeSpan.FromSeconds(2),
                 StandardErrorLines = line => driver?.AddStandardErrorLine(line),
             });
@@ -255,6 +255,14 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
             ?? throw new InvalidOperationException("Controlled adapter did not record its descendant process id.");
     }
 
+    internal async Task<int> PublishSecondWindowedDescendantAsync(CancellationToken cancellationToken = default)
+    {
+        using var operation = CreateBoundedCancellation(cancellationToken);
+        operation.Token.ThrowIfCancellationRequested();
+        _fixture.ReleaseSecondWindowedDescendant();
+        return await _fixture.WaitForSecondWindowedDescendantPublicationAsync(operation.Token).ConfigureAwait(false);
+    }
+
     internal Task TerminateControlledAdapterAsync(CancellationToken cancellationToken = default) =>
         _fixture.TerminateAdapterAsync(cancellationToken);
 
@@ -360,12 +368,26 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
     }
 
 
-    private static Dictionary<string, string?> CandidateEnvironment(FixtureProcess fixture, string inertProgramPath) =>
-        new()
+    private static Dictionary<string, string?> CandidateEnvironment(
+        FixtureProcess fixture,
+        string inertProgramPath,
+        IReadOnlyDictionary<string, string?>? additionalEnvironment = null)
+    {
+        var environment = new Dictionary<string, string?>
         {
             ["NETCOREDBG_PATH"] = fixture.ExecutablePath,
             ["NETCOREDBG_PROGRAM_PATH"] = inertProgramPath,
         };
+        if (additionalEnvironment is not null)
+        {
+            foreach (var (name, value) in additionalEnvironment)
+            {
+                environment[name] = value;
+            }
+        }
+
+        return environment;
+    }
 
     private static async Task CleanupFailedStartAsync(FixtureProcess? fixture, string scratchDirectory)
     {
@@ -540,7 +562,8 @@ internal sealed record ModernMcpStartOptions(
     JsonObject? InitialMeta = null,
     bool DisableFormElicitation = false,
     string? PriorProcessToken = null,
-    FixtureConfiguration? FixtureConfiguration = null);
+    FixtureConfiguration? FixtureConfiguration = null,
+    IReadOnlyDictionary<string, string?>? AdditionalEnvironment = null);
 
 /// <summary>Kind is the controlled transcript kind: <c>startup</c> or <c>request</c>.</summary>
 internal sealed record ModernNativeAction(string Kind, string? Command, string? Detail);

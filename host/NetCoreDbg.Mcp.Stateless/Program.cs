@@ -31,7 +31,10 @@ internal static class Program
             return;
         }
 
-        var sessions = new DebugSessionRegistry(Environment.GetEnvironmentVariable("NETCOREDBG_PATH"));
+        var sessions = new DebugSessionRegistry(
+            Environment.GetEnvironmentVariable("NETCOREDBG_PATH"),
+            Environment.GetEnvironmentVariable("FLAUI_BRIDGE_PATH"),
+            Environment.GetEnvironmentVariable("NETCOREDBG_MCP_ARTIFACT_ROOT"));
         var builder = Host.CreateApplicationBuilder();
         builder.Logging.ClearProviders();
         builder.Logging.AddConsole(options => options.LogToStandardErrorThreshold = LogLevel.Trace);
@@ -112,16 +115,26 @@ internal static class Program
         private readonly ConcurrentDictionary<string, NetCoreDbgSession> _sessions = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, NativeSceneSessionBinding> _nativeSceneBindings = new(StringComparer.Ordinal);
         private readonly string? _debuggerPath;
+        private readonly string? _bridgePath;
+        private readonly string? _artifactRoot;
         private readonly Func<NetCoreDbgSession, bool> _isUsable;
         private readonly Func<NetCoreDbgSession, ValueTask> _dispose;
 
         internal DebugSessionRegistry(string? debuggerPath)
-            : this(debuggerPath, static session => session.IsUsable)
+            : this(
+                debuggerPath,
+                Environment.GetEnvironmentVariable("FLAUI_BRIDGE_PATH"),
+                Environment.GetEnvironmentVariable("NETCOREDBG_MCP_ARTIFACT_ROOT"))
+        {
+        }
+
+        internal DebugSessionRegistry(string? debuggerPath, string? bridgePath, string? artifactRoot)
+            : this(debuggerPath, bridgePath, artifactRoot, static session => session.IsUsable)
         {
         }
 
         private DebugSessionRegistry(string? debuggerPath, Func<NetCoreDbgSession, bool> isUsable)
-            : this(debuggerPath, isUsable, static session => session.DisposeAsync())
+            : this(debuggerPath, bridgePath: null, artifactRoot: null, isUsable)
         {
         }
 
@@ -129,8 +142,29 @@ internal static class Program
             string? debuggerPath,
             Func<NetCoreDbgSession, bool> isUsable,
             Func<NetCoreDbgSession, ValueTask> dispose)
+            : this(debuggerPath, bridgePath: null, artifactRoot: null, isUsable, dispose)
+        {
+        }
+
+        private DebugSessionRegistry(
+            string? debuggerPath,
+            string? bridgePath,
+            string? artifactRoot,
+            Func<NetCoreDbgSession, bool> isUsable)
+            : this(debuggerPath, bridgePath, artifactRoot, isUsable, static session => session.DisposeAsync())
+        {
+        }
+
+        private DebugSessionRegistry(
+            string? debuggerPath,
+            string? bridgePath,
+            string? artifactRoot,
+            Func<NetCoreDbgSession, bool> isUsable,
+            Func<NetCoreDbgSession, ValueTask> dispose)
         {
             _debuggerPath = debuggerPath;
+            _bridgePath = bridgePath;
+            _artifactRoot = artifactRoot;
             _isUsable = isUsable;
             _dispose = dispose;
         }
@@ -148,7 +182,8 @@ internal static class Program
                 _ when IsNativeSceneTool(request.Name) => await NativeSceneToolDispatcher.DispatchAsync(
                     request.Name,
                     request.Arguments,
-                    ResolveNativeSceneBinding).ConfigureAwait(false),
+                    ResolveNativeSceneBindingAsync,
+                    cancellationToken).ConfigureAwait(false),
                 _ => UnknownTool(request.Name),
             };
         }
@@ -211,12 +246,13 @@ internal static class Program
                     RequestTimeout,
                     StopTimeout,
                     cancellationToken).ConfigureAwait(false);
-                var binding = new NativeSceneSessionBinding(session);
                 while (true)
                 {
                     var token = CreateToken();
+                    var binding = new NativeSceneSessionBinding(session, token, _bridgePath, _artifactRoot);
                     if (!_sessions.TryAdd(token, session))
                     {
+                        await binding.DisposeAsync().ConfigureAwait(false);
                         continue;
                     }
 
@@ -226,6 +262,7 @@ internal static class Program
                         return Success("start_debug_success", token, session.State);
                     }
 
+                    await binding.DisposeAsync().ConfigureAwait(false);
                     _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(token, session));
                 }
             }
@@ -233,7 +270,11 @@ internal static class Program
             {
                 if (registeredToken is not null)
                 {
-                    _nativeSceneBindings.TryRemove(registeredToken, out _);
+                    if (_nativeSceneBindings.TryRemove(registeredToken, out var binding))
+                    {
+                        await binding.DisposeAsync().ConfigureAwait(false);
+                    }
+
                     _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(registeredToken, session!));
                 }
 
@@ -268,7 +309,7 @@ internal static class Program
 
             if (!_sessions.TryGetValue(sessionId!, out var session))
             {
-                _nativeSceneBindings.TryRemove(sessionId!, out _);
+                await RemoveNativeSceneBindingAsync(sessionId!).ConfigureAwait(false);
                 return NotFound();
             }
 
@@ -276,16 +317,8 @@ internal static class Program
 
             if (!isUsable && _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(sessionId!, session)))
             {
-                _nativeSceneBindings.TryRemove(sessionId!, out _);
-                try
-                {
-                    await _dispose(session).ConfigureAwait(false);
-                }
-                catch (Exception)
-                {
-                    // Removal is authoritative: cleanup failure must not disclose handle state.
-                }
-
+                await RemoveNativeSceneBindingAsync(sessionId!).ConfigureAwait(false);
+                await DisposeRemovedSessionAsync(session).ConfigureAwait(false);
                 return NotFound();
             }
 
@@ -310,11 +343,11 @@ internal static class Program
 
             if (!_sessions.TryRemove(sessionId!, out var session))
             {
-                _nativeSceneBindings.TryRemove(sessionId!, out _);
+                await RemoveNativeSceneBindingAsync(sessionId!).ConfigureAwait(false);
                 return NotFound();
             }
 
-            _nativeSceneBindings.TryRemove(sessionId!, out _);
+            await RemoveNativeSceneBindingAsync(sessionId!).ConfigureAwait(false);
 
             try
             {
@@ -333,7 +366,9 @@ internal static class Program
         {
             var sessions = _sessions.ToArray();
             _sessions.Clear();
+            var bindings = _nativeSceneBindings.ToArray();
             _nativeSceneBindings.Clear();
+            await Task.WhenAll(bindings.Select(static binding => binding.Value.DisposeAsync().AsTask())).ConfigureAwait(false);
             await Task.WhenAll(sessions.Select(session => session.Value.StopAsync(cancellationToken))).ConfigureAwait(false);
         }
 
@@ -341,11 +376,11 @@ internal static class Program
         private static bool IsNativeSceneTool(string tool) => NativeSceneToolDispatcher.ListTools()
             .Any(candidate => StringComparer.Ordinal.Equals(candidate.Name, tool));
 
-        private NativeSceneSessionBinding? ResolveNativeSceneBinding(string sessionId)
+        private async ValueTask<NativeSceneSessionBinding?> ResolveNativeSceneBindingAsync(string sessionId)
         {
             if (!_sessions.TryGetValue(sessionId, out var session))
             {
-                _nativeSceneBindings.TryRemove(sessionId, out _);
+                await RemoveNativeSceneBindingAsync(sessionId).ConfigureAwait(false);
                 return null;
             }
 
@@ -353,14 +388,22 @@ internal static class Program
             {
                 if (_sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(sessionId, session)))
                 {
-                    _nativeSceneBindings.TryRemove(sessionId, out _);
-                    _ = DisposeRemovedSessionAsync(session);
+                    await RemoveNativeSceneBindingAsync(sessionId).ConfigureAwait(false);
+                    await DisposeRemovedSessionAsync(session).ConfigureAwait(false);
                 }
 
                 return null;
             }
 
             return _nativeSceneBindings.TryGetValue(sessionId, out var binding) ? binding : null;
+        }
+
+        private async ValueTask RemoveNativeSceneBindingAsync(string sessionId)
+        {
+            if (_nativeSceneBindings.TryRemove(sessionId, out var binding))
+            {
+                await binding.DisposeAsync().ConfigureAwait(false);
+            }
         }
 
         private async Task DisposeRemovedSessionAsync(NetCoreDbgSession session)

@@ -1,10 +1,10 @@
 # Native Scene Probe — Future Acceptance Playbook
 
-## Status: M0-G0 AND M0 FOUNDATION EXECUTED; M0 EVIDENCE AND M1 NOT EXECUTED
+## Status: M0-G0 AND M0 EXECUTED; M1 NOT EXECUTED
 
-The operator approved the exact merged contract bytes. M0-G0 T001–T007 is GREEN at 40/40, and the additive M0 foundation T008–T012 is GREEN at 42/42 across the native capability and affected ModernMcp suites. The six frozen native-scene names are now listed and session-bound: `get_ui_probe_capabilities` returns the frozen declaration, unimplemented M0 capture/read paths return typed unavailable results without observer or artifact activity, and all M1 primitives remain explicitly unsupported. No bridge, visual capture, artifact store/read implementation, stability, atomicity, WPF fixture/probe, route cutover, package, release, or publication work has executed.
+The operator approved the exact merged contract bytes. M0-G0 T001–T007 is GREEN at 40/40. M0 foundation and evidence T008–T020 are GREEN: the exact M0 command is 38/38, the full NativeScene + ModernMcp affected set is 113/113, and the standalone Windows bridge build completed with zero warnings/errors. The six frozen names are session-bound and truthful: lossless capture is supported only when the exact bridge path and verified pinned local candidate are available, while retained artifact reads remain independent of later bridge availability. The native route produces a real bounded controlled PrintWindow PNG, server-owned budgeted opaque artifacts, single-pass bounded integrity-checked reads, timer-driven expiry, process/HWND identity revalidation, and typed unavailable failures. M1 stability, element/scene atomicity, WPF probe, route cutover, package, release, and publication work has not executed.
 
-GREEN T007 authorized the internal M0 tasks T008+, but it did not authorize a release or behavioral M0 claim. T012 establishes only the explicit local-session capability front door; T013–T020 remain required before M0 evidence acceptance.
+GREEN T020 authorizes the internal M1 tasks T021+, but it does not authorize release, public-route selection, Factory/Gallery behavior, or a full behavioral C001–C024 acceptance claim. T032/T034 remain the later full behavior gates.
 
 M0-G0 authority remains pinned by:
 
@@ -31,12 +31,12 @@ Use the repository's existing focused-host pattern: `ModernMcpProcessDriver` sta
 
 ## 2. Planned focused commands
 
-The M0-G0 command below was executed after T001 approval. Later M0/M1 commands remain future commands and must not run before their dependency gates.
+The M0-G0 and M0 commands below were executed after their dependency gates. M1 and the full M0/M1 acceptance commands remain future commands.
 
 ### M0-G0 — freeze and prove the wire
 
 ```powershell
-# EXECUTED after T001 approval — terminal result: 39 passed, 0 failed, 0 skipped.
+# EXECUTED after T001 approval — terminal result: 40 passed, 0 failed, 0 skipped.
 dotnet test host/NetCoreDbg.Mcp.Stateless.Tests/NetCoreDbg.Mcp.Stateless.Tests.csproj -c Debug --filter "FullyQualifiedName~NativeSceneSchemaParityTests|FullyQualifiedName~NativeSceneNegativeWireTests" -v minimal
 ```
 
@@ -53,7 +53,7 @@ Expected evidence:
 ### M0 — native capability, bridge, visual artifact, and bounded reads
 
 ```powershell
-# NOT EXECUTED — run only after M0-G0 is accepted and M0 implementation exists.
+# EXECUTED after GREEN T012 and bridge build — terminal result: 38 passed, 0 failed, 0 skipped.
 dotnet test host/NetCoreDbg.Mcp.Stateless.Tests/NetCoreDbg.Mcp.Stateless.Tests.csproj -c Debug --filter "FullyQualifiedName~NativeSceneCapabilityTests|FullyQualifiedName~NativeSceneArtifactStoreTests|FullyQualifiedName~NativeSceneBridgeLifecycleTests|FullyQualifiedName~NativeSceneVisualEvidenceTests" -v minimal
 ```
 

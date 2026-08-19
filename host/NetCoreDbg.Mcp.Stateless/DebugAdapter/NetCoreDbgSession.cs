@@ -45,6 +45,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private Task? _cleanupTask;
     private Exception? _readerFailure;
     private NativeSceneTargetIdentity? _nativeSceneTargetIdentity;
+    private readonly object _nativeSceneTargetIdentityGate = new();
+    private int _nativeSceneCaptureAuthorityInvalidated;
     private int _outgoingSequence;
     private bool _supportsConfigurationDone;
     private bool _supportsTerminate;
@@ -89,6 +91,18 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     internal bool IsUsable => !_readerTask.IsCompleted && !HasExited();
     internal bool TryGetNativeSceneTargetIdentity(out NativeSceneTargetIdentity targetIdentity)
     {
+        targetIdentity = Volatile.Read(ref _nativeSceneTargetIdentity)!;
+        return targetIdentity is not null;
+    }
+
+    internal bool TryGetNativeSceneCaptureTargetIdentity(out NativeSceneTargetIdentity targetIdentity)
+    {
+        if (Volatile.Read(ref _nativeSceneCaptureAuthorityInvalidated) != 0)
+        {
+            targetIdentity = null!;
+            return false;
+        }
+
         targetIdentity = Volatile.Read(ref _nativeSceneTargetIdentity)!;
         return targetIdentity is not null;
     }
@@ -457,12 +471,18 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     private void CaptureNativeSceneTargetIdentity(JsonElement body)
     {
-        Volatile.Write(ref _nativeSceneTargetIdentity, null);
         if (TryGetInt32(body, "systemProcessId") is not int processId
             || processId <= 0
             || !body.TryGetProperty("isLocalProcess", out var isLocalProcess)
             || isLocalProcess.ValueKind != JsonValueKind.True)
         {
+            return;
+        }
+
+        var pinned = Volatile.Read(ref _nativeSceneTargetIdentity);
+        if (pinned is not null && pinned.ProcessId != processId)
+        {
+            Interlocked.Exchange(ref _nativeSceneCaptureAuthorityInvalidated, 1);
             return;
         }
 
@@ -487,16 +507,27 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 Convert.ToHexString(SHA256.HashData(executable)).ToLowerInvariant(),
                 TryGetAssemblyVersion(executablePath),
                 ProbeVersion: null);
-            Volatile.Write(ref _nativeSceneTargetIdentity, identity);
+            lock (_nativeSceneTargetIdentityGate)
+            {
+                pinned = _nativeSceneTargetIdentity;
+                if (pinned is null)
+                {
+                    Volatile.Write(ref _nativeSceneTargetIdentity, identity);
+                }
+                else if (!pinned.Equals(identity))
+                {
+                    Interlocked.Exchange(ref _nativeSceneCaptureAuthorityInvalidated, 1);
+                }
+            }
         }
         catch (Exception exception) when (exception is ArgumentException
-            or InvalidOperationException
-            or NotSupportedException
-            or Win32Exception
-            or UnauthorizedAccessException
-            or IOException
-            or System.Security.SecurityException
-            or CryptographicException)
+                                         or InvalidOperationException
+                                         or NotSupportedException
+                                         or Win32Exception
+                                         or UnauthorizedAccessException
+                                         or IOException
+                                         or System.Security.SecurityException
+                                         or CryptographicException)
         {
         }
     }

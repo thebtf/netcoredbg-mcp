@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Encodings.Web;
@@ -12,6 +13,11 @@ if (args.Length == 1 && string.Equals(args[0], "--controlled-dap-descendant", St
     return;
 }
 
+if (args.Length == 1 && string.Equals(args[0], "--controlled-dap-windowed-descendant", StringComparison.Ordinal))
+{
+    ControlledEvidenceWindow.Run();
+    return;
+}
 var options = AdapterOptions.Parse(args, Environment.GetEnvironmentVariable("CONTROLLED_DAP_OPTIONS"));
 var transcriptPath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_TRANSCRIPT")
     ?? throw new InvalidOperationException("CONTROLLED_DAP_TRANSCRIPT is required.");
@@ -37,7 +43,9 @@ internal sealed record AdapterOptions(
     bool EnableConfigurationDoneAfterInitialization,
     bool HoldConfigurationDoneCapabilityDeltaUntilRelease,
     bool EnableTerminateAfterInitialization,
-    bool ExitAfterLaunchResponse)
+    bool ExitAfterLaunchResponse,
+    bool SpawnWindowedDescendant,
+    bool PublishSecondWindowedDescendantAfterRelease)
 {
     public static AdapterOptions Parse(string[] args, string? environmentOptions)
     {
@@ -60,6 +68,8 @@ internal sealed record AdapterOptions(
         var holdConfigurationDoneCapabilityDeltaUntilRelease = false;
         var enableTerminateAfterInitialization = false;
         var exitAfterLaunchResponse = false;
+        var spawnWindowedDescendant = false;
+        var publishSecondWindowedDescendantAfterRelease = false;
 
         foreach (var argument in args.Concat(SplitOptions(environmentOptions)))
         {
@@ -78,6 +88,13 @@ internal sealed record AdapterOptions(
                     break;
                 case "--spawn-descendant":
                     spawnDescendant = true;
+                    break;
+                case "--spawn-windowed-descendant":
+                    spawnDescendant = true;
+                    spawnWindowedDescendant = true;
+                    break;
+                case "--publish-second-windowed-descendant-after-release":
+                    publishSecondWindowedDescendantAfterRelease = true;
                     break;
                 case "--initialized-before-correct-initialize-response":
                     initializedBeforeCorrectInitializeResponse = true;
@@ -149,13 +166,109 @@ internal sealed record AdapterOptions(
             enableConfigurationDoneAfterInitialization,
             holdConfigurationDoneCapabilityDeltaUntilRelease,
             enableTerminateAfterInitialization,
-            exitAfterLaunchResponse);
+            exitAfterLaunchResponse,
+            spawnWindowedDescendant,
+            publishSecondWindowedDescendantAfterRelease);
     }
 
     private static IEnumerable<string> SplitOptions(string? options) =>
         string.IsNullOrWhiteSpace(options)
             ? []
             : options.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+}
+
+internal static class ControlledEvidenceWindow
+{
+    private const uint WsOverlappedWindow = 0x00CF0000;
+    private const uint WsVisible = 0x10000000;
+    private const int SwShow = 5;
+
+    public static void Run()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException("Windowed controlled descendants require Windows.");
+        }
+
+        var window = CreateWindowEx(
+            0,
+            "STATIC",
+            "Native Scene Controlled Evidence",
+            WsOverlappedWindow | WsVisible,
+            32,
+            32,
+            800,
+            600,
+            IntPtr.Zero,
+            IntPtr.Zero,
+            IntPtr.Zero,
+            IntPtr.Zero);
+        if (window == IntPtr.Zero)
+        {
+            throw new InvalidOperationException($"Could not create controlled evidence window: {Marshal.GetLastWin32Error()}.");
+        }
+
+        ShowWindow(window, SwShow);
+        if (!UpdateWindow(window))
+        {
+            throw new InvalidOperationException($"Could not render controlled evidence window: {Marshal.GetLastWin32Error()}.");
+        }
+
+        while (GetMessage(out var message, IntPtr.Zero, 0, 0) > 0)
+        {
+            TranslateMessage(ref message);
+            DispatchMessage(ref message);
+        }
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateWindowEx(
+        uint exStyle,
+        string className,
+        string windowName,
+        uint style,
+        int x,
+        int y,
+        int width,
+        int height,
+        IntPtr parent,
+        IntPtr menu,
+        IntPtr instance,
+        IntPtr parameter);
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr window, int command);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool UpdateWindow(IntPtr window);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern int GetMessage(out Message message, IntPtr window, uint minimumFilter, uint maximumFilter);
+
+    [DllImport("user32.dll")]
+    private static extern bool TranslateMessage(ref Message message);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr DispatchMessage(ref Message message);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Message
+    {
+        public IntPtr Window;
+        public uint Value;
+        public UIntPtr WParam;
+        public IntPtr LParam;
+        public uint Time;
+        public Point Point;
+        public uint Private;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Point
+    {
+        public int X;
+        public int Y;
+    }
 }
 
 internal sealed class ControlledDapAdapter
@@ -176,12 +289,15 @@ internal sealed class ControlledDapAdapter
     private readonly Queue<DapFrame> _deferredRequests = new();
     private readonly string? _gracefulReleasePath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_GRACEFUL_RELEASE");
     private readonly string? _configurationDoneCapabilityDeltaReleasePath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_CONFIGURATION_DONE_CAPABILITY_DELTA_RELEASE");
+    private readonly string? _secondWindowedDescendantReleasePath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_SECOND_WINDOWED_DESCENDANT_RELEASE");
     private Process? _descendant;
+    private Process? _secondDescendant;
     private Task? _lifecycleEvents;
     private readonly CancellationTokenSource _lifecycleEventsCancellation = new();
     private static readonly TimeSpan InitializeGateWindow = TimeSpan.FromMilliseconds(75);
     private static readonly TimeSpan GracefulReleaseTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan ConfigurationDoneCapabilityDeltaReleaseTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan SecondWindowedDescendantReleaseTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DescendantCleanupTimeout = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan LifecycleEventsCompletionTimeout = TimeSpan.FromSeconds(1);
     private Task<DapFrame?>? _nextRequest;
@@ -202,7 +318,7 @@ internal sealed class ControlledDapAdapter
         await RecordAsync(new { kind = "startup", arguments = JsonSerializer.Serialize(_processArguments), processId = Environment.ProcessId }, cancellationToken);
         if (_options.SpawnDescendant)
         {
-            _descendant = StartDescendant();
+            _descendant = StartDescendant(_options.SpawnWindowedDescendant);
             await RecordAsync(new { kind = "descendant", processId = _descendant.Id }, cancellationToken);
         }
 
@@ -238,6 +354,13 @@ internal sealed class ControlledDapAdapter
                 }
             }
 
+            if (_secondDescendant is { HasExited: false })
+            {
+                _secondDescendant.Kill(entireProcessTree: true);
+                using var secondDescendantCleanup = new CancellationTokenSource(DescendantCleanupTimeout);
+                await _secondDescendant.WaitForExitAsync(secondDescendantCleanup.Token);
+            }
+
             if (_descendant is { HasExited: false })
             {
                 _descendant.Kill(entireProcessTree: true);
@@ -246,6 +369,7 @@ internal sealed class ControlledDapAdapter
             }
 
             _descendant?.Dispose();
+            _secondDescendant?.Dispose();
             _lifecycleEventsCancellation.Dispose();
             _writeGate.Dispose();
             _transcriptWriteMutex.Dispose();
@@ -428,6 +552,25 @@ internal sealed class ControlledDapAdapter
                 cancellationToken);
         }
 
+        if (_options.PublishSecondWindowedDescendantAfterRelease)
+        {
+            await WaitForSecondWindowedDescendantReleaseAsync(cancellationToken);
+            _secondDescendant = StartDescendant(windowed: true);
+            await WriteEventAsync(
+                "process",
+                new
+                {
+                    name = "controlled-dap-second-windowed-descendant",
+                    systemProcessId = _secondDescendant.Id,
+                    isLocalProcess = true,
+                    startMethod = "launch",
+                },
+                cancellationToken);
+            await RecordAsync(
+                new { kind = "second-windowed-descendant-published", processId = _secondDescendant.Id },
+                cancellationToken);
+        }
+
         await WriteEventAsync("stopped", new { reason = _options.StopReason, threadId = 1 }, cancellationToken);
         await Task.Delay(TimeSpan.FromMilliseconds(75), cancellationToken);
         await WriteEventAsync("continued", new { threadId = 1, allThreadsContinued = true }, cancellationToken);
@@ -437,13 +580,13 @@ internal sealed class ControlledDapAdapter
         await WriteEventAsync("terminated", body: null, cancellationToken);
     }
 
-    private static Process StartDescendant() =>
+    private Process StartDescendant(bool windowed) =>
         Process.Start(new ProcessStartInfo
         {
             FileName = Environment.ProcessPath ?? throw new InvalidOperationException("Process path is unavailable."),
             UseShellExecute = false,
             CreateNoWindow = true,
-            ArgumentList = { "--controlled-dap-descendant" },
+            ArgumentList = { windowed ? "--controlled-dap-windowed-descendant" : "--controlled-dap-descendant" },
         }) ?? throw new InvalidOperationException("Could not start controlled adapter descendant.");
 
     private async Task<DapFrame?> ReadNextFrameAsync(CancellationToken cancellationToken)
@@ -539,6 +682,21 @@ internal sealed class ControlledDapAdapter
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(ConfigurationDoneCapabilityDeltaReleaseTimeout);
         while (!File.Exists(_configurationDoneCapabilityDeltaReleasePath))
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(25), timeout.Token);
+        }
+    }
+
+    private async Task WaitForSecondWindowedDescendantReleaseAsync(CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(_secondWindowedDescendantReleasePath))
+        {
+            throw new InvalidOperationException("CONTROLLED_DAP_SECOND_WINDOWED_DESCENDANT_RELEASE is required when the second windowed descendant is held.");
+        }
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(SecondWindowedDescendantReleaseTimeout);
+        while (!File.Exists(_secondWindowedDescendantReleasePath))
         {
             await Task.Delay(TimeSpan.FromMilliseconds(25), timeout.Token);
         }

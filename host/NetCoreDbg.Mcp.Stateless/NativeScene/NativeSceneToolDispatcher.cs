@@ -20,16 +20,11 @@ internal static class NativeSceneToolDispatcher
 
     internal static IReadOnlyList<Tool> ListTools() => Tools;
 
-    internal static ValueTask<CallToolResult> DispatchAsync(
+    internal static async ValueTask<CallToolResult> DispatchAsync(
         string tool,
         IDictionary<string, JsonElement>? arguments,
-        Func<string, NativeSceneSessionBinding?> resolveBinding) =>
-        ValueTask.FromResult(Dispatch(tool, arguments, resolveBinding));
-
-    internal static CallToolResult Dispatch(
-        string tool,
-        IDictionary<string, JsonElement>? arguments,
-        Func<string, NativeSceneSessionBinding?> resolveBinding)
+        Func<string, ValueTask<NativeSceneSessionBinding?>> resolveBinding,
+        CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(tool);
         ArgumentNullException.ThrowIfNull(resolveBinding);
@@ -48,7 +43,7 @@ internal static class NativeSceneToolDispatcher
         using var requestDocument = JsonDocument.Parse(requestJson);
         var request = requestDocument.RootElement;
         var debugSessionId = request.GetProperty("debugSessionId").GetString()!;
-        var binding = resolveBinding(debugSessionId);
+        var binding = await resolveBinding(debugSessionId).ConfigureAwait(false);
         if (binding is null)
         {
             return ToolError(tool, DebugSessionNotFound, "Debug session is not available.");
@@ -67,8 +62,10 @@ internal static class NativeSceneToolDispatcher
 
         return tool switch
         {
-            "get_ui_probe_capabilities" => Success(tool, CapabilityDeclaration(candidate)),
-            "capture_visual_evidence" or "read_capture_artifact" or "wait_for_ui_stable" or "capture_element_snapshot" or "capture_native_scene" =>
+            "get_ui_probe_capabilities" => Success(tool, CapabilityDeclaration(candidate, binding.SupportsVisualEvidence)),
+            "capture_visual_evidence" => await CaptureVisualEvidenceAsync(binding, request, candidate, cancellationToken).ConfigureAwait(false),
+            "read_capture_artifact" => await ReadCaptureArtifactAsync(binding, request, cancellationToken).ConfigureAwait(false),
+            "wait_for_ui_stable" or "capture_element_snapshot" or "capture_native_scene" =>
                 ToolError(tool, UnsupportedCapability, "Native scene capability is unsupported."),
             _ => throw new InvalidOperationException("Known native scene tool has no dispatch branch."),
         };
@@ -145,7 +142,7 @@ internal static class NativeSceneToolDispatcher
         }
     }
 
-    private static JsonObject CapabilityDeclaration(JsonElement candidate) => new()
+    private static JsonObject CapabilityDeclaration(JsonElement candidate, bool supportsVisualEvidence) => new()
     {
         ["kind"] = "ui_probe_capabilities",
         ["protocolVersion"] = Contract.ProtocolVersion,
@@ -155,12 +152,12 @@ internal static class NativeSceneToolDispatcher
         {
             ["supportedProtocolVersions"] = new JsonArray(JsonValue.Create(Contract.ProtocolVersion)),
             ["supportedSchemaVersions"] = new JsonArray(JsonValue.Create(Contract.SchemaVersion)),
-            ["primitives"] = PrimitiveCapabilities(),
+            ["primitives"] = PrimitiveCapabilities(supportsVisualEvidence),
             ["context"] = CapabilityStates(Contract.ContextNames),
             ["settleConditions"] = CapabilityStates(Contract.SettleConditionNames),
             ["atomicSceneAuthority"] = "unsupported",
             ["uiaGuardedTraversal"] = "unsupported",
-            ["losslessVisualEvidence"] = "unsupported",
+            ["losslessVisualEvidence"] = supportsVisualEvidence ? "supported" : "unsupported",
             ["customAdapterNamespaces"] = new JsonArray(),
             ["limits"] = NegotiatedLimits(),
         },
@@ -170,7 +167,7 @@ internal static class NativeSceneToolDispatcher
         JsonNode.Parse(candidate.GetRawText()) as JsonObject
         ?? throw new InvalidOperationException("Native scene binding supplied an invalid candidate projection.");
 
-    private static JsonArray PrimitiveCapabilities()
+    private static JsonArray PrimitiveCapabilities(bool supportsVisualEvidence)
     {
         var capabilities = new JsonArray();
         foreach (var primitive in Contract.Primitives)
@@ -179,7 +176,11 @@ internal static class NativeSceneToolDispatcher
             {
                 ["name"] = primitive.Name,
                 ["milestone"] = primitive.Milestone,
-                ["availability"] = StringComparer.Ordinal.Equals(primitive.Name, "get_ui_probe_capabilities") ? "supported" : "unsupported",
+                ["availability"] = StringComparer.Ordinal.Equals(primitive.Name, "get_ui_probe_capabilities") ||
+                                   StringComparer.Ordinal.Equals(primitive.Name, "read_capture_artifact") ||
+                                   (supportsVisualEvidence && StringComparer.Ordinal.Equals(primitive.Name, "capture_visual_evidence"))
+                    ? "supported"
+                    : "unsupported",
             });
         }
 
@@ -206,6 +207,58 @@ internal static class NativeSceneToolDispatcher
         }
 
         return limits;
+    }
+
+    private static async Task<CallToolResult> CaptureVisualEvidenceAsync(
+        NativeSceneSessionBinding binding,
+        JsonElement request,
+        JsonElement candidate,
+        CancellationToken cancellationToken)
+    {
+        if (!binding.SupportsVisualEvidence)
+        {
+            return ToolError("capture_visual_evidence", UnsupportedCapability, "Native scene capability is unsupported.");
+        }
+
+        var result = await binding.CaptureVisualEvidenceAsync(
+            request.GetProperty("sceneRequest"),
+            request.GetProperty("evidenceScope"),
+            candidate,
+            cancellationToken).ConfigureAwait(false);
+        return result.Manifest is { } manifest
+            ? Success("capture_visual_evidence", manifest)
+            : ToolError("capture_visual_evidence", result.Code!, result.Message!);
+    }
+
+    private static async Task<CallToolResult> ReadCaptureArtifactAsync(
+        NativeSceneSessionBinding binding,
+        JsonElement request,
+        CancellationToken cancellationToken)
+    {
+
+        var result = await binding.ReadCaptureArtifactAsync(
+            request.GetProperty("artifactId").GetString()!,
+            request.GetProperty("offset").GetInt64(),
+            request.GetProperty("maxBytes").GetInt32(),
+            cancellationToken).ConfigureAwait(false);
+        return result switch
+        {
+            NativeSceneArtifactReadChunk chunk => Success("read_capture_artifact", new JsonObject
+            {
+                ["kind"] = chunk.Kind,
+                ["artifactId"] = chunk.ArtifactId,
+                ["offset"] = chunk.Offset,
+                ["bytesRead"] = chunk.BytesRead,
+                ["dataBase64"] = chunk.DataBase64,
+                ["endOfArtifact"] = chunk.EndOfArtifact,
+                ["mediaType"] = chunk.MediaType,
+                ["byteLength"] = chunk.ByteLength,
+                ["sha256"] = chunk.Sha256,
+                ["artifactSchemaVersion"] = chunk.ArtifactSchemaVersion,
+            }),
+            NativeSceneArtifactReadError error => ToolError("read_capture_artifact", error.Code, error.Message),
+            _ => throw new InvalidOperationException("Native scene artifact store returned an unknown result."),
+        };
     }
 
     private static CallToolResult ToolError(string tool, string code, string message) => Emit(

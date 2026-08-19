@@ -143,6 +143,9 @@ public static class JsonRpcHandler
         }
     }
 
+    internal static JsonObject HandleNativeSceneEvidence(JsonObject request, int boundProcessId) =>
+        NativeSceneEvidenceCommands.Handle(request, boundProcessId);
+
     private static JsonNode GetState(JsonNode? @params, UIA3Automation automation, AutomationElement? mainWindow)
     {
         return new JsonObject

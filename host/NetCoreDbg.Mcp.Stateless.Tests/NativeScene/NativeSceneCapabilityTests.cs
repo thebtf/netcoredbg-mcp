@@ -16,7 +16,7 @@ public sealed class NativeSceneCapabilityTests
     [
         ("get_ui_probe_capabilities", "M0", "supported"),
         ("capture_visual_evidence", "M0", "unsupported"),
-        ("read_capture_artifact", "M0", "unsupported"),
+        ("read_capture_artifact", "M0", "supported"),
         ("wait_for_ui_stable", "M1", "unsupported"),
         ("capture_element_snapshot", "M1", "unsupported"),
         ("capture_native_scene", "M1", "unsupported"),
@@ -116,8 +116,8 @@ public sealed class NativeSceneCapabilityTests
                 driver,
                 "read_capture_artifact",
                 ArtifactReadArguments(debugSessionId),
-                "unsupported-artifact-read",
-                "UNSUPPORTED_CAPABILITY"));
+                "artifact-read-without-bridge",
+                "ARTIFACT_NOT_FOUND"));
 
         var limits = Object(capabilities["limits"]);
         Assert.Equal(
@@ -129,6 +129,30 @@ public sealed class NativeSceneCapabilityTests
         }
 
         Assert.DoesNotContain(EnumeratePropertyNames(declaration), static name => name == "artifactId");
+    }
+
+    [Fact]
+    public async Task LiveLocalSession_WithoutBridge_ReturnsFixedNotFoundForUnknownOpaqueArtifactWithoutNativeActions()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(
+            new ModernMcpStartOptions(
+                FixtureConfiguration: new FixtureConfiguration(SpawnDescendant: true),
+                AdditionalEnvironment: new Dictionary<string, string?> { ["FLAUI_BRIDGE_PATH"] = null }));
+        var debugSessionId = await StartDebugAsync(driver, "unknown-artifact-start");
+
+        var error = await AssertNoNativeActionsAsync(
+            driver,
+            () => AssertToolErrorAsync(
+                driver,
+                "read_capture_artifact",
+                ArtifactReadArguments(debugSessionId, "Vn2bL9e0qR5xTa1M3cD7Uw"),
+                "unknown-artifact-read",
+                "ARTIFACT_NOT_FOUND"));
+
+        Assert.Equal("Artifact is not available.", Text(error["message"]));
+        Assert.Equal(
+            ["code", "kind", "message", "tool"],
+            error.Select(static property => property.Key).OrderBy(static name => name, StringComparer.Ordinal));
     }
 
     [Fact]
@@ -316,12 +340,14 @@ public sealed class NativeSceneCapabilityTests
         return arguments;
     }
 
-    private static JsonObject ArtifactReadArguments(string debugSessionId) => new()
+    private static JsonObject ArtifactReadArguments(
+        string debugSessionId,
+        string artifactId = "artifact_visual_capability_0001") => new()
     {
         ["debugSessionId"] = debugSessionId,
         ["protocolVersion"] = ActiveProtocolVersion,
         ["schemaVersion"] = ActiveSchemaVersion,
-        ["artifactId"] = "artifact_visual_capability_0001",
+        ["artifactId"] = artifactId,
         ["offset"] = 0,
         ["maxBytes"] = 1,
     };
