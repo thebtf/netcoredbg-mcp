@@ -14,7 +14,7 @@ set breakpoints, step through code, inspect variables, evaluate expressions, rea
 debug output, and operate Windows UI Automation surfaces such as WPF, WinForms,
 and Avalonia windows without opening an IDE.
 
-**135 MCP tools · 8 prompts · 4 resources · 2152 collected tests · release v0.23.6**
+**135 MCP tools · 8 prompts · 4 resources · 2157 collected tests · release v0.23.7**
 
 ## Quick Links
 
@@ -23,14 +23,15 @@ and Avalonia windows without opening an IDE.
 - **Reference:** [Available Tools](#available-tools) · [Resources](#mcp-resources) · [Prompts](#mcp-prompts) · [Architecture](#architecture-overview)
 - **Project:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-## What's New in v0.23.6
+## What's New in v0.23.7
 
-- **Lossless screenshot evidence (opt-in)** — `ui_take_screenshot` keeps its
-  default navigation preview and adds a session-scoped evidence mode with the
-  original PNG, SHA-256, capture/DPI/geometry metadata, and an optional
-  raw-derived crop. The inline preview remains navigation-only; it is not
-  acceptance evidence. This release adds no DOM/WPF metrics, pixel diff, model
-  calibration, or operator sign-off.
+- **Isolated code-search worker** — the code-search family now runs in a
+  bounded dedicated Python subprocess, so search latency and failures are
+  isolated from the MCP server process.
+- **Native Scene Probe M0/M1 (source-only)** — the .NET host gains six
+  reviewed additive primitives for lossless visual evidence and atomic
+  native-scene capture behind hash-pinned contracts. The host remains
+  source-only and is not part of the published wheel.
 
 ## Highlights
 
