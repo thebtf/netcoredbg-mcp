@@ -271,6 +271,32 @@ internal sealed class NativeSceneArtifactStore : IAsyncDisposable
         }
     }
 
+    internal async Task AbortAsync(NativeSceneArtifactStaging staged, CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (_disposed ||
+                staged.CommitResult is not null ||
+                !_staged.TryGetValue(staged.ArtifactId, out var activeStaging) ||
+                !ReferenceEquals(activeStaging, staged))
+            {
+                return;
+            }
+
+            TryDeleteFile(staged.StagingPath);
+            _staged.Remove(staged.ArtifactId);
+            staged.Session.StagedArtifactIds.Remove(staged.ArtifactId);
+            _aggregateBytes -= staged.ByteLength;
+            staged.Complete(NativeSceneArtifactCommitResult.WriteFailed());
+            RemoveEmptySession(staged.Session);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     public async ValueTask DisposeAsync()
     {
         await _gate.WaitAsync().ConfigureAwait(false);
@@ -918,6 +944,8 @@ internal sealed class NativeSceneArtifactStaging
 
     internal Task<NativeSceneArtifactCommitResult> CommitAsync(CancellationToken cancellationToken) =>
         _store.CommitAsync(this, cancellationToken);
+    internal Task AbortAsync(CancellationToken cancellationToken) =>
+        _store.AbortAsync(this, cancellationToken);
 
     internal NativeSceneArtifactCommitResult Complete(NativeSceneArtifactCommitResult result) =>
         CommitResult ??= result;

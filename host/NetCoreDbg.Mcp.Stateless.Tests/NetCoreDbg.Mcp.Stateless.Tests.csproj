@@ -24,6 +24,7 @@
 
   <ItemGroup>
     <ProjectReference Include="Fixtures\ControlledDapAdapter\ControlledDapAdapter.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="Fixtures\NativeSceneProbe.WpfFixture\NativeSceneProbe.WpfFixture.csproj" ReferenceOutputAssembly="false" SkipGetTargetFrameworkProperties="true" />
     <ProjectReference Include="..\NetCoreDbg.Mcp.Stateless\NetCoreDbg.Mcp.Stateless.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
 

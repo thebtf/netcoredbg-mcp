@@ -236,46 +236,65 @@ internal static class Program
             }
 
             NetCoreDbgSession? session = null;
+            NativeSceneSessionBinding? binding = null;
             string? registeredToken = null;
             try
             {
+                var token = CreateToken();
+                binding = new NativeSceneSessionBinding(token, _bridgePath, _artifactRoot);
                 session = await NetCoreDbgSession.StartAsync(
                     _debuggerPath,
                     program!,
                     InitializeTimeout,
                     RequestTimeout,
                     StopTimeout,
+                    binding.ProbeLaunchEnvironment,
                     cancellationToken).ConfigureAwait(false);
-                while (true)
+                binding.AttachSession(session);
+                if (!_sessions.TryAdd(token, session) || !_nativeSceneBindings.TryAdd(token, binding))
                 {
-                    var token = CreateToken();
-                    var binding = new NativeSceneSessionBinding(session, token, _bridgePath, _artifactRoot);
-                    if (!_sessions.TryAdd(token, session))
-                    {
-                        await binding.DisposeAsync().ConfigureAwait(false);
-                        continue;
-                    }
-
-                    if (_nativeSceneBindings.TryAdd(token, binding))
-                    {
-                        registeredToken = token;
-                        return Success("start_debug_success", token, session.State);
-                    }
-
-                    await binding.DisposeAsync().ConfigureAwait(false);
                     _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(token, session));
+                    await binding.DisposeAsync().ConfigureAwait(false);
+                    binding = null;
+                    await _dispose(session).ConfigureAwait(false);
+                    session = null;
+                    return Error("debug_session_not_found", "DEBUG_SESSION_NOT_FOUND");
                 }
+
+                registeredToken = token;
+                binding = null;
+                return Success("start_debug_success", token, session.State);
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                if (binding is not null)
+                {
+                    await binding.DisposeAsync().ConfigureAwait(false);
+                }
+
+                if (session is not null)
+                {
+                    await _dispose(session).ConfigureAwait(false);
+                }
+
+                throw;
+            }
+
             catch (Exception) when (!cancellationToken.IsCancellationRequested)
             {
                 if (registeredToken is not null)
                 {
-                    if (_nativeSceneBindings.TryRemove(registeredToken, out var binding))
+                    if (_nativeSceneBindings.TryRemove(registeredToken, out var registeredBinding))
                     {
-                        await binding.DisposeAsync().ConfigureAwait(false);
+                        await registeredBinding.DisposeAsync().ConfigureAwait(false);
                     }
 
                     _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(registeredToken, session!));
+                }
+
+                if (binding is not null)
+                {
+                    await binding.DisposeAsync().ConfigureAwait(false);
                 }
 
                 if (session is not null)

@@ -25,43 +25,67 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
     private static readonly TimeSpan BridgeTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan ArtifactRetention = TimeSpan.FromHours(4);
 
-    private readonly NetCoreDbgSession _session;
+    private NetCoreDbgSession? _session;
     private readonly string _debugSessionId;
     private readonly string? _bridgePath;
     private readonly string? _artifactRoot;
     private readonly SemaphoreSlim _gate = new(initialCount: 1, maxCount: 1);
+    private readonly NativeSceneProbeChannel _probeChannel = new();
 
     private NativeSceneBridgeClient? _bridgeClient;
     private Process? _bridgeProcess;
     private NativeSceneArtifactStore? _artifactStore;
+    private NativeSceneCaptureCoordinator? _captureCoordinator;
+    private JsonObject? _captureStabilityObservation;
     private readonly NativeSceneStabilityCoordinator _stabilityCoordinator;
     private int _disposed;
+
+    internal NativeSceneSessionBinding(
+        string debugSessionId,
+        string? bridgePath,
+        string? artifactRoot)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(debugSessionId);
+        _debugSessionId = debugSessionId;
+        _bridgePath = bridgePath;
+        _artifactRoot = artifactRoot;
+        AuthorizationNonce = CreateOpaqueId();
+        _stabilityCoordinator = new NativeSceneStabilityCoordinator(TimeProvider.System, ObserveStabilityAsync);
+    }
 
     internal NativeSceneSessionBinding(
         NetCoreDbgSession session,
         string debugSessionId,
         string? bridgePath,
         string? artifactRoot)
+        : this(debugSessionId, bridgePath, artifactRoot)
     {
-        _session = session ?? throw new ArgumentNullException(nameof(session));
-        ArgumentException.ThrowIfNullOrWhiteSpace(debugSessionId);
-        _debugSessionId = debugSessionId;
-        _bridgePath = bridgePath;
-        _artifactRoot = artifactRoot;
-        AuthorizationNonce = CreateOpaqueId();
-        _stabilityCoordinator = new NativeSceneStabilityCoordinator(TimeProvider.System, ObserveUnobservableStabilityAsync);
+        AttachSession(session);
     }
 
     internal string AuthorizationNonce { get; }
+    internal IReadOnlyDictionary<string, string> ProbeLaunchEnvironment => _probeChannel.LaunchEnvironment;
+
+    internal void AttachSession(NetCoreDbgSession session)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        if (Interlocked.CompareExchange(ref _session, session, null) is not null)
+        {
+            throw new InvalidOperationException("The native-scene binding is already attached to a debug session.");
+        }
+    }
+
 
     internal bool SupportsVisualEvidence =>
         Volatile.Read(ref _disposed) == 0 &&
         OperatingSystem.IsWindows() &&
         TryGetBridgePath(out _);
 
+    internal bool SupportsSceneCapture => Volatile.Read(ref _disposed) == 0;
+
     internal bool TryGetCandidate(out JsonElement candidate)
     {
-        if (!_session.TryGetNativeSceneTargetIdentity(out var targetIdentity))
+        if (_session is not { } session || !session.TryGetNativeSceneTargetIdentity(out var targetIdentity))
         {
             candidate = default;
             return false;
@@ -90,15 +114,51 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
 
     internal bool MatchesExpectedCandidateIdentity(JsonElement expectedCandidateIdentity)
     {
-        return _session.TryGetNativeSceneCaptureTargetIdentity(out var targetIdentity)
-            && (expectedCandidateIdentity.ValueKind == JsonValueKind.Null ||
-                (expectedCandidateIdentity.ValueKind == JsonValueKind.Object &&
-                 MatchesExpectedValue(expectedCandidateIdentity, "executableSha256", targetIdentity.ExecutableSha256) &&
-                 MatchesExpectedValue(expectedCandidateIdentity, "assemblyVersion", targetIdentity.AssemblyVersion) &&
-                 MatchesExpectedValue(expectedCandidateIdentity, "probeVersion", targetIdentity.ProbeVersion)));
+        return _session is { } session &&
+               session.TryGetNativeSceneCaptureTargetIdentity(out var targetIdentity)
+               && (expectedCandidateIdentity.ValueKind == JsonValueKind.Null ||
+                   (expectedCandidateIdentity.ValueKind == JsonValueKind.Object &&
+                    MatchesExpectedValue(expectedCandidateIdentity, "executableSha256", targetIdentity.ExecutableSha256) &&
+                    MatchesExpectedValue(expectedCandidateIdentity, "assemblyVersion", targetIdentity.AssemblyVersion) &&
+                    MatchesExpectedValue(expectedCandidateIdentity, "probeVersion", targetIdentity.ProbeVersion)));
     }
     internal Task<JsonObject> WaitForStableAsync(JsonElement sceneRequest, CancellationToken cancellationToken) =>
         _stabilityCoordinator.WaitForStableAsync(sceneRequest, cancellationToken);
+    internal Task<JsonObject> CaptureElementAsync(JsonElement request, CancellationToken cancellationToken) =>
+        CaptureSceneAsync(request, isElement: true, cancellationToken);
+
+    internal Task<JsonObject> CaptureNativeSceneAsync(JsonElement request, CancellationToken cancellationToken) =>
+        CaptureSceneAsync(request, isElement: false, cancellationToken);
+
+    private async Task<JsonObject> CaptureSceneAsync(
+        JsonElement request,
+        bool isElement,
+        CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                return new JsonObject
+                {
+                    ["kind"] = "tool_error",
+                    ["tool"] = isElement ? "capture_element_snapshot" : "capture_native_scene",
+                    ["code"] = "UNSUPPORTED_CAPABILITY",
+                    ["message"] = "Native scene capability is unsupported.",
+                };
+            }
+
+            return isElement
+                ? await GetOrCreateCaptureCoordinator().CaptureElementAsync(request, cancellationToken).ConfigureAwait(false)
+                : await GetOrCreateCaptureCoordinator().CaptureNativeSceneAsync(request, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
 
 
     internal async Task<NativeSceneVisualEvidenceResult> CaptureVisualEvidenceAsync(
@@ -112,7 +172,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
         {
             await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
             entered = true;
-            if (!SupportsVisualEvidence || !_session.TryGetNativeSceneCaptureTargetIdentity(out var targetIdentity))
+            if (!SupportsVisualEvidence || _session is not { } session || !session.TryGetNativeSceneCaptureTargetIdentity(out var targetIdentity))
             {
                 return NativeSceneVisualEvidenceResult.CandidateMismatch();
             }
@@ -147,7 +207,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
                 return NativeSceneVisualEvidenceResult.ObserverUnavailable();
             }
 
-            if (!_session.TryGetNativeSceneCaptureTargetIdentity(out var recheckedTargetIdentity) ||
+            if (!session.TryGetNativeSceneCaptureTargetIdentity(out var recheckedTargetIdentity) ||
                 !targetIdentity.Equals(recheckedTargetIdentity))
             {
                 return NativeSceneVisualEvidenceResult.CandidateMismatch();
@@ -164,14 +224,14 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
                     ArtifactSchemaVersion,
                     png,
                     cancellationToken).ConfigureAwait(false);
-                if (!_session.TryGetNativeSceneCaptureTargetIdentity(out recheckedTargetIdentity) ||
+                if (!session.TryGetNativeSceneCaptureTargetIdentity(out recheckedTargetIdentity) ||
                     !targetIdentity.Equals(recheckedTargetIdentity))
                 {
                     return NativeSceneVisualEvidenceResult.CandidateMismatch();
                 }
 
                 var stability = await _stabilityCoordinator.RevalidateForCaptureAsync(sceneRequest, cancellationToken).ConfigureAwait(false);
-                if (!_session.TryGetNativeSceneCaptureTargetIdentity(out recheckedTargetIdentity) ||
+                if (!session.TryGetNativeSceneCaptureTargetIdentity(out recheckedTargetIdentity) ||
                     !targetIdentity.Equals(recheckedTargetIdentity))
                 {
                     return NativeSceneVisualEvidenceResult.CandidateMismatch();
@@ -257,6 +317,7 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
         try
         {
             await DisposeBridgeAsync().ConfigureAwait(false);
+            await _probeChannel.DisposeAsync().ConfigureAwait(false);
             if (_artifactStore is { } store)
             {
                 _artifactStore = null;
@@ -279,6 +340,120 @@ internal sealed class NativeSceneSessionBinding : IAsyncDisposable
     private NativeSceneArtifactStore GetOrCreateArtifactStore() => _artifactStore ??= new NativeSceneArtifactStore(
         _artifactRoot ?? Path.Combine(Path.GetTempPath(), "netcoredbg-mcp-native-scene"),
         TimeProvider.System);
+    private NativeSceneCaptureCoordinator GetOrCreateCaptureCoordinator() => _captureCoordinator ??=
+        new NativeSceneCaptureCoordinator(
+            GetOrCreateArtifactStore(),
+            _debugSessionId,
+            CreateCurrentCandidate,
+            GetCurrentCaptureTarget,
+            _probeChannel.CaptureAsync,
+            CaptureGuardedAsync,
+            SetCaptureStabilityObservation,
+            _stabilityCoordinator.RevalidateForCaptureAsync);
+
+    private JsonObject CreateCurrentCandidate()
+    {
+        if (!TryGetCandidate(out var candidate))
+        {
+            throw new InvalidOperationException("Native-scene capture candidate is unavailable.");
+        }
+
+        return JsonNode.Parse(candidate.GetRawText())!.AsObject();
+    }
+
+    private NativeSceneTargetIdentity? GetCurrentCaptureTarget() =>
+        _session is { } session && session.TryGetNativeSceneCaptureTargetIdentity(out var target)
+            ? target
+            : null;
+
+    private void SetCaptureStabilityObservation(JsonObject? observation) =>
+        _captureStabilityObservation = observation is null ? null : observation.DeepClone().AsObject();
+
+    private async Task<JsonObject> ObserveStabilityAsync(JsonElement _, CancellationToken cancellationToken)
+    {
+        var observation = _captureStabilityObservation;
+        if (observation is null)
+        {
+            return await ObserveUnobservableStabilityAsync(default, cancellationToken).ConfigureAwait(false);
+        }
+
+        await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken).ConfigureAwait(false);
+        return observation.DeepClone().AsObject();
+    }
+
+    private async Task<JsonObject?> CaptureGuardedAsync(
+        string operation,
+        JsonObject request,
+        CancellationToken cancellationToken)
+    {
+        if (_session is not { } session ||
+            !session.TryGetNativeSceneCaptureTargetIdentity(out var target) ||
+            !TryGetBoundWindowHandle(out var hwnd))
+        {
+            return null;
+        }
+
+        request["hwnd"] = hwnd;
+        NativeSceneBridgeCallResult result;
+        try
+        {
+            StartBridge(target.ProcessId);
+            result = await _bridgeClient!.SendAsync(AuthorizationNonce, request, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+        finally
+        {
+            await DisposeBridgeAsync().ConfigureAwait(false);
+        }
+
+        return result.IsAvailable &&
+               result.Payload is not null &&
+               session.TryGetNativeSceneCaptureTargetIdentity(out var recheckedTarget) &&
+               target.Equals(recheckedTarget)
+            ? result.Payload
+            : null;
+    }
+
+    private bool TryGetBoundWindowHandle(out long hwnd)
+    {
+        hwnd = 0;
+        if (!OperatingSystem.IsWindows() || GetCurrentCaptureTarget() is not { } target)
+        {
+            return false;
+        }
+
+        try
+        {
+            using var process = Process.GetProcessById(target.ProcessId);
+            if (process.HasExited ||
+                !StringComparer.Ordinal.Equals(
+                    target.ProcessIdentity,
+                    string.Concat(
+                        "process_",
+                        process.Id.ToString(CultureInfo.InvariantCulture),
+                        "_start_",
+                        process.StartTime.ToUniversalTime().Ticks.ToString(CultureInfo.InvariantCulture))) ||
+                process.MainWindowHandle == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            hwnd = process.MainWindowHandle.ToInt64();
+            return hwnd != 0;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
 
     private void StartBridge(int processId)
     {

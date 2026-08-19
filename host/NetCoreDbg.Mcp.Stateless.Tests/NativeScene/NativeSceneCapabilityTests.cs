@@ -18,8 +18,8 @@ public sealed class NativeSceneCapabilityTests
         ("capture_visual_evidence", "M0", "unsupported"),
         ("read_capture_artifact", "M0", "supported"),
         ("wait_for_ui_stable", "M1", "supported"),
-        ("capture_element_snapshot", "M1", "unsupported"),
-        ("capture_native_scene", "M1", "unsupported"),
+        ("capture_element_snapshot", "M1", "supported"),
+        ("capture_native_scene", "M1", "supported"),
     ];
 
     private static readonly (string Name, string Availability)[] ExpectedContextStates =

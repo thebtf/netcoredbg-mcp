@@ -286,6 +286,7 @@ internal sealed class ControlledDapAdapter
     private readonly Stream _output = Console.OpenStandardOutput();
     private readonly SemaphoreSlim _writeGate = new(1, 1);
     private DapFrame? _pendingLaunch;
+    private readonly Dictionary<string, string> _launchEnvironment = new(StringComparer.Ordinal);
     private readonly Queue<DapFrame> _deferredRequests = new();
     private readonly string? _gracefulReleasePath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_GRACEFUL_RELEASE");
     private readonly string? _configurationDoneCapabilityDeltaReleasePath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_CONFIGURATION_DONE_CAPABILITY_DELTA_RELEASE");
@@ -316,11 +317,6 @@ internal sealed class ControlledDapAdapter
     public async Task RunAsync(CancellationToken cancellationToken)
     {
         await RecordAsync(new { kind = "startup", arguments = JsonSerializer.Serialize(_processArguments), processId = Environment.ProcessId }, cancellationToken);
-        if (_options.SpawnDescendant)
-        {
-            _descendant = StartDescendant(_options.SpawnWindowedDescendant);
-            await RecordAsync(new { kind = "descendant", processId = _descendant.Id }, cancellationToken);
-        }
 
         try
         {
@@ -462,6 +458,7 @@ internal sealed class ControlledDapAdapter
                 await ProcessDeferredRequestsAsync(cancellationToken);
                 return false;
             case "launch":
+                SetLaunchEnvironment(root);
                 _pendingLaunch = request.Detach();
                 await RecordAsync(new { kind = "launch-gated", sequence }, cancellationToken);
                 if (!_options.SupportsConfigurationDone)
@@ -507,6 +504,12 @@ internal sealed class ControlledDapAdapter
         }
 
         _pendingLaunch = null;
+        if (_options.SpawnDescendant && _descendant is null)
+        {
+            _descendant = StartDescendant(_options.SpawnWindowedDescendant);
+            await RecordAsync(new { kind = "descendant", processId = _descendant.Id }, cancellationToken);
+        }
+
         if (_options.DelayLaunchResponseForStartupTimeout)
         {
             await Task.Delay(TimeSpan.FromMilliseconds(1100), cancellationToken);
@@ -580,14 +583,93 @@ internal sealed class ControlledDapAdapter
         await WriteEventAsync("terminated", body: null, cancellationToken);
     }
 
-    private Process StartDescendant(bool windowed) =>
-        Process.Start(new ProcessStartInfo
+    private Process StartDescendant(bool windowed)
+    {
+        var configuredExecutable = windowed
+            ? Environment.GetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_EXECUTABLE")
+            : null;
+        var startInfo = new ProcessStartInfo
         {
-            FileName = Environment.ProcessPath ?? throw new InvalidOperationException("Process path is unavailable."),
+            FileName = string.IsNullOrWhiteSpace(configuredExecutable)
+                ? Environment.ProcessPath ?? throw new InvalidOperationException("Process path is unavailable.")
+                : configuredExecutable,
             UseShellExecute = false,
             CreateNoWindow = true,
-            ArgumentList = { windowed ? "--controlled-dap-windowed-descendant" : "--controlled-dap-descendant" },
-        }) ?? throw new InvalidOperationException("Could not start controlled adapter descendant.");
+        };
+        foreach (var (name, value) in _launchEnvironment)
+        {
+            startInfo.Environment[name] = value;
+        }
+
+
+        if (string.IsNullOrWhiteSpace(configuredExecutable))
+        {
+            startInfo.ArgumentList.Add(windowed ? "--controlled-dap-windowed-descendant" : "--controlled-dap-descendant");
+        }
+        else
+        {
+            foreach (var argument in ConfiguredWindowedDescendantArguments())
+            {
+                startInfo.ArgumentList.Add(argument);
+            }
+        }
+
+        return Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Could not start controlled adapter descendant.");
+    }
+
+    private static IReadOnlyList<string> ConfiguredWindowedDescendantArguments()
+    {
+        var serialized = Environment.GetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_ARGUMENTS");
+        if (string.IsNullOrWhiteSpace(serialized))
+        {
+            return [];
+        }
+
+        try
+        {
+            var arguments = JsonSerializer.Deserialize<string[]>(serialized)
+                ?? throw new InvalidOperationException("Configured windowed descendant arguments must be a JSON array.");
+            if (arguments.Any(string.IsNullOrWhiteSpace))
+            {
+                throw new InvalidOperationException("Configured windowed descendant arguments must be non-empty.");
+            }
+
+            return arguments;
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidOperationException("Configured windowed descendant arguments must be valid JSON.", exception);
+        }
+    }
+    private void SetLaunchEnvironment(JsonElement root)
+    {
+        _launchEnvironment.Clear();
+        if (!root.TryGetProperty("arguments", out var arguments) ||
+            arguments.ValueKind != JsonValueKind.Object ||
+            !arguments.TryGetProperty("env", out var environment))
+        {
+            return;
+        }
+
+        if (environment.ValueKind != JsonValueKind.Object)
+        {
+            throw new InvalidDataException("DAP launch environment must be an object.");
+        }
+
+        foreach (var property in environment.EnumerateObject())
+        {
+            if (string.IsNullOrWhiteSpace(property.Name) ||
+                property.Value.ValueKind != JsonValueKind.String ||
+                property.Value.GetString() is not { Length: > 0 } value)
+            {
+                throw new InvalidDataException("DAP launch environment contains an invalid variable.");
+            }
+
+            _launchEnvironment.Add(property.Name, value);
+        }
+    }
+
 
     private async Task<DapFrame?> ReadNextFrameAsync(CancellationToken cancellationToken)
     {

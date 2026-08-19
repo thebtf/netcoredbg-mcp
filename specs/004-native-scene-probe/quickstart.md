@@ -1,10 +1,10 @@
 # Native Scene Probe — Future Acceptance Playbook
 
-## Status: M0-G0, M0, AND M1 STABILITY EXECUTED; M1 ATOMICITY NOT EXECUTED
+## Status: M0-G0, M0, AND INTERNAL M1 EXECUTED; EXTERNAL/FINAL ACCEPTANCE NOT EXECUTED
 
-The operator approved the exact merged contract bytes. M0-G0 T001–T007 remains GREEN at 40/40 and M0 T008–T020 at 38/38. M1 stability T021–T023 is GREEN at 10/10, with the full NativeScene + ModernMcp affected set GREEN at 123/123. `wait_for_ui_stable` now returns historical evidence with `revalidatedByCapture: false`; every visual evidence capture performs a fresh coordinator pass and records `revalidatedByCapture: true`, even when currently observable conditions remain honestly `UNOBSERVABLE`. The coordinator enforces the requested timeout against non-completing observers using the injected clock and releases its per-session gate after deadline. No prior wait receipt is reused as authorization. Element/scene capture, WPF atomic probe, guarded UIA scene qualification, route cutover, package, release, and publication work has not executed.
+The operator approved the exact merged contract bytes. M0-G0 T001–T007 remains GREEN at 40/40 and M0 T008–T020 at 38/38. Internal M1 T021–T029 is GREEN: stability 10/10, atomicity 11/11, exact M1 command 21/21, and the full NativeScene + ModernMcp affected set 135/135. The opt-in WPF probe performs one synchronous dispatcher-affine immutable-DTO transaction; equal revisions alone produce atomic `COMPLETE`, changed/incomplete revisions remain qualified. Element captures return bounded one-node artifacts, guarded UIA remains PARTIAL/UNOBSERVABLE only, guarded graphs reject cycles/disconnected roots, and post-stage failures explicitly abort private staging state. No prior wait receipt is reused as authorization. External consumption T030–T031, full focused acceptance T032–T035, Factory/Gallery/DTCG behavior, route cutover, package, release, and publication work has not executed.
 
-GREEN T023 authorizes internal T024+, but it does not authorize an M1 acceptance claim, release, public-route selection, Factory/Gallery behavior, or full behavioral C001–C024 acceptance. T029, T032, and T034 remain later gates.
+GREEN T029 authorizes internal T030+, but it does not itself authorize release, public-route selection, Factory/Gallery behavior, or a full behavioral C001–C024 acceptance claim. T032 and T034 remain the full behavior gates.
 
 M0-G0 authority remains pinned by:
 
@@ -71,7 +71,7 @@ Expected evidence:
 ### M1 — settle/revalidate, element facts, and atomicity qualification
 
 ```powershell
-# NOT EXECUTED — run only after M0 acceptance and M1 implementation exists.
+# EXECUTED after GREEN T020 and producer builds — terminal result: 21 passed, 0 failed, 0 skipped.
 dotnet test host/NetCoreDbg.Mcp.Stateless.Tests/NetCoreDbg.Mcp.Stateless.Tests.csproj -c Debug --filter "FullyQualifiedName~NativeSceneStabilityTests|FullyQualifiedName~NativeSceneAtomicityTests" -v minimal
 ```
 

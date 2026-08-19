@@ -107,12 +107,29 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         return targetIdentity is not null;
     }
 
+    internal static Task<NetCoreDbgSession> StartAsync(
+        string debuggerPath,
+        string programPath,
+        TimeSpan initializeTimeout,
+        TimeSpan requestTimeout,
+        TimeSpan stopTimeout,
+        CancellationToken cancellationToken) =>
+        StartAsync(
+            debuggerPath,
+            programPath,
+            initializeTimeout,
+            requestTimeout,
+            stopTimeout,
+            launchEnvironment: null,
+            cancellationToken: cancellationToken);
+
     internal static async Task<NetCoreDbgSession> StartAsync(
         string debuggerPath,
         string programPath,
         TimeSpan initializeTimeout,
         TimeSpan requestTimeout,
         TimeSpan stopTimeout,
+        IReadOnlyDictionary<string, string>? launchEnvironment,
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(debuggerPath);
@@ -156,7 +173,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                     processTreeOwnership);
             }
 
-            await session.StartProtocolAsync(programPath, initializeTimeout, cancellationToken).ConfigureAwait(false);
+            await session.StartProtocolAsync(programPath, initializeTimeout, launchEnvironment, cancellationToken).ConfigureAwait(false);
             return session;
         }
         catch
@@ -196,7 +213,14 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
     public ValueTask DisposeAsync() => new(EnsureCleanupAsync());
 
-    private async Task StartProtocolAsync(string programPath, TimeSpan initializeTimeout, CancellationToken cancellationToken)
+    private Task StartProtocolAsync(string programPath, TimeSpan initializeTimeout, CancellationToken cancellationToken) =>
+        StartProtocolAsync(programPath, initializeTimeout, launchEnvironment: null, cancellationToken: cancellationToken);
+
+    private async Task StartProtocolAsync(
+        string programPath,
+        TimeSpan initializeTimeout,
+        IReadOnlyDictionary<string, string>? launchEnvironment,
+        CancellationToken cancellationToken)
     {
         _ = await SendRequestAsync(
             "initialize",
@@ -215,9 +239,12 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         await _initialized.Task.WaitAsync(initializeTimeout, cancellationToken).ConfigureAwait(false);
 
+        object launchArguments = launchEnvironment is { Count: > 0 }
+            ? new { program = programPath, env = launchEnvironment }
+            : new { program = programPath };
         var launch = await BeginRequestAsync(
             "launch",
-            new { program = programPath },
+            launchArguments,
             _requestTimeout,
             cancellationToken).ConfigureAwait(false);
         try

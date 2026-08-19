@@ -639,7 +639,9 @@ internal sealed record FixtureConfiguration(
     bool EnableTerminateAfterInitialization = false,
     bool ExitAfterLaunchResponse = false,
     bool SpawnWindowedDescendant = false,
-    bool PublishSecondWindowedDescendantAfterRelease = false)
+    bool PublishSecondWindowedDescendantAfterRelease = false,
+    string? WindowedDescendantExecutablePath = null,
+    IReadOnlyList<string>? WindowedDescendantArguments = null)
 {
     public string AsEnvironmentValue() => string.Join(
         ';',
@@ -680,6 +682,8 @@ internal sealed class FixtureProcess : IAsyncDisposable
     private readonly string? _previousRelease;
     private readonly string? _previousConfigurationDoneCapabilityDeltaRelease;
     private readonly string? _previousSecondWindowedDescendantRelease;
+    private readonly string? _previousWindowedDescendantExecutable;
+    private readonly string? _previousWindowedDescendantArguments;
     private readonly HashSet<int> _preExistingAdapterPids;
     private readonly string _executablePath;
     private const int StartupPollAttempts = 20;
@@ -699,6 +703,8 @@ internal sealed class FixtureProcess : IAsyncDisposable
         string? previousRelease,
         string? previousConfigurationDoneCapabilityDeltaRelease,
         string? previousSecondWindowedDescendantRelease,
+        string? previousWindowedDescendantExecutable,
+        string? previousWindowedDescendantArguments,
         HashSet<int> preExistingAdapterPids)
     {
         _scratchDirectory = scratchDirectory;
@@ -712,6 +718,8 @@ internal sealed class FixtureProcess : IAsyncDisposable
         _previousRelease = previousRelease;
         _previousConfigurationDoneCapabilityDeltaRelease = previousConfigurationDoneCapabilityDeltaRelease;
         _previousSecondWindowedDescendantRelease = previousSecondWindowedDescendantRelease;
+        _previousWindowedDescendantExecutable = previousWindowedDescendantExecutable;
+        _previousWindowedDescendantArguments = previousWindowedDescendantArguments;
         _preExistingAdapterPids = preExistingAdapterPids;
     }
 
@@ -735,12 +743,18 @@ internal sealed class FixtureProcess : IAsyncDisposable
         var previousRelease = Environment.GetEnvironmentVariable("CONTROLLED_DAP_GRACEFUL_RELEASE");
         var previousConfigurationDoneCapabilityDeltaRelease = Environment.GetEnvironmentVariable("CONTROLLED_DAP_CONFIGURATION_DONE_CAPABILITY_DELTA_RELEASE");
         var previousSecondWindowedDescendantRelease = Environment.GetEnvironmentVariable("CONTROLLED_DAP_SECOND_WINDOWED_DESCENDANT_RELEASE");
+        var previousWindowedDescendantExecutable = Environment.GetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_EXECUTABLE");
+        var previousWindowedDescendantArguments = Environment.GetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_ARGUMENTS");
         var preExistingAdapterPids = ExactAdapterProcessIds(executable);
         Environment.SetEnvironmentVariable("CONTROLLED_DAP_TRANSCRIPT", transcriptPath);
         Environment.SetEnvironmentVariable("CONTROLLED_DAP_OPTIONS", configuration.AsEnvironmentValue());
         Environment.SetEnvironmentVariable("CONTROLLED_DAP_GRACEFUL_RELEASE", releasePath);
         Environment.SetEnvironmentVariable("CONTROLLED_DAP_CONFIGURATION_DONE_CAPABILITY_DELTA_RELEASE", configurationDoneCapabilityDeltaReleasePath);
         Environment.SetEnvironmentVariable("CONTROLLED_DAP_SECOND_WINDOWED_DESCENDANT_RELEASE", secondWindowedDescendantReleasePath);
+        Environment.SetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_EXECUTABLE", configuration.WindowedDescendantExecutablePath);
+        Environment.SetEnvironmentVariable(
+            "CONTROLLED_DAP_WINDOWED_DESCENDANT_ARGUMENTS",
+            configuration.WindowedDescendantArguments is null ? null : JsonSerializer.Serialize(configuration.WindowedDescendantArguments));
         return new FixtureProcess(
             scratchDirectory,
             transcriptPath,
@@ -753,6 +767,8 @@ internal sealed class FixtureProcess : IAsyncDisposable
             previousRelease,
             previousConfigurationDoneCapabilityDeltaRelease,
             previousSecondWindowedDescendantRelease,
+            previousWindowedDescendantExecutable,
+            previousWindowedDescendantArguments,
             preExistingAdapterPids);
     }
     public void MarkAdapterStartAttempted() => _adapterStartAttempted = true;
@@ -850,6 +866,8 @@ internal sealed class FixtureProcess : IAsyncDisposable
                 Environment.SetEnvironmentVariable("CONTROLLED_DAP_GRACEFUL_RELEASE", _previousRelease);
                 Environment.SetEnvironmentVariable("CONTROLLED_DAP_CONFIGURATION_DONE_CAPABILITY_DELTA_RELEASE", _previousConfigurationDoneCapabilityDeltaRelease);
                 Environment.SetEnvironmentVariable("CONTROLLED_DAP_SECOND_WINDOWED_DESCENDANT_RELEASE", _previousSecondWindowedDescendantRelease);
+                Environment.SetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_EXECUTABLE", _previousWindowedDescendantExecutable);
+                Environment.SetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_ARGUMENTS", _previousWindowedDescendantArguments);
             }
         }
 

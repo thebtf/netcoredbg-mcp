@@ -487,6 +487,41 @@ public sealed class NativeSceneArtifactStoreTests
         Assert.Empty(Directory.EnumerateFiles(scope.Root, "*", SearchOption.AllDirectories));
     }
 
+    [Fact]
+    public async Task StagedArtifact_AbortDiscardsPrivateStateReleasesCapacityAndIsIdempotent()
+    {
+        var payload = Payload(97);
+        await using var scope = ArtifactStoreTestScope.Create(maximumArtifactCount: 1, maximumAggregateBytes: payload.Length);
+        var sessionId = Capability("abort-session");
+        var staged = await scope.Store.StageAsync(
+            sessionId,
+            Capability("abort-capture"),
+            MediaType,
+            ArtifactSchemaVersion,
+            payload);
+
+        Assert.Equal(1, scope.Store.StagedArtifactMetadataCount);
+
+        await staged.AbortAsync();
+        await staged.AbortAsync();
+
+        Assert.Equal(0, scope.Store.StagedArtifactMetadataCount);
+        Assert.Equal(0, scope.Store.CommittedArtifactMetadataCount);
+        Assert.Empty(Directory.EnumerateFiles(scope.Root, "*", SearchOption.AllDirectories));
+        AssertFixedNotFound(await scope.Store.ReadAsync(sessionId, staged.ArtifactId, offset: 0, maxBytes: 1));
+
+        var replacement = await scope.Store.StageAsync(
+            sessionId,
+            Capability("abort-replacement-capture"),
+            MediaType,
+            ArtifactSchemaVersion,
+            payload);
+        await replacement.AbortAsync();
+
+        Assert.Equal(0, scope.Store.StagedArtifactMetadataCount);
+        Assert.Empty(Directory.EnumerateFiles(scope.Root, "*", SearchOption.AllDirectories));
+    }
+
     private static NativeSceneArtifactDescriptorSnapshot AssertCommitted(NativeSceneArtifactCommitResultSnapshot result)
     {
         Assert.Null(result.Code);
@@ -710,14 +745,22 @@ internal sealed class NativeSceneArtifactStoreDriver : IAsyncDisposable
     private readonly MethodInfo _stageAsync;
     private readonly MethodInfo _readAsync;
     private readonly MethodInfo _stopSessionAsync;
+    private readonly FieldInfo _stagedArtifactMetadata;
     private readonly FieldInfo _artifactMetadata;
 
-    private NativeSceneArtifactStoreDriver(object store, MethodInfo stageAsync, MethodInfo readAsync, MethodInfo stopSessionAsync, FieldInfo artifactMetadata)
+    private NativeSceneArtifactStoreDriver(
+        object store,
+        MethodInfo stageAsync,
+        MethodInfo readAsync,
+        MethodInfo stopSessionAsync,
+        FieldInfo stagedArtifactMetadata,
+        FieldInfo artifactMetadata)
     {
         _store = store;
         _stageAsync = stageAsync;
         _readAsync = readAsync;
         _stopSessionAsync = stopSessionAsync;
+        _stagedArtifactMetadata = stagedArtifactMetadata;
         _artifactMetadata = artifactMetadata;
     }
 
@@ -765,6 +808,8 @@ internal sealed class NativeSceneArtifactStoreDriver : IAsyncDisposable
             typeof(int),
             typeof(CancellationToken));
         var stopSessionAsync = RequireTaskMethod(storeType, "StopSessionAsync", typeof(string), typeof(CancellationToken));
+        var stagedArtifactMetadata = storeType.GetField("_staged", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(stagedArtifactMetadata);
         var artifactMetadata = storeType.GetField("_artifacts", BindingFlags.Instance | BindingFlags.NonPublic);
         Assert.NotNull(artifactMetadata);
 
@@ -773,7 +818,7 @@ internal sealed class NativeSceneArtifactStoreDriver : IAsyncDisposable
             : [root, timeProvider];
         var store = constructor.Invoke(constructorArguments);
         Assert.NotNull(store);
-        return new NativeSceneArtifactStoreDriver(store!, stageAsync, readAsync, stopSessionAsync, artifactMetadata!);
+        return new NativeSceneArtifactStoreDriver(store!, stageAsync, readAsync, stopSessionAsync, stagedArtifactMetadata!, artifactMetadata!);
     }
 
     public async Task<NativeSceneArtifactStagingDriver> StageAsync(
@@ -814,6 +859,18 @@ internal sealed class NativeSceneArtifactStoreDriver : IAsyncDisposable
         get
         {
             var metadata = _artifactMetadata.GetValue(_store);
+            Assert.NotNull(metadata);
+            var count = metadata!.GetType().GetProperty("Count", BindingFlags.Instance | BindingFlags.Public);
+            Assert.NotNull(count);
+            return Assert.IsType<int>(count!.GetValue(metadata));
+        }
+    }
+
+    public int StagedArtifactMetadataCount
+    {
+        get
+        {
+            var metadata = _stagedArtifactMetadata.GetValue(_store);
             Assert.NotNull(metadata);
             var count = metadata!.GetType().GetProperty("Count", BindingFlags.Instance | BindingFlags.Public);
             Assert.NotNull(count);
@@ -900,6 +957,13 @@ internal sealed class NativeSceneArtifactStagingDriver
         return new NativeSceneArtifactCommitResultSnapshot(result!);
     }
 
+    public async Task AbortAsync(CancellationToken cancellationToken = default)
+    {
+        var abortAsync = RequiredTaskMethod(_staged.GetType(), "AbortAsync", typeof(CancellationToken));
+        var task = Assert.IsAssignableFrom<Task>(abortAsync.Invoke(_staged, [cancellationToken]));
+        await task;
+    }
+
     private static MethodInfo RequiredGenericTaskMethod(Type type, string name, params Type[] parameterTypes)
     {
         var method = type.GetMethod(
@@ -912,6 +976,20 @@ internal sealed class NativeSceneArtifactStagingDriver
         Assert.True(
             method!.ReturnType.IsGenericType && method.ReturnType.GetGenericTypeDefinition() == typeof(Task<>),
             $"Missing production contract: {type.FullName}.{name} must return Task<T>.");
+        return method;
+    }
+
+    private static MethodInfo RequiredTaskMethod(Type type, string name, params Type[] parameterTypes)
+    {
+        var method = type.GetMethod(
+            name,
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+            binder: null,
+            types: parameterTypes,
+            modifiers: null);
+        Assert.NotNull(method);
+        Assert.False(method!.IsPublic, $"{type.FullName}.{name} must remain an internal host operation.");
+        Assert.True(typeof(Task).IsAssignableFrom(method.ReturnType), $"Missing production contract: {type.FullName}.{name} must return Task.");
         return method;
     }
 
