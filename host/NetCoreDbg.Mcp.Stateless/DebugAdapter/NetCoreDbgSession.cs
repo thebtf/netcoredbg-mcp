@@ -2,12 +2,15 @@ using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
+using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Unicode;
 using System.Text.Json;
 using Microsoft.Win32.SafeHandles;
+using NetCoreDbg.Mcp.Stateless.NativeScene;
 
 namespace NetCoreDbg.Mcp.Stateless.DebugAdapter;
 
@@ -41,6 +44,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private DapSessionState _state = new(null, null, null);
     private Task? _cleanupTask;
     private Exception? _readerFailure;
+    private NativeSceneTargetIdentity? _nativeSceneTargetIdentity;
     private int _outgoingSequence;
     private bool _supportsConfigurationDone;
     private bool _supportsTerminate;
@@ -83,6 +87,11 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
     internal bool IsUsable => !_readerTask.IsCompleted && !HasExited();
+    internal bool TryGetNativeSceneTargetIdentity(out NativeSceneTargetIdentity targetIdentity)
+    {
+        targetIdentity = Volatile.Read(ref _nativeSceneTargetIdentity)!;
+        return targetIdentity is not null;
+    }
 
     internal static async Task<NetCoreDbgSession> StartAsync(
         string debuggerPath,
@@ -395,6 +404,9 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         switch (eventName)
         {
+            case "process":
+                CaptureNativeSceneTargetIdentity(body);
+                break;
             case "initialized":
                 if (_initializeResponseObserved)
                 {
@@ -440,6 +452,80 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             case "terminated":
                 UpdateState(current => current with { Event = eventName });
                 break;
+        }
+    }
+
+    private void CaptureNativeSceneTargetIdentity(JsonElement body)
+    {
+        Volatile.Write(ref _nativeSceneTargetIdentity, null);
+        if (TryGetInt32(body, "systemProcessId") is not int processId
+            || processId <= 0
+            || !body.TryGetProperty("isLocalProcess", out var isLocalProcess)
+            || isLocalProcess.ValueKind != JsonValueKind.True)
+        {
+            return;
+        }
+
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            var executablePath = process.MainModule?.FileName;
+            if (string.IsNullOrWhiteSpace(executablePath))
+            {
+                return;
+            }
+
+            using var executable = File.OpenRead(executablePath);
+            var identity = new NativeSceneTargetIdentity(
+                processId,
+                string.Concat(
+                    "process_",
+                    processId.ToString(CultureInfo.InvariantCulture),
+                    "_start_",
+                    process.StartTime.ToUniversalTime().Ticks.ToString(CultureInfo.InvariantCulture)),
+                executablePath,
+                Convert.ToHexString(SHA256.HashData(executable)).ToLowerInvariant(),
+                TryGetAssemblyVersion(executablePath),
+                ProbeVersion: null);
+            Volatile.Write(ref _nativeSceneTargetIdentity, identity);
+        }
+        catch (Exception exception) when (exception is ArgumentException
+            or InvalidOperationException
+            or NotSupportedException
+            or Win32Exception
+            or UnauthorizedAccessException
+            or IOException
+            or System.Security.SecurityException
+            or CryptographicException)
+        {
+        }
+    }
+
+    private static string? TryGetAssemblyVersion(string executablePath)
+    {
+        try
+        {
+            return AssemblyName.GetAssemblyName(executablePath).Version?.ToString();
+        }
+        catch (BadImageFormatException)
+        {
+            return null;
+        }
+        catch (FileLoadException)
+        {
+            return null;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
+        catch (System.Security.SecurityException)
+        {
+            return null;
         }
     }
 

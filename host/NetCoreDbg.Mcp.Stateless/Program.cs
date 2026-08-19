@@ -9,6 +9,7 @@ using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 using NetCoreDbg.Mcp.Stateless.DebugAdapter;
+using NetCoreDbg.Mcp.Stateless.NativeScene;
 
 namespace NetCoreDbg.Mcp.Stateless;
 
@@ -109,6 +110,7 @@ internal static class Program
         private static readonly TimeSpan StopTimeout = TimeSpan.FromSeconds(1);
 
         private readonly ConcurrentDictionary<string, NetCoreDbgSession> _sessions = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, NativeSceneSessionBinding> _nativeSceneBindings = new(StringComparer.Ordinal);
         private readonly string? _debuggerPath;
         private readonly Func<NetCoreDbgSession, bool> _isUsable;
         private readonly Func<NetCoreDbgSession, ValueTask> _dispose;
@@ -143,6 +145,10 @@ internal static class Program
                 StartDebug => await StartAsync(context, cancellationToken).ConfigureAwait(false),
                 GetDebugState => await GetStateAsync(request, cancellationToken).ConfigureAwait(false),
                 StopDebug => await StopAsync(request, cancellationToken).ConfigureAwait(false),
+                _ when IsNativeSceneTool(request.Name) => await NativeSceneToolDispatcher.DispatchAsync(
+                    request.Name,
+                    request.Arguments,
+                    ResolveNativeSceneBinding).ConfigureAwait(false),
                 _ => UnknownTool(request.Name),
             };
         }
@@ -194,25 +200,54 @@ internal static class Program
                 return Error("debug_session_not_found", "DEBUG_SESSION_NOT_FOUND");
             }
 
+            NetCoreDbgSession? session = null;
+            string? registeredToken = null;
             try
             {
-                var session = await NetCoreDbgSession.StartAsync(
+                session = await NetCoreDbgSession.StartAsync(
                     _debuggerPath,
                     program!,
                     InitializeTimeout,
                     RequestTimeout,
                     StopTimeout,
                     cancellationToken).ConfigureAwait(false);
-                var token = CreateToken();
-                while (!_sessions.TryAdd(token, session))
+                var binding = new NativeSceneSessionBinding(session);
+                while (true)
                 {
-                    token = CreateToken();
-                }
+                    var token = CreateToken();
+                    if (!_sessions.TryAdd(token, session))
+                    {
+                        continue;
+                    }
 
-                return Success("start_debug_success", token, session.State);
+                    if (_nativeSceneBindings.TryAdd(token, binding))
+                    {
+                        registeredToken = token;
+                        return Success("start_debug_success", token, session.State);
+                    }
+
+                    _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(token, session));
+                }
             }
             catch (Exception) when (!cancellationToken.IsCancellationRequested)
             {
+                if (registeredToken is not null)
+                {
+                    _nativeSceneBindings.TryRemove(registeredToken, out _);
+                    _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(registeredToken, session!));
+                }
+
+                if (session is not null)
+                {
+                    try
+                    {
+                        await _dispose(session).ConfigureAwait(false);
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+
                 return Error("debug_session_not_found", "DEBUG_SESSION_NOT_FOUND");
             }
         }
@@ -226,8 +261,14 @@ internal static class Program
                 return InvalidArguments(GetDebugState);
             }
 
-            if (!hasSessionId || !_sessions.TryGetValue(sessionId!, out var session))
+            if (!hasSessionId)
             {
+                return NotFound();
+            }
+
+            if (!_sessions.TryGetValue(sessionId!, out var session))
+            {
+                _nativeSceneBindings.TryRemove(sessionId!, out _);
                 return NotFound();
             }
 
@@ -235,6 +276,7 @@ internal static class Program
 
             if (!isUsable && _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(sessionId!, session)))
             {
+                _nativeSceneBindings.TryRemove(sessionId!, out _);
                 try
                 {
                     await _dispose(session).ConfigureAwait(false);
@@ -261,10 +303,18 @@ internal static class Program
                 return InvalidArguments(StopDebug);
             }
 
-            if (!hasSessionId || !_sessions.TryRemove(sessionId!, out var session))
+            if (!hasSessionId)
             {
                 return NotFound();
             }
+
+            if (!_sessions.TryRemove(sessionId!, out var session))
+            {
+                _nativeSceneBindings.TryRemove(sessionId!, out _);
+                return NotFound();
+            }
+
+            _nativeSceneBindings.TryRemove(sessionId!, out _);
 
             try
             {
@@ -283,9 +333,46 @@ internal static class Program
         {
             var sessions = _sessions.ToArray();
             _sessions.Clear();
+            _nativeSceneBindings.Clear();
             await Task.WhenAll(sessions.Select(session => session.Value.StopAsync(cancellationToken))).ConfigureAwait(false);
         }
 
+
+        private static bool IsNativeSceneTool(string tool) => NativeSceneToolDispatcher.ListTools()
+            .Any(candidate => StringComparer.Ordinal.Equals(candidate.Name, tool));
+
+        private NativeSceneSessionBinding? ResolveNativeSceneBinding(string sessionId)
+        {
+            if (!_sessions.TryGetValue(sessionId, out var session))
+            {
+                _nativeSceneBindings.TryRemove(sessionId, out _);
+                return null;
+            }
+
+            if (!_isUsable(session))
+            {
+                if (_sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(sessionId, session)))
+                {
+                    _nativeSceneBindings.TryRemove(sessionId, out _);
+                    _ = DisposeRemovedSessionAsync(session);
+                }
+
+                return null;
+            }
+
+            return _nativeSceneBindings.TryGetValue(sessionId, out var binding) ? binding : null;
+        }
+
+        private async Task DisposeRemovedSessionAsync(NetCoreDbgSession session)
+        {
+            try
+            {
+                await _dispose(session).ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+            }
+        }
 
         private static bool TryReadProgram(
             IDictionary<string, JsonElement>? arguments,
@@ -368,7 +455,14 @@ internal static class Program
                     : null;
         }
 
-        private static string CreateToken() => Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+        private static string CreateToken()
+        {
+            Span<byte> bytes = stackalloc byte[32];
+            RandomNumberGenerator.Fill(bytes);
+            var base64 = Convert.ToBase64String(bytes);
+            CryptographicOperations.ZeroMemory(bytes);
+            return base64.TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        }
 
         private static CallToolResult Success(string kind, string sessionId, DapSessionState state) => Result(new
         {
@@ -426,6 +520,7 @@ internal static class Program
                 Tool("start_debug", "Start debugging a program.", "{\"type\":\"object\",\"properties\":{\"program\":{\"type\":\"string\",\"minLength\":1}},\"additionalProperties\":false}"),
                 Tool("get_debug_state", "Get the state of a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":32}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("stop_debug", "Stop a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":32}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
+                .. NativeSceneToolDispatcher.ListTools(),
             ],
             TimeToLive = CacheLifetime,
             CacheScope = CacheScope.Public,

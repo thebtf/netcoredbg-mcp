@@ -247,6 +247,14 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
             .ToArray();
     }
 
+    internal async Task<int> ReadDescendantProcessIdAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var transcript = await _fixture.ReadTranscriptAsync().ConfigureAwait(false);
+        return Assert.Single(transcript, static entry => entry.Kind == "descendant").ProcessId
+            ?? throw new InvalidOperationException("Controlled adapter did not record its descendant process id.");
+    }
+
     internal Task TerminateControlledAdapterAsync(CancellationToken cancellationToken = default) =>
         _fixture.TerminateAdapterAsync(cancellationToken);
 

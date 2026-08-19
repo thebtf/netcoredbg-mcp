@@ -1,10 +1,12 @@
 # Native Scene Probe — Future Acceptance Playbook
 
-## Status: M0-G0 EXECUTED; M0 AND M1 NOT EXECUTED
+## Status: M0-G0 AND M0 FOUNDATION EXECUTED; M0 EVIDENCE AND M1 NOT EXECUTED
 
-The operator approved the exact merged contract bytes and M0-G0 T001–T007 have executed. The focused contract gate is GREEN at 39/39 after independent review corrections for RFC3339 date-time validation and immutable catalog-byte exposure. No native-scene primitive is registered or callable; M0/M1 observer, artifact, stability, atomicity, WPF fixture/probe, bridge, route, package, release, and publication work remains unexecuted.
+The operator approved the exact merged contract bytes. M0-G0 T001–T007 is GREEN at 40/40, and the additive M0 foundation T008–T012 is GREEN at 42/42 across the native capability and affected ModernMcp suites. The six frozen native-scene names are now listed and session-bound: `get_ui_probe_capabilities` returns the frozen declaration, unimplemented M0 capture/read paths return typed unavailable results without observer or artifact activity, and all M1 primitives remain explicitly unsupported. No bridge, visual capture, artifact store/read implementation, stability, atomicity, WPF fixture/probe, route cutover, package, release, or publication work has executed.
 
-T001 operator approval authorizes only M0-G0 T002–T007. M0/M1 primitive implementation and acceptance remain blocked until T007 has produced GREEN M0-G0 contract/runtime-validator evidence:
+GREEN T007 authorized the internal M0 tasks T008+, but it did not authorize a release or behavioral M0 claim. T012 establishes only the explicit local-session capability front door; T013–T020 remain required before M0 evidence acceptance.
+
+M0-G0 authority remains pinned by:
 
 1. T001's Approval Record names the exact candidate bytes in `contracts/native-scene-probe.schema.json`, `contracts/native-scene-artifact.schema.json`, and `contracts/parity-corpus.json`; and
 2. T002–T007 prove exact-byte schema loading, request/result validator parity on concrete fixtures, corpus syntax/internal-reference integrity, expected classification vocabulary, fixed primitive-name/milestone pairing, and negative structural/version cases.

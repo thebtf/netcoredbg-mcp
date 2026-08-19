@@ -414,6 +414,20 @@ internal sealed class ControlledDapAdapter
 
     private async Task EmitLifecycleEventsAsync(CancellationToken cancellationToken)
     {
+        if (_descendant is { } descendant)
+        {
+            await WriteEventAsync(
+                "process",
+                new
+                {
+                    name = "controlled-dap-descendant",
+                    systemProcessId = descendant.Id,
+                    isLocalProcess = true,
+                    startMethod = "launch",
+                },
+                cancellationToken);
+        }
+
         await WriteEventAsync("stopped", new { reason = _options.StopReason, threadId = 1 }, cancellationToken);
         await Task.Delay(TimeSpan.FromMilliseconds(75), cancellationToken);
         await WriteEventAsync("continued", new { threadId = 1, allThreadsContinued = true }, cancellationToken);

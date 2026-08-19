@@ -95,7 +95,7 @@ public sealed class ModernProtocolContractTests
     }
 
     [Fact]
-    public async Task ToolsList_ReturnsExactlyTheOrderedThreeToolCatalogWithRuntimeSchemas()
+    public async Task ToolsList_ReturnsExactlyTheOrderedNineToolCatalogWithRuntimeSchemas()
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync();
 
@@ -318,15 +318,30 @@ public sealed class ModernProtocolContractTests
     private static void AssertCatalog(JsonObject result)
     {
         var tools = Assert.IsType<JsonArray>(result["tools"]);
-        Assert.Equal(3, tools.Count);
-        Assert.Equal(["start_debug", "get_debug_state", "stop_debug"], tools.Select(static tool => tool?["name"]?.GetValue<string>()));
+        Assert.Equal(9, tools.Count);
+        Assert.Equal(
+            [
+                "start_debug",
+                "get_debug_state",
+                "stop_debug",
+                "get_ui_probe_capabilities",
+                "capture_visual_evidence",
+                "read_capture_artifact",
+                "wait_for_ui_stable",
+                "capture_element_snapshot",
+                "capture_native_scene",
+            ],
+            tools.Select(static tool => tool?["name"]?.GetValue<string>()));
+        Assert.Equal(
+            ["start_debug", "get_debug_state", "stop_debug"],
+            tools.Take(3).Select(static tool => tool?["name"]?.GetValue<string>()));
 
         var start = Assert.IsType<JsonObject>(tools[0]);
         Assert.Equal("object", start["inputSchema"]?["type"]?.GetValue<string>());
         Assert.False(start["inputSchema"]?["additionalProperties"]?.GetValue<bool>() ?? true);
         Assert.Equal(1, Assert.IsType<JsonObject>(start["inputSchema"]?["properties"])["program"]?["minLength"]?.GetValue<int>());
 
-        foreach (var tool in tools.Skip(1).Select(static tool => Assert.IsType<JsonObject>(tool)))
+        foreach (var tool in tools.Skip(1).Take(2).Select(static tool => Assert.IsType<JsonObject>(tool)))
         {
             var schema = Assert.IsType<JsonObject>(tool["inputSchema"]);
             Assert.Equal("object", schema["type"]?.GetValue<string>());
