@@ -18,18 +18,14 @@ from netcoredbg_mcp.session.runtime_smoke_v2.generate import expand_generated_ca
 from tests.test_host_proxy import MINIMAL_PLAN
 
 EXAMPLE_PATH = Path("docs/examples/runtime-smoke-v2-drag-drop-grid.json")
-SELECTOR_SAFETY_EXAMPLE_PATH = Path(
-    "docs/examples/runtime-smoke-v2-selector-safety.json"
-)
+SELECTOR_SAFETY_EXAMPLE_PATH = Path("docs/examples/runtime-smoke-v2-selector-safety.json")
 NOVASCRIPT_ACTION_ORACLE_APP_DIAGNOSTICS_EXAMPLE_PATH = Path(
     "docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json"
 )
 APP_DIAGNOSTICS_WAIT_JSON_EXAMPLE_PATH = Path(
     "docs/examples/runtime-smoke-app-diagnostics-wait-json.json"
 )
-APP_DIAGNOSTICS_POLL_EXAMPLE_PATH = Path(
-    "docs/examples/runtime-smoke-app-diagnostics-poll.json"
-)
+APP_DIAGNOSTICS_POLL_EXAMPLE_PATH = Path("docs/examples/runtime-smoke-app-diagnostics-poll.json")
 README_PATH = Path("README.md")
 README_RU_PATH = Path("README.ru.md")
 PLAYBOOK_PATH = Path("docs/PRODUCTION-TESTING-PLAYBOOK.md")
@@ -261,9 +257,7 @@ def _load_selector_safety_example() -> dict[str, Any]:
 
 def _load_novascript_action_oracle_app_diagnostics_example() -> dict[str, Any]:
     return json.loads(
-        NOVASCRIPT_ACTION_ORACLE_APP_DIAGNOSTICS_EXAMPLE_PATH.read_text(
-            encoding="utf-8"
-        )
+        NOVASCRIPT_ACTION_ORACLE_APP_DIAGNOSTICS_EXAMPLE_PATH.read_text(encoding="utf-8")
     )
 
 
@@ -326,8 +320,7 @@ def assert_drag_drop_docs_contract(plan: dict[str, Any]) -> None:
     first_row_drag_index, first_row_drag = next(
         (index, action)
         for index, action in enumerate(actions)
-        if action.get("kind") == "ui.drag"
-        and action.get("source", {}).get("row_identity")
+        if action.get("kind") == "ui.drag" and action.get("source", {}).get("row_identity")
     )
     first_drag_selector = first_row_drag.get("source", {}).get("selector")
     first_drag_identity = first_row_drag.get("source", {}).get("row_identity")
@@ -349,16 +342,13 @@ def assert_drag_drop_docs_contract(plan: dict[str, Any]) -> None:
     )
     assert any(action.get("expect", {}).get("no_op") is True for action in drag_actions)
     assert any(
-        waypoint.get("relative_to") == "viewport"
-        and int(waypoint.get("hold_ms", 0)) > 0
+        waypoint.get("relative_to") == "viewport" and int(waypoint.get("hold_ms", 0)) > 0
         for action in drag_actions
         for waypoint in action.get("path", [])
         if isinstance(waypoint, dict)
     )
     offscreen_drop_actions = [
-        action
-        for action in drag_actions
-        if action.get("drop", {}).get("ensure_visible") is True
+        action for action in drag_actions if action.get("drop", {}).get("ensure_visible") is True
     ]
     assert offscreen_drop_actions
     for action in offscreen_drop_actions:
@@ -366,9 +356,7 @@ def assert_drag_drop_docs_contract(plan: dict[str, Any]) -> None:
         drop = action["drop"]
         assert drop.get("selector") == action["source"]["selector"]
         assert drop.get("row_identity")
-        assert drop.get("identity", {}).get("column") == action.get("identity", {}).get(
-            "column"
-        )
+        assert drop.get("identity", {}).get("column") == action.get("identity", {}).get("column")
         assert drop.get("rows", {}).get("visible_only") is True
         assert drop.get("rows", {}).get("max") == action.get("rows", {}).get("max")
         assert drop.get("columns") == action.get("columns")
@@ -377,9 +365,7 @@ def assert_drag_drop_docs_contract(plan: dict[str, Any]) -> None:
         assert isinstance(drop.get("scroll_settle_ms"), int)
         assert drop["scroll_settle_ms"] > 0
 
-    viewport_probes = [
-        probe for probe in _probes(plan) if probe.get("kind") == "ui.grid.viewport"
-    ]
+    viewport_probes = [probe for probe in _probes(plan) if probe.get("kind") == "ui.grid.viewport"]
     assert viewport_probes
     assert any(probe.get("phase") == "both" for probe in viewport_probes)
     assert all(probe.get("identity") for probe in viewport_probes)
@@ -388,13 +374,10 @@ def assert_drag_drop_docs_contract(plan: dict[str, Any]) -> None:
         for probe in viewport_probes
     )
     assert any(
-        probe.get("expect", {}).get("row_count_preserved") is True
-        for probe in viewport_probes
+        probe.get("expect", {}).get("row_count_preserved") is True for probe in viewport_probes
     )
 
-    notes = " ".join(
-        str(note) for case in plan.get("cases", []) for note in case.get("notes", [])
-    )
+    notes = " ".join(str(note) for case in plan.get("cases", []) for note in case.get("notes", []))
     assert "BLOCKED" in notes
     assert "route_evidence" in notes
     assert "ui.grid.viewport" in notes
@@ -435,17 +418,13 @@ def test_selector_safety_example_declares_blocked_no_mutation_contract() -> None
     assert probes[0]["selector"]["automation_id"] == "selectorSafetyStatus"
     assert probes[0]["expected"] == "Selector side effects: 0"
 
-    notes = " ".join(
-        str(note) for case in plan.get("cases", []) for note in case.get("notes", [])
-    )
+    notes = " ".join(str(note) for case in plan.get("cases", []) for note in case.get("notes", []))
     assert "BLOCKED" in notes
     assert "No-mutation proof" in notes
 
 
 @pytest.mark.asyncio
-async def test_selector_safety_example_runs_through_v2_parser_with_blocked_evidence() -> (
-    None
-):
+async def test_selector_safety_example_runs_through_v2_parser_with_blocked_evidence() -> None:
     session = SelectorSafetySmokeSession()
 
     result = await RuntimeSmokeRunner(
@@ -466,14 +445,8 @@ async def test_selector_safety_example_runs_through_v2_parser_with_blocked_evide
     assert result["cleanup"]["status"] == "PASS"
     assert result["cleanup"]["process_registry_after"] == 0
     transition = result["cases"][0]["transitions"][0]
-    assert (
-        transition["before"]["ui.property.selector_sentinel_after"]
-        == "Selector side effects: 0"
-    )
-    assert (
-        transition["after"]["ui.property.selector_sentinel_after"]
-        == "Selector side effects: 0"
-    )
+    assert transition["before"]["ui.property.selector_sentinel_after"] == "Selector side effects: 0"
+    assert transition["after"]["ui.property.selector_sentinel_after"] == "Selector side effects: 0"
     assert "ui.property.selector_sentinel_after" not in transition["diff"]
     assert session.launch_requests
     assert len(session.property_requests) == 2
@@ -503,9 +476,7 @@ def test_drag_drop_grid_example_rejects_missing_row_identity_checks() -> None:
         assert_drag_drop_docs_contract(plan)
 
 
-def test_drag_drop_grid_example_rejects_missing_inline_ensure_visible_preflight() -> (
-    None
-):
+def test_drag_drop_grid_example_rejects_missing_inline_ensure_visible_preflight() -> None:
     plan = copy.deepcopy(_load_example())
     first_action = plan["cases"][0]["transitions"][0]["action"]
     first_action.pop("ensure_visible", None)
@@ -520,18 +491,14 @@ def test_drag_drop_grid_example_rejects_missing_offscreen_drop_note() -> None:
     plan = copy.deepcopy(_load_example())
     for case in plan["cases"]:
         case["notes"] = [
-            note
-            for note in case.get("notes", [])
-            if "drop.ensure_visible" not in str(note)
+            note for note in case.get("notes", []) if "drop.ensure_visible" not in str(note)
         ]
 
     with pytest.raises(AssertionError):
         assert_drag_drop_docs_contract(plan)
 
 
-def test_drag_drop_grid_example_rejects_missing_offscreen_row_target_drop_contract() -> (
-    None
-):
+def test_drag_drop_grid_example_rejects_missing_offscreen_row_target_drop_contract() -> None:
     plan = copy.deepcopy(_load_example())
     for action in _actions(plan):
         drop = action.get("drop")
@@ -545,9 +512,7 @@ def test_drag_drop_grid_example_rejects_missing_offscreen_row_target_drop_contra
 
 
 @pytest.mark.asyncio
-async def test_drag_drop_grid_example_runs_through_v2_parser_with_fake_ui_evidence() -> (
-    None
-):
+async def test_drag_drop_grid_example_runs_through_v2_parser_with_fake_ui_evidence() -> None:
     session = DocsExampleSmokeSession()
 
     result = await RuntimeSmokeRunner(
@@ -567,9 +532,9 @@ async def test_drag_drop_grid_example_runs_through_v2_parser_with_fake_ui_eviden
     assert len(session.ensure_visible_requests) == 2
     assert len(session.drag_requests) == 3
     assert len(session.viewport_requests) == 6
-    assert session.operation_order.index(
-        "ui.grid.ensure_visible"
-    ) < session.operation_order.index("ui.drag")
+    assert session.operation_order.index("ui.grid.ensure_visible") < session.operation_order.index(
+        "ui.drag"
+    )
     assert session.ensure_visible_requests[0]["selector"] == {
         "automation_id": "DataGridUnderTest",
         "control_type": "DataGrid",
@@ -623,8 +588,7 @@ def test_readme_links_customer_mode_runtime_guidance() -> None:
     playbook = PLAYBOOK_PATH.read_text(encoding="utf-8")
     playbook_link = "docs/PRODUCTION-TESTING-PLAYBOOK.md"
     winforms_boundary = (
-        "WinForms `dragList` primitive smoke is not a substitute for WPF DataGrid "
-        "CR-001 acceptance"
+        "WinForms `dragList` primitive smoke is not a substitute for WPF DataGrid CR-001 acceptance"
     )
 
     assert playbook_link in readme
@@ -645,24 +609,45 @@ def test_readme_links_customer_mode_runtime_guidance() -> None:
     assert "Installed MCP Client Exchange" in playbook
     assert "installed release-candidate server" in playbook
     assert winforms_boundary in _collapsed(playbook)
-    assert (
-        "fail closed before side effects if target-side realization hides the drag"
-        in playbook
-    )
+    assert "fail closed before side effects if target-side realization hides the drag" in playbook
+
 
 def test_readmes_document_non_mutating_source_checkout_mcp_launch() -> None:
     readme = README_PATH.read_text(encoding="utf-8")
     readme_ru = README_RU_PATH.read_text(encoding="utf-8")
+    workspace_config = {
+        "mcpServers": {
+            "netcoredbg": {
+                "command": "netcoredbg-mcp",
+                "args": ["--project-from-cwd"],
+            }
+        }
+    }
+    pinned_config = {
+        "mcpServers": {
+            "netcoredbg": {
+                "command": "netcoredbg-mcp",
+                "args": ["--project", "C:\\Work\\MyDotNetApp"],
+            }
+        }
+    }
 
     for document in (readme, readme_ru):
-        assert "\nnetcoredbg-mcp --project-from-cwd\n" in document
+        assert "\nnetcoredbg-mcp --project C:\\Work\\MyDotNetApp\n" in document
         assert "uv sync --locked --project C:\\Work\\netcoredbg-mcp" in document
         assert "cd C:\\Work\\MyDotNetApp" in document
         assert (
-            "uv run --no-sync --project C:\\Work\\netcoredbg-mcp "
-            "netcoredbg-mcp --project-from-cwd"
+            "uv run --no-sync --project C:\\Work\\netcoredbg-mcp netcoredbg-mcp --project-from-cwd"
         ) in document
+        json_config_blocks = [
+            json.loads(block)
+            for block in re.findall(r"```json\n(.*?)\n```", document, re.DOTALL)
+            if '"mcpServers"' in block
+        ]
+        assert workspace_config in json_config_blocks
+        assert pinned_config in json_config_blocks
         assert not re.search(r"\buv\s+run\s+--project\b", document)
+
 
 def test_release_policy_uses_one_consumer_first_autonomy_contract() -> None:
     agents = AGENTS_PATH.read_text(encoding="utf-8")
@@ -700,6 +685,7 @@ def test_readme_documents_runner_controlled_input_provenance_model() -> None:
     assert "RUNNER_GLOBAL_INPUT_AMBIGUOUS" not in readme
     assert "runner_emulated_input" not in readme
     assert "full isolation is proven" not in readme
+
 
 def test_readme_and_playbook_document_diagnostic_schema_gate() -> None:
     readme = README_PATH.read_text(encoding="utf-8")
@@ -743,8 +729,7 @@ def test_readme_and_playbook_document_diagnostic_schema_gate() -> None:
         "debug.tracepoint.remove",
     }
     winforms_boundary = (
-        "WinForms `dragList` primitive smoke is not a substitute for WPF DataGrid "
-        "CR-001 acceptance"
+        "WinForms `dragList` primitive smoke is not a substitute for WPF DataGrid CR-001 acceptance"
     )
 
     assert "docs/PRODUCTION-TESTING-PLAYBOOK.md" in readme
@@ -753,17 +738,17 @@ def test_readme_and_playbook_document_diagnostic_schema_gate() -> None:
     for term in required_terms:
         assert term in playbook
     collapsed_playbook = _collapsed(playbook)
-    assert collapsed_playbook.index(
-        _collapsed(winforms_boundary)
-    ) < collapsed_playbook.index("### 8. Supporting Runtime-Smoke Diagnostic Schema Contract")
+    assert collapsed_playbook.index(_collapsed(winforms_boundary)) < collapsed_playbook.index(
+        "### 8. Supporting Runtime-Smoke Diagnostic Schema Contract"
+    )
+
 
 def test_readme_and_playbook_document_novascript_action_oracle_app_diagnostics_gate() -> None:
     readme = README_PATH.read_text(encoding="utf-8")
     playbook = PLAYBOOK_PATH.read_text(encoding="utf-8")
     example_path = "docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json"
     replay_packet_path = (
-        "docs/reproduction-scenarios/"
-        "novascript-action-oracle-app-diagnostics-replay-2026-06-21.md"
+        "docs/reproduction-scenarios/novascript-action-oracle-app-diagnostics-replay-2026-06-21.md"
     )
     required_terms = {
         "NovaScript Action-Oracle App-Diagnostics Consumer Gate",
@@ -794,9 +779,8 @@ def test_readme_and_playbook_document_novascript_action_oracle_app_diagnostics_g
     assert replay_packet_path in playbook
     for term in required_terms:
         assert term in playbook
-    assert "does not replace the CR-003 DataGrid drag/drop replay gate" in _collapsed(
-        playbook
-    )
+    assert "does not replace the CR-003 DataGrid drag/drop replay gate" in _collapsed(playbook)
+
 
 def test_novascript_action_oracle_app_diagnostics_example_is_consumer_ready() -> None:
     plan = _load_novascript_action_oracle_app_diagnostics_example()
@@ -847,9 +831,7 @@ def test_novascript_action_oracle_app_diagnostics_example_is_consumer_ready() ->
         "require_active_process": True,
     }
     assert probe["artifacts"] == {
-        "expected": [
-            ".agent/runtime-smoke/app-diagnostics/novascript-action-oracle.json"
-        ]
+        "expected": [".agent/runtime-smoke/app-diagnostics/novascript-action-oracle.json"]
     }
     assert validate_diagnostic_schema_example(probe, kind="app_diagnostics") == []
 
@@ -861,9 +843,7 @@ def test_runtime_smoke_examples_remain_schema_compatible() -> None:
         Path("docs/examples/runtime-smoke-v2-handwritten.json"),
         Path("docs/examples/runtime-smoke-v2-matrix-toggle.json"),
         Path("docs/examples/runtime-smoke-v2-state-only-file-json-matrix.json"),
-        Path(
-            "docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json"
-        ),
+        Path("docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json"),
         Path("docs/examples/runtime-smoke-wpf-workflow-plan.json"),
     ]
 
@@ -877,9 +857,7 @@ def test_diagnostic_examples_remain_schema_compatible() -> None:
         "oracle_pack": Path("docs/examples/runtime-smoke-oracle-pack.json"),
         "app_diagnostics": Path("docs/examples/runtime-smoke-app-diagnostics.json"),
         "semantic_probe": Path("docs/examples/runtime-smoke-semantic-probe.json"),
-        "tracepoint_guardrail": Path(
-            "docs/examples/runtime-smoke-tracepoint-guardrail.json"
-        ),
+        "tracepoint_guardrail": Path("docs/examples/runtime-smoke-tracepoint-guardrail.json"),
     }
     payloads: dict[str, dict[str, Any]] = {}
 
@@ -900,16 +878,11 @@ def test_diagnostic_examples_remain_schema_compatible() -> None:
             payloads["tracepoint_guardrail"]["status"],
         }
     )
-    assert (
-        "debug.tracepoint.remove"
-        in payloads["tracepoint_guardrail"]["cleanup"]["operations"]
-    )
+    assert "debug.tracepoint.remove" in payloads["tracepoint_guardrail"]["cleanup"]["operations"]
 
 
 def test_app_diagnostics_wait_json_example_remains_schema_compatible() -> None:
-    payload = json.loads(
-        APP_DIAGNOSTICS_WAIT_JSON_EXAMPLE_PATH.read_text(encoding="utf-8")
-    )
+    payload = json.loads(APP_DIAGNOSTICS_WAIT_JSON_EXAMPLE_PATH.read_text(encoding="utf-8"))
 
     assert validate_diagnostic_schema_example(payload, kind="app_diagnostics") == []
     assert payload["wait_json"]["path"] == ".agent/runtime-smoke/app-diagnostics.json"
@@ -938,9 +911,7 @@ def test_app_diagnostics_poll_example_remains_schema_compatible() -> None:
     assert payload["observations"] == []
 
 
-def test_playbook_documents_dotnet_compatibility_host_candidate_journey_as_real_process() -> (
-    None
-):
+def test_playbook_documents_dotnet_compatibility_host_candidate_journey_as_real_process() -> None:
     playbook = PLAYBOOK_PATH.read_text(encoding="utf-8")
     collapsed = _collapsed(playbook)
 
@@ -983,17 +954,20 @@ def test_playbook_documents_dotnet_compatibility_host_candidate_journey_as_real_
     # Backend evidence must prove the installed netcoredbg-mcp package, not
     # just which Python interpreter answered -- a bare interpreter --version
     # says nothing about whether the package is even installed there.
-    assert _collapsed(
-        "the installed backend package version from `& $ConsumerPython -m "
-        "netcoredbg_mcp --version`"
-    ) in collapsed
-    assert _collapsed(
-        "not that the `netcoredbg-mcp` package is even installed there"
-    ) in collapsed
-    assert _collapsed(
-        "its own `--version` output, proving which installed backend "
-        "answered the exchange"
-    ) not in collapsed
+    assert (
+        _collapsed(
+            "the installed backend package version from `& $ConsumerPython -m "
+            "netcoredbg_mcp --version`"
+        )
+        in collapsed
+    )
+    assert _collapsed("not that the `netcoredbg-mcp` package is even installed there") in collapsed
+    assert (
+        _collapsed(
+            "its own `--version` output, proving which installed backend answered the exchange"
+        )
+        not in collapsed
+    )
     assert "$ConsumerCli --version` still succeeds" in playbook
 
     # Unambiguous, PKG-001-reusable verdict semantics: PASS is required, not
@@ -1008,15 +982,21 @@ def test_playbook_documents_dotnet_compatibility_host_candidate_journey_as_real_
     # (e.g. the proxied Python server's own name, proving the client
     # bypassed the candidate host entirely rather than exercising it).
     assert 'result["server_name"] != "netcoredbg-mcp-host"' in playbook
-    assert _collapsed(
-        "`server_name` exactly equal to `netcoredbg-mcp-host` (never the "
-        "Python server's own identity or any other value)"
-    ) in collapsed
-    assert _collapsed(
-        "`server_name` is anything other than `netcoredbg-mcp-host` (for "
-        "example the proxied Python server's own name, meaning the client "
-        "bypassed the candidate host entirely)"
-    ) in collapsed
+    assert (
+        _collapsed(
+            "`server_name` exactly equal to `netcoredbg-mcp-host` (never the "
+            "Python server's own identity or any other value)"
+        )
+        in collapsed
+    )
+    assert (
+        _collapsed(
+            "`server_name` is anything other than `netcoredbg-mcp-host` (for "
+            "example the proxied Python server's own name, meaning the client "
+            "bypassed the candidate host entirely)"
+        )
+        in collapsed
+    )
 
     # Do not hardcode a specific tool count -- prove catalog parity live
     # against a same-run direct-Python baseline instead.
@@ -1029,16 +1009,22 @@ def test_playbook_documents_dotnet_compatibility_host_candidate_journey_as_real_
     assert "extra_in_host" in playbook
     assert "catalog_match" in playbook
     assert 'or not result["catalog_match"]' in playbook
-    assert _collapsed(
-        "`catalog_match` is `true`: the complete host tool-name set fetched "
-        "through `$ConsumerNetHost` exactly equals the complete tool-name set "
-        "fetched in the same run directly from `$ConsumerPython`"
-    ) in collapsed
-    assert _collapsed(
-        "`catalog_match=true` (the complete host tool-name set exactly "
-        "equals the complete direct-Python tool-name set fetched live in "
-        "the same run)"
-    ) in collapsed
+    assert (
+        _collapsed(
+            "`catalog_match` is `true`: the complete host tool-name set fetched "
+            "through `$ConsumerNetHost` exactly equals the complete tool-name set "
+            "fetched in the same run directly from `$ConsumerPython`"
+        )
+        in collapsed
+    )
+    assert (
+        _collapsed(
+            "`catalog_match=true` (the complete host tool-name set exactly "
+            "equals the complete direct-Python tool-name set fetched live in "
+            "the same run)"
+        )
+        in collapsed
+    )
 
     # An unavailable Python interpreter or missing installed wheel can never
     # reach `initialize`, so it must be BROKEN, never PARTIALLY_WORKS.
@@ -1046,15 +1032,18 @@ def test_playbook_documents_dotnet_compatibility_host_candidate_journey_as_real_
         "stops the exchange from ever reaching `initialize` -- this is "
         "`BROKEN`, never `PARTIALLY_WORKS` and never a silent `PRODUCT_WORKS`"
     ) in collapsed.replace("\u2014", "--")
-    assert _collapsed(
-        "Once the host process has started, no further failure is "
-        "`PARTIALLY_WORKS`"
-    ) in collapsed
-    assert _collapsed(
-        "including because no python interpreter is reachable through "
-        "`NETCOREDBG_MCP_PYTHON_EXECUTABLE`/`PATH` or the resolved "
-        "interpreter lacks the installed wheel"
-    ) in collapsed
+    assert (
+        _collapsed("Once the host process has started, no further failure is `PARTIALLY_WORKS`")
+        in collapsed
+    )
+    assert (
+        _collapsed(
+            "including because no python interpreter is reachable through "
+            "`NETCOREDBG_MCP_PYTHON_EXECUTABLE`/`PATH` or the resolved "
+            "interpreter lacks the installed wheel"
+        )
+        in collapsed
+    )
 
     # A revert that puts the python/wheel prerequisite gap back into
     # PARTIALLY_WORKS (conflating a build-time gap with a runtime one that
@@ -1082,23 +1071,22 @@ def test_playbook_documents_dotnet_compatibility_host_candidate_journey_as_real_
     assert real_plan_payload in playbook
     assert "tests/test_host_proxy.py::MINIMAL_PLAN" in playbook
     assert 'or result["call_status"] != "PASS"' in playbook
-    assert _collapsed(
-        "`call_status=PASS` (not merely `call_is_error=false`)"
-    ) in collapsed
+    assert _collapsed("`call_status=PASS` (not merely `call_is_error=false`)") in collapsed
 
     # A revert to the old invalid empty-operations plan (which only ever
     # produces INVALID_SETUP, never PASS) must fail this test.
-    invalid_empty_operations_payload = (
-        '{"schema": "netcoredbg.runtime_smoke.v2", "operations": []}'
-    )
+    invalid_empty_operations_payload = '{"schema": "netcoredbg.runtime_smoke.v2", "operations": []}'
     assert invalid_empty_operations_payload not in playbook
 
     # Supporting protocol check must point at the real host-proxy critical
     # gate, matching the flow 2 "Supporting contract check" convention.
-    assert _collapsed(
-        "Supporting protocol check; this source-tree test is mandatory but "
-        "does not produce the UXDD verdict"
-    ) in collapsed
+    assert (
+        _collapsed(
+            "Supporting protocol check; this source-tree test is mandatory but "
+            "does not produce the UXDD verdict"
+        )
+        in collapsed
+    )
     assert (
         "uv run --locked --extra dev pytest "
         "tests/critical/test_host_proxy_critical.py -m critical" in playbook
@@ -1120,35 +1108,38 @@ def test_playbook_documents_dotnet_compatibility_host_candidate_journey_as_real_
     assert "debug://breakpoints" in playbook
     assert "debug://output" in playbook
     assert "debug://threads" in playbook
-    assert _collapsed(
-        "Logging capability is absent (`logging_capability=false`), matching "
-        "the installed Python backend"
-    ) in collapsed
-    assert _collapsed(
-        "Prompts capability is present and `prompt_names` is exactly the "
-        "eight native host prompts"
-    ) in collapsed
-    assert _collapsed(
-        "Resources capability is present with `subscribe=true`"
-    ) in collapsed
+    assert (
+        _collapsed(
+            "Logging capability is absent (`logging_capability=false`), matching "
+            "the installed Python backend"
+        )
+        in collapsed
+    )
+    assert (
+        _collapsed(
+            "Prompts capability is present and `prompt_names` is exactly the "
+            "eight native host prompts"
+        )
+        in collapsed
+    )
+    assert _collapsed("Resources capability is present with `subscribe=true`") in collapsed
     assert "inventing a second parallel installed smoke" in collapsed
     assert (
         "invents a second parallel installed smoke instead of extending the "
         "same `$ConsumerNetHost` exchange" in collapsed
     )
-    assert _collapsed(
-        "gate for roots, progress/ logging, prompts, resources/subscriptions, "
-        "and x-mux"
-    ) in collapsed or _collapsed(
-        "gate for roots, progress/logging, prompts, resources/subscriptions, "
-        "and x-mux"
-    ) in collapsed
+    assert (
+        _collapsed("gate for roots, progress/ logging, prompts, resources/subscriptions, and x-mux")
+        in collapsed
+        or _collapsed(
+            "gate for roots, progress/logging, prompts, resources/subscriptions, and x-mux"
+        )
+        in collapsed
+    )
     assert "resource subscriptions, and x-mux ownership" in collapsed
 
 
-def test_playbook_dotnet_candidate_journey_does_not_erode_python_default_boundary() -> (
-    None
-):
+def test_playbook_dotnet_candidate_journey_does_not_erode_python_default_boundary() -> None:
     playbook = PLAYBOOK_PATH.read_text(encoding="utf-8")
     collapsed = _collapsed(playbook)
 
@@ -1182,8 +1173,7 @@ def test_playbook_dotnet_candidate_journey_does_not_erode_python_default_boundar
     assert _collapsed(no_cutover_claim) in collapsed
     assert (
         "it does not itself gate the current wave's release, and it does not "
-        "claim publication, packaging completion, or entry-point cutover"
-        in collapsed
+        "claim publication, packaging completion, or entry-point cutover" in collapsed
     )
 
     # Never let this flow claim it is now the default/published entry point.
@@ -1209,22 +1199,26 @@ def test_playbook_dotnet_candidate_journey_does_not_erode_python_default_boundar
     # BROKEN must explicitly name a non-PASS `tools/call` result (including a
     # silently-accepted INVALID_SETUP) as a verdict failure, not just a
     # protocol-level fault -- this is the erosion this journey must resist.
-    assert _collapsed(
-        "returns anything other than `call_status=PASS` (including a "
-        "silently-accepted `INVALID_SETUP`)"
-    ) in collapsed
+    assert (
+        _collapsed(
+            "returns anything other than `call_status=PASS` (including a "
+            "silently-accepted `INVALID_SETUP`)"
+        )
+        in collapsed
+    )
 
     # The failure-mode catalog must name catalog_match=false as a BROKEN
     # divergence, not a PARTIALLY_WORKS one -- the old wording allowed either.
-    assert _collapsed(
-        "a non-empty `missing_from_host` or `extra_in_host`, i.e. "
-        "`catalog_match=false`"
-    ) in collapsed
-    assert _collapsed(
-        "diverges from the direct-Python journey without an honest "
-        "`BROKEN` verdict naming the divergence"
-    ) in collapsed
     assert (
-        "without an honest `PARTIALLY_WORKS`/`BROKEN` verdict" not in playbook
+        _collapsed("a non-empty `missing_from_host` or `extra_in_host`, i.e. `catalog_match=false`")
+        in collapsed
     )
+    assert (
+        _collapsed(
+            "diverges from the direct-Python journey without an honest "
+            "`BROKEN` verdict naming the divergence"
+        )
+        in collapsed
+    )
+    assert "without an honest `PARTIALLY_WORKS`/`BROKEN` verdict" not in playbook
     assert "`catalog_match=true`" in playbook

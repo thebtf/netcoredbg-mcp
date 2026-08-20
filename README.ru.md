@@ -85,7 +85,7 @@ netcoredbg-mcp --version
 ```powershell
 pip install --upgrade netcoredbg-mcp
 $env:NETCOREDBG_PATH = "C:\Tools\netcoredbg\netcoredbg.exe"
-netcoredbg-mcp --project-from-cwd
+netcoredbg-mcp --project C:\Work\MyDotNetApp
 ```
 
 После обновления выполните `netcoredbg-mcp --setup`, если изменился target runtime
@@ -93,7 +93,11 @@ netcoredbg-mcp --project-from-cwd
 
 ### Конфигурация клиента
 
-Типовая MCP-конфигурация использует установленную команду:
+Используйте `--project-from-cwd` только когда клиент запускает сервер из .NET
+workspace или передаёт local MCP roots. Если нет явного `--project` и operator
+environment pin, local MCP roots имеют приоритет. Когда нет ни operator pin,
+ни пригодного local root, сервер ищет в startup directory marker solution,
+project или Git и при отсутствии marker использует сам startup directory.
 
 ```json
 {
@@ -106,15 +110,31 @@ netcoredbg-mcp --project-from-cwd
 }
 ```
 
-Если отладчиком управляют вне setup flow, передайте его путь через environment
-клиентского процесса, а не коммитьте его в репозиторий:
+Если клиент запускает серверы из постоянного global location, закрепите target
+project явно, а не полагайтесь на startup directory сервера:
 
 ```json
 {
   "mcpServers": {
     "netcoredbg": {
       "command": "netcoredbg-mcp",
-      "args": ["--project-from-cwd"],
+      "args": ["--project", "C:\\Work\\MyDotNetApp"]
+    }
+  }
+}
+```
+
+Если отладчиком управляют вне setup flow, передайте его путь через environment
+клиентского процесса, а не коммитьте его в репозиторий. Используйте тот же
+режим выбора проекта, что подходит клиенту; этот пример для global location
+закрепляет target явно:
+
+```json
+{
+  "mcpServers": {
+    "netcoredbg": {
+      "command": "netcoredbg-mcp",
+      "args": ["--project", "C:\\Work\\MyDotNetApp"],
       "env": {
         "NETCOREDBG_PATH": "C:\\Tools\\netcoredbg\\netcoredbg.exe"
       }

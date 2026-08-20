@@ -86,7 +86,7 @@ Use `pip` when your environment owns Python packages directly:
 ```powershell
 pip install --upgrade netcoredbg-mcp
 $env:NETCOREDBG_PATH = "C:\Tools\netcoredbg\netcoredbg.exe"
-netcoredbg-mcp --project-from-cwd
+netcoredbg-mcp --project C:\Work\MyDotNetApp
 ```
 
 Run `netcoredbg-mcp --setup` after an upgrade if the target runtime changed or
@@ -94,7 +94,12 @@ you need a new managed debugger or FlaUI bridge.
 
 ### Client configuration
 
-A generic MCP configuration uses the installed command:
+Use `--project-from-cwd` only when the client launches the server from the .NET
+workspace or supplies local MCP roots. When no explicit `--project` or operator
+environment pin is configured, local MCP roots take precedence. If there is
+neither an operator pin nor a usable local root, the server searches its startup
+directory for a solution, project, or Git marker and falls back to that startup
+directory when no marker exists.
 
 ```json
 {
@@ -107,15 +112,31 @@ A generic MCP configuration uses the installed command:
 }
 ```
 
-If the debugger is managed outside the setup flow, set its path in the client
-process environment rather than committing it to a repository:
+For a client that starts servers from a stable global location, pin the target
+project explicitly instead of relying on that server startup directory:
 
 ```json
 {
   "mcpServers": {
     "netcoredbg": {
       "command": "netcoredbg-mcp",
-      "args": ["--project-from-cwd"],
+      "args": ["--project", "C:\\Work\\MyDotNetApp"]
+    }
+  }
+}
+```
+
+If the debugger is managed outside the setup flow, set its path in the client
+process environment rather than committing it to a repository. Use the same
+project-selection mode that fits the client; this globally launched example
+pins its target explicitly:
+
+```json
+{
+  "mcpServers": {
+    "netcoredbg": {
+      "command": "netcoredbg-mcp",
+      "args": ["--project", "C:\\Work\\MyDotNetApp"],
       "env": {
         "NETCOREDBG_PATH": "C:\\Tools\\netcoredbg\\netcoredbg.exe"
       }
