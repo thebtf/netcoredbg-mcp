@@ -147,14 +147,18 @@ uv run --no-sync --project C:\Work\netcoredbg-mcp netcoredbg-mcp --project-from-
 long-poll operations: они возвращают результат, когда debuggee останавливается,
 завершается, принудительно прекращается или достигает timeout.
 
-Используйте такую последовательность:
+Для консольных программ используйте такую последовательность:
 
-1. Добавьте breakpoint в интересующий участок кода.
+1. Добавьте breakpoint в интересующий вас участок кода.
 2. Вызовите `start_debug` с программой и при необходимости с `pre_build=true`.
 3. Дождитесь `state=stopped`.
 4. Прочитайте `get_call_stack`, `get_scopes` и `get_variables`.
 5. Вычисляйте выражения и переходите по шагам только в состоянии остановки.
 6. Продолжите или завершите сессию.
+
+Для WPF, Avalonia и WinForms используйте последовательность из раздела Desktop UI ниже.
+Она запускает приложение без breakpoint, ждёт загрузки окна и только затем
+добавляет точку останова: breakpoint до запуска может выглядеть как зависание окна.
 
 Пример launch request:
 
@@ -180,7 +184,8 @@ stack и variables, но окно не будет нормально реаги�
 
 ```text
 start_debug(...)
-ui_get_window_tree()
+ui_get_window_tree() # Дождитесь загрузки окна приложения.
+add_breakpoint(file="MainWindow.xaml.cs", line=42)
 ui_find_element(automation_id="saveButton")
 ui_click(automation_id="saveButton")
 # Trigger the breakpoint, then inspect state after it reports STOPPED.

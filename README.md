@@ -149,7 +149,7 @@ lockfile.
 operations: they return when the debuggee stops, exits, terminates, or reaches
 their timeout.
 
-Use this sequence:
+For console programs, use this sequence:
 
 1. Add a breakpoint in the code path of interest.
 2. Call `start_debug` with the program and, when appropriate, `pre_build=true`.
@@ -157,6 +157,10 @@ Use this sequence:
 4. Read `get_call_stack`, `get_scopes`, and `get_variables`.
 5. Evaluate or step only while stopped.
 6. Continue or terminate the session.
+
+For WPF, Avalonia, and WinForms targets, use the Desktop UI sequence below instead.
+It starts the application without breakpoints, waits for the window to load, and
+only then adds a breakpoint; a pre-launch breakpoint can make the window appear hung.
 
 A representative launch request is:
 
@@ -182,7 +186,8 @@ become available but the window will not respond normally until you continue.
 
 ```text
 start_debug(...)
-ui_get_window_tree()
+ui_get_window_tree() # Wait for the application window to load.
+add_breakpoint(file="MainWindow.xaml.cs", line=42)
 ui_find_element(automation_id="saveButton")
 ui_click(automation_id="saveButton")
 # Trigger the breakpoint, then inspect state after it reports STOPPED.

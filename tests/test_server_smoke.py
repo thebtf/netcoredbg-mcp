@@ -73,10 +73,33 @@ class TestServerSmoke:
 
     @pytest.mark.asyncio
     async def test_readme_tool_counts_match_registry(self):
-        """Published totals and category sums must match the live registry."""
+        """Published tool, prompt, and resource contracts match the live registry."""
         from netcoredbg_mcp.server import create_server
 
-        registered_count = len(await create_server().list_tools())
+        mcp = create_server()
+        registered_count = len(await mcp.list_tools())
+        prompt_names = {prompt.name for prompt in await mcp.list_prompts()}
+        resource_uris = {str(resource.uri) for resource in await mcp.list_resources()}
+        expected_prompt_names = {
+            "dap-escape-hatch",
+            "debug",
+            "debug-exception",
+            "debug-gui",
+            "debug-mistakes",
+            "debug-scenario",
+            "debug-visual",
+            "investigate",
+        }
+        expected_resource_uris = {
+            "debug://breakpoints",
+            "debug://output",
+            "debug://state",
+            "debug://threads",
+        }
+
+        assert prompt_names == expected_prompt_names
+        assert resource_uris == expected_resource_uris
+
         for readme, heading, headline_pattern in (
             (
                 "README.md",
@@ -86,7 +109,7 @@ class TestServerSmoke:
             (
                 "README.ru.md",
                 "## Карта инструментов",
-                r"\*\*Python 3\.10\+ · автоматизация Windows GUI · (\d+) инструмент(?:ов|а)",
+                r"\*\*Python 3\.10\+ · автоматизация Windows GUI · (\d+) инструмент(?:ов|\u0430)",
             ),
         ):
             text = Path(readme).read_text(encoding="utf-8")
@@ -99,6 +122,17 @@ class TestServerSmoke:
             ]
             assert int(headline.group(1)) == registered_count
             assert sum(category_counts) == registered_count
+
+            resource_paragraphs = [
+                paragraph for paragraph in table.split("\n\n") if "debug://" in paragraph
+            ]
+            prompt_paragraphs = [
+                paragraph for paragraph in table.split("\n\n") if "`debug-gui`" in paragraph
+            ]
+            assert len(resource_paragraphs) == 1, f"Missing published resource list in {readme}"
+            assert len(prompt_paragraphs) == 1, f"Missing published prompt list in {readme}"
+            assert set(re.findall(r"`([^`]+)`", resource_paragraphs[0])) == expected_resource_uris
+            assert set(re.findall(r"`([^`]+)`", prompt_paragraphs[0])) == expected_prompt_names
 
     @pytest.mark.asyncio
     async def test_debug_launch_preflight_schema_and_annotations(self):
