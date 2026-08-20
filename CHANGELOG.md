@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.23.7] - 2026-08-19
+
+### Fixed
+- The code-search family now runs in a bounded dedicated Python subprocess
+  instead of an unbounded in-process worker, isolating search latency and
+  failure modes from the MCP server process.
+
+### Added
+- The source-only .NET host gains the reviewed Native Scene Probe M0/M1
+  capability: six additive primitives (`get_ui_probe_capabilities`,
+  `capture_visual_evidence`, `read_capture_artifact`, `wait_for_ui_stable`,
+  `capture_element_snapshot`, `capture_native_scene`) with hash-pinned Draft-7
+  contracts, a 24-case parity corpus, atomic server-owned artifact storage
+  with session-bound integrity-checked reads, honest guarded-UIA partial
+  results, and an opt-in WPF in-process atomicity probe. The host remains
+  source-only: it is not included in the wheel and is not a published
+  entrypoint.
+- The wheel's FlaUI bridge sources add `NativeSceneEvidenceCommands.cs`,
+  exercised only by the source-only host.
+- Earlier in this range the host also gained the stateless MCP 2026-07-28
+  walking-skeleton route and native code-search tools.
+
+### Compatibility
+- The public catalog remains 135 tools, 8 prompts, and 4 resources. No
+  breaking changes to the published Python API or CLI.
+
 ## [0.23.6] - 2026-08-18
 
 ### Added
