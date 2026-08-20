@@ -261,14 +261,22 @@ workspace и artifacts.
 ### Происхождение ввода
 
 Runtime-smoke plans умеют отличать ввод runner от ввода оператора или внешнего
-источника. При `input_policy.no_global_input=true` monitor возвращает
-`CLEAN_PROVEN` только если в action window нет ввода оператора; отсутствующий
-или противоречивый evidence даёт `DIRTY_UNPROVEN` и блокирует product verdict.
+источника. Для product verdict без ввода оператора задайте одновременно
+`input_policy.no_global_input=true` и `run_confidence.no_operator=true`.
+Первый параметр запрещает runner global input, второй требует от monitor
+confidence evidence для action window.
 
-Когда plan разрешает global input под управлением runner, например `ui.drag`,
-каждое покрытое input event должно иметь provenance `runner_injected`.
-`foreign_injected` или `physical` даёт `DIRTY_UNPROVEN`; такой запуск нельзя
-считать product verdict.
+Итоговый `run_confidence` бывает `CLEAN_PROVEN`, когда monitor подтверждает
+отсутствие ввода оператора, `DIRTY_UNPROVEN`, когда он обнаруживает physical или
+foreign input либо получает некорректные или неатрибутируемые данные о вводе, и
+`UNPROVEN`, когда evidence monitor недоступен или неполон. Product verdict
+допустим только при `CLEAN_PROVEN`.
+
+Когда plan разрешает runner-controlled global input, например `ui.drag`, задайте
+`input_policy.no_global_input=false` и оставьте `run_confidence.no_operator=true`,
+если product verdict требует confidence evidence. Каждое покрытое input event
+должно иметь provenance `runner_injected`. `foreign_injected` или `physical`
+дают `DIRTY_UNPROVEN`; такой запуск нельзя считать product verdict.
 
 ## Справочник командной строки
 

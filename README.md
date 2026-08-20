@@ -264,15 +264,22 @@ for WPF workflow, WPF DataGrid drag/drop, and diagnostic-plan shapes.
 ### Input provenance
 
 Runtime-smoke plans can distinguish the runner's own input from operator or
-foreign input. With `input_policy.no_global_input=true`, the monitor reports a
-`CLEAN_PROVEN` result only when the action window is free of operator input;
-missing or conflicting evidence yields `DIRTY_UNPROVEN` and blocks a product
-verdict.
+foreign input. For an operator-free product verdict, set both
+`input_policy.no_global_input=true` and `run_confidence.no_operator=true`.
+The first setting prevents runner-controlled global input; the second requires
+input-monitor confidence evidence for the action window.
 
-When a plan permits runner-controlled global input, such as `ui.drag`, every
-covered input event must carry `runner_injected` provenance. A
-`foreign_injected` or `physical` event yields `DIRTY_UNPROVEN`; the caller must
-not treat that run as a product verdict.
+The resulting `run_confidence` classification is `CLEAN_PROVEN` when the
+monitor proves no operator input, `DIRTY_UNPROVEN` when it observes physical or
+foreign input or receives malformed/unattributable input evidence, or `UNPROVEN`
+when monitor evidence is unavailable or incomplete. Only `CLEAN_PROVEN` permits a
+product verdict.
+
+When a plan permits runner-controlled global input, such as `ui.drag`, set
+`input_policy.no_global_input=false` and retain `run_confidence.no_operator=true`
+when a product verdict needs confidence evidence. Every covered input event must
+carry `runner_injected` provenance. A `foreign_injected` or `physical` event
+yields `DIRTY_UNPROVEN`; the caller must not treat that run as a product verdict.
 
 ## Command-line reference
 

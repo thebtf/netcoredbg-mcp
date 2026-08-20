@@ -104,23 +104,33 @@ class TestServerSmoke:
             (
                 "README.md",
                 "## Tool map",
-                r"\*\*Python 3\.10\+ · Windows GUI automation · (\d+) tools",
+                (
+                    r"\*\*Python 3\.10\+ · Windows GUI automation · (\d+) tools · "
+                    r"(\d+) prompts · (\d+) resources · v[^\s*]+\*\*"
+                ),
             ),
             (
                 "README.ru.md",
                 "## Карта инструментов",
-                r"\*\*Python 3\.10\+ · автоматизация Windows GUI · (\d+) инструмент(?:ов|\u0430)",
+                (
+                    r"\*\*Python 3\.10\+ · автоматизация Windows GUI · "
+                    r"(\d+) инструмент(?:ов|\u0430) · "
+                    r"(\d+) \u043f\u0440\u043e\u043c\u043f\u0442\u043e\u0432 · "
+                    r"(\d+) \u0440\u0435\u0441\u0443\u0440\u0441\u0430 · v[^\s*]+\*\*"
+                ),
             ),
         ):
             text = Path(readme).read_text(encoding="utf-8")
             headline = re.search(headline_pattern, text)
-            assert headline is not None, f"Missing MCP tool total in {readme}"
+            assert headline is not None, f"Missing MCP catalog totals in {readme}"
             table = text.split(heading, 1)[1].split("\n## ", 1)[0]
             category_counts = [
                 int(match.group(1))
                 for match in re.finditer(r"^\| [^|]+ \| (\d+) \|", table, re.MULTILINE)
             ]
             assert int(headline.group(1)) == registered_count
+            assert int(headline.group(2)) == len(expected_prompt_names)
+            assert int(headline.group(3)) == len(expected_resource_uris)
             assert sum(category_counts) == registered_count
 
             resource_paragraphs = [
