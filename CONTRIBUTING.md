@@ -1,177 +1,146 @@
 # Contributing to netcoredbg-mcp
 
-Thank you for improving `netcoredbg-mcp`. This project is a production-facing
-debugging bridge for AI agents, so contributions need to preserve debugger
-correctness, path safety, and sensitive-data hygiene.
+`netcoredbg-mcp` is a debugging bridge used by coding agents. Contributions must
+preserve debugger correctness, path authority, process cleanup, and
+sensitive-data boundaries.
 
-## Setup
+## Development setup
+
+Use Python 3.10 or later. Windows is required for the complete GUI automation
+stack; non-GUI tests may run on other platforms when their platform-specific
+dependencies are available or mocked.
 
 ```powershell
 git clone https://github.com/thebtf/netcoredbg-mcp.git
 cd netcoredbg-mcp
-uv sync --extra dev
-uv run netcoredbg-mcp --setup
-uv run pytest --collect-only -q
+uv sync --locked --extra dev
+uv run --no-sync netcoredbg-mcp --version
+uv run --no-sync pytest --collect-only -q
 ```
 
-Use Python 3.10 or newer. Windows is required for the full GUI automation stack;
-non-GUI unit tests can run elsewhere when platform-specific dependencies are
-available or mocked.
+The public package is a Python MCP server. Its source tree also carries bridge
+and host code for development, but source-only host features are not an excuse
+to change the published Python consumer contract without explicit coverage.
 
-## Local Development
+## Local development and tests
+
+Run the smallest relevant gate first, then expand verification when the changed
+behavior requires it:
 
 ```powershell
-# Run the server help and version checks
-uv run netcoredbg-mcp --help
-uv run netcoredbg-mcp --version
+# Server entry point
+uv run --no-sync netcoredbg-mcp --help
+uv run --no-sync netcoredbg-mcp --version
 
-# Run focused tests
-uv run pytest tests/test_server_smoke.py -q
+# Focused Python tests
+uv run --no-sync pytest tests/test_server_smoke.py -q
+uv run --no-sync pytest tests/test_client.py tests/test_session.py -q
 
-# Run the full unit suite
-uv run pytest -q
+# Full Python suite
+uv run --no-sync pytest -q
 
-# For Python changes, lint the files you touched
-uv run ruff check <changed-python-files>
+# Lint touched Python files
+uv run --no-sync ruff check <changed-python-files>
 ```
 
-Before writing or changing tests, read `.agent/guides/TESTING_GUIDELINES.md` if
-it exists in your local clone. `.agent/` and `.codex/` are local agent working
-state, not repository artifacts; keep them out of commits unless the maintainer
-explicitly asks for a tracked project instruction update.
+Bug fixes require a regression test that fails before the repair and passes
+after it. New public MCP tools require focused behavior coverage and server
+registration coverage. Add or update a manual smoke scenario when a real debug
+session can reproduce the user-visible failure.
 
-## Manual Smoke Tests
+### Manual smoke tests
 
-The manual smoke suite exercises the real MCP tools against fixture apps. Build
-the baseline fixture first for general DAP and WinForms coverage, and build the
-WPF and Avalonia fixtures before claiming full GUI smoke coverage.
+The manual smoke suite drives real MCP tools against fixture applications. Build
+the fixture set required by the scenarios you claim:
 
 ```powershell
 dotnet build tests/fixtures/SmokeTestApp -c Debug
 dotnet build tests/fixtures/WpfSmokeApp -c Debug
 dotnet build tests/fixtures/AvaloniaSmokeApp -c Debug
 $env:NETCOREDBG_PATH = "C:\Tools\netcoredbg\netcoredbg.exe"
-uv run python tests/smoke_test_manual.py --list
-uv run python tests/smoke_test_manual.py
+uv run --no-sync python tests/smoke_test_manual.py --list
+uv run --no-sync python tests/smoke_test_manual.py
 ```
 
-`tests/fixtures/WpfSmokeApp` enables the WPF Shift/DataGrid evidence scenario.
-`tests/fixtures/AvaloniaSmokeApp` enables the Avalonia UI fixture compatibility
-scenario. Missing fixture binaries intentionally skip those scenarios, so the
-scenario list is part of the evidence for what was actually exercised.
+Missing fixture binaries intentionally skip their associated GUI scenarios.
+Record the scenario inventory with any smoke-test result so reviewers can see
+what actually ran.
 
-When fixing a bug found during live debugging, add or update a smoke scenario so
-the same failure is observable before the fix and passing afterward.
+## Documentation
 
-## Sensitive Data Rules
+Update user documentation in the same pull request when behavior, commands,
+environment variables, setup flow, or the public MCP surface changes.
+
+- `README.md` is the canonical English consumer README.
+- Update `README.ru.md` only after finalizing `README.md`; preserve heading
+  order/levels, tables, list nesting, and fenced-code-block count.
+- Keep examples generic. Do not put downstream project names, credentials,
+  client configuration, or local machine paths in tracked documentation.
+- Put release history in `CHANGELOG.md`; use `RELEASE_NOTES.md` only for the
+  current published release.
+
+## Sensitive data
 
 Never commit:
 
 - `.mcp.json`, `.netcoredbg-mcp.launch.json`, `.env`, logs, dumps, or local MCP
-  client configuration files.
-- Credentials, tokens, API keys, connection strings, IP inventories, server
-  names, private project names, or local downstream checkout paths.
+  client configuration.
+- Credentials, tokens, API keys, connection strings, private hostnames, server
+  inventories, or downstream project paths.
 - Real user or company data in tests, docs, comments, fixtures, screenshots, or
   examples.
 
-Use generic examples such as `C:\Work\MyDotNetApp` and
-`C:\Tools\netcoredbg\netcoredbg.exe`. Launch profiles should use `inherit` for
-secrets so values stay in the MCP server process environment and are not written
-to repository files.
+Use generic paths such as `C:\Work\MyDotNetApp` and
+`C:\Tools\netcoredbg\netcoredbg.exe`. Launch profiles should inherit only the
+environment values they need; never write secret values into repository files.
 
-Before opening a PR, run a marker scan for accidental downstream references.
-Keep project-specific marker lists out of the repository; pass them from your
-local shell history, private notes, or reviewer instructions.
+Before opening a pull request, scan the changed material for accidental private
+markers using your local marker list. The scan must report no matches.
 
-```powershell
-rg -n --hidden --no-ignore -g '!.git/**' -g '!**/.git/**' -g '!.venv/**' -g '!**/.venv/**' "<private-marker-regex>"
-```
+## Coding expectations
 
-The command should return no matches.
+- Implement complete behavior; do not submit stubs, placeholder paths, or tests
+  that prove only object construction.
+- Validate user-controlled paths, launch arguments, environment profiles, and
+  DAP payloads at the boundary.
+- Redact public responses that could expose environment values, launch-profile
+  data, sensitive paths, or process metadata.
+- Prefer focused modules and explicit errors over hidden fallback behavior.
+- Preserve observable behavior during refactors unless the pull request names
+  and tests the intentional change.
 
-## Coding Standards
+## Branches, commits, and pull requests
 
-- Implement complete behavior; do not submit stubs, placeholders, or tests that
-  only prove construction.
-- Validate user-supplied paths, launch arguments, environment profiles, and DAP
-  payloads at boundaries.
-- Keep public responses redacted when they mention environment variables,
-  launch profiles, paths that may be sensitive, or process metadata.
-- Prefer small focused modules and explicit error messages over hidden fallback
-  behavior.
-- Preserve observable behavior during refactors unless the PR explicitly
-  documents and tests the behavior change.
-
-## Tests
-
-Bug fixes require a regression test first. New MCP tools require focused unit
-coverage plus server registration coverage. User-visible workflows should add or
-update a smoke scenario when a real debug session can catch the failure class.
-
-Useful commands:
-
-```powershell
-uv run pytest tests/test_server_smoke.py -q
-uv run pytest tests/test_client.py tests/test_session.py -q
-uv run pytest -q
-```
-
-If a test cannot run on your platform, state that in the PR and include the
-closest verification you did run.
-
-For Python changes, run `uv run ruff check <changed-python-files>` on the files
-you touched. Do not use a docs-only PR to clean unrelated historical lint debt.
-
-## Documentation
-
-Update documentation in the same PR when behavior, commands, environment
-variables, setup flow, or MCP surface changes.
-
-- `README.md` is the canonical English README.
-- `README.ru.md` must preserve the same heading structure and code fence count as
-  `README.md`.
-- Keep examples generic and free of private downstream project data.
-- Use `CHANGELOG.md` for user-visible changes.
-
-## Branches, Commits, and Pull Requests
-
-Create a branch from `main`:
+Create a focused branch from current `main`:
 
 ```powershell
 git switch main
-git pull origin main
+git pull --ff-only origin main
 git switch -c work/fix-short-description
 ```
 
-Use conventional commit style:
+Use Conventional Commit-style messages:
 
 ```text
 feat(debug): add launch profile support
 fix(dap): preserve null launch environment values
-docs(readme): refresh release documentation
+docs(readme): clarify screenshot evidence modes
 test(server): cover tool registration
 ```
 
-Pull requests should include:
+A pull request should state:
 
-- What changed and why.
-- User-visible behavior and compatibility impact.
-- Tests and smoke checks run.
-- Sensitive-data scan result when docs, fixtures, logs, or launch environment
-  handling changed.
+1. What changed and why.
+2. Consumer behavior and compatibility impact.
+3. Tests, smoke scenarios, or other evidence run.
+4. Sensitive-data scan result when documentation, fixtures, logs, or launch
+   environment handling changed.
 
-All changes go through PR review. Do not commit directly to `main`.
+All changes go through review; do not commit directly to `main`.
 
-## Release Notes
+## Release boundary
 
-Releases are maintainer-driven. A release PR may prepare versioned documentation
-for the upcoming tag, but tags are created only during the release step after
-review and approval.
-
-The release flow is:
-
-1. Merge the release-ready PR.
-2. Update local `main`.
-3. Run the required tests and smoke checks.
-4. Create an annotated `vX.Y.Z` tag.
-5. Push the tag and monitor the publish workflow.
+Maintainers own versioning and publication. A release change first merges into
+`main`; the required release gates then validate the built consumer payload
+before an annotated `vX.Y.Z` tag is created and its publish workflow is
+monitored. Do not create a release tag from an unmerged pull request.

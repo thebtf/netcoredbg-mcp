@@ -78,8 +78,16 @@ class TestServerSmoke:
 
         registered_count = len(await create_server().list_tools())
         for readme, heading, headline_pattern in (
-            ("README.md", "## Available Tools", r"\*\*(\d+) MCP tools"),
-            ("README.ru.md", "## Доступные инструменты", r"\*\*(\d+) MCP-инструмент(?:а|ов)?"),
+            (
+                "README.md",
+                "## Tool map",
+                r"\*\*Python 3\.10\+ · Windows GUI automation · (\d+) tools",
+            ),
+            (
+                "README.ru.md",
+                "## Карта инструментов",
+                r"\*\*Python 3\.10\+ · автоматизация Windows GUI · (\d+) инструмент(?:ов|а)",
+            ),
         ):
             text = Path(readme).read_text(encoding="utf-8")
             headline = re.search(headline_pattern, text)

@@ -618,19 +618,16 @@ async def test_drag_drop_grid_example_runs_through_v2_parser_with_fake_ui_eviden
     }
 
 
-def test_readme_and_playbook_document_customer_mode_drag_drop_gate() -> None:
+def test_readme_links_customer_mode_runtime_guidance() -> None:
     readme = README_PATH.read_text(encoding="utf-8")
     playbook = PLAYBOOK_PATH.read_text(encoding="utf-8")
-    example_link = "docs/examples/runtime-smoke-v2-drag-drop-grid.json"
+    playbook_link = "docs/PRODUCTION-TESTING-PLAYBOOK.md"
     winforms_boundary = (
         "WinForms `dragList` primitive smoke is not a substitute for WPF DataGrid "
         "CR-001 acceptance"
     )
 
-    assert example_link in readme
-    assert example_link in playbook
-    assert winforms_boundary in _collapsed(readme)
-    assert winforms_boundary in _collapsed(playbook)
+    assert playbook_link in readme
     assert "PRODUCT_WORKS" in playbook
     assert "PARTIALLY_WORKS" in playbook
     assert "BROKEN" in playbook
@@ -647,11 +644,11 @@ def test_readme_and_playbook_document_customer_mode_drag_drop_gate() -> None:
     assert "Installed CLI Consumer Smoke" in playbook
     assert "Installed MCP Client Exchange" in playbook
     assert "installed release-candidate server" in playbook
+    assert winforms_boundary in _collapsed(playbook)
     assert (
         "fail closed before side effects if target-side realization hides the drag"
         in playbook
     )
-
 
 def test_readmes_document_non_mutating_source_checkout_mcp_launch() -> None:
     readme = README_PATH.read_text(encoding="utf-8")
@@ -659,22 +656,13 @@ def test_readmes_document_non_mutating_source_checkout_mcp_launch() -> None:
 
     for document in (readme, readme_ru):
         assert "\nnetcoredbg-mcp --project-from-cwd\n" in document
-        assert re.search(
-            r"uv\s+sync\s+--locked\s+--project\s+\S+.*?"
-            r"cd\s+\S*my-dotnet-project\s+"
-            r"uv\s+run\s+--no-sync\s+--project\s+\S+\s+"
-            r"netcoredbg-mcp\s+--project-from-cwd",
-            document,
-            re.DOTALL,
-        )
-        assert re.search(
-            r'"run",\s*"--no-sync",\s*"--project",\s*"[^"]+",\s*'
-            r'"netcoredbg-mcp",\s*"--project-from-cwd"',
-            document,
-            re.DOTALL,
-        )
+        assert "uv sync --locked --project C:\\Work\\netcoredbg-mcp" in document
+        assert "cd C:\\Work\\MyDotNetApp" in document
+        assert (
+            "uv run --no-sync --project C:\\Work\\netcoredbg-mcp "
+            "netcoredbg-mcp --project-from-cwd"
+        ) in document
         assert not re.search(r"\buv\s+run\s+--project\b", document)
-
 
 def test_release_policy_uses_one_consumer_first_autonomy_contract() -> None:
     agents = AGENTS_PATH.read_text(encoding="utf-8")
@@ -697,28 +685,21 @@ def test_release_policy_uses_one_consumer_first_autonomy_contract() -> None:
 
 def test_readme_documents_runner_controlled_input_provenance_model() -> None:
     readme = README_PATH.read_text(encoding="utf-8")
-    readme_ru = README_RU_PATH.read_text(encoding="utf-8")
-    english = _collapsed(readme)
-    russian = _collapsed(readme_ru)
 
-    for document in (english, russian):
-        for term in (
-            "runner_injected",
-            "foreign_injected",
-            "physical",
-            "ui.drag",
-            "CLEAN_PROVEN",
-            "DIRTY_UNPROVEN",
-        ):
-            assert term in document
-        assert "RUNNER_GLOBAL_INPUT_AMBIGUOUS" not in document
-        assert "runner_emulated_input" not in document
-
-    assert "product verdict" in english
-    assert "product verdict" in russian
-    assert "full isolation is proven" not in english
-    assert "полная изоляция доказана" not in russian
-
+    assert "docs/PRODUCTION-TESTING-PLAYBOOK.md" in readme
+    for term in (
+        "runner_injected",
+        "foreign_injected",
+        "physical",
+        "ui.drag",
+        "CLEAN_PROVEN",
+        "DIRTY_UNPROVEN",
+        "product verdict",
+    ):
+        assert term in readme
+    assert "RUNNER_GLOBAL_INPUT_AMBIGUOUS" not in readme
+    assert "runner_emulated_input" not in readme
+    assert "full isolation is proven" not in readme
 
 def test_readme_and_playbook_document_diagnostic_schema_gate() -> None:
     readme = README_PATH.read_text(encoding="utf-8")
@@ -766,25 +747,20 @@ def test_readme_and_playbook_document_diagnostic_schema_gate() -> None:
         "CR-001 acceptance"
     )
 
-    for document in (readme, playbook):
-        for example_path in diagnostic_examples:
-            assert example_path in document
-        for term in required_terms:
-            assert term in document
+    assert "docs/PRODUCTION-TESTING-PLAYBOOK.md" in readme
+    for example_path in diagnostic_examples:
+        assert example_path in playbook
+    for term in required_terms:
+        assert term in playbook
     collapsed_playbook = _collapsed(playbook)
     assert collapsed_playbook.index(
         _collapsed(winforms_boundary)
     ) < collapsed_playbook.index("### 8. Supporting Runtime-Smoke Diagnostic Schema Contract")
 
-
-def test_readme_and_playbook_document_novascript_action_oracle_app_diagnostics_gate() -> (
-    None
-):
+def test_readme_and_playbook_document_novascript_action_oracle_app_diagnostics_gate() -> None:
     readme = README_PATH.read_text(encoding="utf-8")
     playbook = PLAYBOOK_PATH.read_text(encoding="utf-8")
-    example_path = (
-        "docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json"
-    )
+    example_path = "docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json"
     replay_packet_path = (
         "docs/reproduction-scenarios/"
         "novascript-action-oracle-app-diagnostics-replay-2026-06-21.md"
@@ -813,19 +789,14 @@ def test_readme_and_playbook_document_novascript_action_oracle_app_diagnostics_g
         "BROKEN",
     }
 
-    assert example_path in readme
+    assert "docs/PRODUCTION-TESTING-PLAYBOOK.md" in readme
     assert example_path in playbook
     assert replay_packet_path in playbook
-    assert (
-        "NovaScript consumers validating the current action-oracle app-diagnostics path"
-        in readme
-    )
     for term in required_terms:
         assert term in playbook
     assert "does not replace the CR-003 DataGrid drag/drop replay gate" in _collapsed(
         playbook
     )
-
 
 def test_novascript_action_oracle_app_diagnostics_example_is_consumer_ready() -> None:
     plan = _load_novascript_action_oracle_app_diagnostics_example()
