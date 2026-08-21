@@ -174,8 +174,8 @@ public sealed class SymbolSearchEngine
             ThrowArgumentOrFailure($"line {line} is outside file range 1..{lines.Length}", operation.Tool);
         }
 
-        var startLine = Math.Max(1, line - radius);
-        var endLine = Math.Min(lines.Length, line + radius);
+        var startLine = (int)Math.Max(1L, (long)line - radius);
+        var endLine = (int)Math.Min(lines.Length, (long)line + radius);
         var selectedLines = new List<SourceLine>(endLine - startLine + 1);
         for (var lineNumber = startLine; lineNumber <= endLine; lineNumber++)
         {

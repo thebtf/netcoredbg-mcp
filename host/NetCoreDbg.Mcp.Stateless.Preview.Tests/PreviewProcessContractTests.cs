@@ -823,6 +823,7 @@ public sealed class PreviewProcessContractTests
     public void UnavailableSymlinkPrivilegeUsesInjectedReparseSeam()
     {
         Assert.False(TryCreateSymbolicLink(static () => throw new UnauthorizedAccessException()));
+        Assert.False(TryCreateSymbolicLink(static () => throw new IOException()));
         AssertInjectedReparseComponentIsRefused(
             PreviewRepositoryLayout.FixtureRoot,
             PreviewRepositoryLayout.FixtureRoot);
@@ -1014,6 +1015,10 @@ public sealed class PreviewProcessContractTests
             return true;
         }
         catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+        catch (IOException)
         {
             return false;
         }

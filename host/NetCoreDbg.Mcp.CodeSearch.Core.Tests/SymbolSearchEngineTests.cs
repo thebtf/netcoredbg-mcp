@@ -26,6 +26,20 @@ public sealed class SymbolSearchEngineTests
     }
 
     [Fact]
+    public void LegacyPolicyClampsSourceContextRadiusWithoutIntegerOverflow()
+    {
+        using var root = TestRoot.Create();
+        root.Write("Source.cs", "first\nsecond\n");
+        var engine = new SymbolSearchEngine(root.Path, LegacySearchPolicy.Instance);
+
+        var context = engine.GetSourceContext("Source.cs", line: 1, radius: int.MaxValue);
+
+        Assert.Equal(1, context.StartLine);
+        Assert.Equal(2, context.EndLine);
+        Assert.Equal([1, 2], context.Lines.Select(static line => line.Line));
+    }
+
+    [Fact]
     public void PreviewPolicyUsesCsOnlyDeterministicResultsAndClosedArgumentFailure()
     {
         using var root = TestRoot.Create();
