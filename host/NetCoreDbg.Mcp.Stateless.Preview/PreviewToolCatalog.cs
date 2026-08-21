@@ -6,6 +6,8 @@ namespace NetCoreDbg.Mcp.Stateless.Preview;
 internal static class PreviewToolCatalog
 {
     internal const string FindCodeSymbol = "find_code_symbol";
+    internal const string ServerName = "netcoredbg-mcp-stateless-preview";
+    internal const string ServerVersion = "1.0.0";
     internal const int MaximumCompleteResponseFrameBytes = 256 * 1024;
     internal static readonly TimeSpan CacheLifetime = TimeSpan.FromMinutes(5);
 

@@ -22,11 +22,20 @@ internal sealed class PreviewToolHandler
         CallAsync(context.Params, context.JsonRpcRequest.Id, cancellationToken);
 
     internal ValueTask<CallToolResult> CallAsync(
-        CallToolRequestParams request,
+        CallToolRequestParams? request,
         RequestId requestId,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (request is null)
+        {
+            return Respond(InvalidToolArguments(), cancellationToken);
+        }
+        if (request.Name is null)
+        {
+            return Respond(InvalidToolArguments(), cancellationToken);
+        }
+
         if (!string.Equals(request.Name, PreviewToolCatalog.FindCodeSymbol, StringComparison.Ordinal))
         {
             return Respond(
@@ -38,7 +47,7 @@ internal sealed class PreviewToolHandler
 
         if (!TryReadArguments(request.Arguments, out var name, out var kind))
         {
-            return Respond(Error(SearchFailure.InvalidToolArguments(PreviewToolCatalog.FindCodeSymbol)), cancellationToken);
+            return Respond(InvalidToolArguments(), cancellationToken);
         }
 
         try
@@ -117,6 +126,9 @@ internal sealed class PreviewToolHandler
 
     internal static CallToolResult FrameBudgetExceeded() =>
         Error(SearchFailure.PreviewSearchBudgetExceeded(PreviewToolCatalog.FindCodeSymbol));
+
+    internal static CallToolResult InvalidToolArguments() =>
+        Error(SearchFailure.InvalidToolArguments(PreviewToolCatalog.FindCodeSymbol));
 
     private static CallToolResult UnknownTool(string tool) => new()
     {

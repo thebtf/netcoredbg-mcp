@@ -46,6 +46,74 @@ public sealed class SymbolSearchEngineTests
         Assert.DoesNotContain(root.Path, failure.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void PreviewPolicyExcludesBinAndObjWhileLegacyKeepsBuildOutput()
+    {
+        using var root = TestRoot.Create();
+        const string marker = "BuildOutputMarker";
+        root.Write("Root.cs", $"public sealed class {marker} {{ }}\n");
+        root.Write("bin/Debug/net8.0/Generated.cs", $"public sealed class {marker} {{ }}\n");
+        root.Write("obj/Debug/net8.0/Generated.cs", $"public sealed class {marker} {{ }}\n");
+
+        var preview = new SymbolSearchEngine(root.Path, PreviewSearchPolicy.Instance)
+            .FindCodeSymbol(marker, "class");
+        var legacy = new SymbolSearchEngine(root.Path, LegacySearchPolicy.Instance)
+            .FindCodeSymbol(marker, "class");
+
+        Assert.Equal(["Root.cs"], preview.Select(static match => match.File));
+        Assert.Contains("bin/Debug/net8.0/Generated.cs", legacy.Select(static match => match.File));
+        Assert.Contains("obj/Debug/net8.0/Generated.cs", legacy.Select(static match => match.File));
+    }
+
+    [Fact]
+    public void PreviewPolicySkipsExcludedReparseDirectoriesBeforeStrictInspection()
+    {
+        using var root = TestRoot.Create();
+        root.Write(".gitignore", string.Empty);
+        var excludedBin = new DirectoryInfo(Path.Combine(root.Path, "bin"));
+        var inspector = new TestStrictPathInspector(new Dictionary<string, StrictPathInfo>(StringComparer.Ordinal)
+        {
+            [excludedBin.FullName] = new StrictPathInfo(Exists: true, IsDirectory: true, IsReparsePoint: true, FinalTarget: null),
+        });
+        var engine = new SymbolSearchEngine(
+            root.Path,
+            PreviewSearchPolicy.Instance,
+            inspector,
+            enumerateDirectories: directory => string.Equals(directory.FullName, root.Path, StringComparison.Ordinal) ? [excludedBin] : [],
+            enumerateFiles: static _ => []);
+
+        var symbols = engine.FindCodeSymbol("Missing", "class");
+
+        Assert.Empty(symbols);
+        Assert.DoesNotContain(excludedBin.FullName, inspector.InspectedPaths);
+    }
+
+    [Fact]
+    public void PreviewPolicyExcludedDirectoriesDoNotConsumeStrictTraversalBudget()
+    {
+        const int excludedDirectoryCount = 2048;
+        using var root = TestRoot.Create();
+        root.Write(".gitignore", string.Empty);
+        var excludedDirectories = Enumerable.Range(0, excludedDirectoryCount)
+            .Select(index => new DirectoryInfo(Path.Combine(root.Path, $"Parent{index:D4}", "bin")))
+            .ToArray();
+        var inspector = new TestStrictPathInspector(excludedDirectories.ToDictionary(
+            static directory => directory.FullName,
+            static _ => new StrictPathInfo(Exists: true, IsDirectory: true, IsReparsePoint: false, FinalTarget: null),
+            StringComparer.Ordinal));
+        var engine = new SymbolSearchEngine(
+            root.Path,
+            PreviewSearchPolicy.Instance,
+            inspector,
+            enumerateDirectories: directory => string.Equals(directory.FullName, root.Path, StringComparison.Ordinal) ? excludedDirectories : [],
+            enumerateFiles: static _ => []);
+
+        var symbols = engine.FindCodeSymbol("Missing", "class");
+
+        Assert.Empty(symbols);
+        Assert.DoesNotContain(inspector.InspectedPaths, path => excludedDirectories.Any(directory => string.Equals(directory.FullName, path, StringComparison.Ordinal)));
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]

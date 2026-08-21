@@ -101,6 +101,39 @@ public sealed class PreviewProcessContractTests
     }
 
     [Fact]
+    public async Task MissingOrMalformedRequestLocalMetadataIsNeverDispatched()
+    {
+        var malformedRequests = new JsonNode?[]
+        {
+            null,
+            new JsonObject(),
+            new JsonObject { ["_meta"] = "malformed" },
+            new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ProtocolVersion] = 1, [MetaKeys.ClientInfo] = new JsonObject { ["name"] = "client", ["version"] = "1.0" }, [MetaKeys.ClientCapabilities] = new JsonObject() } },
+            new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ProtocolVersion] = PreviewMcpProcessDriver.CurrentProtocolVersion, [MetaKeys.ClientInfo] = "malformed", [MetaKeys.ClientCapabilities] = new JsonObject() } },
+            new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ProtocolVersion] = PreviewMcpProcessDriver.CurrentProtocolVersion, [MetaKeys.ClientInfo] = new JsonObject { ["name"] = "client", ["version"] = "1.0" }, [MetaKeys.ClientCapabilities] = "malformed" } },
+            new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ProtocolVersion] = PreviewMcpProcessDriver.CurrentProtocolVersion, [MetaKeys.ClientCapabilities] = new JsonObject() } },
+            new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ProtocolVersion] = PreviewMcpProcessDriver.CurrentProtocolVersion, [MetaKeys.ClientInfo] = new JsonObject { ["name"] = "client", ["version"] = "1.0" } } },
+            new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ProtocolVersion] = PreviewMcpProcessDriver.CurrentProtocolVersion, [MetaKeys.ClientInfo] = new JsonObject { ["name"] = " ", ["version"] = "1.0" }, [MetaKeys.ClientCapabilities] = new JsonObject() } },
+            new JsonObject { ["_meta"] = new JsonObject { [MetaKeys.ProtocolVersion] = PreviewMcpProcessDriver.CurrentProtocolVersion, [MetaKeys.ClientInfo] = new JsonObject { ["name"] = "client", ["version"] = " " }, [MetaKeys.ClientCapabilities] = new JsonObject() } },
+        };
+
+        foreach (var parameters in malformedRequests)
+        {
+            await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
+            await driver.SendRequestAsync("tools/list", parameters, new RequestId($"malformed-meta-{Guid.NewGuid():N}"));
+
+            var response = await driver.TryReadMessageAsync(TimeSpan.FromSeconds(2));
+            if (response is null)
+            {
+                Assert.True(await driver.WaitForTransportClosureAsync(TimeSpan.FromSeconds(2)));
+                continue;
+            }
+
+            Assert.IsType<JsonRpcError>(response);
+        }
+    }
+
+    [Fact]
     public async Task InvalidToolArguments_ReturnClosedRedactedErrorsWithoutPartialResults()
     {
         await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
@@ -128,6 +161,16 @@ public sealed class PreviewProcessContractTests
         }
     }
 
+
+    [Fact]
+    public async Task OmittedToolCallParams_ReturnsClosedRedactedError()
+    {
+        await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
+
+        var result = RequireResult(await driver.SendAsync("tools/call", parameters: null, new RequestId("omitted-tool-call-params")));
+
+        AssertClosedError(result, "invalid_tool_arguments", "INVALID_TOOL_ARGUMENTS");
+    }
     [Fact]
     public async Task UnknownAndExcludedRoutes_AreNotRegisteredOrDispatched()
     {
@@ -141,12 +184,41 @@ public sealed class PreviewProcessContractTests
         Assert.True(unknown["isError"]!.GetValue<bool>());
         Assert.False(unknown.ContainsKey("structuredContent"));
         Assert.Equal("Unknown tool: start_debug", SingleText(unknown));
+        var whitespaceUnknown = RequireResult(await driver.CallToolAsync(
+            " ",
+            new JsonObject(),
+            new RequestId("whitespace-unknown-tool")));
+        Assert.True(whitespaceUnknown["isError"]!.GetValue<bool>());
+        Assert.False(whitespaceUnknown.ContainsKey("structuredContent"));
+        Assert.Equal("Unknown tool:  ", SingleText(whitespaceUnknown));
+
+
 
         var excluded = await driver.SendAsync(
             "resources/list",
             new JsonObject { ["_meta"] = PreviewMcpProcessDriver.CurrentMeta() },
             new RequestId("excluded-method"));
         Assert.Equal(-32601, Assert.IsType<JsonRpcError>(excluded).Error.Code);
+    }
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task MissingOrNullToolNameReturnsClosedInvalidArguments(bool includeNullName)
+    {
+        await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
+        var parameters = new JsonObject
+        {
+            ["arguments"] = new JsonObject(),
+            ["_meta"] = PreviewMcpProcessDriver.CurrentMeta(),
+        };
+        if (includeNullName)
+        {
+            parameters["name"] = null;
+        }
+
+        var result = RequireResult(await driver.SendAsync("tools/call", parameters, new RequestId($"missing-tool-name-{includeNullName}")));
+
+        AssertClosedError(result, "invalid_tool_arguments", "INVALID_TOOL_ARGUMENTS");
     }
     [Fact]
     public async Task InBudget257CharacterUnsupportedVersionPreservesRequestedValueCorrelationAndFrameCap()
@@ -189,6 +261,137 @@ public sealed class PreviewProcessContractTests
         var result = RequireResult(response);
         Assert.Equal(requestId, Assert.IsType<JsonRpcResponse>(response).Id);
         Assert.Equal($"Unknown tool: {unknownToolName}", SingleText(result));
+        Assert.True(BoundedResponseFrameSerializer.FitsUnknownToolResponseWithinLimit(requestId, unknownToolName, out var state));
+        Assert.Equal(FrameByteCount(response), state.BytesWritten);
+        Assert.True(FrameByteCount(response) <= maximumFrameBytes);
+    }
+
+    [Fact]
+    public async Task NearCapIdBeyondFallbackLimitDeliversExactUnsupportedVersionResponse()
+    {
+        const int maximumFrameBytes = 256 * 1024;
+        var fallbackIdLength = maximumFrameBytes - FrameByteCount(FrameBudgetFallback(new RequestId("base"))) + "base".Length;
+        var requestId = new RequestId(new string('i', fallbackIdLength + 1));
+        var requestedVersion = new string('v', 257);
+        var metadata = PreviewMcpProcessDriver.CurrentMeta();
+        metadata[MetaKeys.ProtocolVersion] = requestedVersion;
+
+        Assert.False(BoundedResponseFrameSerializer.FitsFrameBudgetExceededResponseWithinLimit(requestId));
+        Assert.True(BoundedResponseFrameSerializer.FitsUnsupportedVersionErrorWithinLimit(
+            requestId,
+            requestedVersion,
+            PreviewMcpProcessDriver.CurrentProtocolVersion,
+            out var expected));
+
+        await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
+        var response = await driver.CallToolAsync(
+            ToolName,
+            new JsonObject { ["name"] = "PreviewMarker", ["kind"] = "class" },
+            requestId,
+            metadata);
+
+        var error = Assert.IsType<JsonRpcError>(response);
+        Assert.Equal(requestId, error.Id);
+        Assert.Equal(-32022, error.Error.Code);
+        var data = Assert.IsType<JsonElement>(error.Error.Data);
+        Assert.Equal(requestedVersion, data.GetProperty("requested").GetString());
+        Assert.Equal(FrameByteCount(response), expected.BytesWritten);
+        Assert.True(FrameByteCount(response) <= maximumFrameBytes);
+    }
+    [Fact]
+    public async Task NearCapIdBeyondFallbackLimitDeliversLegacyMethodNotFound()
+    {
+        const int maximumFrameBytes = 256 * 1024;
+        var fallbackIdLength = maximumFrameBytes - FrameByteCount(FrameBudgetFallback(new RequestId("base"))) + "base".Length;
+        var requestId = new RequestId(new string('i', fallbackIdLength + 1));
+        var expected = LegacyInitializeMethodNotFound(requestId);
+
+        Assert.False(BoundedResponseFrameSerializer.FitsFrameBudgetExceededResponseWithinLimit(requestId));
+        Assert.True(FrameByteCount(expected) <= maximumFrameBytes);
+
+        await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
+        var response = await driver.SendAsync("initialize", new JsonObject(), requestId);
+
+        var error = Assert.IsType<JsonRpcError>(response);
+        Assert.Equal(requestId, error.Id);
+        Assert.Equal(-32601, error.Error.Code);
+        Assert.Equal("Method not found", error.Error.Message);
+        Assert.Equal(FrameByteCount(expected), FrameByteCount(error));
+    }
+
+
+    [Fact]
+    public async Task ExactCapInvalidToolArgumentsResponseIsAccepted()
+    {
+        const int maximumFrameBytes = 256 * 1024;
+        var exactIdLength = maximumFrameBytes - FrameByteCount(InvalidToolArgumentsResponse(new RequestId("base"))) + "base".Length;
+        var requestId = new RequestId(new string('i', exactIdLength));
+        var expected = InvalidToolArgumentsResponse(requestId);
+
+        Assert.True(BoundedResponseFrameSerializer.FitsInvalidToolArgumentsResponseWithinLimit(requestId, out var state));
+        Assert.Equal(maximumFrameBytes, state.BytesWritten);
+        Assert.Equal(maximumFrameBytes, FrameByteCount(expected));
+
+        await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
+        var response = await driver.CallToolAsync(ToolName, new JsonObject(), requestId);
+
+        Assert.Equal(requestId, Assert.IsType<JsonRpcResponse>(response).Id);
+        AssertClosedError(RequireResult(response), "invalid_tool_arguments", "INVALID_TOOL_ARGUMENTS");
+        Assert.Equal(maximumFrameBytes, FrameByteCount(response));
+    }
+
+    [Fact]
+    public async Task NearCapIdBeyondFallbackLimitDeliversExcludedMethodNotFound()
+    {
+        const int maximumFrameBytes = 256 * 1024;
+        var fallbackIdLength = maximumFrameBytes - FrameByteCount(FrameBudgetFallback(new RequestId("base"))) + "base".Length;
+        var requestId = new RequestId(new string('i', fallbackIdLength + 1));
+        var expected = LegacyInitializeMethodNotFound(requestId);
+
+        Assert.False(BoundedResponseFrameSerializer.FitsFrameBudgetExceededResponseWithinLimit(requestId));
+        Assert.True(FrameByteCount(expected) <= maximumFrameBytes);
+
+        await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
+        var response = await driver.SendAsync("resources/list", new JsonObject { ["_meta"] = PreviewMcpProcessDriver.CurrentMeta() }, requestId);
+
+        var error = Assert.IsType<JsonRpcError>(response);
+        Assert.Equal(requestId, error.Id);
+        Assert.Equal(-32601, error.Error.Code);
+        Assert.Equal("Method not found", error.Error.Message);
+        Assert.Equal(FrameByteCount(expected), FrameByteCount(error));
+    }
+
+    [Fact]
+    public async Task NearCapIdBeyondFallbackLimitDeliversExactUnknownToolResponse()
+    {
+        const int maximumFrameBytes = 256 * 1024;
+        var fallbackIdLength = maximumFrameBytes - FrameByteCount(FrameBudgetFallback(new RequestId("base"))) + "base".Length;
+        var requestId = new RequestId(new string('i', fallbackIdLength + 1));
+        const string unknownTool = "unknown";
+
+        Assert.False(BoundedResponseFrameSerializer.FitsFrameBudgetExceededResponseWithinLimit(requestId));
+        Assert.True(BoundedResponseFrameSerializer.FitsUnknownToolResponseWithinLimit(requestId, unknownTool, out var expected));
+
+        await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
+        await driver.SendRequestAsync(
+            RequestMethods.ToolsCall,
+            new JsonObject
+            {
+                ["name"] = unknownTool,
+                ["arguments"] = new JsonObject(),
+                ["_meta"] = PreviewMcpProcessDriver.CurrentMeta(),
+            },
+            requestId);
+        var response = Assert.IsType<JsonRpcResponse>(await driver.TryReadMessageAsync(TimeSpan.FromSeconds(2)));
+
+        Assert.Equal(requestId, response.Id);
+        var result = RequireResult(response);
+        var metadata = Assert.IsType<JsonObject>(result["_meta"]);
+        var serverInfo = Assert.IsType<JsonObject>(metadata["io.modelcontextprotocol/serverInfo"]);
+        Assert.Equal(PreviewToolCatalog.ServerName, serverInfo["name"]!.GetValue<string>());
+        Assert.Equal(PreviewToolCatalog.ServerVersion, serverInfo["version"]!.GetValue<string>());
+        Assert.Equal($"Unknown tool: {unknownTool}", SingleText(result));
+        Assert.Equal(FrameByteCount(response), expected.BytesWritten);
         Assert.True(FrameByteCount(response) <= maximumFrameBytes);
     }
 
@@ -232,7 +435,11 @@ public sealed class PreviewProcessContractTests
         using var root = TemporaryProject.Create("ContainedMarker");
         using var outside = TemporaryProject.Create("EscapingMarker");
         var escapingFile = Path.Combine(root.Path, "ZEscaping.cs");
-        File.CreateSymbolicLink(escapingFile, Path.Combine(outside.Path, "Marker.cs"));
+        if (!TryCreateSymbolicLink(() => File.CreateSymbolicLink(escapingFile, Path.Combine(outside.Path, "Marker.cs"))))
+        {
+            AssertInjectedReparseComponentIsRefused(escapingFile, escapingFile);
+            return;
+        }
 
         await using var driver = await PreviewMcpProcessDriver.StartRawAsync(root.Path);
         var result = RequireResult(await driver.CallToolAsync(
@@ -265,35 +472,40 @@ public sealed class PreviewProcessContractTests
     }
 
     [Fact]
-    public async Task EveryResponsePathKeepsHugeToolAndVersionInputsWithinTheCompleteFrameCap()
+    public async Task UnrepresentableUnknownToolClosesBeforeDispatchWithoutResponse()
     {
         const int maximumFrameBytes = 256 * 1024;
-        var unboundedTool = new string('t', maximumFrameBytes * 4);
-        var unboundedVersion = new string('v', maximumFrameBytes * 4);
+        var unknownTool = new string('t', maximumFrameBytes * 4);
+        var requestId = new RequestId("huge-tool");
         await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
 
-        var unsupportedMetadata = PreviewMcpProcessDriver.CurrentMeta();
-        unsupportedMetadata[MetaKeys.ProtocolVersion] = unboundedVersion;
-        var unsupportedVersion = await driver.ListToolsAsync(new RequestId("huge-version"), unsupportedMetadata);
-        var unknownTool = await driver.CallToolAsync(
-            unboundedTool,
-            new JsonObject(),
-            new RequestId("huge-tool"));
+        await driver.SendRequestAsync(
+            "tools/call",
+            new JsonObject
+            {
+                ["name"] = unknownTool,
+                ["arguments"] = new JsonObject(),
+                ["_meta"] = PreviewMcpProcessDriver.CurrentMeta(),
+            },
+            requestId);
 
-        Assert.True(FrameByteCount(unknownTool) <= maximumFrameBytes);
-        Assert.True(FrameByteCount(unsupportedVersion) <= maximumFrameBytes);
-        var oversizedUnknown = Assert.IsType<JsonRpcResponse>(unknownTool);
-        Assert.Equal(new RequestId("huge-tool"), oversizedUnknown.Id);
-        AssertClosedError(RequireResult(oversizedUnknown), "preview_search_budget_exceeded", "PREVIEW_SEARCH_BUDGET_EXCEEDED");
-        Assert.DoesNotContain(unboundedTool, JsonSerializer.Serialize(unknownTool, McpJsonUtilities.DefaultOptions), StringComparison.Ordinal);
-        var oversizedVersion = Assert.IsType<JsonRpcError>(unsupportedVersion);
-        Assert.Equal(new RequestId("huge-version"), oversizedVersion.Id);
-        Assert.Equal("Unsupported protocol version", oversizedVersion.Error.Message);
-        Assert.Equal(-32022, oversizedVersion.Error.Code);
-        var oversizedVersionData = Assert.IsType<JsonElement>(oversizedVersion.Error.Data);
-        Assert.Equal("unsupported", oversizedVersionData.GetProperty("requested").GetString());
-        Assert.Equal([PreviewMcpProcessDriver.CurrentProtocolVersion], oversizedVersionData.GetProperty("supported").EnumerateArray().Select(static value => value.GetString()));
-        Assert.DoesNotContain(unboundedVersion, JsonSerializer.Serialize(unsupportedVersion, McpJsonUtilities.DefaultOptions), StringComparison.Ordinal);
+        Assert.Null(await driver.TryReadMessageAsync(TimeSpan.FromSeconds(2)));
+        Assert.True(await driver.WaitForTransportClosureAsync(TimeSpan.FromSeconds(2)));
+    }
+
+    [Fact]
+    public async Task UnrepresentableUnsupportedVersionClosesBeforeDispatchWithoutResponse()
+    {
+        const int maximumFrameBytes = 256 * 1024;
+        var requestId = new RequestId("huge-version");
+        var metadata = PreviewMcpProcessDriver.CurrentMeta();
+        metadata[MetaKeys.ProtocolVersion] = new string('v', maximumFrameBytes * 4);
+        await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
+
+        await driver.SendRequestAsync("tools/list", new JsonObject { ["_meta"] = metadata }, requestId);
+
+        Assert.Null(await driver.TryReadMessageAsync(TimeSpan.FromSeconds(2)));
+        Assert.True(await driver.WaitForTransportClosureAsync(TimeSpan.FromSeconds(2)));
     }
 
     [Fact]
@@ -551,9 +763,14 @@ public sealed class PreviewProcessContractTests
         var container = Path.Combine(Path.GetTempPath(), $"netcoredbg-preview-alias-{Guid.NewGuid():N}");
         Directory.CreateDirectory(container);
         var link = Path.Combine(container, "alias");
-        Directory.CreateSymbolicLink(link, target.Path);
         try
         {
+            if (!TryCreateSymbolicLink(() => Directory.CreateSymbolicLink(link, target.Path)))
+            {
+                AssertInjectedReparseComponentIsRefused(Path.Combine(link, "Nested"), link);
+                return;
+            }
+
             await AssertInvalidLaunchAsync(PreviewRepositoryLayout.Root, "--project", Path.Combine(link, "Nested"));
         }
         finally
@@ -571,9 +788,22 @@ public sealed class PreviewProcessContractTests
         var real = Path.Combine(container, "real");
         Directory.CreateDirectory(real);
         File.WriteAllText(Path.Combine(real, "Marker.cs"), "public sealed class RealMarker { }\n");
-        Directory.CreateSymbolicLink(alias, target.Path);
         try
         {
+            if (!TryCreateSymbolicLink(() => Directory.CreateSymbolicLink(alias, target.Path)))
+            {
+                foreach (var rawPath in new[]
+                {
+                    string.Concat(alias, Path.DirectorySeparatorChar, "."),
+                    string.Concat(alias, Path.DirectorySeparatorChar, "..", Path.DirectorySeparatorChar, "real"),
+                })
+                {
+                    AssertInjectedReparseComponentIsRefused(rawPath, alias);
+                }
+
+                return;
+            }
+
             foreach (var rawPath in new[]
             {
                 string.Concat(alias, Path.DirectorySeparatorChar, "."),
@@ -590,31 +820,41 @@ public sealed class PreviewProcessContractTests
     }
 
     [Fact]
+    public void UnavailableSymlinkPrivilegeUsesInjectedReparseSeam()
+    {
+        Assert.False(TryCreateSymbolicLink(static () => throw new UnauthorizedAccessException()));
+        AssertInjectedReparseComponentIsRefused(
+            PreviewRepositoryLayout.FixtureRoot,
+            PreviewRepositoryLayout.FixtureRoot);
+    }
+
+    [Fact]
     public async Task MultipleAndReparseLaunchRoots_AreRefusedBeforeServing()
     {
         using var target = TemporaryProject.Create("ReparseRootMarker");
         var linkPath = Path.Combine(Path.GetTempPath(), $"netcoredbg-preview-link-{Guid.NewGuid():N}");
-        Directory.CreateSymbolicLink(linkPath, target.Path);
         try
         {
-            foreach (var arguments in new[]
+            await AssertInvalidLaunchAsync(
+                PreviewRepositoryLayout.Root,
+                "--project",
+                PreviewRepositoryLayout.FixtureRoot,
+                "--project",
+                target.Path);
+            if (!TryCreateSymbolicLink(() => Directory.CreateSymbolicLink(linkPath, target.Path)))
             {
-                new[] { "--project", PreviewRepositoryLayout.FixtureRoot, "--project", target.Path },
-                new[] { "--project", linkPath },
-            })
-            {
-                using var process = PreviewOutputPathResolver.StartDirect(arguments);
-                var output = process.StandardOutput.ReadToEndAsync();
-                var error = process.StandardError.ReadToEndAsync();
-                await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(2));
-                Assert.Equal(64, process.ExitCode);
-                Assert.Equal("", await output);
-                Assert.Equal("PREVIEW_ROOT_INVALID\n", await error);
+                AssertInjectedReparseComponentIsRefused(linkPath, linkPath);
+                return;
             }
+
+            await AssertInvalidLaunchAsync(PreviewRepositoryLayout.Root, "--project", linkPath);
         }
         finally
         {
-            Directory.Delete(linkPath);
+            if (Directory.Exists(linkPath))
+            {
+                Directory.Delete(linkPath);
+            }
         }
     }
 
@@ -700,8 +940,22 @@ public sealed class PreviewProcessContractTests
         return new JsonRpcResponse
         {
             Id = id,
-            Result = JsonSerializer.SerializeToNode(result, McpJsonUtilities.DefaultOptions),
+            Result = ResultWithServerInfo(result),
         };
+    }
+
+    private static JsonObject ResultWithServerInfo(CallToolResult result)
+    {
+        var node = JsonSerializer.SerializeToNode(result, McpJsonUtilities.DefaultOptions)!.AsObject();
+        node["_meta"] = new JsonObject
+        {
+            ["io.modelcontextprotocol/serverInfo"] = new JsonObject
+            {
+                ["name"] = PreviewToolCatalog.ServerName,
+                ["version"] = PreviewToolCatalog.ServerVersion,
+            },
+        };
+        return node;
     }
 
     private static int FrameByteCount(JsonRpcMessage message) =>
@@ -710,6 +964,22 @@ public sealed class PreviewProcessContractTests
     {
         Id = id,
         Result = JsonSerializer.SerializeToNode(PreviewToolHandler.FrameBudgetExceeded(), McpJsonUtilities.DefaultOptions),
+    };
+
+    private static JsonRpcResponse InvalidToolArgumentsResponse(RequestId id) => new()
+    {
+        Id = id,
+        Result = ResultWithServerInfo(PreviewToolHandler.InvalidToolArguments()),
+    };
+
+    private static JsonRpcError LegacyInitializeMethodNotFound(RequestId id) => new()
+    {
+        Id = id,
+        Error = new JsonRpcErrorDetail
+        {
+            Code = -32601,
+            Message = "Method not found",
+        },
     };
 
 
@@ -734,6 +1004,31 @@ public sealed class PreviewProcessContractTests
         Assert.Equal(64, process.ExitCode);
         Assert.Equal("", await standardOutput);
         Assert.Equal("PREVIEW_ROOT_INVALID\n", await standardError);
+    }
+
+    private static bool TryCreateSymbolicLink(Action create)
+    {
+        try
+        {
+            create();
+            return true;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private static void AssertInjectedReparseComponentIsRefused(string rawPath, string reparseComponent)
+    {
+        var parsed = PreviewProjectRootParser.TryParse(
+            ["--project", rawPath],
+            out _,
+            path => string.Equals(path, reparseComponent, StringComparison.OrdinalIgnoreCase)
+                ? FileAttributes.Directory | FileAttributes.ReparsePoint
+                : File.GetAttributes(path));
+
+        Assert.False(parsed);
     }
 
     private sealed class TemporaryProject : IDisposable

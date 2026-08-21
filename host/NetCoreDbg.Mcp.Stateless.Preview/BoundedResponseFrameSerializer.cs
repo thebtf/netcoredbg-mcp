@@ -54,6 +54,31 @@ internal static class BoundedResponseFrameSerializer
         return counter.Fits;
     }
 
+    internal static bool FitsInvalidToolArgumentsResponseWithinLimit(RequestId id) =>
+        FitsInvalidToolArgumentsResponseWithinLimit(id, out _);
+
+    internal static bool FitsInvalidToolArgumentsResponseWithinLimit(RequestId id, out FramePreflightState state)
+    {
+        var counter = new BoundedJsonByteCounter(PreviewToolCatalog.MaximumCompleteResponseFrameBytes);
+        WriteResponsePrefix(ref counter, id);
+        WriteAscii(ref counter, ",\"result\":{\"resultType\":\"complete\",\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\""u8);
+        WriteInvalidToolArgumentsPayload(ref counter, nestedInText: true);
+        WriteAscii(ref counter, "\"}],\"structuredContent\":"u8);
+        WriteInvalidToolArgumentsPayload(ref counter, nestedInText: false);
+        WriteServerInfoMetadata(ref counter);
+        WriteAscii(ref counter, "}}"u8);
+        state = counter.State;
+        return counter.Fits;
+    }
+
+    internal static bool FitsLegacyInitializeMethodNotFoundErrorWithinLimit(RequestId id)
+    {
+        var counter = new BoundedJsonByteCounter(PreviewToolCatalog.MaximumCompleteResponseFrameBytes);
+        WriteResponsePrefix(ref counter, id);
+        WriteAscii(ref counter, ",\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}"u8);
+        return counter.Fits;
+    }
+
     internal static bool FitsUnsupportedVersionErrorWithinLimit(
         RequestId id,
         string requestedVersion,
@@ -77,7 +102,9 @@ internal static class BoundedResponseFrameSerializer
         WriteResponsePrefix(ref counter, id);
         WriteAscii(ref counter, ",\"result\":{\"resultType\":\"complete\",\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"Unknown tool: "u8);
         counter.WriteJsonStringContent(tool, trackToken: true);
-        WriteAscii(ref counter, "\"}]}}"u8);
+        WriteAscii(ref counter, "\"}]"u8);
+        WriteServerInfoMetadata(ref counter);
+        WriteAscii(ref counter, "}}"u8);
         state = counter.State;
         return counter.Fits;
     }
@@ -93,6 +120,7 @@ internal static class BoundedResponseFrameSerializer
         WriteFindCodeSymbolPayload(ref counter, matches, nestedInText: true);
         WriteAscii(ref counter, "\"}],\"structuredContent\":"u8);
         WriteFindCodeSymbolPayload(ref counter, matches, nestedInText: false);
+        WriteServerInfoMetadata(ref counter);
         WriteAscii(ref counter, "}}"u8);
         state = counter.State;
         return counter.Fits;
@@ -122,6 +150,15 @@ internal static class BoundedResponseFrameSerializer
         WriteAscii(ref counter, "}}"u8);
     }
 
+    private static void WriteServerInfoMetadata(ref BoundedJsonByteCounter counter)
+    {
+        WriteAscii(ref counter, ",\"_meta\":{\"io.modelcontextprotocol/serverInfo\":{\"name\":"u8);
+        WriteJsonString(ref counter, PreviewToolCatalog.ServerName, nestedInText: false, trackToken: false);
+        WriteAscii(ref counter, ",\"version\":"u8);
+        WriteJsonString(ref counter, PreviewToolCatalog.ServerVersion, nestedInText: false, trackToken: false);
+        WriteAscii(ref counter, "}}"u8);
+    }
+
     private static void WriteResponsePrefix(ref BoundedJsonByteCounter counter, RequestId id)
     {
         WriteAscii(ref counter, "{\"jsonrpc\":\"2.0\",\"id\":"u8);
@@ -148,6 +185,17 @@ internal static class BoundedResponseFrameSerializer
         WriteJsonString(ref counter, "preview_search_budget_exceeded", nestedInText, trackToken: false);
         WriteAscii(ref counter, ",\"error\":"u8, nestedInText);
         WriteJsonString(ref counter, "PREVIEW_SEARCH_BUDGET_EXCEEDED", nestedInText, trackToken: false);
+        WriteAscii(ref counter, ",\"tool\":"u8, nestedInText);
+        WriteJsonString(ref counter, PreviewToolCatalog.FindCodeSymbol, nestedInText, trackToken: false);
+        WriteAscii(ref counter, "}"u8, nestedInText);
+    }
+
+    private static void WriteInvalidToolArgumentsPayload(ref BoundedJsonByteCounter counter, bool nestedInText)
+    {
+        WriteAscii(ref counter, "{\"kind\":"u8, nestedInText);
+        WriteJsonString(ref counter, "invalid_tool_arguments", nestedInText, trackToken: false);
+        WriteAscii(ref counter, ",\"error\":"u8, nestedInText);
+        WriteJsonString(ref counter, "INVALID_TOOL_ARGUMENTS", nestedInText, trackToken: false);
         WriteAscii(ref counter, ",\"tool\":"u8, nestedInText);
         WriteJsonString(ref counter, PreviewToolCatalog.FindCodeSymbol, nestedInText, trackToken: false);
         WriteAscii(ref counter, "}"u8, nestedInText);

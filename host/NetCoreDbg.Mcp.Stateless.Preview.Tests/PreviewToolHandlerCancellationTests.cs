@@ -21,6 +21,17 @@ public sealed class PreviewToolHandlerCancellationTests
         await AssertCancellationBeforeResponseAsync(root.Path, PreviewToolCatalog.FindCodeSymbol, arguments: null);
     }
 
+
+    [Fact]
+    public async Task NullRequestReturnsClosedInvalidArguments()
+    {
+        using var root = TestRoot.Create("FollowupMarker");
+
+        var result = await new PreviewToolHandler(CreateSearch(root.Path)).CallAsync(null!, NewRequestId(), CancellationToken.None);
+
+        Assert.Equal("invalid_tool_arguments", result.StructuredContent!.Value.GetProperty("kind").GetString());
+        Assert.Equal("INVALID_TOOL_ARGUMENTS", result.StructuredContent!.Value.GetProperty("error").GetString());
+    }
     [Fact]
     public async Task SuccessCancellationBeforeResponse_ReturnsNoToolResult_AndLaterRequestWorks()
     {
@@ -49,16 +60,13 @@ public sealed class PreviewToolHandlerCancellationTests
     public async Task SearchFailureCancellationBeforeResponse_ReturnsNoToolResult_AndLaterRequestWorks()
     {
         using var root = TestRoot.Create("FailureMarker");
-        using var outside = TestRoot.Create("EscapingMarker");
-        File.CreateSymbolicLink(
-            Path.Combine(root.Path, "ZEscaping.cs"),
-            Path.Combine(outside.Path, "Marker.cs"));
+        File.WriteAllText(Path.Combine(root.Path, ".gitignore"), "[z-a]\n");
 
         await AssertCancellationBeforeResponseAsync(
             root.Path,
             PreviewToolCatalog.FindCodeSymbol,
             Arguments("FailureMarker", "class"),
-            expectedFailure: "preview_path_refused");
+            expectedFailure: "preview_search_unreadable");
     }
 
     private static async Task AssertCancellationBeforeResponseAsync(
@@ -98,6 +106,7 @@ public sealed class PreviewToolHandlerCancellationTests
         ["name"] = JsonSerializer.SerializeToElement(name),
         ["kind"] = JsonSerializer.SerializeToElement(kind),
     };
+
 
     private sealed class TestRoot : IDisposable
     {

@@ -39,6 +39,13 @@ refusal, unreadable search, or budget/deadline exhaustion. Unknown tool calls
 remain text-only; excluded methods are method-not-found. No failure returns
 partial data.
 
+For every emitted unknown-tool or `-32022` unsupported-version response,
+preserve the exact requested payload and same request ID whenever the complete
+same-ID response fits the 256 KiB cap. If a request cannot be represented with
+that exact payload under the cap, refuse or close it before dispatch with no
+response; never emit a truncated, partial, sentinel, or otherwise falsified
+requested value.
+
 ## Search boundary
 
 Preview validates regular/non-reparse lexical and final-under-root paths before

@@ -14,6 +14,7 @@ public sealed class LegacySearchPolicy : SearchPolicy
         {
             ".cs", ".xaml", ".axaml", ".csproj", ".json", ".config",
         },
+        ExcludedDirectoryNames: new HashSet<string>(StringComparer.Ordinal),
         MaximumSymbolResults: null,
         MaximumReferenceResults: 1000,
         Strict: false,
@@ -39,6 +40,7 @@ public sealed class PreviewSearchPolicy : SearchPolicy
 {
     private static readonly SearchPolicySettings SettingsValue = new(
         SourceExtensions: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".cs" },
+        ExcludedDirectoryNames: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "bin", "obj" },
         MaximumSymbolResults: 128,
         MaximumReferenceResults: 128,
         Strict: true,
@@ -61,6 +63,7 @@ public sealed class PreviewSearchPolicy : SearchPolicy
 
 internal sealed record SearchPolicySettings(
     HashSet<string> SourceExtensions,
+    HashSet<string> ExcludedDirectoryNames,
     int? MaximumSymbolResults,
     int MaximumReferenceResults,
     bool Strict,

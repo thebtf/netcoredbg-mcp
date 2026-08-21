@@ -317,16 +317,10 @@ public sealed class SymbolSearchEngine
         foreach (var child in EnumerateDirectories(directory, rules, operation))
         {
             operation.Check();
-            if (_settings.Strict)
+            if (!_settings.Strict
+                && (IsReparsePoint(child) || ShouldPruneDirectory(child.FullName, rules, operation)))
             {
-                VerifyStrictDirectory(child, operation);
-            }
-            else
-            {
-                if (IsReparsePoint(child) || ShouldPruneDirectory(child.FullName, rules, operation))
-                {
-                    continue;
-                }
+                continue;
             }
 
             foreach (var descendant in TraversedDirectories(child, rules, operation, _settings.Strict))
@@ -834,6 +828,11 @@ public sealed class SymbolSearchEngine
             foreach (var child in _enumerateDirectories(directory))
             {
                 operation.Check();
+                if (_settings.ExcludedDirectoryNames.Contains(child.Name))
+                {
+                    continue;
+                }
+
                 VerifyStrictDirectory(child, operation);
                 if (ShouldPruneDirectory(child.FullName, rules, operation))
                 {
