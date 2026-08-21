@@ -425,6 +425,11 @@ public sealed class SymbolSearchEngine
         SearchOperation operation)
     {
         var expandedPath = ExpandHome(rawPath);
+        if (_settings.Strict)
+        {
+            VerifyStrictRawParentDirectories(expandedPath, operation);
+        }
+
         string candidate;
         try
         {
@@ -583,6 +588,52 @@ public sealed class SymbolSearchEngine
         return !string.Equals(relative, "..", StringComparison.Ordinal)
             && !relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal)
             && !Path.IsPathFullyQualified(relative);
+    }
+
+    private void VerifyStrictRawParentDirectories(string rawPath, SearchOperation operation)
+    {
+        var rawCandidate = Path.IsPathFullyQualified(rawPath)
+            ? rawPath
+            : Path.Combine(_projectRoot, rawPath);
+        if (Path.AltDirectorySeparatorChar != Path.DirectorySeparatorChar)
+        {
+            rawCandidate = rawCandidate.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+        }
+
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        if (!rawCandidate.StartsWith(_projectRoot, comparison)
+            || rawCandidate.Length == _projectRoot.Length
+            || rawCandidate[_projectRoot.Length] != Path.DirectorySeparatorChar)
+        {
+            return;
+        }
+
+        var components = rawCandidate[(_projectRoot.Length + 1)..].Split(
+            Path.DirectorySeparatorChar,
+            StringSplitOptions.RemoveEmptyEntries);
+        var rawParent = _projectRoot;
+        for (var index = 0; index < components.Length - 1; index++)
+        {
+            operation.Check();
+            rawParent = Path.Combine(rawParent, components[index]);
+            string parent;
+            try
+            {
+                parent = Path.GetFullPath(rawParent);
+            }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+            {
+                ThrowFileNotFoundOrFailure(rawPath, operation.Tool);
+                throw;
+            }
+
+            if (IsWithinRoot(parent))
+            {
+                VerifyStrictDirectory(new DirectoryInfo(parent), operation);
+            }
+        }
     }
 
     private void VerifyStrictParentDirectories(string candidate, SearchOperation operation)
@@ -1107,7 +1158,28 @@ public sealed class SymbolSearchEngine
                 : new GitIgnoreRule(value, negated, directoryOnly, anchored, value.Contains('/'));
         }
 
-        internal void Validate(SearchOperation operation) => CreateGlobRegex(Pattern, operation);
+        internal void Validate(SearchOperation operation)
+        {
+            for (var index = 0; index < Pattern.Length; index++)
+            {
+                if (Pattern[index] != '[')
+                {
+                    continue;
+                }
+
+                var closing = FindClosingBracket(Pattern, index + 1, operation);
+                if (closing == index + 1)
+                {
+                    throw new ArgumentException("Empty glob character class.");
+                }
+                if (closing > index + 1)
+                {
+                    index = closing;
+                }
+            }
+
+            CreateGlobRegex(Pattern, operation);
+        }
 
         internal bool Matches(string relativePath, bool isDirectory, SearchOperation? operation)
         {

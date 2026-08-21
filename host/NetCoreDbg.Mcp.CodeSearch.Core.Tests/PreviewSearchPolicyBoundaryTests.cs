@@ -214,6 +214,26 @@ public sealed class PreviewSearchPolicyBoundaryTests
     }
 
     [Fact]
+    public void PreviewPolicyMapsAChangedSourceLengthAfterOpenToClosedUnreadableWithoutResult()
+    {
+        using var root = TestRoot.Create();
+        var source = new FileInfo(Path.Combine(root.Path, "Changed.cs"));
+        var engine = new SymbolSearchEngine(
+            root.Path,
+            PreviewSearchPolicy.Instance,
+            new RecordingStrictPathInspector(root.Path),
+            enumerateFiles: _ => [source],
+            openRead: _ => new ChangedLengthStream());
+
+        var failure = Assert.Throws<SearchFailureException>(() => engine.FindCodeSymbol("Absent", "class"));
+
+        Assert.Equal(
+            new SearchFailure("preview_search_unreadable", "PREVIEW_SEARCH_UNREADABLE", "find_code_symbol"),
+            failure.Failure);
+        Assert.DoesNotContain(root.Path, failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void PreviewPolicyTruncatesContextAt512UnicodeScalarsWithoutSplittingSurrogatePair()
     {
         using var root = TestRoot.Create();
@@ -382,6 +402,16 @@ public sealed class PreviewSearchPolicyBoundaryTests
         }
 
         public override int Read(byte[] buffer, int offset, int count) => throw new IOException();
+    }
+
+    private sealed class ChangedLengthStream : MemoryStream
+    {
+        internal ChangedLengthStream()
+            : base([0], writable: false)
+        {
+        }
+
+        public override long Length => 0;
     }
 
     private sealed class RecordingStrictPathInspector : IStrictPathInspector

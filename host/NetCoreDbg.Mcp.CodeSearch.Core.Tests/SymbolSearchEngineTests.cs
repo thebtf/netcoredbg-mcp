@@ -76,6 +76,39 @@ public sealed class SymbolSearchEngineTests
     }
 
     [Fact]
+    public void PreviewPolicyRefusesRawReparseComponentBeforeDotNormalization()
+    {
+        using var root = TestRoot.Create();
+        root.Write("real/Marker.cs", "first\n");
+        var rawReparse = Path.Combine(root.Path, "reparseAlias");
+        var inspector = new TestStrictPathInspector(new Dictionary<string, StrictPathInfo>(StringComparer.Ordinal)
+        {
+            [rawReparse] = new(
+                Exists: true,
+                IsDirectory: true,
+                IsReparsePoint: true,
+                FinalTarget: root.Path),
+        });
+        var engine = new SymbolSearchEngine(root.Path, PreviewSearchPolicy.Instance, inspector);
+        var rawPath = string.Concat(
+            "reparseAlias",
+            Path.DirectorySeparatorChar,
+            "..",
+            Path.DirectorySeparatorChar,
+            "real",
+            Path.DirectorySeparatorChar,
+            "Marker.cs");
+
+        var failure = Assert.Throws<SearchFailureException>(() => engine.GetSourceContext(rawPath, 1, 0));
+
+        Assert.Equal(
+            new SearchFailure("preview_path_refused", "PREVIEW_PATH_REFUSED", "get_source_context"),
+            failure.Failure);
+        Assert.Contains(rawReparse, inspector.InspectedPaths, StringComparer.Ordinal);
+        Assert.DoesNotContain(root.Path, failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void PreviewPolicyRefusesEscapingRootBeforeInspectingTargetGitIgnore()
     {
         using var root = TestRoot.Create();
@@ -156,6 +189,22 @@ public sealed class SymbolSearchEngineTests
     {
         using var root = TestRoot.Create();
         root.Write(".gitignore", "[z-a]\n");
+        root.Write("Contained.cs", "public sealed class Contained { }\n");
+        var engine = new SymbolSearchEngine(root.Path, PreviewSearchPolicy.Instance);
+
+        var failure = Assert.Throws<SearchFailureException>(() => engine.FindCodeSymbol("Contained", "class"));
+
+        Assert.Equal(
+            new SearchFailure("preview_search_unreadable", "PREVIEW_SEARCH_UNREADABLE", "find_code_symbol"),
+            failure.Failure);
+        Assert.DoesNotContain(root.Path, failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PreviewPolicyRedactsEmptyCharacterClassRootGitIgnore()
+    {
+        using var root = TestRoot.Create();
+        root.Write(".gitignore", "[]\n");
         root.Write("Contained.cs", "public sealed class Contained { }\n");
         var engine = new SymbolSearchEngine(root.Path, PreviewSearchPolicy.Instance);
 
