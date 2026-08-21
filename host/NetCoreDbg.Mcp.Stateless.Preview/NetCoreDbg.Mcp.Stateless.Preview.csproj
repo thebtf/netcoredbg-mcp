@@ -1,26 +1,19 @@
 <Project Sdk="Microsoft.NET.Sdk">
-
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
-    <RootNamespace>NetCoreDbg.Mcp.Host</RootNamespace>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
-
   <ItemGroup>
-    <PackageReference Include="ModelContextProtocol" Version="1.4.1" />
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.7" />
+    <PackageReference Include="ModelContextProtocol" Version="2.1.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.10" />
   </ItemGroup>
-
   <ItemGroup>
     <ProjectReference Include="..\NetCoreDbg.Mcp.CodeSearch.Core\NetCoreDbg.Mcp.CodeSearch.Core.csproj" />
   </ItemGroup>
-
   <ItemGroup>
-    <InternalsVisibleTo Include="NetCoreDbg.Mcp.Host.Tests" />
-    <InternalsVisibleTo Include="NetCoreDbg.Mcp.Host.PromptTests" />
+    <InternalsVisibleTo Include="NetCoreDbg.Mcp.Stateless.Preview.Tests" />
   </ItemGroup>
-
 </Project>

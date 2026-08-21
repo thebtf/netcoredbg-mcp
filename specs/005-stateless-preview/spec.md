@@ -137,6 +137,13 @@ Whitespace-only `name` is invalid despite JSON Schema `minLength`. Unknown
 excluded protocol methods return JSON-RPC method-not-found and have no side
 effect.
 
+For every emitted unknown-tool or `-32022` unsupported-version response, the
+exact requested payload and same request ID are preserved whenever the complete
+same-ID JSON-RPC response fits the 256 KiB cap. If a request cannot be
+represented with that exact payload under the cap, the server MUST refuse or
+close it before dispatch with no response. It MUST NOT emit a truncated,
+partial, sentinel, or otherwise falsified requested value.
+
 ## Exact tool result contract
 
 The sole text block is the compact UTF-8 JSON serialization of
