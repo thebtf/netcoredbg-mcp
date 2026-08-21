@@ -4,12 +4,13 @@ Released: 2026-08-20
 
 ## Summary
 
-`v0.23.7` is a PATCH release. `search_source` now runs in a bounded dedicated
-Python subprocess, so that query's latency and failures do not share the MCP
-server process. `find_code_symbol`, `find_code_references`, and
-`get_source_context` remain in-process. In the same range, the source-only .NET
-host gained the reviewed Native Scene Probe M0/M1 capability; it is not part of
-the published wheel and is not a published entrypoint.
+`v0.23.7` is a PATCH release. `search_source` now runs regex matching in a
+bounded dedicated Python subprocess. Source-file enumeration and waiting for
+that worker remain in the MCP server process. `find_code_symbol`,
+`find_code_references`, and `get_source_context` remain in-process. In the
+same range, the source-only .NET host gained the reviewed Native Scene Probe
+M0/M1 capability; it is not part of the published wheel and is not a published
+entrypoint.
 
 ## Consumer Claims
 
@@ -17,8 +18,9 @@ the published wheel and is not a published entrypoint.
    the authoritative, backward-compatible consumer path.
 2. This release adds no tools, prompts, resources, or breaking API changes;
    the public catalog remains 135 tools, 8 prompts, and 4 resources.
-3. `search_source` now executes in a bounded dedicated subprocess; its faults
-   cannot stall or crash the MCP server process. The other code-search tools
+3. `search_source` runs regex matching in a bounded dedicated subprocess.
+   Worker failures are surfaced as tool errors, while source-file enumeration
+   and waiting for the worker remain in-process. The other code-search tools
    remain in-process.
 4. The Native Scene Probe M0/M1 capability is internal and source-only: it
    adds no consumer-visible surface in this release.

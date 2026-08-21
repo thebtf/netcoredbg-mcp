@@ -687,6 +687,26 @@ def test_readmes_document_non_mutating_source_checkout_mcp_launch() -> None:
         assert pinned_config in json_config_blocks
         assert not re.search(r"\buv\s+run\s+--project\b", document)
 
+
+def test_release_notes_scope_search_source_worker_isolation_truthfully() -> None:
+    changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+    release_notes = Path("RELEASE_NOTES.md").read_text(encoding="utf-8")
+
+    for document in (changelog, release_notes):
+        normalized = " ".join(document.split())
+        assert (
+            "`search_source` now runs regex matching in a bounded dedicated Python subprocess"
+            in normalized
+        )
+        assert (
+            "Source-file enumeration and waiting for that worker remain in the MCP server process"
+            in normalized
+        )
+        assert "latency and failures do not share the MCP server process" not in normalized
+    assert "Worker failures are surfaced as tool errors" in release_notes
+    assert "crash the MCP server process" not in release_notes.lower()
+    assert "cannot stall" not in release_notes.lower()
+
 def test_release_policy_uses_one_consumer_first_autonomy_contract() -> None:
     agents = AGENTS_PATH.read_text(encoding="utf-8")
     protocol = RELEASE_PROTOCOL_PATH.read_text(encoding="utf-8")

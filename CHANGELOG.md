@@ -9,9 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.23.7] - 2026-08-20
 
 ### Fixed
-- `search_source` now runs in a bounded dedicated Python subprocess instead
-  of an unbounded in-process worker, isolating that query's latency and failure
-  modes from the MCP server process. The other code-search tools remain in-process.
+- `search_source` now runs regex matching in a bounded dedicated Python
+  subprocess. Source-file enumeration and waiting for that worker remain in
+  the MCP server process; the other code-search tools remain in-process.
 
 ### Added
 - The source-only .NET host gains the reviewed Native Scene Probe M0/M1
