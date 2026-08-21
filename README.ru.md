@@ -3,103 +3,70 @@
 # netcoredbg-mcp
 
 [![PyPI](https://img.shields.io/pypi/v/netcoredbg-mcp?style=flat-square)](https://pypi.org/project/netcoredbg-mcp/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
+[![Лицензия MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?style=flat-square)](#требования)
 [![MCP](https://img.shields.io/badge/MCP-Server-6f42c1?style=flat-square)](https://modelcontextprotocol.io/)
-[![Platform](https://img.shields.io/badge/Platform-Windows-2ea44f?style=flat-square)](#ограничения)
+[![Платформа](https://img.shields.io/badge/Platform-Windows-2ea44f?style=flat-square)](#ограничения)
 
-`netcoredbg-mcp` даёт AI-агентам полноценный отладчик для .NET-приложений.
-Через Model Context Protocol агент может запускать процесс или подключаться к
-нему, ставить точки останова, выполнять код пошагово, смотреть переменные,
-вычислять выражения, читать вывод отладки и управлять поверхностями Windows UI
-Automation, включая окна WPF, WinForms и Avalonia, без IDE.
+Отлаживайте .NET-приложения в coding-агенте с поддержкой MCP, не выходя из его
+рабочего процесса. `netcoredbg-mcp` объединяет `netcoredbg`, Debug Adapter
+Protocol и Windows UI Automation: агент наблюдает за запущенным приложением,
+намеренно останавливает его и изучает состояние, объясняющее поведение.
 
-**135 MCP-инструментов · 8 промптов · 4 ресурса · 2157 собранных тестов · релиз v0.23.7**
+**Python 3.10+ · автоматизация Windows GUI · 135 инструментов · 8 промптов · 4 ресурса · v0.23.7**
 
-## Быстрые ссылки
+## Возможности
 
-- **Старт:** [Быстрый старт](#быстрый-старт) · [Установка](#установка) · [Настройка клиентов](#настройка-клиентов)
-- **Использование:** [Первая сессия отладки](#первая-сессия-отладки) · [Отладка GUI-приложений](#отладка-gui-приложений) · [Визуальная инспекция](#визуальная-инспекция)
-- **Справочник:** [Доступные инструменты](#доступные-инструменты) · [Ресурсы](#mcp-ресурсы) · [Промпты](#mcp-промпты) · [Архитектура](#обзор-архитектуры)
-- **Проект:** [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
-
-## Что нового в v0.23.7
-
-- **Изолированный code-search worker** — семейство code-search теперь
-  работает в отдельном ограниченном Python-подпроцессе: задержки и сбои
-  поиска изолированы от процесса MCP-сервера.
-- **Native Scene Probe M0/M1 (только исходники)** — .NET-хост получил шесть
-  проверенных аддитивных примитивов для lossless visual evidence и атомарного
-  захвата native-сцены за хэш-закреплёнными контрактами. Хост остаётся
-  source-only и не входит в публикуемый wheel.
-
-## Основные возможности
-
-| Возможность | Что умеют агенты |
+| Задача | Что делает MCP-сервер |
 |---|---|
-| Управление отладкой | Запускать, подключаться, перезапускать, продолжать, приостанавливать, завершать и пошагово выполнять .NET-код |
-| Точки останова | Работать с file, function, conditional, hit-count, exception и tracepoint-сценариями |
-| Инспекция | Смотреть threads, stack frames, scopes, variables, modules, expressions, source, disassembly и memory |
-| GUI-автоматизация | Читать дерево окон, искать элементы, кликать, наводить указатель по точному селектору, вводить текст, делать screenshots и annotations, работать с clipboard, окнами и UI evidence |
-| Интеграция сборки | Запускать pre-launch `dotnet build`, получать progress notifications и build diagnostics, чистить заблокированные debug-процессы |
-| Runtime smoke | Предзапусковая очистка, instrumentation groups, output checkpoints, freshness checks и bounded scenario runner |
-| Безопасность multi-agent | Владение сессией через `mcp-mux`, read-only-наблюдатели, освобождение владения после inactivity timeout |
+| Разобраться в сбое | Запускает или подключается к .NET-процессу, ставит точки останова, читает потоки, стеки, области видимости, переменные, модули, вывод и исключения. |
+| Управлять desktop-приложением | Находит элементы UI, читает дерево окон, кликает, вводит текст, выбирает элементы, работает с буфером обмена и собирает ограниченный evidence для WPF, WinForms и Avalonia. |
+| Не выдавать preview за evidence | Делает preview для навигации или по явному запросу сохраняет lossless screenshot с метаданными целостности. |
+| Проверить исправление | Выполняет ограниченный runtime-smoke plan с cleanup, output checkpoints, freshness checks и записанным evidence. |
+| Искать по проекту | Находит C# symbols и references, читает source context или выполняет ограниченный запрос `search_source`. |
+
+Опубликованный Python-пакет — точка входа для потребителя. Экспериментальный
+.NET host и Native Scene Probe остаются только в исходниках и не добавляют
+инструменты в этот wheel.
 
 ## Быстрый старт
 
+Установите пакет, дайте мастеру настройки найти или подготовить отладчик, затем
+зарегистрируйте публичный CLI в MCP-клиенте. Команда ниже предназначена для Claude Code:
+
 ```powershell
-# 1. Установите MCP-сервер
 pipx install netcoredbg-mcp
-
-# 2. Запустите первичную настройку
 netcoredbg-mcp --setup
-
-# 3. Зарегистрируйте сервер в Claude Code
-claude mcp add netcoredbg -- netcoredbg-mcp --project-from-cwd
+claude mcp add --scope user netcoredbg -- netcoredbg-mcp --project-from-cwd
 ```
 
-Затем попросите агента:
+После изменения конфигурации перезапустите MCP-клиент. Из .NET workspace
+попросите агента:
 
 ```text
-Set a breakpoint in Program.cs, run the app, and inspect local variables when it stops.
+Set a breakpoint in Program.cs, run the application, and show the local values when it stops.
 ```
 
-## Важные замечания
+`--project-from-cwd` ищет вверх от каталога запуска сервера solution или
+.NET-проект. Используйте `--project`, когда сервер нужно закрепить за одним project root.
 
-> [!IMPORTANT]
-> Для отладки .NET Core файл `dbgshim.dll` рядом с `netcoredbg.exe` должен
-> совпадать с major-версией целевого runtime. Setup wizard сканирует
-> установленные runtime и готовит совместимые копии dbgshim.
-> Перед запуском `inspect_debug_launch_compatibility(program)` показывает
-> целевой runtime, активный shim и выбранного кандидата из кэша без сборки,
-> запуска или замены файлов. `blocked_no_matching_shim` — только рекомендация;
-> прежний `start_debug` остаётся fail-open.
+## Требования
 
-> [!IMPORTANT]
-> `start_debug` — long-poll-инструмент. Если debuggee — GUI-приложение,
-> ответ может вернуться только после остановки на breakpoint, выхода процесса или
-> timeout. Используйте screenshots и UI tools, пока приложение работает;
-> инспекцию переменных запускайте только в состоянии stopped.
-
-> [!CAUTION]
-> Не коммитьте `.mcp.json`, `.netcoredbg-mcp.launch.json`, credentials,
-> инвентарь серверов или локальные пути downstream-проектов. Launch profiles
-> поддерживают `inherit`, чтобы секреты оставались в окружении процесса
-> MCP-сервера.
-
-## Установка
-
-### Требования
-
-- Windows для GUI automation и сценариев FlaUI/pywinauto.
 - Python 3.10 или новее.
-- .NET SDK/runtime для целевого приложения.
-- `netcoredbg`; используйте `netcoredbg-mcp --setup`, если не нужна ручная
-  установка.
+- `pipx` (рекомендуется) или `pip` для установки пакета.
+- .NET SDK/runtime, подходящий для отлаживаемого приложения.
+- `netcoredbg`. Мастер настройки умеет скачать или найти его и ищет кандидатов
+  `dbgshim.dll`.
 - MCP-клиент: Claude Code, Cursor, Cline, Roo Code, Windsurf, Continue или
   Claude Desktop.
+- Windows — для GUI-автоматизации. Возможности отладки зависят от target runtime
+  и возможностей `netcoredbg`.
+
+## Установка и настройка
 
 ### Рекомендуемая установка
+
+`pipx` изолирует command-line server от project environments:
 
 ```powershell
 pipx install netcoredbg-mcp
@@ -107,124 +74,32 @@ netcoredbg-mcp --setup
 netcoredbg-mcp --version
 ```
 
-Мастер настройки скачивает или находит `netcoredbg`, сканирует версии dbgshim,
-собирает FlaUI bridge при необходимости и печатает готовый фрагмент конфигурации
-MCP.
+Мастер настройки проверяет .NET SDK, подготавливает или находит `netcoredbg`,
+ищет кандидатов `dbgshim`, при необходимости собирает FlaUI bridge в Windows и
+выводит фрагмент конфигурации клиента.
 
-### Ручная установка
+### Установка через менеджер пакетов
+
+Используйте `pip`, если Python-пакетами управляет ваше окружение:
 
 ```powershell
-pip install netcoredbg-mcp
+pip install --upgrade netcoredbg-mcp
 $env:NETCOREDBG_PATH = "C:\Tools\netcoredbg\netcoredbg.exe"
-netcoredbg-mcp --project-from-cwd
+netcoredbg-mcp --project C:\Work\MyDotNetApp
 ```
 
-Ручная установка нужна, если вы закрепляете локально управляемую сборку
-`netcoredbg` или корпоративная среда блокирует автоматические загрузки.
+После обновления выполните `netcoredbg-mcp --setup`, если изменился target runtime
+или нужен новый managed debugger либо FlaUI bridge.
 
-### Запуск из локальной рабочей копии
+### Конфигурация клиента
 
-Установленный CLI выше остаётся рекомендуемой точкой входа MCP. Для рабочей
-копии разработчика сначала один раз синхронизируйте окружение исходного проекта,
-а затем запускайте сервер из рабочей папки .NET-проекта, который нужно отладить:
-
-```powershell
-uv sync --locked --project D:\Dev\netcoredbg-mcp
-# Добавьте `--extra dev` к команде синхронизации, если нужны тестовые инструменты.
-cd D:\Dev\my-dotnet-project
-uv run --no-sync --project D:\Dev\netcoredbg-mcp netcoredbg-mcp --project-from-cwd
-```
-
-Флаг `--project` выбирает Python-окружение исходного проекта, но сохраняет
-рабочую папку вызывающего процесса. Поэтому `--project-from-cwd` делает текущий
-.NET-проект корнем отладки. Не задавайте исходный проект `netcoredbg-mcp` как
-рабочую папку сервера.
-
-Обычный `uv run` перед запуском может синхронизировать окружение проекта.
-Флаг `--no-sync` не даёт перезапускам MCP-сервера заменять файлы в общей
-`.venv`. После изменения зависимостей или lockfile снова выполните явную
-синхронизацию.
-
-Используйте тот же формат команды без изменения окружения в MCP-конфигурации
-для локальной рабочей копии, заменив путь на фактический:
-
-```jsonc
-{
-  "mcpServers": {
-    "netcoredbg-source": {
-      "command": "uv",
-      "args": [
-        "run",
-        "--no-sync",
-        "--project",
-        "D:\\Dev\\netcoredbg-mcp",
-        "netcoredbg-mcp",
-        "--project-from-cwd"
-      ]
-    }
-  }
-}
-```
-
-Не коммитьте локальные пути конкретной машины из `.mcp.json`.
-
-### Обновление
-
-```powershell
-pipx upgrade netcoredbg-mcp
-netcoredbg-mcp --setup
-```
-
-Запускайте setup после обновления, если изменился целевой .NET runtime, нужна
-новая сборка FlaUI bridge или фрагменты конфигурации MCP-клиента должны быть
-сгенерированы
-заново.
-
-## Конфигурация
-
-### Профили окружения запуска
-
-`start_debug` может читать `.netcoredbg-mcp.launch.json` из найденного project
-root и применять переменные окружения профиля к debuggee process. Окружение процесса
-сборки при этом не меняется.
+Используйте `--project-from-cwd` только когда клиент запускает сервер из .NET
+workspace или передаёт local MCP roots. Если нет явного `--project` и operator
+environment pin, local MCP roots имеют приоритет. Когда нет ни operator pin,
+ни пригодного local root, сервер ищет в startup directory marker solution,
+project или Git и при отсутствии marker использует сам startup directory.
 
 ```json
-{
-  "defaultProfile": "default",
-  "profiles": {
-    "default": {
-      "env": {
-        "DOTNET_ENVIRONMENT": "Development",
-        "APP_MODE": "Debug"
-      },
-      "inherit": ["PATH"]
-    }
-  }
-}
-```
-
-Приоритет детерминированный:
-
-1. `inherit` копирует только явно перечисленные переменные из процесса MCP-сервера.
-2. Значения profile `env` переопределяют унаследованные значения.
-3. Прямые значения `start_debug(env={...})` переопределяют профиль.
-
-Значения `env`, равные `null`, передаются в DAP как явные null, чтобы запросить
-удаление или unset semantics там, где адаптер это поддерживает. Ответы tools
-включают только имена переменных, counts, profile name, source path и redacted
-metadata; значения окружения не возвращаются.
-
-Файл `.gitignore` исключает `.netcoredbg-mcp.launch.json` по умолчанию.
-Коммитьте профиль только тогда, когда он содержит не секреты, а значения,
-которыми можно безопасно делиться.
-
-### Базовая конфигурация сервера
-
-Используйте `--project-from-cwd` для CLI-агентов, которые запускают сервер из
-workspace. Используйте `--project`, когда MCP-клиент стартует из стабильного
-глобального расположения и нужно явно ограничить все debug paths.
-
-```jsonc
 {
   "mcpServers": {
     "netcoredbg": {
@@ -235,28 +110,10 @@ workspace. Используйте `--project`, когда MCP-клиент ст�
 }
 ```
 
-Если setup не установил managed `netcoredbg`, добавьте `NETCOREDBG_PATH`:
+Если клиент запускает серверы из постоянного global location, закрепите target
+project явно, а не полагайтесь на startup directory сервера:
 
-```jsonc
-{
-  "mcpServers": {
-    "netcoredbg": {
-      "command": "netcoredbg-mcp",
-      "args": ["--project-from-cwd"],
-      "env": {
-        "NETCOREDBG_PATH": "C:\\Tools\\netcoredbg\\netcoredbg.exe"
-      }
-    }
-  }
-}
-```
-
-### Конфигурация на уровне проекта
-
-Используйте project-local MCP config, если клиент это поддерживает. Храните
-machine-specific secrets и пути к бинарным файлам вне git.
-
-```jsonc
+```json
 {
   "mcpServers": {
     "netcoredbg": {
@@ -267,70 +124,63 @@ machine-specific secrets и пути к бинарным файлам вне git
 }
 ```
 
-## Настройка клиентов
+Если отладчиком управляют вне setup flow, передайте его путь через environment
+клиентского процесса, а не коммитьте его в репозиторий. Используйте тот же
+режим выбора проекта, что подходит клиенту; этот пример для global location
+закрепляет target явно:
 
-### Claude Code
-
-```powershell
-claude mcp add netcoredbg -- netcoredbg-mcp --project-from-cwd
-```
-
-### Cursor, Cline, Roo Code, Windsurf, Continue, Claude Desktop
-
-Добавьте тот же server shape в файл конфигурации MCP для вашего клиента:
-
-```jsonc
+```json
 {
   "mcpServers": {
     "netcoredbg": {
       "command": "netcoredbg-mcp",
-      "args": ["--project-from-cwd"]
+      "args": ["--project", "C:\\Work\\MyDotNetApp"],
+      "env": {
+        "NETCOREDBG_PATH": "C:\\Tools\\netcoredbg\\netcoredbg.exe"
+      }
     }
   }
 }
 ```
 
-Типичные расположения конфигов:
+Не добавляйте в source control `.mcp.json`, `.netcoredbg-mcp.launch.json`,
+учётные данные и локальные project paths.
 
-| Клиент | Типичный путь к конфигу |
-|---|---|
-| Cursor | `%USERPROFILE%\.cursor\mcp.json` |
-| Cline | VS Code extension MCP settings |
-| Roo Code | `%USERPROFILE%\.roo\mcp.json` или project `.roo\mcp.json` |
-| Windsurf | `%USERPROFILE%\.codeium\windsurf\mcp_config.json` |
-| Continue | `%USERPROFILE%\.continue\config.json` |
-| Claude Desktop | `%APPDATA%\Claude\claude_desktop_config.json` |
+### Запуск из source checkout
 
-## Первая сессия отладки
+Установленный CLI — маршрут потребителя. Используйте source checkout только при
+разработке самого сервера:
 
-### Long-Poll Pattern
-
-Инструменты выполнения ждут значимого debugger event. `start_debug`,
-`continue_execution`, `step_over`, `step_into` и `step_out` возвращаются, когда
-debuggee останавливается, выходит, завершается или достигает timeout.
-
-### Пассивная проверка активности
-
-Пока debuggee работает в состоянии `RUNNING`,
-`debuggee_activity(window_ms=1000)` учитывает только события, уже полученные
-сессией через DAP: продолжения и остановки, output, module events и trace
-appends. Инструмент не приостанавливает debuggee, не выполняет пошаговые
-команды, не вычисляет выражения и не читает process-health signals. Количество
-выполненных инструкций явно помечается как недоступное; активность не
-интерпретируется как признак исправности или зависания.
-
-### Типичный workflow
-
-```text
-1. Поставьте breakpoint в коде, который нужно проверить.
-2. Запустите отладку с pre_build=true.
-3. Дождитесь state=stopped.
-4. Прочитайте call stack, scopes и variables.
-5. Вычислите нужные expressions или перейдите к следующей строке.
-6. Продолжите или завершите session.
+```powershell
+uv sync --locked --project C:\Work\netcoredbg-mcp
+cd C:\Work\MyDotNetApp
+uv run --no-sync --project C:\Work\netcoredbg-mcp netcoredbg-mcp --project-from-cwd
 ```
 
-### Пример запуска с pre-build
+`--no-sync` не даёт supervised-перезапуску сервера менять общее виртуальное
+окружение. После изменения dependencies или lockfile синхронизируйте окружение явно.
+
+## Первая отладочная сессия
+
+`start_debug` запускает debug session и обычно возвращает результат, когда она
+уже работает. `continue_execution`, `step_over`, `step_into` и `step_out` —
+long-poll operations: они возвращают результат, когда debuggee останавливается,
+завершается, принудительно прекращается или достигает timeout.
+
+Для консольных программ используйте такую последовательность:
+
+1. Добавьте breakpoint в интересующий вас участок кода.
+2. Вызовите `start_debug` с программой и при необходимости с `pre_build=true`.
+3. Дождитесь `state=stopped`.
+4. Прочитайте `get_call_stack`, `get_scopes` и `get_variables`.
+5. Вычисляйте выражения и переходите по шагам только в состоянии остановки.
+6. Продолжите или завершите сессию.
+
+Для WPF, Avalonia и WinForms используйте последовательность из раздела Desktop UI ниже.
+Она запускает приложение без breakpoint, ждёт загрузки окна и только затем
+добавляет точку останова: breakpoint до запуска может выглядеть как зависание окна.
+
+Пример launch request:
 
 ```json
 {
@@ -341,419 +191,226 @@ appends. Инструмент не приостанавливает debuggee, �
 }
 ```
 
-Для приложений .NET 6+ можно передать собранный `.exe`, если рядом есть
-подходящие `.dll` и `.runtimeconfig.json`. Сервер выберет DLL-цель, чтобы
-избежать конфликтов `deps.json`.
+Для .NET 6+ принимается собранный `.exe`, если рядом есть соответствующие `.dll`
+и `.runtimeconfig.json`. Вызовите `inspect_debug_launch_compatibility(program)`,
+когда нужно проверить выбранные runtime и shim без запуска процесса.
 
-## Отладка GUI-приложений
+## Desktop UI и visual evidence
 
-### Правило
-
-Не используйте debugger inspection tools, пока GUI app работает штатно. Сначала
-остановитесь на breakpoint или приостановите process; иначе stack, scopes и
-variables недоступны по устройству отладчика.
-
-### GUI workflow
+Пока GUI debuggee находится в состоянии `RUNNING`, наблюдайте за ним и управляйте
+им через UI tools. Когда UI thread остановлен breakpoint или pause, доступны
+stack и variables, но окно не будет нормально реагировать, пока вы не продолжите
+выполнение.
 
 ```text
-1. Запустите приложение.
-2. Используйте ui_take_screenshot или ui_get_window_tree, чтобы наблюдать UI.
-3. Используйте UI tools для кликов, ввода, выбора и ожидания изменений состояния.
-4. Поставьте breakpoint перед кодом, который нужно проверить.
-5. Выполните действие в UI.
-6. Когда state=stopped, проверьте variables и call stack.
+start_debug(...)
+ui_get_window_tree() # Дождитесь загрузки окна приложения.
+add_breakpoint(file="MainWindow.xaml.cs", line=42)
+ui_find_element(automation_id="saveButton")
+ui_click(automation_id="saveButton")
+# Trigger the breakpoint, then inspect state after it reports STOPPED.
 ```
 
-### Stealth Mode
+### Режимы screenshot
 
-Используйте stealth mode, когда пользователь должен сохранять focus в другом
-приложении, пока агент запускает и инспектирует debuggee в фоне.
+`ui_take_screenshot()` возвращает WebP navigation preview с
+`evidence_grade=preview_only`. Он подходит для поиска следующего UI action, но
+не для утверждений на основе lossless visual evidence.
+
+Для артефакта с исходным raster и метаданными целостности включите режим явно:
 
 ```text
-start_debug(
-    program="bin/Debug/net8.0/App.dll",
-    build_project="App.csproj",
-    stealth_mode=True,
-)
-ui_get_window_tree()
-ui_click(automation_id="btnSave")
+ui_take_screenshot(evidence=true)
 ```
 
-В stealth mode чтение UIA tree и клики по automation-id не активируют окно
-debuggee. `ui_send_keys` и fallback для blank screenshot могут использовать
-flash-focus: bridge ненадолго выводит debuggee вперед, выполняет операцию и
-восстанавливает прежнее foreground window. Вызовите `ui_bring_to_front()`, если
-debuggee должен явно выйти из stealth mode.
+В этом режиме возвращается `evidence_grade=lossless_raster`, сохраняется
+session-scoped PNG artifact и добавляются SHA-256 с geometry provenance. Любой
+raw-derived crop требует `evidence=true`; preview-only capture его не даёт.
 
-### Визуальная инспекция
+`ui_take_annotated_screenshot()` возвращает Set-of-Mark labels, после чего можно
+вызвать `ui_click_annotated(element_id=...)`. Используйте `ui_bring_to_front()`,
+только когда debuggee должен намеренно выйти из stealth mode.
 
-Screenshots возвращают MCP image content, поэтому vision-capable agents могут
-смотреть layout и state. Annotated screenshots добавляют Set-of-Mark labels к
-элементам, по которым можно кликать через `ui_click_annotated`.
+## Карта инструментов
 
-```text
-ui_take_screenshot()
-ui_take_annotated_screenshot()
-ui_click_annotated(element_id=3)
-```
+Опубликованный MCP catalog содержит 135 инструментов.
 
-`ui_hover(...)` перемещает реальный указатель на единственный элемент, найденный
-по селектору в уже активном окне debuggee. Инструмент возвращает evidence о точном
-окне, неизменном focus, указателе и hit-test, не активируя окно и не отправляя
-события кнопок мыши. В runtime-smoke v2 доступно такое же действие `ui.hover`;
-при `input_policy.no_global_input` оно блокируется до перемещения указателя.
-
-### Доказательства runtime smoke
-
-Для повторяемой проверки агентом используйте runtime smoke-инструменты вместе:
-`debug_hygiene_preflight` очищает устаревшее состояние отладчика,
-`output_checkpoint` и `output_assert_since` подтверждают, что вывод изменился
-после известной точки, `verify_debug_freshness` проверяет, что live process
-соответствует ожидаемым workspace и artifacts, а `run_runtime_smoke` запускает
-bounded scenario plan с cleanup. Для длинных агентских прогонов используйте
-durable lifecycle surface: `runtime_smoke_start` возвращает `run_id`,
-`runtime_smoke_tail_events` читает ограниченные cursor events,
-`runtime_smoke_get_result` возвращает финальный scenario envelope, а
-`runtime_smoke_stop` идемпотентно останавливает активный run с cleanup evidence.
-
-Lifecycle `runtime_smoke_*` — стабильный agent-facing API для UI replay. Перед
-запуском используйте `runtime_smoke_validate_plan`, для одиночного проверенного
-прогона — `runtime_smoke_run_plan`, а для durable orchestration —
-`runtime_smoke_start` вместе с wait/event/result-инструментами; завершайте через
-`runtime_smoke_stop` и `runtime_smoke_cleanup_contract`. Агенты должны
-использовать это семейство напрямую, без второго replay alias или action DSL.
-
-No-operator plans в runtime-smoke могут запросить confidence evidence, когда
-агенту нужно доказать, что сценарий не загрязнён вводом оператора. Совмещайте
-`input_policy.no_global_input` с `run_confidence.no_operator`:
-
-```json
-{
-  "schema": "netcoredbg.runtime_smoke.v2",
-  "input_policy": {"no_global_input": true},
-  "run_confidence": {"no_operator": true}
-}
-```
-
-В поддерживаемых desktop-сессиях Windows стандартный адаптер
-`runtime.input_monitor.check` снимает сэмплы `windows.GetLastInputInfo` до и во
-время action windows. `CLEAN_PROVEN` означает, что bounded scenario можно
-интерпретировать как продуктовый verdict. Если адаптер возвращает `DIRTY`,
-no-operator envelope использует `run_confidence.classification ==
-"DIRTY_UNPROVEN"` и блокирует продуктовый verdict, чтобы вызывающая сторона
-перезапустила сценарий, а не записала случайный product `FAIL`. Это обнаружение
-загрязнения текущей desktop-session, а не полная изоляция клавиатуры, pointer,
-foreground window или focus на уровне ОС.
-
-Если plan намеренно разрешает runner-controlled global input
-(`input_policy.no_global_input=false`), покрытый provenance path для `ui.drag`
-использует подписанную runner-инъекцию и OS event attribution. Такие actions
-передают metadata `runner_injected`, а `runtime.input_monitor.check`
-классифицирует каждое наблюдённое событие в action window как
-`runner_injected`, `foreign_injected` или `physical`. Run остаётся
-`CLEAN_PROVEN` только когда все наблюдённые события подписаны runner'ом; любое
-physical или foreign-injected событие становится `DIRTY_UNPROVEN` и блокирует
-product verdict. Отсутствующее или пустое monitor evidence оставляет no-operator confidence в состоянии `UNPROVEN`.
-
-Manual smoke fixtures теперь покрывают базовое console/WinForms-приложение,
-`tests/fixtures/WpfSmokeApp` и `tests/fixtures/AvaloniaSmokeApp`. Соберите все
-три fixture projects, прежде чем заявлять полное GUI smoke coverage; если
-binaries отсутствуют, эти manual scenarios намеренно пропускаются.
-
-Для WPF product-smoke workflows начните с
-[`docs/examples/runtime-smoke-wpf-workflow-plan.json`](docs/examples/runtime-smoke-wpf-workflow-plan.json).
-Он документирует схему `netcoredbg.runtime_smoke.v1`, операции
-DataGrid/ListBox/focus, output assertions и `cleanup.restore_files` с graceful
-debug stop. Пример запускает WPF fixture DLL через `dotnet`, поэтому freshness
-ожидает `expected_process_name: "dotnet"` и `expected_modules:
-["WpfSmokeApp.dll"]`. Соответствующий manual scenario:
-`WPF One-Call Runtime Smoke Workflow`.
-
-Теперь WPF workflow заранее подключает UI Automation после запуска, выбирает
-стабильное пригодное top-level window, объединяет cell evidence из
-`GridPattern` с descendant text fallback и восстанавливает fixture files, даже
-если Windows недолго удерживает attributes или locks. Avalonia остаётся
-first-class compatibility target: её manual fixture должна давать ограниченное
-`UNSUPPORTED` или `BLOCKED` evidence для UIA gaps, а не выпадать из release
-checks.
-
-Для WPF DataGrid drag/drop и edge-scroll release proof начните с
-[`docs/examples/runtime-smoke-v2-drag-drop-grid.json`](docs/examples/runtime-smoke-v2-drag-drop-grid.json).
-V2-пример показывает `ui.drag`, before/after `ui.grid.viewport` probes,
-selected payload identity checks, negative no-op expectations и fail-closed
-`BLOCKED`, когда real pointer route или viewport evidence недоступны. WinForms
-`dragList` primitive smoke не заменяет WPF DataGrid CR-001 acceptance.
-
-Diagnostic schemas используют `netcoredbg.runtime_smoke.diagnostics.v1`.
-Начните с примеров `docs/examples/runtime-smoke-oracle-pack.json`,
-`docs/examples/runtime-smoke-app-diagnostics.json`,
-`docs/examples/runtime-smoke-semantic-probe.json` и
-`docs/examples/runtime-smoke-tracepoint-guardrail.json`, когда добавляете
-oracle packs, app diagnostics, semantic probes или instrumentation guardrails.
-NovaScript consumers, проверяющие текущий action-oracle app-diagnostics path,
-могут адаптировать
-[`docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json`](docs/examples/runtime-smoke-novascript-action-oracle-app-diagnostics.json),
-чтобы сгенерировать bounded `app_diagnostics` probe из template
-`novascript-action-oracle` с launch-scoped diagnostic evidence acquisition.
-Diagnostic payloads используют только `PASS`, `BLOCKED` и `FAIL`; evidence
-ограничивается `max_text_length`, `max_list_items` и `max_json_bytes`; поля
-`raw_tree`, `window_tree`, `ui_tree`, `screenshot_base64`, `access_token`,
-`api_key`, `password` и `secret` должны быть удалены до возврата evidence;
-`backend_result`, `exception`, `raw_output` и `stack` нужно суммаризировать.
-App diagnostics могут объявлять freshness expectations: `expected_process_name`,
-`expected_modules`, workspace artifacts и `loaded_sources`; возвращаемая
-freshness evidence сохраняет module `symbolStatus`, чтобы live-target
-PDB/process proof мог отклонить stale `PASS` diagnostic artifact. Tracepoint
-guardrails должны явно назвать `allowed_when`, `blocked_when`, `unsafe_when` и
-cleanup ownership через `debug.tracepoint.remove`.
-
-## Edit-and-Continue
-
-`apply_code_change` применяет поддерживаемые source edits к остановленной .NET
-debug session без restart process. Инструмент предназначен для method-body
-changes, найденных во время live investigation; если меняется shape программы,
-нужен rebuild.
-
-### EnC Setup
-
-Соберите EnC-capable `netcoredbg` через встроенный setup flow:
-
-```powershell
-netcoredbg-mcp setup --enc
-```
-
-Команда запускает `scripts/build-netcoredbg-enc.ps1`, устанавливает
-поддерживаемую сборку fork `thebtf/netcoredbg` с `ncdbhook.dll` и кладёт её в
-managed path `~/.netcoredbg-mcp/netcoredbg`, который принимает custom DAP
-request `applyDeltas`. На Windows x64 setup по умолчанию скачивает опубликованную
-EnC-сборку `3.1.3-1062-enc.2`; передайте `-BuildFromSource` в script для
-локальной сборки из исходников. Если `ncdbhook.dll` отсутствует,
-`apply_code_change` вернёт понятную ошибку вместо crash.
-
-### Runtime Code Change Workflow
-
-```text
-find_code_symbol(name="OrderService")
-get_source_context(file="Services/OrderService.cs", line=42, radius=8)
-apply_code_change(
-    file="Services/OrderService.cs",
-    edits=[{"start_line": 42, "end_line": 44, "new_text": "return fixedValue;"}],
-)
-continue_execution()
-```
-
-Debug session должна быть в STOPPED state. Успешное изменение обновляет source
-file и применяет IL/metadata/PDB deltas через `netcoredbg`; session остается
-STOPPED, пока вы не продолжите выполнение или step.
-
-Rude edits вроде добавления fields, изменения method signatures или generics
-отклоняются до runtime application. Для них используйте
-`restart_debug(rebuild=True)`.
-
-## Доступные инструменты
-
-| Категория | Количество | Tools |
+| Категория | Количество | Примеры |
 |---|---:|---|
-| Debug control | 14 | `start_debug`, `inspect_debug_launch_compatibility`, `attach_debug`, `stop_debug`, `restart_debug`, `continue_execution`, `pause_execution`, `step_over`, `get_step_in_targets`, `step_into`, `step_out`, `get_debug_state`, `debuggee_activity`, `terminate_debug` |
-| Breakpoints and exceptions | 7 | `add_breakpoint`, `remove_breakpoint`, `list_breakpoints`, `clear_breakpoints`, `add_function_breakpoint`, `remove_function_breakpoint`, `configure_exceptions` |
-| Inspection and DAP coverage | 15 | `get_threads`, `get_call_stack`, `get_scopes`, `get_variables`, `evaluate_expression`, `set_variable`, `get_exception_info`, `get_modules`, `get_progress`, `get_loaded_sources`, `disassemble`, `get_locations`, `quick_evaluate`, `get_exception_context`, `get_stop_context` |
-| Tracepoints | 6 | `add_tracepoint`, `remove_tracepoint`, `get_trace_log`, `get_trace_delta`, `mark_trace_cursor`, `clear_trace_log` |
-| Snapshots and object analysis | 5 | `create_snapshot`, `diff_snapshots`, `list_snapshots`, `analyze_collection`, `summarize_object` |
-| Memory | 2 | `read_memory`, `write_memory` |
-| Output and build diagnostics | 4 | `get_output`, `search_output`, `get_output_tail`, `get_build_diagnostics` |
-| Runtime smoke orchestration | 21 | `debug_hygiene_preflight`, instrumentation groups, output checkpoints/assertions, freshness checks, one-shot plan execution, lifecycle start/tail/wait/result/stop, plan/probe validation, probe execution, evidence bundles, event cursors/deltas и cleanup contracts |
-| UI automation | 55 | Дерево окон, поиск элементов, focus, keyboard, mouse, наведение указателя по точному селектору (`ui_hover`), screenshots, annotations, selection, clipboard, управление окнами, expand/collapse, value setting, virtualization, grid evidence, UI snapshots, UI events и semantic monitors |
-| Code search | 4 | `find_code_symbol`, `find_code_references`, `get_source_context`, `search_source` |
+| Управление отладкой | 14 | `start_debug`, `attach_debug`, `continue_execution`, `pause_execution`, `terminate_debug` |
+| Точки останова и исключения | 7 | File/function breakpoints и настройка exceptions |
+| Инспекция и покрытие DAP | 15 | Stacks, scopes, variables, modules, disassembly, source locations |
+| Трейспойнты | 6 | Добавление, чтение, очистка и cursor trace evidence |
+| Снимки и анализ объектов | 5 | Создание, сравнение, список и summary captured state |
+| Память и вывод | 6 | Memory, debugger output и build diagnostics |
+| Runtime smoke | 21 | Hygiene, validation, execution, lifecycle и cleanup evidence |
+| UI-автоматизация | 55 | Windows, elements, focus, input, screenshots, grids и monitors |
+| Поиск по коду | 4 | Symbols, references, context и regex search |
 | Edit-and-Continue | 1 | `apply_code_change` |
-| Process management | 1 | `cleanup_processes` |
+| Управление процессами | 1 | `cleanup_processes` |
 
-## MCP-ресурсы
+Сервер также предоставляет четыре ресурса: `debug://state`,
+`debug://breakpoints`, `debug://output` и `debug://threads`.
 
-| URI | Содержимое |
+Восемь промптов задают готовые workflows: `debug`, `debug-gui`,
+`debug-exception`, `debug-visual`, `debug-mistakes`, `investigate`,
+`debug-scenario` и `dap-escape-hatch`.
+
+### Граница code search
+
+`find_code_symbol`, `find_code_references` и `get_source_context` выполняются
+в процессе MCP-сервера. Для `search_source` enumeration project files и
+синхронное ожидание остаются в этом процессе; чтение/сканирование каждого
+source file и regex matching запускаются в отдельном ограниченном Python
+subprocess с timeout по умолчанию пять секунд и максимумом 1 000 результатов.
+Учитывается только корневой `.gitignore` проекта; вложенные ignore files не
+читаются.
+
+## Проверка через runtime smoke
+
+Используйте runtime-smoke tools, когда нужна ограниченная и повторяемая проверка,
+а не разовый диалог с отладчиком. Начните с `debug_hygiene_preflight`, создайте
+output checkpoint, выполните validated plan и завершите запуск его cleanup-контрактом.
+`verify_debug_freshness` подтверждает, что live process соответствует ожидаемым
+workspace и artifacts.
+Для длительной orchestration используйте lifecycle family:
+`runtime_smoke_start`, `runtime_smoke_tail_events`, `runtime_smoke_get_result`
+и `runtime_smoke_stop`. Consumer-mode release gate описан в
+[production testing playbook](docs/PRODUCTION-TESTING-PLAYBOOK.md), а примеры в
+[`docs/examples/`](docs/examples/) покрывают WPF workflow, WPF DataGrid drag/drop
+и diagnostic-plan shapes.
+
+### Происхождение ввода
+
+Runtime-smoke plans умеют отличать ввод runner от ввода оператора или внешнего
+источника. Для product verdict без ввода оператора задайте одновременно
+`input_policy.no_global_input=true` и `run_confidence.no_operator=true`.
+Первый параметр запрещает runner global input, второй требует от monitor
+confidence evidence для action window.
+
+Итоговый `run_confidence` бывает `CLEAN_PROVEN`, когда monitor подтверждает
+отсутствие ввода оператора, `DIRTY_UNPROVEN`, когда он обнаруживает physical или
+foreign input либо получает некорректные или неатрибутируемые данные о вводе, и
+`UNPROVEN`, когда evidence monitor недоступен или неполон. Product verdict
+допустим только при `CLEAN_PROVEN`.
+
+Когда plan разрешает runner-controlled global input, например `ui.drag`, задайте
+`input_policy.no_global_input=false` и оставьте `run_confidence.no_operator=true`,
+если product verdict требует confidence evidence. Каждое покрытое input event
+должно иметь provenance `runner_injected`. `foreign_injected` или `physical`
+дают `DIRTY_UNPROVEN`; такой запуск нельзя считать product verdict.
+
+## Справочник командной строки
+
+| Команда или option | Назначение |
 |---|---|
-| `debug://state` | Текущее состояние debug session |
-| `debug://breakpoints` | Активные breakpoints и verification state |
-| `debug://output` | Буферизированный вывод debuggee и сборки |
-| `debug://threads` | Текущий thread list |
+| `netcoredbg-mcp --version` | Печатает версию установленного пакета. |
+| `netcoredbg-mcp --setup` | Подготавливает или находит необходимые компоненты отладчика и выводит фрагмент конфигурации клиента. |
+| `netcoredbg-mcp setup --enc` | Устанавливает предсобранный Edit-and-Continue debugger с `ncdbhook.dll` для Windows x64; сборка из исходников включается отдельно. |
+| `netcoredbg-mcp --project C:\Work\MyApp` | Закрепляет все debug operations за одним project root. |
+| `netcoredbg-mcp --project-from-cwd` | Определяет project по startup directory и совместимым local MCP roots. |
 
-## MCP-промпты
+`--project` и `--project-from-cwd` взаимоисключающие. `--enc` используйте
+только с `setup` или `--setup`.
 
-| Prompt | Когда использовать |
+## Справочник конфигурации
+
+| Переменная | Назначение |
 |---|---|
-| `debug` | Общий debugging workflow |
-| `debug-gui` | WPF, WinForms, Avalonia и UI Automation debugging |
-| `debug-exception` | Exception-first investigation |
-| `debug-visual` | Screenshot и Set-of-Mark workflows |
-| `debug-mistakes` | Частые ошибки агента при отладке и восстановлении после них |
-| `investigate` | Параметризованное расследование symptoms |
-| `debug-scenario` | Debugging plans под конкретный сценарий |
-| `dap-escape-hatch` | Продвинутые DAP commands без first-class MCP wrappers |
+| `NETCOREDBG_PATH` | Явный путь к `netcoredbg`. |
+| `NETCOREDBG_PROJECT_ROOT` / `MCP_PROJECT_ROOT` | Авторитетный запасной project root. |
+| `NETCOREDBG_ALLOWED_PATHS` | Дополнительные comma-separated path prefixes, доступные серверу. |
+| `FLAUI_BRIDGE_PATH` | Явный путь к FlaUI bridge executable. |
+| `NETCOREDBG_SCREENSHOT_MAX_WIDTH` / `NETCOREDBG_SCREENSHOT_QUALITY` | Размер inline preview и WebP quality. |
+| `NETCOREDBG_SESSION_TIMEOUT` | Тайм-аут неактивности при multi-agent ownership. |
+| `LOG_LEVEL` / `LOG_FILE` | Управление diagnostic logging сервера. |
 
-## Безопасность multi-agent
+Явный `--project` или project-root environment variable имеет приоритет над MCP
+client roots. Сетевые/UNC client roots отклоняются.
 
-При запуске через `mcp-mux` mutating debug tools принадлежат конкретной сессии.
-Один агент может управлять live debug session, а другие сохраняют read-only
-observability через state, output, screenshots и inspection tools. Ownership
-автоматически освобождается после настроенного inactivity timeout.
-
-## Обзор архитектуры
+## Архитектура
 
 ```mermaid
 graph TB
-    subgraph MCP["MCP Server"]
-        MAIN["__main__.py"]
-        SERVER["server.py"]
-        PROMPTS["prompts.py"]
-        TOOLS["tools/*"]
-        SESSION["session/*"]
-        BUILD["build/*"]
-        UI["ui/*"]
-        SETUP["setup/*"]
-    end
-
-    subgraph DAP["Debug Adapter Protocol"]
-        CLIENT["dap/client.py"]
-        PROTOCOL["dap/protocol.py"]
-        EVENTS["dap/events.py"]
-    end
-
-    MAIN --> SERVER
-    SERVER --> PROMPTS
-    SERVER --> TOOLS
-    TOOLS --> SESSION
-    TOOLS --> BUILD
-    TOOLS --> UI
-    SESSION --> CLIENT
-    CLIENT --> PROTOCOL
-    CLIENT --> EVENTS
-    CLIENT <-->|stdio JSON-RPC| NETCOREDBG["netcoredbg"]
-    NETCOREDBG --> APP[".NET debuggee"]
-    SETUP --> NETCOREDBG
+    Client[MCP client] --> Server[netcoredbg-mcp stdio server]
+    Server --> Tools[Debug, inspection, UI, smoke, and search tools]
+    Tools --> Session[Session manager and process registry]
+    Session --> DAP[DAP client]
+    DAP --> Debugger[netcoredbg]
+    Debugger --> App[.NET debuggee]
+    Tools --> UI[Windows UI automation bridge]
 ```
 
-### Как это работает
+Публичный console script запускает FastMCP stdio server. Его tool modules
+используют общий session manager, который владеет состоянием отладчика,
+проверенной областью проекта, очисткой процессов, выводом, снимками и trace evidence.
+DAP client работает с `netcoredbg`; Windows UI operations используют FlaUI bridge,
+когда он доступен, и pywinauto fallback для поддерживаемых операций.
 
-1. `__main__.py` разбирает CLI flags, настраивает project-root policy и запускает
-   FastMCP stdio server.
-2. `server.py` регистрирует tools, prompts, resources, progress notifications и
-   session ownership checks.
-3. Tool modules разделяют debugger control, breakpoints, inspection, memory,
-   output, process cleanup и UI automation.
-4. `SessionManager` владеет debugger state, path validation, event handling,
-   snapshots, tracepoints, output buffers и process cleanup.
-5. `DAPClient` говорит с `netcoredbg` через JSON-RPC over stdio.
-6. UI automation использует FlaUI bridge на Windows и pywinauto fallback там,
-   где он поддерживается.
-
-## Параметры командной строки
-
-```text
-netcoredbg-mcp --help
-netcoredbg-mcp --version
-netcoredbg-mcp --setup
-netcoredbg-mcp setup --enc
-netcoredbg-mcp --project C:\Work\MyApp
-netcoredbg-mcp --project-from-cwd
-```
-
-| Option | Назначение |
-|---|---|
-| `--version` | Напечатать package version |
-| `--setup` | Запустить первичную настройку и выйти |
-| `--project PATH` | Ограничить debug operations конкретным project root |
-| `setup --enc` | Собрать и установить EnC-capable `netcoredbg` с `ncdbhook.dll` |
-| `--project-from-cwd` | Определить project root из process working directory и MCP roots |
-
-`--project` и `--project-from-cwd` взаимно исключают друг друга.
-
-## Переменные окружения
-
-| Variable | Default | Назначение |
-|---|---|---|
-| `NETCOREDBG_PATH` | auto-discovered after setup | Явный путь к `netcoredbg` |
-| `NETCOREDBG_PROJECT_ROOT` | unset | Project root fallback |
-| `MCP_PROJECT_ROOT` | unset | Generic MCP project root fallback |
-| `NETCOREDBG_ALLOWED_PATHS` | empty | Дополнительные allowed path prefixes через запятую |
-| `NETCOREDBG_SCREENSHOT_MAX_WIDTH` | `1568` | Максимальная ширина inline screenshot |
-| `NETCOREDBG_SCREENSHOT_QUALITY` | `80` | Качество сжатия screenshot |
-| `NETCOREDBG_MAX_TRACE_ENTRIES` | `1000` | Вместимость tracepoint log |
-| `NETCOREDBG_EVALUATE_TIMEOUT` | `0.5` | Timeout tracepoint expression в секундах |
-| `NETCOREDBG_RATE_LIMIT_INTERVAL` | `0.1` | Rate-limit interval для tracepoint hits |
-| `NETCOREDBG_MAX_SNAPSHOTS` | `20` | Вместимость snapshots |
-| `NETCOREDBG_MAX_VARS_PER_SNAPSHOT` | `200` | Variables, сохраняемые в одном snapshot |
-| `NETCOREDBG_MAX_OUTPUT_BYTES` | `10000000` | Общий лимит output buffer |
-| `NETCOREDBG_MAX_OUTPUT_ENTRY` | `100000` | Лимит одной output entry |
-| `NETCOREDBG_SESSION_TIMEOUT` | `60.0` | Inactivity timeout для multi-agent ownership |
-| `NETCOREDBG_STACKTRACE_DELAY_MS` | `0` | Diagnostic delay перед stackTrace requests |
-| `FLAUI_BRIDGE_PATH` | auto-discovered | Явный путь к FlaUI bridge executable |
-| `LOG_LEVEL` | `INFO` | Python logging level |
-| `LOG_FILE` | unset | Необязательный diagnostic log file |
-
-## Решение проблем
+## Устранение неполадок
 
 ### `netcoredbg` не найден
 
-**Симптом:** startup или `start_debug` сообщает, что `netcoredbg` не найден.
+**Симптом:** startup или `start_debug` сообщает, что debugger не найден.
 
 **Причина:** setup не установил managed debugger, а `NETCOREDBG_PATH` не задан.
 
-**Исправление:** запустите `netcoredbg-mcp --setup` или задайте
-`NETCOREDBG_PATH` как явный путь к `netcoredbg.exe`.
+**Решение:** выполните `netcoredbg-mcp --setup` или задайте полный путь к
+`netcoredbg.exe` в environment MCP-клиента.
 
-**Проверка:** `netcoredbg-mcp --version` выполняется успешно, а MCP-клиент может
-получить список server tools.
+**Проверка:** снова выполните `netcoredbg-mcp --setup` и убедитесь, что в выводе
+указан найденный или подготовленный debugger. Затем проверьте, что MCP-клиент
+выводит инструменты сервера.
 
-### Breakpoints не привязываются
+### Breakpoint остаётся неподтверждённым
 
-**Симптом:** breakpoint остаётся unverified или process не останавливается там,
-где ожидалось.
+**Симптом:** процесс не останавливается на запрошенной строке source code.
 
-**Причина:** stale build output, wrong target DLL, optimized Release binaries или
-строка без executable IL.
+**Причина:** возможны stale build output, неверная target DLL, optimized Release
+binaries или строка без executable IL.
 
-**Исправление:** запускайте с `pre_build=True`, отлаживайте `Debug`
-configuration, проверьте, что source file соответствует built assembly, и
-посмотрите `list_breakpoints()` на DAP-adjusted lines.
+**Решение:** используйте `pre_build=true`, отлаживайте Debug build, проверьте
+соответствие source и assembly и прочитайте `list_breakpoints()` для
+DAP-adjusted locations.
 
-**Проверка:** breakpoint response сообщает `verified=true` или включает DAP line
-adjustment.
+**Проверка:** ответ содержит `verified=true` или скорректированную строку.
 
 ### GUI выглядит зависшим
 
-**Симптом:** окно WPF, WinForms или Avalonia перестаёт перерисовываться после debug command.
+**Симптом:** окно WPF, WinForms или Avalonia перестаёт перерисовываться после
+команды отладки.
 
-**Причина:** debugger остановил UI thread на breakpoint или pause.
+**Причина:** его UI thread остановлен breakpoint или pause.
 
-**Исправление:** инспектируйте variables в состоянии stopped, затем вызовите
-`continue_execution()`, прежде чем ждать реакции GUI на clicks или keystrokes.
+**Решение:** изучите состояние во время остановки, затем вызовите
+`continue_execution()` и только после этого ожидайте UI input.
 
-**Проверка:** `get_debug_state()` сообщает `running`, и screenshots снова
+**Проверка:** `get_debug_state()` возвращает `running`, а свежие screenshots
 обновляются.
 
-### Path rejected в worktree
+### Отклонён путь к worktree
 
-**Симптом:** launch или build падает с path validation error.
+**Симптом:** запуск или build сообщает об ошибке path validation.
 
-**Причина:** project root был resolved в другой checkout или worktree path
-находится вне allowed root set.
+**Причина:** сервер определил другой project root либо worktree находится за
+пределами разрешённых paths.
 
-**Исправление:** используйте `--project-from-cwd` из активного worktree или
-добавьте prefix worktree в `NETCOREDBG_ALLOWED_PATHS`.
+**Решение:** запустите сервер из этого worktree с `--project-from-cwd` или
+добавьте его prefix в `NETCOREDBG_ALLOWED_PATHS`.
 
 **Проверка:** `start_debug` принимает build и program paths внутри worktree.
 
 ## Ограничения
 
 - GUI automation ориентирована на Windows.
-- `netcoredbg` и DAP capabilities зависят от runtime и целевого приложения.
-- Memory reads и writes требуют поддержки debug adapter и валидных memory
-  references.
-- Native debugging, browser automation и non-.NET runtimes вне scope.
+- Поведение `netcoredbg` и DAP зависит от target runtime и поддержки debugger.
+- Memory tools требуют валидных memory references, поддерживаемых адаптером.
+- Native debugging, browser automation и не-.NET runtimes не поддерживаются.
 
 ## Участие в разработке
 
-См. [CONTRIBUTING.md](CONTRIBUTING.md): setup, tests, PR expectations и правила
-для sensitive data.
+Правила development setup, ожидания по тестам, sensitive-data rules и требования
+к pull request описаны в [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Лицензия
 

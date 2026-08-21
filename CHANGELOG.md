@@ -6,12 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-## [0.23.7] - 2026-08-19
+## [0.23.7] - 2026-08-20
 
 ### Fixed
-- The code-search family now runs in a bounded dedicated Python subprocess
-  instead of an unbounded in-process worker, isolating search latency and
-  failure modes from the MCP server process.
+- `search_source` now runs regex matching in a bounded dedicated Python
+  subprocess. Source-file enumeration and waiting for that worker remain in
+  the MCP server process; the other code-search tools remain in-process.
 
 ### Added
 - The source-only .NET host gains the reviewed Native Scene Probe M0/M1
