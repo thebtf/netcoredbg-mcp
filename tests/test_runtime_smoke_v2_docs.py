@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+import xml.etree.ElementTree as ET
 from collections import deque
 from pathlib import Path
 from typing import Any
@@ -740,6 +741,130 @@ def test_readmes_scope_search_source_execution_and_ignore_rules() -> None:
         in readme_ru
     )
 
+
+def test_sonarqube_release_policy_requires_two_clean_exact_head_receipts() -> None:
+    agents = AGENTS_PATH.read_text(encoding="utf-8")
+    protocol = RELEASE_PROTOCOL_PATH.read_text(encoding="utf-8")
+    collapsed_protocol = _collapsed(protocol)
+
+    config = ET.parse("SonarQube.Analysis.xml").getroot()
+    assert next(
+        property_.text
+        for property_ in config
+        if property_.tag.endswith("Property")
+        and property_.attrib.get("Name") == "sonar.projectKey"
+    ) == "thebtf_netcoredbg_mcp"
+
+    for marker in (
+        "CANDIDATE_SHA",
+        "actual post-merge scan",
+        "only SonarQube evidence eligible for the tag gate",
+        "git status --porcelain=v1 --untracked-files=all --ignored",
+        "detached scanner worktree",
+        "SonarQube.Analysis.xml",
+        "sonar.scm.revision=$HEAD_SHA",
+        "do not treat `report-task.txt` as SHA evidence",
+        "the fixed repository project key `thebtf_netcoredbg_mcp`",
+        "returned analysis **project** MUST equal that key",
+        "its **revision** MUST equal `HEAD_SHA`",
+        "analysis key is unique analysis identity",
+        "scanner metadata key, and submitted task-report key MUST all equal",
+        "task ID equals the submitted Compute Engine task ID",
+        "task-report task/server-origin comparisons",
+        "credential-free `SONAR_HOST_URL` origin",
+        "Re-read `git rev-parse HEAD` after scanner end",
+        "Poll **only** the submitted Compute Engine task every five seconds",
+        "10 minutes",
+        "exactly one analysis ID",
+        "analysis-bound `OK` quality-gate",
+        "latest-project quality-gate result is not evidence",
+        "target SHA, submitted task ID, polling start/deadline, and last observed task state",
+        "A failed task or any nonterminal result",
+        "PROJECT_RELEASE_PROTOCOL_BLOCKED",
+        "every page",
+        "query, total, page sequence, and every unique key",
+        "union of baseline keys",
+        "fix the code and repeat the affected scan",
+        "every baseline or discovered key to be absent",
+        "explicit empty-result",
+        "pagination_complete=true",
+        "Serialize all analysis activity for the fixed project",
+        "current project analysis ID and revision",
+        "submitted analysis ID and `HEAD_SHA`",
+        "before and after the exact-head finding pagination",
+        "from the submitted Compute Engine task through the final receipt",
+        "OPEN",
+        "CONFIRMED",
+        "REOPENED",
+        "WONTFIX",
+        "FALSE-POSITIVE",
+        "accepted risk",
+        "NOSONAR",
+        "issue suppression",
+        "quality-profile exclusion",
+        "FIXED_IN_CURRENT_HEAD",
+        "never its value",
+        "do not start a scan",
+        "Do not infer a scan, pass, merge, tag, or publish",
+        "SONAR_CREDENTIALS_UNAVAILABLE",
+        "SONAR_SCANNER_UNAVAILABLE",
+        "one secret-free receipt per scan",
+    ):
+        assert marker.lower() in protocol.lower()
+
+    for marker in (
+        "Two exact-head SonarQube release scans",
+        "SONAR_CREDENTIALS_UNAVAILABLE",
+        "SONAR_SCANNER_UNAVAILABLE",
+        "thebtf_netcoredbg_mcp",
+        "NOSONAR",
+        "FALSE-POSITIVE",
+        "FIXED_IN_CURRENT_HEAD",
+        "completed integration scope is on `main`",
+        "no dependent slice in the same integration wave remains active",
+        "Merge only after primary UXDD, review, this candidate receipt",
+        "Only the post-merge receipt can authorize tag creation",
+    ):
+        assert marker in agents
+
+    assert collapsed_protocol.index("Release-candidate pre-merge scan") < collapsed_protocol.index("Actual post-merge scan") < collapsed_protocol.index("only SonarQube evidence eligible for the tag gate")
+    assert "annotated tag's target must equal that receipt's captured SHA" in protocol
+    assert "A candidate receipt must never authorize a tag." in protocol
+    assert (
+        "The post-merge `origin/main` receipt is the only SonarQube evidence eligible for the tag gate."
+        in protocol
+    )
+
+    finding_clause = next(
+        line for line in protocol.splitlines() if line.startswith("4. Before scanner begin")
+    )
+    assert "from the submitted Compute Engine task through the final receipt" in finding_clause
+    assert (
+        "no other scan may submit or complete for that project during this interval"
+        in finding_clause
+    )
+    assert (
+        "Before and after the exact-head finding pagination, read the "
+        "**current project analysis ID and revision** and require both to equal "
+        "the **submitted analysis ID and `HEAD_SHA`**. Retrieve every finding "
+        "page only between those matching readbacks."
+    ) in finding_clause
+    assert (
+        finding_clause.index("serialize all analysis activity")
+        < finding_clause.index("Before and after the exact-head finding pagination")
+        < finding_clause.index("Retrieve every finding page only between those matching readbacks")
+    )
+    assert collapsed_protocol.index("obtain a new candidate receipt") < collapsed_protocol.index("Fast-forward local `main`") < collapsed_protocol.index("post-merge SonarQube receipt") < collapsed_protocol.index("create an annotated tag")
+
+    collapsed_agents = _collapsed(agents)
+    assert (
+        collapsed_agents.index("run the pre-merge exact-head SonarQube gate on `CANDIDATE_SHA`")
+        < collapsed_agents.index("Merge only after primary UXDD, review, this candidate receipt")
+    )
+    assert (
+        collapsed_agents.index("Fast-forward local `main` to the merged `origin/main` target")
+        < collapsed_agents.index("Create and push the annotated PATCH/MINOR tag")
+    )
 
 def test_release_policy_uses_one_consumer_first_autonomy_contract() -> None:
     agents = AGENTS_PATH.read_text(encoding="utf-8")
