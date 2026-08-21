@@ -259,10 +259,12 @@ raw-derived crop требует `evidence=true`; preview-only capture его н�
 ### Граница code search
 
 `find_code_symbol`, `find_code_references` и `get_source_context` выполняются
-в процессе MCP-сервера. Только `search_source` запускается в отдельном
-ограниченном Python subprocess: timeout по умолчанию — пять секунд, максимум —
-1 000 результатов. Инструмент ищет в поддерживаемых project files и учитывает
-`.gitignore`.
+в процессе MCP-сервера. Для `search_source` enumeration project files и
+синхронное ожидание остаются в этом процессе; чтение/сканирование каждого
+source file и regex matching запускаются в отдельном ограниченном Python
+subprocess с timeout по умолчанию пять секунд и максимумом 1 000 результатов.
+Учитывается только корневой `.gitignore` проекта; вложенные ignore files не
+читаются.
 
 ## Проверка через runtime smoke
 

@@ -50,8 +50,13 @@ session can reproduce the user-visible failure.
 
 ### Manual smoke tests
 
-The manual smoke suite drives real MCP tools against fixture applications. Build
-the fixture set required by the scenarios you claim:
+The manual smoke suite drives real MCP tools against fixture applications.
+Build all three fixtures below for a clean full Windows manual-smoke run.
+`SmokeTestApp` is the required baseline. `WpfSmokeApp` is required because the
+WPF V2 selector-scoped hover scenario fails when its output is absent.
+`AvaloniaSmokeApp` is also part of the scenario set: its V2 state-oracle path
+attempts `pre_build`, and a failed build is `INVALID_SETUP`/FAIL rather than a
+skipped scenario.
 
 ```powershell
 dotnet build tests/fixtures/SmokeTestApp -c Debug
@@ -62,7 +67,6 @@ uv run --no-sync python tests/smoke_test_manual.py --list
 uv run --no-sync python tests/smoke_test_manual.py
 ```
 
-Missing fixture binaries intentionally skip their associated GUI scenarios.
 Record the scenario inventory with any smoke-test result so reviewers can see
 what actually ran.
 
@@ -140,7 +144,9 @@ All changes go through review; do not commit directly to `main`.
 
 ## Release boundary
 
-Maintainers own versioning and publication. A release change first merges into
-`main`; the required release gates then validate the built consumer payload
-before an annotated `vX.Y.Z` tag is created and its publish workflow is
-monitored. Do not create a release tag from an unmerged pull request.
+Maintainers own versioning and publication. Keep a release change on its
+release-prep branch while the required release gates build and install the
+candidate, complete consumer-mode and remaining pre-PR checks, and pass review.
+Only then merge it into `main`; create the annotated `vX.Y.Z` tag from the
+verified merged commit and monitor its publish workflow. Do not create a release
+tag from an unmerged pull request.

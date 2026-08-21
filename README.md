@@ -263,9 +263,11 @@ Eight prompts provide guided workflows: `debug`, `debug-gui`,
 ### Code search boundary
 
 `find_code_symbol`, `find_code_references`, and `get_source_context` execute
-in the MCP server process. `search_source` alone runs in a bounded dedicated
-Python subprocess, with a default five-second timeout and a maximum of 1,000
-results. It searches supported project files while honoring `.gitignore`.
+in the MCP server process. For `search_source`, source-file enumeration and the
+synchronous wait remain in that process; per-file source reading/scanning and
+regex matching run in a bounded dedicated Python subprocess, with a default
+five-second timeout and a maximum of 1,000 results. It honors only the project
+root `.gitignore`; nested ignore files are not consulted.
 
 ## Runtime-smoke verification
 

@@ -707,6 +707,40 @@ def test_release_notes_scope_search_source_worker_isolation_truthfully() -> None
     assert "crash the MCP server process" not in release_notes.lower()
     assert "cannot stall" not in release_notes.lower()
 
+
+def test_readmes_scope_search_source_execution_and_ignore_rules() -> None:
+    readme = " ".join(README_PATH.read_text(encoding="utf-8").split())
+    readme_ru = " ".join(README_RU_PATH.read_text(encoding="utf-8").split())
+
+    assert (
+        "source-file enumeration and the synchronous wait remain in that process"
+        in readme
+    )
+    assert (
+        "per-file source reading/scanning and regex matching run in a bounded dedicated "
+        "Python subprocess"
+        in readme
+    )
+    assert (
+        "honors only the project root `.gitignore`; nested ignore files are not consulted"
+        in readme
+    )
+    assert (
+        "enumeration project files и синхронное ожидание остаются в этом процессе"
+        in readme_ru
+    )
+    assert (
+        "чтение/сканирование каждого source file и regex matching запускаются в отдельном "
+        "ограниченном Python subprocess"
+        in readme_ru
+    )
+    assert (
+        "Учитывается только корневой `.gitignore` проекта; "
+        "вложенные ignore files не читаются"
+        in readme_ru
+    )
+
+
 def test_release_policy_uses_one_consumer_first_autonomy_contract() -> None:
     agents = AGENTS_PATH.read_text(encoding="utf-8")
     protocol = RELEASE_PROTOCOL_PATH.read_text(encoding="utf-8")
