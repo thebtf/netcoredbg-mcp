@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Stateless preview release manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "version",
+    "tag",
+    "commit",
+    "rid",
+    "archive",
+    "executable"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "version": {
+      "$ref": "#/$defs/version"
+    },
+    "tag": {
+      "$ref": "#/$defs/tag"
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "rid": {
+      "const": "win-x64"
+    },
+    "archive": {
+      "$ref": "#/$defs/archive"
+    },
+    "executable": {
+      "$ref": "#/$defs/executable"
+    }
+  },
+  "$defs": {
+    "version": {
+      "type": "string",
+      "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)-preview\\.(?:[1-9][0-9]*)$"
+    },
+    "tag": {
+      "type": "string",
+      "pattern": "^stateless-preview-v(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)-preview\\.(?:[1-9][0-9]*)$"
+    },
+    "hashed_file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "size_bytes",
+        "sha256"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "archive": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/hashed_file"
+        },
+        {
+          "properties": {
+            "name": {
+              "pattern": "^netcoredbg-mcp-stateless-preview-win-x64-(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)-preview\\.(?:[1-9][0-9]*)\\.zip$"
+            }
+          }
+        }
+      ]
+    },
+    "executable": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/hashed_file"
+        },
+        {
+          "properties": {
+            "name": {
+              "const": "netcoredbg-mcp-stateless-preview.exe"
+            }
+          }
+        }
+      ]
+    }
+  }
+}
