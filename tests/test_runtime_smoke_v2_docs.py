@@ -788,6 +788,11 @@ def test_sonarqube_release_policy_requires_two_clean_exact_head_receipts() -> No
         "every baseline or discovered key to be absent",
         "explicit empty-result",
         "pagination_complete=true",
+        "Serialize all analysis activity for the fixed project",
+        "current project analysis ID and revision",
+        "submitted analysis ID and `HEAD_SHA`",
+        "before and after the exact-head finding pagination",
+        "from the submitted Compute Engine task through the final receipt",
         "OPEN",
         "CONFIRMED",
         "REOPENED",
@@ -817,12 +822,49 @@ def test_sonarqube_release_policy_requires_two_clean_exact_head_receipts() -> No
         "FIXED_IN_CURRENT_HEAD",
         "completed integration scope is on `main`",
         "no dependent slice in the same integration wave remains active",
+        "Merge only after primary UXDD, review, this candidate receipt",
+        "Only the post-merge receipt can authorize tag creation",
     ):
         assert marker in agents
 
     assert collapsed_protocol.index("Release-candidate pre-merge scan") < collapsed_protocol.index("Actual post-merge scan") < collapsed_protocol.index("only SonarQube evidence eligible for the tag gate")
     assert "annotated tag's target must equal that receipt's captured SHA" in protocol
+    assert "A candidate receipt must never authorize a tag." in protocol
+    assert (
+        "The post-merge `origin/main` receipt is the only SonarQube evidence eligible for the tag gate."
+        in protocol
+    )
+
+    finding_clause = next(
+        line for line in protocol.splitlines() if line.startswith("4. Before scanner begin")
+    )
+    assert "from the submitted Compute Engine task through the final receipt" in finding_clause
+    assert (
+        "no other scan may submit or complete for that project during this interval"
+        in finding_clause
+    )
+    assert (
+        "Before and after the exact-head finding pagination, read the "
+        "**current project analysis ID and revision** and require both to equal "
+        "the **submitted analysis ID and `HEAD_SHA`**. Retrieve every finding "
+        "page only between those matching readbacks."
+    ) in finding_clause
+    assert (
+        finding_clause.index("serialize all analysis activity")
+        < finding_clause.index("Before and after the exact-head finding pagination")
+        < finding_clause.index("Retrieve every finding page only between those matching readbacks")
+    )
     assert collapsed_protocol.index("obtain a new candidate receipt") < collapsed_protocol.index("Fast-forward local `main`") < collapsed_protocol.index("post-merge SonarQube receipt") < collapsed_protocol.index("create an annotated tag")
+
+    collapsed_agents = _collapsed(agents)
+    assert (
+        collapsed_agents.index("run the pre-merge exact-head SonarQube gate on `CANDIDATE_SHA`")
+        < collapsed_agents.index("Merge only after primary UXDD, review, this candidate receipt")
+    )
+    assert (
+        collapsed_agents.index("Fast-forward local `main` to the merged `origin/main` target")
+        < collapsed_agents.index("Create and push the annotated PATCH/MINOR tag")
+    )
 
 def test_release_policy_uses_one_consumer_first_autonomy_contract() -> None:
     agents = AGENTS_PATH.read_text(encoding="utf-8")
