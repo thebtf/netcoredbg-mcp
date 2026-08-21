@@ -20,7 +20,7 @@ Release decisions use this order; later evidence cannot overrule an earlier fail
 
 1. **Primary UXDD consumer-mode release gate.** Build and install the release candidate, then exercise every user journey claimed by the release through the same public CLI/MCP entry point and packaging shape a consumer receives. Every claimed journey must reach `PRODUCT_WORKS`.
 2. **Supporting — test protocols.** Run the required unit, integration, critical, runtime-smoke, build, and packaging checks. They are mandatory evidence, but green tests cannot turn `PARTIALLY_WORKS` or `BROKEN` consumer behavior into a releasable product.
-3. **Supporting — independent review and release mechanics.** Resolve blocking review findings, prove version parity, and complete git, tag, publication, and post-publication checks.
+3. **Supporting — independent review, SonarQube, and release mechanics.** Resolve blocking review findings, obtain the exact-head SonarQube scanner/quality-gate/finding-remediation receipt, prove version parity, and complete git, tag, publication, and post-publication checks.
 
 A planned PATCH/MINOR release inside a legitimate run is autonomous. A legitimate run is a bounded spec, PRD, ADR, or active run contract with explicit acceptance criteria and release intent. User review, approval, and a separate `release` / `go ahead` command are not routine gates. If the governing artifact omits release intent or marks release out of scope, do not infer a release from implementation alone.
 
@@ -57,6 +57,7 @@ pre-publication gates also block tag creation.
 | Version parity | Check `pyproject.toml`, `src/netcoredbg_mcp/__init__.py`, `uv.lock`, README release copy, changelog, and release notes | Any public version surface disagrees with `X.Y.Z` / `vX.Y.Z` |
 | Changelog and release notes | `CHANGELOG.md` has a dated `X.Y.Z` section; `RELEASE_NOTES.md` has user-facing notes | Either file missing or contains only generic placeholder text |
 | Documentation refresh | README and README.ru reflect the current tool/test counts and release highlights; docs examples touched since last tag have matching tests | Public docs still describe an older released surface |
+| SonarQube exact-head gate | Follow the exact-head SonarQube procedure below using `SonarQube.Analysis.xml`; retain the scanner, Compute Engine, quality-gate, and finding-disposition receipt | Credentials or scanner are unavailable; the scan does not bind the current release head; Compute Engine or quality gate is not `SUCCESS`/`OK`; any finding is open or not fixed on that exact head |
 | Critical suite | `uv run --locked --extra dev pytest tests/critical -m critical` | Any `@critical` test fails or the suite cannot run |
 | Runtime-smoke docs/examples | `uv run --locked --extra dev pytest tests/test_runtime_smoke_v2_docs.py tests/test_runtime_smoke_diagnostics_schema.py tests/critical/test_runtime_smoke_v2_critical.py` or a narrower documented equivalent | Docs examples, diagnostic schemas, or v2 critical guards fail |
 | Package build | `uv build` | Wheel or sdist build fails |
@@ -64,6 +65,48 @@ pre-publication gates also block tag creation.
 | Primary UXDD consumer-mode release gate | Build and install the release candidate; execute `docs/PRODUCTION-TESTING-PLAYBOOK.md` through the public package/CLI/MCP surface; enumerate every user journey claimed by the release | Any claimed journey is not `PRODUCT_WORKS`; `PARTIALLY_WORKS`, `BROKEN`, private-helper-only proof, or unit-test-only proof blocks release |
 | MCP PR review | Release-prep PR summary reports zero unresolved blocking findings, and reviewer status is clean enough for merge | Any `fix_now` or unresolved mandatory review thread remains |
 | Tag collision check | `git ls-remote --tags origin refs/tags/vX.Y.Z` returns empty before tag creation | Target tag already exists on origin |
+
+### SonarQube exact-head gate
+
+Run this gate **after every release-prep and review correction is committed and
+before merge or tag creation**. The scanner, its submitted analysis, the quality
+gate, and the finding readback all bind one release-candidate `HEAD_SHA`:
+
+1. Read `HEAD_SHA` from `git rev-parse HEAD`; preserve it in the release report.
+   Invoke the repository-configured .NET SonarQube scanner from that worktree
+   with `SonarQube.Analysis.xml`, `SONAR_HOST_URL`, `SONAR_TOKEN`, and
+   `sonar.scm.revision=$HEAD_SHA`; build the repository between scanner begin and
+   end. Do not reuse a report from another branch, worktree, or commit.
+2. Preserve the scanner metadata/properties showing the submitted
+   `sonar.scm.revision=$HEAD_SHA`, plus the scanner's task report. The metadata
+   binds the captured git `HEAD_SHA` to the scanner submission; the task report
+   must identify the configured project (`thebtf_netcoredbg_mcp`), submitted
+   task, and server. `report-task.txt` is not itself SHA evidence. Re-read
+   `git rev-parse HEAD` after scanner end; any SHA change invalidates the
+   analysis and requires a new scan of the new head.
+3. Wait for that submitted Compute Engine task only. Its terminal receipt must
+   be `SUCCESS`, resolve one analysis ID, and the quality-gate readback for that
+   analysis ID must be `OK`. A project-level/latest-quality-gate result without
+   the task and analysis identity is not evidence for this release head.
+4. Read every SonarQube finding associated with that exact analysis/head and
+   record its key, rule, severity, path/line, and disposition. The only
+   releasable disposition is `FIXED_IN_CURRENT_HEAD`, evidenced by a code fix on
+   `HEAD_SHA` and SonarQube readback showing the finding is no longer open. A
+   correction changes `HEAD_SHA`: re-run every affected review and required
+   gate, then obtain a fresh exact-head SonarQube receipt before merge.
+   `OPEN`, `CONFIRMED`, `REOPENED`, `WONTFIX`, `FALSE-POSITIVE`, accepted risk,
+   `NOSONAR`, issue suppression, and quality-profile exclusion are not release
+   dispositions and block release. Fix the code, re-run the exact-head scan,
+   and obtain a new quality-gate receipt instead of bypassing the finding.
+
+`SONAR_HOST_URL` and `SONAR_TOKEN` are required readiness inputs. If either is
+missing, blank, inaccessible, rejected, or cannot be used without exposing it,
+record `SONAR_CREDENTIALS_UNAVAILABLE` with the missing/unavailable input name
+only (never its value) and stop as `PROJECT_RELEASE_PROTOCOL_BLOCKED`. Likewise,
+an unavailable scanner, scanner failure, missing/ambiguous task report,
+nonterminal or failed Compute Engine task, missing/mismatched analysis/head,
+non-`OK` quality gate, or incomplete finding disposition is a fail-closed
+pre-publication blocker—not an inferred pass or an authorization to tag.
 
 ### Post-publication verification
 
@@ -81,7 +124,7 @@ pre-publication gates also block tag creation.
 | --- | --- | --- | --- |
 | Local release-prep branch and commit | Automatic | Sensitive content, incoherent diff, or unrelated dirty state | Git status, diff, and gate output |
 | Release-prep PR creation | Automatic | Unreviewed broad product change outside release-owned files | PR URL and changed-file list |
-| PR merge | Automatic after the primary UXDD consumer-mode release gate, independent MCP PR review, and required checks are clean | `PARTIALLY_WORKS`, `BROKEN`, `fix_now`, unresolved mandatory review threads, failed checks, or high-risk scope expansion | UXDD run report, MCP PR summary, GitHub merge state, status checks |
+| PR merge | Automatic after the primary UXDD consumer-mode release gate, independent MCP PR review, the final exact-head SonarQube receipt, and required checks are clean | `PARTIALLY_WORKS`, `BROKEN`, `fix_now`, unresolved mandatory review threads, missing/stale/non-`OK` SonarQube receipt, unresolved SonarQube finding, failed checks, or high-risk scope expansion | UXDD run report, MCP PR summary, SonarQube task/analysis/quality-gate/finding receipt, GitHub merge state, status checks |
 | Planned PATCH or MINOR tag and remote publication | Automatic when the release belongs to a legitimate run, its completed integration scope is on `main`, no dependent slice in the same integration wave remains active, every claimed consumer journey is `PRODUCT_WORKS`, and every pre-publication gate passes | MAJOR/breaking change, tag collision, failed gate, ambiguous scope, production/customer deployment outside this workstation, secrets, or destructive cleanup with unpreserved work | Governing run artifact, UXDD consumer evidence, pre-publication gate evidence; post-publication remote tag, workflow status, release URL, and package smoke |
 | MAJOR or breaking release | Approval required | Always | Explicit user approval naming the version |
 | Production/customer deployment outside this workstation | Approval required | Always | Named target, deploy plan, health checks |
@@ -97,7 +140,7 @@ release checks remain mandatory supporting gates, but none can override a
 failed or partial UXDD result. Any failed pre-publication gate blocks tag
 creation. Any failed post-publication verification blocks release completion;
 a pushed tag enters Recovery After Tag Push. Same-tag publication repair/retry
-there remains automatic when the tagged commit and artifacts are unchanged;
+there remains automatic when the tagged commit and release artifacts are unchanged;
 new-patch correction also remains automatic unless an existing high-risk
 approval trigger applies. Approval is not a substitute for green gates.
 
@@ -130,7 +173,12 @@ as the only release-note source for a milestone release.
 
 1. Prepare release-owned files on a branch named `work/release-vX.Y.Z-prep`.
 2. Build and install the release candidate; run the primary UXDD consumer-mode release gate through the public package/CLI/MCP entry point; then run the remaining local pre-PR protocol gates and write evidence paths into the release report. PR review waits for step 3, and post-publication verification waits for step 6.
-3. Open a PR, run MCP PR review, fix or resolve findings, and merge automatically only after the primary UXDD consumer-mode release gate reports `PRODUCT_WORKS` for every claimed journey and all supporting gates are clean.
+3. Open a PR, run MCP PR review, fix or resolve findings, then run the
+   exact-head SonarQube gate after the final source change. If SonarQube requires
+   a code correction, re-run affected review/required checks and obtain a new
+   exact-head SonarQube receipt. Merge automatically only after the primary UXDD
+   consumer-mode release gate reports `PRODUCT_WORKS` for every claimed journey
+   and all supporting gates, including the final SonarQube receipt, are clean.
 4. Fast-forward local `main` to `origin/main`.
 5. After every pre-publication gate passes, create an annotated tag with
    `git tag -a vX.Y.Z -m "Release vX.Y.Z"` and push it with
