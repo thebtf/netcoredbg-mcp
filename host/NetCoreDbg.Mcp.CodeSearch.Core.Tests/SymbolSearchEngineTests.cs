@@ -61,6 +61,48 @@ public sealed class SymbolSearchEngineTests
     }
 
     [Fact]
+    public void PreviewPolicyAlwaysPrunesVcsMetadataDespiteDescendantNegation()
+    {
+        using var root = TestRoot.Create();
+        const string marker = "VcsMetadataMarker";
+        root.Write(".gitignore", "!keep.cs\n");
+        root.Write(".git/keep.cs", $"public sealed class {marker} {{ }}\n");
+        var engine = new SymbolSearchEngine(root.Path, PreviewSearchPolicy.Instance);
+
+        var symbols = engine.FindCodeSymbol(marker, "class");
+
+        Assert.Empty(symbols);
+    }
+
+    [Fact]
+    public void LegacyPolicyRetainsVcsDescendantNegationBehavior()
+    {
+        using var root = TestRoot.Create();
+        const string marker = "LegacyVcsMetadataMarker";
+        root.Write(".gitignore", "!keep.cs\n");
+        root.Write(".git/keep.cs", $"public sealed class {marker} {{ }}\n");
+        var engine = new SymbolSearchEngine(root.Path, LegacySearchPolicy.Instance);
+
+        var symbols = engine.FindCodeSymbol(marker, "class");
+
+        Assert.Equal([".git/keep.cs"], symbols.Select(static match => match.File));
+    }
+
+    [Fact]
+    public void PreviewPolicyPrunesCaseVariantVcsMetadata()
+    {
+        using var root = TestRoot.Create();
+        const string marker = "CaseVariantVcsMetadataMarker";
+        root.Write(".gitignore", "!keep.cs\n");
+        root.Write(".GIT/keep.cs", $"public sealed class {marker} {{ }}\n");
+        var engine = new SymbolSearchEngine(root.Path, PreviewSearchPolicy.Instance);
+
+        var symbols = engine.FindCodeSymbol(marker, "class");
+
+        Assert.Empty(symbols);
+    }
+
+    [Fact]
     public void PreviewPolicyExcludesBinAndObjWhileLegacyKeepsBuildOutput()
     {
         using var root = TestRoot.Create();

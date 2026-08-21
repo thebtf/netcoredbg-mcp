@@ -435,6 +435,7 @@ public sealed class PreviewProcessContractTests
     {
         using var outside = TemporaryProject.Create("OutsideMarker");
         var hostileWorkingDirectory = outside.Path;
+        File.WriteAllText(Path.Combine(hostileWorkingDirectory, "appsettings.json"), "{");
         await using var driver = await PreviewMcpProcessDriver.StartRawAsync(
             PreviewRepositoryLayout.FixtureRoot,
             hostileWorkingDirectory,

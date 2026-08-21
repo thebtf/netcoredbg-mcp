@@ -24,7 +24,7 @@ internal static class Program
 
         var search = new SymbolSearchEngine(root.Path, PreviewSearchPolicy.Instance);
         var tools = new PreviewToolHandler(search);
-        var builder = Host.CreateApplicationBuilder();
+        var builder = Host.CreateEmptyApplicationBuilder(new HostApplicationBuilderSettings());
         builder.Logging.ClearProviders();
         builder.Services.AddMcpServer(options =>
             {

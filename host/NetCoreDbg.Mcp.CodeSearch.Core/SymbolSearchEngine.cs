@@ -352,9 +352,24 @@ public sealed class SymbolSearchEngine
     private bool ShouldPruneDirectory(
         string path,
         IReadOnlyList<GitIgnoreRule> rules,
-        SearchOperation operation) =>
-        IsIgnored(path, isDirectory: true, rules, operation)
-        && !HasDescendantNegation(path, rules, operation);
+        SearchOperation operation)
+    {
+        if (_settings.Strict && IsAlwaysIgnoredDirectory(path))
+        {
+            return true;
+        }
+
+        return IsIgnored(path, isDirectory: true, rules, operation)
+            && !HasDescendantNegation(path, rules, operation);
+    }
+
+    private static bool IsAlwaysIgnoredDirectory(string path)
+    {
+        var name = Path.GetFileName(path);
+        return string.Equals(name, ".git", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(name, ".hg", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(name, ".svn", StringComparison.OrdinalIgnoreCase);
+    }
 
     private bool IsIgnored(
         string path,
