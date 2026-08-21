@@ -62,6 +62,10 @@ htmlcov/
 .tox/
 .mypy_cache/
 .ruff_cache/
+coverage.xml
+TestResults/
+.scannerwork/
+.sonarqube/
 
 # .NET
 bin/
