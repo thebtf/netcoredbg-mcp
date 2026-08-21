@@ -47,12 +47,33 @@ internal static class Program
                         return;
                     }
 
-
-                    if (context.JsonRpcMessage is JsonRpcRequest { Method: RequestMethods.Initialize } request)
+                    if (context.JsonRpcMessage is JsonRpcRequest request
+                        && TryGetUnsupportedProtocolVersion(request, out var requestedVersion)
+                        && !BoundedResponseFrameSerializer.FitsUnsupportedVersionErrorWithinLimit(
+                            request.Id,
+                            requestedVersion,
+                            ProtocolVersion,
+                            out _))
                     {
                         await context.Server.SendMessageAsync(new JsonRpcError
                         {
                             Id = request.Id,
+                            Error = new JsonRpcErrorDetail
+                            {
+                                Code = -32022,
+                                Message = "Unsupported protocol version",
+                                Data = UnsupportedVersionData(),
+                            },
+                        }, cancellationToken).ConfigureAwait(false);
+                        return;
+                    }
+
+
+                    if (context.JsonRpcMessage is JsonRpcRequest { Method: RequestMethods.Initialize } initializeRequest)
+                    {
+                        await context.Server.SendMessageAsync(new JsonRpcError
+                        {
+                            Id = initializeRequest.Id,
                             Error = new JsonRpcErrorDetail
                             {
                                 Code = -32601,
@@ -104,14 +125,26 @@ internal static class Program
     }
 
     private static bool IsCompleteResponseFrameWithinLimit(JsonRpcMessage message) =>
-        JsonSerializer.SerializeToUtf8Bytes(message, McpJsonUtilities.DefaultOptions).Length
-        <= PreviewToolCatalog.MaximumCompleteResponseFrameBytes;
+        BoundedResponseFrameSerializer.FitsWithinLimit(message);
+
     private static bool IsRequestIdWithinResponseFrameLimit(RequestId id) =>
-        IsCompleteResponseFrameWithinLimit(new JsonRpcResponse
+        BoundedResponseFrameSerializer.FitsFrameBudgetExceededResponseWithinLimit(id);
+
+    private static bool TryGetUnsupportedProtocolVersion(JsonRpcRequest request, out string requestedVersion)
+    {
+        requestedVersion = string.Empty;
+        if (request.Params is not JsonObject parameters
+            || parameters["_meta"] is not JsonObject metadata
+            || metadata[MetaKeys.ProtocolVersion] is not JsonValue version
+            || !version.TryGetValue<string>(out var candidate)
+            || candidate is null)
         {
-            Id = id,
-            Result = JsonSerializer.SerializeToNode(PreviewToolHandler.FrameBudgetExceeded(), McpJsonUtilities.DefaultOptions),
-        });
+            return false;
+        }
+
+        requestedVersion = candidate;
+        return !string.Equals(requestedVersion, ProtocolVersion, StringComparison.Ordinal);
+    }
 
     private static void ReplaceOversizedResponse(JsonRpcMessage message)
     {

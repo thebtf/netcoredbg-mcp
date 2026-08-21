@@ -1,5 +1,4 @@
 using System.Text.Json;
-using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 using NetCoreDbg.Mcp.CodeSearch.Core;
@@ -30,7 +29,11 @@ internal sealed class PreviewToolHandler
         cancellationToken.ThrowIfCancellationRequested();
         if (!string.Equals(request.Name, PreviewToolCatalog.FindCodeSymbol, StringComparison.Ordinal))
         {
-            return Respond(UnknownTool(request.Name), cancellationToken);
+            return Respond(
+                BoundedResponseFrameSerializer.FitsUnknownToolResponseWithinLimit(requestId, request.Name, out _)
+                    ? UnknownTool(request.Name)
+                    : FrameBudgetExceeded(),
+                cancellationToken);
         }
 
         if (!TryReadArguments(request.Arguments, out var name, out var kind))
@@ -41,23 +44,7 @@ internal sealed class PreviewToolHandler
         try
         {
             var matches = _search.FindCodeSymbol(name, kind, cancellationToken);
-            var result = Result(new
-            {
-                kind = "find_code_symbol_success",
-                results = matches.Select(static match => new
-                {
-                    file = match.File,
-                    line = match.Line,
-                    name = match.Name,
-                    kind = match.Kind,
-                    context = match.Context,
-                }).ToArray(),
-            }, isError: false);
-            return Respond(
-                IsCompleteResponseFrameWithinLimit(requestId, result)
-                    ? result
-                    : Error(SearchFailure.PreviewSearchBudgetExceeded(PreviewToolCatalog.FindCodeSymbol)),
-                cancellationToken);
+            return Respond(FindCodeSymbolResultOrFrameBudgetExceeded(requestId, matches), cancellationToken);
         }
         catch (SearchFailureException exception)
         {
@@ -105,14 +92,27 @@ internal sealed class PreviewToolHandler
         return kind is "class" or "method" or "property" or "field";
     }
 
-    private static bool IsCompleteResponseFrameWithinLimit(RequestId id, CallToolResult result)
+    private static CallToolResult FindCodeSymbolResultOrFrameBudgetExceeded(
+        RequestId id,
+        IReadOnlyList<SymbolMatch> matches)
     {
-        JsonRpcMessage response = new JsonRpcResponse
+        if (!BoundedResponseFrameSerializer.FitsFindCodeSymbolSuccessResponseWithinLimit(id, matches, out _))
         {
-            Id = id,
-            Result = JsonSerializer.SerializeToNode(result, McpJsonUtilities.DefaultOptions)!,
-        };
-        return JsonSerializer.SerializeToUtf8Bytes(response, McpJsonUtilities.DefaultOptions).Length <= PreviewToolCatalog.MaximumCompleteResponseFrameBytes;
+            return FrameBudgetExceeded();
+        }
+
+        return Result(new
+        {
+            kind = "find_code_symbol_success",
+            results = matches.Select(static match => new
+            {
+                file = match.File,
+                line = match.Line,
+                name = match.Name,
+                kind = match.Kind,
+                context = match.Context,
+            }).ToArray(),
+        }, isError: false);
     }
 
     internal static CallToolResult FrameBudgetExceeded() =>

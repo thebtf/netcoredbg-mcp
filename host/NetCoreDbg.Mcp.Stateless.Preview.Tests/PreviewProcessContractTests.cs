@@ -2,6 +2,7 @@ using ModelContextProtocol;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using NetCoreDbg.Mcp.CodeSearch.Core;
 using ModelContextProtocol.Protocol;
 using Xunit;
 
@@ -50,6 +51,33 @@ public sealed class PreviewProcessContractTests
             "{\"kind\":\"find_code_symbol_success\",\"results\":[{\"file\":\"Markers.cs\",\"line\":3,\"name\":\"PreviewMarker\",\"kind\":\"class\",\"context\":\"public sealed class PreviewMarker { }\"}]}",
             structured.ToJsonString());
         Assert.Equal(structured.ToJsonString(), SingleText(result));
+    }
+
+    [Fact]
+    public async Task SuccessfulFindCodeSymbolWithLongPathAndEscapedContextPreservesParityAndFrameCap()
+    {
+        const int maximumFrameBytes = 256 * 1024;
+        var directoryName = new string('p', 120);
+        var escapedContext = string.Concat(Enumerable.Repeat("\"\\", 400));
+        using var root = TemporaryProject.Create(
+            "LongPayloadMarker",
+            $"public sealed class LongPayloadMarker {{ }} // {escapedContext}\n");
+        var directory = Path.Combine(root.Path, directoryName);
+        Directory.CreateDirectory(directory);
+        File.Move(Path.Combine(root.Path, "Marker.cs"), Path.Combine(directory, "LongPayload.cs"));
+        await using var driver = await PreviewMcpProcessDriver.StartRawAsync(root.Path);
+
+        var response = await driver.CallToolAsync(
+            ToolName,
+            new JsonObject { ["name"] = "LongPayloadMarker", ["kind"] = "class" },
+            new RequestId("long-success"));
+        var result = RequireResult(response);
+        var match = Assert.IsType<JsonObject>(Assert.Single(result["structuredContent"]!["results"]!.AsArray()));
+
+        Assert.Contains(directoryName, match["file"]!.GetValue<string>(), StringComparison.Ordinal);
+        Assert.InRange(match["context"]!.GetValue<string>().EnumerateRunes().Count(), 450, 512);
+        Assert.Equal(result["structuredContent"]!.ToJsonString(), SingleText(result));
+        Assert.True(FrameByteCount(response) <= maximumFrameBytes);
     }
 
     [Fact]
@@ -139,6 +167,12 @@ public sealed class PreviewProcessContractTests
         var data = Assert.IsType<JsonElement>(error.Error.Data);
         Assert.Equal(requestedVersion, data.GetProperty("requested").GetString());
         Assert.Equal([PreviewMcpProcessDriver.CurrentProtocolVersion], data.GetProperty("supported").EnumerateArray().Select(static value => value.GetString()));
+        Assert.True(BoundedResponseFrameSerializer.FitsUnsupportedVersionErrorWithinLimit(
+            requestId,
+            requestedVersion,
+            PreviewMcpProcessDriver.CurrentProtocolVersion,
+            out var state));
+        Assert.Equal(FrameByteCount(response), state.BytesWritten);
         Assert.True(FrameByteCount(response) <= maximumFrameBytes);
     }
 
@@ -234,8 +268,8 @@ public sealed class PreviewProcessContractTests
     public async Task EveryResponsePathKeepsHugeToolAndVersionInputsWithinTheCompleteFrameCap()
     {
         const int maximumFrameBytes = 256 * 1024;
-        var unboundedTool = new string('t', maximumFrameBytes + 1);
-        var unboundedVersion = new string('v', maximumFrameBytes + 1);
+        var unboundedTool = new string('t', maximumFrameBytes * 4);
+        var unboundedVersion = new string('v', maximumFrameBytes * 4);
         await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
 
         var unsupportedMetadata = PreviewMcpProcessDriver.CurrentMeta();
@@ -260,6 +294,95 @@ public sealed class PreviewProcessContractTests
         Assert.Equal("unsupported", oversizedVersionData.GetProperty("requested").GetString());
         Assert.Equal([PreviewMcpProcessDriver.CurrentProtocolVersion], oversizedVersionData.GetProperty("supported").EnumerateArray().Select(static value => value.GetString()));
         Assert.DoesNotContain(unboundedVersion, JsonSerializer.Serialize(unsupportedVersion, McpJsonUtilities.DefaultOptions), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CompleteResultFramePreflightMatchesJsonRpcResponseWireSize()
+    {
+        var id = new RequestId("result-envelope");
+        var result = PreviewToolHandler.FrameBudgetExceeded();
+        var response = new JsonRpcResponse
+        {
+            Id = id,
+            Result = JsonSerializer.SerializeToNode(result, McpJsonUtilities.DefaultOptions),
+        };
+
+        Assert.True(BoundedResponseFrameSerializer.FitsFrameBudgetExceededResponseWithinLimit(id, out var state));
+        Assert.Equal(FrameByteCount(response), state.BytesWritten);
+    }
+
+    [Fact]
+    public void FindCodeSymbolPayloadFramePreflightMatchesJsonRpcResponseWireSize()
+    {
+        var id = new RequestId("payload-envelope");
+        IReadOnlyList<SymbolMatch> matches =
+        [
+            new SymbolMatch("A/\"\\\u0001😀.cs", 3, "Preflight", "class", "public sealed class \"\\\u0001😀Preflight { }"),
+        ];
+        var response = FindCodeSymbolResponse(id, matches);
+
+        Assert.True(BoundedResponseFrameSerializer.FitsFindCodeSymbolSuccessResponseWithinLimit(id, matches, out var state));
+        Assert.Equal(FrameByteCount(response), state.BytesWritten);
+    }
+
+    [Fact]
+    public void FindCodeSymbolEscapedContextNearCapPreservesExactWireSize()
+    {
+        const int maximumFrameBytes = 256 * 1024;
+        var id = new RequestId("near-cap-escaped");
+        var escapedUnit = "\"\\\u0001😀";
+        IReadOnlyList<SymbolMatch> baselineMatches = [new SymbolMatch("NearCap.cs", 1, "NearCap", "class", string.Empty)];
+        var baselineBytes = FrameByteCount(FindCodeSymbolResponse(id, baselineMatches));
+        var unitBytes = FrameByteCount(FindCodeSymbolResponse(
+            id,
+            [new SymbolMatch("NearCap.cs", 1, "NearCap", "class", escapedUnit)])) - baselineBytes;
+        var context = string.Concat(Enumerable.Repeat(escapedUnit, (maximumFrameBytes - baselineBytes) / unitBytes));
+        IReadOnlyList<SymbolMatch> matches = [new SymbolMatch("NearCap.cs", 1, "NearCap", "class", context)];
+        var response = FindCodeSymbolResponse(id, matches);
+
+        Assert.InRange(maximumFrameBytes - FrameByteCount(response), 0, unitBytes - 1);
+        Assert.True(BoundedResponseFrameSerializer.FitsFindCodeSymbolSuccessResponseWithinLimit(id, matches, out var state));
+        Assert.Equal(FrameByteCount(response), state.BytesWritten);
+    }
+
+    [Fact]
+    public void BoundedFramePreflightsStopAtTheCapWithConstantTokenSlices()
+    {
+        const int maximumFrameBytes = 256 * 1024;
+        var oversizedValue = new string('r', maximumFrameBytes * 4);
+
+        Assert.False(BoundedResponseFrameSerializer.FitsUnknownToolResponseWithinLimit(
+            new RequestId("huge-tool"),
+            oversizedValue,
+            out var unknownToolState));
+        Assert.Equal(maximumFrameBytes, unknownToolState.BytesWritten);
+        Assert.InRange(unknownToolState.MaximumTokenUtf16CodeUnits, 1, 128);
+
+        foreach (var matches in new IReadOnlyList<SymbolMatch>[]
+        {
+            [new SymbolMatch(oversizedValue, 1, "HugePath", "class", "context")],
+            [new SymbolMatch("HugeContext.cs", 1, "HugeContext", "class", oversizedValue)],
+        })
+        {
+            Assert.False(BoundedResponseFrameSerializer.FitsFindCodeSymbolSuccessResponseWithinLimit(
+                new RequestId("huge-result"),
+                matches,
+                out var successState));
+            Assert.Equal(maximumFrameBytes, successState.BytesWritten);
+            Assert.InRange(successState.MaximumTokenUtf16CodeUnits, 1, 128);
+        }
+    }
+
+    [Fact]
+    public void BoundedFrameSerializerAcceptsAnExactCapResponse()
+    {
+        const int maximumFrameBytes = 256 * 1024;
+        var exactIdLength = maximumFrameBytes - FrameByteCount(FrameBudgetFallback(new RequestId("base"))) + "base".Length;
+        var exact = FrameBudgetFallback(new RequestId(new string('i', exactIdLength)));
+
+        Assert.Equal(maximumFrameBytes, FrameByteCount(exact));
+        Assert.True(BoundedResponseFrameSerializer.FitsWithinLimit(exact, out var state), $"Bounded writer stopped at {state.BytesWritten} bytes.");
+        Assert.Equal(maximumFrameBytes, state.BytesWritten);
     }
 
     [Fact]
@@ -313,7 +436,7 @@ public sealed class PreviewProcessContractTests
             await rejected.SendRequestAsync(
                 "tools/list",
                 new JsonObject { ["_meta"] = PreviewMcpProcessDriver.CurrentMeta() },
-                new RequestId(new string('i', maximumFrameBytes + 1)));
+                new RequestId(new string('i', maximumFrameBytes * 4)));
 
             Assert.Null(await rejected.TryReadMessageAsync(TimeSpan.FromSeconds(1)));
             Assert.True(await rejected.WaitForTransportClosureAsync(TimeSpan.FromSeconds(2)));
@@ -551,6 +674,34 @@ public sealed class PreviewProcessContractTests
         var content = Assert.IsType<JsonObject>(Assert.Single(result["content"]!.AsArray()));
         Assert.Equal("text", content["type"]!.GetValue<string>());
         return content["text"]!.GetValue<string>();
+    }
+
+    private static JsonRpcResponse FindCodeSymbolResponse(RequestId id, IReadOnlyList<SymbolMatch> matches)
+    {
+        var payload = new
+        {
+            kind = "find_code_symbol_success",
+            results = matches.Select(static match => new
+            {
+                file = match.File,
+                line = match.Line,
+                name = match.Name,
+                kind = match.Kind,
+                context = match.Context,
+            }).ToArray(),
+        };
+        var result = new CallToolResult
+        {
+            ResultType = "complete",
+            IsError = false,
+            Content = [new TextContentBlock { Text = JsonSerializer.Serialize(payload) }],
+            StructuredContent = JsonSerializer.SerializeToElement(payload),
+        };
+        return new JsonRpcResponse
+        {
+            Id = id,
+            Result = JsonSerializer.SerializeToNode(result, McpJsonUtilities.DefaultOptions),
+        };
     }
 
     private static int FrameByteCount(JsonRpcMessage message) =>
