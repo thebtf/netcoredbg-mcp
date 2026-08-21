@@ -40,6 +40,30 @@ internal static class Program
             {
                 filters.AddIncomingFilter(next => async (context, cancellationToken) =>
                 {
+                    if (context.JsonRpcMessage is JsonRpcRequest { Method: not RequestMethods.Initialize } metadataRequest
+                        && !HasRequiredRequestMetadata(metadataRequest))
+                    {
+                        _ = context.Server.DisposeAsync().AsTask();
+                        return;
+                    }
+
+                    if (context.JsonRpcMessage is JsonRpcRequest versionRequest
+                        && TryGetUnsupportedProtocolVersion(versionRequest, out var requestedVersion))
+                    {
+                        if (!BoundedResponseFrameSerializer.FitsUnsupportedVersionErrorWithinLimit(
+                                versionRequest.Id,
+                                requestedVersion,
+                                ProtocolVersion,
+                                out _))
+                        {
+                            _ = context.Server.DisposeAsync().AsTask();
+                            return;
+                        }
+
+                        await next(context, cancellationToken).ConfigureAwait(false);
+                        return;
+                    }
+
                     if (context.JsonRpcMessage is JsonRpcRequest { Method: RequestMethods.ToolsCall, Params: null } nullParametersRequest)
                     {
                         if (!BoundedResponseFrameSerializer.FitsInvalidToolArgumentsResponseWithinLimit(nullParametersRequest.Id))
@@ -106,12 +130,6 @@ internal static class Program
                         return;
                     }
 
-                    if (context.JsonRpcMessage is JsonRpcRequest request
-                        && !HasRequiredRequestMetadata(request))
-                    {
-                        _ = context.Server.DisposeAsync().AsTask();
-                        return;
-                    }
 
                     await next(context, cancellationToken).ConfigureAwait(false);
                 });

@@ -134,6 +134,41 @@ public sealed class PreviewProcessContractTests
     }
 
     [Fact]
+    public async Task MissingMetadataPrecedesMalformedToolArguments()
+    {
+        await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
+        await driver.SendRequestAsync(
+            "tools/call",
+            new JsonObject { ["name"] = ToolName, ["arguments"] = new JsonObject() },
+            new RequestId("missing-meta-invalid-arguments"));
+
+        Assert.Null(await driver.TryReadMessageAsync(TimeSpan.FromSeconds(2)));
+        Assert.True(await driver.WaitForTransportClosureAsync(TimeSpan.FromSeconds(2)));
+    }
+
+    [Fact]
+    public async Task UnsupportedVersionPrecedesMalformedToolArguments()
+    {
+        var metadata = PreviewMcpProcessDriver.CurrentMeta();
+        metadata[MetaKeys.ProtocolVersion] = "1900-01-01";
+        await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
+
+        var response = await driver.SendAsync(
+            "tools/call",
+            new JsonObject
+            {
+                ["name"] = ToolName,
+                ["arguments"] = new JsonObject(),
+                ["_meta"] = metadata,
+            },
+            new RequestId("unsupported-invalid-arguments"));
+
+        var error = Assert.IsType<JsonRpcError>(response);
+        Assert.Equal(-32022, error.Error.Code);
+        Assert.Equal("Unsupported protocol version", error.Error.Message);
+    }
+
+    [Fact]
     public async Task InvalidToolArguments_ReturnClosedRedactedErrorsWithoutPartialResults()
     {
         await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
@@ -163,13 +198,13 @@ public sealed class PreviewProcessContractTests
 
 
     [Fact]
-    public async Task OmittedToolCallParams_ReturnsClosedRedactedError()
+    public async Task OmittedToolCallParamsWithMissingMetadataClosesBeforeDispatch()
     {
         await using var driver = await PreviewMcpProcessDriver.StartRawAsync(PreviewRepositoryLayout.FixtureRoot);
+        await driver.SendRequestAsync("tools/call", parameters: null, new RequestId("omitted-tool-call-params"));
 
-        var result = RequireResult(await driver.SendAsync("tools/call", parameters: null, new RequestId("omitted-tool-call-params")));
-
-        AssertClosedError(result, "invalid_tool_arguments", "INVALID_TOOL_ARGUMENTS");
+        Assert.Null(await driver.TryReadMessageAsync(TimeSpan.FromSeconds(2)));
+        Assert.True(await driver.WaitForTransportClosureAsync(TimeSpan.FromSeconds(2)));
     }
     [Fact]
     public async Task UnknownAndExcludedRoutes_AreNotRegisteredOrDispatched()
