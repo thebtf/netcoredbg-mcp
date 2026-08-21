@@ -68,46 +68,24 @@ pre-publication gates also block tag creation.
 
 ### SonarQube exact-head gate
 
-Run this gate **after every release-prep and review correction is committed and
-before merge or tag creation**. The scanner, its submitted analysis, the quality
-gate, and the finding readback all bind one release-candidate `HEAD_SHA`:
+Run this gate **twice** for every release. The two independent scan targets are:
 
-1. Read `HEAD_SHA` from `git rev-parse HEAD`; preserve it in the release report.
-   Invoke the repository-configured .NET SonarQube scanner from that worktree
-   with `SonarQube.Analysis.xml`, `SONAR_HOST_URL`, `SONAR_TOKEN`, and
-   `sonar.scm.revision=$HEAD_SHA`; build the repository between scanner begin and
-   end. Do not reuse a report from another branch, worktree, or commit.
-2. Preserve the scanner metadata/properties showing the submitted
-   `sonar.scm.revision=$HEAD_SHA`, plus the scanner's task report. The metadata
-   binds the captured git `HEAD_SHA` to the scanner submission; the task report
-   must identify the configured project (`thebtf_netcoredbg_mcp`), submitted
-   task, and server. `report-task.txt` is not itself SHA evidence. Re-read
-   `git rev-parse HEAD` after scanner end; any SHA change invalidates the
-   analysis and requires a new scan of the new head.
-3. Wait for that submitted Compute Engine task only. Its terminal receipt must
-   be `SUCCESS`, resolve one analysis ID, and the quality-gate readback for that
-   analysis ID must be `OK`. A project-level/latest-quality-gate result without
-   the task and analysis identity is not evidence for this release head.
-4. Read every SonarQube finding associated with that exact analysis/head and
-   record its key, rule, severity, path/line, and disposition. The only
-   releasable disposition is `FIXED_IN_CURRENT_HEAD`, evidenced by a code fix on
-   `HEAD_SHA` and SonarQube readback showing the finding is no longer open. A
-   correction changes `HEAD_SHA`: re-run every affected review and required
-   gate, then obtain a fresh exact-head SonarQube receipt before merge.
-   `OPEN`, `CONFIRMED`, `REOPENED`, `WONTFIX`, `FALSE-POSITIVE`, accepted risk,
-   `NOSONAR`, issue suppression, and quality-profile exclusion are not release
-   dispositions and block release. Fix the code, re-run the exact-head scan,
-   and obtain a new quality-gate receipt instead of bypassing the finding.
+1. **Release-candidate pre-merge scan.** After the final release-prep/review correction, capture `CANDIDATE_SHA` with `git rev-parse HEAD` and produce a complete receipt for that exact candidate.
+2. **Actual post-merge scan.** After merge, fetch `origin/main`, fast-forward local `main` to that commit, capture the actual `origin/main` SHA, and produce a fresh complete receipt for that SHA **before tag creation**.
 
-`SONAR_HOST_URL` and `SONAR_TOKEN` are required readiness inputs. If either is
-missing, blank, inaccessible, rejected, or cannot be used without exposing it,
-record `SONAR_CREDENTIALS_UNAVAILABLE` with the missing/unavailable input name
-only (never its value) and stop as `PROJECT_RELEASE_PROTOCOL_BLOCKED`. Likewise,
-an unavailable scanner, scanner failure, missing/ambiguous task report,
-nonterminal or failed Compute Engine task, missing/mismatched analysis/head,
-non-`OK` quality gate, or incomplete finding disposition is a fail-closed
-pre-publication blocker—not an inferred pass or an authorization to tag.
+A candidate receipt must never authorize a tag. Any mismatch between the captured target and the scanner worktree HEAD, scanner metadata, receipt, or post-scan HEAD is `PROJECT_RELEASE_PROTOCOL_BLOCKED`; recreate a clean scanner worktree and rescan the mismatched target. The post-merge `origin/main` receipt is the only SonarQube evidence eligible for the tag gate. The annotated tag's target must equal that receipt's captured SHA; otherwise tag creation blocks.
 
+For each scan below, `HEAD_SHA` means that scan's captured target: `CANDIDATE_SHA` for the pre-merge scan or the captured `origin/main` SHA for the post-merge scan.
+
+For **each** scan, perform and record all of the following:
+
+1. Create a new detached scanner worktree at the captured target SHA, outside the permanent release checkout, before scanner begin. It must contain the committed `SonarQube.Analysis.xml` from that exact head. Before scanning, require `git rev-parse HEAD` to equal the captured SHA and require `git status --porcelain=v1 --untracked-files=all --ignored` to report no tracked, untracked, or ignored entry within the configured scan scope. Refuse the scan otherwise. Run the scanner only in this isolated worktree; never treat permanent root `.agent` coordination residue as scanner source. The XML exclusions complement this check but do not replace it.
+2. Read `sonar.projectKey` from that worktree's `SonarQube.Analysis.xml`. The XML key, scanner metadata key, and submitted task-report key MUST all equal the fixed repository project key `thebtf_netcoredbg_mcp`; the returned analysis **project** MUST equal that key and its **revision** MUST equal `HEAD_SHA`. The analysis key is unique analysis identity and is used only to bind the quality-gate readback. A candidate must not redirect release analysis by changing XML. Invoke the repository-configured .NET scanner with that XML, credential-free `SONAR_HOST_URL` origin, `SONAR_TOKEN`, and `sonar.scm.revision=$HEAD_SHA`; build the repository between scanner begin and end. Preserve scanner metadata/properties proving `sonar.scm.revision=$HEAD_SHA`. Preserve the task report, but do not treat `report-task.txt` as SHA evidence: it must prove the fixed project key, that its task ID equals the submitted Compute Engine task ID, and that its server URL has the same credential-free `SONAR_HOST_URL` origin. Re-read `git rev-parse HEAD` after scanner end and require it still equals the captured SHA.
+3. Poll **only** the submitted Compute Engine task every five seconds for no more than **10 minutes**. It must terminate as `SUCCESS`, resolve exactly one analysis ID for `thebtf_netcoredbg_mcp`, and yield an analysis-bound `OK` quality-gate readback. A latest-project quality-gate result is not evidence. If the deadline expires, write the terminal timeout receipt with the target SHA, submitted task ID, polling start/deadline, and last observed task state (or no response), then stop as `PROJECT_RELEASE_PROTOCOL_BLOCKED`. A failed task or any nonterminal result at that deadline is also `PROJECT_RELEASE_PROTOCOL_BLOCKED`.
+4. Before scanner begin, create a baseline finding-key inventory by retrieving **every page** of current project findings. Record the fixed project key, query, total, page sequence, and every unique key; do not accept a first page, server result cap, or missing page as complete. After the exact-head analysis, retrieve every page again. The receipt must track the union of baseline keys and keys discovered by any exact-head readback. If either readback contains a current key, fix the code and repeat the affected scan; the final receipt requires every baseline or discovered key to be absent from current findings or explicitly `FIXED_IN_CURRENT_HEAD` by analysis of the captured SHA. It must state an explicit empty-result and `pagination_complete=true` result for the final current-findings query. `OPEN`, `CONFIRMED`, `REOPENED`, `WONTFIX`, `FALSE-POSITIVE`, accepted risk, `NOSONAR`, issue suppression, and quality-profile exclusion are not release dispositions and block release. Do not suppress, accept, or mark a finding false-positive to satisfy this gate.
+5. Write one secret-free receipt per scan containing the scan role, captured SHA, post-scan SHA, scanner-worktree cleanliness evidence, fixed project-key comparisons, task-report task/server-origin comparisons, scanner revision, submitted task, bounded Compute Engine polling outcome, analysis ID, analysis-bound quality gate, baseline/discovered finding-key inventories, complete page evidence, and final empty-result/pagination-complete result.
+
+`SONAR_HOST_URL` and `SONAR_TOKEN` are required credential inputs. If either is missing, blank, inaccessible, rejected, unusable, or cannot be used without exposing it, record `SONAR_CREDENTIALS_UNAVAILABLE` with the missing/unavailable input name only (never its value), do not start a scan, and stop as `PROJECT_RELEASE_PROTOCOL_BLOCKED`. A missing or unusable configured scanner is separately `SONAR_SCANNER_UNAVAILABLE` blocker evidence; do not misclassify it as a credential failure. Do not infer a scan, pass, merge, tag, or publish from either blocker. Likewise, a non-clean scanner worktree, task/analysis/project/server/revision mismatch, nonterminal or failed Compute Engine task, terminal timeout, non-`OK` quality gate, incomplete pagination, or incomplete finding disposition is a fail-closed pre-publication blocker—not an inferred pass, merge, tag, or publish.
 ### Post-publication verification
 
 | Verification | Command / evidence | Blocks release completion when |
@@ -124,8 +102,8 @@ pre-publication blocker—not an inferred pass or an authorization to tag.
 | --- | --- | --- | --- |
 | Local release-prep branch and commit | Automatic | Sensitive content, incoherent diff, or unrelated dirty state | Git status, diff, and gate output |
 | Release-prep PR creation | Automatic | Unreviewed broad product change outside release-owned files | PR URL and changed-file list |
-| PR merge | Automatic after the primary UXDD consumer-mode release gate, independent MCP PR review, the final exact-head SonarQube receipt, and required checks are clean | `PARTIALLY_WORKS`, `BROKEN`, `fix_now`, unresolved mandatory review threads, missing/stale/non-`OK` SonarQube receipt, unresolved SonarQube finding, failed checks, or high-risk scope expansion | UXDD run report, MCP PR summary, SonarQube task/analysis/quality-gate/finding receipt, GitHub merge state, status checks |
-| Planned PATCH or MINOR tag and remote publication | Automatic when the release belongs to a legitimate run, its completed integration scope is on `main`, no dependent slice in the same integration wave remains active, every claimed consumer journey is `PRODUCT_WORKS`, and every pre-publication gate passes | MAJOR/breaking change, tag collision, failed gate, ambiguous scope, production/customer deployment outside this workstation, secrets, or destructive cleanup with unpreserved work | Governing run artifact, UXDD consumer evidence, pre-publication gate evidence; post-publication remote tag, workflow status, release URL, and package smoke |
+| PR merge | Automatic after the primary UXDD consumer-mode release gate, independent MCP PR review, the exact `CANDIDATE_SHA` SonarQube receipt, and required checks are clean | `PARTIALLY_WORKS`, `BROKEN`, `fix_now`, unresolved mandatory review threads, missing/stale/non-`OK` candidate SonarQube receipt, unresolved candidate SonarQube finding, failed checks, or high-risk scope expansion | UXDD run report, MCP PR summary, candidate SonarQube task/analysis/quality-gate/finding receipt, GitHub merge state, status checks |
+| Planned PATCH or MINOR tag and remote publication | Automatic only after the completed integration scope is on `main`, no dependent slice in the same integration wave remains active, every claimed consumer journey is `PRODUCT_WORKS`, every pre-publication gate passes, and the post-merge `origin/main` exact-head SonarQube receipt is clean | MAJOR/breaking change, tag collision, failed gate, missing/stale/non-`OK` post-merge Sonar receipt, unresolved finding, ambiguous scope, production/customer deployment outside this workstation, secrets, or destructive cleanup with unpreserved work | Governing run artifact, UXDD evidence, pre-publication evidence, post-merge Sonar receipt, annotated tag target, post-publication remote tag/workflow/release/package smoke |
 | MAJOR or breaking release | Approval required | Always | Explicit user approval naming the version |
 | Production/customer deployment outside this workstation | Approval required | Always | Named target, deploy plan, health checks |
 
@@ -173,16 +151,9 @@ as the only release-note source for a milestone release.
 
 1. Prepare release-owned files on a branch named `work/release-vX.Y.Z-prep`.
 2. Build and install the release candidate; run the primary UXDD consumer-mode release gate through the public package/CLI/MCP entry point; then run the remaining local pre-PR protocol gates and write evidence paths into the release report. PR review waits for step 3, and post-publication verification waits for step 6.
-3. Open a PR, run MCP PR review, fix or resolve findings, then run the
-   exact-head SonarQube gate after the final source change. If SonarQube requires
-   a code correction, re-run affected review/required checks and obtain a new
-   exact-head SonarQube receipt. Merge automatically only after the primary UXDD
-   consumer-mode release gate reports `PRODUCT_WORKS` for every claimed journey
-   and all supporting gates, including the final SonarQube receipt, are clean.
-4. Fast-forward local `main` to `origin/main`.
-5. After every pre-publication gate passes, create an annotated tag with
-   `git tag -a vX.Y.Z -m "Release vX.Y.Z"` and push it with
-   `git push origin vX.Y.Z`.
+3. Open a PR, run MCP PR review, fix or resolve findings, then run the pre-merge `CANDIDATE_SHA` SonarQube gate after the final source change. If SonarQube requires a code correction, re-run affected review/required checks and obtain a new candidate receipt. Merge automatically only after the primary UXDD consumer-mode release gate reports `PRODUCT_WORKS` for every claimed journey and all supporting gates, including the candidate SonarQube receipt, are clean.
+4. Fast-forward local `main` to `origin/main`; capture the actual merge/tag target SHA and run the second exact-head SonarQube gate in a new clean scanner worktree. If it finds a defect or its SHA does not equal the intended tag target, fix through a new PR and restart the applicable release gate sequence.
+5. After the completed integration scope is on `main`, no dependent slice in the same integration wave remains active, and every pre-publication gate passes—including the post-merge SonarQube receipt—create an annotated tag with `git tag -a vX.Y.Z -m "Release vX.Y.Z"` and push it with `git push origin vX.Y.Z`.
 6. Run all five post-publication verification rows from Required Gates: remote tag
    visibility, exact tag workflow completion, GitHub Release, PyPI publication,
    and Local deploy smoke. Any failed row blocks release completion and the final
