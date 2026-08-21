@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using NetCoreDbg.Mcp.CodeSearch.Core;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
@@ -77,7 +78,7 @@ internal sealed class NativeCodeSearch
         var name = RequiredString(arguments, "name");
         var kind = OptionalString(arguments, "kind");
         var engine = await CreateEngineAsync(server, cancellationToken).ConfigureAwait(false);
-        var results = engine.FindCodeSymbol(name, kind, cancellationToken);
+        var results = ToJson(engine.FindCodeSymbol(name, kind, cancellationToken));
         return Success(new JsonObject
         {
             ["results"] = results,
@@ -94,7 +95,7 @@ internal sealed class NativeCodeSearch
         var name = RequiredString(arguments, "name");
         var maxResults = OptionalInt32(arguments, "max_results", 1000);
         var engine = await CreateEngineAsync(server, cancellationToken).ConfigureAwait(false);
-        var results = engine.FindCodeReferences(name, maxResults, cancellationToken);
+        var results = ToJson(engine.FindCodeReferences(name, maxResults, cancellationToken));
         return Success(new JsonObject
         {
             ["results"] = results,
@@ -112,13 +113,13 @@ internal sealed class NativeCodeSearch
         var line = RequiredInt32(arguments, "line");
         var radius = OptionalInt32(arguments, "radius", 10);
         var engine = await CreateEngineAsync(server, cancellationToken).ConfigureAwait(false);
-        var sourceContext = engine.GetSourceContext(file, line, radius, cancellationToken);
+        var sourceContext = ToJson(engine.GetSourceContext(file, line, radius, cancellationToken));
         sourceContext["project_root"] = engine.ProjectRoot;
         return Success(sourceContext);
     }
 
 
-    private async ValueTask<SourceSearchEngine> CreateEngineAsync(McpServer server, CancellationToken cancellationToken)
+    private async ValueTask<SymbolSearchEngine> CreateEngineAsync(McpServer server, CancellationToken cancellationToken)
     {
         var projectRoot = await _projectRootResolver.ResolveAsync(server, cancellationToken).ConfigureAwait(false);
         if (projectRoot is null)
@@ -126,7 +127,62 @@ internal sealed class NativeCodeSearch
             throw new InvalidOperationException(UnconfiguredProjectMessage);
         }
 
-        return new SourceSearchEngine(projectRoot);
+        return new SymbolSearchEngine(projectRoot, LegacySearchPolicy.Instance);
+    }
+
+    private static JsonArray ToJson(IReadOnlyList<SymbolMatch> matches)
+    {
+        var results = new JsonArray();
+        foreach (var match in matches)
+        {
+            results.Add(new JsonObject
+            {
+                ["file"] = match.File,
+                ["line"] = match.Line,
+                ["name"] = match.Name,
+                ["kind"] = match.Kind,
+                ["context"] = match.Context,
+            });
+        }
+
+        return results;
+    }
+
+    private static JsonArray ToJson(IReadOnlyList<ReferenceMatch> matches)
+    {
+        var results = new JsonArray();
+        foreach (var match in matches)
+        {
+            results.Add(new JsonObject
+            {
+                ["file"] = match.File,
+                ["line"] = match.Line,
+                ["context"] = match.Context,
+            });
+        }
+
+        return results;
+    }
+
+    private static JsonObject ToJson(SourceContext sourceContext)
+    {
+        var lines = new JsonArray();
+        foreach (var line in sourceContext.Lines)
+        {
+            lines.Add(new JsonObject
+            {
+                ["line"] = line.Line,
+                ["text"] = line.Text,
+            });
+        }
+
+        return new JsonObject
+        {
+            ["file"] = sourceContext.File,
+            ["start_line"] = sourceContext.StartLine,
+            ["end_line"] = sourceContext.EndLine,
+            ["lines"] = lines,
+        };
     }
 
     private static string RequiredString(IDictionary<string, JsonElement>? arguments, string name)
@@ -217,584 +273,6 @@ internal sealed class NativeCodeSearch
     };
 }
 
-/// <summary>Deterministic, project-bounded file traversal and source search.</summary>
-internal sealed class SourceSearchEngine
-{
-    private static readonly HashSet<string> SourceExtensions = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ".cs", ".xaml", ".axaml", ".csproj", ".json", ".config",
-    };
-    private static readonly HashSet<string> AlwaysIgnoredDirectories = new(StringComparer.Ordinal)
-    {
-        ".git", ".hg", ".svn",
-    };
-    private static readonly string[] SymbolKinds = ["class", "method", "property", "field"];
-    private const int MaximumResults = 1000;
-    private const string Modifiers =
-        "public|private|protected|internal|static|abstract|sealed|partial|virtual|override|async|extern|readonly|const|volatile|required|new";
-    private const string TypePattern = @"[\w.<>,\[\]?]+";
-
-    private readonly string _projectRoot;
-    private readonly IReadOnlyList<GitIgnoreRule> _ignoreRules;
-
-    internal SourceSearchEngine(string projectRoot)
-    {
-        if (!Directory.Exists(projectRoot))
-        {
-            throw new DirectoryNotFoundException($"Project root is not a directory: {projectRoot}");
-        }
-
-        _projectRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(projectRoot));
-        _ignoreRules = LoadGitIgnoreRules(_projectRoot);
-    }
-
-    internal string ProjectRoot => _projectRoot;
-
-    internal JsonArray FindCodeSymbol(string name, string? kind, CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(name))
-        {
-            throw new ArgumentException("Symbol name must not be empty");
-        }
-
-        if (kind is not null && !SymbolKinds.Contains(kind, StringComparer.Ordinal))
-        {
-            throw new ArgumentException(
-                $"Unsupported symbol kind '{kind}'. Supported kinds: class, field, method, property");
-        }
-
-        var kinds = kind is null ? SymbolKinds : [kind];
-        var patterns = kinds.Select(symbolKind => (Kind: symbolKind, Pattern: CreateSymbolPattern(symbolKind, name))).ToArray();
-        var results = new JsonArray();
-
-        foreach (var path in SourceFiles("*.cs", cancellationToken))
-        {
-            var relativeFile = RelativePath(path);
-            var lines = ReadLines(path);
-            for (var index = 0; index < lines.Length; index++)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                foreach (var (symbolKind, pattern) in patterns)
-                {
-                    if (!pattern.IsMatch(lines[index]))
-                    {
-                        continue;
-                    }
-
-                    results.Add(new JsonObject
-                    {
-                        ["file"] = relativeFile,
-                        ["line"] = index + 1,
-                        ["name"] = name,
-                        ["kind"] = symbolKind,
-                        ["context"] = lines[index].Trim(),
-                    });
-                    break;
-                }
-            }
-        }
-
-        return results;
-    }
-
-    internal JsonArray FindCodeReferences(string name, int maxResults, CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(name))
-        {
-            throw new ArgumentException("Reference name must not be empty");
-        }
-        if (maxResults < 1)
-        {
-            throw new ArgumentException("max_results must be at least 1");
-        }
-
-        var limit = Math.Min(maxResults, MaximumResults);
-        var referencePattern = CreateReferencePattern(name);
-        var results = new JsonArray();
-
-        foreach (var path in SourceFiles(null, cancellationToken))
-        {
-            var relativeFile = RelativePath(path);
-            var lines = ReadLines(path);
-            for (var index = 0; index < lines.Length; index++)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                if (!referencePattern.IsMatch(lines[index]))
-                {
-                    continue;
-                }
-
-                results.Add(new JsonObject
-                {
-                    ["file"] = relativeFile,
-                    ["line"] = index + 1,
-                    ["context"] = lines[index].Trim(),
-                });
-                if (results.Count >= limit)
-                {
-                    return results;
-                }
-            }
-        }
-
-        return results;
-    }
-
-    internal JsonObject GetSourceContext(string filePath, int line, int radius, CancellationToken cancellationToken)
-    {
-        if (line < 1)
-        {
-            throw new ArgumentException("line must be at least 1");
-        }
-        if (radius < 0)
-        {
-            throw new ArgumentException("radius must be non-negative");
-        }
-
-        var path = ResolveProjectFile(filePath, cancellationToken);
-        var lines = ReadLines(path);
-        if (line > lines.Length)
-        {
-            throw new ArgumentException($"line {line} is outside file range 1..{lines.Length}");
-        }
-
-        var startLine = Math.Max(1, line - radius);
-        var endLine = Math.Min(lines.Length, line + radius);
-        var selectedLines = new JsonArray();
-        for (var lineNumber = startLine; lineNumber <= endLine; lineNumber++)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            selectedLines.Add(new JsonObject
-            {
-                ["line"] = lineNumber,
-                ["text"] = lines[lineNumber - 1],
-            });
-        }
-
-        return new JsonObject
-        {
-            ["file"] = RelativePath(path),
-            ["start_line"] = startLine,
-            ["end_line"] = endLine,
-            ["lines"] = selectedLines,
-        };
-    }
-
-
-    private IEnumerable<string> SourceFiles(string? fileGlob, CancellationToken cancellationToken)
-    {
-        foreach (var directory in TraversedDirectories(new DirectoryInfo(_projectRoot), cancellationToken))
-        {
-            foreach (var file in EnumerateFiles(directory))
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                if (!IsSourceFile(file) || (fileGlob is not null && !MatchesFileGlob(file.FullName, fileGlob)))
-                {
-                    continue;
-                }
-
-                yield return file.FullName;
-            }
-        }
-    }
-
-    private IEnumerable<DirectoryInfo> TraversedDirectories(DirectoryInfo directory, CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        yield return directory;
-
-        foreach (var child in EnumerateDirectories(directory))
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (IsReparsePoint(child) || ShouldPruneDirectory(child.FullName))
-            {
-                continue;
-            }
-
-            foreach (var descendant in TraversedDirectories(child, cancellationToken))
-            {
-                yield return descendant;
-            }
-        }
-    }
-
-    private bool IsSourceFile(FileInfo file)
-    {
-        if (!SourceExtensions.Contains(file.Extension) || !file.Exists || !ResolvesWithinRoot(file))
-        {
-            return false;
-        }
-
-        return !IsIgnored(file.FullName, isDirectory: false);
-    }
-
-    private bool ShouldPruneDirectory(string path) =>
-        IsIgnored(path, isDirectory: true) && !HasDescendantNegation(path);
-
-    private bool IsIgnored(string path, bool isDirectory)
-    {
-        var relativePath = RelativePath(path);
-        if (isDirectory && AlwaysIgnoredDirectories.Contains(Path.GetFileName(path)))
-        {
-            return true;
-        }
-
-        var ignored = false;
-        foreach (var rule in _ignoreRules)
-        {
-            if (rule.Matches(relativePath, isDirectory))
-            {
-                ignored = !rule.Negated;
-            }
-        }
-
-        return ignored;
-    }
-
-    private bool HasDescendantNegation(string path)
-    {
-        var relativePath = RelativePath(path).Trim('/');
-        foreach (var rule in _ignoreRules)
-        {
-            if (!rule.Negated)
-            {
-                continue;
-            }
-            if (!rule.Anchored && !rule.HasSlash)
-            {
-                return true;
-            }
-
-            var pattern = rule.Pattern.Trim('/');
-            if (string.Equals(pattern, relativePath, StringComparison.Ordinal)
-                || pattern.StartsWith(relativePath + "/", StringComparison.Ordinal))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private string ResolveProjectFile(string rawPath, CancellationToken cancellationToken)
-    {
-        var expandedPath = ExpandHome(rawPath);
-        string candidate;
-        try
-        {
-            candidate = Path.GetFullPath(
-                Path.IsPathFullyQualified(expandedPath)
-                    ? expandedPath
-                    : Path.Combine(_projectRoot, expandedPath));
-        }
-        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
-        {
-            throw new FileNotFoundException($"Source file not found: {rawPath}");
-        }
-
-        if (!IsWithinRoot(candidate))
-        {
-            throw new ArgumentException($"Path is outside project root: {rawPath}");
-        }
-
-        if (Directory.Exists(candidate))
-        {
-            throw new IOException($"Path is not a file: {rawPath}");
-        }
-        if (File.Exists(candidate))
-        {
-            var file = new FileInfo(candidate);
-            if (IsSourceFile(file))
-            {
-                return candidate;
-            }
-
-            throw new FileNotFoundException($"Source file not found: {rawPath}");
-        }
-
-        if (IsBasenameOnly(rawPath))
-        {
-            return ResolveUniqueBasename(Path.GetFileName(rawPath), cancellationToken);
-        }
-
-        throw new FileNotFoundException($"Source file not found: {rawPath}");
-    }
-
-    private string ResolveUniqueBasename(string filename, CancellationToken cancellationToken)
-    {
-        var matches = SourceFiles(null, cancellationToken)
-            .Where(path => string.Equals(Path.GetFileName(path), filename, StringComparison.Ordinal))
-            .ToArray();
-        return matches.Length switch
-        {
-            0 => throw new FileNotFoundException($"Source file not found: {filename}"),
-            1 => matches[0],
-            _ => throw new ArgumentException($"Source file basename is ambiguous: {filename}"),
-        };
-    }
-
-    private static string ExpandHome(string path)
-    {
-        if (path.Length == 1 && path[0] == '~')
-        {
-            return Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        }
-        if (path.Length > 1 && path[0] == '~' && (path[1] == '/' || path[1] == '\\'))
-        {
-            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), path[2..]);
-        }
-
-        return path;
-    }
-
-    private static bool IsBasenameOnly(string path) =>
-        path.IndexOf(Path.DirectorySeparatorChar) < 0
-        && path.IndexOf(Path.AltDirectorySeparatorChar) < 0;
-
-    private bool MatchesFileGlob(string path, string fileGlob)
-    {
-        var relativePath = RelativePath(path);
-        return GlobMatches(relativePath, fileGlob) || GlobMatches(Path.GetFileName(path), fileGlob);
-    }
-
-    private string RelativePath(string path) => Path.GetRelativePath(_projectRoot, path).Replace('\\', '/');
-
-    private bool ResolvesWithinRoot(FileInfo file)
-    {
-        try
-        {
-            var resolved = file.ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? file.FullName;
-            return IsWithinRoot(resolved);
-        }
-        catch (IOException)
-        {
-            return false;
-        }
-    }
-
-    private bool IsWithinRoot(string path)
-    {
-        var relative = Path.GetRelativePath(_projectRoot, Path.GetFullPath(path));
-        return !string.Equals(relative, "..", StringComparison.Ordinal)
-            && !relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal)
-            && !Path.IsPathFullyQualified(relative);
-    }
-
-    private static Regex CreateSymbolPattern(string kind, string name)
-    {
-        var escapedName = Regex.Escape(name);
-        var pattern = kind switch
-        {
-            "class" => $@"^\s*(?:(?:{Modifiers})\s+)*(?:class|record|struct|interface)\s+{escapedName}\b",
-            "method" => $@"^\s*(?:(?:{Modifiers})\s+)*(?:(?:{TypePattern}\s+)+{escapedName}|{escapedName})\s*\(",
-            "property" => $@"^\s*(?:(?:{Modifiers})\s+)*(?:{TypePattern}\s+)+{escapedName}\s*\{{",
-            "field" => $@"^\s*(?:(?:{Modifiers})\s+)*(?:{TypePattern}\s+)+{escapedName}\s*(?:=|;)",
-            _ => throw new ArgumentOutOfRangeException(nameof(kind)),
-        };
-        return new Regex(pattern, RegexOptions.CultureInvariant);
-    }
-
-    private static Regex CreateReferencePattern(string name)
-    {
-        var escaped = Regex.Escape(name);
-        var pattern = Regex.IsMatch(name, "^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.CultureInvariant)
-            ? $@"(?<![A-Za-z0-9_]){escaped}(?![A-Za-z0-9_])"
-            : escaped;
-        return new Regex(pattern, RegexOptions.CultureInvariant);
-    }
-
-    private static string[] ReadLines(string path)
-    {
-        var text = new UTF8Encoding(
-            encoderShouldEmitUTF8Identifier: false,
-            throwOnInvalidBytes: false).GetString(File.ReadAllBytes(path));
-        var lines = new List<string>();
-        var start = 0;
-        for (var index = 0; index < text.Length; index++)
-        {
-            var character = text[index];
-            var isLineBreak = character is '\n' or '\r' or '\v' or '\f'
-                or '\u001c' or '\u001d' or '\u001e' or '\u0085' or '\u2028' or '\u2029';
-            if (!isLineBreak)
-            {
-                continue;
-            }
-
-            lines.Add(text[start..index]);
-            if (character == '\r' && index + 1 < text.Length && text[index + 1] == '\n')
-            {
-                index++;
-            }
-            start = index + 1;
-        }
-
-        if (start < text.Length)
-        {
-            lines.Add(text[start..]);
-        }
-        return lines.ToArray();
-    }
-
-    private static IReadOnlyList<DirectoryInfo> EnumerateDirectories(DirectoryInfo directory)
-    {
-        try
-        {
-            return directory.EnumerateDirectories().OrderBy(static entry => entry.Name, StringComparer.Ordinal).ToArray();
-        }
-        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
-        {
-            return [];
-        }
-    }
-
-    private static IReadOnlyList<FileInfo> EnumerateFiles(DirectoryInfo directory)
-    {
-        try
-        {
-            return directory.EnumerateFiles().OrderBy(static entry => entry.Name, StringComparer.Ordinal).ToArray();
-        }
-        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
-        {
-            return [];
-        }
-    }
-
-    private static bool IsReparsePoint(DirectoryInfo directory)
-    {
-        try
-        {
-            return (directory.Attributes & FileAttributes.ReparsePoint) != 0;
-        }
-        catch (IOException)
-        {
-            return true;
-        }
-    }
-
-    private static IReadOnlyList<GitIgnoreRule> LoadGitIgnoreRules(string root)
-    {
-        var gitIgnore = Path.Combine(root, ".gitignore");
-        if (!File.Exists(gitIgnore))
-        {
-            return [];
-        }
-
-        return ReadLines(gitIgnore)
-            .Select(GitIgnoreRule.Parse)
-            .Where(static rule => rule is not null)
-            .Select(static rule => rule!)
-            .ToArray();
-    }
-
-    private static bool GlobMatches(string value, string pattern)
-    {
-        var expression = new StringBuilder("^");
-        for (var index = 0; index < pattern.Length; index++)
-        {
-            switch (pattern[index])
-            {
-                case '*':
-                    expression.Append(".*");
-                    break;
-                case '?':
-                    expression.Append('.');
-                    break;
-                case '[':
-                    var closing = pattern.IndexOf(']', index + 1);
-                    if (closing <= index + 1)
-                    {
-                        expression.Append("\\[");
-                        break;
-                    }
-
-                    var characterClass = pattern[(index + 1)..closing];
-                    expression.Append('[');
-                    expression.Append(characterClass[0] == '!' ? "^" + characterClass[1..] : characterClass);
-                    expression.Append(']');
-                    index = closing;
-                    break;
-                default:
-                    expression.Append(Regex.Escape(pattern[index].ToString()));
-                    break;
-            }
-        }
-        expression.Append('$');
-        return Regex.IsMatch(value, expression.ToString(), RegexOptions.CultureInvariant);
-    }
-
-
-
-
-    private sealed record GitIgnoreRule(
-        string Pattern,
-        bool Negated,
-        bool DirectoryOnly,
-        bool Anchored,
-        bool HasSlash)
-    {
-        internal static GitIgnoreRule? Parse(string line)
-        {
-            var value = line.Trim();
-            if (value.Length == 0 || value.StartsWith('#'))
-            {
-                return null;
-            }
-
-            var negated = value.StartsWith('!');
-            if (negated)
-            {
-                value = value[1..].Trim();
-                if (value.Length == 0)
-                {
-                    return null;
-                }
-            }
-
-            var anchored = value.StartsWith('/');
-            if (anchored)
-            {
-                value = value.TrimStart('/');
-            }
-
-            var directoryOnly = value.EndsWith('/');
-            value = value.TrimEnd('/');
-            return value.Length == 0
-                ? null
-                : new GitIgnoreRule(value, negated, directoryOnly, anchored, value.Contains('/'));
-        }
-
-        internal bool Matches(string relativePath, bool isDirectory)
-        {
-            var path = relativePath.Replace('\\', '/').Trim('/');
-            if (path.Length == 0)
-            {
-                return false;
-            }
-
-            if (DirectoryOnly && !isDirectory)
-            {
-                if (Anchored || HasSlash)
-                {
-                    return string.Equals(path, Pattern, StringComparison.Ordinal)
-                        || path.StartsWith(Pattern + "/", StringComparison.Ordinal);
-                }
-
-                return path.Split('/').SkipLast(1).Any(part => GlobMatches(part, Pattern));
-            }
-
-            if (Anchored || HasSlash)
-            {
-                return GlobMatches(path, Pattern);
-            }
-            if (DirectoryOnly)
-            {
-                return path.Split('/').Any(part => GlobMatches(part, Pattern));
-            }
-
-            return GlobMatches(Path.GetFileName(path), Pattern);
-        }
-    }
-}
 
 /// <summary>Exact public definitions for the three deterministic native replacements.</summary>
 internal static class NativeCodeSearchCatalog
