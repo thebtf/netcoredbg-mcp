@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.DependencyInjection;
@@ -35,11 +36,17 @@ internal static class Program
             Environment.GetEnvironmentVariable("NETCOREDBG_PATH"),
             Environment.GetEnvironmentVariable("FLAUI_BRIDGE_PATH"),
             Environment.GetEnvironmentVariable("NETCOREDBG_MCP_ARTIFACT_ROOT"));
+        var host = BuildHost(sessions);
+        await host.RunAsync().ConfigureAwait(false);
+    }
+
+    private static IHost BuildHost(DebugSessionRegistry sessions)
+    {
         var builder = Host.CreateApplicationBuilder();
         builder.Logging.ClearProviders();
         builder.Logging.AddConsole(options => options.LogToStandardErrorThreshold = LogLevel.Trace);
         builder.Services.AddSingleton(sessions);
-        builder.Services.AddSingleton<IHostedService>(new SessionDisposer(sessions));
+        builder.Services.AddHostedService(_ => new SessionDisposer(sessions));
 
         builder.Services.AddMcpServer(options =>
             {
@@ -65,8 +72,7 @@ internal static class Program
                 await next(context, cancellationToken).ConfigureAwait(false);
             }));
 
-        using var host = builder.Build();
-        await host.RunAsync().ConfigureAwait(false);
+        return builder.Build();
     }
 
     private static async Task RunUnixProcessGroupProxyAsync(string debuggerPath, string terminationControlHandle)
@@ -107,12 +113,15 @@ internal static class Program
         private const string StartDebug = "start_debug";
         private const string GetDebugState = "get_debug_state";
         private const string StopDebug = "stop_debug";
+        private const string GetThreads = "get_threads";
         private const string InputRequestId = "start_debug_program";
         private static readonly TimeSpan InitializeTimeout = TimeSpan.FromSeconds(10);
         private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(30);
         private static readonly TimeSpan StopTimeout = TimeSpan.FromSeconds(1);
+        private const int MaximumSerializedThreadsBytes = 256 * 1024;
 
         private readonly ConcurrentDictionary<string, NetCoreDbgSession> _sessions = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, SessionSlot> _slots = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, NativeSceneSessionBinding> _nativeSceneBindings = new(StringComparer.Ordinal);
         private readonly string? _debuggerPath;
         private readonly string? _bridgePath;
@@ -182,6 +191,7 @@ internal static class Program
                 StartDebug => await StartAsync(context, cancellationToken).ConfigureAwait(false),
                 GetDebugState => await GetStateAsync(request, cancellationToken).ConfigureAwait(false),
                 StopDebug => await StopAsync(request, cancellationToken).ConfigureAwait(false),
+                GetThreads => await GetThreadsAsync(request, cancellationToken).ConfigureAwait(false),
                 _ when IsNativeSceneTool(request.Name) => await NativeSceneToolDispatcher.DispatchAsync(
                     request.Name,
                     request.Arguments,
@@ -240,7 +250,7 @@ internal static class Program
 
             NetCoreDbgSession? session = null;
             NativeSceneSessionBinding? binding = null;
-            string? registeredToken = null;
+            SessionSlot? registeredSlot = null;
             try
             {
                 var token = CreateToken();
@@ -254,9 +264,19 @@ internal static class Program
                     binding.ProbeLaunchEnvironment,
                     cancellationToken).ConfigureAwait(false);
                 binding.AttachSession(session);
-                if (!_sessions.TryAdd(token, session) || !_nativeSceneBindings.TryAdd(token, binding))
+                SessionSlot? slot = null;
+                slot = new SessionSlot(
+                    StopTimeout,
+                    session.StopAsync,
+                    () => DisposeSlotResourcesAsync(session, binding),
+                    () => RemoveSlot(token, session, binding, slot!));
+                if (!_sessions.TryAdd(token, session)
+                    || !_slots.TryAdd(token, slot)
+                    || !_nativeSceneBindings.TryAdd(token, binding))
                 {
+                    _slots.TryRemove(new KeyValuePair<string, SessionSlot>(token, slot));
                     _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(token, session));
+                    _nativeSceneBindings.TryRemove(new KeyValuePair<string, NativeSceneSessionBinding>(token, binding));
                     await binding.DisposeAsync().ConfigureAwait(false);
                     binding = null;
                     await _dispose(session).ConfigureAwait(false);
@@ -264,50 +284,70 @@ internal static class Program
                     return Error("debug_session_not_found", "DEBUG_SESSION_NOT_FOUND");
                 }
 
-                registeredToken = token;
-                binding = null;
+                registeredSlot = slot;
+                session.ReaderFailed += failedSession => OnReaderFailed(token, failedSession);
+                if (!_isUsable(session))
+                {
+                    OnReaderFailed(token, session);
+                }
+
                 return Success("start_debug_success", token, session.State);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                if (binding is not null)
+                if (registeredSlot is not null)
                 {
-                    await binding.DisposeAsync().ConfigureAwait(false);
+                    try
+                    {
+                        await registeredSlot.CloseAndDrainAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception)
+                    {
+                    }
                 }
-
-                if (session is not null)
+                else
                 {
-                    await _dispose(session).ConfigureAwait(false);
+                    if (binding is not null)
+                    {
+                        await binding.DisposeAsync().ConfigureAwait(false);
+                    }
+
+                    if (session is not null)
+                    {
+                        await _dispose(session).ConfigureAwait(false);
+                    }
                 }
 
                 throw;
             }
-
             catch (Exception) when (!cancellationToken.IsCancellationRequested)
             {
-                if (registeredToken is not null)
-                {
-                    if (_nativeSceneBindings.TryRemove(registeredToken, out var registeredBinding))
-                    {
-                        await registeredBinding.DisposeAsync().ConfigureAwait(false);
-                    }
-
-                    _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(registeredToken, session!));
-                }
-
-                if (binding is not null)
-                {
-                    await binding.DisposeAsync().ConfigureAwait(false);
-                }
-
-                if (session is not null)
+                if (registeredSlot is not null)
                 {
                     try
                     {
-                        await _dispose(session).ConfigureAwait(false);
+                        await registeredSlot.CloseAndDrainAsync().ConfigureAwait(false);
                     }
                     catch (Exception)
                     {
+                    }
+                }
+                else
+                {
+                    if (binding is not null)
+                    {
+                        await binding.DisposeAsync().ConfigureAwait(false);
+                    }
+
+                    if (session is not null)
+                    {
+                        try
+                        {
+                            await _dispose(session).ConfigureAwait(false);
+                        }
+                        catch (Exception)
+                        {
+                        }
                     }
                 }
 
@@ -336,19 +376,101 @@ internal static class Program
             }
 
             var isUsable = _isUsable(session);
-
-            if (!isUsable && _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(sessionId!, session)))
+            if (!isUsable)
             {
-                await RemoveNativeSceneBindingAsync(sessionId!).ConfigureAwait(false);
-                await DisposeRemovedSessionAsync(session).ConfigureAwait(false);
+                if (_slots.TryGetValue(sessionId!, out var slot))
+                {
+                    try
+                    {
+                        await slot.CloseAndDrainAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+                else if (_sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(sessionId!, session)))
+                {
+                    await RemoveNativeSceneBindingAsync(sessionId!).ConfigureAwait(false);
+                    await DisposeRemovedSessionAsync(session).ConfigureAwait(false);
+                }
+
                 return NotFound();
             }
 
-            return isUsable
-                ? Success("debug_state_success", sessionId!, session.State)
-                : NotFound();
+            return Success("debug_state_success", sessionId!, session.State);
         }
 
+        private async ValueTask<CallToolResult> GetThreadsAsync(
+            CallToolRequestParams request,
+            CancellationToken cancellationToken)
+        {
+            if (!TryReadSessionId(request.Arguments, out var sessionId, out var hasSessionId) || !hasSessionId)
+            {
+                return InvalidArguments(GetThreads);
+            }
+
+            if (!_sessions.TryGetValue(sessionId!, out var session)
+                || !_slots.TryGetValue(sessionId!, out var slot))
+            {
+                await RemoveNativeSceneBindingAsync(sessionId!).ConfigureAwait(false);
+                return NotFound();
+            }
+
+            var lease = slot.TryAcquire();
+            if (lease is null)
+            {
+                return NotFound();
+            }
+
+            var closeAfterLease = false;
+            try
+            {
+                if (!_isUsable(session))
+                {
+                    closeAfterLease = true;
+                    return NotFound();
+                }
+
+                using var operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.AbortToken);
+                var threads = await session.GetThreadsAsync(operation.Token).ConfigureAwait(false);
+                if (threads.IsRefused)
+                {
+                    return Error("dap_threads_refused", "DAP_THREADS_REFUSED");
+                }
+
+                var serialized = JsonSerializer.Serialize(new ThreadsSuccessContent("threads_success", threads.Threads));
+                if (Encoding.UTF8.GetByteCount(serialized) > MaximumSerializedThreadsBytes)
+                {
+                    closeAfterLease = true;
+                    return Error("dap_threads_protocol_error", "DAP_THREADS_PROTOCOL_ERROR");
+                }
+
+                return SerializedResult(serialized, isError: false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+                closeAfterLease = true;
+                return Error("dap_threads_protocol_error", "DAP_THREADS_PROTOCOL_ERROR");
+            }
+            finally
+            {
+                lease.Dispose();
+                if (closeAfterLease)
+                {
+                    try
+                    {
+                        await slot.CloseAndDrainAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+            }
+        }
         private async ValueTask<CallToolResult> StopAsync(
             CallToolRequestParams request,
             CancellationToken cancellationToken)
@@ -363,14 +485,32 @@ internal static class Program
                 return NotFound();
             }
 
-            if (!_sessions.TryRemove(sessionId!, out var session))
+            if (!_sessions.TryGetValue(sessionId!, out var session))
+            {
+                await RemoveNativeSceneBindingAsync(sessionId!).ConfigureAwait(false);
+                return NotFound();
+            }
+
+            if (_slots.TryGetValue(sessionId!, out var slot))
+            {
+                try
+                {
+                    await slot.CloseAndDrainAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
+                    return StopSuccess(session.State);
+                }
+                catch (Exception) when (!cancellationToken.IsCancellationRequested)
+                {
+                    return NotFound();
+                }
+            }
+
+            if (!_sessions.TryRemove(sessionId!, out session))
             {
                 await RemoveNativeSceneBindingAsync(sessionId!).ConfigureAwait(false);
                 return NotFound();
             }
 
             await RemoveNativeSceneBindingAsync(sessionId!).ConfigureAwait(false);
-
             try
             {
                 await session.StopAsync(cancellationToken).ConfigureAwait(false);
@@ -386,14 +526,194 @@ internal static class Program
 
         public async ValueTask DisposeAsync(CancellationToken cancellationToken)
         {
-            var sessions = _sessions.ToArray();
-            _sessions.Clear();
-            var bindings = _nativeSceneBindings.ToArray();
-            _nativeSceneBindings.Clear();
-            await Task.WhenAll(bindings.Select(static binding => binding.Value.DisposeAsync().AsTask())).ConfigureAwait(false);
-            await Task.WhenAll(sessions.Select(session => session.Value.StopAsync(cancellationToken))).ConfigureAwait(false);
+            var slots = _slots.Values.ToArray();
+            try
+            {
+                await Task.WhenAll(slots.Select(slot => slot.CloseAndDrainAsync(cancellationToken))).ConfigureAwait(false);
+            }
+            finally
+            {
+                var sessions = _sessions.ToArray();
+                _sessions.Clear();
+                var bindings = _nativeSceneBindings.ToArray();
+                _nativeSceneBindings.Clear();
+                await Task.WhenAll(bindings.Select(static binding => binding.Value.DisposeAsync().AsTask())).ConfigureAwait(false);
+                await Task.WhenAll(sessions.Select(session => DisposeRemovedSessionAsync(session.Value, cancellationToken))).ConfigureAwait(false);
+            }
         }
 
+        private void OnReaderFailed(string token, NetCoreDbgSession session)
+        {
+            if (_sessions.TryGetValue(token, out var registeredSession)
+                && ReferenceEquals(session, registeredSession)
+                && _slots.TryGetValue(token, out var slot))
+            {
+                _ = ObserveCloseAsync(slot);
+            }
+        }
+
+        private static async Task ObserveCloseAsync(SessionSlot slot)
+        {
+            try
+            {
+                await slot.CloseAndDrainAsync().ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+            }
+        }
+
+        private void RemoveSlot(
+            string token,
+            NetCoreDbgSession session,
+            NativeSceneSessionBinding binding,
+            SessionSlot slot)
+        {
+            _slots.TryRemove(new KeyValuePair<string, SessionSlot>(token, slot));
+            _sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(token, session));
+            _nativeSceneBindings.TryRemove(new KeyValuePair<string, NativeSceneSessionBinding>(token, binding));
+        }
+
+        private async ValueTask DisposeSlotResourcesAsync(
+            NetCoreDbgSession session,
+            NativeSceneSessionBinding binding)
+        {
+            try
+            {
+                await binding.DisposeAsync().ConfigureAwait(false);
+            }
+            finally
+            {
+                await _dispose(session).ConfigureAwait(false);
+            }
+        }
+
+        private sealed class SessionSlot
+        {
+            private readonly object _gate = new();
+            private readonly TimeSpan _drainTimeout;
+            private readonly Func<CancellationToken, Task> _stop;
+            private readonly Func<ValueTask> _dispose;
+            private readonly Action _remove;
+            private readonly CancellationTokenSource _abort = new();
+            private CancellationTokenRegistration? _cancellationRegistration;
+            private Task? _closeTask;
+            private TaskCompletionSource<bool>? _drained;
+            private int _leases;
+            private bool _closed;
+            private bool _abortDisposed;
+
+            internal SessionSlot(
+                TimeSpan drainTimeout,
+                Func<CancellationToken, Task> stop,
+                Func<ValueTask> dispose,
+                Action remove)
+            {
+                _drainTimeout = drainTimeout;
+                _stop = stop;
+                _dispose = dispose;
+                _remove = remove;
+            }
+
+            internal SessionLease? TryAcquire()
+            {
+                lock (_gate)
+                {
+                    if (_closed)
+                    {
+                        return null;
+                    }
+
+                    _leases++;
+                    return new SessionLease(this, _abort.Token);
+                }
+            }
+
+            internal Task CloseAndDrainAsync(CancellationToken cancellationToken = default)
+            {
+                lock (_gate)
+                {
+                    if (_closeTask is not null)
+                    {
+                        RegisterCancellation(cancellationToken);
+                        return _closeTask;
+                    }
+
+                    _closed = true;
+                    var drained = _leases == 0
+                        ? Task.CompletedTask
+                        : (_drained ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
+                    _remove();
+                    RegisterCancellation(cancellationToken);
+                    return _closeTask = CloseAndDrainCoreAsync(drained);
+                }
+            }
+
+            private async Task CloseAndDrainCoreAsync(Task drained)
+            {
+                try
+                {
+                    var drainExpired = await Task.WhenAny(drained, Task.Delay(_drainTimeout)).ConfigureAwait(false) != drained;
+                    if (drainExpired)
+                    {
+                        _abort.Cancel();
+                    }
+
+                    await drained.ConfigureAwait(false);
+                    await _stop(_abort.IsCancellationRequested ? _abort.Token : CancellationToken.None).ConfigureAwait(false);
+                }
+                finally
+                {
+                    try
+                    {
+                        await _dispose().ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        lock (_gate)
+                        {
+                            _cancellationRegistration?.Dispose();
+                            _abort.Dispose();
+                            _abortDisposed = true;
+                        }
+                    }
+                }
+            }
+
+            private void RegisterCancellation(CancellationToken cancellationToken)
+            {
+                if (!_abortDisposed && !_cancellationRegistration.HasValue && cancellationToken.CanBeCanceled)
+                {
+                    _cancellationRegistration = cancellationToken.Register(
+                        static source => ((CancellationTokenSource)source!).Cancel(),
+                        _abort);
+                }
+            }
+
+            private void Release()
+            {
+                lock (_gate)
+                {
+                    _leases--;
+                    if (_closed && _leases == 0)
+                    {
+                        _drained?.TrySetResult(true);
+                    }
+                }
+            }
+
+            internal sealed class SessionLease(SessionSlot slot, CancellationToken abortToken) : IDisposable
+            {
+                private SessionSlot? _slot = slot;
+
+                internal CancellationToken AbortToken { get; } = abortToken;
+
+                public void Dispose()
+                {
+                    Interlocked.Exchange(ref _slot, null)?.Release();
+                }
+            }
+        }
 
         private static bool IsNativeSceneTool(string tool) => NativeSceneToolDispatcher.ListTools()
             .Any(candidate => StringComparer.Ordinal.Equals(candidate.Name, tool));
@@ -408,7 +728,17 @@ internal static class Program
 
             if (!_isUsable(session))
             {
-                if (_sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(sessionId, session)))
+                if (_slots.TryGetValue(sessionId, out var slot))
+                {
+                    try
+                    {
+                        await slot.CloseAndDrainAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+                else if (_sessions.TryRemove(new KeyValuePair<string, NetCoreDbgSession>(sessionId, session)))
                 {
                     await RemoveNativeSceneBindingAsync(sessionId).ConfigureAwait(false);
                     await DisposeRemovedSessionAsync(session).ConfigureAwait(false);
@@ -428,14 +758,29 @@ internal static class Program
             }
         }
 
-        private async Task DisposeRemovedSessionAsync(NetCoreDbgSession session)
+        private async Task DisposeRemovedSessionAsync(
+            NetCoreDbgSession session,
+            CancellationToken cancellationToken = default)
         {
             try
             {
-                await _dispose(session).ConfigureAwait(false);
+                try
+                {
+                    await session.StopAsync(cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception) when (!cancellationToken.IsCancellationRequested)
+                {
+                }
             }
-            catch (Exception)
+            finally
             {
+                try
+                {
+                    await _dispose(session).ConfigureAwait(false);
+                }
+                catch (Exception)
+                {
+                }
             }
         }
 
@@ -574,6 +919,20 @@ internal static class Program
             Content = [new TextContentBlock { Text = JsonSerializer.Serialize(content) }],
             StructuredContent = JsonSerializer.SerializeToElement(content),
         };
+
+        private static CallToolResult SerializedResult(string serializedContent, bool isError)
+        {
+            using var document = JsonDocument.Parse(serializedContent);
+            return new CallToolResult
+            {
+                ResultType = "complete",
+                IsError = isError,
+                Content = [new TextContentBlock { Text = serializedContent }],
+                StructuredContent = document.RootElement.Clone(),
+            };
+        }
+
+        private sealed record ThreadsSuccessContent(string kind, IReadOnlyList<DapThread> threads);
     }
 
     private static class ToolCatalog
@@ -585,6 +944,7 @@ internal static class Program
                 Tool("start_debug", "Start debugging a program.", "{\"type\":\"object\",\"properties\":{\"program\":{\"type\":\"string\",\"minLength\":1}},\"additionalProperties\":false}"),
                 Tool("get_debug_state", "Get the state of a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":32}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 Tool("stop_debug", "Stop a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":32}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
+                Tool("get_threads", "Get threads in a debug session.", "{\"type\":\"object\",\"properties\":{\"debugSessionId\":{\"type\":\"string\",\"minLength\":1}},\"required\":[\"debugSessionId\"],\"additionalProperties\":false}"),
                 .. NativeSceneToolDispatcher.ListTools(),
             ],
             TimeToLive = CacheLifetime,

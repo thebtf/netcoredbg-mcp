@@ -45,7 +45,8 @@ internal sealed record AdapterOptions(
     bool EnableTerminateAfterInitialization,
     bool ExitAfterLaunchResponse,
     bool SpawnWindowedDescendant,
-    bool PublishSecondWindowedDescendantAfterRelease)
+    bool PublishSecondWindowedDescendantAfterRelease,
+    string ThreadsResponseMode)
 {
     public static AdapterOptions Parse(string[] args, string? environmentOptions)
     {
@@ -70,6 +71,7 @@ internal sealed record AdapterOptions(
         var exitAfterLaunchResponse = false;
         var spawnWindowedDescendant = false;
         var publishSecondWindowedDescendantAfterRelease = false;
+        var threadsResponseMode = "success";
 
         foreach (var argument in args.Concat(SplitOptions(environmentOptions)))
         {
@@ -142,6 +144,9 @@ internal sealed record AdapterOptions(
                     && int.TryParse(argument["--exit-code=".Length..], NumberStyles.None, CultureInfo.InvariantCulture, out var parsedExitCode):
                     exitCode = parsedExitCode;
                     break;
+                case var _ when argument.StartsWith("--threads-response=", StringComparison.Ordinal):
+                    threadsResponseMode = argument["--threads-response=".Length..];
+                    break;
                 default:
                     throw new ArgumentException($"Unknown fixture option '{argument}'.", nameof(args));
             }
@@ -168,7 +173,8 @@ internal sealed record AdapterOptions(
             enableTerminateAfterInitialization,
             exitAfterLaunchResponse,
             spawnWindowedDescendant,
-            publishSecondWindowedDescendantAfterRelease);
+            publishSecondWindowedDescendantAfterRelease,
+            threadsResponseMode);
     }
 
     private static IEnumerable<string> SplitOptions(string? options) =>
@@ -291,10 +297,12 @@ internal sealed class ControlledDapAdapter
     private readonly string? _gracefulReleasePath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_GRACEFUL_RELEASE");
     private readonly string? _configurationDoneCapabilityDeltaReleasePath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_CONFIGURATION_DONE_CAPABILITY_DELTA_RELEASE");
     private readonly string? _secondWindowedDescendantReleasePath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_SECOND_WINDOWED_DESCENDANT_RELEASE");
+    private readonly string? _threadsResponseReleasePath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_THREADS_RESPONSE_RELEASE");
     private Process? _descendant;
     private Process? _secondDescendant;
     private Task? _lifecycleEvents;
     private readonly CancellationTokenSource _lifecycleEventsCancellation = new();
+    private Task? _heldThreadsResponse;
     private static readonly TimeSpan InitializeGateWindow = TimeSpan.FromMilliseconds(75);
     private static readonly TimeSpan GracefulReleaseTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan ConfigurationDoneCapabilityDeltaReleaseTimeout = TimeSpan.FromSeconds(2);
@@ -338,6 +346,18 @@ internal sealed class ControlledDapAdapter
         finally
         {
             _lifecycleEventsCancellation.Cancel();
+            if (_heldThreadsResponse is { } heldThreadsResponse)
+            {
+                try
+                {
+                    await heldThreadsResponse.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (_lifecycleEventsCancellation.IsCancellationRequested)
+                {
+                    // Fixture teardown aborts an unreleased held response after cleanup commands were observed.
+                }
+            }
+
             if (_lifecycleEvents is { } lifecycleEvents)
             {
                 try
@@ -490,6 +510,8 @@ internal sealed class ControlledDapAdapter
                 }
 
                 return false;
+            case "threads":
+                return await HandleThreadsRequestAsync(sequence, cancellationToken);
             default:
                 await WriteResponseAsync(sequence, command, body: null, cancellationToken);
                 return false;
@@ -784,6 +806,25 @@ internal sealed class ControlledDapAdapter
         }
     }
 
+    private async Task WaitForThreadsResponseReleaseAsync(CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(_threadsResponseReleasePath))
+        {
+            throw new InvalidOperationException("CONTROLLED_DAP_THREADS_RESPONSE_RELEASE is required when the threads response is held.");
+        }
+
+        while (!File.Exists(_threadsResponseReleasePath))
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(25), cancellationToken);
+        }
+    }
+
+    private async Task CompleteHeldThreadsResponseAsync(int sequence, CancellationToken cancellationToken)
+    {
+        await WaitForThreadsResponseReleaseAsync(cancellationToken);
+        await WriteResponseAsync(sequence, "threads", new { threads = Threads(1, "worker") }, cancellationToken);
+    }
+
     private async Task<DapFrame?> ReadFrameAsync(CancellationToken cancellationToken)
     {
         var header = await ReadHeaderAsync(cancellationToken);
@@ -828,7 +869,109 @@ internal sealed class ControlledDapAdapter
             }
         }
     }
-    private async Task WriteResponseAsync(int requestSequence, string command, object? body, CancellationToken cancellationToken, bool omitBody = false)
+    private async Task<bool> HandleThreadsRequestAsync(int sequence, CancellationToken cancellationToken)
+    {
+        switch (_options.ThreadsResponseMode)
+        {
+            case "success":
+                await WriteResponseAsync(sequence, "threads", new { threads = Threads(2, "worker") }, cancellationToken);
+                return false;
+            case "refused":
+                await WriteResponseAsync(sequence, "threads", new { message = "controlled adapter refusal" }, cancellationToken, success: false);
+                return false;
+            case "wrong-command":
+                await WriteResponseAsync(sequence, "stackTrace", new { threads = Threads(1, "worker") }, cancellationToken);
+                return false;
+            case "malformed-body":
+                await WriteResponseAsync(sequence, "threads", new
+                {
+                    threads = new[]
+                    {
+                        new Dictionary<string, object?>
+                        {
+                            ["id"] = "not-an-int32",
+                            ["name"] = 17,
+                        },
+                    },
+                }, cancellationToken);
+                return false;
+            case "max-threads":
+                await WriteResponseAsync(sequence, "threads", new { threads = Threads(256, "t") }, cancellationToken);
+                return false;
+            case "too-many-threads":
+                await WriteResponseAsync(sequence, "threads", new { threads = Threads(257, "t") }, cancellationToken);
+                return false;
+            case "max-name-bytes":
+                await WriteResponseAsync(sequence, "threads", new { threads = Threads(1, new string('n', 1024)) }, cancellationToken);
+                return false;
+            case "too-many-name-bytes":
+                await WriteResponseAsync(sequence, "threads", new { threads = Threads(1, new string('n', 1025)) }, cancellationToken);
+                return false;
+            case "structured-content-at-limit":
+                await WriteResponseAsync(sequence, "threads", new { threads = ThreadsForStructuredContentBytes(262_144) }, cancellationToken);
+                return false;
+            case "structured-content-over-limit":
+                await WriteResponseAsync(sequence, "threads", new { threads = ThreadsForStructuredContentBytes(262_145) }, cancellationToken);
+                return false;
+            case "timeout":
+                await RecordAsync(new { kind = "threads-response-timeout", sequence }, cancellationToken);
+                return false;
+            case "hold":
+                await RecordAsync(new { kind = "threads-response-gated", sequence }, cancellationToken);
+                _heldThreadsResponse = CompleteHeldThreadsResponseAsync(sequence, _lifecycleEventsCancellation.Token);
+                return false;
+            case "reader-failure":
+                await WriteMalformedDapFrameAsync(cancellationToken);
+                return true;
+            default:
+                throw new InvalidOperationException($"Unknown threads response mode '{_options.ThreadsResponseMode}'.");
+        }
+    }
+
+    private static List<Dictionary<string, object?>> Threads(int count, string name)
+    {
+        var threads = new List<Dictionary<string, object?>>(count);
+        for (var id = 1; id <= count; id++)
+        {
+            threads.Add(new Dictionary<string, object?>
+            {
+                ["id"] = id,
+                ["name"] = name,
+            });
+        }
+
+        return threads;
+    }
+
+    private static List<Dictionary<string, object?>> ThreadsForStructuredContentBytes(int targetBytes)
+    {
+        var threads = Threads(256, string.Empty);
+        var remaining = targetBytes - StructuredContentByteCount(threads);
+        for (var index = 0; remaining > 0 && index < threads.Count; index++)
+        {
+            var nameBytes = Math.Min(remaining, 1024);
+            threads[index]["name"] = new string('b', nameBytes);
+            remaining -= nameBytes;
+        }
+
+        if (remaining != 0 || StructuredContentByteCount(threads) != targetBytes)
+        {
+            throw new InvalidOperationException($"Could not create a {targetBytes}-byte normalized structured-content thread list.");
+        }
+
+        return threads;
+    }
+
+    private static int StructuredContentByteCount(IReadOnlyList<Dictionary<string, object?>> threads) =>
+        JsonSerializer.SerializeToUtf8Bytes(new { kind = "threads_success", threads }).Length;
+
+    private async Task WriteResponseAsync(
+        int requestSequence,
+        string command,
+        object? body,
+        CancellationToken cancellationToken,
+        bool omitBody = false,
+        bool success = true)
     {
         if (omitBody)
         {
@@ -837,7 +980,7 @@ internal sealed class ControlledDapAdapter
                 seq = _outgoingSequence++,
                 type = "response",
                 request_seq = requestSequence,
-                success = true,
+                success,
                 command,
             }, cancellationToken);
             return;
@@ -848,7 +991,7 @@ internal sealed class ControlledDapAdapter
             seq = _outgoingSequence++,
             type = "response",
             request_seq = requestSequence,
-            success = true,
+            success,
             command,
             body,
         }, cancellationToken);

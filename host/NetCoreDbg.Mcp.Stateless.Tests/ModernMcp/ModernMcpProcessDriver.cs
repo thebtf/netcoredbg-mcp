@@ -200,7 +200,8 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         JsonObject? arguments,
         JsonObject meta,
         RequestId id,
-        CancellationToken cancellationToken = default) =>
+        CancellationToken cancellationToken = default,
+        TimeSpan? timeout = null) =>
         SendRawRequestAsync(
             "tools/call",
             new JsonObject
@@ -210,20 +211,22 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
                 ["_meta"] = meta.DeepClone(),
             },
             id,
-            cancellationToken);
+            cancellationToken,
+            timeout);
 
     internal async Task<JsonRpcResponse> SendRawRequestAsync(
         string method,
         JsonNode? parameters,
         RequestId id,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        TimeSpan? timeout = null)
     {
         lock (_gate)
         {
             _requests.Add(new ModernMcpRequestObservation(id, method, parameters?.DeepClone()));
         }
 
-        using var operation = CreateBoundedCancellation(cancellationToken);
+        using var operation = CreateBoundedCancellation(cancellationToken, timeout);
         return await Client.SendRequestAsync(
             new JsonRpcRequest
             {
@@ -246,6 +249,23 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
             .Select(static entry => new ModernNativeAction(entry.Kind, entry.Command, entry.RawPayload))
             .ToArray();
     }
+
+    internal async Task WaitForThreadsRequestAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await _fixture.WaitForThreadsRequestAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new Xunit.Sdk.XunitException("get_threads did not emit a DAP 'threads' request before the test deadline.");
+        }
+    }
+
+    internal Task WaitForFixtureRecordAsync(string kind, CancellationToken cancellationToken = default) =>
+        _fixture.WaitForTranscriptKindAsync(kind, cancellationToken);
+
+    internal void ReleaseThreadsResponse() => _fixture.ReleaseThreadsResponse();
 
     internal async Task<int> ReadDescendantProcessIdAsync(CancellationToken cancellationToken = default)
     {
@@ -415,10 +435,10 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         }
     }
 
-    private static CancellationTokenSource CreateBoundedCancellation(CancellationToken cancellationToken)
+    private static CancellationTokenSource CreateBoundedCancellation(CancellationToken cancellationToken, TimeSpan? timeout = null)
     {
         var operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        operation.CancelAfter(RequestTimeout);
+        operation.CancelAfter(timeout ?? RequestTimeout);
         return operation;
     }
 
