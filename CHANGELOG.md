@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.23.8] - 2026-08-22
+
+### Fixed
+- `ui_take_screenshot` now labels raw-raster geometry and capture provenance
+  with physical-pixel units and DPI context, and reports honest target
+  comparability for an explicitly expected HWND and physical dimensions.
+
 ## [0.23.7] - 2026-08-20
 
 ### Fixed
