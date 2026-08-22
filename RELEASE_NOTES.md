@@ -1,29 +1,27 @@
-# netcoredbg-mcp v0.23.7
+# netcoredbg-mcp v0.23.8
 
-Released: 2026-08-20
+Prepared: 2026-08-22
 
 ## Summary
 
-`v0.23.7` is a PATCH release. `search_source` now runs regex matching in a
-bounded dedicated Python subprocess. Source-file enumeration and waiting for
-that worker remain in the MCP server process. `find_code_symbol`,
-`find_code_references`, and `get_source_context` remain in-process. In the
-same range, the source-only .NET host gained the reviewed Native Scene Probe
-M0/M1 capability; it is not part of the published wheel and is not a published
-entrypoint.
+`v0.23.8` is a PATCH release candidate containing one consumer-facing fix:
+`ui_take_screenshot` now identifies its raw-raster geometry and capture
+provenance with physical-pixel units and DPI context, and exposes honest target
+comparability for an explicitly expected HWND and physical dimensions.
 
 ## Consumer Claims
 
 1. The published Python package and `netcoredbg-mcp` console entrypoint remain
    the authoritative, backward-compatible consumer path.
-2. This release adds no tools, prompts, resources, or breaking API changes;
-   the public catalog remains 135 tools, 8 prompts, and 4 resources.
-3. `search_source` runs regex matching in a bounded dedicated subprocess.
-   Worker failures are surfaced as tool errors, while source-file enumeration
-   and waiting for the worker remain in-process. The other code-search tools
-   remain in-process.
-4. The Native Scene Probe M0/M1 capability is internal and source-only: it
-   adds no consumer-visible surface in this release.
+2. The public catalog remains 135 tools, 8 prompts, and 4 resources; this patch
+   adds no tool, prompt, resource, or breaking API change.
+3. Default `ui_take_screenshot()` output remains a WebP navigation preview with
+   `evidence_grade=preview_only`. With `evidence=true`, the result carries
+   lossless raw-raster metadata including physical dimensions, DPI, and capture
+   provenance.
+4. When the caller supplies `expected_hwnd`, `expected_physical_width`, and
+   `expected_physical_height`, the screenshot result reports `MATCHED` or
+   `MISMATCH`; raw evidence persists only for a matched physical target.
 
 ## Compatibility and Upgrade
 
@@ -32,7 +30,7 @@ There is no intentional breaking change to the published Python API or CLI.
 Upgrade an existing installation:
 
 ```powershell
-python -m pip install --upgrade netcoredbg-mcp==0.23.7
+python -m pip install --upgrade netcoredbg-mcp==0.23.8
 # or
 pipx upgrade netcoredbg-mcp
 ```
@@ -40,27 +38,18 @@ pipx upgrade netcoredbg-mcp
 For a new workstation:
 
 ```powershell
-pipx install netcoredbg-mcp==0.23.7
+pipx install netcoredbg-mcp==0.23.8
 netcoredbg-mcp --setup
 ```
 
 ## Known Residuals
 
-- The .NET compatibility host remains source-only; it is not included in the
-  wheel and is not a published entrypoint. The native-scene capability ships
-  as reviewed source with its acceptance receipt under
-  `specs/004-native-scene-probe/`.
-- Python remains the execution authority; no native .NET tool-family migration
-  or Python-runtime retirement is part of this release.
-- MCP Tasks remain deliberately unadvertised and unsupported until the Python
-  authority negotiates one exact protocol dialect.
-- External PR review debt: the Codex reviewer timed out on the native-scene
-  capability PR (#255); CodeRabbit approved that head. Any later Codex
-  findings are scheduled for the next patch.
+- Target comparability is `UNASSERTED` when a screenshot call does not provide
+  an expected HWND and physical dimensions; this is an honest absence of a
+  caller-provided comparison target, not a successful geometry assertion.
 
-## Release evidence
+## Release Evidence
 
-The completed release passed version parity, wheel build, installed CLI/import
-smoke, installed MCP consumer journeys, required Python suites, PR review,
-merge, annotated-tag publication, and post-publication verification. The
-published tag is `v0.23.7` on `6a378b546758ea05515044ac5bb64a6c3fb49bcf`.
+The release-candidate evidence records the exact wheel, installed CLI/import
+smoke, focused screenshot contracts, and built public NovaScript capture. This
+candidate has not been merged, tagged, or published.
