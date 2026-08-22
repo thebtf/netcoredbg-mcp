@@ -261,6 +261,45 @@ public sealed class NetCoreDbgSessionTests
         Assert.Equal(new string?[] { "stopped", "continued", "exited", "terminated" }, lifecycleEvents);
         Assert.Equal(new DapSessionSnapshot("terminated", stopReason, exitCode), emitting.State);
     }
+    [Fact]
+    public async Task GetCallStack_ContinuedDuringAdmission_WritesBeforeLifecycleTransition()
+    {
+        await using var session = await StartAsync(new FixtureConfiguration(
+            SupportsDelayedStackTraceLoading: true,
+            LifecycleMode: "all-stop-held-continued"));
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await session.Fixture.WaitForEventAsync("stopped", cancellation.Token);
+        await session.HoldDapWriteAsync(cancellation.Token);
+        var writeHeld = true;
+        var callStack = session.GetCallStackIsRefusedAsync(1, 0, 20, cancellation.Token);
+        try
+        {
+            await session.WaitForPendingStackTraceAsync(cancellation.Token);
+            var lifecycleTransition = WaitUntilAsync(
+                () => Task.FromResult(session.State.Event == "continued"),
+                TimeSpan.FromSeconds(2));
+            session.Fixture.ReleaseGracefulShutdown();
+            await session.Fixture.WaitForEventAsync("continued", cancellation.Token);
+            var transitionedBeforeWrite = await Task.WhenAny(
+                lifecycleTransition,
+                Task.Delay(TimeSpan.FromMilliseconds(200), cancellation.Token)) == lifecycleTransition;
+            session.ReleaseDapWrite();
+            writeHeld = false;
+
+            Assert.True(await callStack);
+            await lifecycleTransition;
+            Assert.False(transitionedBeforeWrite,
+                "A continued lifecycle transition must not complete before the pending stackTrace write is admitted.");
+        }
+        finally
+        {
+            if (writeHeld)
+            {
+                session.ReleaseDapWrite();
+            }
+        }
+    }
+
 
     [Fact]
     public async Task StopAsync_ReaderFailureSkipsGracefulRequestTimeouts()

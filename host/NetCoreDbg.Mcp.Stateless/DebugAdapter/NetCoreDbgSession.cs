@@ -21,6 +21,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private const int MaximumPayloadBytes = 16 * 1024 * 1024;
     private const int MaximumThreadCount = 256;
     private const int MaximumThreadNameBytes = 1024;
+    private const int MaximumStackFrameCount = 256;
+    private const int MaximumStackFrameNameBytes = 1024;
+    private const int MaximumStackFramePathBytes = 4096;
+    private const long MaximumSafeDapInteger = 9_007_199_254_740_991L;
     private static readonly Encoding HeaderEncoding = Encoding.ASCII;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -35,6 +39,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private readonly TimeSpan _requestTimeout;
     private readonly TimeSpan _stopTimeout;
     private readonly SemaphoreSlim _writeGate = new(1, 1);
+    private readonly SemaphoreSlim _callStackAdmissionGate = new(1, 1);
     private readonly ConcurrentDictionary<int, PendingRequest> _pending = new();
     private readonly TaskCompletionSource<bool> _initialized = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly object _stateGate = new();
@@ -53,6 +58,10 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
     private int _outgoingSequence;
     private bool _supportsConfigurationDone;
     private bool _supportsTerminate;
+    private DapStackTraceCapabilities _stackTraceCapabilities;
+    private CallStackEligibility? _allThreadsStoppedEligibility;
+    private Dictionary<int, CallStackEligibility>? _threadEligibility;
+    private HashSet<int>? _invalidatedAllThreadTargets;
     private bool _initializeResponseObserved;
     private bool CapabilitiesObserved { get; set; }
     private readonly TaskCompletionSource<bool>? _initializeResponseContinuationReached;
@@ -252,6 +261,51 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         return DapThreadsResult.Succeeded(normalized);
     }
+    internal async Task<DapCallStackResult> GetCallStackAsync(
+        int threadId,
+        uint startFrame,
+        uint levels,
+        CancellationToken cancellationToken)
+    {
+        var response = await SendStackTraceRequestAsync(
+            threadId,
+            startFrame,
+            levels,
+            cancellationToken).ConfigureAwait(false);
+        if (response is null || !response.Success || !response.TargetCurrent)
+        {
+            return DapCallStackResult.Refused;
+        }
+
+        if (response.Body.ValueKind != JsonValueKind.Object
+            || !response.Body.TryGetProperty("stackFrames", out var stackFrames)
+            || stackFrames.ValueKind != JsonValueKind.Array
+            || stackFrames.GetArrayLength() > MaximumStackFrameCount)
+        {
+            throw new InvalidDataException("DAP stackTrace response body is invalid.");
+        }
+
+        uint? totalFrames = null;
+        if (response.Body.TryGetProperty("totalFrames", out var totalFramesElement))
+        {
+            if (totalFramesElement.ValueKind != JsonValueKind.Number
+                || !totalFramesElement.TryGetUInt32(out var parsedTotalFrames))
+            {
+                throw new InvalidDataException("DAP stackTrace totalFrames must be an unsigned 32-bit integer.");
+            }
+
+            totalFrames = parsedTotalFrames;
+        }
+
+        var normalized = new DapStackFrame[stackFrames.GetArrayLength()];
+        var index = 0;
+        foreach (var stackFrame in stackFrames.EnumerateArray())
+        {
+            normalized[index++] = NormalizeStackFrame(stackFrame);
+        }
+
+        return DapCallStackResult.Succeeded(normalized, totalFrames);
+    }
 
     public ValueTask DisposeAsync() => new(EnsureCleanupAsync());
 
@@ -354,12 +408,50 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             RemovePending(request);
         }
     }
+    private async Task<DapResponse?> SendStackTraceRequestAsync(
+        int threadId,
+        uint startFrame,
+        uint levels,
+        CancellationToken cancellationToken)
+    {
+        PendingRequest? request = null;
+        await _callStackAdmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var target = CaptureCallStackTarget(threadId);
+            if (target is null)
+            {
+                return null;
+            }
+
+            request = await BeginRequestAsync(
+                "stackTrace",
+                new { threadId, startFrame, levels },
+                _requestTimeout,
+                cancellationToken,
+                target).ConfigureAwait(false);
+        }
+        finally
+        {
+            _callStackAdmissionGate.Release();
+        }
+
+        try
+        {
+            return await WaitForResponseAsync(request, _requestTimeout, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            RemovePending(request);
+        }
+    }
 
     private async Task<PendingRequest> BeginRequestAsync(
         string command,
         object? arguments,
         TimeSpan timeout,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        CapturedCallStackTarget? stackTraceTarget = null)
     {
         if (Volatile.Read(ref _readerFailure) is { } readerFailure)
         {
@@ -367,7 +459,7 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
 
         var sequence = Interlocked.Increment(ref _outgoingSequence);
-        var request = new PendingRequest(sequence, command);
+        var request = new PendingRequest(sequence, command, stackTraceTarget);
         if (!_pending.TryAdd(sequence, request))
         {
             throw new InvalidOperationException($"DAP request sequence '{sequence}' was reused.");
@@ -505,7 +597,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             _initializeResponseObserved = true;
         }
 
-        request.Completion.TrySetResult(new DapResponse(body, success.ValueKind == JsonValueKind.True));
+        var targetCurrent = request.StackTraceTarget is not { } target || IsCallStackTargetCurrent(target);
+        request.Completion.TrySetResult(new DapResponse(body, success.ValueKind == JsonValueKind.True, targetCurrent));
     }
 
     private void HandleEvent(JsonElement message)
@@ -546,24 +639,14 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 CapabilitiesObserved = true;
                 break;
             case "stopped":
-                UpdateState(current => current with
-                {
-                    Event = eventName,
-                    StopReason = TryGetString(body, "reason"),
-                });
+                HandleStoppedEvent(body);
                 break;
             case "continued":
-                UpdateState(current => current with { Event = eventName });
+                HandleContinuedEvent(body);
                 break;
             case "exited":
-                UpdateState(current => current with
-                {
-                    Event = eventName,
-                    ExitCode = TryGetInt32(body, "exitCode"),
-                });
-                break;
             case "terminated":
-                UpdateState(current => current with { Event = eventName });
+                HandleTerminalEvent(eventName, body);
                 break;
         }
     }
@@ -665,6 +748,11 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             _supportsConfigurationDone = false;
             _supportsTerminate = false;
+            lock (_stateGate)
+            {
+                _stackTraceCapabilities = default;
+            }
+
             return;
         }
 
@@ -675,6 +763,11 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 
         _supportsConfigurationDone = ReadOptionalBoolean(body, "supportsConfigurationDoneRequest");
         _supportsTerminate = ReadOptionalBoolean(body, "supportsTerminateRequest");
+        var capabilities = new DapStackTraceCapabilities(ReadOptionalBoolean(body, "supportsDelayedStackTraceLoading"));
+        lock (_stateGate)
+        {
+            _stackTraceCapabilities = capabilities;
+        }
     }
 
     private void UpdateState(Func<DapSessionState, DapSessionState> update)
@@ -683,6 +776,165 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         {
             _state = update(_state);
         }
+    }
+    private void HandleStoppedEvent(JsonElement body)
+    {
+        var allThreadsStopped = ReadOptionalBoolean(body, "allThreadsStopped");
+        var threadId = TryGetInt32(body, "threadId");
+        _callStackAdmissionGate.Wait();
+        try
+        {
+            lock (_stateGate)
+            {
+                _state = _state with
+                {
+                    Event = "stopped",
+                    StopReason = TryGetString(body, "reason"),
+                };
+                ClearCallStackEligibility();
+                if (allThreadsStopped)
+                {
+                    _allThreadsStoppedEligibility = new CallStackEligibility();
+                }
+                else if (threadId is { } stoppedThreadId)
+                {
+                    (_threadEligibility ??= new())[stoppedThreadId] = new CallStackEligibility();
+                }
+            }
+        }
+        finally
+        {
+            _callStackAdmissionGate.Release();
+        }
+    }
+
+    private void HandleContinuedEvent(JsonElement body)
+    {
+        var hasAllThreadsContinued = body.ValueKind == JsonValueKind.Object
+            && body.TryGetProperty("allThreadsContinued", out _);
+        var allThreadsContinued = ReadOptionalBoolean(body, "allThreadsContinued");
+        var threadId = TryGetInt32(body, "threadId");
+        _callStackAdmissionGate.Wait();
+        try
+        {
+            lock (_stateGate)
+            {
+                _state = _state with { Event = "continued" };
+                if (!hasAllThreadsContinued || allThreadsContinued || threadId is null)
+                {
+                    ClearCallStackEligibility();
+                    return;
+                }
+
+                _threadEligibility?.Remove(threadId.Value);
+                if (_allThreadsStoppedEligibility is not null)
+                {
+                    (_invalidatedAllThreadTargets ??= new()).Add(threadId.Value);
+                }
+            }
+        }
+        finally
+        {
+            _callStackAdmissionGate.Release();
+        }
+    }
+
+    private void HandleTerminalEvent(string eventName, JsonElement body)
+    {
+        _callStackAdmissionGate.Wait();
+        try
+        {
+            lock (_stateGate)
+            {
+                _state = eventName == "exited"
+                    ? _state with { Event = eventName, ExitCode = TryGetInt32(body, "exitCode") }
+                    : _state with { Event = eventName };
+                ClearCallStackEligibility();
+            }
+        }
+        finally
+        {
+            _callStackAdmissionGate.Release();
+        }
+    }
+
+    private CapturedCallStackTarget? CaptureCallStackTarget(int threadId)
+    {
+        lock (_stateGate)
+        {
+            if (!_stackTraceCapabilities.SupportsDelayedStackTraceLoading)
+            {
+                return null;
+            }
+
+            if (_allThreadsStoppedEligibility is { } allTargets
+                && (_invalidatedAllThreadTargets is null || !_invalidatedAllThreadTargets.Contains(threadId)))
+            {
+                return new CapturedCallStackTarget(allTargets, threadId);
+            }
+
+            return _threadEligibility is not null
+                && _threadEligibility.TryGetValue(threadId, out var target)
+                    ? new CapturedCallStackTarget(target, threadId)
+                    : null;
+        }
+    }
+
+    private bool IsCallStackTargetCurrent(CapturedCallStackTarget target)
+    {
+        lock (_stateGate)
+        {
+            if (ReferenceEquals(_allThreadsStoppedEligibility, target.Eligibility))
+            {
+                return _invalidatedAllThreadTargets is null || !_invalidatedAllThreadTargets.Contains(target.ThreadId);
+            }
+
+            return _threadEligibility is not null
+                && _threadEligibility.TryGetValue(target.ThreadId, out var current)
+                && ReferenceEquals(current, target.Eligibility);
+        }
+    }
+
+    private void ClearCallStackEligibility()
+    {
+        _allThreadsStoppedEligibility = null;
+        _threadEligibility?.Clear();
+        _invalidatedAllThreadTargets = null;
+    }
+
+    private static DapStackFrame NormalizeStackFrame(JsonElement stackFrame)
+    {
+        var id = RequireInt32(stackFrame, "id");
+        var name = RequireString(stackFrame, "name");
+        if (Encoding.UTF8.GetByteCount(name) > MaximumStackFrameNameBytes)
+        {
+            throw new InvalidDataException("DAP stack frame name exceeds the supported maximum.");
+        }
+
+        var line = RequireSafeDapInteger(stackFrame, "line");
+        var column = RequireSafeDapInteger(stackFrame, "column");
+        if (!stackFrame.TryGetProperty("source", out var sourceElement))
+        {
+            return new DapStackFrame(id, name, null, 0, 0);
+        }
+
+        if (sourceElement.ValueKind != JsonValueKind.Object)
+        {
+            throw new InvalidDataException("DAP stack frame source must be an object.");
+        }
+
+        if (!sourceElement.TryGetProperty("path", out var pathElement))
+        {
+            return new DapStackFrame(id, name, null, 0, 0);
+        }
+
+        var path = RequireString(sourceElement, "path");
+        if (Encoding.UTF8.GetByteCount(path) > MaximumStackFramePathBytes)
+        {
+            throw new InvalidDataException("DAP stack frame source path exceeds the supported maximum.");
+        }
+
+        return new DapStackFrame(id, name, path, line, column);
     }
 
     private Task EnsureCleanupAsync()
@@ -987,6 +1239,20 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         && value.TryGetInt32(out var number)
             ? number
             : null;
+    private static long RequireSafeDapInteger(JsonElement objectElement, string name)
+    {
+        if (objectElement.ValueKind != JsonValueKind.Object
+            || !objectElement.TryGetProperty(name, out var value)
+            || value.ValueKind != JsonValueKind.Number
+            || !value.TryGetInt64(out var number)
+            || number < 0
+            || number > MaximumSafeDapInteger)
+        {
+            throw new InvalidDataException($"DAP property '{name}' must be a safe non-negative integer.");
+        }
+
+        return number;
+    }
 
     private static TimeSpan RequirePositiveTimeout(TimeSpan timeout, string parameterName) =>
         timeout > TimeSpan.Zero
@@ -1681,14 +1947,21 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
 
-    private sealed class PendingRequest(int sequence, string command)
+    private sealed class PendingRequest(int sequence, string command, CapturedCallStackTarget? stackTraceTarget = null)
     {
         public int Sequence { get; } = sequence;
         public string Command { get; } = command;
+        public CapturedCallStackTarget? StackTraceTarget { get; } = stackTraceTarget;
         public TaskCompletionSource<DapResponse> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
-    private sealed record DapResponse(JsonElement Body, bool Success);
+    private sealed class CallStackEligibility;
+
+    private readonly record struct DapStackTraceCapabilities(bool SupportsDelayedStackTraceLoading);
+
+    private readonly record struct CapturedCallStackTarget(CallStackEligibility Eligibility, int ThreadId);
+
+    private sealed record DapResponse(JsonElement Body, bool Success, bool TargetCurrent = true);
 }
 
 internal sealed record DapThread(
@@ -1700,4 +1973,18 @@ internal sealed record DapThreadsResult(bool IsRefused, IReadOnlyList<DapThread>
     internal static DapThreadsResult Refused { get; } = new(true, Array.Empty<DapThread>());
 
     internal static DapThreadsResult Succeeded(IReadOnlyList<DapThread> threads) => new(false, threads);
+}
+
+internal sealed record DapStackFrame(
+    [property: JsonPropertyName("id")] int Id,
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("source")] string? Source,
+    [property: JsonPropertyName("line")] long Line,
+    [property: JsonPropertyName("column")] long Column);
+
+internal sealed record DapCallStackResult(bool IsRefused, IReadOnlyList<DapStackFrame> Frames, uint? TotalFrames)
+{
+    internal static DapCallStackResult Refused { get; } = new(true, Array.Empty<DapStackFrame>(), null);
+
+    internal static DapCallStackResult Succeeded(IReadOnlyList<DapStackFrame> frames, uint? totalFrames) => new(false, frames, totalFrames);
 }

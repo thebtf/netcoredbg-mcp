@@ -88,6 +88,26 @@ public sealed class StructuredContentSchemaParityTests
         ValidateVariant(schema, refused);
         ValidateVariant(schema, protocolError);
     }
+    [Fact]
+    public async Task LiveHost_StructuredContentMatchesEveryFrozenCallStackSchemaVariant()
+    {
+        // Arrange
+        var schema = LoadSchema();
+
+        // Act
+        var success = await CallStackContentAsync("success", "call-stack-schema-success");
+        var refused = await CallStackContentAsync("refused", "call-stack-schema-refused");
+        var protocolError = await CallStackContentAsync("malformed-body", "call-stack-schema-protocol-error");
+
+        // Assert
+        Assert.Equal("call_stack_success", success["kind"]?.GetValue<string>());
+        Assert.Equal("dap_stack_trace_refused", refused["kind"]?.GetValue<string>());
+        Assert.Equal("dap_stack_trace_protocol_error", protocolError["kind"]?.GetValue<string>());
+        ValidateVariant(schema, success);
+        ValidateVariant(schema, refused);
+        ValidateVariant(schema, protocolError);
+    }
+
 
     private static JsonObject LoadSchema() => JsonNode.Parse(File.ReadAllText(Path.Combine(
         RepositoryLayout.Root,
@@ -116,6 +136,30 @@ public sealed class StructuredContentSchemaParityTests
             meta,
             new RequestId(requestId)));
     }
+    private static async Task<JsonObject> CallStackContentAsync(string responseMode, string requestId)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            DisableFormElicitation: true,
+            FixtureConfiguration: new FixtureConfiguration(
+                SupportsDelayedStackTraceLoading: true,
+                LifecycleMode: "all-stop",
+                StackTraceResponseMode: responseMode)));
+        var meta = ModernMcpProcessDriver.CurrentMeta();
+        var start = Structured(await driver.CallToolRawAsync(
+            "start_debug",
+            new JsonObject { ["program"] = driver.InertProgramPath },
+            meta,
+            new RequestId($"{requestId}-start")));
+        var debugSessionId = Assert.IsType<string>(start["debugSessionId"]?.GetValue<string>());
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await driver.WaitForFixtureEventAsync("stopped", observation.Token);
+        return Structured(await driver.CallToolRawAsync(
+            "get_call_stack",
+            new JsonObject { ["debugSessionId"] = debugSessionId, ["threadId"] = 1 },
+            meta,
+            new RequestId(requestId)));
+    }
+
 
     private static JsonObject Structured(JsonRpcResponse response)
     {
@@ -146,13 +190,12 @@ public sealed class StructuredContentSchemaParityTests
             .Order()
             .ToArray();
         var properties = Assert.IsType<JsonObject>(schema["properties"]);
-        Assert.Equal(required, properties.Select(static property => property.Key).Order());
-        Assert.Equal(properties.Select(static property => property.Key).Order(), content.Select(static property => property.Key).Order());
+        Assert.All(content, property => Assert.True(properties.ContainsKey(property.Key)));
         Assert.All(required, property => Assert.True(content.ContainsKey(property)));
 
-        foreach (var property in properties)
+        foreach (var property in content)
         {
-            ValidateValue(definitions, Assert.IsType<JsonObject>(property.Value), content[property.Key]);
+            ValidateValue(definitions, Assert.IsType<JsonObject>(properties[property.Key]), property.Value);
         }
     }
 

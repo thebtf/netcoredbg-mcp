@@ -18,6 +18,9 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
     private readonly FixtureProcess _fixture;
     private readonly object _session;
     private readonly MethodInfo _stopAsync;
+    private readonly MethodInfo _getCallStackAsync;
+    private readonly SemaphoreSlim _writeGate;
+    private readonly FieldInfo _pending;
     private readonly PropertyInfo _state;
     private readonly PropertyInfo _isUsable;
     private readonly Task _readerTask;
@@ -33,6 +36,9 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         FixtureProcess fixture,
         object session,
         MethodInfo stopAsync,
+        MethodInfo getCallStackAsync,
+        SemaphoreSlim writeGate,
+        FieldInfo pending,
         PropertyInfo state,
         PropertyInfo isUsable,
         Task readerTask,
@@ -41,12 +47,14 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         _fixture = fixture;
         _session = session;
         _stopAsync = stopAsync;
+        _getCallStackAsync = getCallStackAsync;
+        _writeGate = writeGate;
+        _pending = pending;
         _state = state;
         _isUsable = isUsable;
         _readerTask = readerTask;
         _disposeAsync = disposeAsync;
     }
-
     public FixtureProcess Fixture => _fixture;
     public int OwnedProcessId => (RequirePrivateProcessField(_session.GetType(), "_process").GetValue(_session)
         ?? throw new InvalidOperationException("NetCoreDbgSession._process returned null.")) is Process process
@@ -84,6 +92,45 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
 
     public bool CapabilitiesObserved => (bool)(RequirePrivateProperty(_session.GetType(), "CapabilitiesObserved", typeof(bool)).GetValue(_session)
         ?? throw new InvalidOperationException("NetCoreDbgSession.CapabilitiesObserved returned null."));
+    public async Task<bool> GetCallStackIsRefusedAsync(
+        int threadId,
+        uint startFrame,
+        uint levels,
+        CancellationToken cancellationToken)
+    {
+        var result = await AwaitAsyncResult(
+            _getCallStackAsync.Invoke(_session, [threadId, startFrame, levels, cancellationToken]),
+            "GetCallStackAsync",
+            cancellationToken);
+        Assert.NotNull(result);
+        return Assert.IsType<bool>(RequireProperty(result!.GetType(), "IsRefused", typeof(bool)).GetValue(result));
+    }
+
+    public Task HoldDapWriteAsync(CancellationToken cancellationToken) => _writeGate.WaitAsync(cancellationToken);
+
+    public void ReleaseDapWrite() => _writeGate.Release();
+
+    public async Task WaitForPendingStackTraceAsync(CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            var pending = _pending.GetValue(_session)
+                ?? throw new InvalidOperationException("NetCoreDbgSession._pending returned null.");
+            var values = _pending.FieldType.GetProperty("Values")?.GetValue(pending) as System.Collections.IEnumerable
+                ?? throw new InvalidOperationException("NetCoreDbgSession._pending.Values returned null.");
+            if (values.Cast<object>().Any(request =>
+                    string.Equals(
+                        RequireProperty(request.GetType(), "Command", typeof(string)).GetValue(request) as string,
+                        "stackTrace",
+                        StringComparison.Ordinal)))
+            {
+                return;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(10), cancellationToken);
+        }
+    }
+
 
     public static async Task<NetCoreDbgSessionContractDriver> StartAsync(
         FixtureConfiguration configuration,
@@ -104,6 +151,9 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             var state = RequireProperty(sessionType, "State", stateType);
             var isUsable = RequireInternalProperty(sessionType, "IsUsable", typeof(bool));
             var readerTask = RequirePrivateTaskField(sessionType, "_readerTask");
+            var getCallStackAsync = RequireTaskMethod(sessionType, "GetCallStackAsync", typeof(int), typeof(uint), typeof(uint), typeof(CancellationToken));
+            var writeGate = RequirePrivateField(sessionType, "_writeGate", typeof(SemaphoreSlim));
+            var pending = RequirePrivateField(sessionType, "_pending");
             var stopAsync = RequireTaskMethod(sessionType, "StopAsync", typeof(CancellationToken));
             var disposeAsync = RequireAsyncDisposable(sessionType);
             RequireNarrowSessionSurface(sessionType);
@@ -124,8 +174,9 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             Assert.NotNull(session);
             var activeReaderTask = readerTask.GetValue(session) as Task
                 ?? throw new InvalidOperationException("NetCoreDbgSession._readerTask returned null.");
+            var activeWriteGate = Assert.IsType<SemaphoreSlim>(writeGate.GetValue(session));
             await fixture.WaitForStartupAsync(startupCancellation.Token);
-            return new NetCoreDbgSessionContractDriver(fixture, session, stopAsync, state, isUsable, activeReaderTask, disposeAsync);
+            return new NetCoreDbgSessionContractDriver(fixture, session, stopAsync, getCallStackAsync, activeWriteGate, pending, state, isUsable, activeReaderTask, disposeAsync);
         }
         catch
         {
@@ -180,6 +231,9 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             var state = RequireProperty(sessionType, "State", stateType);
             var isUsable = RequireInternalProperty(sessionType, "IsUsable", typeof(bool));
             var readerTask = RequirePrivateTaskField(sessionType, "_readerTask");
+            var getCallStackAsync = RequireTaskMethod(sessionType, "GetCallStackAsync", typeof(int), typeof(uint), typeof(uint), typeof(CancellationToken));
+            var writeGate = RequirePrivateField(sessionType, "_writeGate", typeof(SemaphoreSlim));
+            var pending = RequirePrivateField(sessionType, "_pending");
             var supportsConfigurationDone = RequirePrivateField(sessionType, "_supportsConfigurationDone", typeof(bool));
             var stopAsync = RequireTaskMethod(sessionType, "StopAsync", typeof(CancellationToken));
             var disposeAsync = RequireAsyncDisposable(sessionType);
@@ -222,8 +276,9 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
             await AwaitAsyncResult(started, "StartProtocolAsync", startupCancellation.Token);
             var activeReaderTask = readerTask.GetValue(session) as Task
                 ?? throw new InvalidOperationException("NetCoreDbgSession._readerTask returned null.");
+            var activeWriteGate = Assert.IsType<SemaphoreSlim>(writeGate.GetValue(session));
             await fixture.WaitForStartupAsync(startupCancellation.Token);
-            return new NetCoreDbgSessionContractDriver(fixture, session, stopAsync, state, isUsable, activeReaderTask, disposeAsync);
+            return new NetCoreDbgSessionContractDriver(fixture, session, stopAsync, getCallStackAsync, activeWriteGate, pending, state, isUsable, activeReaderTask, disposeAsync);
         }
         catch
         {
@@ -616,6 +671,14 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         Assert.Equal(expectedType, field.FieldType);
         return field;
     }
+    private static FieldInfo RequirePrivateField(Type type, string name)
+    {
+        var field = type.GetField(name, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+        Assert.NotNull(field);
+        Assert.True(field!.IsPrivate, $"Missing production contract: {type.FullName}.{name} must be private.");
+        return field;
+    }
+
 
     private static void RequireStateShape(Type stateType)
     {
@@ -778,7 +841,12 @@ internal sealed record FixtureConfiguration(
     bool PublishSecondWindowedDescendantAfterRelease = false,
     string? WindowedDescendantExecutablePath = null,
     IReadOnlyList<string>? WindowedDescendantArguments = null,
-    string ThreadsResponseMode = "success")
+    string ThreadsResponseMode = "success",
+    bool SupportsDelayedStackTraceLoading = false,
+    bool OmitDelayedStackTraceLoading = false,
+    string LifecycleMode = "default",
+    bool SuppressContinuedAfterStopped = false,
+    string StackTraceResponseMode = "success")
 {
     public string AsEnvironmentValue() => string.Join(
         ';',
@@ -805,6 +873,11 @@ internal sealed record FixtureConfiguration(
             EnableTerminateAfterInitialization ? "--enable-terminate-after-initialization" : null,
             ExitAfterLaunchResponse ? "--exit-after-launch-response" : null,
             $"--threads-response={ThreadsResponseMode}",
+            SupportsDelayedStackTraceLoading ? "--supports-delayed-stack-trace-loading" : null,
+            OmitDelayedStackTraceLoading ? "--omit-delayed-stack-trace-loading" : null,
+            $"--lifecycle-mode={LifecycleMode}",
+            SuppressContinuedAfterStopped ? "--suppress-continued-after-stopped" : null,
+            $"--stack-trace-response={StackTraceResponseMode}",
         }.Where(static value => value is not null));
 }
 
@@ -816,12 +889,14 @@ internal sealed class FixtureProcess : IAsyncDisposable
     private readonly string _configurationDoneCapabilityDeltaReleasePath;
     private readonly string _secondWindowedDescendantReleasePath;
     private readonly string _threadsResponseReleasePath;
+    private readonly string _stackTraceResponseReleasePath;
     private readonly string? _previousTranscript;
     private readonly string? _previousOptions;
     private readonly string? _previousRelease;
     private readonly string? _previousConfigurationDoneCapabilityDeltaRelease;
     private readonly string? _previousSecondWindowedDescendantRelease;
     private readonly string? _previousThreadsResponseRelease;
+    private readonly string? _previousStackTraceResponseRelease;
     private readonly string? _previousWindowedDescendantExecutable;
     private readonly string? _previousWindowedDescendantArguments;
     private readonly HashSet<int> _preExistingAdapterPids;
@@ -838,6 +913,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
         string configurationDoneCapabilityDeltaReleasePath,
         string secondWindowedDescendantReleasePath,
         string threadsResponseReleasePath,
+        string stackTraceResponseReleasePath,
         string executablePath,
         string? previousTranscript,
         string? previousOptions,
@@ -846,6 +922,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
         string? previousSecondWindowedDescendantRelease,
         string? previousWindowedDescendantExecutable,
         string? previousThreadsResponseRelease,
+        string? previousStackTraceResponseRelease,
         string? previousWindowedDescendantArguments,
         HashSet<int> preExistingAdapterPids)
     {
@@ -855,6 +932,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
         _configurationDoneCapabilityDeltaReleasePath = configurationDoneCapabilityDeltaReleasePath;
         _secondWindowedDescendantReleasePath = secondWindowedDescendantReleasePath;
         _threadsResponseReleasePath = threadsResponseReleasePath;
+        _stackTraceResponseReleasePath = stackTraceResponseReleasePath;
         _executablePath = executablePath;
         _previousTranscript = previousTranscript;
         _previousOptions = previousOptions;
@@ -864,6 +942,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
         _previousWindowedDescendantExecutable = previousWindowedDescendantExecutable;
         _previousThreadsResponseRelease = previousThreadsResponseRelease;
         _previousWindowedDescendantArguments = previousWindowedDescendantArguments;
+        _previousStackTraceResponseRelease = previousStackTraceResponseRelease;
         _preExistingAdapterPids = preExistingAdapterPids;
     }
 
@@ -881,6 +960,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
         var configurationDoneCapabilityDeltaReleasePath = Path.Combine(scratchDirectory, "configuration-done-capabilities-delta.release");
         var secondWindowedDescendantReleasePath = Path.Combine(scratchDirectory, "second-windowed-descendant.release");
         var threadsResponseReleasePath = Path.Combine(scratchDirectory, "threads-response.release");
+        var stackTraceResponseReleasePath = Path.Combine(scratchDirectory, "stack-trace-response.release");
         File.WriteAllText(transcriptPath, string.Empty, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
 
         var previousTranscript = Environment.GetEnvironmentVariable("CONTROLLED_DAP_TRANSCRIPT");
@@ -889,6 +969,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
         var previousConfigurationDoneCapabilityDeltaRelease = Environment.GetEnvironmentVariable("CONTROLLED_DAP_CONFIGURATION_DONE_CAPABILITY_DELTA_RELEASE");
         var previousSecondWindowedDescendantRelease = Environment.GetEnvironmentVariable("CONTROLLED_DAP_SECOND_WINDOWED_DESCENDANT_RELEASE");
         var previousThreadsResponseRelease = Environment.GetEnvironmentVariable("CONTROLLED_DAP_THREADS_RESPONSE_RELEASE");
+        var previousStackTraceResponseRelease = Environment.GetEnvironmentVariable("CONTROLLED_DAP_STACK_TRACE_RESPONSE_RELEASE");
         var previousWindowedDescendantExecutable = Environment.GetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_EXECUTABLE");
         var previousWindowedDescendantArguments = Environment.GetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_ARGUMENTS");
         var preExistingAdapterPids = ExactAdapterProcessIds(executable);
@@ -898,6 +979,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
         Environment.SetEnvironmentVariable("CONTROLLED_DAP_CONFIGURATION_DONE_CAPABILITY_DELTA_RELEASE", configurationDoneCapabilityDeltaReleasePath);
         Environment.SetEnvironmentVariable("CONTROLLED_DAP_SECOND_WINDOWED_DESCENDANT_RELEASE", secondWindowedDescendantReleasePath);
         Environment.SetEnvironmentVariable("CONTROLLED_DAP_THREADS_RESPONSE_RELEASE", threadsResponseReleasePath);
+        Environment.SetEnvironmentVariable("CONTROLLED_DAP_STACK_TRACE_RESPONSE_RELEASE", stackTraceResponseReleasePath);
         Environment.SetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_EXECUTABLE", configuration.WindowedDescendantExecutablePath);
         Environment.SetEnvironmentVariable(
             "CONTROLLED_DAP_WINDOWED_DESCENDANT_ARGUMENTS",
@@ -909,6 +991,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
             configurationDoneCapabilityDeltaReleasePath,
             secondWindowedDescendantReleasePath,
             threadsResponseReleasePath,
+            stackTraceResponseReleasePath,
             executable,
             previousTranscript,
             previousOptions,
@@ -917,6 +1000,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
             previousSecondWindowedDescendantRelease,
             previousWindowedDescendantExecutable,
             previousThreadsResponseRelease,
+            previousStackTraceResponseRelease,
             previousWindowedDescendantArguments,
             preExistingAdapterPids);
     }
@@ -926,6 +1010,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
     public void ReleaseConfigurationDoneCapabilityDelta() => File.WriteAllText(_configurationDoneCapabilityDeltaReleasePath, string.Empty);
     public void ReleaseSecondWindowedDescendant() => File.WriteAllText(_secondWindowedDescendantReleasePath, string.Empty);
     public void ReleaseThreadsResponse() => File.WriteAllText(_threadsResponseReleasePath, string.Empty);
+    public void ReleaseStackTraceResponse() => File.WriteAllText(_stackTraceResponseReleasePath, string.Empty);
 
     public async Task WaitForStartupAsync(CancellationToken cancellationToken)
     {
@@ -944,6 +1029,18 @@ internal sealed class FixtureProcess : IAsyncDisposable
         () => ReadTranscriptLinesSnapshot()
             .Select(FixtureTranscriptEntry.Parse)
             .Any(static entry => entry.Kind == "request" && entry.Command == "threads"),
+        cancellationToken);
+
+    public Task WaitForStackTraceRequestAsync(CancellationToken cancellationToken) => WaitUntilAsync(
+        () => ReadTranscriptLinesSnapshot()
+            .Select(FixtureTranscriptEntry.Parse)
+            .Any(static entry => entry.Kind == "request" && entry.Command == "stackTrace"),
+        cancellationToken);
+
+    public Task WaitForEventAsync(string eventName, CancellationToken cancellationToken) => WaitUntilAsync(
+        () => ReadTranscriptLinesSnapshot()
+            .Select(FixtureTranscriptEntry.Parse)
+            .Any(entry => entry.Kind == "event" && entry.Event == eventName),
         cancellationToken);
 
     public Task WaitForTranscriptKindAsync(string kind, CancellationToken cancellationToken) => WaitUntilAsync(
@@ -995,6 +1092,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
             ReleaseGracefulShutdown();
             ReleaseConfigurationDoneCapabilityDelta();
             ReleaseThreadsResponse();
+            ReleaseStackTraceResponse();
         }
         catch (Exception exception)
         {
@@ -1032,6 +1130,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
                 Environment.SetEnvironmentVariable("CONTROLLED_DAP_THREADS_RESPONSE_RELEASE", _previousThreadsResponseRelease);
                 Environment.SetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_EXECUTABLE", _previousWindowedDescendantExecutable);
                 Environment.SetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_ARGUMENTS", _previousWindowedDescendantArguments);
+                Environment.SetEnvironmentVariable("CONTROLLED_DAP_STACK_TRACE_RESPONSE_RELEASE", _previousStackTraceResponseRelease);
             }
         }
 

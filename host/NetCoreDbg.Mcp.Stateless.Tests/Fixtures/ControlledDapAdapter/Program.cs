@@ -46,7 +46,12 @@ internal sealed record AdapterOptions(
     bool ExitAfterLaunchResponse,
     bool SpawnWindowedDescendant,
     bool PublishSecondWindowedDescendantAfterRelease,
-    string ThreadsResponseMode)
+    string ThreadsResponseMode,
+    bool SupportsDelayedStackTraceLoading,
+    bool OmitDelayedStackTraceLoading,
+    string LifecycleMode,
+    bool SuppressContinuedAfterStopped,
+    string StackTraceResponseMode)
 {
     public static AdapterOptions Parse(string[] args, string? environmentOptions)
     {
@@ -72,6 +77,11 @@ internal sealed record AdapterOptions(
         var spawnWindowedDescendant = false;
         var publishSecondWindowedDescendantAfterRelease = false;
         var threadsResponseMode = "success";
+        var supportsDelayedStackTraceLoading = false;
+        var omitDelayedStackTraceLoading = false;
+        var lifecycleMode = "default";
+        var suppressContinuedAfterStopped = false;
+        var stackTraceResponseMode = "success";
 
         foreach (var argument in args.Concat(SplitOptions(environmentOptions)))
         {
@@ -147,6 +157,21 @@ internal sealed record AdapterOptions(
                 case var _ when argument.StartsWith("--threads-response=", StringComparison.Ordinal):
                     threadsResponseMode = argument["--threads-response=".Length..];
                     break;
+                case "--supports-delayed-stack-trace-loading":
+                    supportsDelayedStackTraceLoading = true;
+                    break;
+                case "--omit-delayed-stack-trace-loading":
+                    omitDelayedStackTraceLoading = true;
+                    break;
+                case var _ when argument.StartsWith("--lifecycle-mode=", StringComparison.Ordinal):
+                    lifecycleMode = argument["--lifecycle-mode=".Length..];
+                    break;
+                case "--suppress-continued-after-stopped":
+                    suppressContinuedAfterStopped = true;
+                    break;
+                case var _ when argument.StartsWith("--stack-trace-response=", StringComparison.Ordinal):
+                    stackTraceResponseMode = argument["--stack-trace-response=".Length..];
+                    break;
                 default:
                     throw new ArgumentException($"Unknown fixture option '{argument}'.", nameof(args));
             }
@@ -174,7 +199,12 @@ internal sealed record AdapterOptions(
             exitAfterLaunchResponse,
             spawnWindowedDescendant,
             publishSecondWindowedDescendantAfterRelease,
-            threadsResponseMode);
+            threadsResponseMode,
+            supportsDelayedStackTraceLoading,
+            omitDelayedStackTraceLoading,
+            lifecycleMode,
+            suppressContinuedAfterStopped,
+            stackTraceResponseMode);
     }
 
     private static IEnumerable<string> SplitOptions(string? options) =>
@@ -298,16 +328,19 @@ internal sealed class ControlledDapAdapter
     private readonly string? _configurationDoneCapabilityDeltaReleasePath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_CONFIGURATION_DONE_CAPABILITY_DELTA_RELEASE");
     private readonly string? _secondWindowedDescendantReleasePath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_SECOND_WINDOWED_DESCENDANT_RELEASE");
     private readonly string? _threadsResponseReleasePath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_THREADS_RESPONSE_RELEASE");
+    private readonly string? _stackTraceResponseReleasePath = Environment.GetEnvironmentVariable("CONTROLLED_DAP_STACK_TRACE_RESPONSE_RELEASE");
     private Process? _descendant;
     private Process? _secondDescendant;
     private Task? _lifecycleEvents;
     private readonly CancellationTokenSource _lifecycleEventsCancellation = new();
+    private Task? _heldStackTraceResponse;
     private Task? _heldThreadsResponse;
     private static readonly TimeSpan InitializeGateWindow = TimeSpan.FromMilliseconds(75);
     private static readonly TimeSpan GracefulReleaseTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan ConfigurationDoneCapabilityDeltaReleaseTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan SecondWindowedDescendantReleaseTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DescendantCleanupTimeout = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan StackTraceResponseReleaseTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan LifecycleEventsCompletionTimeout = TimeSpan.FromSeconds(1);
     private Task<DapFrame?>? _nextRequest;
     private int _outgoingSequence = 1;
@@ -351,6 +384,17 @@ internal sealed class ControlledDapAdapter
                 try
                 {
                     await heldThreadsResponse.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (_lifecycleEventsCancellation.IsCancellationRequested)
+                {
+                    // Fixture teardown aborts an unreleased held response after cleanup commands were observed.
+                }
+            }
+            if (_heldStackTraceResponse is { } heldStackTraceResponse)
+            {
+                try
+                {
+                    await heldStackTraceResponse.ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (_lifecycleEventsCancellation.IsCancellationRequested)
                 {
@@ -441,11 +485,17 @@ internal sealed class ControlledDapAdapter
                 var supportsTerminate = _options.EnableTerminateAfterInitialization
                     ? false
                     : _options.SupportsTerminate;
-                await WriteResponseAsync(sequence, command, new
+                var initializeCapabilities = new Dictionary<string, object?>
                 {
-                    supportsConfigurationDoneRequest = supportsConfigurationDone,
-                    supportsTerminateRequest = supportsTerminate,
-                }, cancellationToken, omitBody: _options.OmitInitializeResponseBody);
+                    ["supportsConfigurationDoneRequest"] = supportsConfigurationDone,
+                    ["supportsTerminateRequest"] = supportsTerminate,
+                };
+                if (!_options.OmitDelayedStackTraceLoading)
+                {
+                    initializeCapabilities["supportsDelayedStackTraceLoading"] = _options.SupportsDelayedStackTraceLoading;
+                }
+
+                await WriteResponseAsync(sequence, command, initializeCapabilities, cancellationToken, omitBody: _options.OmitInitializeResponseBody);
                 await RecordAsync(new
                 {
                     kind = "initialize-response",
@@ -512,6 +562,8 @@ internal sealed class ControlledDapAdapter
                 return false;
             case "threads":
                 return await HandleThreadsRequestAsync(sequence, cancellationToken);
+            case "stackTrace":
+                return await HandleStackTraceRequestAsync(sequence, cancellationToken);
             default:
                 await WriteResponseAsync(sequence, command, body: null, cancellationToken);
                 return false;
@@ -596,13 +648,107 @@ internal sealed class ControlledDapAdapter
                 cancellationToken);
         }
 
-        await WriteEventAsync("stopped", new { reason = _options.StopReason, threadId = 1 }, cancellationToken);
-        await Task.Delay(TimeSpan.FromMilliseconds(75), cancellationToken);
-        await WriteEventAsync("continued", new { threadId = 1, allThreadsContinued = true }, cancellationToken);
-        await Task.Delay(TimeSpan.FromMilliseconds(75), cancellationToken);
-        await WriteEventAsync("exited", new { exitCode = _options.ExitCode }, cancellationToken);
-        await Task.Delay(TimeSpan.FromMilliseconds(75), cancellationToken);
-        await WriteEventAsync("terminated", body: null, cancellationToken);
+        switch (_options.LifecycleMode)
+        {
+            case "default":
+                await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: null, cancellationToken);
+                if (_options.SuppressContinuedAfterStopped)
+                {
+                    return;
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(75), cancellationToken);
+                await WriteContinuedEventAsync(threadId: 1, allThreadsContinued: true, cancellationToken);
+                await Task.Delay(TimeSpan.FromMilliseconds(75), cancellationToken);
+                await WriteEventAsync("exited", new { exitCode = _options.ExitCode }, cancellationToken);
+                await Task.Delay(TimeSpan.FromMilliseconds(75), cancellationToken);
+                await WriteEventAsync("terminated", body: null, cancellationToken);
+                return;
+            case "all-stop-exited":
+                await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken);
+                await Task.Delay(TimeSpan.FromMilliseconds(75), cancellationToken);
+                await WriteEventAsync("exited", new { exitCode = _options.ExitCode }, cancellationToken);
+                return;
+            case "all-stop-terminated":
+                await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken);
+                await Task.Delay(TimeSpan.FromMilliseconds(75), cancellationToken);
+                await WriteEventAsync("terminated", body: null, cancellationToken);
+                return;
+            case "all-stop":
+                await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken);
+                return;
+            case "all-stop-held-continued":
+                await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken);
+                await WaitForGracefulReleaseAsync(shouldWait: true, cancellationToken);
+                await WriteContinuedEventAsync(threadId: 1, allThreadsContinued: true, cancellationToken);
+                return;
+
+            case "partial-stop":
+                await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: false, cancellationToken);
+                return;
+            case "partial-stop-replacement":
+                await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: false, cancellationToken);
+                await WriteStoppedEventAsync(threadId: 2, allThreadsStopped: false, cancellationToken, "partial-stop-replacement");
+                return;
+            case "partial-stop-missing-thread":
+                await WriteStoppedEventAsync(threadId: null, allThreadsStopped: false, cancellationToken);
+                return;
+            case "all-stop-continued-omitted":
+                await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken);
+                await Task.Delay(TimeSpan.FromMilliseconds(75), cancellationToken);
+                await WriteContinuedEventAsync(threadId: 1, allThreadsContinued: null, cancellationToken);
+                return;
+            case "all-stop-continued-true":
+                await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken);
+                await Task.Delay(TimeSpan.FromMilliseconds(75), cancellationToken);
+                await WriteContinuedEventAsync(threadId: 1, allThreadsContinued: true, cancellationToken);
+                return;
+            case "all-stop-continued-partial":
+                await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken);
+                await Task.Delay(TimeSpan.FromMilliseconds(75), cancellationToken);
+                await WriteContinuedEventAsync(threadId: 1, allThreadsContinued: false, cancellationToken);
+                return;
+            case "all-stop-continued-partial-missing-thread":
+                await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken);
+                await Task.Delay(TimeSpan.FromMilliseconds(75), cancellationToken);
+                await WriteContinuedEventAsync(threadId: null, allThreadsContinued: false, cancellationToken);
+                return;
+            default:
+                throw new InvalidOperationException($"Unknown lifecycle mode '{_options.LifecycleMode}'.");
+        }
+    }
+    private async Task WriteStoppedEventAsync(int? threadId, bool? allThreadsStopped, CancellationToken cancellationToken, string? recordKind = null)
+    {
+        var body = new Dictionary<string, object?> { ["reason"] = _options.StopReason };
+        if (threadId is { } target)
+        {
+            body["threadId"] = target;
+        }
+
+        if (allThreadsStopped is { } all)
+        {
+            body["allThreadsStopped"] = all;
+        }
+
+        await WriteEventAsync("stopped", body, cancellationToken);
+        await RecordAsync(new { kind = recordKind ?? "stopped-event" }, cancellationToken);
+    }
+
+    private async Task WriteContinuedEventAsync(int? threadId, bool? allThreadsContinued, CancellationToken cancellationToken)
+    {
+        var body = new Dictionary<string, object?>();
+        if (threadId is { } target)
+        {
+            body["threadId"] = target;
+        }
+
+        if (allThreadsContinued is { } all)
+        {
+            body["allThreadsContinued"] = all;
+        }
+
+        await WriteEventAsync("continued", body, cancellationToken);
+        await RecordAsync(new { kind = "continued-event" }, cancellationToken);
     }
 
     private Process StartDescendant(bool windowed)
@@ -818,6 +964,26 @@ internal sealed class ControlledDapAdapter
             await Task.Delay(TimeSpan.FromMilliseconds(25), cancellationToken);
         }
     }
+    private async Task WaitForStackTraceResponseReleaseAsync(CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(_stackTraceResponseReleasePath))
+        {
+            throw new InvalidOperationException("CONTROLLED_DAP_STACK_TRACE_RESPONSE_RELEASE is required when the stackTrace response is held.");
+        }
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(StackTraceResponseReleaseTimeout);
+        while (!File.Exists(_stackTraceResponseReleasePath))
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(25), timeout.Token);
+        }
+    }
+
+    private async Task CompleteHeldStackTraceResponseAsync(int sequence, CancellationToken cancellationToken)
+    {
+        await WaitForStackTraceResponseReleaseAsync(cancellationToken);
+        await WriteResponseAsync(sequence, "stackTrace", new { stackFrames = StackFrames(1, "frame") }, cancellationToken);
+    }
 
     private async Task CompleteHeldThreadsResponseAsync(int sequence, CancellationToken cancellationToken)
     {
@@ -927,6 +1093,160 @@ internal sealed class ControlledDapAdapter
                 throw new InvalidOperationException($"Unknown threads response mode '{_options.ThreadsResponseMode}'.");
         }
     }
+
+    private async Task<bool> HandleStackTraceRequestAsync(int sequence, CancellationToken cancellationToken)
+    {
+        switch (_options.StackTraceResponseMode)
+        {
+            case "success":
+                await WriteResponseAsync(sequence, "stackTrace", new { stackFrames = StackFrames(2, "frame") }, cancellationToken);
+                return false;
+            case "empty-name-source-reference":
+                await WriteResponseAsync(sequence, "stackTrace", new
+                {
+                    stackFrames = new[]
+                    {
+                        new Dictionary<string, object?> { ["id"] = 1, ["name"] = string.Empty, ["line"] = 7UL, ["column"] = 11UL },
+                        new Dictionary<string, object?> { ["id"] = 2, ["name"] = "source-reference-only", ["source"] = new { sourceReference = 97 }, ["line"] = 0UL, ["column"] = 0UL },
+                    },
+                    totalFrames = 2U,
+                }, cancellationToken);
+                return false;
+            case "refused":
+                await WriteResponseAsync(sequence, "stackTrace", new { message = "controlled adapter stack trace refusal" }, cancellationToken, success: false);
+                return false;
+            case "wrong-command":
+                await WriteResponseAsync(sequence, "threads", new { stackFrames = StackFrames(1, "frame") }, cancellationToken);
+                return false;
+            case "malformed-body":
+                await WriteResponseAsync(sequence, "stackTrace", new { stackFrames = new[] { new Dictionary<string, object?> { ["id"] = "not-an-int32", ["name"] = 17 } } }, cancellationToken);
+                return false;
+            case "too-many-frames":
+                await WriteResponseAsync(sequence, "stackTrace", new { stackFrames = StackFrames(257, "frame") }, cancellationToken);
+                return false;
+            case "max-name-bytes":
+                await WriteResponseAsync(sequence, "stackTrace", new { stackFrames = StackFrames(1, new string('n', 1024)) }, cancellationToken);
+                return false;
+            case "too-many-name-bytes":
+                await WriteResponseAsync(sequence, "stackTrace", new { stackFrames = StackFrames(1, new string('n', 1025)) }, cancellationToken);
+                return false;
+            case "max-path-bytes":
+                await WriteResponseAsync(sequence, "stackTrace", new { stackFrames = StackFrames(1, "frame", new string('p', 4096)) }, cancellationToken);
+                return false;
+            case "too-many-path-bytes":
+                await WriteResponseAsync(sequence, "stackTrace", new { stackFrames = StackFrames(1, "frame", new string('p', 4097)) }, cancellationToken);
+                return false;
+            case "structured-content-at-limit":
+                await WriteResponseAsync(sequence, "stackTrace", new { stackFrames = StackFramesForStructuredContentBytes(262_144) }, cancellationToken);
+                return false;
+            case "structured-content-over-limit":
+                await WriteResponseAsync(sequence, "stackTrace", new { stackFrames = StackFramesForStructuredContentBytes(262_145) }, cancellationToken);
+                return false;
+            case "timeout":
+                await RecordAsync(new { kind = "stack-trace-response-timeout", sequence }, cancellationToken);
+                return false;
+            case "safe-line-column":
+                await WriteResponseAsync(sequence, "stackTrace", new
+                {
+                    stackFrames = new[] { new Dictionary<string, object?> { ["id"] = 1, ["name"] = "frame", ["source"] = new { path = "C:/safe.cs" }, ["line"] = 9_007_199_254_740_991L, ["column"] = 9_007_199_254_740_991L } },
+                }, cancellationToken);
+                return false;
+            case "line-above-safe":
+                await WriteResponseAsync(sequence, "stackTrace", new
+                {
+                    stackFrames = new[] { new Dictionary<string, object?> { ["id"] = 1, ["name"] = "frame", ["line"] = 9_007_199_254_740_992L, ["column"] = 0 } },
+                }, cancellationToken);
+                return false;
+            case "column-negative":
+                await WriteResponseAsync(sequence, "stackTrace", new
+                {
+                    stackFrames = new[] { new Dictionary<string, object?> { ["id"] = 1, ["name"] = "frame", ["line"] = 0, ["column"] = -1 } },
+                }, cancellationToken);
+                return false;
+            case "line-non-integral":
+                await WriteResponseAsync(sequence, "stackTrace", new
+                {
+                    stackFrames = new[] { new Dictionary<string, object?> { ["id"] = 1, ["name"] = "frame", ["line"] = 1.5, ["column"] = 0 } },
+                }, cancellationToken);
+                return false;
+            case "hold":
+                await RecordAsync(new { kind = "stack-trace-response-gated", sequence }, cancellationToken);
+                _heldStackTraceResponse = CompleteHeldStackTraceResponseAsync(sequence, _lifecycleEventsCancellation.Token);
+                return false;
+            case "hold-then-continued-omitted":
+                await RecordAsync(new { kind = "stack-trace-response-gated", sequence }, cancellationToken);
+                await WriteContinuedEventAsync(threadId: 1, allThreadsContinued: null, cancellationToken);
+                _heldStackTraceResponse = CompleteHeldStackTraceResponseAsync(sequence, _lifecycleEventsCancellation.Token);
+                return false;
+            case "hold-then-continued-restop":
+                await RecordAsync(new { kind = "stack-trace-response-gated", sequence }, cancellationToken);
+                await WriteContinuedEventAsync(threadId: 1, allThreadsContinued: true, cancellationToken);
+                await WriteStoppedEventAsync(threadId: 1, allThreadsStopped: true, cancellationToken, "restopped-event");
+                _heldStackTraceResponse = CompleteHeldStackTraceResponseAsync(sequence, _lifecycleEventsCancellation.Token);
+                return false;
+            case "reader-failure":
+                await WriteMalformedDapFrameAsync(cancellationToken);
+                return true;
+            default:
+                throw new InvalidOperationException($"Unknown stack trace response mode '{_options.StackTraceResponseMode}'.");
+        }
+    }
+
+    private static List<Dictionary<string, object?>> StackFrames(int count, string name, string? path = null)
+    {
+        var frames = new List<Dictionary<string, object?>>(count);
+        for (var id = 1; id <= count; id++)
+        {
+            var frame = new Dictionary<string, object?>
+            {
+                ["id"] = id,
+                ["name"] = name,
+                ["line"] = 0UL,
+                ["column"] = 0UL,
+            };
+            if (path is not null)
+            {
+                frame["source"] = new Dictionary<string, object?> { ["path"] = path };
+            }
+
+            frames.Add(frame);
+        }
+
+        return frames;
+    }
+
+    private static List<Dictionary<string, object?>> StackFramesForStructuredContentBytes(int targetBytes)
+    {
+        var frames = StackFrames(256, string.Empty);
+        var remaining = targetBytes - StackTraceStructuredContentByteCount(frames);
+        for (var index = 0; remaining > 0 && index < frames.Count; index++)
+        {
+            var nameBytes = Math.Min(remaining, 1024);
+            frames[index]["name"] = new string('b', nameBytes);
+            remaining -= nameBytes;
+        }
+
+        if (remaining != 0 || StackTraceStructuredContentByteCount(frames) != targetBytes)
+        {
+            throw new InvalidOperationException($"Could not create a {targetBytes}-byte normalized structured-content stack-frame list.");
+        }
+
+        return frames;
+    }
+
+    private static int StackTraceStructuredContentByteCount(IReadOnlyList<Dictionary<string, object?>> frames) =>
+        JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            kind = "call_stack_success",
+            frames = frames.Select(static frame => new
+            {
+                id = frame["id"],
+                name = frame["name"],
+                source = (string?)null,
+                line = frame["line"],
+                column = frame["column"],
+            }),
+        }).Length;
 
     private static List<Dictionary<string, object?>> Threads(int count, string name)
     {
