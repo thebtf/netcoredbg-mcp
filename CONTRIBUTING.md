@@ -150,3 +150,8 @@ candidate, complete consumer-mode and remaining pre-PR checks, and pass review.
 Only then merge it into `main`; create the annotated `vX.Y.Z` tag from the
 verified merged commit and monitor its publish workflow. Do not create a release
 tag from an unmerged pull request.
+
+For the mandatory two exact-head SonarQube scans, follow
+[`docs/SONARQUBE-ONBOARDING.md`](docs/SONARQUBE-ONBOARDING.md). It defines the
+project-local credential names and the candidate/post-merge runner commands;
+neither an unavailable credential nor a candidate receipt permits tag creation.
