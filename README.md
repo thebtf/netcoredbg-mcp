@@ -231,6 +231,21 @@ This mode returns `evidence_grade=lossless_raster`, persists a session-scoped
 PNG artifact, and includes SHA-256 and geometry provenance. Any raw-derived
 crop requires `evidence=true`; preview-only captures do not provide it.
 
+Without an expected target, persisted evidence reports
+`target_comparability.status=UNASSERTED`: it is valid lossless evidence, but
+does not prove a resize target. Supply all three physical target fields to
+compare the raw raster, not a derivative:
+
+```text
+ui_take_screenshot(evidence=true, expected_hwnd=..., expected_physical_width=..., expected_physical_height=...)
+```
+
+The response reports `MATCHED` or `MISMATCH`; only `MATCHED` persists raw
+evidence. `max_width` affects only the preview and HD derivative, never this
+comparison. `ui_resize_window()` reports request-versus-readback
+`target_comparability.status` as `MATCHED`, `MISMATCH`, or `UNAVAILABLE`;
+`resized=true` confirms request completion, not target equality.
+
 Use `ui_take_annotated_screenshot()` to receive Set-of-Mark labels, then invoke
 `ui_click_annotated(element_id=...)`. Use `ui_bring_to_front()` only when the
 debuggee should intentionally leave stealth mode.
