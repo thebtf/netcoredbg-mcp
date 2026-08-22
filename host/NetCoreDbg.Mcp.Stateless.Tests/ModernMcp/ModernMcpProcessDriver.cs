@@ -262,10 +262,26 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         }
     }
 
+    internal async Task WaitForStackTraceRequestAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await _fixture.WaitForStackTraceRequestAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new Xunit.Sdk.XunitException("get_call_stack did not emit a DAP 'stackTrace' request before the test deadline.");
+        }
+    }
+
+    internal Task WaitForFixtureEventAsync(string eventName, CancellationToken cancellationToken = default) =>
+        _fixture.WaitForEventAsync(eventName, cancellationToken);
+
     internal Task WaitForFixtureRecordAsync(string kind, CancellationToken cancellationToken = default) =>
         _fixture.WaitForTranscriptKindAsync(kind, cancellationToken);
 
     internal void ReleaseThreadsResponse() => _fixture.ReleaseThreadsResponse();
+    internal void ReleaseStackTraceResponse() => _fixture.ReleaseStackTraceResponse();
 
     internal async Task<int> ReadDescendantProcessIdAsync(CancellationToken cancellationToken = default)
     {

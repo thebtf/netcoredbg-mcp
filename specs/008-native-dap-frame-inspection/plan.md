@@ -7,19 +7,30 @@ sequenceDiagram
   participant C as Modern MCP client
   participant R as DebugSessionRegistry
   participant L as Registry-owned SessionSlot
-  participant S as NetCoreDbgSession operation/state gate
+  participant S as NetCoreDbgSession
+  participant A as _callStackAdmissionGate
+  participant T as _stateGate
   participant D as netcoredbg DAP
   C->>R: get_call_stack(debugSessionId, threadId, startFrame?, levels?)
   R->>R: validate closed input and resolve opaque token
   R->>L: acquire operation lease
   L->>S: GetCallStackAsync
-  S->>S: under one gate, require capability and requested target's current private token
-  alt capability absent or token invalidated before write
-    S-->>R: redacted stack-trace refusal; no stackTrace write
-  else capture current target token and write finite request
-    S->>D: correlated finite stackTrace(threadId, startFrame, levels)
-    D-->>S: correlated success or refusal
-    S-->>R: bounded typed frame result
+  S->>A: acquire admission
+  A->>T: require capability and capture target token
+  alt capability absent or target invalid before write
+    A-->>S: release admission; redacted refusal; no stackTrace write
+  else capture, register pending request, and write
+    A->>D: correlated finite stackTrace(threadId, startFrame, levels)
+    A-->>S: release admission after write
+    D-->>S: correlated response
+    S->>T: reader validates captured token; no admission reacquisition
+    S-->>R: bounded typed frame result or redacted refusal
+  end
+  opt DAP stopped, continued, exited, or terminated event
+    D-->>S: lifecycle event
+    S->>A: handler acquires admission
+    A->>T: mutate state and eligibility
+    A-->>S: release admission
   end
   R->>R: normalize and enforce 256 KiB structuredContent ceiling
   R-->>C: call_stack_success or redacted typed error
@@ -32,7 +43,7 @@ sequenceDiagram
 
 `Program.DebugSessionRegistry` owns the public catalog order, exact MCP input validation, opaque-token lookup, complete result envelope, serialized `structuredContent` ceiling, and one `SessionSlot` lease per live token. It does not inspect session state or capability before dispatch. `SessionSlot` remains lifecycle ownership only: it serializes admission, supplies the abort token, removes the exact token on close, and invokes the existing one-winner drain/stop/dispose path.
 
-`DebugAdapter.NetCoreDbgSession` owns the only new internal typed DAP command, a narrow initialize-derived `supportsDelayedStackTraceLoading` session capability record, and one internal DAP operation/state gate. The initialize record is true only for an explicit boolean true and is neither exposed nor generalized into a feature registry. Under the gate, a `stopped` event with `allThreadsStopped:true` replaces every prior eligibility token with one all-target token. A `stopped` event whose `allThreadsStopped` is omitted or false atomically clears every all-target and per-target token, then installs only a per-target token for its supplied `threadId`; if it omits `threadId`, it installs no token. `continued` has three exhaustive transitions: omitted `allThreadsContinued` or `true` atomically clears all-target and every per-target token; `false` with a named `threadId` invalidates only that target and preserves unrelated target eligibility while excluding the named target from any all-target representation; `false` without `threadId` fails closed by clearing every token, making no target eligible, and retaining no unknown token. `GetCallStackAsync` holds admission from capability/token checking until it has registered and written the correlated finite request, capturing the requested target's private token for that request only. Reader-ordered response publication re-enters the gate and compares that capture with the requested target's still-current token. A held response after target continuation or resume→restop therefore returns refusal with no frames and preserves the session; a new token admits only a newly admitted request. Tokens are never exposed or cached, and the registry has no state/capability precheck. This makes races testable: admission writes before the event under the former token, or refuses with no post-event write; after valid named partial continuation, only the named target is refused and unrelated targets remain eligible.
+`DebugAdapter.NetCoreDbgSession` owns the only new internal typed DAP command, a narrow initialize-derived `supportsDelayedStackTraceLoading` session capability record, and exactly two gates. `_callStackAdmissionGate` serializes `GetCallStackAsync` target capture, pending-request registration, and `stackTrace` write; the single DAP reader also enters it before its `stopped`, `continued`, `exited`, and `terminated` handlers change lifecycle eligibility. `_stateGate` protects lifecycle state, the capability record, and private eligibility-token visibility. While holding admission, the operation takes state to require capability and capture its request-local target token, then registers and writes the correlated request before releasing admission. The response reader validates that captured token under `_stateGate` at its serial dispatch position and does not reacquire admission. Under this ordering, a held response invalidated by continuation, terminal transition, or resume→restop refuses without frames; only a newly admitted request can use a replacement token. A `stopped` event with `allThreadsStopped:true` replaces every prior eligibility token with one all-target token. A `stopped` event whose `allThreadsStopped` is omitted or false atomically clears every all-target and per-target token, then installs only a per-target token for its supplied `threadId`; if it omits `threadId`, it installs no token. `continued` has three exhaustive transitions: omitted `allThreadsContinued` or `true` atomically clears all-target and every per-target token; `false` with a named `threadId` invalidates only that target and preserves unrelated target eligibility while excluding the named target from any all-target representation; `false` without `threadId` fails closed by clearing every token, making no target eligible, and retaining no unknown token. `exited` and `terminated` clear eligibility under the same admission-then-state ordering. Tokens are neither exposed nor cached, and the registry has no state/capability precheck.
 
 Empty names are valid when within the 1,024-byte limit. A source object without `path`, including a sourceReference-only object, is likewise valid and normalizes to `source:null,line:0,column:0`; raw `sourceReference` is deliberately excluded because it is an adapter-local handle for a future source-retrieval authority, not execution-location data B2 needs. Frame `line` and `column` accept only integers in `0..9007199254740991`, inclusive, matching the vendored DAP `uint64` safe-integer maximum; negative, non-integral, and above-range values are protocol errors.
 
@@ -40,7 +51,7 @@ B1 is binding provenance, not current-head test evidence: implementation `3ed4b8
 
 ## Alternatives
 
-ADR-006 selects an internal typed bounded `stackTrace` seam with an initialize-derived paging gate and session-local state/write atomicity. Generic DAP forwarding is rejected because it exports arbitrary adapter authority. Retaining call-stack inspection only in Python is rejected because it leaves the native stateful walking skeleton unable to locate execution. Scopes and frame consumption are deliberately deferred to a later slice.
+ADR-006 selects an internal typed bounded `stackTrace` seam with an initialize-derived paging gate, admission-serialized capture/register/write, and reader-ordered state-token validation. Generic DAP forwarding is rejected because it exports arbitrary adapter authority. Retaining call-stack inspection only in Python is rejected because it leaves the native stateful walking skeleton unable to locate execution. Scopes and frame consumption are deliberately deferred to a later slice.
 
 ## Migration
 
@@ -53,7 +64,7 @@ Python is neither called nor changed by this native request. Retained installed 
 | Requirement | Ticket | Future implementation/test owners (not executed by this planning packet) |
 |---|---|---|
 | B2-REQ-001/002/005/006 | B2-T02, B2-T03 | `host/NetCoreDbg.Mcp.Stateless/Program.cs`; `host/NetCoreDbg.Mcp.Stateless.Tests/ModernMcp/GetCallStackContractTests.cs` (new); `ModernProtocolContractTests.cs`; `StructuredContentSchemaParityTests.cs`; `specs/001-mcp-stateless-strangler/contracts/modern-front-door.schema.json` |
-| B2-REQ-003/004/007/008 | B2-T02, B2-T03 | `host/NetCoreDbg.Mcp.Stateless/DebugAdapter/NetCoreDbgSession.cs` (private initialize-capability record, request-local target-token capture, atomic stopped/continued eligibility transitions, and reader-ordered token-current response publication under the operation/state gate; no public lifecycle token); `host/NetCoreDbg.Mcp.Stateless.Tests/DebugAdapter/NetCoreDbgSessionContractDriver.cs`; `NetCoreDbgSessionTests.cs`; `SessionSlotContractTests.cs`; `ModernMcp/SessionSlotLifecycleTests.cs` |
+| B2-REQ-003/004/007/008 | B2-T02, B2-T03 | `host/NetCoreDbg.Mcp.Stateless/DebugAdapter/NetCoreDbgSession.cs` (`_callStackAdmissionGate` serializing request-local target capture, pending registration, and write plus the DAP reader's stopped/continued/exited/terminated handlers; `_stateGate` protecting lifecycle state and private token visibility; serial-reader validation of the captured target token under `_stateGate` at correlated-response dispatch without admission-gate reacquisition; no public lifecycle token); `host/NetCoreDbg.Mcp.Stateless.Tests/DebugAdapter/NetCoreDbgSessionContractDriver.cs`; `NetCoreDbgSessionTests.cs`; `SessionSlotContractTests.cs`; `ModernMcp/SessionSlotLifecycleTests.cs` |
 | B2-REQ-003/004/006 | B2-T01, B2-T02, B2-T03 | `host/NetCoreDbg.Mcp.Stateless.Tests/Fixtures/ControlledDapAdapter/Program.cs`; `DebugAdapter/NetCoreDbgSessionContractDriver.cs`; `ModernMcp/ModernMcpProcessDriver.cs` (including all-thread `continued` omitted/true, named partial continuation, missing-thread partial fail-closed, held-response continuation and resume→restop no-frame checks, plus `line`/`column` safe-integer boundaries) |
 | B2-REQ-004/008 | B2-T01, B2-T02 | `docs/dap-protocol/specification.md`; `docs/dap-protocol/debugAdapterProtocol.json`; no Python source change |
 | B2-REQ-009 | B2-G0, B2-T04 | fresh independent `B2-G0` recheck over the corrected ADR/spec/plan/tasks packet, including all-thread/named-partial continuation and held-response token-current publication, then installed platform security-review contract `C:/Users/btf/.omp/profiles/nvmd-selfhost/plugins/cache/plugins/nvmd-ai___nvmd-ai___0.9.19/wiki/security-review.md`; durable security evidence only at root `.agent/runs/b2-native-frame-inspection/security-review.md` |

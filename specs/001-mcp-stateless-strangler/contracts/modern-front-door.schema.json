@@ -74,6 +74,35 @@
       },
       "additionalProperties": false
     },
+    "getCallStackArguments": {
+      "type": "object",
+      "required": [
+        "debugSessionId",
+        "threadId"
+      ],
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "threadId": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "startFrame": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "levels": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256
+        }
+      },
+      "additionalProperties": false
+    },
     "startDebugSuccess": {
       "type": "object",
       "required": [
@@ -168,6 +197,68 @@
       },
       "additionalProperties": false
     },
+    "stackFrame": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "source",
+        "line",
+        "column"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "name": {
+          "type": "string"
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "column": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "additionalProperties": false
+    },
+    "callStackSuccess": {
+      "type": "object",
+      "required": [
+        "kind",
+        "frames"
+      ],
+      "properties": {
+        "kind": {
+          "const": "call_stack_success"
+        },
+        "frames": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/stackFrame"
+          }
+        },
+        "totalFrames": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        }
+      },
+      "additionalProperties": false
+    },
     "debugSessionNotFound": {
       "type": "object",
       "required": [
@@ -216,6 +307,38 @@
       },
       "additionalProperties": false
     },
+    "dapStackTraceRefused": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_stack_trace_refused"
+        },
+        "error": {
+          "const": "DAP_STACK_TRACE_REFUSED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapStackTraceProtocolError": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_stack_trace_protocol_error"
+        },
+        "error": {
+          "const": "DAP_STACK_TRACE_PROTOCOL_ERROR"
+        }
+      },
+      "additionalProperties": false
+    },
     "missingProgramCapability": {
       "type": "object",
       "required": [
@@ -251,7 +374,8 @@
             "start_debug",
             "get_debug_state",
             "stop_debug",
-            "get_threads"
+            "get_threads",
+            "get_call_stack"
           ]
         }
       },
@@ -272,6 +396,9 @@
           "$ref": "#/$defs/threadsSuccess"
         },
         {
+          "$ref": "#/$defs/callStackSuccess"
+        },
+        {
           "$ref": "#/$defs/debugSessionNotFound"
         },
         {
@@ -282,6 +409,12 @@
         },
         {
           "$ref": "#/$defs/dapThreadsProtocolError"
+        },
+        {
+          "$ref": "#/$defs/dapStackTraceRefused"
+        },
+        {
+          "$ref": "#/$defs/dapStackTraceProtocolError"
         },
         {
           "$ref": "#/$defs/invalidToolArguments"
