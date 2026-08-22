@@ -43,6 +43,16 @@ class TestSonarqubeExactHeadRunner(TestCase):
             {"SONAR_HOST_URL": "https://sonar.example.test", "SONAR_TOKEN": "scan-token"},
         )
 
+    def test_scanner_commands_supply_token_but_render_redacted(self):
+        begin = runner.scanner_begin_command(
+            ["scanner"], Path("SonarQube.Analysis.xml"), "https://sonar.example.test", "a" * 40, "scan-token"
+        )
+        end = runner.scanner_end_command(["scanner"], "scan-token")
+
+        self.assertIn("/d:sonar.token=scan-token", begin)
+        self.assertIn("/d:sonar.token=scan-token", end)
+        self.assertNotIn("scan-token", runner.redact(" ".join(begin), ("scan-token",)))
+
     def test_in_tree_dotenv_is_rejected_before_source_children_run(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

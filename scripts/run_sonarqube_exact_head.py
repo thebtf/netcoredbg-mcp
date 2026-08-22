@@ -167,7 +167,7 @@ def run_process(
     label: str,
     credential_input_names: Sequence[str] = (),
 ) -> None:
-    print("+ " + " ".join(command), flush=True)
+    print("+ " + redact(" ".join(command), secrets), flush=True)
     try:
         completed = subprocess.run(
             list(command),
@@ -332,7 +332,9 @@ def discover_scanner(override: str | None) -> list[str]:
     raise RunnerError("SONAR_SCANNER_UNAVAILABLE: install SonarScanner for .NET or pass --scanner.")
 
 
-def scanner_begin_command(scanner: Sequence[str], analysis_xml: Path, host: str, head: str) -> list[str]:
+def scanner_begin_command(
+    scanner: Sequence[str], analysis_xml: Path, host: str, head: str, token: str
+) -> list[str]:
     return [
         *scanner,
         "begin",
@@ -340,7 +342,12 @@ def scanner_begin_command(scanner: Sequence[str], analysis_xml: Path, host: str,
         f"/s:{analysis_xml}",
         f"/d:sonar.host.url={host}",
         f"/d:sonar.scm.revision={head}",
+        f"/d:sonar.token={token}",
     ]
+
+
+def scanner_end_command(scanner: Sequence[str], token: str) -> list[str]:
+    return [*scanner, "end", f"/d:sonar.token={token}"]
 
 
 def project_inventory(repository_root: Path) -> tuple[Path, list[Path], list[Path]]:
@@ -1048,7 +1055,13 @@ def execute(role: str, scanner_override: str | None) -> Path:
             )
             scanner_env = scanner_environment(inherited_environment, credentials)
             run_process(
-                scanner_begin_command(scanner, analysis_xml, credentials["SONAR_HOST_URL"], context.head),
+                scanner_begin_command(
+                    scanner,
+                    analysis_xml,
+                    credentials["SONAR_HOST_URL"],
+                    context.head,
+                    credentials["SONAR_TOKEN"],
+                ),
                 cwd=context.repository_root,
                 environment=scanner_env,
                 secrets=secrets,
@@ -1081,7 +1094,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
                     label=f"Standalone project build ({project.name})",
                 )
             run_process(
-                [*scanner, "end"],
+                scanner_end_command(scanner, credentials["SONAR_TOKEN"]),
                 cwd=context.repository_root,
                 environment=scanner_env,
                 secrets=secrets,

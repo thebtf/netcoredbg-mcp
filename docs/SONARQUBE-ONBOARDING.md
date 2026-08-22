@@ -3,8 +3,8 @@
 This repository uses the fixed SonarQube project key
 `thebtf_netcoredbg_mcp`. The tracked runner is
 `scripts/run_sonarqube_exact_head.py`; it is the required release-scan command.
-It never accepts `SONAR_ADMIN_TOKEN`, never places credentials in argv, and
-writes only secret-free receipts.
+It never accepts `SONAR_ADMIN_TOKEN` and writes only secret-free receipts and
+redacted logs.
 
 ## One-time workstation setup
 
@@ -39,16 +39,19 @@ worktree: the runner rejects any in-tree `.env`, including an ignored or
 symlinked file, before it starts repository-controlled build code. Use the
 credential-free SonarQube HTTP(S) origin for `SONAR_HOST_URL`.
 
-`SONAR_TOKEN` is the project analysis credential. It is passed only to the
-scanner's `begin`/`end` processes and the runner's submitted Compute Engine task
-readback, which requires project Execute Analysis but not administration.
+`SONAR_TOKEN` is the project analysis credential. SonarScanner for .NET 11.2.1
+requires it as `/d:sonar.token` on the scanner's `begin` and `end` process
+command lines; the runner redacts it from displayed commands and output. This
+creates unavoidable same-host process-argument visibility while each scanner
+process runs. The token is also used for the runner's submitted Compute Engine
+task readback, which requires project Execute Analysis but not administration.
 `SONAR_READ_TOKEN` belongs to a separate non-admin principal with project Browse
 access and is used for the analysis-bound quality gate, current-analysis
 bookends, issue inventory, and hotspot inventory. Any `SONAR_ADMIN_TOKEN` is
 rejected.
 
 Neither credential reaches Git, `dotnet build`, or test child processes. Never
-put either token in a command line, a tracked file, a receipt, or a log.
+put either token in a tracked file, receipt, or unredacted log.
 
 ## Release scans
 
