@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.Loader;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Hosting;
 using Xunit;
 
 namespace NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter;
@@ -329,6 +330,113 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         Assert.NotNull(stopAsync);
         return Assert.IsAssignableFrom<Task>(stopAsync!.Invoke(disposer, [cancellationToken]));
     }
+
+    public async Task<HostedThreadsLease> StartHostedThreadsLeaseAsync(CancellationToken cancellationToken)
+    {
+        const string sessionId = "host-drain-session";
+        var assembly = _session.GetType().Assembly;
+        var registryType = RequireType(assembly, "NetCoreDbg.Mcp.Stateless.Program+DebugSessionRegistry");
+        var registryConstructor = registryType.GetConstructor(
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            types: [typeof(string)],
+            modifiers: null);
+        Assert.NotNull(registryConstructor);
+        var registry = registryConstructor!.Invoke([null]);
+        var sessionsField = registryType.GetField("_sessions", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(sessionsField);
+        var sessions = sessionsField!.GetValue(registry)
+            ?? throw new InvalidOperationException("DebugSessionRegistry._sessions returned null.");
+        var slotType = Assert.IsAssignableFrom<Type>(registryType.GetNestedType("SessionSlot", BindingFlags.NonPublic));
+        var slotsField = registryType.GetField("_slots", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(slotsField);
+        var slots = slotsField!.GetValue(registry)
+            ?? throw new InvalidOperationException("DebugSessionRegistry._slots returned null.");
+        var removeSession = sessions.GetType().GetMethod("TryRemove", [typeof(string), _session.GetType().MakeByRefType()]);
+        var removeSlot = slots.GetType().GetMethod("TryRemove", [typeof(string), slotType.MakeByRefType()]);
+        var addSession = sessions.GetType().GetMethod("TryAdd", [typeof(string), _session.GetType()]);
+        var addSlot = slots.GetType().GetMethod("TryAdd", [typeof(string), slotType]);
+        Assert.NotNull(removeSession);
+        Assert.NotNull(removeSlot);
+        Assert.NotNull(addSession);
+        Assert.NotNull(addSlot);
+
+        Action remove = () =>
+        {
+            _ = removeSlot!.Invoke(slots, [sessionId, null]);
+            _ = removeSession!.Invoke(sessions, [sessionId, null]);
+        };
+        Func<CancellationToken, Task> stop = StopAsync;
+        Func<ValueTask> dispose = () => new ValueTask(DisposeSessionAsync());
+        var slotConstructor = slotType.GetConstructor(
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            types: [typeof(TimeSpan), typeof(Func<CancellationToken, Task>), typeof(Func<ValueTask>), typeof(Action)],
+            modifiers: null);
+        Assert.NotNull(slotConstructor);
+        var slot = slotConstructor!.Invoke([TimeSpan.FromSeconds(2), stop, dispose, remove]);
+        Assert.True((bool)addSession!.Invoke(sessions, [sessionId, _session])!);
+        Assert.True((bool)addSlot!.Invoke(slots, [sessionId, slot])!);
+
+        IHost? host = null;
+        try
+        {
+            var programType = RequireType(assembly, "NetCoreDbg.Mcp.Stateless.Program");
+            var buildHost = programType.GetMethod(
+                "BuildHost",
+                BindingFlags.Static | BindingFlags.NonPublic,
+                binder: null,
+                types: [registryType],
+                modifiers: null);
+            Assert.NotNull(buildHost);
+            host = Assert.IsAssignableFrom<IHost>(buildHost!.Invoke(null, [registry]));
+            await host.StartAsync(cancellationToken).ConfigureAwait(false);
+
+            var getThreadsAsync = registryType.GetMethod(
+                "GetThreadsAsync",
+                BindingFlags.Instance | BindingFlags.NonPublic,
+                binder: null,
+                types: [typeof(ModelContextProtocol.Protocol.CallToolRequestParams), typeof(CancellationToken)],
+                modifiers: null);
+            Assert.NotNull(getThreadsAsync);
+            var pending = getThreadsAsync!.Invoke(registry,
+            [
+                new ModelContextProtocol.Protocol.CallToolRequestParams
+                {
+                    Name = "get_threads",
+                    Arguments = new Dictionary<string, JsonElement>
+                    {
+                        ["debugSessionId"] = JsonSerializer.SerializeToElement(sessionId),
+                    },
+                },
+                cancellationToken,
+            ]);
+            var asTask = pending?.GetType().GetMethod("AsTask", BindingFlags.Instance | BindingFlags.Public, Type.EmptyTypes);
+            Assert.NotNull(asTask);
+            var threads = Assert.IsAssignableFrom<Task<ModelContextProtocol.Protocol.CallToolResult>>(asTask!.Invoke(pending, []));
+            return new HostedThreadsLease(host, threads);
+        }
+        catch
+        {
+            if (host is not null)
+            {
+                try
+                {
+                    await host.StopAsync(CancellationToken.None).ConfigureAwait(false);
+                }
+                finally
+                {
+                    host.Dispose();
+                }
+            }
+            else
+            {
+                remove();
+            }
+
+            throw;
+        }
+    }
     public async Task<RegistryStateProbe> GetStateThroughRegistryAsync(Func<object, bool> isUsable)
     {
         const string sessionId = "test-session";
@@ -593,6 +701,34 @@ internal sealed class NetCoreDbgSessionContractDriver : IAsyncDisposable
         Assert.NotNull(asTask);
         return await AwaitAsyncResult(asTask!.Invoke(value, []), member, cancellationToken);
     }
+    internal sealed class HostedThreadsLease(IHost host, Task<ModelContextProtocol.Protocol.CallToolResult> threads) : IAsyncDisposable
+    {
+        private bool _stopped;
+
+        public Task<ModelContextProtocol.Protocol.CallToolResult> Threads { get; } = threads;
+
+        public async Task StopAsync(CancellationToken cancellationToken)
+        {
+            await host.StopAsync(cancellationToken).ConfigureAwait(false);
+            _stopped = true;
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            try
+            {
+                if (!_stopped)
+                {
+                    await host.StopAsync(CancellationToken.None).ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                host.Dispose();
+            }
+        }
+    }
+
 }
 
 internal sealed class ConcurrentNetCoreDbgSessionContractDriver(
@@ -641,7 +777,8 @@ internal sealed record FixtureConfiguration(
     bool SpawnWindowedDescendant = false,
     bool PublishSecondWindowedDescendantAfterRelease = false,
     string? WindowedDescendantExecutablePath = null,
-    IReadOnlyList<string>? WindowedDescendantArguments = null)
+    IReadOnlyList<string>? WindowedDescendantArguments = null,
+    string ThreadsResponseMode = "success")
 {
     public string AsEnvironmentValue() => string.Join(
         ';',
@@ -667,6 +804,7 @@ internal sealed record FixtureConfiguration(
             HoldConfigurationDoneCapabilityDeltaUntilRelease ? "--hold-configuration-done-capabilities-delta-until-release" : null,
             EnableTerminateAfterInitialization ? "--enable-terminate-after-initialization" : null,
             ExitAfterLaunchResponse ? "--exit-after-launch-response" : null,
+            $"--threads-response={ThreadsResponseMode}",
         }.Where(static value => value is not null));
 }
 
@@ -677,11 +815,13 @@ internal sealed class FixtureProcess : IAsyncDisposable
     private readonly string _releasePath;
     private readonly string _configurationDoneCapabilityDeltaReleasePath;
     private readonly string _secondWindowedDescendantReleasePath;
+    private readonly string _threadsResponseReleasePath;
     private readonly string? _previousTranscript;
     private readonly string? _previousOptions;
     private readonly string? _previousRelease;
     private readonly string? _previousConfigurationDoneCapabilityDeltaRelease;
     private readonly string? _previousSecondWindowedDescendantRelease;
+    private readonly string? _previousThreadsResponseRelease;
     private readonly string? _previousWindowedDescendantExecutable;
     private readonly string? _previousWindowedDescendantArguments;
     private readonly HashSet<int> _preExistingAdapterPids;
@@ -697,6 +837,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
         string releasePath,
         string configurationDoneCapabilityDeltaReleasePath,
         string secondWindowedDescendantReleasePath,
+        string threadsResponseReleasePath,
         string executablePath,
         string? previousTranscript,
         string? previousOptions,
@@ -704,6 +845,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
         string? previousConfigurationDoneCapabilityDeltaRelease,
         string? previousSecondWindowedDescendantRelease,
         string? previousWindowedDescendantExecutable,
+        string? previousThreadsResponseRelease,
         string? previousWindowedDescendantArguments,
         HashSet<int> preExistingAdapterPids)
     {
@@ -712,6 +854,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
         _releasePath = releasePath;
         _configurationDoneCapabilityDeltaReleasePath = configurationDoneCapabilityDeltaReleasePath;
         _secondWindowedDescendantReleasePath = secondWindowedDescendantReleasePath;
+        _threadsResponseReleasePath = threadsResponseReleasePath;
         _executablePath = executablePath;
         _previousTranscript = previousTranscript;
         _previousOptions = previousOptions;
@@ -719,6 +862,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
         _previousConfigurationDoneCapabilityDeltaRelease = previousConfigurationDoneCapabilityDeltaRelease;
         _previousSecondWindowedDescendantRelease = previousSecondWindowedDescendantRelease;
         _previousWindowedDescendantExecutable = previousWindowedDescendantExecutable;
+        _previousThreadsResponseRelease = previousThreadsResponseRelease;
         _previousWindowedDescendantArguments = previousWindowedDescendantArguments;
         _preExistingAdapterPids = preExistingAdapterPids;
     }
@@ -736,6 +880,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
         var releasePath = Path.Combine(scratchDirectory, "graceful-shutdown.release");
         var configurationDoneCapabilityDeltaReleasePath = Path.Combine(scratchDirectory, "configuration-done-capabilities-delta.release");
         var secondWindowedDescendantReleasePath = Path.Combine(scratchDirectory, "second-windowed-descendant.release");
+        var threadsResponseReleasePath = Path.Combine(scratchDirectory, "threads-response.release");
         File.WriteAllText(transcriptPath, string.Empty, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
 
         var previousTranscript = Environment.GetEnvironmentVariable("CONTROLLED_DAP_TRANSCRIPT");
@@ -743,6 +888,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
         var previousRelease = Environment.GetEnvironmentVariable("CONTROLLED_DAP_GRACEFUL_RELEASE");
         var previousConfigurationDoneCapabilityDeltaRelease = Environment.GetEnvironmentVariable("CONTROLLED_DAP_CONFIGURATION_DONE_CAPABILITY_DELTA_RELEASE");
         var previousSecondWindowedDescendantRelease = Environment.GetEnvironmentVariable("CONTROLLED_DAP_SECOND_WINDOWED_DESCENDANT_RELEASE");
+        var previousThreadsResponseRelease = Environment.GetEnvironmentVariable("CONTROLLED_DAP_THREADS_RESPONSE_RELEASE");
         var previousWindowedDescendantExecutable = Environment.GetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_EXECUTABLE");
         var previousWindowedDescendantArguments = Environment.GetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_ARGUMENTS");
         var preExistingAdapterPids = ExactAdapterProcessIds(executable);
@@ -751,6 +897,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
         Environment.SetEnvironmentVariable("CONTROLLED_DAP_GRACEFUL_RELEASE", releasePath);
         Environment.SetEnvironmentVariable("CONTROLLED_DAP_CONFIGURATION_DONE_CAPABILITY_DELTA_RELEASE", configurationDoneCapabilityDeltaReleasePath);
         Environment.SetEnvironmentVariable("CONTROLLED_DAP_SECOND_WINDOWED_DESCENDANT_RELEASE", secondWindowedDescendantReleasePath);
+        Environment.SetEnvironmentVariable("CONTROLLED_DAP_THREADS_RESPONSE_RELEASE", threadsResponseReleasePath);
         Environment.SetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_EXECUTABLE", configuration.WindowedDescendantExecutablePath);
         Environment.SetEnvironmentVariable(
             "CONTROLLED_DAP_WINDOWED_DESCENDANT_ARGUMENTS",
@@ -761,6 +908,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
             releasePath,
             configurationDoneCapabilityDeltaReleasePath,
             secondWindowedDescendantReleasePath,
+            threadsResponseReleasePath,
             executable,
             previousTranscript,
             previousOptions,
@@ -768,6 +916,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
             previousConfigurationDoneCapabilityDeltaRelease,
             previousSecondWindowedDescendantRelease,
             previousWindowedDescendantExecutable,
+            previousThreadsResponseRelease,
             previousWindowedDescendantArguments,
             preExistingAdapterPids);
     }
@@ -776,6 +925,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
     public void ReleaseGracefulShutdown() => File.WriteAllText(_releasePath, string.Empty);
     public void ReleaseConfigurationDoneCapabilityDelta() => File.WriteAllText(_configurationDoneCapabilityDeltaReleasePath, string.Empty);
     public void ReleaseSecondWindowedDescendant() => File.WriteAllText(_secondWindowedDescendantReleasePath, string.Empty);
+    public void ReleaseThreadsResponse() => File.WriteAllText(_threadsResponseReleasePath, string.Empty);
 
     public async Task WaitForStartupAsync(CancellationToken cancellationToken)
     {
@@ -789,6 +939,18 @@ internal sealed class FixtureProcess : IAsyncDisposable
             .Select(FixtureTranscriptEntry.Parse)
             .ToArray();
     }
+
+    public Task WaitForThreadsRequestAsync(CancellationToken cancellationToken) => WaitUntilAsync(
+        () => ReadTranscriptLinesSnapshot()
+            .Select(FixtureTranscriptEntry.Parse)
+            .Any(static entry => entry.Kind == "request" && entry.Command == "threads"),
+        cancellationToken);
+
+    public Task WaitForTranscriptKindAsync(string kind, CancellationToken cancellationToken) => WaitUntilAsync(
+        () => ReadTranscriptLinesSnapshot()
+            .Select(FixtureTranscriptEntry.Parse)
+            .Any(entry => entry.Kind == kind),
+        cancellationToken);
 
     public async Task<int> GetProcessIdAsync(CancellationToken cancellationToken)
     {
@@ -832,6 +994,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
         {
             ReleaseGracefulShutdown();
             ReleaseConfigurationDoneCapabilityDelta();
+            ReleaseThreadsResponse();
         }
         catch (Exception exception)
         {
@@ -866,6 +1029,7 @@ internal sealed class FixtureProcess : IAsyncDisposable
                 Environment.SetEnvironmentVariable("CONTROLLED_DAP_GRACEFUL_RELEASE", _previousRelease);
                 Environment.SetEnvironmentVariable("CONTROLLED_DAP_CONFIGURATION_DONE_CAPABILITY_DELTA_RELEASE", _previousConfigurationDoneCapabilityDeltaRelease);
                 Environment.SetEnvironmentVariable("CONTROLLED_DAP_SECOND_WINDOWED_DESCENDANT_RELEASE", _previousSecondWindowedDescendantRelease);
+                Environment.SetEnvironmentVariable("CONTROLLED_DAP_THREADS_RESPONSE_RELEASE", _previousThreadsResponseRelease);
                 Environment.SetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_EXECUTABLE", _previousWindowedDescendantExecutable);
                 Environment.SetEnvironmentVariable("CONTROLLED_DAP_WINDOWED_DESCENDANT_ARGUMENTS", _previousWindowedDescendantArguments);
             }

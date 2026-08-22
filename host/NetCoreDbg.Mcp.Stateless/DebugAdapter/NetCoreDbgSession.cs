@@ -9,6 +9,7 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Unicode;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Win32.SafeHandles;
 using NetCoreDbg.Mcp.Stateless.NativeScene;
 
@@ -18,6 +19,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
 {
     private const int MaximumHeaderBytes = 16 * 1024;
     private const int MaximumPayloadBytes = 16 * 1024 * 1024;
+    private const int MaximumThreadCount = 256;
+    private const int MaximumThreadNameBytes = 1024;
     private static readonly Encoding HeaderEncoding = Encoding.ASCII;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -89,6 +92,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
     internal bool IsUsable => !_readerTask.IsCompleted && !HasExited();
+
+    internal event Action<NetCoreDbgSession>? ReaderFailed;
     internal bool TryGetNativeSceneTargetIdentity(out NativeSceneTargetIdentity targetIdentity)
     {
         targetIdentity = Volatile.Read(ref _nativeSceneTargetIdentity)!;
@@ -211,6 +216,43 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         }
     }
 
+    internal async Task<DapThreadsResult> GetThreadsAsync(CancellationToken cancellationToken)
+    {
+        var response = await SendRequestAcceptingRefusalAsync(
+            "threads",
+            arguments: null,
+            _requestTimeout,
+            cancellationToken).ConfigureAwait(false);
+        if (!response.Success)
+        {
+            return DapThreadsResult.Refused;
+        }
+
+        if (response.Body.ValueKind != JsonValueKind.Object
+            || !response.Body.TryGetProperty("threads", out var threads)
+            || threads.ValueKind != JsonValueKind.Array
+            || threads.GetArrayLength() > MaximumThreadCount)
+        {
+            throw new InvalidDataException("DAP threads response body is invalid.");
+        }
+
+        var normalized = new DapThread[threads.GetArrayLength()];
+        var index = 0;
+        foreach (var thread in threads.EnumerateArray())
+        {
+            var id = RequireInt32(thread, "id");
+            var name = RequireString(thread, "name");
+            if (Encoding.UTF8.GetByteCount(name) > MaximumThreadNameBytes)
+            {
+                throw new InvalidDataException("DAP thread name exceeds the supported maximum.");
+            }
+
+            normalized[index++] = new DapThread(id, name);
+        }
+
+        return DapThreadsResult.Succeeded(normalized);
+    }
+
     public ValueTask DisposeAsync() => new(EnsureCleanupAsync());
 
     private Task StartProtocolAsync(string programPath, TimeSpan initializeTimeout, CancellationToken cancellationToken) =>
@@ -276,6 +318,11 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         try
         {
             var response = await WaitForResponseAsync(request, timeout, cancellationToken).ConfigureAwait(false);
+            if (!response.Success)
+            {
+                throw new InvalidDataException($"DAP request '{command}' failed or returned an invalid success flag.");
+            }
+
             if (string.Equals(command, "initialize", StringComparison.Ordinal)
                 && _initializeResponseContinuationReached is { } continuationReached)
             {
@@ -284,6 +331,23 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             }
 
             return response;
+        }
+        finally
+        {
+            RemovePending(request);
+        }
+    }
+
+    private async Task<DapResponse> SendRequestAcceptingRefusalAsync(
+        string command,
+        object? arguments,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        var request = await BeginRequestAsync(command, arguments, timeout, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await WaitForResponseAsync(request, timeout, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -378,6 +442,13 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
                 Volatile.Write(ref _readerFailure, failure);
                 _initialized.TrySetException(failure);
                 FailPending(failure);
+                try
+                {
+                    ReaderFailed?.Invoke(this);
+                }
+                catch (Exception)
+                {
+                }
             }
         }
     }
@@ -417,7 +488,8 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
             return;
         }
 
-        if (!message.TryGetProperty("success", out var success) || success.ValueKind != JsonValueKind.True)
+        if (!message.TryGetProperty("success", out var success)
+            || (success.ValueKind != JsonValueKind.True && success.ValueKind != JsonValueKind.False))
         {
             request.Completion.TrySetException(new InvalidDataException(
                 $"DAP request '{request.Command}' failed or returned an invalid success flag."));
@@ -427,13 +499,13 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         var body = message.TryGetProperty("body", out var bodyElement)
             ? bodyElement.Clone()
             : default;
-        if (request.Command == "initialize")
+        if (success.ValueKind == JsonValueKind.True && request.Command == "initialize")
         {
             ReadInitializeCapabilities(body);
             _initializeResponseObserved = true;
         }
 
-        request.Completion.TrySetResult(new DapResponse(body));
+        request.Completion.TrySetResult(new DapResponse(body, success.ValueKind == JsonValueKind.True));
     }
 
     private void HandleEvent(JsonElement message)
@@ -1616,5 +1688,16 @@ internal sealed class NetCoreDbgSession : IAsyncDisposable
         public TaskCompletionSource<DapResponse> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
-    private sealed record DapResponse(JsonElement Body);
+    private sealed record DapResponse(JsonElement Body, bool Success);
+}
+
+internal sealed record DapThread(
+    [property: JsonPropertyName("id")] int Id,
+    [property: JsonPropertyName("name")] string Name);
+
+internal sealed record DapThreadsResult(bool IsRefused, IReadOnlyList<DapThread> Threads)
+{
+    internal static DapThreadsResult Refused { get; } = new(true, Array.Empty<DapThread>());
+
+    internal static DapThreadsResult Succeeded(IReadOnlyList<DapThread> threads) => new(false, threads);
 }

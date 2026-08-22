@@ -95,7 +95,7 @@ public sealed class ModernProtocolContractTests
     }
 
     [Fact]
-    public async Task ToolsList_ReturnsExactlyTheOrderedNineToolCatalogWithRuntimeSchemas()
+    public async Task ToolsList_ReturnsExactlyTheOrderedTenToolCatalogWithRuntimeSchemas()
     {
         await using var driver = await ModernMcpProcessDriver.StartAsync();
 
@@ -318,12 +318,13 @@ public sealed class ModernProtocolContractTests
     private static void AssertCatalog(JsonObject result)
     {
         var tools = Assert.IsType<JsonArray>(result["tools"]);
-        Assert.Equal(9, tools.Count);
+        Assert.Equal(10, tools.Count);
         Assert.Equal(
             [
                 "start_debug",
                 "get_debug_state",
                 "stop_debug",
+                "get_threads",
                 "get_ui_probe_capabilities",
                 "capture_visual_evidence",
                 "read_capture_artifact",
@@ -333,8 +334,8 @@ public sealed class ModernProtocolContractTests
             ],
             tools.Select(static tool => tool?["name"]?.GetValue<string>()));
         Assert.Equal(
-            ["start_debug", "get_debug_state", "stop_debug"],
-            tools.Take(3).Select(static tool => tool?["name"]?.GetValue<string>()));
+            ["start_debug", "get_debug_state", "stop_debug", "get_threads"],
+            tools.Take(4).Select(static tool => tool?["name"]?.GetValue<string>()));
 
         var start = Assert.IsType<JsonObject>(tools[0]);
         Assert.Equal("object", start["inputSchema"]?["type"]?.GetValue<string>());
@@ -349,6 +350,15 @@ public sealed class ModernProtocolContractTests
             Assert.Contains("debugSessionId", Assert.IsType<JsonArray>(schema["required"]).Select(static value => value?.GetValue<string>()));
             Assert.Equal(32, Assert.IsType<JsonObject>(schema["properties"])["debugSessionId"]?["minLength"]?.GetValue<int>());
         }
+
+        var threads = Assert.IsType<JsonObject>(tools[3]);
+        var threadsSchema = Assert.IsType<JsonObject>(threads["inputSchema"]);
+        Assert.Equal("object", threadsSchema["type"]?.GetValue<string>());
+        Assert.False(threadsSchema["additionalProperties"]?.GetValue<bool>() ?? true);
+        Assert.Equal(["debugSessionId"], Assert.IsType<JsonArray>(threadsSchema["required"]).Select(static value => value?.GetValue<string>()));
+        var debugSessionId = Assert.IsType<JsonObject>(threadsSchema["properties"])["debugSessionId"];
+        Assert.Equal("string", debugSessionId?["type"]?.GetValue<string>());
+        Assert.Equal(1, debugSessionId?["minLength"]?.GetValue<int>());
     }
 
     private static async Task<string> RequestProgramElicitationAsync(ModernMcpFirstWireDriver driver, RequestId initialId)

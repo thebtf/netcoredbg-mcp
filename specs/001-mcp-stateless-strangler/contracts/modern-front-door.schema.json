@@ -61,6 +61,19 @@
       },
       "additionalProperties": false
     },
+    "getThreadsArguments": {
+      "type": "object",
+      "required": [
+        "debugSessionId"
+      ],
+      "properties": {
+        "debugSessionId": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
     "startDebugSuccess": {
       "type": "object",
       "required": [
@@ -117,6 +130,44 @@
       },
       "additionalProperties": false
     },
+    "thread": {
+      "type": "object",
+      "required": [
+        "id",
+        "name"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "threadsSuccess": {
+      "type": "object",
+      "required": [
+        "kind",
+        "threads"
+      ],
+      "properties": {
+        "kind": {
+          "const": "threads_success"
+        },
+        "threads": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/thread"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "debugSessionNotFound": {
       "type": "object",
       "required": [
@@ -129,6 +180,38 @@
         },
         "error": {
           "const": "DEBUG_SESSION_NOT_FOUND"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapThreadsRefused": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_threads_refused"
+        },
+        "error": {
+          "const": "DAP_THREADS_REFUSED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dapThreadsProtocolError": {
+      "type": "object",
+      "required": [
+        "kind",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dap_threads_protocol_error"
+        },
+        "error": {
+          "const": "DAP_THREADS_PROTOCOL_ERROR"
         }
       },
       "additionalProperties": false
@@ -167,7 +250,8 @@
           "enum": [
             "start_debug",
             "get_debug_state",
-            "stop_debug"
+            "stop_debug",
+            "get_threads"
           ]
         }
       },
@@ -185,10 +269,19 @@
           "$ref": "#/$defs/stopDebugSuccess"
         },
         {
+          "$ref": "#/$defs/threadsSuccess"
+        },
+        {
           "$ref": "#/$defs/debugSessionNotFound"
         },
         {
           "$ref": "#/$defs/missingProgramCapability"
+        },
+        {
+          "$ref": "#/$defs/dapThreadsRefused"
+        },
+        {
+          "$ref": "#/$defs/dapThreadsProtocolError"
         },
         {
           "$ref": "#/$defs/invalidToolArguments"

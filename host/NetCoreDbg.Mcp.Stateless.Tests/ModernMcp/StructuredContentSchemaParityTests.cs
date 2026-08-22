@@ -69,6 +69,54 @@ public sealed class StructuredContentSchemaParityTests
         }
     }
 
+    [Fact]
+    public async Task LiveHost_StructuredContentMatchesEveryFrozenThreadSchemaVariant()
+    {
+        // Arrange
+        var schema = LoadSchema();
+
+        // Act
+        var success = await ThreadContentAsync("success", "threads-schema-success");
+        var refused = await ThreadContentAsync("refused", "threads-schema-refused");
+        var protocolError = await ThreadContentAsync("malformed-body", "threads-schema-protocol-error");
+
+        // Assert
+        Assert.Equal("threads_success", success["kind"]?.GetValue<string>());
+        Assert.Equal("dap_threads_refused", refused["kind"]?.GetValue<string>());
+        Assert.Equal("dap_threads_protocol_error", protocolError["kind"]?.GetValue<string>());
+        ValidateVariant(schema, success);
+        ValidateVariant(schema, refused);
+        ValidateVariant(schema, protocolError);
+    }
+
+    private static JsonObject LoadSchema() => JsonNode.Parse(File.ReadAllText(Path.Combine(
+        RepositoryLayout.Root,
+        "specs",
+        "001-mcp-stateless-strangler",
+        "contracts",
+        "modern-front-door.schema.json")))!.AsObject();
+
+    private static async Task<JsonObject> ThreadContentAsync(string responseMode, string requestId)
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(new ModernMcpStartOptions(
+            DisableFormElicitation: true,
+            FixtureConfiguration: new FixtureConfiguration(
+                SuppressLifecycleEvents: true,
+                ThreadsResponseMode: responseMode)));
+        var meta = ModernMcpProcessDriver.CurrentMeta();
+        var start = Structured(await driver.CallToolRawAsync(
+            "start_debug",
+            new JsonObject { ["program"] = driver.InertProgramPath },
+            meta,
+            new RequestId($"{requestId}-start")));
+        var debugSessionId = Assert.IsType<string>(start["debugSessionId"]?.GetValue<string>());
+        return Structured(await driver.CallToolRawAsync(
+            "get_threads",
+            new JsonObject { ["debugSessionId"] = debugSessionId },
+            meta,
+            new RequestId(requestId)));
+    }
+
     private static JsonObject Structured(JsonRpcResponse response)
     {
         var result = ModernMcpProcessDriver.RequireResult(response);
@@ -139,9 +187,31 @@ public sealed class StructuredContentSchemaParityTests
             ? typeArray.Select(static type => Assert.IsType<string>(type?.GetValue<string>()))
             : [Assert.IsType<string>(schema["type"]?.GetValue<string>())];
         Assert.Contains(types, type => HasType(value, type));
+        if (value is JsonArray array)
+        {
+            if (schema["maxItems"] is JsonValue maximumItems)
+            {
+                Assert.True(array.Count <= maximumItems.GetValue<int>());
+            }
+
+            var itemSchema = Assert.IsType<JsonObject>(schema["items"]);
+            foreach (var item in array)
+            {
+                ValidateValue(definitions, itemSchema, item);
+            }
+        }
+
         if (schema["minLength"] is JsonValue minimumLength)
         {
             Assert.True(Assert.IsAssignableFrom<JsonValue>(value).GetValue<string>().Length >= minimumLength.GetValue<int>());
+        }
+        if (schema["minimum"] is JsonValue minimum)
+        {
+            Assert.True(Assert.IsAssignableFrom<JsonValue>(value).GetValue<long>() >= minimum.GetValue<long>());
+        }
+        if (schema["maximum"] is JsonValue maximum)
+        {
+            Assert.True(Assert.IsAssignableFrom<JsonValue>(value).GetValue<long>() <= maximum.GetValue<long>());
         }
     }
 
@@ -157,6 +227,7 @@ public sealed class StructuredContentSchemaParityTests
         "null" => value is null,
         "string" => value is JsonValue json && json.TryGetValue<string>(out _),
         "integer" => value is JsonValue json && json.TryGetValue<long>(out _),
+        "array" => value is JsonArray,
         _ => false,
     };
 }
