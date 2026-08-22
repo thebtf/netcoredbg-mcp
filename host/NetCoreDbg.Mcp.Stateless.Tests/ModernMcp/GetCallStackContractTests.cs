@@ -39,8 +39,9 @@ public sealed class GetCallStackContractTests
         var result = ModernMcpProcessDriver.RequireResult(await driver.ListToolsRawAsync(ModernMcpProcessDriver.CurrentMeta(), new RequestId("call-stack-catalog")));
         var tools = Assert.IsType<JsonArray>(result["tools"]);
         Assert.Equal("get_threads", tools[3]?["name"]?.GetValue<string>());
-        var tool = Assert.IsType<JsonObject>(tools[4]);
-        Assert.Equal(Tool, tool["name"]?.GetValue<string>());
+        var tool = Assert.Single(
+            tools.Select(static candidate => Assert.IsType<JsonObject>(candidate)),
+            candidate => candidate["name"]?.GetValue<string>() == Tool);
         var schema = Assert.IsType<JsonObject>(tool["inputSchema"]);
         Assert.Equal("object", schema["type"]?.GetValue<string>());
         Assert.False(schema["additionalProperties"]?.GetValue<bool>() ?? true);

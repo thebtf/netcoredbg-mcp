@@ -340,7 +340,6 @@ internal sealed class ControlledDapAdapter
     private static readonly TimeSpan ConfigurationDoneCapabilityDeltaReleaseTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan SecondWindowedDescendantReleaseTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DescendantCleanupTimeout = TimeSpan.FromSeconds(1);
-    private static readonly TimeSpan StackTraceResponseReleaseTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan LifecycleEventsCompletionTimeout = TimeSpan.FromSeconds(1);
     private Task<DapFrame?>? _nextRequest;
     private int _outgoingSequence = 1;
@@ -971,11 +970,9 @@ internal sealed class ControlledDapAdapter
             throw new InvalidOperationException("CONTROLLED_DAP_STACK_TRACE_RESPONSE_RELEASE is required when the stackTrace response is held.");
         }
 
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(StackTraceResponseReleaseTimeout);
         while (!File.Exists(_stackTraceResponseReleasePath))
         {
-            await Task.Delay(TimeSpan.FromMilliseconds(25), timeout.Token);
+            await Task.Delay(TimeSpan.FromMilliseconds(25), cancellationToken);
         }
     }
 
@@ -1100,6 +1097,9 @@ internal sealed class ControlledDapAdapter
         {
             case "success":
                 await WriteResponseAsync(sequence, "stackTrace", new { stackFrames = StackFrames(2, "frame") }, cancellationToken);
+                return false;
+            case "success-with-total-frames":
+                await WriteResponseAsync(sequence, "stackTrace", new { stackFrames = StackFrames(2, "frame"), totalFrames = 2U }, cancellationToken);
                 return false;
             case "empty-name-source-reference":
                 await WriteResponseAsync(sequence, "stackTrace", new

@@ -95,12 +95,13 @@ public sealed class StructuredContentSchemaParityTests
         var schema = LoadSchema();
 
         // Act
-        var success = await CallStackContentAsync("success", "call-stack-schema-success");
+        var success = await CallStackContentAsync("success-with-total-frames", "call-stack-schema-success");
         var refused = await CallStackContentAsync("refused", "call-stack-schema-refused");
         var protocolError = await CallStackContentAsync("malformed-body", "call-stack-schema-protocol-error");
 
         // Assert
         Assert.Equal("call_stack_success", success["kind"]?.GetValue<string>());
+        Assert.Equal(2, success["totalFrames"]?.GetValue<int>());
         Assert.Equal("dap_stack_trace_refused", refused["kind"]?.GetValue<string>());
         Assert.Equal("dap_stack_trace_protocol_error", protocolError["kind"]?.GetValue<string>());
         ValidateVariant(schema, success);
