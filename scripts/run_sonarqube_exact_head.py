@@ -179,7 +179,9 @@ def run_process(
             check=False,
         )
     except OSError as error:
-        raise RunnerError(f"{label} could not start: {error.__class__.__name__}.") from error
+        code = error.winerror if getattr(error, "winerror", None) is not None else error.errno
+        detail = redact(str(error), secrets)
+        raise RunnerError(f"{label} could not start: {error.__class__.__name__} code={code}: {detail}") from error
     output = completed.stdout or ""
     if output:
         print(redact(output, secrets), end="" if output.endswith("\n") else "\n", flush=True)
