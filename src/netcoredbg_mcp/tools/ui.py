@@ -20,6 +20,10 @@ UI_TREE_DISCOVERY_TIMEOUT_SECONDS = 10.0
 BRIDGE_NOT_CONNECTED_DIAGNOSTIC = "Not connected. Call 'connect' first."
 
 
+class _PhysicalCaptureProvenanceUnavailableError(ValueError):
+    """The strict target cannot be compared to a trustworthy lossless capture."""
+
+
 def _is_bridge_not_connected_error(error: BaseException) -> bool:
     return isinstance(error, RuntimeError) and BRIDGE_NOT_CONNECTED_DIAGNOSTIC in str(error)
 
@@ -1402,6 +1406,9 @@ def register_ui_tools(
         crop_y: int | None = None,
         crop_width: int | None = None,
         crop_height: int | None = None,
+        expected_hwnd: int | None = None,
+        expected_physical_width: int | None = None,
+        expected_physical_height: int | None = None,
     ) -> Any:
         """Take a screenshot of the debugged application's window.
 
@@ -1419,15 +1426,26 @@ def register_ui_tools(
             crop_y: Raw-image crop origin Y; requires all crop arguments.
             crop_width: Raw-image crop width; requires all crop arguments.
             crop_height: Raw-image crop height; requires all crop arguments.
+            expected_hwnd: Require this HWND and physical raster size before persisting
+                evidence.
+            expected_physical_width: Required raw raster width in physical pixels with
+                expected_hwnd.
+            expected_physical_height: Required raw raster height in physical pixels with
+                expected_hwnd.
         """
+
         valid_formats = {"webp", "jpeg", "png"}
         crop_values = (crop_x, crop_y, crop_width, crop_height)
         crop_requested = any(value is not None for value in crop_values)
         crop_rect: tuple[int, int, int, int] | None = None
+        strict_values = (expected_hwnd, expected_physical_width, expected_physical_height)
+        strict_target_requested = any(value is not None for value in strict_values)
+        strict_target: dict[str, int | str] | None = None
 
         try:
             import base64
             import hashlib
+            import io
             import json
             import time as _time
             import uuid
@@ -1458,6 +1476,40 @@ def register_ui_tools(
                 assert crop_height is not None
                 crop_rect = (crop_x, crop_y, crop_width, crop_height)
 
+            if strict_target_requested:
+                if not evidence:
+                    raise ValueError("physical target assertions require evidence=True")
+                if not all(value is not None for value in strict_values):
+                    raise ValueError(
+                        "expected_hwnd, expected_physical_width, and "
+                        "expected_physical_height must be supplied together"
+                    )
+                assert expected_hwnd is not None
+                assert expected_physical_width is not None
+                assert expected_physical_height is not None
+                for name, value in (
+                    ("expected_hwnd", expected_hwnd),
+                    ("expected_physical_width", expected_physical_width),
+                    ("expected_physical_height", expected_physical_height),
+                ):
+                    if type(value) is not int:
+                        raise ValueError(f"{name} must be an integer")
+                if expected_hwnd == 0:
+                    raise ValueError("expected_hwnd must be non-zero")
+                for name, value in (
+                    ("expected_physical_width", expected_physical_width),
+                    ("expected_physical_height", expected_physical_height),
+                ):
+                    if value <= 0:
+                        raise ValueError(f"{name} must be positive, got {value}")
+                strict_target = {
+                    "hwnd": expected_hwnd,
+                    "width": expected_physical_width,
+                    "height": expected_physical_height,
+                    "unit": "physical_px",
+                    "coordinate_space": "raw_raster",
+                }
+
             # Validate format against allow-list
             safe_format = format if format in valid_formats else "webp"
             bridge_screenshot: dict[str, Any] | None = None
@@ -1466,7 +1518,11 @@ def register_ui_tools(
             png_bytes = b""
             raw_width = 0
             raw_height = 0
-
+            persist_evidence = evidence
+            physical_target: dict[str, Any] | None = None
+            target_comparability: dict[str, Any] | None = (
+                {"status": "UNASSERTED"} if evidence else None
+            )
             pid = session.state.process_id
             if not pid:
                 return build_error_response(
@@ -1482,12 +1538,18 @@ def register_ui_tools(
 
             loop = asyncio.get_running_loop()
 
-            # Capture raw screenshot
-            if getattr(session, "stealth_mode", False):
+            # Strict physical assertions require the FlaUI bridge's PrintWindow raster
+            # even when the session is not in stealth mode.
+            if strict_target_requested or getattr(session, "stealth_mode", False):
                 ui = await _ensure_ui_connected()
                 from ..ui.flaui_client import FlaUIBackend
 
-                if isinstance(ui, FlaUIBackend):
+                if not isinstance(ui, FlaUIBackend):
+                    if strict_target_requested:
+                        raise _PhysicalCaptureProvenanceUnavailableError(
+                            "Physical target assertions require FlaUI bridge lossless capture"
+                        )
+                else:
                     bridge_result = await ui.client.call(
                         "screenshot", {"evidence": True} if evidence else {}
                     )
@@ -1495,13 +1557,26 @@ def register_ui_tools(
                         _stealth_response_mode(bridge_result) == "flash-focus"
                     )
                     if not isinstance(bridge_result, dict) or "base64" not in bridge_result:
+                        if strict_target_requested:
+                            raise _PhysicalCaptureProvenanceUnavailableError(
+                                "Physical target assertions require valid bridge "
+                                "screenshot provenance"
+                            )
                         logger.warning(
                             "screenshot: bridge returned invalid screenshot response; "
                             "falling back to HWND capture"
                         )
                     else:
-                        bridge_screenshot = bridge_result
-                        png_bytes = base64.b64decode(bridge_result["base64"])
+                        try:
+                            png_bytes = base64.b64decode(
+                                bridge_result["base64"], validate=strict_target_requested
+                            )
+                        except Exception as error:
+                            if strict_target_requested:
+                                raise _PhysicalCaptureProvenanceUnavailableError(
+                                    "Bridge screenshot raw PNG is invalid"
+                                ) from error
+                            raise
                         bridge_width = bridge_result.get("width")
                         bridge_height = bridge_result.get("height")
                         if (
@@ -1510,18 +1585,48 @@ def register_ui_tools(
                             or bridge_width <= 0
                             or bridge_height <= 0
                         ):
+                            if strict_target_requested:
+                                raise _PhysicalCaptureProvenanceUnavailableError(
+                                    "Bridge screenshot requires positive integer dimensions"
+                                )
                             raise ValueError(
                                 "Bridge screenshot response requires positive integer "
                                 "width and height"
                             )
                         raw_width = bridge_width
                         raw_height = bridge_height
+                        bridge_screenshot = bridge_result
                         if evidence:
                             method = bridge_result.get("method")
                             bridge_hwnd = bridge_result.get("hwnd")
                             bridge_client_rect = bridge_result.get("client_rect")
+                            bridge_window_bounds = bridge_result.get("window_bounds")
                             bridge_dpi = bridge_result.get("dpi")
                             client_rect_keys = ("left", "top", "right", "bottom")
+                            valid_client_rect = (
+                                isinstance(bridge_client_rect, dict)
+                                and all(
+                                    type(bridge_client_rect.get(key)) is int
+                                    for key in client_rect_keys
+                                )
+                                and bridge_client_rect["right"] > bridge_client_rect["left"]
+                                and bridge_client_rect["bottom"] > bridge_client_rect["top"]
+                                and bridge_client_rect.get("unit") == "physical_px"
+                                and bridge_client_rect.get("coordinate_space") == "client"
+                                and bridge_client_rect.get("source_api") == "GetClientRect"
+                            )
+                            valid_window_bounds = (
+                                isinstance(bridge_window_bounds, dict)
+                                and all(
+                                    type(bridge_window_bounds.get(key)) is int
+                                    for key in client_rect_keys
+                                )
+                                and bridge_window_bounds["right"] > bridge_window_bounds["left"]
+                                and bridge_window_bounds["bottom"] > bridge_window_bounds["top"]
+                                and bridge_window_bounds.get("unit") == "physical_px"
+                                and bridge_window_bounds.get("coordinate_space") == "screen"
+                                and bridge_window_bounds.get("source_api") == "GetWindowRect"
+                            )
                             if (
                                 method != "PrintWindow"
                                 or type(bridge_hwnd) is not int
@@ -1535,10 +1640,44 @@ def register_ui_tools(
                                 or bridge_client_rect["bottom"] <= bridge_client_rect["top"]
                                 or type(bridge_dpi) is not int
                                 or bridge_dpi <= 0
+                                or not valid_client_rect
+                                or (strict_target_requested and not valid_window_bounds)
                             ):
+                                if strict_target_requested:
+                                    raise _PhysicalCaptureProvenanceUnavailableError(
+                                        "Physical target assertions require valid bridge "
+                                        "screenshot provenance"
+                                    )
                                 raise ValueError(
                                     "Evidence capture requires valid bridge screenshot provenance"
                                 )
+                            if strict_target_requested:
+                                from PIL import Image
+
+                                try:
+                                    with Image.open(io.BytesIO(png_bytes)) as raw_png:
+                                        if raw_png.format != "PNG":
+                                            raise ValueError("raw capture is not PNG")
+                                        raw_png.load()
+                                        decoded_width, decoded_height = raw_png.size
+                                except Exception as error:
+                                    raise _PhysicalCaptureProvenanceUnavailableError(
+                                        "Bridge screenshot raw PNG is invalid"
+                                    ) from error
+                                if (decoded_width, decoded_height) != (raw_width, raw_height):
+                                    raise _PhysicalCaptureProvenanceUnavailableError(
+                                        "Bridge screenshot dimensions do not match decoded PNG "
+                                        "dimensions"
+                                    )
+                                assert isinstance(bridge_window_bounds, dict)
+                                if (
+                                    bridge_window_bounds["right"] - bridge_window_bounds["left"],
+                                    bridge_window_bounds["bottom"] - bridge_window_bounds["top"],
+                                ) != (raw_width, raw_height):
+                                    raise _PhysicalCaptureProvenanceUnavailableError(
+                                        "Bridge window bounds do not match claimed raw raster "
+                                        "dimensions"
+                                    )
                             capture_metadata = await loop.run_in_executor(
                                 None,
                                 lambda: build_capture_metadata(
@@ -1550,8 +1689,59 @@ def register_ui_tools(
                                     dpi=bridge_dpi,
                                 ),
                             )
+                            if strict_target_requested:
+                                assert strict_target is not None
+                                assert capture_metadata is not None
+                                actual_target = {
+                                    "hwnd": bridge_hwnd,
+                                    "width": raw_width,
+                                    "height": raw_height,
+                                    "unit": "physical_px",
+                                    "coordinate_space": "window",
+                                    "bounds_source": "GetWindowRect",
+                                }
+                                mismatch_fields = [
+                                    field
+                                    for field in ("hwnd", "width", "height")
+                                    if actual_target[field] != strict_target[field]
+                                ]
+                                physical_target = {
+                                    "status": "matched" if not mismatch_fields else "mismatch",
+                                    **(
+                                        {"code": "PHYSICAL_CAPTURE_MISMATCH"}
+                                        if mismatch_fields
+                                        else {}
+                                    ),
+                                    "expected": strict_target,
+                                    "actual": actual_target,
+                                    "mismatch_fields": mismatch_fields,
+                                }
+                                target_comparability = {
+                                    "status": "MATCHED" if not mismatch_fields else "MISMATCH",
+                                    **(
+                                        {"code": "PHYSICAL_CAPTURE_MISMATCH"}
+                                        if mismatch_fields
+                                        else {}
+                                    ),
+                                    "expected": strict_target,
+                                    "actual": actual_target,
+                                    "mismatch_fields": mismatch_fields,
+                                }
+                                persist_evidence = not mismatch_fields
+                                capture_metadata["raw_raster"] = {
+                                    "width": raw_width,
+                                    "height": raw_height,
+                                    "unit": "physical_px",
+                                    "coordinate_space": "window",
+                                    "raster_source": method,
+                                    "bounds_source": "GetWindowRect",
+                                }
 
             if bridge_screenshot is None:
+                if strict_target_requested:
+                    raise _PhysicalCaptureProvenanceUnavailableError(
+                        "Physical target assertions require FlaUI bridge lossless capture"
+                    )
                 hwnd = get_hwnd_for_pid(pid)
                 if not hwnd:
                     return build_error_response(
@@ -1588,13 +1778,17 @@ def register_ui_tools(
                     "logical_height",
                 }.issubset(capture_metadata)
             ):
+                if strict_target_requested:
+                    raise _PhysicalCaptureProvenanceUnavailableError(
+                        "Physical target assertions require complete bridge screenshot provenance"
+                    )
                 raise ValueError("Evidence capture requires complete capture metadata")
 
             frame_analysis = await loop.run_in_executor(
                 None,
                 lambda: analyze_screenshot_frame(png_bytes),
             )
-            if frame_analysis["probable_black"]:
+            if frame_analysis["probable_black"] and (physical_target is None or persist_evidence):
                 return _probable_black_frame_response(
                     frame_analysis,
                     retry_tool="ui_take_screenshot",
@@ -1605,7 +1799,7 @@ def register_ui_tools(
             crop_path = None
             crop_bytes = None
             crop_size: tuple[int, int] | None = None
-            if evidence and crop_rect is not None:
+            if persist_evidence and crop_rect is not None:
                 crop_left, crop_top, crop_w, crop_h = crop_rect
                 crop_bytes, cropped_width, cropped_height = await loop.run_in_executor(
                     None,
@@ -1624,7 +1818,7 @@ def register_ui_tools(
                 None,
                 lambda: create_preview(png_bytes, max_width=max_width, quality=80),
             )
-            if evidence:
+            if persist_evidence:
                 assert sid is not None
                 assert temp_manager is not None
                 capture_id = uuid.uuid4().hex
@@ -1649,7 +1843,7 @@ def register_ui_tools(
                 "height": hd_h,
                 "preview_width": preview_w,
                 "format": safe_format,
-                "evidence_grade": "lossless_raster" if evidence else "preview_only",
+                "evidence_grade": "lossless_raster" if persist_evidence else "preview_only",
                 "state": session.state.state.value
                 if hasattr(session.state.state, "value")
                 else str(session.state.state),
@@ -1668,7 +1862,11 @@ def register_ui_tools(
                 ):
                     if key in bridge_screenshot:
                         metadata[key] = bridge_screenshot[key]
-            if evidence:
+            if physical_target is not None:
+                metadata["physical_target"] = physical_target
+            if target_comparability is not None:
+                metadata["target_comparability"] = target_comparability
+            if persist_evidence:
                 metadata.update(
                     {
                         "retention": "stop_cleanup_or_stale_gc_after_4h",
@@ -1696,7 +1894,11 @@ def register_ui_tools(
                         }
                     )
 
-            if sid and temp_manager is not None:
+            if (
+                sid
+                and temp_manager is not None
+                and (not strict_target_requested or persist_evidence)
+            ):
                 ts = int(_time.time() * 1000) & 0xFFFFFFFF
                 hd_path = temp_manager.save_screenshot(
                     sid,
@@ -1717,8 +1919,12 @@ def register_ui_tools(
                     text=json.dumps(metadata),
                 ),
             ]
-        except Exception as e:
-            return build_error_response(str(e), state=session.state.state)
+        except _PhysicalCaptureProvenanceUnavailableError as error:
+            response = build_error_response(str(error), state=session.state.state)
+            response["code"] = "PHYSICAL_CAPTURE_PROVENANCE_UNAVAILABLE"
+            return response
+        except Exception as error:
+            return build_error_response(str(error), state=session.state.state)
 
     @mcp.tool(
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)

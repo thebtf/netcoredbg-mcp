@@ -67,8 +67,26 @@ public static class ScreenshotCommands
     }
 
     private readonly record struct CaptureSnapshot(
-        int RasterWidth,
-        int RasterHeight,
+        int WindowLeft,
+        int WindowTop,
+        int WindowRight,
+        int WindowBottom,
+        int ClientLeft,
+        int ClientTop,
+        int ClientRight,
+        int ClientBottom,
+        uint Dpi)
+    {
+        public int RasterWidth => WindowRight - WindowLeft;
+        public int RasterHeight => WindowBottom - WindowTop;
+    }
+
+    internal readonly record struct WindowGeometry(
+        long Hwnd,
+        int WindowLeft,
+        int WindowTop,
+        int WindowRight,
+        int WindowBottom,
         int ClientLeft,
         int ClientTop,
         int ClientRight,
@@ -80,6 +98,10 @@ public static class ScreenshotCommands
         int Width,
         int Height,
         long Hwnd,
+        int WindowLeft,
+        int WindowTop,
+        int WindowRight,
+        int WindowBottom,
         int ClientLeft,
         int ClientTop,
         int ClientRight,
@@ -99,6 +121,12 @@ public static class ScreenshotCommands
         {
             var hwnd = ResolveTargetHwnd(hwndValue, mainWindow);
             return evidence ? CaptureEvidenceWithPrintWindow(hwnd) : CaptureWithPrintWindow(hwnd);
+        }
+
+        if (evidence)
+        {
+            var hwnd = ResolveTargetHwnd(hwndValue, mainWindow);
+            return CaptureEvidenceWithPrintWindow(hwnd);
         }
 
         CaptureImage capture;
@@ -140,6 +168,10 @@ public static class ScreenshotCommands
                 bitmap.Width,
                 bitmap.Height,
                 hwnd.ToInt64(),
+                after.WindowLeft,
+                after.WindowTop,
+                after.WindowRight,
+                after.WindowBottom,
                 after.ClientLeft,
                 after.ClientTop,
                 after.ClientRight,
@@ -211,25 +243,20 @@ public static class ScreenshotCommands
 
     private static JsonObject CaptureEvidenceWithPrintWindow(IntPtr hwnd)
     {
-        var capture = CaptureLosslessPng(hwnd);
-        return new JsonObject
+        var printWindowBefore = ReadCaptureSnapshot(hwnd);
+        var printWindowBitmap = CaptureBitmapWithPrintWindow(
+            hwnd, printWindowBefore.RasterWidth, printWindowBefore.RasterHeight)
+            ?? throw new InvalidOperationException("Evidence capture requires a PrintWindow raster");
+        using (printWindowBitmap)
         {
-            ["base64"] = Convert.ToBase64String(capture.Bytes),
-            ["width"] = capture.Width,
-            ["height"] = capture.Height,
-            ["method"] = "PrintWindow",
-            ["flags"] = (int)PW_RENDERFULLCONTENT,
-            ["variance"] = capture.Variance,
-            ["hwnd"] = capture.Hwnd,
-            ["client_rect"] = new JsonObject
-            {
-                ["left"] = capture.ClientLeft,
-                ["top"] = capture.ClientTop,
-                ["right"] = capture.ClientRight,
-                ["bottom"] = capture.ClientBottom,
-            },
-            ["dpi"] = capture.Dpi,
-        };
+            var printWindowAfter = ReadCaptureSnapshot(hwnd);
+            EnsureStableCaptureSnapshot(printWindowBefore, printWindowAfter);
+            var printWindowResult = EncodeBitmap(printWindowBitmap);
+            printWindowResult["method"] = "PrintWindow";
+            printWindowResult["flags"] = (int)PW_RENDERFULLCONTENT;
+            printWindowResult["variance"] = NormalizedPixelVariance(printWindowBitmap);
+            return AddCaptureProvenance(printWindowResult, hwnd, printWindowAfter);
+        }
     }
 
     private static (int width, int height) GetWindowSize(IntPtr hwnd)
@@ -246,13 +273,21 @@ public static class ScreenshotCommands
         return (width, height);
     }
 
-    private static CaptureSnapshot ReadCaptureSnapshot(IntPtr hwnd)
+    internal static WindowGeometry ReadWindowGeometry(IntPtr hwnd)
     {
-        var (rasterWidth, rasterHeight) = GetWindowSize(hwnd);
+        if (hwnd == IntPtr.Zero)
+            throw new ArgumentException("Target HWND must be non-zero.", nameof(hwnd));
+
+        if (!GetWindowRect(hwnd, out var windowRect))
+            throw new InvalidOperationException(
+                $"GetWindowRect failed for HWND {hwnd.ToInt64()}: {Marshal.GetLastWin32Error()}");
+        if (windowRect.Right <= windowRect.Left || windowRect.Bottom <= windowRect.Top)
+            throw new InvalidOperationException(
+                $"Window has invalid dimensions: {windowRect.Right - windowRect.Left}x{windowRect.Bottom - windowRect.Top}");
+
         if (!GetClientRect(hwnd, out var clientRect))
             throw new InvalidOperationException(
                 $"GetClientRect failed for HWND {hwnd.ToInt64()}: {Marshal.GetLastWin32Error()}");
-
         if (clientRect.Right <= clientRect.Left || clientRect.Bottom <= clientRect.Top)
             throw new InvalidOperationException(
                 $"Client rectangle has invalid dimensions for HWND {hwnd.ToInt64()}");
@@ -262,14 +297,32 @@ public static class ScreenshotCommands
             throw new InvalidOperationException(
                 $"GetDpiForWindow failed for HWND {hwnd.ToInt64()}: {Marshal.GetLastWin32Error()}");
 
-        return new CaptureSnapshot(
-            rasterWidth,
-            rasterHeight,
+        return new WindowGeometry(
+            hwnd.ToInt64(),
+            windowRect.Left,
+            windowRect.Top,
+            windowRect.Right,
+            windowRect.Bottom,
             clientRect.Left,
             clientRect.Top,
             clientRect.Right,
             clientRect.Bottom,
             dpi);
+    }
+
+    private static CaptureSnapshot ReadCaptureSnapshot(IntPtr hwnd)
+    {
+        var geometry = ReadWindowGeometry(hwnd);
+        return new CaptureSnapshot(
+            geometry.WindowLeft,
+            geometry.WindowTop,
+            geometry.WindowRight,
+            geometry.WindowBottom,
+            geometry.ClientLeft,
+            geometry.ClientTop,
+            geometry.ClientRight,
+            geometry.ClientBottom,
+            geometry.Dpi);
     }
 
     private static void EnsureStableCaptureSnapshot(CaptureSnapshot before, CaptureSnapshot after)
@@ -286,7 +339,20 @@ public static class ScreenshotCommands
             ["left"] = snapshot.ClientLeft,
             ["top"] = snapshot.ClientTop,
             ["right"] = snapshot.ClientRight,
-            ["bottom"] = snapshot.ClientBottom
+            ["bottom"] = snapshot.ClientBottom,
+            ["unit"] = "physical_px",
+            ["coordinate_space"] = "client",
+            ["source_api"] = "GetClientRect",
+        };
+        result["window_bounds"] = new JsonObject
+        {
+            ["left"] = snapshot.WindowLeft,
+            ["top"] = snapshot.WindowTop,
+            ["right"] = snapshot.WindowRight,
+            ["bottom"] = snapshot.WindowBottom,
+            ["unit"] = "physical_px",
+            ["coordinate_space"] = "screen",
+            ["source_api"] = "GetWindowRect",
         };
         result["dpi"] = (int)snapshot.Dpi;
         return result;
@@ -414,9 +480,10 @@ public static class ScreenshotCommands
     private static JsonObject EncodeBitmap(Bitmap bitmap)
     {
         var bytes = EncodePng(bitmap);
+        var base64 = Convert.ToBase64String(bytes);
         return new JsonObject
         {
-            ["base64"] = Convert.ToBase64String(bytes),
+            ["base64"] = base64,
             ["width"] = bitmap.Width,
             ["height"] = bitmap.Height
         };

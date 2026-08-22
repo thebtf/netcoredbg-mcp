@@ -75,12 +75,151 @@ public static class TransformCommands
         pattern.Resize(width, height);
         Program.Log($"resize_window: resized '{title}' to {width}x{height}");
 
-        return new JsonObject
+        var result = new JsonObject
         {
             ["resized"] = true,
             ["width"] = width,
             ["height"] = height,
-            ["window_title"] = title
+            ["window_title"] = title,
+            ["request"] = new JsonObject
+            {
+                ["width"] = width,
+                ["height"] = height,
+                ["unit"] = "uia_pattern_units",
+                ["coordinate_space"] = "UIA.TransformPattern.Resize",
+            }
+        };
+
+        try
+        {
+            var hwnd = target.Properties.NativeWindowHandle.ValueOrDefault;
+            var native = ScreenshotCommands.ReadWindowGeometry(hwnd);
+            var uia = target.BoundingRectangle;
+            var dpiScale = native.Dpi / 96d;
+            var uiaWidth = uia.Right - uia.Left;
+            var uiaHeight = uia.Bottom - uia.Top;
+            var windowWidth = native.WindowRight - native.WindowLeft;
+            var windowHeight = native.WindowBottom - native.WindowTop;
+            var mismatchFields = new JsonArray();
+            if (uiaWidth != width)
+                mismatchFields.Add("uia_width");
+            if (uiaHeight != height)
+                mismatchFields.Add("uia_height");
+            if (windowWidth != width)
+                mismatchFields.Add("window_width");
+            if (windowHeight != height)
+                mismatchFields.Add("window_height");
+            result["target_comparability"] = new JsonObject
+            {
+                ["status"] = mismatchFields.Count == 0 ? "MATCHED" : "MISMATCH",
+                ["requested"] = new JsonObject
+                {
+                    ["width"] = width,
+                    ["height"] = height,
+                    ["unit"] = "uia_pattern_units",
+                    ["coordinate_space"] = "UIA.TransformPattern.Resize",
+                },
+                ["actual"] = new JsonObject
+                {
+                    ["uia_bounds"] = new JsonObject
+                    {
+                        ["width"] = uiaWidth,
+                        ["height"] = uiaHeight,
+                        ["unit"] = "physical_px",
+                        ["coordinate_space"] = "screen",
+                        ["source_api"] = "UIA.BoundingRectangle",
+                    },
+                    ["window_bounds"] = new JsonObject
+                    {
+                        ["width"] = windowWidth,
+                        ["height"] = windowHeight,
+                        ["unit"] = "physical_px",
+                        ["coordinate_space"] = "screen",
+                        ["source_api"] = "GetWindowRect",
+                    },
+                },
+                ["mismatch_fields"] = mismatchFields,
+            };
+            var uiaBounds = Bounds(
+                uia.Left, uia.Top, uia.Right, uia.Bottom, dpiScale, "screen", "UIA.BoundingRectangle");
+            uiaBounds["source_coordinate_space"] = "uia_element_bounds";
+            result["geometry"] = new JsonObject
+            {
+                ["status"] = "available",
+                ["hwnd"] = native.Hwnd,
+                ["uia_bounds"] = uiaBounds,
+                ["window_bounds"] = Bounds(
+                    native.WindowLeft, native.WindowTop, native.WindowRight, native.WindowBottom,
+                    dpiScale, "screen", "GetWindowRect"),
+                ["client_bounds"] = Bounds(
+                    native.ClientLeft, native.ClientTop, native.ClientRight, native.ClientBottom,
+                    dpiScale, "client", "GetClientRect"),
+                ["dpi"] = new JsonObject
+                {
+                    ["value"] = native.Dpi,
+                    ["unit"] = "dpi",
+                    ["source_api"] = "GetDpiForWindow",
+                },
+                ["dpi_scale"] = new JsonObject
+                {
+                    ["value"] = dpiScale,
+                    ["reference_dpi"] = 96,
+                },
+            };
+        }
+        catch (Exception error)
+        {
+            result["geometry"] = new JsonObject
+            {
+                ["status"] = "unavailable",
+                ["code"] = "POST_RESIZE_GEOMETRY_UNAVAILABLE",
+                ["reason"] = error.Message,
+            };
+            result["target_comparability"] = new JsonObject
+            {
+                ["status"] = "UNAVAILABLE",
+                ["requested"] = new JsonObject
+                {
+                    ["width"] = width,
+                    ["height"] = height,
+                    ["unit"] = "uia_pattern_units",
+                    ["coordinate_space"] = "UIA.TransformPattern.Resize",
+                },
+                ["mismatch_fields"] = new JsonArray(),
+                ["code"] = "POST_RESIZE_GEOMETRY_UNAVAILABLE",
+            };
+        }
+
+        return result;
+    }
+
+    private static JsonObject Bounds(
+        double left,
+        double top,
+        double right,
+        double bottom,
+        double dpiScale,
+        string coordinateSpace,
+        string sourceApi)
+    {
+        return new JsonObject
+        {
+            ["physical_px"] = new JsonObject
+            {
+                ["left"] = left,
+                ["top"] = top,
+                ["right"] = right,
+                ["bottom"] = bottom,
+            },
+            ["dip"] = new JsonObject
+            {
+                ["left"] = left / dpiScale,
+                ["top"] = top / dpiScale,
+                ["right"] = right / dpiScale,
+                ["bottom"] = bottom / dpiScale,
+            },
+            ["coordinate_space"] = coordinateSpace,
+            ["source_api"] = sourceApi,
         };
     }
 }

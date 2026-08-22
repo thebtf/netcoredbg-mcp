@@ -227,6 +227,22 @@ ui_take_screenshot(evidence=true)
 session-scoped PNG artifact и добавляются SHA-256 с geometry provenance. Любой
 raw-derived crop требует `evidence=true`; preview-only capture его не даёт.
 
+Без ожидаемого target сохранённое evidence возвращает
+`target_comparability.status=UNASSERTED`: это валидное lossless evidence, но
+оно не доказывает соответствие размеру после resize. Для сравнения raw raster,
+а не производного изображения, передайте все три параметра physical target:
+
+```text
+ui_take_screenshot(evidence=true, expected_hwnd=..., expected_physical_width=..., expected_physical_height=...)
+```
+
+Ответ возвращает `MATCHED` или `MISMATCH`; raw evidence сохраняется только
+при статусе `MATCHED`. `max_width` меняет лишь preview и HD derivative, но не
+это сравнение. `ui_resize_window()` возвращает request-versus-readback
+`target_comparability.status`: `MATCHED`, `MISMATCH` или `UNAVAILABLE`;
+`resized=true` подтверждает завершение request, а не соответствие запрошенному
+размеру.
+
 `ui_take_annotated_screenshot()` возвращает Set-of-Mark labels, после чего можно
 вызвать `ui_click_annotated(element_id=...)`. Используйте `ui_bring_to_front()`,
 только когда debuggee должен намеренно выйти из stealth mode.

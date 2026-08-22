@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import io
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -969,3 +970,95 @@ def test_crop_png_rejects_invalid_rectangles(rectangle: tuple[int, int, int, int
         ValueError, match=r"^Crop rectangle must be positive and within image bounds$"
     ):
         crop_png(_png((255, 0, 0), (2, 2)), *rectangle)
+
+
+@pytest.mark.asyncio
+async def test_non_stealth_resize_mismatch_then_default_evidence_is_unasserted(
+    capturing_mcp,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """The public non-stealth route must not invent strict target comparability."""
+    from unittest.mock import AsyncMock, patch
+
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    png = _png((255, 255, 255), (300, 150))
+    saved_names: list[str] = []
+
+    def save_screenshot_bundle(
+        _sid: str,
+        raw: bytes,
+        raw_name: str,
+        _crop: bytes | None,
+        _crop_name: str | None,
+    ) -> tuple[object, None]:
+        saved_names.append(raw_name)
+        path = tmp_path / raw_name
+        path.write_bytes(raw)
+        return path, None
+
+    def save_screenshot(_sid: str, data: bytes, name: str):
+        saved_names.append(name)
+        path = tmp_path / name
+        path.write_bytes(data)
+        return path
+
+    backend = SimpleNamespace(
+        process_id=42,
+        resize_window=AsyncMock(
+            return_value={
+                "resized": True,
+                "target_comparability": {"status": "MISMATCH"},
+            }
+        ),
+        get_window_tree=AsyncMock(return_value={"windows": [{"name": "WpfSmokeApp"}], "count": 1}),
+    )
+    monkeypatch.setattr("netcoredbg_mcp.ui.screenshot.get_hwnd_for_pid", lambda _pid: 123)
+    monkeypatch.setattr(
+        "netcoredbg_mcp.ui.screenshot.capture_window_evidence",
+        lambda _hwnd: (
+            png,
+            300,
+            150,
+            {
+                "method": "PrintWindow",
+                "hwnd": 123,
+                "client_rect": {"left": 0, "top": 0, "right": 300, "bottom": 150},
+                "dpi": 144,
+                "dpi_scale": 1.5,
+                "physical_width": 300,
+                "physical_height": 150,
+                "logical_width": 200.0,
+                "logical_height": 100.0,
+            },
+        ),
+    )
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+        session_id="evidence-session",
+        temp_manager=SimpleNamespace(
+            save_screenshot_bundle=save_screenshot_bundle,
+            save_screenshot=save_screenshot,
+        ),
+    )
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(capturing_mcp, session, check_session_access=lambda _ctx: None)
+        resize = await capturing_mcp.tools["ui_resize_window"](
+            SimpleNamespace(), width=200, height=100
+        )
+        tree = await capturing_mcp.tools["ui_get_window_tree"]()
+        screenshot = await capturing_mcp.tools["ui_take_screenshot"](
+            SimpleNamespace(), evidence=True
+        )
+
+    assert resize["data"]["target_comparability"]["status"] == "MISMATCH"
+    assert tree["data"]["count"] == 1
+    metadata = json.loads(screenshot[-1].text)
+    assert metadata["target_comparability"] == {"status": "UNASSERTED"}
+    assert "physical_target" not in metadata
+    assert saved_names

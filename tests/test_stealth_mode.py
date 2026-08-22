@@ -16,7 +16,6 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-RED_REPRO_REASON = "Issue reproduction scenario; run targeted test with --runxfail to observe RED."
 
 
 class ToolRegistry:
@@ -205,6 +204,135 @@ def test_bridge_screenshot_uses_printwindow_in_stealth_mode() -> None:
     assert '["base64"] = base64' in command
     assert "Capture.Rectangle(rect)" in command
     assert command.index("if (JsonRpcHandler.Stealth)") < command.index("Capture.Rectangle(rect)")
+
+
+def test_bridge_resize_window_returns_unit_labelled_post_resize_geometry() -> None:
+    command = (PROJECT_ROOT / "bridge" / "Commands" / "TransformCommands.cs").read_text(
+        encoding="utf-8"
+    )
+    resize_start = command.index("public static JsonNode ResizeWindow")
+    resize_body = command[resize_start:]
+
+    required_fields = (
+        '["request"]',
+        '["geometry"]',
+        '["target_comparability"]',
+        '["uia_bounds"]',
+        '["window_bounds"]',
+        '["client_bounds"]',
+        '["dpi"]',
+        '["dpi_scale"]',
+        '"MATCHED"',
+        '"MISMATCH"',
+        '"UNAVAILABLE"',
+        '"physical_px"',
+        '"dip"',
+        '"uia_element_bounds"',
+        '"UIA.TransformPattern.Resize"',
+        '"UIA.BoundingRectangle"',
+        '"GetWindowRect"',
+        '"GetClientRect"',
+        '"POST_RESIZE_GEOMETRY_UNAVAILABLE"',
+    )
+    assert all(field in resize_body for field in required_fields) and (
+        resize_body.index("pattern.Resize(width, height);") < resize_body.index('["geometry"]')
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("comparability", ("MATCHED", "MISMATCH", "UNAVAILABLE"))
+async def test_ui_resize_window_preserves_bridge_target_comparability(comparability: str) -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._process_id = 42
+    backend._client = MagicMock()
+    backend._client.call = AsyncMock(
+        return_value={"resized": True, "target_comparability": {"status": comparability}}
+    )
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+    )
+    registry = ToolRegistry()
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(registry, session, check_session_access=lambda _ctx: None)
+        response = await registry.tools["ui_resize_window"](
+            SimpleNamespace(), width=800, height=600
+        )
+
+    backend._client.call.assert_awaited_once_with("resize_window", {"width": 800, "height": 600})
+    assert response["data"] == {"resized": True, "target_comparability": {"status": comparability}}
+
+
+@pytest.mark.asyncio
+async def test_public_resize_uia_readback_then_evidence_screenshot_at_150_dpi(tmp_path) -> None:
+    from PIL import Image
+
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (1536, 1080), (255, 255, 255)).save(buffer, format="PNG")
+    raw_png = buffer.getvalue()
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._process_id = 42
+    backend._client = MagicMock()
+    backend._client.call = AsyncMock(
+        side_effect=[
+            {
+                "resized": True,
+                "target_comparability": {"status": "MATCHED"},
+                "geometry": {
+                    "status": "available",
+                    "uia_bounds": {
+                        "physical_px": {"left": 0, "top": 0, "right": 1536, "bottom": 1080},
+                        "dip": {"left": 0, "top": 0, "right": 1024, "bottom": 720},
+                    },
+                },
+            },
+            _bridge_lossless_screenshot(raw_png, width=1536, height=1080),
+        ]
+    )
+    bundle_calls: list[tuple[str, str, str | None, int]] = []
+    session = _stealth_evidence_session(tmp_path, bundle_calls)
+    registry = ToolRegistry()
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(registry, session, check_session_access=lambda _ctx: None)
+        resize = await registry.tools["ui_resize_window"](
+            SimpleNamespace(), width=1536, height=1080
+        )
+        screenshot = await registry.tools["ui_take_screenshot"](
+            SimpleNamespace(),
+            evidence=True,
+            max_width=640,
+            expected_hwnd=777,
+            expected_physical_width=1536,
+            expected_physical_height=1080,
+        )
+
+    metadata = json.loads(screenshot[1].text)
+    assert resize["data"]["target_comparability"]["status"] == "MATCHED"
+    assert resize["data"]["geometry"]["uia_bounds"]["dip"]["right"] == 1024
+    assert (
+        metadata["target_comparability"]["status"],
+        metadata["raw_width"],
+        metadata["width"],
+    ) == (
+        "MATCHED",
+        1536,
+        640,
+    )
+    assert metadata["capture_metadata"]["dpi_scale"] == 1.5
+    assert backend._client.call.await_args_list == [
+        call("resize_window", {"width": 1536, "height": 1080}),
+        call("screenshot", {"evidence": True}),
+    ]
 
 
 def test_bridge_stealth_screenshot_limits_provenance_to_evidence() -> None:
@@ -1122,6 +1250,7 @@ async def test_ui_take_screenshot_evidence_persists_raw_png_with_hash(tmp_path) 
     assert isinstance(content, list), content
     metadata = json.loads(content[1].text)
     assert metadata["evidence_grade"] == "lossless_raster"
+    assert metadata["target_comparability"] == {"status": "UNASSERTED"}
     assert metadata["retention"] == "stop_cleanup_or_stale_gc_after_4h"
     assert metadata["capture_metadata"] == capture_metadata
     assert metadata["raw_mime"] == "image/png"
@@ -1283,7 +1412,15 @@ async def test_ui_take_screenshot_stealth_evidence_uses_bridge_capture_provenanc
             "height": 8,
             "method": "PrintWindow",
             "hwnd": 777,
-            "client_rect": {"left": 0, "top": 0, "right": 6, "bottom": 4},
+            "client_rect": {
+                "left": 0,
+                "top": 0,
+                "right": 6,
+                "bottom": 4,
+                "unit": "physical_px",
+                "coordinate_space": "client",
+                "source_api": "GetClientRect",
+            },
             "dpi": 144,
         }
     )
@@ -1320,7 +1457,15 @@ async def test_ui_take_screenshot_stealth_evidence_uses_bridge_capture_provenanc
     assert metadata["capture_metadata"] == {
         "method": "PrintWindow",
         "hwnd": 777,
-        "client_rect": {"left": 0, "top": 0, "right": 6, "bottom": 4},
+        "client_rect": {
+            "left": 0,
+            "top": 0,
+            "right": 6,
+            "bottom": 4,
+            "unit": "physical_px",
+            "coordinate_space": "client",
+            "source_api": "GetClientRect",
+        },
         "dpi": 144,
         "dpi_scale": 1.5,
         "physical_width": 8,
@@ -1341,8 +1486,63 @@ async def test_ui_take_screenshot_stealth_evidence_uses_bridge_capture_provenanc
         pytest.param(None, {"hwnd": True}, id="non-integer-hwnd"),
         pytest.param(
             None,
-            {"client_rect": {"left": 0, "top": 0, "right": 0, "bottom": 4}},
+            {
+                "client_rect": {
+                    "left": 0,
+                    "top": 0,
+                    "right": 0,
+                    "bottom": 4,
+                    "unit": "physical_px",
+                    "coordinate_space": "client",
+                    "source_api": "GetClientRect",
+                }
+            },
             id="empty-client-rect",
+        ),
+        pytest.param(
+            None,
+            {
+                "client_rect": {
+                    "left": 0,
+                    "top": 0,
+                    "right": 6,
+                    "bottom": 4,
+                    "unit": "dip",
+                    "coordinate_space": "client",
+                    "source_api": "GetClientRect",
+                }
+            },
+            id="client-rect-wrong-unit",
+        ),
+        pytest.param(
+            None,
+            {
+                "client_rect": {
+                    "left": 0,
+                    "top": 0,
+                    "right": 6,
+                    "bottom": 4,
+                    "unit": "physical_px",
+                    "coordinate_space": "screen",
+                    "source_api": "GetClientRect",
+                }
+            },
+            id="client-rect-wrong-space",
+        ),
+        pytest.param(
+            None,
+            {
+                "client_rect": {
+                    "left": 0,
+                    "top": 0,
+                    "right": 6,
+                    "bottom": 4,
+                    "unit": "physical_px",
+                    "coordinate_space": "client",
+                    "source_api": "UIA.BoundingRectangle",
+                }
+            },
+            id="client-rect-wrong-source",
         ),
         pytest.param(None, {"dpi": 0}, id="zero-dpi"),
     ],
@@ -1367,7 +1567,15 @@ async def test_ui_take_screenshot_stealth_evidence_rejects_missing_or_invalid_br
         "height": 8,
         "method": "PrintWindow",
         "hwnd": 777,
-        "client_rect": {"left": 0, "top": 0, "right": 6, "bottom": 4},
+        "client_rect": {
+            "left": 0,
+            "top": 0,
+            "right": 6,
+            "bottom": 4,
+            "unit": "physical_px",
+            "coordinate_space": "client",
+            "source_api": "GetClientRect",
+        },
         "dpi": 144,
     }
     if missing_key is not None:
@@ -1398,6 +1606,315 @@ async def test_ui_take_screenshot_stealth_evidence_rejects_missing_or_invalid_br
 
     assert response["error"] == "Evidence capture requires valid bridge screenshot provenance"
     assert not (tmp_path / "unexpected.png").exists()
+
+
+def _bridge_lossless_screenshot(
+    png: bytes,
+    *,
+    width: int,
+    height: int,
+    hwnd: int = 777,
+    window_bounds: bool = True,
+) -> dict[str, object]:
+    result: dict[str, object] = {
+        "base64": base64.b64encode(png).decode("ascii"),
+        "width": width,
+        "height": height,
+        "method": "PrintWindow",
+        "hwnd": hwnd,
+        "client_rect": {
+            "left": 0,
+            "top": 0,
+            "right": width,
+            "bottom": height,
+            "unit": "physical_px",
+            "coordinate_space": "client",
+            "source_api": "GetClientRect",
+        },
+        "dpi": 144,
+    }
+    if window_bounds:
+        result["window_bounds"] = {
+            "left": 100,
+            "top": 50,
+            "right": 100 + width,
+            "bottom": 50 + height,
+            "unit": "physical_px",
+            "coordinate_space": "screen",
+            "source_api": "GetWindowRect",
+        }
+    return result
+
+
+def _stealth_evidence_session(tmp_path, bundle_calls: list[tuple[str, str, str | None, int]]):
+    from netcoredbg_mcp.session.manager import DebugState
+
+    return SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=True,
+        session_id="strict-physical-target",
+        temp_manager=SimpleNamespace(
+            save_screenshot_bundle=_save_evidence_bundle(tmp_path, bundle_calls),
+            save_screenshot=lambda _sid, data, name: (tmp_path / name).write_bytes(data)
+            and tmp_path / name,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_ui_take_screenshot_strict_physical_target_persists_exact_raw_bridge_raster(
+    tmp_path,
+) -> None:
+    from PIL import Image
+
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (1536, 1080), (255, 255, 255)).save(buffer, format="PNG")
+    raw_png = buffer.getvalue()
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._process_id = 42
+    backend._client = MagicMock()
+    backend._client.call = AsyncMock(
+        return_value=_bridge_lossless_screenshot(raw_png, width=1536, height=1080)
+    )
+    bundle_calls: list[tuple[str, str, str | None, int]] = []
+    session = _stealth_evidence_session(tmp_path, bundle_calls)
+    registry = ToolRegistry()
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(registry, session, check_session_access=lambda _ctx: None)
+        content = await registry.tools["ui_take_screenshot"](
+            SimpleNamespace(),
+            evidence=True,
+            max_width=640,
+            expected_hwnd=777,
+            expected_physical_width=1536,
+            expected_physical_height=1080,
+        )
+
+    metadata = json.loads(content[1].text)
+    assert (
+        metadata["evidence_grade"],
+        metadata["raw_width"],
+        metadata["raw_height"],
+        metadata["width"],
+        metadata["preview_width"],
+        metadata["target_comparability"]["status"],
+        metadata["physical_target"],
+        metadata["capture_metadata"]["raw_raster"]["raster_source"],
+        Path(metadata["raw_path"]).read_bytes(),
+        len(bundle_calls),
+    ) == (
+        "lossless_raster",
+        1536,
+        1080,
+        640,
+        640,
+        "MATCHED",
+        {
+            "status": "matched",
+            "expected": {
+                "hwnd": 777,
+                "width": 1536,
+                "height": 1080,
+                "unit": "physical_px",
+                "coordinate_space": "raw_raster",
+            },
+            "actual": {
+                "hwnd": 777,
+                "width": 1536,
+                "height": 1080,
+                "unit": "physical_px",
+                "coordinate_space": "window",
+                "bounds_source": "GetWindowRect",
+            },
+            "mismatch_fields": [],
+        },
+        "PrintWindow",
+        raw_png,
+        1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_ui_take_screenshot_strict_target_mismatch_returns_preview_without_evidence(
+    tmp_path,
+) -> None:
+    from PIL import Image
+
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (1535, 1079), (255, 255, 255)).save(buffer, format="PNG")
+    raw_png = buffer.getvalue()
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._process_id = 42
+    backend._client = MagicMock()
+    backend._client.call = AsyncMock(
+        return_value=_bridge_lossless_screenshot(raw_png, width=1535, height=1079)
+    )
+    bundle_calls: list[tuple[str, str, str | None, int]] = []
+    session = _stealth_evidence_session(tmp_path, bundle_calls)
+    registry = ToolRegistry()
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(registry, session, check_session_access=lambda _ctx: None)
+        content = await registry.tools["ui_take_screenshot"](
+            SimpleNamespace(),
+            evidence=True,
+            expected_hwnd=777,
+            expected_physical_width=1536,
+            expected_physical_height=1080,
+        )
+
+    metadata = json.loads(content[1].text)
+    assert (
+        metadata["evidence_grade"],
+        metadata["target_comparability"]["status"],
+        metadata["physical_target"],
+        {key for key in ("retention", "raw_path", "raw_sha256", "crop_path") if key in metadata},
+        bundle_calls,
+    ) == (
+        "preview_only",
+        "MISMATCH",
+        {
+            "status": "mismatch",
+            "code": "PHYSICAL_CAPTURE_MISMATCH",
+            "expected": {
+                "hwnd": 777,
+                "width": 1536,
+                "height": 1080,
+                "unit": "physical_px",
+                "coordinate_space": "raw_raster",
+            },
+            "actual": {
+                "hwnd": 777,
+                "width": 1535,
+                "height": 1079,
+                "unit": "physical_px",
+                "coordinate_space": "window",
+                "bounds_source": "GetWindowRect",
+            },
+            "mismatch_fields": ["width", "height"],
+        },
+        set(),
+        [],
+    )
+
+
+@pytest.mark.asyncio
+async def test_ui_take_screenshot_strict_physical_target_rejects_inconsistent_raw_bridge_provenance(
+    tmp_path,
+) -> None:
+    from PIL import Image
+
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+    from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (1535, 1079), (255, 255, 255)).save(buffer, format="PNG")
+    backend = FlaUIBackend.__new__(FlaUIBackend)
+    backend._process_id = 42
+    backend._client = MagicMock()
+    backend._client.call = AsyncMock(
+        return_value=_bridge_lossless_screenshot(buffer.getvalue(), width=1536, height=1080)
+    )
+    bundle_calls: list[tuple[str, str, str | None, int]] = []
+    session = _stealth_evidence_session(tmp_path, bundle_calls)
+    registry = ToolRegistry()
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(registry, session, check_session_access=lambda _ctx: None)
+        response = await registry.tools["ui_take_screenshot"](
+            SimpleNamespace(),
+            evidence=True,
+            expected_hwnd=777,
+            expected_physical_width=1536,
+            expected_physical_height=1080,
+        )
+
+    assert (
+        response["error"],
+        response["code"],
+        "data" in response,
+        isinstance(response, list),
+        bundle_calls,
+    ) == (
+        "Bridge screenshot dimensions do not match decoded PNG dimensions",
+        "PHYSICAL_CAPTURE_PROVENANCE_UNAVAILABLE",
+        False,
+        False,
+        [],
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("strict_arguments", "expected_error"),
+    [
+        pytest.param(
+            {"expected_hwnd": 777},
+            (
+                "expected_hwnd, expected_physical_width, and "
+                "expected_physical_height must be supplied together"
+            ),
+            id="partial",
+        ),
+        pytest.param(
+            {
+                "expected_hwnd": 0,
+                "expected_physical_width": 1536,
+                "expected_physical_height": 1080,
+            },
+            "expected_hwnd must be non-zero",
+            id="zero-hwnd",
+        ),
+        pytest.param(
+            {
+                "expected_hwnd": 777,
+                "expected_physical_width": 0,
+                "expected_physical_height": 1080,
+            },
+            "expected_physical_width must be positive, got 0",
+            id="zero-width",
+        ),
+        pytest.param(
+            {
+                "expected_hwnd": 777,
+                "expected_physical_width": 1536,
+                "expected_physical_height": 0,
+            },
+            "expected_physical_height must be positive, got 0",
+            id="zero-height",
+        ),
+    ],
+)
+async def test_ui_take_screenshot_strict_physical_target_rejects_malformed_assertions(
+    tmp_path,
+    strict_arguments: dict[str, int],
+    expected_error: str,
+) -> None:
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    bundle_calls: list[tuple[str, str, str | None, int]] = []
+    session = _stealth_evidence_session(tmp_path, bundle_calls)
+    registry = ToolRegistry()
+    register_ui_tools(registry, session, check_session_access=lambda _ctx: None)
+
+    response = await registry.tools["ui_take_screenshot"](
+        SimpleNamespace(), evidence=True, **strict_arguments
+    )
+
+    assert (
+        response["error"],
+        "code" in response,
+        "data" in response,
+        bundle_calls,
+    ) == (expected_error, False, False, [])
 
 
 @pytest.mark.asyncio
