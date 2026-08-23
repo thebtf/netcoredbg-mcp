@@ -101,6 +101,29 @@ environment values they need; never write secret values into repository files.
 Before opening a pull request, scan the changed material for accidental private
 markers using your local marker list. The scan must report no matches.
 
+### Local SonarQube credentials
+
+The exact-head SonarQube runner has one local credential source:
+`<coordination-root>/.env`, where `coordination-root` is the parent of `git
+rev-parse --git-common-dir`. It is gitignored and may contain only
+`SONAR_HOST_URL`, `SONAR_TOKEN`, and `SONAR_READ_TOKEN`. The runner reads it
+through a verified no-follow file object. On Windows, the reader rejects reparse
+points, a non-owner SID, a missing or unprotected DACL, and any allow ACE for a
+different SID. On other platforms, it requires the current user to own a regular
+file with no group or other permission bits.
+
+`SONAR_HOST_URL` must be an HTTPS origin. HTTP is allowed only for a literal
+numeric IPv4 loopback address or `[::1]`. The runner rejects HTTP hostnames,
+non-loopback HTTP addresses, paths, queries, fragments, userinfo, and invalid
+ports. Explicit values in the runner's parent process override the corresponding
+`.env` values only when their names use the exact canonical casing. The runner
+rejects every other `SONAR_*` input and removes every case variant from child
+environments. Never put `.env` or a symbolic link in a detached scanner
+worktree, and never set `SONAR_ADMIN_TOKEN`: either source is rejected by the
+runner. See [`docs/SONARQUBE-ONBOARDING.md`](docs/SONARQUBE-ONBOARDING.md) for
+one-time project-token creation, configured-origin and scanner-argv redaction,
+and the two required scan roles.
+
 ## Coding expectations
 
 - Implement complete behavior; do not submit stubs, placeholder paths, or tests
@@ -150,3 +173,8 @@ candidate, complete consumer-mode and remaining pre-PR checks, and pass review.
 Only then merge it into `main`; create the annotated `vX.Y.Z` tag from the
 verified merged commit and monitor its publish workflow. Do not create a release
 tag from an unmerged pull request.
+
+For the mandatory two exact-head SonarQube scans, follow
+[`docs/SONARQUBE-ONBOARDING.md`](docs/SONARQUBE-ONBOARDING.md). It defines the
+project-local credential names and the candidate/post-merge runner commands;
+neither an unavailable credential nor a candidate receipt permits tag creation.
