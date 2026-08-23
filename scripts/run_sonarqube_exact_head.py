@@ -361,19 +361,22 @@ def project_inventory(repository_root: Path) -> tuple[Path, list[Path], list[Pat
     if not solution_projects or any(not project.is_file() for project in solution_projects):
         raise RunnerError("Solution project inventory is incomplete.")
     excluded_parts = {".git", ".agent", ".sonarqube", "bin", "obj", "fixtures", "test-app"}
+    discovered_projects = {
+        path.resolve()
+        for path in repository_root.rglob("*.csproj")
+        if not excluded_parts.intersection(
+            part.lower() for part in path.relative_to(repository_root).parts
+        )
+    }
     projects = sorted(
-        (
-            path.resolve()
-            for path in repository_root.rglob("*.csproj")
-            if not excluded_parts.intersection(
-                part.lower() for part in path.relative_to(repository_root).parts
-            )
-        ),
+        discovered_projects | set(solution_projects),
         key=lambda path: path.as_posix().lower(),
     )
-    if not projects or not set(solution_projects).issubset(projects):
-        raise RunnerError("Solution project inventory disagrees with discovered C# projects.")
-    return solution, projects, [project for project in projects if project not in set(solution_projects)]
+    if not projects:
+        raise RunnerError("C# project inventory is empty.")
+    return solution, projects, sorted(
+        discovered_projects - set(solution_projects), key=lambda path: path.as_posix().lower()
+    )
 
 
 def scanner_metadata(repository_root: Path, expected_head: str) -> dict[str, Any]:
