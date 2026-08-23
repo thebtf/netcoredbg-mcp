@@ -53,6 +53,28 @@ class TestSonarqubeExactHeadRunner(TestCase):
         self.assertIn("/d:sonar.token=scan-token", end)
         self.assertNotIn("scan-token", runner.redact(" ".join(begin), ("scan-token",)))
 
+    def test_scanner_metadata_reads_dotnet_analysis_config(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = root / ".sonarqube" / "conf" / "SonarQubeAnalysisConfig.xml"
+            config.parent.mkdir(parents=True)
+            config.write_text(
+                "<SonarQubeAnalysisConfig>"
+                f"<SonarProjectKey>{runner.PROJECT_KEY}</SonarProjectKey>"
+                "<LocalSettings>"
+                f'<Property Name="sonar.scm.revision">{"a" * 40}</Property>'
+                "</LocalSettings>"
+                "</SonarQubeAnalysisConfig>",
+                encoding="utf-8",
+            )
+
+            metadata = runner.scanner_metadata(root, "a" * 40)
+
+        self.assertEqual(
+            (metadata["project_key"], metadata["sonar_scm_revision"]),
+            (runner.PROJECT_KEY, "a" * 40),
+        )
+
     def test_in_tree_dotenv_is_rejected_before_source_children_run(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

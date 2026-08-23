@@ -390,6 +390,8 @@ def scanner_metadata(repository_root: Path, expected_head: str) -> dict[str, Any
                     name = element.attrib.get("Name") or element.attrib.get("name") or element.attrib.get("key")
                     if name in found and element.text:
                         found[name].append((relative, element.text.strip()))
+                    if element.tag.rsplit("}", 1)[-1] == "SonarProjectKey" and element.text:
+                        found["sonar.projectKey"].append((relative, element.text.strip()))
             else:
                 for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
                     name, separator, value = line.partition("=")
