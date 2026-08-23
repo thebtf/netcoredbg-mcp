@@ -3,10 +3,9 @@
 This repository uses the fixed SonarQube project key
 `thebtf_netcoredbg_mcp`. The tracked runner is
 `scripts/run_sonarqube_exact_head.py`; it is the required release-scan command.
-It never accepts `SONAR_ADMIN_TOKEN` and writes only secret-free receipts and
-redacted logs.
+It writes only secret-free receipts and redacted logs.
 
-## One-time workstation setup
+## One-time local onboarding
 
 Install the supported SonarScanner for .NET on `PATH`:
 
@@ -19,43 +18,62 @@ dotnet-sonarscanner`. The runner discovers `dotnet-sonarscanner`,
 `SonarScanner.MSBuild.exe`, or `SonarScanner.MSBuild`; an exceptional local
 path can be supplied as a single executable with `--scanner <path>`.
 
-Keep the two project-scoped Sonar credentials in the existing secret Vault; the
-Vault is the durable authority, not a file in this repository. In the
-`netcoredbg-mcp` Vault project, materialize `sonarqube-analysis-token` as
-`SONAR_TOKEN` and `sonarqube-read-token` as `SONAR_READ_TOKEN`. The administrative
-credential remains separately owned in `nvmd-devops` as `sonarqube-admin-token`;
-never materialize it here because the runner rejects `SONAR_ADMIN_TOKEN`. The
-runner consumes only these runtime environment names:
+The maintainer performing this one-time onboarding creates two **project-scoped**
+SonarQube tokens for `thebtf_netcoredbg_mcp`: an analysis token with Execute
+Analysis access and a separate non-admin Browse token. The maintainer writes
+them, together with the credential-free SonarQube HTTP(S) origin, to the
+primary repository-root `.env`. This is the durable local runtime source for
+the runner.
+
+The runner derives that root instead of trusting its current working directory:
 
 ```text
-SONAR_HOST_URL
-SONAR_TOKEN
-SONAR_READ_TOKEN
+coordination-root = parent(git rev-parse --git-common-dir)
+dotenv             = <coordination-root>/.env
 ```
 
-Inject those values from the Vault directly into the runner's parent-process
-environment without printing them. Do **not** create a `.env` in a scanner
-worktree: the runner rejects any in-tree `.env`, including an ignored or
-symlinked file, before it starts repository-controlled build code. Use the
-credential-free SonarQube HTTP(S) origin for `SONAR_HOST_URL`.
+For a linked scanner worktree, this remains the primary repository root, not
+the linked worktree. The runner loads no other dotenv file.
 
-`SONAR_TOKEN` is the project analysis credential. SonarScanner for .NET 11.2.1
-requires it as `/d:sonar.token` on the scanner's `begin` and `end` process
-command lines; the runner redacts it from displayed commands and output. This
-creates unavoidable same-host process-argument visibility while each scanner
-process runs. The token is also used for the runner's submitted Compute Engine
-task readback, which requires project Execute Analysis but not administration.
-`SONAR_READ_TOKEN` belongs to a separate non-admin principal with project Browse
-access and is used for the analysis-bound quality gate, current-analysis
-bookends, issue inventory, and hotspot inventory. Any `SONAR_ADMIN_TOKEN` is
-rejected.
+`<coordination-root>/.env` may contain exactly these three keys:
 
-Neither credential reaches Git, `dotnet build`, or test child processes. Never
-put either token in a tracked file, receipt, or unredacted log.
+```text
+SONAR_HOST_URL=https://sonarqube.example.invalid
+SONAR_TOKEN=<project-analysis-token>
+SONAR_READ_TOKEN=<project-browse-token>
+```
+
+The file is local-only: `.gitignore` must ignore `.env`, it must never be
+committed or copied into receipts/logs, and its ACL must allow only its owner
+to read or change it. Do not place it in a linked scanner worktree, including
+as an ignored file or symlink. The runner refuses a scanner worktree that
+contains `.env`.
+
+An explicitly supplied process environment value for any of the three allowed
+keys overrides that key's value from `<coordination-root>/.env`. This is the
+only supported temporary override. The runner rejects `SONAR_ADMIN_TOKEN` in
+either source and rejects other `SONAR_` credential names; administrative
+credentials are outside this repository and never participate in its scripts
+or release workflow.
+
+`SONAR_TOKEN` is the project analysis credential. SonarScanner for .NET
+requires it as `/d:sonar.token` on the scanner's `begin` and `end` child-process
+arguments. The runner redacts the token in every displayed command and captured
+output, but a same-host process observer can see a live scanner process's argv;
+run scans only on a trusted local account. `SONAR_READ_TOKEN` is used only for
+the analysis-bound quality gate, current-analysis bookends, issue inventory,
+and hotspot inventory.
+
+The runner removes all Sonar credential variables from build and test child
+environments. It supplies the analysis token only to the scanner `begin`/`end`
+processes and never writes a token to Git, a tracked file, a receipt, or an
+unredacted log.
 
 ## Release scans
 
 Run both roles from a new clean detached linked worktree at the role's exact SHA.
+That worktree must not contain `.env`; the runner obtains credentials only from
+the coordination-root `.env` and explicit process overrides described above.
 The runner checks clean status before and after scanning, uses the committed
 `SonarQube.Analysis.xml`, sets `sonar.scm.revision` to the captured
 40-character HEAD, builds the solution plus every maintained `.csproj` omitted

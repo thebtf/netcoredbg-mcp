@@ -26,12 +26,23 @@ class TestSonarqubeExactHeadRunner(TestCase):
             "SONAR_READ_TOKEN": "read-token",
         }
 
-    def test_build_environment_scrubs_all_sonar_credentials(self):
-        build_environment = runner.scrub_sonar_environment(
-            {**self.credentials(), "SONAR_ADMIN_TOKEN": "admin-token", "SAFE_VALUE": "kept"}
+    @staticmethod
+    def context(primary_root: Path, scanner_root: Path) -> runner.GitContext:
+        return runner.GitContext(
+            scanner_root, primary_root / ".git", scanner_root / ".git", primary_root, "a" * 40
         )
 
-        self.assertFalse(set(build_environment).intersection(runner.SONAR_ENV))
+    def test_build_environment_scrubs_all_sonar_credentials(self):
+        build_environment = runner.scrub_sonar_environment(
+            {
+                **self.credentials(),
+                "SONAR_ADMIN_TOKEN": "admin-token",
+                "SONAR_UNKNOWN_CREDENTIAL": "unknown-token",
+                "SAFE_VALUE": "kept",
+            }
+        )
+
+        self.assertEqual(build_environment, {"SAFE_VALUE": "kept"})
 
     def test_scanner_environment_exposes_only_scan_credential(self):
         scanner_environment = runner.scanner_environment(
@@ -75,21 +86,115 @@ class TestSonarqubeExactHeadRunner(TestCase):
             (runner.PROJECT_KEY, "a" * 40),
         )
 
-    def test_in_tree_dotenv_is_rejected_before_source_children_run(self):
+    def test_scanner_worktree_dotenv_is_rejected_before_primary_root_loading(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            nested_directory = root / "candidate-controlled"
-            nested_directory.mkdir()
+            primary_root = root / "primary"
+            scanner_root = root / "scanner"
+            nested_directory = scanner_root / "candidate-controlled"
+            primary_root.mkdir()
+            nested_directory.mkdir(parents=True)
             (nested_directory / ".env").write_text("SONAR_TOKEN=synthetic", encoding="utf-8")
 
             with self.assertRaisesRegex(runner.RunnerError, "in-tree .env"):
-                runner.load_credentials(root, self.credentials())
+                runner.load_credentials(self.context(primary_root, scanner_root), self.credentials())
+
+    def test_primary_root_dotenv_provides_credentials(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            primary_root = root / "primary"
+            scanner_root = root / "scanner"
+            primary_root.mkdir()
+            scanner_root.mkdir()
+            (primary_root / ".env").write_text(
+                "SONAR_HOST_URL=https://sonar.example.test\nSONAR_TOKEN=scan-token\nSONAR_READ_TOKEN=read-token\n",
+                encoding="utf-8",
+            )
+
+            credentials = runner.load_credentials(self.context(primary_root, scanner_root), {})
+
+        self.assertEqual(credentials, self.credentials())
+
+    def test_process_credentials_override_primary_root_dotenv(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            primary_root = root / "primary"
+            scanner_root = root / "scanner"
+            primary_root.mkdir()
+            scanner_root.mkdir()
+            (primary_root / ".env").write_text(
+                "SONAR_HOST_URL=https://sonar.example.test\nSONAR_TOKEN=file-token\nSONAR_READ_TOKEN=read-token\n",
+                encoding="utf-8",
+            )
+
+            credentials = runner.load_credentials(
+                self.context(primary_root, scanner_root), {"SONAR_TOKEN": "process-token"}
+            )
+
+        self.assertEqual(credentials, {**self.credentials(), "SONAR_TOKEN": "process-token"})
+
+    def test_missing_primary_root_dotenv_or_value_is_a_named_blocker(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            for content in (None, "SONAR_HOST_URL=https://sonar.example.test\nSONAR_TOKEN=scan-token\n"):
+                with self.subTest(content=content):
+                    primary_root = root / ("missing" if content is None else "incomplete")
+                    scanner_root = root / ("missing-scanner" if content is None else "incomplete-scanner")
+                    primary_root.mkdir()
+                    scanner_root.mkdir()
+                    if content is not None:
+                        (primary_root / ".env").write_text(content, encoding="utf-8")
+
+                    with self.assertRaisesRegex(runner.CredentialsUnavailable, "SONAR_CREDENTIALS_UNAVAILABLE"):
+                        runner.load_credentials(self.context(primary_root, scanner_root), {})
+
+    def test_admin_token_is_rejected_from_primary_root_dotenv_and_process(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            for source, content, process_env in (
+                ("file", "SONAR_ADMIN_TOKEN=admin-token\n", {}),
+                ("process", None, {**self.credentials(), "SONAR_ADMIN_TOKEN": "admin-token"}),
+            ):
+                with self.subTest(source=source):
+                    primary_root = root / source
+                    scanner_root = root / f"{source}-scanner"
+                    primary_root.mkdir()
+                    scanner_root.mkdir()
+                    if content is not None:
+                        (primary_root / ".env").write_text(content, encoding="utf-8")
+
+                    with self.assertRaisesRegex(runner.RunnerError, "SONAR_ADMIN_TOKEN"):
+                        runner.load_credentials(self.context(primary_root, scanner_root), process_env)
+
+    def test_unknown_credential_names_are_rejected(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            for source, content, process_env in (
+                ("file-sonar", "SONAR_UNKNOWN_CREDENTIAL=value\n", {}),
+                ("file-other", "FOO=value\n", {}),
+                ("process", None, {**self.credentials(), "SONAR_UNKNOWN_CREDENTIAL": "value"}),
+            ):
+                with self.subTest(source=source):
+                    primary_root = root / source
+                    scanner_root = root / f"{source}-scanner"
+                    primary_root.mkdir()
+                    scanner_root.mkdir()
+                    if content is not None:
+                        (primary_root / ".env").write_text(content, encoding="utf-8")
+
+                    with self.assertRaisesRegex(runner.RunnerError, "Unknown"):
+                        runner.load_credentials(self.context(primary_root, scanner_root), process_env)
 
     def test_malformed_host_is_a_named_credential_blocker(self):
         with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            primary_root = root / "primary"
+            scanner_root = root / "scanner"
+            primary_root.mkdir()
+            scanner_root.mkdir()
             with self.assertRaisesRegex(runner.CredentialsUnavailable, r"^SONAR_CREDENTIALS_UNAVAILABLE: SONAR_HOST_URL\."):
                 runner.load_credentials(
-                    Path(temporary_directory),
+                    self.context(primary_root, scanner_root),
                     {**self.credentials(), "SONAR_HOST_URL": "sonar.example.test"},
                 )
 
@@ -121,12 +226,6 @@ class TestSonarqubeExactHeadRunner(TestCase):
 
         self.assertEqual((raised.exception.status, raised.exception.input_name), (401, "SONAR_TOKEN"))
 
-    def test_admin_token_is_rejected(self):
-        with TemporaryDirectory() as temporary_directory:
-            with self.assertRaisesRegex(runner.RunnerError, "SONAR_ADMIN_TOKEN"):
-                runner.load_credentials(
-                    Path(temporary_directory), {**self.credentials(), "SONAR_ADMIN_TOKEN": "admin-token"}
-                )
 
     def test_head_drift_after_scan_is_rejected(self):
         with TemporaryDirectory() as temporary_directory:

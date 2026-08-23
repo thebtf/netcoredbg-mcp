@@ -26,6 +26,7 @@ from typing import Any, Iterator, Mapping, Sequence
 PROJECT_KEY = "thebtf_netcoredbg_mcp"
 REQUIRED_ENV = ("SONAR_HOST_URL", "SONAR_TOKEN", "SONAR_READ_TOKEN")
 SONAR_ENV = (*REQUIRED_ENV, "SONAR_ADMIN_TOKEN")
+SIMPLE_DOTENV_ASSIGNMENT_RE = re.compile(r"(?P<name>[A-Z_][A-Z0-9_]*)=(?P<value>[^\r\n]*)\Z")
 RECEIPT_SCHEMA_VERSION = 2
 CE_TIMEOUT_SECONDS = 10 * 60
 INDEX_TIMEOUT_SECONDS = 2 * 60
@@ -122,26 +123,65 @@ def response_origin(value: str) -> str:
 def assert_no_in_tree_dotenv(repository_root: Path) -> None:
     for dotenv_path in repository_root.rglob(".env"):
         if dotenv_path.exists() or dotenv_path.is_symlink():
-            raise RunnerError(
-                "Refusing an in-tree .env: inject Sonar credentials from the Vault into the runner process."
-            )
+            raise RunnerError("Refusing an in-tree .env in the scanner worktree.")
 
 
-def load_credentials(repository_root: Path, process_env: Mapping[str, str]) -> dict[str, str]:
-    """Read only parent-process credentials; source-tree files are never credential inputs."""
-    assert_no_in_tree_dotenv(repository_root)
+def load_dotenv_credentials(coordination_root: Path) -> dict[str, str]:
+    dotenv_path = coordination_root / ".env"
+    try:
+        lines = dotenv_path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return {}
+    except OSError as error:
+        raise CredentialsUnavailable(*REQUIRED_ENV) from error
+
+    credentials: dict[str, str] = {}
+    for line_number, raw_line in enumerate(lines, start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        assignment = SIMPLE_DOTENV_ASSIGNMENT_RE.fullmatch(line)
+        if assignment is None:
+            raise RunnerError(f"Primary .env has an invalid assignment at line {line_number}.")
+        name = assignment["name"]
+        if name == "SONAR_ADMIN_TOKEN":
+            raise RunnerError("SONAR_ADMIN_TOKEN is forbidden; use only project-scoped credentials.")
+        if name not in REQUIRED_ENV:
+            raise RunnerError(f"Unknown primary .env key: {name}.")
+        if name in credentials:
+            raise RunnerError(f"Primary .env assigns {name} more than once.")
+        credentials[name] = assignment["value"].strip()
+    return credentials
+
+
+def assert_allowed_sonar_inputs(process_env: Mapping[str, str]) -> None:
     if "SONAR_ADMIN_TOKEN" in process_env:
         raise RunnerError("SONAR_ADMIN_TOKEN is forbidden; use only project-scoped credentials.")
-    missing = [name for name in REQUIRED_ENV if not process_env.get(name, "").strip()]
+    unknown_names = sorted(
+        name for name in process_env if name.startswith("SONAR_") and name not in REQUIRED_ENV
+    )
+    if unknown_names:
+        raise RunnerError(f"Unknown Sonar credential name: {unknown_names[0]}.")
+
+
+def load_credentials(context: GitContext, process_env: Mapping[str, str]) -> dict[str, str]:
+    """Load only approved Sonar credentials from the primary root and process."""
+    assert_no_in_tree_dotenv(context.repository_root)
+    dotenv_credentials = load_dotenv_credentials(context.coordination_root)
+    assert_allowed_sonar_inputs(process_env)
+    credentials = {
+        name: (process_env[name] if name in process_env else dotenv_credentials.get(name, "")).strip()
+        for name in REQUIRED_ENV
+    }
+    missing = [name for name, value in credentials.items() if not value]
     if missing:
         raise CredentialsUnavailable(*missing)
-    credentials = {name: process_env[name].strip() for name in REQUIRED_ENV}
     credentials["SONAR_HOST_URL"] = credential_free_host(credentials["SONAR_HOST_URL"])
     return credentials
 
 
 def scrub_sonar_environment(source: Mapping[str, str]) -> dict[str, str]:
-    return {key: value for key, value in source.items() if key not in SONAR_ENV}
+    return {key: value for key, value in source.items() if not key.startswith("SONAR_")}
 
 
 def scanner_environment(base_environment: Mapping[str, str], credentials: Mapping[str, str]) -> dict[str, str]:
@@ -1043,7 +1083,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
     with project_lock(context.coordination_root, role, context.head, run_id):
         write_receipt(target_receipt, receipt, secrets)
         try:
-            credentials = load_credentials(context.repository_root, inherited_environment)
+            credentials = load_credentials(context, inherited_environment)
             secrets = (credentials["SONAR_TOKEN"], credentials["SONAR_READ_TOKEN"])
             receipt["credential_inputs"] = list(REQUIRED_ENV)
             if role == "post-merge":

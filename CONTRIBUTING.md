@@ -101,6 +101,18 @@ environment values they need; never write secret values into repository files.
 Before opening a pull request, scan the changed material for accidental private
 markers using your local marker list. The scan must report no matches.
 
+### Local SonarQube credentials
+
+The exact-head SonarQube runner has one local credential source:
+`<coordination-root>/.env`, where `coordination-root` is the parent of `git
+rev-parse --git-common-dir`. It is gitignored, owner-only, and may contain only
+`SONAR_HOST_URL`, `SONAR_TOKEN`, and `SONAR_READ_TOKEN`. Explicit values in the
+runner's parent process override the corresponding `.env` values. Never put
+`.env` in a detached scanner worktree, and never set `SONAR_ADMIN_TOKEN`: either
+source is rejected by the runner. See
+[`docs/SONARQUBE-ONBOARDING.md`](docs/SONARQUBE-ONBOARDING.md) for one-time
+project-token creation, scanner-argv redaction, and the two required scan roles.
+
 ## Coding expectations
 
 - Implement complete behavior; do not submit stubs, placeholder paths, or tests
