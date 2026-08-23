@@ -37,7 +37,7 @@ public static class Program
         }
     }
 
-    private static void RunStdin()
+    internal static void RunStdin()
     {
         Log("FlaUIBridge started, waiting for JSON-RPC requests on stdin...");
         string? line;

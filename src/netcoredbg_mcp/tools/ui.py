@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import math
 from collections.abc import Callable
 from typing import Any
 
@@ -358,6 +359,97 @@ def register_ui_tools(
         ):
             return "flash-focus"
         return "stealth"
+
+    def _is_strict_typed_bitblt_fallback(
+        result: dict[str, Any],
+        process_id: int,
+        hwnd: int,
+        client_rect: dict[str, Any],
+        window_bounds: dict[str, Any],
+        dpi: int,
+    ) -> bool:
+        def contains_nonfinite_number(value: Any) -> bool:
+            if type(value) is float:
+                return not math.isfinite(value)
+            if isinstance(value, dict):
+                return any(contains_nonfinite_number(item) for item in value.values())
+            if isinstance(value, list):
+                return any(contains_nonfinite_number(item) for item in value)
+            return False
+
+        if contains_nonfinite_number(result):
+            return False
+        if (
+            result.get("method") != "BitBlt"
+            or result.get("fallback") != "flash-focus"
+            or result.get("fallback_reason") != "probable_black_printwindow"
+            or result.get("authority") != "foreground_window_gdi_raster"
+            or result.get("capture_authority") != "foreground_window_gdi_raster"
+            or result.get("source_api") != "GetWindowDC"
+            or result.get("rop") != "SRCCOPY"
+            or result.get("evidence_grade") != "typed_bitblt_fallback"
+            or result.get("printwindow_classification") != "probable_black_discarded"
+            or not isinstance(result.get("printwindow_analysis"), dict)
+            or result["printwindow_analysis"].get("classification") != "PROBABLE_BLACK_FRAME"
+            or type(result.get("printwindow_variance")) not in (int, float)
+            or type(result.get("alternate_attempts")) is not int
+            or result["alternate_attempts"] != 1
+            or type(result.get("process_id")) is not int
+            or result["process_id"] != process_id
+        ):
+            return False
+
+        stability = result.get("capture_stability")
+        if not isinstance(stability, dict):
+            return False
+        before = stability.get("before")
+        after = stability.get("after")
+        if not isinstance(before, dict) or not isinstance(after, dict):
+            return False
+
+        def matches_snapshot(snapshot: dict[str, Any]) -> bool:
+            return (
+                type(snapshot.get("hwnd")) is int
+                and snapshot["hwnd"] == hwnd
+                and type(snapshot.get("process_id")) is int
+                and snapshot["process_id"] == process_id
+                and snapshot.get("client_rect") == client_rect
+                and snapshot.get("window_bounds") == window_bounds
+                and type(snapshot.get("dpi")) is int
+                and snapshot["dpi"] == dpi
+            )
+
+        if not matches_snapshot(before) or not matches_snapshot(after) or before != after:
+            return False
+
+        foreground = result.get("foreground")
+        if not isinstance(foreground, dict):
+            return False
+        activation = foreground.get("activation")
+        restoration = foreground.get("restoration")
+        if not isinstance(activation, dict) or not isinstance(restoration, dict):
+            return False
+        if (
+            activation.get("attempted") is not True
+            or activation.get("set_foreground_returned") is not True
+            or activation.get("verified") is not True
+            or type(activation.get("foreground_hwnd")) is not int
+            or activation["foreground_hwnd"] != hwnd
+            or type(restoration.get("required")) is not bool
+            or restoration.get("attempted") is not restoration["required"]
+            or restoration.get("verified") is not True
+            or type(restoration.get("set_foreground_returned")) is not bool
+            or type(restoration.get("foreground_hwnd")) is not int
+        ):
+            return False
+        if restoration["required"]:
+            return (
+                restoration["set_foreground_returned"]
+                and restoration["foreground_hwnd"] != 0
+                and type(restoration.get("process_id")) is int
+                and restoration["process_id"] > 0
+            )
+        return not restoration["set_foreground_returned"] and restoration["foreground_hwnd"] == 0
 
     async def _find_ui_element(
         automation_id: str | None = None,
@@ -1415,13 +1507,16 @@ def register_ui_tools(
         Returns inline ImageContent (WebP at max_width resolution) directly
         to your vision pipeline, plus TextContent with metadata and HD file path.
 
-        Set evidence to retain the raw lossless PNG for the active debug session.
-        Crop coordinates require evidence mode and are applied to that raw PNG.
+        Set evidence to retain a raw PNG for the active debug session. With strict
+        physical assertions, a probable-black PrintWindow raster may make one
+        independently verified BitBlt attempt. Its explicit
+        ``typed_bitblt_fallback`` evidence grade is a distinct capture authority.
+        Crop coordinates require evidence mode and are applied to the accepted raw PNG.
 
         Args:
             max_width: Maximum image width. Default 1280; max useful is 1568.
             format: Image format: "webp" (smallest), "jpeg", "png"
-            evidence: Persist the raw PNG as session-scoped lossless evidence.
+            evidence: Persist the raw PNG as session-scoped evidence.
             crop_x: Raw-image crop origin X; requires all crop arguments.
             crop_y: Raw-image crop origin Y; requires all crop arguments.
             crop_width: Raw-image crop width; requires all crop arguments.
@@ -1515,6 +1610,7 @@ def register_ui_tools(
             bridge_screenshot: dict[str, Any] | None = None
             capture_metadata: dict[str, Any] | None = None
             foreground_mutation_attempted = False
+            typed_bitblt_fallback = False
             png_bytes = b""
             raw_width = 0
             raw_height = 0
@@ -1550,9 +1646,28 @@ def register_ui_tools(
                             "Physical target assertions require FlaUI bridge lossless capture"
                         )
                 else:
-                    bridge_result = await ui.client.call(
-                        "screenshot", {"evidence": True} if evidence else {}
-                    )
+                    bridge_request: dict[str, bool | int] = {"evidence": True} if evidence else {}
+                    if strict_target_requested:
+                        assert expected_hwnd is not None
+                        assert expected_physical_width is not None
+                        assert expected_physical_height is not None
+                        bridge_request.update(
+                            {
+                                "typed_bitblt_fallback": True,
+                                "expected_hwnd": expected_hwnd,
+                                "expected_physical_width": expected_physical_width,
+                                "expected_physical_height": expected_physical_height,
+                                "expected_process_id": pid,
+                            }
+                        )
+                    try:
+                        bridge_result = await ui.client.call("screenshot", bridge_request)
+                    except RuntimeError as error:
+                        if strict_target_requested:
+                            raise _PhysicalCaptureProvenanceUnavailableError(
+                                f"Physical target assertions require successful bridge capture: {error}"
+                            ) from error
+                        raise
                     foreground_mutation_attempted = (
                         _stealth_response_mode(bridge_result) == "flash-focus"
                     )
@@ -1602,6 +1717,7 @@ def register_ui_tools(
                             bridge_client_rect = bridge_result.get("client_rect")
                             bridge_window_bounds = bridge_result.get("window_bounds")
                             bridge_dpi = bridge_result.get("dpi")
+                            bridge_process_id = bridge_result.get("process_id")
                             client_rect_keys = ("left", "top", "right", "bottom")
                             valid_client_rect = (
                                 isinstance(bridge_client_rect, dict)
@@ -1627,8 +1743,31 @@ def register_ui_tools(
                                 and bridge_window_bounds.get("coordinate_space") == "screen"
                                 and bridge_window_bounds.get("source_api") == "GetWindowRect"
                             )
+                            typed_bitblt_fallback = (
+                                strict_target_requested
+                                and type(bridge_hwnd) is int
+                                and bridge_hwnd != 0
+                                and isinstance(bridge_client_rect, dict)
+                                and isinstance(bridge_window_bounds, dict)
+                                and type(bridge_dpi) is int
+                                and _is_strict_typed_bitblt_fallback(
+                                    bridge_result,
+                                    pid,
+                                    bridge_hwnd,
+                                    bridge_client_rect,
+                                    bridge_window_bounds,
+                                    bridge_dpi,
+                                )
+                            )
                             if (
-                                method != "PrintWindow"
+                                (method != "PrintWindow" and not typed_bitblt_fallback)
+                                or (
+                                    strict_target_requested
+                                    and (
+                                        type(bridge_process_id) is not int
+                                        or bridge_process_id != pid
+                                    )
+                                )
                                 or type(bridge_hwnd) is not int
                                 or bridge_hwnd == 0
                                 or not isinstance(bridge_client_rect, dict)
@@ -1651,6 +1790,8 @@ def register_ui_tools(
                                 raise ValueError(
                                     "Evidence capture requires valid bridge screenshot provenance"
                                 )
+                            if typed_bitblt_fallback:
+                                foreground_mutation_attempted = True
                             if strict_target_requested:
                                 from PIL import Image
 
@@ -1689,6 +1830,33 @@ def register_ui_tools(
                                     dpi=bridge_dpi,
                                 ),
                             )
+                            if typed_bitblt_fallback:
+                                capture_metadata.update(
+                                    {
+                                        "fallback": bridge_result["fallback"],
+                                        "fallback_reason": bridge_result["fallback_reason"],
+                                        "authority": bridge_result["authority"],
+                                        "capture_authority": bridge_result["capture_authority"],
+                                        "source_api": bridge_result["source_api"],
+                                        "rop": bridge_result["rop"],
+                                        "evidence_grade": bridge_result["evidence_grade"],
+                                        "alternate_attempts": bridge_result["alternate_attempts"],
+                                        "printwindow_classification": bridge_result[
+                                            "printwindow_classification"
+                                        ],
+                                        "printwindow_variance": bridge_result[
+                                            "printwindow_variance"
+                                        ],
+                                        "printwindow_analysis": bridge_result[
+                                            "printwindow_analysis"
+                                        ],
+                                        "process_id": bridge_result["process_id"],
+                                        "window_bounds": bridge_result["window_bounds"],
+                                        "capture_stability": bridge_result["capture_stability"],
+                                        "foreground": bridge_result["foreground"],
+                                        "bridge_assembly": bridge_result["bridge_assembly"],
+                                    }
+                                )
                             if strict_target_requested:
                                 assert strict_target is not None
                                 assert capture_metadata is not None
@@ -1765,7 +1933,7 @@ def register_ui_tools(
                 raw_width <= 0
                 or raw_height <= 0
                 or not isinstance(capture_metadata, dict)
-                or capture_metadata.get("method") != "PrintWindow"
+                or (capture_metadata.get("method") != "PrintWindow" and not typed_bitblt_fallback)
                 or not {
                     "method",
                     "hwnd",
@@ -1788,7 +1956,9 @@ def register_ui_tools(
                 None,
                 lambda: analyze_screenshot_frame(png_bytes),
             )
-            if frame_analysis["probable_black"] and (physical_target is None or persist_evidence):
+            if frame_analysis["probable_black"] and (
+                typed_bitblt_fallback or physical_target is None or persist_evidence
+            ):
                 return _probable_black_frame_response(
                     frame_analysis,
                     retry_tool="ui_take_screenshot",
@@ -1843,7 +2013,13 @@ def register_ui_tools(
                 "height": hd_h,
                 "preview_width": preview_w,
                 "format": safe_format,
-                "evidence_grade": "lossless_raster" if persist_evidence else "preview_only",
+                "evidence_grade": (
+                    "typed_bitblt_fallback"
+                    if persist_evidence and typed_bitblt_fallback
+                    else "lossless_raster"
+                    if persist_evidence
+                    else "preview_only"
+                ),
                 "state": session.state.state.value
                 if hasattr(session.state.state, "value")
                 else str(session.state.state),
@@ -1854,10 +2030,26 @@ def register_ui_tools(
                     metadata["mode"] = mode
                 for key in (
                     "method",
+                    "hwnd",
+                    "client_rect",
+                    "window_bounds",
+                    "dpi",
                     "fallback",
+                    "fallback_reason",
+                    "authority",
+                    "capture_authority",
+                    "source_api",
+                    "rop",
+                    "alternate_attempts",
                     "flags",
                     "variance",
                     "printwindow_variance",
+                    "printwindow_classification",
+                    "printwindow_analysis",
+                    "process_id",
+                    "capture_stability",
+                    "foreground",
+                    "bridge_assembly",
                     "printwindow_error",
                 ):
                     if key in bridge_screenshot:

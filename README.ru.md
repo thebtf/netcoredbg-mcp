@@ -223,9 +223,16 @@ ui_click(automation_id="saveButton")
 ui_take_screenshot(evidence=true)
 ```
 
-В этом режиме возвращается `evidence_grade=lossless_raster`, сохраняется
-session-scoped PNG artifact и добавляются SHA-256 с geometry provenance. Любой
-raw-derived crop требует `evidence=true`; preview-only capture его не даёт.
+Обычно этот режим возвращает `evidence_grade=lossless_raster`, сохраняет session-scoped
+PrintWindow PNG и добавляет SHA-256 с geometry provenance. Для strict physical target
+после вероятно чёрного PrintWindow raster допустима одна проверенная попытка `BitBlt`.
+Такой ответ явно содержит `method=BitBlt`, `fallback=flash-focus`,
+`fallback_reason=probable_black_printwindow` и
+`evidence_grade=typed_bitblt_fallback`; в нём есть authority `GetWindowDC`, ROP,
+PID target, стабильные geometry/DPI и подтверждение foreground activation/restoration.
+Malformed, чёрный, нестабильный, несовпадающий или неполно подтверждённый fallback
+ничего не сохраняет. Любой raw-derived crop требует `evidence=true`; preview-only
+capture его не даёт.
 
 Без ожидаемого target сохранённое evidence возвращает
 `target_comparability.status=UNASSERTED`: это валидное lossless evidence, но
