@@ -227,9 +227,16 @@ in explicitly:
 ui_take_screenshot(evidence=true)
 ```
 
-This mode returns `evidence_grade=lossless_raster`, persists a session-scoped
-PNG artifact, and includes SHA-256 and geometry provenance. Any raw-derived
-crop requires `evidence=true`; preview-only captures do not provide it.
+Normally this mode returns `evidence_grade=lossless_raster`, persists a session-scoped
+PrintWindow PNG, and includes SHA-256 and geometry provenance. For a strict physical
+target, a probable-black PrintWindow raster may make one verified `BitBlt` attempt.
+That response is explicitly `method=BitBlt`, `fallback=flash-focus`,
+`fallback_reason=probable_black_printwindow`, and
+`evidence_grade=typed_bitblt_fallback`; it records the `GetWindowDC` authority,
+ROP, target PID, stable geometry/DPI, and foreground activation/restoration proof.
+Any malformed, black, unstable, mismatched, or incompletely proven fallback persists
+nothing. Any raw-derived crop requires `evidence=true`; preview-only captures do not
+provide it.
 
 Without an expected target, persisted evidence reports
 `target_comparability.status=UNASSERTED`: it is valid lossless evidence, but

@@ -38,7 +38,9 @@ public partial class MainWindow : Window
     private int PreviewMouseLeftButtonUpCount { get; set; }
     private int ClickCount { get; set; }
     private int FocusChangeCount { get; set; }
-
+    private readonly string? _captureCalibrationMode =
+        Environment.GetEnvironmentVariable("NETCOREDBG_TEST_CAPTURE_CALIBRATION");
+    private NativeCalibrationWindow? _captureCalibrationWindow;
     private sealed class CueDragPayload
     {
         public CueDragPayload(CueRow sourceRow, IReadOnlyList<CueRow> rows, string selectionMode)
@@ -82,6 +84,7 @@ public partial class MainWindow : Window
         public Rect Bounds { get; }
     }
 
+
     public MainWindow()
     {
         InitializeComponent();
@@ -97,8 +100,27 @@ public partial class MainWindow : Window
             new RoutedEventHandler(HoverRegion_Click),
             handledEventsToo: true);
         SetHoverState("closed", surfaceVisible: false);
+        if (_captureCalibrationMode is "marker" or "black")
+        {
+            ContentRendered += OnCalibrationContentRendered;
+            Closed += OnCalibrationClosed;
+        }
     }
 
+    private void OnCalibrationContentRendered(object? sender, EventArgs e)
+    {
+        ContentRendered -= OnCalibrationContentRendered;
+        Hide();
+        _captureCalibrationWindow = new NativeCalibrationWindow(
+            drawMarker: _captureCalibrationMode == "marker");
+        _captureCalibrationWindow.Show();
+    }
+
+    private void OnCalibrationClosed(object? sender, EventArgs e)
+    {
+        _captureCalibrationWindow?.Dispose();
+        _captureCalibrationWindow = null;
+    }
     private void HoverFocusSentinel_GotKeyboardFocus(
         object sender,
         KeyboardFocusChangedEventArgs e)

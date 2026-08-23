@@ -2,6 +2,7 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text.Json.Nodes;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Capturing;
@@ -11,75 +12,39 @@ namespace FlaUIBridge.Commands;
 
 public static class ScreenshotCommands
 {
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern uint GetDpiForWindow(IntPtr hWnd);
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr GetForegroundWindow();
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool SetForegroundWindow(IntPtr hWnd);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern IntPtr GetWindowDC(IntPtr hWnd);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
-
-    [DllImport("gdi32.dll", SetLastError = true)]
-    private static extern bool BitBlt(
-        IntPtr hdcDest,
-        int nXDest,
-        int nYDest,
-        int nWidth,
-        int nHeight,
-        IntPtr hdcSrc,
-        int nXSrc,
-        int nYSrc,
-        int dwRop);
-
+    private static readonly IScreenshotCaptureTransport ProductionCaptureTransport =
+        new NativeScreenshotCaptureTransport();
+    private static readonly AsyncLocal<IScreenshotCaptureTransport?> ScopedCaptureTransport = new();
     private const uint PW_RENDERFULLCONTENT = 0x00000002;
-    private const int SW_RESTORE = 9;
-    private const int SRCCOPY = 0x00CC0020;
     private const double BlankFrameVarianceThreshold = 0.01;
     private const int MaximumRasterBytes = 64 * 1024 * 1024;
     private const int MaximumRasterDimension = 8_192;
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct RECT
+    private static IScreenshotCaptureTransport CaptureTransport =>
+        ScopedCaptureTransport.Value ?? ProductionCaptureTransport;
+
+    internal static IDisposable PushCaptureTransportForTesting(IScreenshotCaptureTransport transport)
     {
-        public int Left;
-        public int Top;
-        public int Right;
-        public int Bottom;
+        ArgumentNullException.ThrowIfNull(transport);
+        var previous = ScopedCaptureTransport.Value;
+        ScopedCaptureTransport.Value = transport;
+        return new CaptureTransportScope(previous);
     }
 
-    private readonly record struct CaptureSnapshot(
-        int WindowLeft,
-        int WindowTop,
-        int WindowRight,
-        int WindowBottom,
-        int ClientLeft,
-        int ClientTop,
-        int ClientRight,
-        int ClientBottom,
-        uint Dpi)
+    private sealed class CaptureTransportScope(IScreenshotCaptureTransport? previous) : IDisposable
     {
-        public int RasterWidth => WindowRight - WindowLeft;
-        public int RasterHeight => WindowBottom - WindowTop;
+        private bool _disposed;
+
+        public void Dispose()
+        {
+            if (_disposed)
+                return;
+
+            ScopedCaptureTransport.Value = previous;
+            _disposed = true;
+        }
     }
+    private readonly record struct StrictCaptureTarget(long ExpectedHwnd, uint ExpectedProcessId);
 
     internal readonly record struct WindowGeometry(
         long Hwnd,
@@ -116,17 +81,36 @@ public static class ScreenshotCommands
 
         var hwndValue = @params?["hwnd"]?.GetValue<long>();
         var evidence = @params?["evidence"]?.GetValue<bool>() ?? false;
+        var typedBitBltFallback = @params?["typed_bitblt_fallback"]?.GetValue<bool>() ?? false;
+        StrictCaptureTarget? strictCaptureTarget = null;
+        if (typedBitBltFallback)
+        {
+            var expectedHwnd = @params?["expected_hwnd"]?.GetValue<long>();
+            var expectedWidth = @params?["expected_physical_width"]?.GetValue<int>();
+            var expectedHeight = @params?["expected_physical_height"]?.GetValue<int>();
+            var expectedProcessId = @params?["expected_process_id"]?.GetValue<int>();
+            if (expectedHwnd is null || expectedHwnd == 0 || expectedWidth is null or <= 0 ||
+                expectedHeight is null or <= 0 || expectedProcessId is null or <= 0)
+            {
+                throw new ArgumentException(
+                    "Typed BitBlt fallback requires an expected HWND, active process ID, and positive physical dimensions.");
+            }
+            strictCaptureTarget = new StrictCaptureTarget(
+                expectedHwnd.Value, checked((uint)expectedProcessId.Value));
+        }
 
         if (JsonRpcHandler.Stealth)
         {
             var hwnd = ResolveTargetHwnd(hwndValue, mainWindow);
-            return evidence ? CaptureEvidenceWithPrintWindow(hwnd) : CaptureWithPrintWindow(hwnd);
+            return evidence
+                ? CaptureEvidenceWithPrintWindow(hwnd, typedBitBltFallback, strictCaptureTarget)
+                : CaptureWithPrintWindow(hwnd);
         }
 
         if (evidence)
         {
             var hwnd = ResolveTargetHwnd(hwndValue, mainWindow);
-            return CaptureEvidenceWithPrintWindow(hwnd);
+            return CaptureEvidenceWithPrintWindow(hwnd, typedBitBltFallback, strictCaptureTarget);
         }
 
         CaptureImage capture;
@@ -241,89 +225,230 @@ public static class ScreenshotCommands
         return result;
     }
 
-    private static JsonObject CaptureEvidenceWithPrintWindow(IntPtr hwnd)
+    private static JsonObject CaptureEvidenceWithPrintWindow(
+        IntPtr hwnd,
+        bool typedBitBltFallback,
+        StrictCaptureTarget? strictCaptureTarget)
     {
+        if (typedBitBltFallback && strictCaptureTarget is StrictCaptureTarget expectedTarget)
+            EnsureStrictExpectedHandle(expectedTarget);
+
         var printWindowBefore = ReadCaptureSnapshot(hwnd);
+        if (typedBitBltFallback && strictCaptureTarget is StrictCaptureTarget strictBefore)
+            EnsureStrictCaptureProcess(printWindowBefore, strictBefore.ExpectedProcessId);
         var printWindowBitmap = CaptureBitmapWithPrintWindow(
             hwnd, printWindowBefore.RasterWidth, printWindowBefore.RasterHeight)
             ?? throw new InvalidOperationException("Evidence capture requires a PrintWindow raster");
+        if (printWindowBitmap.Width != printWindowBefore.RasterWidth ||
+            printWindowBitmap.Height != printWindowBefore.RasterHeight)
+        {
+            printWindowBitmap.Dispose();
+            throw new InvalidOperationException("PrintWindow raster dimensions do not match the capture target.");
+        }
+
+        CaptureSnapshot printWindowAfter;
+        double printWindowVariance;
         using (printWindowBitmap)
         {
-            var printWindowAfter = ReadCaptureSnapshot(hwnd);
+            printWindowAfter = ReadCaptureSnapshot(hwnd);
             EnsureStableCaptureSnapshot(printWindowBefore, printWindowAfter);
-            var printWindowResult = EncodeBitmap(printWindowBitmap);
-            printWindowResult["method"] = "PrintWindow";
-            printWindowResult["flags"] = (int)PW_RENDERFULLCONTENT;
-            printWindowResult["variance"] = NormalizedPixelVariance(printWindowBitmap);
-            return AddCaptureProvenance(printWindowResult, hwnd, printWindowAfter);
+            if (typedBitBltFallback && strictCaptureTarget is StrictCaptureTarget strictAfter)
+                EnsureStrictCaptureProcess(printWindowAfter, strictAfter.ExpectedProcessId);
+            printWindowVariance = NormalizedPixelVariance(printWindowBitmap);
+            if (!typedBitBltFallback || !IsProbablyBlackFrame(printWindowBitmap))
+            {
+                var printWindowResult = EncodeBitmap(printWindowBitmap);
+                printWindowResult["method"] = "PrintWindow";
+                printWindowResult["flags"] = (int)PW_RENDERFULLCONTENT;
+                printWindowResult["variance"] = printWindowVariance;
+                return AddCaptureProvenance(printWindowResult, hwnd, printWindowAfter);
+            }
         }
+
+        if (strictCaptureTarget is not StrictCaptureTarget target)
+            throw new InvalidOperationException("Typed BitBlt fallback target is unavailable.");
+        return CaptureEvidenceWithVerifiedBitBltFallback(
+            hwnd, target, printWindowAfter, printWindowVariance);
+    }
+
+    private static JsonObject CaptureEvidenceWithVerifiedBitBltFallback(
+        IntPtr hwnd,
+        StrictCaptureTarget strictCaptureTarget,
+        CaptureSnapshot printWindowAfter,
+        double printWindowVariance)
+    {
+        var savedForeground = CaptureTransport.GetForegroundWindow();
+        CaptureSnapshot? savedForegroundSnapshot = savedForeground == IntPtr.Zero
+            ? null
+            : ReadCaptureSnapshot(savedForeground);
+        var activation = new JsonObject
+        {
+            ["attempted"] = true,
+            ["set_foreground_returned"] = false,
+            ["foreground_hwnd"] = hwnd.ToInt64(),
+            ["verified"] = false,
+        };
+        var restoration = new JsonObject
+        {
+            ["required"] = savedForeground != IntPtr.Zero,
+            ["attempted"] = false,
+            ["set_foreground_returned"] = false,
+            ["foreground_hwnd"] = savedForeground.ToInt64(),
+            ["verified"] = false,
+        };
+        if (savedForegroundSnapshot is CaptureSnapshot savedForegroundIdentity)
+            restoration["process_id"] = checked((int)savedForegroundIdentity.ProcessId);
+
+        try
+        {
+            var activationTransition = CaptureTransport.ActivateForegroundVerified(
+                hwnd,
+                strictCaptureTarget.ExpectedProcessId,
+                IntPtr.Zero,
+                0);
+            activation["set_foreground_returned"] = activationTransition.SetForegroundReturned;
+            if (!activationTransition.Verified)
+                throw new InvalidOperationException("Typed BitBlt fallback could not activate the capture target safely.");
+            activation["verified"] = true;
+
+            var fallbackBefore = ReadCaptureSnapshot(hwnd);
+            EnsureStableCaptureSnapshot(printWindowAfter, fallbackBefore);
+            EnsureStrictCaptureProcess(fallbackBefore, strictCaptureTarget.ExpectedProcessId);
+            if (CaptureTransport.GetForegroundWindow() != hwnd)
+                throw new InvalidOperationException("Typed BitBlt fallback lost foreground before raster capture.");
+            using var fallbackBitmap = CaptureBitmapWithBitBlt(
+                hwnd, fallbackBefore.RasterWidth, fallbackBefore.RasterHeight);
+            if (CaptureTransport.GetForegroundWindow() != hwnd)
+                throw new InvalidOperationException("Typed BitBlt fallback lost foreground during raster capture.");
+            var fallbackAfter = ReadCaptureSnapshot(hwnd);
+            EnsureStableCaptureSnapshot(fallbackBefore, fallbackAfter);
+            EnsureStrictCaptureProcess(fallbackAfter, strictCaptureTarget.ExpectedProcessId);
+
+            var result = EncodeBitmap(fallbackBitmap);
+            result["method"] = "BitBlt";
+            result["fallback"] = "flash-focus";
+            result["fallback_reason"] = "probable_black_printwindow";
+            result["authority"] = "foreground_window_gdi_raster";
+            result["capture_authority"] = "foreground_window_gdi_raster";
+            result["source_api"] = "GetWindowDC";
+            result["rop"] = "SRCCOPY";
+            result["evidence_grade"] = "typed_bitblt_fallback";
+            result["alternate_attempts"] = 1;
+            result["printwindow_classification"] = "probable_black_discarded";
+            result["printwindow_variance"] = printWindowVariance;
+            result["printwindow_analysis"] = new JsonObject
+            {
+                ["classification"] = "PROBABLE_BLACK_FRAME",
+                ["variance"] = printWindowVariance,
+            };
+            result["process_id"] = checked((int)fallbackAfter.ProcessId);
+            result["capture_stability"] = new JsonObject
+            {
+                ["before"] = CaptureSnapshotJson(hwnd, fallbackBefore),
+                ["after"] = CaptureSnapshotJson(hwnd, fallbackAfter),
+            };
+            result["foreground"] = new JsonObject
+            {
+                ["activation"] = activation,
+                ["restoration"] = restoration,
+            };
+            return AddCaptureProvenance(result, hwnd, fallbackAfter);
+        }
+        finally
+        {
+            if (savedForeground == IntPtr.Zero)
+            {
+                restoration["verified"] = true;
+            }
+            else
+            {
+                if (savedForegroundSnapshot is not CaptureSnapshot restoredForegroundIdentity ||
+                    CaptureTransport.GetForegroundWindow() != hwnd ||
+                    ReadCaptureSnapshot(savedForeground).ProcessId != restoredForegroundIdentity.ProcessId)
+                {
+                    throw new InvalidOperationException("Typed BitBlt fallback could not restore foreground safely.");
+                }
+
+                restoration["attempted"] = true;
+                var restorationTransition = CaptureTransport.ActivateForegroundVerified(
+                    savedForeground,
+                    restoredForegroundIdentity.ProcessId,
+                    hwnd,
+                    printWindowAfter.ProcessId);
+                restoration["set_foreground_returned"] = restorationTransition.SetForegroundReturned;
+                restoration["verified"] = restorationTransition.Verified;
+                if (!restorationTransition.Verified)
+                    throw new InvalidOperationException("Typed BitBlt fallback could not restore foreground safely.");
+            }
+        }
+    }
+
+    private static JsonObject CaptureSnapshotJson(IntPtr hwnd, CaptureSnapshot snapshot)
+    {
+        return new JsonObject
+        {
+            ["hwnd"] = hwnd.ToInt64(),
+            ["process_id"] = checked((int)snapshot.ProcessId),
+            ["client_rect"] = new JsonObject
+            {
+                ["left"] = snapshot.ClientLeft,
+                ["top"] = snapshot.ClientTop,
+                ["right"] = snapshot.ClientRight,
+                ["bottom"] = snapshot.ClientBottom,
+                ["unit"] = "physical_px",
+                ["coordinate_space"] = "client",
+                ["source_api"] = "GetClientRect",
+            },
+            ["window_bounds"] = new JsonObject
+            {
+                ["left"] = snapshot.WindowLeft,
+                ["top"] = snapshot.WindowTop,
+                ["right"] = snapshot.WindowRight,
+                ["bottom"] = snapshot.WindowBottom,
+                ["unit"] = "physical_px",
+                ["coordinate_space"] = "screen",
+                ["source_api"] = "GetWindowRect",
+            },
+            ["dpi"] = checked((int)snapshot.Dpi),
+        };
+    }
+
+    private static void EnsureStrictExpectedHandle(StrictCaptureTarget strictCaptureTarget)
+    {
+        var expectedSnapshot = ReadCaptureSnapshot(new IntPtr(strictCaptureTarget.ExpectedHwnd));
+        EnsureStrictCaptureProcess(expectedSnapshot, strictCaptureTarget.ExpectedProcessId);
+    }
+
+    private static void EnsureStrictCaptureProcess(CaptureSnapshot snapshot, uint expectedProcessId)
+    {
+        if (snapshot.ProcessId != expectedProcessId)
+            throw new InvalidOperationException("Capture target does not belong to the active debuggee process.");
     }
 
     private static (int width, int height) GetWindowSize(IntPtr hwnd)
     {
-        if (!GetWindowRect(hwnd, out var rect))
-            throw new InvalidOperationException(
-                $"GetWindowRect failed for HWND {hwnd.ToInt64()}: {Marshal.GetLastWin32Error()}");
-
-        var width = rect.Right - rect.Left;
-        var height = rect.Bottom - rect.Top;
-        if (width <= 0 || height <= 0)
-            throw new InvalidOperationException($"Window has invalid dimensions: {width}x{height}");
-
-        return (width, height);
+        var snapshot = ReadCaptureSnapshot(hwnd);
+        return (snapshot.RasterWidth, snapshot.RasterHeight);
     }
 
     internal static WindowGeometry ReadWindowGeometry(IntPtr hwnd)
     {
-        if (hwnd == IntPtr.Zero)
-            throw new ArgumentException("Target HWND must be non-zero.", nameof(hwnd));
-
-        if (!GetWindowRect(hwnd, out var windowRect))
-            throw new InvalidOperationException(
-                $"GetWindowRect failed for HWND {hwnd.ToInt64()}: {Marshal.GetLastWin32Error()}");
-        if (windowRect.Right <= windowRect.Left || windowRect.Bottom <= windowRect.Top)
-            throw new InvalidOperationException(
-                $"Window has invalid dimensions: {windowRect.Right - windowRect.Left}x{windowRect.Bottom - windowRect.Top}");
-
-        if (!GetClientRect(hwnd, out var clientRect))
-            throw new InvalidOperationException(
-                $"GetClientRect failed for HWND {hwnd.ToInt64()}: {Marshal.GetLastWin32Error()}");
-        if (clientRect.Right <= clientRect.Left || clientRect.Bottom <= clientRect.Top)
-            throw new InvalidOperationException(
-                $"Client rectangle has invalid dimensions for HWND {hwnd.ToInt64()}");
-
-        var dpi = GetDpiForWindow(hwnd);
-        if (dpi == 0)
-            throw new InvalidOperationException(
-                $"GetDpiForWindow failed for HWND {hwnd.ToInt64()}: {Marshal.GetLastWin32Error()}");
-
+        var snapshot = ReadCaptureSnapshot(hwnd);
         return new WindowGeometry(
             hwnd.ToInt64(),
-            windowRect.Left,
-            windowRect.Top,
-            windowRect.Right,
-            windowRect.Bottom,
-            clientRect.Left,
-            clientRect.Top,
-            clientRect.Right,
-            clientRect.Bottom,
-            dpi);
+            snapshot.WindowLeft,
+            snapshot.WindowTop,
+            snapshot.WindowRight,
+            snapshot.WindowBottom,
+            snapshot.ClientLeft,
+            snapshot.ClientTop,
+            snapshot.ClientRight,
+            snapshot.ClientBottom,
+            snapshot.Dpi);
     }
 
-    private static CaptureSnapshot ReadCaptureSnapshot(IntPtr hwnd)
-    {
-        var geometry = ReadWindowGeometry(hwnd);
-        return new CaptureSnapshot(
-            geometry.WindowLeft,
-            geometry.WindowTop,
-            geometry.WindowRight,
-            geometry.WindowBottom,
-            geometry.ClientLeft,
-            geometry.ClientTop,
-            geometry.ClientRight,
-            geometry.ClientBottom,
-            geometry.Dpi);
-    }
+    private static CaptureSnapshot ReadCaptureSnapshot(IntPtr hwnd) =>
+        CaptureTransport.ReadSnapshot(hwnd);
 
     private static void EnsureStableCaptureSnapshot(CaptureSnapshot before, CaptureSnapshot after)
     {
@@ -334,6 +459,7 @@ public static class ScreenshotCommands
     private static JsonObject AddCaptureProvenance(JsonObject result, IntPtr hwnd, CaptureSnapshot snapshot)
     {
         result["hwnd"] = hwnd.ToInt64();
+        result["process_id"] = checked((int)snapshot.ProcessId);
         result["client_rect"] = new JsonObject
         {
             ["left"] = snapshot.ClientLeft,
@@ -355,99 +481,76 @@ public static class ScreenshotCommands
             ["source_api"] = "GetWindowRect",
         };
         result["dpi"] = (int)snapshot.Dpi;
+        result["bridge_assembly"] = GetManagedAssemblyIdentity();
         return result;
     }
 
-    private static Bitmap? CaptureBitmapWithPrintWindow(IntPtr hwnd, int width, int height)
+    private static JsonObject GetManagedAssemblyIdentity()
     {
-        ValidateCaptureDimensions(width, height);
-        var bitmap = new Bitmap(width, height);
-        try
+        var path = typeof(ScreenshotCommands).Assembly.Location;
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            path = Environment.ProcessPath ?? string.Empty;
+        if (!File.Exists(path))
+            throw new InvalidOperationException("Evidence capture requires a readable managed bridge artifact path.");
+
+        using var stream = File.OpenRead(path);
+        return new JsonObject
         {
-            var printed = false;
-            using (var graphics = Graphics.FromImage(bitmap))
-            {
-                var hdc = graphics.GetHdc();
-                try
-                {
-                    printed = PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT);
-                }
-                finally
-                {
-                    graphics.ReleaseHdc(hdc);
-                }
-            }
-            if (!printed)
-            {
-                bitmap.Dispose();
-                return null;
-            }
-            return bitmap;
-        }
-        catch
-        {
-            bitmap.Dispose();
-            throw;
-        }
+            ["path"] = path,
+            ["sha256"] = Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant(),
+        };
     }
+
+    private static Bitmap? CaptureBitmapWithPrintWindow(IntPtr hwnd, int width, int height) =>
+        CaptureTransport.CapturePrintWindow(hwnd, width, height);
 
     private static Bitmap CaptureWithFlashFocusBitBlt(IntPtr hwnd, int width, int height)
     {
-        var savedForeground = GetForegroundWindow();
+        var savedForeground = CaptureTransport.GetForegroundWindow();
         try
         {
-            ShowWindow(hwnd, SW_RESTORE);
-            SetForegroundWindow(hwnd);
+            CaptureTransport.RestoreWindow(hwnd);
+            CaptureTransport.SetForegroundWindow(hwnd);
             return CaptureBitmapWithBitBlt(hwnd, width, height);
         }
         finally
         {
             if (savedForeground != IntPtr.Zero)
-            {
-                SetForegroundWindow(savedForeground);
-            }
+                CaptureTransport.SetForegroundWindow(savedForeground);
         }
     }
 
-
-    private static Bitmap CaptureBitmapWithBitBlt(IntPtr hwnd, int width, int height)
-    {
-        ValidateCaptureDimensions(width, height);
-        var sourceDc = GetWindowDC(hwnd);
-        if (sourceDc == IntPtr.Zero)
-            throw new InvalidOperationException(
-                $"GetWindowDC failed for HWND {hwnd.ToInt64()}: {Marshal.GetLastWin32Error()}");
-
-        using var bitmap = new Bitmap(width, height);
-        try
-        {
-            using (var graphics = Graphics.FromImage(bitmap))
-            {
-                var hdc = graphics.GetHdc();
-                try
-                {
-                    if (!BitBlt(hdc, 0, 0, width, height, sourceDc, 0, 0, SRCCOPY))
-                    {
-                        throw new InvalidOperationException(
-                            $"BitBlt failed for HWND {hwnd.ToInt64()}: {Marshal.GetLastWin32Error()}");
-                    }
-                }
-                finally
-                {
-                    graphics.ReleaseHdc(hdc);
-                }
-            }
-            return (Bitmap)bitmap.Clone();
-        }
-        finally
-        {
-            ReleaseDC(hwnd, sourceDc);
-        }
-    }
+    private static Bitmap CaptureBitmapWithBitBlt(IntPtr hwnd, int width, int height) =>
+        CaptureTransport.CaptureBitBlt(hwnd, width, height);
 
     private static bool IsBlankFrame(Bitmap bitmap)
     {
         return NormalizedPixelVariance(bitmap) < BlankFrameVarianceThreshold;
+    }
+
+    private static bool IsProbablyBlackFrame(Bitmap bitmap)
+    {
+        const double maxMeanLuminance = 8.0;
+        const int darkLuminanceThreshold = 16;
+        const double minimumDarkPixelFraction = 0.995;
+        var pixelCount = (long)bitmap.Width * bitmap.Height;
+        double luminanceSum = 0;
+        long darkPixelCount = 0;
+
+        for (var y = 0; y < bitmap.Height; y++)
+        {
+            for (var x = 0; x < bitmap.Width; x++)
+            {
+                var color = bitmap.GetPixel(x, y);
+                var luminance = (0.299 * color.R) + (0.587 * color.G) + (0.114 * color.B);
+                luminanceSum += luminance;
+                if (luminance <= darkLuminanceThreshold)
+                    darkPixelCount++;
+            }
+        }
+
+        return luminanceSum / pixelCount <= maxMeanLuminance
+            && (double)darkPixelCount / pixelCount >= minimumDarkPixelFraction;
     }
 
     private static double NormalizedPixelVariance(Bitmap bitmap)
