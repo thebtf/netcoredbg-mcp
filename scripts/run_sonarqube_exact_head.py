@@ -360,12 +360,14 @@ def project_inventory(repository_root: Path) -> tuple[Path, list[Path], list[Pat
     ]
     if not solution_projects or any(not project.is_file() for project in solution_projects):
         raise RunnerError("Solution project inventory is incomplete.")
-    excluded_parts = {".git", ".agent", ".sonarqube", "bin", "obj"}
+    excluded_parts = {".git", ".agent", ".sonarqube", "bin", "obj", "fixtures", "test-app"}
     projects = sorted(
         (
             path.resolve()
             for path in repository_root.rglob("*.csproj")
-            if not excluded_parts.intersection(path.relative_to(repository_root).parts)
+            if not excluded_parts.intersection(
+                part.lower() for part in path.relative_to(repository_root).parts
+            )
         ),
         key=lambda path: path.as_posix().lower(),
     )

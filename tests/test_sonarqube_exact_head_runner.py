@@ -176,6 +176,24 @@ class TestSonarqubeExactHeadRunner(TestCase):
 
         self.assertEqual((solution.name, projects, standalone_projects), ("netcoredbg-mcp.sln", [project.resolve()], []))
 
+    def test_project_inventory_excludes_fixture_projects_outside_scan_scope(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            project = root / "host" / "App.csproj"
+            fixture = root / "tests" / "fixtures" / "BrokenFixture.csproj"
+            project.parent.mkdir(parents=True)
+            fixture.parent.mkdir(parents=True)
+            project.write_text("<Project />", encoding="utf-8")
+            fixture.write_text("<Project />", encoding="utf-8")
+            (root / "netcoredbg-mcp.sln").write_text(
+                'Project("{guid}") = "App", "host\\App.csproj", "{id}"\nEndProject\n',
+                encoding="utf-8",
+            )
+
+            _, projects, standalone_projects = runner.project_inventory(root)
+
+        self.assertEqual((projects, standalone_projects), ([project.resolve()], []))
+
 
 
     def test_compute_engine_readback_uses_submitted_task_and_scan_credential(self):
