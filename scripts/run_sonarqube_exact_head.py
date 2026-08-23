@@ -130,7 +130,7 @@ def credential_free_host(value: str) -> str:
         or parsed.password is not None
         or parsed.query
         or parsed.fragment
-        or parsed.path
+        or parsed.path not in {"", "/"}
         or port == 0
         or (parsed.netloc.endswith(":") and not parsed.netloc.endswith("]"))
     ):
@@ -168,12 +168,47 @@ def normalize_windows_handle_for_crt(handle: Any, invalid_handle_value: int | No
     return normalized_handle
 
 
-def assert_no_in_tree_dotenv(repository_root: Path) -> None:
-    if repository_root.is_symlink():
+def close_windows_handle_if_owned(
+    kernel32: Any, handle: Any | None, invalid_handle_value: int | None
+) -> None:
+    normalized_handle = getattr(handle, "value", handle)
+    if normalized_handle is None or normalized_handle == 0 or normalized_handle == invalid_handle_value:
+        return
+    kernel32.CloseHandle(handle)
+
+
+def _scanner_tree_metadata(path: Path) -> Any:
+    try:
+        metadata = path.stat(follow_symlinks=False)
+    except OSError as error:
+        raise RunnerError("Unable to inspect scanner worktree metadata.") from error
+    if stat.S_ISLNK(getattr(metadata, "st_mode", 0)):
         raise RunnerError("Refusing a symbolic link in the scanner worktree.")
-    for scanner_path in repository_root.rglob("*"):
-        if scanner_path.is_symlink():
-            raise RunnerError("Refusing a symbolic link in the scanner worktree.")
+    if getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        raise RunnerError("Refusing a reparse point in the scanner worktree.")
+    return metadata
+
+
+def iter_scanner_tree(root: Path, pattern: str) -> Iterator[Path]:
+    root_metadata = _scanner_tree_metadata(root)
+    if not stat.S_ISDIR(getattr(root_metadata, "st_mode", 0)):
+        return
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            for path in directory.iterdir():
+                metadata = _scanner_tree_metadata(path)
+                if path.match(pattern):
+                    yield path
+                if stat.S_ISDIR(getattr(metadata, "st_mode", 0)):
+                    pending.append(path)
+        except OSError as error:
+            raise RunnerError("Unable to enumerate the scanner worktree.") from error
+
+
+def assert_no_in_tree_dotenv(repository_root: Path) -> None:
+    for scanner_path in iter_scanner_tree(repository_root, "*"):
         if scanner_path.name == ".env":
             raise RunnerError("Refusing an in-tree .env in the scanner worktree.")
 
@@ -468,8 +503,7 @@ def _read_windows_verified_primary_dotenv(dotenv_path: Path) -> str:
         with os.fdopen(descriptor, "rb", closefd=True) as dotenv_file:
             return dotenv_file.read().decode("utf-8")
     finally:
-        if handle is not None:
-            kernel32.CloseHandle(handle)
+        close_windows_handle_if_owned(kernel32, handle, invalid_handle_value)
 
 
 def process_environment() -> dict[str, str]:
@@ -713,7 +747,7 @@ def is_tracked(repository_root: Path, environment: Mapping[str, str], path: Path
 def clear_generated_artifacts(context: GitContext, environment: Mapping[str, str]) -> list[str]:
     """Delete only known ignored scanner/build output from the disposable worktree."""
     candidates = [context.repository_root / name for name in GENERATED_ROOT_NAMES]
-    for directory in context.repository_root.rglob("*"):
+    for directory in iter_scanner_tree(context.repository_root, "*"):
         if directory.name in GENERATED_DIRECTORY_NAMES and directory.is_dir():
             candidates.append(directory)
     removed: list[str] = []
@@ -798,7 +832,7 @@ def project_inventory(repository_root: Path) -> tuple[Path, list[Path], list[Pat
     excluded_parts = {".git", ".agent", ".sonarqube", "bin", "obj", "fixtures", "test-app"}
     discovered_projects = {
         path.resolve()
-        for path in repository_root.rglob("*.csproj")
+        for path in iter_scanner_tree(repository_root, "*.csproj")
         if not excluded_parts.intersection(
             part.lower() for part in path.relative_to(repository_root).parts
         )
@@ -819,7 +853,7 @@ def scanner_metadata(repository_root: Path, expected_head: str) -> dict[str, Any
     if not metadata_root.is_dir():
         raise RunnerError("SonarScanner did not create metadata.")
     found: dict[str, list[tuple[str, str]]] = {"sonar.projectKey": [], "sonar.scm.revision": []}
-    for path in metadata_root.rglob("*"):
+    for path in iter_scanner_tree(metadata_root, "*"):
         if not path.is_file() or path.is_symlink() or path.suffix.lower() not in {".xml", ".properties", ".txt"}:
             continue
         relative = str(path.relative_to(repository_root)).replace("\\", "/")

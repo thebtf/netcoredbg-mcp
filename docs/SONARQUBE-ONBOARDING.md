@@ -23,7 +23,9 @@ SonarQube tokens for `thebtf_netcoredbg_mcp`: an analysis token with Execute
 Analysis access and a separate non-admin Browse token. The maintainer writes
 them, together with an HTTPS SonarQube origin, to the primary repository-root
 `.env`. The only HTTP exception is a literal numeric IPv4 loopback address or
-`[::1]`. This is the durable local runtime source for the runner.
+`[::1]`. The runner accepts a pathless origin or a root `/` suffix and
+canonicalizes both to `scheme://netloc`. This is the durable local runtime source
+for the runner.
 
 The runner derives that root instead of trusting its current working directory:
 
@@ -49,8 +51,8 @@ Windows, it rejects a reparse point, a non-owner SID, a missing or unprotected
 DACL, and any allow ACE for another SID. On other platforms, it requires the
 current user to own a regular file with no group or other permission bits. Do
 not place it in a linked scanner worktree. The runner rejects a scanner
-worktree that contains `.env` or any symbolic link, including an ignored `.env`
-link.
+worktree that contains `.env`, a symbolic link, or any reparse point, including
+the root and an ignored `.env` link.
 
 An explicitly supplied process environment value for any of the three allowed
 keys overrides that key's value from `<coordination-root>/.env`. The key name

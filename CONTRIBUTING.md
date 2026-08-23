@@ -113,16 +113,18 @@ different SID. On other platforms, it requires the current user to own a regular
 file with no group or other permission bits.
 
 `SONAR_HOST_URL` must be an HTTPS origin. HTTP is allowed only for a literal
-numeric IPv4 loopback address or `[::1]`. The runner rejects HTTP hostnames,
-non-loopback HTTP addresses, paths, queries, fragments, userinfo, and invalid
-ports. Explicit values in the runner's parent process override the corresponding
-`.env` values only when their names use the exact canonical casing. The runner
-rejects every other `SONAR_*` input and removes every case variant from child
-environments. Never put `.env` or a symbolic link in a detached scanner
-worktree, and never set `SONAR_ADMIN_TOKEN`: either source is rejected by the
-runner. See [`docs/SONARQUBE-ONBOARDING.md`](docs/SONARQUBE-ONBOARDING.md) for
-one-time project-token creation, configured-origin and scanner-argv redaction,
-and the two required scan roles.
+numeric IPv4 loopback address or `[::1]`. The runner accepts a pathless origin
+or a root `/` suffix and canonicalizes both to `scheme://netloc`. It rejects HTTP
+hostnames, non-loopback HTTP addresses, non-root paths, queries, fragments,
+userinfo, and invalid ports. Explicit values in the runner's parent process
+override the corresponding `.env` values only when their names use the exact
+canonical casing. The runner rejects every other `SONAR_*` input and removes
+every case variant from child environments. It refuses a scanner worktree that
+contains `.env`, a symbolic link, or another reparse point, including the root.
+Never set `SONAR_ADMIN_TOKEN`: the runner rejects that source. See
+[`docs/SONARQUBE-ONBOARDING.md`](docs/SONARQUBE-ONBOARDING.md) for one-time
+project-token creation, configured-origin and scanner-argv redaction, and the
+two required scan roles.
 
 ## Coding expectations
 
