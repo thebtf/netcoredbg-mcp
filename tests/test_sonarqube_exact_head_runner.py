@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import stat
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -127,21 +128,18 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 scanner_tree_link.symlink_to(external_root, target_is_directory=True)
             except OSError:
 
-                class ScannerTreeSymlink:
-                    def exists(self):
-                        return False
+                class ScannerTreeSymlinkMetadata:
+                    st_mode = stat.S_IFLNK
 
-                    def is_symlink(self):
-                        return True
+                original_stat = Path.stat
 
-                with patch.object(
-                    Path,
-                    "rglob",
-                    autospec=True,
-                    side_effect=lambda path, pattern: [ScannerTreeSymlink()]
-                    if path == scanner_root and pattern == "*"
-                    else [],
-                ):
+                def nonfollowing_stat(path, *, follow_symlinks=True):
+                    if path == scanner_tree_link:
+                        self.assertFalse(follow_symlinks)
+                        return ScannerTreeSymlinkMetadata()
+                    return original_stat(path, follow_symlinks=follow_symlinks)
+
+                with patch.object(Path, "stat", autospec=True, side_effect=nonfollowing_stat):
                     with self.assertRaisesRegex(runner.RunnerError, "symbolic link"):
                         runner.load_credentials(
                             self.context(primary_root, scanner_root), self.credentials()
@@ -151,6 +149,41 @@ class TestSonarqubeExactHeadRunner(TestCase):
                     runner.load_credentials(
                         self.context(primary_root, scanner_root), self.credentials()
                     )
+
+    def test_scanner_tree_iterator_visits_normal_nested_paths(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            nested_directory = root / "nested"
+            nested_file = nested_directory / "artifact.txt"
+            nested_directory.mkdir()
+            nested_file.write_text("content", encoding="utf-8")
+
+            discovered = list(runner.iter_scanner_tree(root, "*.txt"))
+
+        self.assertEqual(discovered, [nested_file])
+
+    def test_scanner_tree_iterator_rejects_fake_windows_reparse_point(self):
+        class FileMetadata:
+            st_file_attributes = 0x0400
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            reparse_directory = root / "candidate-controlled"
+            reparse_directory.mkdir()
+            original_stat = Path.stat
+            stat_calls = []
+
+            def nonfollowing_stat(path, *, follow_symlinks=True):
+                if path == reparse_directory:
+                    stat_calls.append(follow_symlinks)
+                    return FileMetadata()
+                return original_stat(path, follow_symlinks=follow_symlinks)
+
+            with patch.object(Path, "stat", autospec=True, side_effect=nonfollowing_stat):
+                with self.assertRaisesRegex(runner.RunnerError, "reparse point"):
+                    list(runner.iter_scanner_tree(root, "*"))
+
+        self.assertEqual(stat_calls, [False])
 
     def test_primary_root_dotenv_provides_credentials(self):
         with TemporaryDirectory() as temporary_directory:
@@ -329,6 +362,16 @@ class TestSonarqubeExactHeadRunner(TestCase):
             with self.subTest(supplied=supplied):
                 with self.assertRaisesRegex(runner.CredentialsUnavailable, "SONAR_HOST_URL"):
                     runner.credential_free_host(supplied)
+
+    def test_credential_free_host_canonicalizes_root_slash_and_rejects_nonroot_paths(self):
+        canonical_origin = "https://sonar.example.test"
+
+        for supplied in (canonical_origin, f"{canonical_origin}/"):
+            with self.subTest(supplied=supplied):
+                self.assertEqual(runner.credential_free_host(supplied), canonical_origin)
+
+        with self.assertRaisesRegex(runner.CredentialsUnavailable, "SONAR_HOST_URL"):
+            runner.credential_free_host(f"{canonical_origin}/project")
 
     def test_scanner_auth_failure_is_a_named_credential_blocker(self):
         with TemporaryDirectory() as temporary_directory:
@@ -707,6 +750,30 @@ class TestSonarqubeExactHeadRunner(TestCase):
         with self.assertRaises(ValueError):
             runner.normalize_windows_handle_for_crt(ctypes.c_void_p(-1), invalid_handle_value)
 
+    def test_close_windows_handle_if_owned_skips_sentinels_and_closes_owned_handle_once(self):
+        import ctypes
+
+        class Kernel32:
+            def __init__(self):
+                self.closed_handles = []
+
+            def CloseHandle(self, handle):
+                self.closed_handles.append(handle)
+                return True
+
+        kernel32 = Kernel32()
+        invalid_handle_value = ctypes.c_void_p(-1).value
+        for handle in (None, 0, ctypes.c_void_p(), ctypes.c_void_p(-1), invalid_handle_value):
+            with self.subTest(handle=handle):
+                runner.close_windows_handle_if_owned(kernel32, handle, invalid_handle_value)
+
+        self.assertEqual(kernel32.closed_handles, [])
+
+        owned_handle = ctypes.c_void_p(123)
+        runner.close_windows_handle_if_owned(kernel32, owned_handle, invalid_handle_value)
+
+        self.assertEqual(kernel32.closed_handles, [owned_handle])
+
     def test_running_receipt_replaces_prior_pass_before_work(self):
         with TemporaryDirectory() as temporary_directory:
             receipt_path = Path(temporary_directory) / "candidate.json"
@@ -769,6 +836,27 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 "dashboard_url_present": True,
             },
         )
+
+    def test_report_task_accepts_root_slash_server_url_against_canonical_origin(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            report_path = root / ".sonarqube" / "out" / ".sonar" / "report-task.txt"
+            report_path.parent.mkdir(parents=True)
+            report_path.write_text(
+                "\n".join(
+                    (
+                        f"projectKey={runner.PROJECT_KEY}",
+                        "ceTaskId=task-1",
+                        "serverUrl=https://sonar.example.test/",
+                        f"dashboardUrl=https://sonar.example.test/dashboard?id={runner.PROJECT_KEY}",
+                    )
+                ),
+                encoding="utf-8",
+            )
+
+            task_report = runner.report_task(root, "https://sonar.example.test")
+
+        self.assertTrue(task_report["server_origin_matches_configured"])
 
     def test_redirect_handler_never_constructs_a_redirect_request(self):
         handler = runner.NoRedirectHandler()
