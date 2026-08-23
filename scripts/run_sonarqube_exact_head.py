@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -21,7 +23,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, Collection, Iterator, Mapping, Sequence
 
 PROJECT_KEY = "thebtf_netcoredbg_mcp"
 REQUIRED_ENV = ("SONAR_HOST_URL", "SONAR_TOKEN", "SONAR_READ_TOKEN")
@@ -94,19 +96,54 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def is_sonar_environment_name(name: str) -> bool:
+    return name.upper().startswith("SONAR_")
+
+
+def sonar_secret_values(source: Mapping[str, str]) -> set[str]:
+    return {value for name, value in source.items() if is_sonar_environment_name(name) and value}
+
+
+def dotenv_secret_values(content: str) -> set[str]:
+    values: set[str] = set()
+    for raw_line in content.splitlines():
+        name, separator, value = raw_line.strip().partition("=")
+        if separator and is_sonar_environment_name(name):
+            values.add(value)
+            values.add(value.strip())
+    values.discard("")
+    return values
+
+
 def credential_free_host(value: str) -> str:
-    parsed = urllib.parse.urlsplit(value)
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError as error:
+        raise CredentialsUnavailable("SONAR_HOST_URL") from error
     if (
         parsed.scheme not in {"http", "https"}
         or not parsed.netloc
+        or hostname is None
         or parsed.username is not None
         or parsed.password is not None
         or parsed.query
         or parsed.fragment
-        or parsed.path not in {"", "/"}
+        or parsed.path
+        or port == 0
+        or (parsed.netloc.endswith(":") and not parsed.netloc.endswith("]"))
     ):
         raise CredentialsUnavailable("SONAR_HOST_URL")
+    if parsed.scheme == "http":
+        try:
+            address = ipaddress.ip_address(hostname)
+        except ValueError as error:
+            raise CredentialsUnavailable("SONAR_HOST_URL") from error
+        if not ((address.version == 4 and address.is_loopback) or hostname == "::1"):
+            raise CredentialsUnavailable("SONAR_HOST_URL")
     return f"{parsed.scheme}://{parsed.netloc}"
+
 
 def response_origin(value: str) -> str:
     parsed = urllib.parse.urlsplit(value)
@@ -120,23 +157,379 @@ def response_origin(value: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
+def normalize_windows_handle_for_crt(handle: Any, invalid_handle_value: int | None) -> int:
+    normalized_handle = getattr(handle, "value", handle)
+    if (
+        invalid_handle_value is None
+        or type(normalized_handle) is not int
+        or normalized_handle == invalid_handle_value
+    ):
+        raise ValueError("The primary .env file handle is invalid.")
+    return normalized_handle
+
+
 def assert_no_in_tree_dotenv(repository_root: Path) -> None:
-    for dotenv_path in repository_root.rglob(".env"):
-        if dotenv_path.exists() or dotenv_path.is_symlink():
+    if repository_root.is_symlink():
+        raise RunnerError("Refusing a symbolic link in the scanner worktree.")
+    for scanner_path in repository_root.rglob("*"):
+        if scanner_path.is_symlink():
+            raise RunnerError("Refusing a symbolic link in the scanner worktree.")
+        if scanner_path.name == ".env":
             raise RunnerError("Refusing an in-tree .env in the scanner worktree.")
 
 
-def load_dotenv_credentials(coordination_root: Path) -> dict[str, str]:
-    dotenv_path = coordination_root / ".env"
+def _read_posix_verified_primary_dotenv(dotenv_path: Path) -> str:
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:
+        raise OSError("The platform cannot open the primary .env without following links.")
+    descriptor = os.open(dotenv_path, os.O_RDONLY | no_follow)
     try:
-        lines = dotenv_path.read_text(encoding="utf-8").splitlines()
+        file_status = os.fstat(descriptor)
+        if not stat.S_ISREG(file_status.st_mode):
+            raise OSError("The primary .env is not a regular file.")
+        if file_status.st_uid != getattr(os, "geteuid")() or stat.S_IMODE(file_status.st_mode) & 0o077:
+            raise PermissionError("The primary .env is not owner-only.")
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 64 * 1024):
+            chunks.append(chunk)
+        return b"".join(chunks).decode("utf-8")
+    finally:
+        os.close(descriptor)
+
+
+def _read_windows_verified_primary_dotenv(dotenv_path: Path) -> str:
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class FileAttributeTagInfo(ctypes.Structure):
+        _fields_ = [("file_attributes", wintypes.DWORD), ("reparse_tag", wintypes.DWORD)]
+
+    class AceHeader(ctypes.Structure):
+        _fields_ = [("ace_type", ctypes.c_ubyte), ("ace_flags", ctypes.c_ubyte), ("ace_size", wintypes.WORD)]
+
+    class AclSizeInformation(ctypes.Structure):
+        _fields_ = [
+            ("ace_count", wintypes.DWORD),
+            ("acl_bytes_in_use", wintypes.DWORD),
+            ("acl_bytes_free", wintypes.DWORD),
+        ]
+
+    class SidAndAttributes(ctypes.Structure):
+        _fields_ = [("sid", ctypes.c_void_p), ("attributes", wintypes.DWORD)]
+
+    class TokenUser(ctypes.Structure):
+        _fields_ = [("user", SidAndAttributes)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    invalid_handle_value = ctypes.c_void_p(-1).value
+    file_read_data = 0x0001
+    read_control = 0x00020000
+    file_share_read = 0x00000001
+    open_existing = 3
+    file_flag_open_reparse_point = 0x00200000
+    file_attribute_reparse_point = 0x00000400
+    file_attribute_directory = 0x00000010
+    file_type_disk = 0x0001
+    file_attribute_tag_info = 9
+    owner_security_information = 0x00000001
+    dacl_security_information = 0x00000004
+    se_file_object = 1
+    se_dacl_protected = 0x1000
+    token_query = 0x0008
+    token_user = 1
+    error_insufficient_buffer = 122
+    access_allowed_ace_type = 0
+    access_denied_ace_types = {1, 6, 10, 12}
+    inherited_ace = 0x10
+    acl_size_information = 2
+    sid_offset = ctypes.sizeof(AceHeader) + ctypes.sizeof(wintypes.DWORD)
+
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.GetFileInformationByHandleEx.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    kernel32.GetFileInformationByHandleEx.restype = wintypes.BOOL
+    kernel32.GetFileType.argtypes = [wintypes.HANDLE]
+    kernel32.GetFileType.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    advapi32.OpenProcessToken.restype = wintypes.BOOL
+    advapi32.GetTokenInformation.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.GetTokenInformation.restype = wintypes.BOOL
+    advapi32.GetSecurityInfo.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    advapi32.GetSecurityInfo.restype = wintypes.DWORD
+    advapi32.GetSecurityDescriptorDacl.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.BOOL),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.BOOL),
+    ]
+    advapi32.GetSecurityDescriptorDacl.restype = wintypes.BOOL
+    advapi32.GetSecurityDescriptorControl.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.WORD),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.GetSecurityDescriptorControl.restype = wintypes.BOOL
+    advapi32.GetAclInformation.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.c_int,
+    ]
+    advapi32.GetAclInformation.restype = wintypes.BOOL
+    advapi32.GetAce.argtypes = [ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p)]
+    advapi32.GetAce.restype = wintypes.BOOL
+    advapi32.IsValidSid.argtypes = [ctypes.c_void_p]
+    advapi32.IsValidSid.restype = wintypes.BOOL
+    advapi32.GetLengthSid.argtypes = [ctypes.c_void_p]
+    advapi32.GetLengthSid.restype = wintypes.DWORD
+    advapi32.EqualSid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    advapi32.EqualSid.restype = wintypes.BOOL
+
+    def require(success: bool) -> None:
+        if not success:
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    def current_user_sid() -> tuple[ctypes.c_void_p, ctypes.Array[Any]]:
+        token_handle = wintypes.HANDLE()
+        require(advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), token_query, ctypes.byref(token_handle)))
+        try:
+            required_size = wintypes.DWORD()
+            if advapi32.GetTokenInformation(token_handle, token_user, None, 0, ctypes.byref(required_size)):
+                raise OSError("The current process token returned no user SID.")
+            if ctypes.get_last_error() != error_insufficient_buffer or not required_size.value:
+                raise ctypes.WinError(ctypes.get_last_error())
+            buffer = ctypes.create_string_buffer(required_size.value)
+            require(
+                advapi32.GetTokenInformation(
+                    token_handle,
+                    token_user,
+                    buffer,
+                    required_size.value,
+                    ctypes.byref(required_size),
+                )
+            )
+            sid = ctypes.c_void_p(ctypes.cast(buffer, ctypes.POINTER(TokenUser)).contents.user.sid)
+            if not sid.value or not advapi32.IsValidSid(sid):
+                raise OSError("The current process token user SID is invalid.")
+            return sid, buffer
+        finally:
+            require(kernel32.CloseHandle(token_handle))
+
+    handle: Any | None = None
+    try:
+        handle = kernel32.CreateFileW(
+            str(dotenv_path),
+            file_read_data | read_control,
+            file_share_read,
+            None,
+            open_existing,
+            file_flag_open_reparse_point,
+            None,
+        )
+        if handle is None:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            normalize_windows_handle_for_crt(handle, invalid_handle_value)
+        except ValueError as error:
+            raise ctypes.WinError(ctypes.get_last_error()) from error
+        if kernel32.GetFileType(handle) != file_type_disk:
+            raise OSError("The primary .env is not a disk file.")
+        attribute_tag = FileAttributeTagInfo()
+        require(
+            kernel32.GetFileInformationByHandleEx(
+                handle,
+                file_attribute_tag_info,
+                ctypes.byref(attribute_tag),
+                ctypes.sizeof(attribute_tag),
+            )
+        )
+        if attribute_tag.file_attributes & (file_attribute_reparse_point | file_attribute_directory):
+            raise OSError("The primary .env is not a regular non-reparse file.")
+        owner_sid = ctypes.c_void_p()
+        dacl = ctypes.c_void_p()
+        security_descriptor = ctypes.c_void_p()
+        result = advapi32.GetSecurityInfo(
+            handle,
+            se_file_object,
+            owner_security_information | dacl_security_information,
+            ctypes.byref(owner_sid),
+            None,
+            ctypes.byref(dacl),
+            None,
+            ctypes.byref(security_descriptor),
+        )
+        if result:
+            raise ctypes.WinError(result)
+        try:
+            user_sid, user_sid_buffer = current_user_sid()
+            if not owner_sid.value or not advapi32.IsValidSid(owner_sid) or not advapi32.EqualSid(owner_sid, user_sid):
+                raise PermissionError("The primary .env owner does not match the current token user.")
+            dacl_present = wintypes.BOOL()
+            dacl_defaulted = wintypes.BOOL()
+            descriptor_dacl = ctypes.c_void_p()
+            require(
+                advapi32.GetSecurityDescriptorDacl(
+                    security_descriptor,
+                    ctypes.byref(dacl_present),
+                    ctypes.byref(descriptor_dacl),
+                    ctypes.byref(dacl_defaulted),
+                )
+            )
+            if not dacl_present.value or not dacl.value or dacl.value != descriptor_dacl.value:
+                raise PermissionError("The primary .env has no explicit DACL.")
+            control = wintypes.WORD()
+            revision = wintypes.DWORD()
+            require(
+                advapi32.GetSecurityDescriptorControl(
+                    security_descriptor,
+                    ctypes.byref(control),
+                    ctypes.byref(revision),
+                )
+            )
+            if not control.value & se_dacl_protected:
+                raise PermissionError("The primary .env DACL is not protected from inherited access.")
+            acl_information = AclSizeInformation()
+            require(
+                advapi32.GetAclInformation(
+                    dacl,
+                    ctypes.byref(acl_information),
+                    ctypes.sizeof(acl_information),
+                    acl_size_information,
+                )
+            )
+            for index in range(acl_information.ace_count):
+                ace = ctypes.c_void_p()
+                require(advapi32.GetAce(dacl, index, ctypes.byref(ace)))
+                ace_address = ace.value
+                if ace_address is None:
+                    raise OSError("The primary .env DACL has a null ACE pointer.")
+                header = ctypes.cast(ace, ctypes.POINTER(AceHeader)).contents
+                if header.ace_type in access_denied_ace_types:
+                    continue
+                if (
+                    header.ace_type != access_allowed_ace_type
+                    or header.ace_flags & inherited_ace
+                    or header.ace_size < sid_offset
+                ):
+                    raise PermissionError("The primary .env has an unsupported effective DACL ACE.")
+                ace_sid = ctypes.c_void_p(ace_address + sid_offset)
+                if not advapi32.IsValidSid(ace_sid):
+                    raise OSError("The primary .env DACL has an invalid allow ACE SID.")
+                sid_length = advapi32.GetLengthSid(ace_sid)
+                if not sid_length or header.ace_size < sid_offset + sid_length:
+                    raise OSError("The primary .env DACL allow ACE is malformed.")
+                if not advapi32.EqualSid(ace_sid, user_sid):
+                    raise PermissionError("The primary .env grants access outside the current token user.")
+            del user_sid_buffer
+        finally:
+            if security_descriptor.value:
+                kernel32.LocalFree(security_descriptor)
+        descriptor = msvcrt.open_osfhandle(
+            normalize_windows_handle_for_crt(handle, invalid_handle_value),
+            os.O_RDONLY | os.O_BINARY,
+        )
+        handle = None
+        with os.fdopen(descriptor, "rb", closefd=True) as dotenv_file:
+            return dotenv_file.read().decode("utf-8")
+    finally:
+        if handle is not None:
+            kernel32.CloseHandle(handle)
+
+
+def process_environment() -> dict[str, str]:
+    if os.name != "nt":
+        return dict(os.environ)
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetEnvironmentStringsW.argtypes = []
+    kernel32.GetEnvironmentStringsW.restype = ctypes.c_void_p
+    kernel32.FreeEnvironmentStringsW.argtypes = [ctypes.c_void_p]
+    kernel32.FreeEnvironmentStringsW.restype = ctypes.c_int
+    environment_block = kernel32.GetEnvironmentStringsW()
+    if not environment_block:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        environment: dict[str, str] = {}
+        offset = 0
+        character_size = ctypes.sizeof(ctypes.c_wchar)
+        while True:
+            entry = ctypes.wstring_at(environment_block + offset * character_size)
+            if not entry:
+                return environment
+            offset += len(entry) + 1
+            if entry.startswith("="):
+                name, separator, value = entry[1:].partition("=")
+                name = "=" + name
+            else:
+                name, separator, value = entry.partition("=")
+            if not separator:
+                raise OSError("The Windows process environment contains an invalid entry.")
+            environment[name] = value
+    finally:
+        if not kernel32.FreeEnvironmentStringsW(environment_block):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+
+def read_verified_primary_dotenv(dotenv_path: Path) -> str:
+    try:
+        if os.name == "nt":
+            return _read_windows_verified_primary_dotenv(dotenv_path)
+        return _read_posix_verified_primary_dotenv(dotenv_path)
     except FileNotFoundError:
-        return {}
-    except OSError as error:
+        raise
+    except (OSError, UnicodeError) as error:
         raise CredentialsUnavailable(*REQUIRED_ENV) from error
 
+
+def load_dotenv_credentials(
+    coordination_root: Path, redaction_secrets: set[str] | None = None
+) -> dict[str, str]:
+    dotenv_path = coordination_root / ".env"
+    try:
+        content = read_verified_primary_dotenv(dotenv_path)
+    except FileNotFoundError:
+        return {}
+    if redaction_secrets is not None:
+        redaction_secrets.update(dotenv_secret_values(content))
     credentials: dict[str, str] = {}
-    for line_number, raw_line in enumerate(lines, start=1):
+    for line_number, raw_line in enumerate(content.splitlines(), start=1):
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
@@ -157,18 +550,20 @@ def load_dotenv_credentials(coordination_root: Path) -> dict[str, str]:
 def assert_allowed_sonar_inputs(process_env: Mapping[str, str]) -> None:
     if "SONAR_ADMIN_TOKEN" in process_env:
         raise RunnerError("SONAR_ADMIN_TOKEN is forbidden; use only project-scoped credentials.")
-    unknown_names = sorted(
-        name for name in process_env if name.startswith("SONAR_") and name not in REQUIRED_ENV
+    rejected_names = sorted(
+        name for name in process_env if is_sonar_environment_name(name) and name not in REQUIRED_ENV
     )
-    if unknown_names:
-        raise RunnerError(f"Unknown Sonar credential name: {unknown_names[0]}.")
+    if rejected_names:
+        raise RunnerError(f"Unknown Sonar credential name: {rejected_names[0]}.")
 
 
-def load_credentials(context: GitContext, process_env: Mapping[str, str]) -> dict[str, str]:
+def load_credentials(
+    context: GitContext, process_env: Mapping[str, str], redaction_secrets: set[str] | None = None
+) -> dict[str, str]:
     """Load only approved Sonar credentials from the primary root and process."""
     assert_no_in_tree_dotenv(context.repository_root)
-    dotenv_credentials = load_dotenv_credentials(context.coordination_root)
     assert_allowed_sonar_inputs(process_env)
+    dotenv_credentials = load_dotenv_credentials(context.coordination_root, redaction_secrets)
     credentials = {
         name: (process_env[name] if name in process_env else dotenv_credentials.get(name, "")).strip()
         for name in REQUIRED_ENV
@@ -181,7 +576,7 @@ def load_credentials(context: GitContext, process_env: Mapping[str, str]) -> dic
 
 
 def scrub_sonar_environment(source: Mapping[str, str]) -> dict[str, str]:
-    return {key: value for key, value in source.items() if not key.startswith("SONAR_")}
+    return {key: value for key, value in source.items() if not is_sonar_environment_name(key)}
 
 
 def scanner_environment(base_environment: Mapping[str, str], credentials: Mapping[str, str]) -> dict[str, str]:
@@ -191,7 +586,7 @@ def scanner_environment(base_environment: Mapping[str, str], credentials: Mappin
     return environment
 
 
-def redact(text: str, secrets: Sequence[str]) -> str:
+def redact(text: str, secrets: Collection[str]) -> str:
     for secret in secrets:
         if secret:
             text = text.replace(secret, "[REDACTED]")
@@ -203,7 +598,7 @@ def run_process(
     *,
     cwd: Path,
     environment: Mapping[str, str],
-    secrets: Sequence[str],
+    secrets: Collection[str],
     label: str,
     credential_input_names: Sequence[str] = (),
 ) -> None:
@@ -469,15 +864,22 @@ def report_task(repository_root: Path, expected_host: str) -> dict[str, Any]:
         raise RunnerError("SonarScanner report-task project key does not match the fixed project key.")
     if not values.get("ceTaskId"):
         raise RunnerError("SonarScanner report-task lacks its Compute Engine task ID.")
-    if credential_free_host(values.get("serverUrl", "")) != expected_host:
+    server_origin_matches_configured = credential_free_host(values.get("serverUrl", "")) == expected_host
+    if not server_origin_matches_configured:
         raise RunnerError("SonarScanner report-task server origin does not match SONAR_HOST_URL.")
+    dashboard_url = values.get("dashboardUrl", "")
+    dashboard_url_present = bool(dashboard_url)
+    if not dashboard_url_present:
+        raise RunnerError("SonarScanner report-task lacks its dashboard URL.")
+    if response_origin(dashboard_url) != expected_host:
+        raise RunnerError("SonarScanner report-task dashboard origin does not match SONAR_HOST_URL.")
     return {
         "observed": True,
         "path": str(path.relative_to(repository_root)).replace("\\", "/"),
         "project_key": PROJECT_KEY,
         "ce_task_id": values["ceTaskId"],
-        "server_url": expected_host,
-        "dashboard_url": values.get("dashboardUrl", ""),
+        "server_origin_matches_configured": server_origin_matches_configured,
+        "dashboard_url_present": dashboard_url_present,
     }
 
 
@@ -582,22 +984,44 @@ def analysis_quality_gate(host: str, analysis_id: str, token: str) -> dict[str, 
         token,
     )
     project_status = response.get("projectStatus")
-    if not isinstance(project_status, dict) or not isinstance(project_status.get("status"), str):
+    if not isinstance(project_status, dict):
+        raise RunnerError("Analysis-bound quality-gate response is malformed.")
+    status = project_status.get("status")
+    if status not in {"OK", "WARN", "ERROR", "NONE"}:
         raise RunnerError("Analysis-bound quality-gate response is malformed.")
     conditions = project_status.get("conditions")
     if not isinstance(conditions, list):
-        raise RunnerError("Analysis-bound quality-gate conditions are missing.")
+        raise RunnerError("Analysis-bound quality-gate conditions are malformed.")
+    validated_conditions: list[dict[str, str]] = []
+    for condition in conditions:
+        if not isinstance(condition, dict):
+            raise RunnerError("Analysis-bound quality-gate conditions are malformed.")
+        metric_key = condition.get("metricKey")
+        condition_status = condition.get("status")
+        comparator = condition.get("comparator")
+        if (
+            not isinstance(metric_key, str)
+            or not metric_key.strip()
+            or condition_status not in {"OK", "WARN", "ERROR", "NONE"}
+            or comparator not in {"GT", "LT", "EQ", "NE"}
+        ):
+            raise RunnerError("Analysis-bound quality-gate conditions are malformed.")
+        validated_condition = {
+            "metricKey": metric_key,
+            "status": condition_status,
+            "comparator": comparator,
+        }
+        for key in ("warningThreshold", "errorThreshold", "actualValue"):
+            if key in condition:
+                value = condition[key]
+                if not isinstance(value, str):
+                    raise RunnerError("Analysis-bound quality-gate conditions are malformed.")
+                validated_condition[key] = value
+        validated_conditions.append(validated_condition)
     return {
         "analysis_id": analysis_id,
-        "status": project_status["status"],
-        "conditions": [
-            {
-                key: condition.get(key)
-                for key in ("status", "metricKey", "comparator", "errorThreshold", "actualValue")
-            }
-            for condition in conditions
-            if isinstance(condition, dict)
-        ],
+        "status": status,
+        "conditions": validated_conditions,
         "ignored_conditions": project_status.get("ignoredConditions"),
         "cayc_status": project_status.get("caycStatus"),
     }
@@ -849,13 +1273,13 @@ def receipt_path(context: GitContext, role: str) -> Path:
     return context.coordination_root / ".agent" / "e" / "sonarqube" / PROJECT_KEY / context.head / f"{role}.json"
 
 
-def assert_secret_free(receipt: Mapping[str, Any], secrets: Sequence[str]) -> None:
+def assert_secret_free(receipt: Mapping[str, Any], secrets: Collection[str]) -> None:
     encoded = json.dumps(receipt, sort_keys=True, ensure_ascii=False)
     if any(secret and secret in encoded for secret in secrets):
         raise RunnerError("Refusing to write a receipt containing a SonarQube credential.")
 
 
-def write_receipt(path: Path, receipt: Mapping[str, Any], secrets: Sequence[str]) -> None:
+def write_receipt(path: Path, receipt: Mapping[str, Any], secrets: Collection[str]) -> None:
     assert_secret_free(receipt, secrets)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path: Path | None = None
@@ -995,7 +1419,26 @@ def validate_pass_receipt(receipt: Mapping[str, Any]) -> None:
         raise RunnerError("PASS receipt lacks clean-worktree evidence.")
     if not isinstance(scanner, dict) or not scanner.get("observed") or scanner.get("project_key") != PROJECT_KEY or scanner.get("sonar_scm_revision") != receipt.get("captured_head"):
         raise RunnerError("PASS receipt lacks observed scanner project/revision evidence.")
-    if not isinstance(task_report, dict) or not task_report.get("observed") or task_report.get("project_key") != PROJECT_KEY or not task_report.get("ce_task_id") or not task_report.get("server_url"):
+    if (
+        not isinstance(task_report, dict)
+        or set(task_report)
+        != {
+            "observed",
+            "path",
+            "project_key",
+            "ce_task_id",
+            "server_origin_matches_configured",
+            "dashboard_url_present",
+        }
+        or task_report.get("observed") is not True
+        or not isinstance(task_report.get("path"), str)
+        or not task_report.get("path")
+        or task_report.get("project_key") != PROJECT_KEY
+        or not isinstance(task_report.get("ce_task_id"), str)
+        or not task_report.get("ce_task_id")
+        or task_report.get("server_origin_matches_configured") is not True
+        or task_report.get("dashboard_url_present") is not True
+    ):
         raise RunnerError("PASS receipt lacks observed task-report evidence.")
     if (
         not isinstance(compute_engine, dict)
@@ -1068,23 +1511,19 @@ def receipt_base(context: GitContext, role: str, run_id: str) -> dict[str, Any]:
 
 
 def execute(role: str, scanner_override: str | None) -> Path:
-    inherited_environment = dict(os.environ)
+    inherited_environment = process_environment()
     clean_environment = scrub_sonar_environment(inherited_environment)
     context = git_context(Path.cwd(), clean_environment)
     run_id = str(uuid.uuid4())
     target_receipt = receipt_path(context, role)
     receipt = receipt_base(context, role, run_id)
-    secrets = tuple(
-        value
-        for name in ("SONAR_TOKEN", "SONAR_READ_TOKEN", "SONAR_ADMIN_TOKEN")
-        if (value := inherited_environment.get(name))
-    )
+    secrets = sonar_secret_values(inherited_environment)
 
     with project_lock(context.coordination_root, role, context.head, run_id):
         write_receipt(target_receipt, receipt, secrets)
         try:
-            credentials = load_credentials(context, inherited_environment)
-            secrets = (credentials["SONAR_TOKEN"], credentials["SONAR_READ_TOKEN"])
+            credentials = load_credentials(context, inherited_environment, secrets)
+            secrets.update(credentials.values())
             receipt["credential_inputs"] = list(REQUIRED_ENV)
             if role == "post-merge":
                 assert_post_merge_target(context, clean_environment)

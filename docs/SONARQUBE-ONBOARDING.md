@@ -21,9 +21,9 @@ path can be supplied as a single executable with `--scanner <path>`.
 The maintainer performing this one-time onboarding creates two **project-scoped**
 SonarQube tokens for `thebtf_netcoredbg_mcp`: an analysis token with Execute
 Analysis access and a separate non-admin Browse token. The maintainer writes
-them, together with the credential-free SonarQube HTTP(S) origin, to the
-primary repository-root `.env`. This is the durable local runtime source for
-the runner.
+them, together with an HTTPS SonarQube origin, to the primary repository-root
+`.env`. The only HTTP exception is a literal numeric IPv4 loopback address or
+`[::1]`. This is the durable local runtime source for the runner.
 
 The runner derives that root instead of trusting its current working directory:
 
@@ -43,31 +43,35 @@ SONAR_TOKEN=<project-analysis-token>
 SONAR_READ_TOKEN=<project-browse-token>
 ```
 
-The file is local-only: `.gitignore` must ignore `.env`, it must never be
-committed or copied into receipts/logs, and its ACL must allow only its owner
-to read or change it. Do not place it in a linked scanner worktree, including
-as an ignored file or symlink. The runner refuses a scanner worktree that
-contains `.env`.
+The file is local-only: `.gitignore` must ignore `.env`, and no receipt or
+log may contain its values. The runner reads the validated file object. On
+Windows, it rejects a reparse point, a non-owner SID, a missing or unprotected
+DACL, and any allow ACE for another SID. On other platforms, it requires the
+current user to own a regular file with no group or other permission bits. Do
+not place it in a linked scanner worktree. The runner rejects a scanner
+worktree that contains `.env` or any symbolic link, including an ignored `.env`
+link.
 
 An explicitly supplied process environment value for any of the three allowed
-keys overrides that key's value from `<coordination-root>/.env`. This is the
-only supported temporary override. The runner rejects `SONAR_ADMIN_TOKEN` in
-either source and rejects other `SONAR_` credential names; administrative
-credentials are outside this repository and never participate in its scripts
-or release workflow.
+keys overrides that key's value from `<coordination-root>/.env`. The key name
+must use the exact canonical casing. This is the only supported temporary
+override. The runner rejects `SONAR_ADMIN_TOKEN` in either source and rejects
+every other or mis-cased `SONAR_` credential name. Administrative credentials
+are outside this repository and never participate in its scripts or release
+workflow.
 
 `SONAR_TOKEN` is the project analysis credential. SonarScanner for .NET
 requires it as `/d:sonar.token` on the scanner's `begin` and `end` child-process
-arguments. The runner redacts the token in every displayed command and captured
-output, but a same-host process observer can see a live scanner process's argv;
-run scans only on a trusted local account. `SONAR_READ_TOKEN` is used only for
-the analysis-bound quality gate, current-analysis bookends, issue inventory,
-and hotspot inventory.
+arguments. The runner redacts the configured origin and both tokens from every
+displayed command and captured output, but a same-host process observer can see
+a live scanner process's argv. Run scans only on a trusted local account.
+`SONAR_READ_TOKEN` is used only for the analysis-bound quality gate,
+current-analysis bookends, issue inventory, and hotspot inventory.
 
-The runner removes all Sonar credential variables from build and test child
-environments. It supplies the analysis token only to the scanner `begin`/`end`
-processes and never writes a token to Git, a tracked file, a receipt, or an
-unredacted log.
+The runner removes every case variant of `SONAR_*` from build and test child
+environments. It supplies the analysis token only to the scanner `begin` and
+`end` processes. It never writes a token, configured origin, or dashboard URL
+to Git, a tracked file, a receipt, or an unredacted log.
 
 ## Release scans
 
@@ -119,6 +123,12 @@ incomplete issue/hotspot paging, prohibited issue disposition, or any hotspot
 blocks the release. The all-hotspot block is this runner's conservative release
 policy; SonarQube's native REVIEWED outcomes remain recorded as facts.
 
+The runner validates every reported gate condition. A condition needs a
+nonempty `metricKey`, an `OK`, `WARN`, `ERROR`, or `NONE` status, and a `GT`,
+`LT`, `EQ`, or `NE` comparator. If a warning threshold, error threshold, or
+actual value is present, it must be a string. An empty condition list is valid,
+but only a top-level `OK` status passes.
+
 The current `/api/hotspots/search` compatibility endpoint is deprecated by
 SonarQube. The runner retains its complete evidence while also classifying all
 normal issue types, including security and vulnerability issues, through
@@ -135,5 +145,6 @@ all worktrees share one evidence root:
 <coordination-root>/.agent/e/sonarqube/thebtf_netcoredbg_mcp/<sha>/post-merge.json
 ```
 
-A failed receipt records only identifiers, statuses, and the safe failure
-reason—never credential values.
+Receipts never record credential values, the configured origin, or raw
+dashboard URLs. A failed receipt records only identifiers, statuses, and the
+safe failure reason.

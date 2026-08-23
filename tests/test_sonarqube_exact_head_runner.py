@@ -44,6 +44,19 @@ class TestSonarqubeExactHeadRunner(TestCase):
 
         self.assertEqual(build_environment, {"SAFE_VALUE": "kept"})
 
+    def test_scrub_sonar_environment_removes_every_case_variant(self):
+        build_environment = runner.scrub_sonar_environment(
+            {
+                "SONAR_TOKEN": "canonical-token",
+                "sonar_token": "lowercase-token",
+                "Sonar_Admin_Token": "mixed-admin-token",
+                "sOnAr_Unknown_Credential": "mixed-unknown-token",
+                "SAFE_VALUE": "kept",
+            }
+        )
+
+        self.assertEqual(build_environment, {"SAFE_VALUE": "kept"})
+
     def test_scanner_environment_exposes_only_scan_credential(self):
         scanner_environment = runner.scanner_environment(
             {**self.credentials(), "SONAR_ADMIN_TOKEN": "admin-token"}, self.credentials()
@@ -99,6 +112,46 @@ class TestSonarqubeExactHeadRunner(TestCase):
             with self.assertRaisesRegex(runner.RunnerError, "in-tree .env"):
                 runner.load_credentials(self.context(primary_root, scanner_root), self.credentials())
 
+    def test_scanner_tree_symlink_directory_is_rejected_before_dotenv_scanning(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            primary_root = root / "primary"
+            scanner_root = root / "scanner"
+            external_root = root / "external"
+            primary_root.mkdir()
+            scanner_root.mkdir()
+            external_root.mkdir()
+            scanner_tree_link = scanner_root / "candidate-controlled"
+
+            try:
+                scanner_tree_link.symlink_to(external_root, target_is_directory=True)
+            except OSError:
+
+                class ScannerTreeSymlink:
+                    def exists(self):
+                        return False
+
+                    def is_symlink(self):
+                        return True
+
+                with patch.object(
+                    Path,
+                    "rglob",
+                    autospec=True,
+                    side_effect=lambda path, pattern: [ScannerTreeSymlink()]
+                    if path == scanner_root and pattern == "*"
+                    else [],
+                ):
+                    with self.assertRaisesRegex(runner.RunnerError, "symbolic link"):
+                        runner.load_credentials(
+                            self.context(primary_root, scanner_root), self.credentials()
+                        )
+            else:
+                with self.assertRaisesRegex(runner.RunnerError, "symbolic link"):
+                    runner.load_credentials(
+                        self.context(primary_root, scanner_root), self.credentials()
+                    )
+
     def test_primary_root_dotenv_provides_credentials(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -106,14 +159,44 @@ class TestSonarqubeExactHeadRunner(TestCase):
             scanner_root = root / "scanner"
             primary_root.mkdir()
             scanner_root.mkdir()
-            (primary_root / ".env").write_text(
-                "SONAR_HOST_URL=https://sonar.example.test\nSONAR_TOKEN=scan-token\nSONAR_READ_TOKEN=read-token\n",
-                encoding="utf-8",
-            )
 
-            credentials = runner.load_credentials(self.context(primary_root, scanner_root), {})
+            with patch.object(
+                runner,
+                "read_verified_primary_dotenv",
+                return_value=(
+                    "SONAR_HOST_URL=https://sonar.example.test\n"
+                    "SONAR_TOKEN=scan-token\n"
+                    "SONAR_READ_TOKEN=read-token\n"
+                ),
+            ) as verified_reader:
+                credentials = runner.load_credentials(self.context(primary_root, scanner_root), {})
 
+        verified_reader.assert_called_once_with(primary_root / ".env")
         self.assertEqual(credentials, self.credentials())
+
+    def test_load_credentials_uses_verified_dotenv_reader_and_preserves_failure(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            primary_root = root / "primary"
+            scanner_root = root / "scanner"
+            primary_root.mkdir()
+            scanner_root.mkdir()
+            dotenv_path = primary_root / ".env"
+
+            with patch.object(
+                runner,
+                "read_verified_primary_dotenv",
+                create=True,
+                side_effect=runner.CredentialsUnavailable(*runner.REQUIRED_ENV),
+            ) as verified_reader:
+                with self.assertRaisesRegex(
+                    runner.CredentialsUnavailable, "SONAR_CREDENTIALS_UNAVAILABLE"
+                ):
+                    runner.load_credentials(
+                        self.context(primary_root, scanner_root), self.credentials()
+                    )
+
+        verified_reader.assert_called_once_with(dotenv_path)
 
     def test_process_credentials_override_primary_root_dotenv(self):
         with TemporaryDirectory() as temporary_directory:
@@ -122,15 +205,21 @@ class TestSonarqubeExactHeadRunner(TestCase):
             scanner_root = root / "scanner"
             primary_root.mkdir()
             scanner_root.mkdir()
-            (primary_root / ".env").write_text(
-                "SONAR_HOST_URL=https://sonar.example.test\nSONAR_TOKEN=file-token\nSONAR_READ_TOKEN=read-token\n",
-                encoding="utf-8",
-            )
 
-            credentials = runner.load_credentials(
-                self.context(primary_root, scanner_root), {"SONAR_TOKEN": "process-token"}
-            )
+            with patch.object(
+                runner,
+                "read_verified_primary_dotenv",
+                return_value=(
+                    "SONAR_HOST_URL=https://sonar.example.test\n"
+                    "SONAR_TOKEN=file-token\n"
+                    "SONAR_READ_TOKEN=read-token\n"
+                ),
+            ) as verified_reader:
+                credentials = runner.load_credentials(
+                    self.context(primary_root, scanner_root), {"SONAR_TOKEN": "process-token"}
+                )
 
+        verified_reader.assert_called_once_with(primary_root / ".env")
         self.assertEqual(credentials, {**self.credentials(), "SONAR_TOKEN": "process-token"})
 
     def test_missing_primary_root_dotenv_or_value_is_a_named_blocker(self):
@@ -142,11 +231,15 @@ class TestSonarqubeExactHeadRunner(TestCase):
                     scanner_root = root / ("missing-scanner" if content is None else "incomplete-scanner")
                     primary_root.mkdir()
                     scanner_root.mkdir()
-                    if content is not None:
-                        (primary_root / ".env").write_text(content, encoding="utf-8")
+                    reader = (
+                        patch.object(runner, "read_verified_primary_dotenv", side_effect=FileNotFoundError)
+                        if content is None
+                        else patch.object(runner, "read_verified_primary_dotenv", return_value=content)
+                    )
 
-                    with self.assertRaisesRegex(runner.CredentialsUnavailable, "SONAR_CREDENTIALS_UNAVAILABLE"):
-                        runner.load_credentials(self.context(primary_root, scanner_root), {})
+                    with reader:
+                        with self.assertRaisesRegex(runner.CredentialsUnavailable, "SONAR_CREDENTIALS_UNAVAILABLE"):
+                            runner.load_credentials(self.context(primary_root, scanner_root), {})
 
     def test_admin_token_is_rejected_from_primary_root_dotenv_and_process(self):
         with TemporaryDirectory() as temporary_directory:
@@ -160,11 +253,28 @@ class TestSonarqubeExactHeadRunner(TestCase):
                     scanner_root = root / f"{source}-scanner"
                     primary_root.mkdir()
                     scanner_root.mkdir()
-                    if content is not None:
-                        (primary_root / ".env").write_text(content, encoding="utf-8")
 
-                    with self.assertRaisesRegex(runner.RunnerError, "SONAR_ADMIN_TOKEN"):
-                        runner.load_credentials(self.context(primary_root, scanner_root), process_env)
+                    with patch.object(
+                        runner, "read_verified_primary_dotenv", return_value=content or ""
+                    ):
+                        with self.assertRaisesRegex(runner.RunnerError, "SONAR_ADMIN_TOKEN"):
+                            runner.load_credentials(self.context(primary_root, scanner_root), process_env)
+
+    def test_load_credentials_rejects_noncanonical_case_sonar_tokens(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            primary_root = root / "primary"
+            scanner_root = root / "scanner"
+            primary_root.mkdir()
+            scanner_root.mkdir()
+
+            for input_name in ("sonar_token", "sonar_admin_token"):
+                with self.subTest(input_name=input_name):
+                    with self.assertRaises(runner.RunnerError):
+                        runner.load_credentials(
+                            self.context(primary_root, scanner_root),
+                            {**self.credentials(), input_name: "mis-cased-token"},
+                        )
 
     def test_unknown_credential_names_are_rejected(self):
         with TemporaryDirectory() as temporary_directory:
@@ -179,11 +289,12 @@ class TestSonarqubeExactHeadRunner(TestCase):
                     scanner_root = root / f"{source}-scanner"
                     primary_root.mkdir()
                     scanner_root.mkdir()
-                    if content is not None:
-                        (primary_root / ".env").write_text(content, encoding="utf-8")
 
-                    with self.assertRaisesRegex(runner.RunnerError, "Unknown"):
-                        runner.load_credentials(self.context(primary_root, scanner_root), process_env)
+                    with patch.object(
+                        runner, "read_verified_primary_dotenv", return_value=content or ""
+                    ):
+                        with self.assertRaisesRegex(runner.RunnerError, "Unknown"):
+                            runner.load_credentials(self.context(primary_root, scanner_root), process_env)
 
     def test_malformed_host_is_a_named_credential_blocker(self):
         with TemporaryDirectory() as temporary_directory:
@@ -197,6 +308,27 @@ class TestSonarqubeExactHeadRunner(TestCase):
                     self.context(primary_root, scanner_root),
                     {**self.credentials(), "SONAR_HOST_URL": "sonar.example.test"},
                 )
+
+    def test_credential_free_host_requires_secure_or_literal_loopback_http(self):
+        for supplied, expected in (
+            ("https://sonar.example.test:9000", "https://sonar.example.test:9000"),
+            ("http://127.0.0.1:9000", "http://127.0.0.1:9000"),
+            ("http://[::1]:9000", "http://[::1]:9000"),
+        ):
+            with self.subTest(supplied=supplied):
+                self.assertEqual(runner.credential_free_host(supplied), expected)
+
+        for supplied in (
+            "http://sonar.example.test",
+            "http://localhost:9000",
+            "http://192.168.1.10:9000",
+            "https://sonar.example.test:not-a-port",
+            "https://sonar.example.test:65536",
+            "https://sonar.example.test/path",
+        ):
+            with self.subTest(supplied=supplied):
+                with self.assertRaisesRegex(runner.CredentialsUnavailable, "SONAR_HOST_URL"):
+                    runner.credential_free_host(supplied)
 
     def test_scanner_auth_failure_is_a_named_credential_blocker(self):
         with TemporaryDirectory() as temporary_directory:
@@ -396,6 +528,49 @@ class TestSonarqubeExactHeadRunner(TestCase):
             ),
         )
 
+    def test_analysis_quality_gate_rejects_empty_and_malformed_condition_dictionaries(self):
+        valid_condition = {"metricKey": "coverage", "status": "OK", "comparator": "LT"}
+        malformed_conditions = (
+            ("empty", {}),
+            ("missing-metric-key", {"status": "OK", "comparator": "LT"}),
+            ("blank-metric-key", {**valid_condition, "metricKey": ""}),
+            ("non-string-metric-key", {**valid_condition, "metricKey": 1}),
+            ("unknown-status", {**valid_condition, "status": "UNKNOWN"}),
+            ("non-string-status", {**valid_condition, "status": 1}),
+            ("unknown-comparator", {**valid_condition, "comparator": "GTE"}),
+            ("non-string-comparator", {**valid_condition, "comparator": 1}),
+            ("non-string-error-threshold", {**valid_condition, "errorThreshold": 1}),
+            ("non-string-warning-threshold", {**valid_condition, "warningThreshold": 1}),
+            ("non-string-actual-value", {**valid_condition, "actualValue": 1}),
+        )
+
+        for case, condition in malformed_conditions:
+            with self.subTest(case=case):
+                with patch.object(
+                    runner,
+                    "api_json",
+                    return_value={"projectStatus": {"status": "OK", "conditions": [condition]}},
+                ):
+                    with self.assertRaises(runner.RunnerError):
+                        runner.analysis_quality_gate(
+                            "https://sonar.example.test", "analysis-1", "read-token"
+                        )
+
+    def test_analysis_quality_gate_rejects_non_dictionary_condition(self):
+        with patch.object(
+            runner,
+            "api_json",
+            return_value={
+                "projectStatus": {
+                    "status": "OK",
+                    "conditions": [{"status": "OK", "metricKey": "coverage"}, "malformed"],
+                }
+            },
+        ):
+            with self.assertRaisesRegex(runner.RunnerError, "conditions"):
+                runner.analysis_quality_gate(
+                    "https://sonar.example.test", "analysis-1", "read-token"
+                )
 
     def test_hotspot_inventory_binds_live_project_filter(self):
         calls = []
@@ -521,6 +696,17 @@ class TestSonarqubeExactHeadRunner(TestCase):
             ([WinTypes.DWORD, WinTypes.BOOL, WinTypes.DWORD], WinTypes.HANDLE, [WinTypes.HANDLE, WinTypes.DWORD], [WinTypes.HANDLE]),
         )
 
+    def test_windows_handle_is_normalized_before_crt_conversion_and_invalid_value_is_rejected(self):
+        import ctypes
+
+        invalid_handle_value = ctypes.c_void_p(-1).value
+
+        self.assertEqual(
+            runner.normalize_windows_handle_for_crt(ctypes.c_void_p(123), invalid_handle_value), 123
+        )
+        with self.assertRaises(ValueError):
+            runner.normalize_windows_handle_for_crt(ctypes.c_void_p(-1), invalid_handle_value)
+
     def test_running_receipt_replaces_prior_pass_before_work(self):
         with TemporaryDirectory() as temporary_directory:
             receipt_path = Path(temporary_directory) / "candidate.json"
@@ -552,6 +738,38 @@ class TestSonarqubeExactHeadRunner(TestCase):
         with patch.object(runner, "API_OPENER", Opener()):
             with self.assertRaisesRegex(runner.RunnerError, "origin differs"):
                 runner.api_json("https://sonar.example.test", "/api/ce/task", {"id": "task"}, "scan-token")
+
+    def test_report_task_receipt_contains_only_non_sensitive_url_evidence(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            report_path = root / ".sonarqube" / "out" / ".sonar" / "report-task.txt"
+            report_path.parent.mkdir(parents=True)
+            report_path.write_text(
+                "\n".join(
+                    (
+                        f"projectKey={runner.PROJECT_KEY}",
+                        "ceTaskId=task-1",
+                        "serverUrl=https://sonar.example.test",
+                        f"dashboardUrl=https://sonar.example.test/dashboard?id={runner.PROJECT_KEY}",
+                    )
+                ),
+                encoding="utf-8",
+            )
+
+            task_report = runner.report_task(root, "https://sonar.example.test")
+
+        self.assertEqual(
+            task_report,
+            {
+                "observed": True,
+                "path": ".sonarqube/out/.sonar/report-task.txt",
+                "project_key": runner.PROJECT_KEY,
+                "ce_task_id": "task-1",
+                "server_origin_matches_configured": True,
+                "dashboard_url_present": True,
+            },
+        )
+
     def test_redirect_handler_never_constructs_a_redirect_request(self):
         handler = runner.NoRedirectHandler()
 
@@ -600,7 +818,14 @@ class TestSonarqubeExactHeadRunner(TestCase):
             },
             "cleanliness": {"pre": {"status": "clean"}, "post": {"status": "clean"}},
             "scanner_metadata": {"observed": True, "project_key": runner.PROJECT_KEY, "sonar_scm_revision": head},
-            "task_report": {"observed": True, "project_key": runner.PROJECT_KEY, "ce_task_id": "task", "server_url": "https://sonar.example.test"},
+            "task_report": {
+                "observed": True,
+                "path": ".sonarqube/out/.sonar/report-task.txt",
+                "project_key": runner.PROJECT_KEY,
+                "ce_task_id": "task",
+                "server_origin_matches_configured": True,
+                "dashboard_url_present": True,
+            },
             "compute_engine": {
                 "submitted_task_id": "task",
                 "task_id": "task",

@@ -105,13 +105,24 @@ markers using your local marker list. The scan must report no matches.
 
 The exact-head SonarQube runner has one local credential source:
 `<coordination-root>/.env`, where `coordination-root` is the parent of `git
-rev-parse --git-common-dir`. It is gitignored, owner-only, and may contain only
-`SONAR_HOST_URL`, `SONAR_TOKEN`, and `SONAR_READ_TOKEN`. Explicit values in the
-runner's parent process override the corresponding `.env` values. Never put
-`.env` in a detached scanner worktree, and never set `SONAR_ADMIN_TOKEN`: either
-source is rejected by the runner. See
-[`docs/SONARQUBE-ONBOARDING.md`](docs/SONARQUBE-ONBOARDING.md) for one-time
-project-token creation, scanner-argv redaction, and the two required scan roles.
+rev-parse --git-common-dir`. It is gitignored and may contain only
+`SONAR_HOST_URL`, `SONAR_TOKEN`, and `SONAR_READ_TOKEN`. The runner reads it
+through a verified no-follow file object. On Windows, the reader rejects reparse
+points, a non-owner SID, a missing or unprotected DACL, and any allow ACE for a
+different SID. On other platforms, it requires the current user to own a regular
+file with no group or other permission bits.
+
+`SONAR_HOST_URL` must be an HTTPS origin. HTTP is allowed only for a literal
+numeric IPv4 loopback address or `[::1]`. The runner rejects HTTP hostnames,
+non-loopback HTTP addresses, paths, queries, fragments, userinfo, and invalid
+ports. Explicit values in the runner's parent process override the corresponding
+`.env` values only when their names use the exact canonical casing. The runner
+rejects every other `SONAR_*` input and removes every case variant from child
+environments. Never put `.env` or a symbolic link in a detached scanner
+worktree, and never set `SONAR_ADMIN_TOKEN`: either source is rejected by the
+runner. See [`docs/SONARQUBE-ONBOARDING.md`](docs/SONARQUBE-ONBOARDING.md) for
+one-time project-token creation, configured-origin and scanner-argv redaction,
+and the two required scan roles.
 
 ## Coding expectations
 
