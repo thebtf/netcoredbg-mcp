@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.23.9] - 2026-08-23
+
+### Fixed
+- A strict screenshot whose valid PrintWindow raster is all black now makes exactly one explicitly typed BitBlt alternate attempt. The alternate is accepted only after foreground, PID, HWND, physical geometry, and DPI provenance checks; incomplete, black, malformed, or mismatched capture evidence fails closed without persistence.
+
 ## [0.23.8] - 2026-08-22
 
 ### Fixed
