@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import math
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -94,7 +94,7 @@ def register_ui_tools(
             )
         return _backend_holder["instance"]
 
-    async def _ensure_ui_connected() -> Any:
+    async def _ensure_ui_connected(*, restore_joined: bool = False) -> Any:
         """Ensure UI backend is connected to the debug process.
 
         Raises:
@@ -103,6 +103,8 @@ def register_ui_tools(
         """
         from ..ui import NoActiveSessionError, NoProcessIdError
 
+        if not restore_joined:
+            await _join_launch_foreground_restore()
         if session.state.state == DebugState.IDLE:
             raise NoActiveSessionError("No debug session is active. Start debugging first.")
 
@@ -122,6 +124,11 @@ def register_ui_tools(
                 stealth_mode=getattr(session, "stealth_mode", False),
             )
         return backend
+
+    async def _join_launch_foreground_restore() -> None:
+        join = getattr(session, "cancel_pending_stealth_foreground_restore", None)
+        if join is not None:
+            await cast(Callable[[], Awaitable[None]], join)()
 
     def _probable_black_frame_response(
         frame_analysis: dict[str, Any],
@@ -1630,13 +1637,9 @@ def register_ui_tools(
 
             loop = asyncio.get_running_loop()
 
-            # Strict physical assertions require the FlaUI bridge's PrintWindow raster
-            # even when the session is not in stealth mode.
+            await _join_launch_foreground_restore()
             if strict_target_requested or getattr(session, "stealth_mode", False):
-                cancel_restore = getattr(session, "cancel_pending_stealth_foreground_restore", None)
-                if callable(cancel_restore):
-                    await cancel_restore()
-                ui = await _ensure_ui_connected()
+                ui = await _ensure_ui_connected(restore_joined=True)
                 from ..ui.flaui_client import FlaUIBackend
 
                 if not isinstance(ui, FlaUIBackend):

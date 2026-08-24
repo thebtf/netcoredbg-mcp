@@ -1339,10 +1339,12 @@ async def test_ui_bring_to_front_disables_session_stealth_mode() -> None:
         process_id=42,
         bring_to_front=AsyncMock(return_value={"activated": True, "hwnd": 123}),
     )
+    cancel_restore = AsyncMock()
     session = SimpleNamespace(
         process_registry=None,
         state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
         stealth_mode=True,
+        cancel_pending_stealth_foreground_restore=cancel_restore,
     )
     registry = ToolRegistry()
     ctx = SimpleNamespace()
@@ -1357,6 +1359,7 @@ async def test_ui_bring_to_front_disables_session_stealth_mode() -> None:
         response = await registry.tools["ui_bring_to_front"](ctx)
 
     backend.bring_to_front.assert_awaited_once_with()
+    cancel_restore.assert_awaited_once_with()
     assert session.stealth_mode is False
     assert response["data"]["activated"] is True
     assert response["data"]["stealth_mode"] is False
@@ -1531,6 +1534,42 @@ async def test_ui_take_screenshot_evidence_persists_raw_png_with_hash(tmp_path) 
     assert bundle_calls[0][0] == "evidence-session"
     assert bundle_calls[0][1].startswith("evidence_")
     assert bundle_calls[0][2] is None
+
+
+@pytest.mark.asyncio
+async def test_ui_take_screenshot_joins_restore_after_stealth_exit(tmp_path) -> None:
+    from PIL import Image
+
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 6), (255, 255, 255)).save(buffer, format="PNG")
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=False,
+        session_id="evidence-session",
+        cancel_pending_stealth_foreground_restore=AsyncMock(),
+        temp_manager=SimpleNamespace(
+            save_screenshot_bundle=_save_evidence_bundle(tmp_path, []),
+            save_screenshot=lambda _sid, data, name: (tmp_path / name).write_bytes(data)
+            and tmp_path / name,
+        ),
+    )
+    registry = ToolRegistry()
+    capture_metadata = _capture_metadata("PrintWindow", 8, 6)
+    with (
+        patch("netcoredbg_mcp.ui.screenshot.get_hwnd_for_pid", return_value=123),
+        patch(
+            "netcoredbg_mcp.ui.screenshot.capture_window_evidence",
+            return_value=(buffer.getvalue(), 8, 6, capture_metadata),
+        ),
+    ):
+        register_ui_tools(registry, session, check_session_access=lambda _ctx: None)
+        await registry.tools["ui_take_screenshot"](SimpleNamespace(), evidence=True)
+
+    session.cancel_pending_stealth_foreground_restore.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
