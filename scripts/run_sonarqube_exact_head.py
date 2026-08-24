@@ -1138,6 +1138,25 @@ def issue_inventory(host: str, token: str) -> dict[str, Any]:
     )
 
 
+def new_code_issue_inventory(host: str, token: str) -> dict[str, Any]:
+    return paginated_inventory(
+        host,
+        "/api/issues/search",
+        "issues",
+        {
+            "components": PROJECT_KEY,
+            "issueStatuses": ISSUE_STATUSES,
+            "inNewCodePeriod": "true",
+        },
+        token,
+        (
+            "key", "rule", "severity", "status", "issueStatus", "resolution", "type",
+            "component", "project", "line", "message", "impacts", "creationDate",
+            "updateDate", "tags", "textRange", "flows",
+        ),
+    )
+
+
 def hotspot_inventory(host: str, token: str) -> dict[str, Any]:
     # Live SonarQube 26.8 schema requires project; projectKey's empty response is not scope proof.
     return paginated_inventory(
@@ -1414,7 +1433,7 @@ def validate_pass_receipt(receipt: Mapping[str, Any]) -> None:
         "completed_at", "worktree", "cleanliness", "scanner_metadata", "task_report",
         "compute_engine", "analysis_current_before_issues", "analysis_current_after_issues",
         "analysis_current_final", "quality_gate", "pre_scan_issues", "post_scan_issues",
-        "issue_dispositions", "hotspots", "hotspot_dispositions", "post_scan_head",
+        "new_code_issues", "issue_dispositions", "hotspots", "hotspot_dispositions", "post_scan_head",
     )
     if (
         receipt.get("schema_version") != RECEIPT_SCHEMA_VERSION
@@ -1505,6 +1524,15 @@ def validate_pass_receipt(receipt: Mapping[str, Any]) -> None:
         receipt["post_scan_issues"],
         "/api/issues/search",
         {"components": PROJECT_KEY, "issueStatuses": ISSUE_STATUSES},
+    )
+    validate_inventory(
+        receipt["new_code_issues"],
+        "/api/issues/search",
+        {
+            "components": PROJECT_KEY,
+            "issueStatuses": ISSUE_STATUSES,
+            "inNewCodePeriod": "true",
+        },
     )
     validate_inventory(receipt["hotspots"], "/api/hotspots/search", {"project": PROJECT_KEY})
     validate_issue_dispositions(
@@ -1626,8 +1654,10 @@ def execute(role: str, scanner_override: str | None) -> Path:
             receipt["quality_gate"] = analysis_quality_gate(
                 credentials["SONAR_HOST_URL"], analysis_id, credentials["SONAR_READ_TOKEN"]
             )
-            require_ok_quality_gate(receipt["quality_gate"])
             receipt["post_scan_issues"] = issue_inventory(
+                credentials["SONAR_HOST_URL"], credentials["SONAR_READ_TOKEN"]
+            )
+            receipt["new_code_issues"] = new_code_issue_inventory(
                 credentials["SONAR_HOST_URL"], credentials["SONAR_READ_TOKEN"]
             )
             receipt["issue_dispositions"] = issue_dispositions(
@@ -1640,10 +1670,6 @@ def execute(role: str, scanner_override: str | None) -> Path:
                 credentials["SONAR_HOST_URL"], credentials["SONAR_READ_TOKEN"]
             )
             receipt["hotspot_dispositions"] = hotspot_dispositions(receipt["hotspots"])
-            if receipt["issue_dispositions"]["blocking_count"]:
-                raise RunnerError("Current project issues include a prohibited disposition.")
-            if receipt["hotspot_dispositions"]["blocking_count"]:
-                raise RunnerError("Current project contains security hotspots requiring disposition.")
             assert_head_unchanged(context, clean_environment)
             receipt["generated_artifacts_removed_after_scan"] = clear_generated_artifacts(
                 context, clean_environment
@@ -1654,6 +1680,11 @@ def execute(role: str, scanner_override: str | None) -> Path:
             )
             assert_head_unchanged(context, clean_environment)
             receipt["post_scan_head"] = context.head
+            require_ok_quality_gate(receipt["quality_gate"])
+            if receipt["issue_dispositions"]["blocking_count"]:
+                raise RunnerError("Current project issues include a prohibited disposition.")
+            if receipt["hotspot_dispositions"]["blocking_count"]:
+                raise RunnerError("Current project contains security hotspots requiring disposition.")
             receipt["completed_at"] = utc_now()
             receipt["outcome"] = "PASS"
             validate_pass_receipt(receipt)
