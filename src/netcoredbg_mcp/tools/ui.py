@@ -4,7 +4,7 @@ import asyncio
 import logging
 import math
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from mcp.server.fastmcp import Context, FastMCP
 
@@ -1565,11 +1565,7 @@ def register_ui_tools(
                     "crop_x, crop_y, crop_width, and crop_height must be supplied together"
                 )
             if crop_requested:
-                assert crop_x is not None
-                assert crop_y is not None
-                assert crop_width is not None
-                assert crop_height is not None
-                crop_rect = (crop_x, crop_y, crop_width, crop_height)
+                crop_rect = cast(tuple[int, int, int, int], crop_values)
 
             if strict_target_requested:
                 if not evidence:
@@ -1579,28 +1575,28 @@ def register_ui_tools(
                         "expected_hwnd, expected_physical_width, and "
                         "expected_physical_height must be supplied together"
                     )
-                assert expected_hwnd is not None
-                assert expected_physical_width is not None
-                assert expected_physical_height is not None
+                strict_hwnd = cast(int, expected_hwnd)
+                strict_width = cast(int, expected_physical_width)
+                strict_height = cast(int, expected_physical_height)
                 for name, value in (
-                    ("expected_hwnd", expected_hwnd),
-                    ("expected_physical_width", expected_physical_width),
-                    ("expected_physical_height", expected_physical_height),
+                    ("expected_hwnd", strict_hwnd),
+                    ("expected_physical_width", strict_width),
+                    ("expected_physical_height", strict_height),
                 ):
                     if type(value) is not int:
                         raise ValueError(f"{name} must be an integer")
-                if expected_hwnd == 0:
+                if strict_hwnd == 0:
                     raise ValueError("expected_hwnd must be non-zero")
                 for name, value in (
-                    ("expected_physical_width", expected_physical_width),
-                    ("expected_physical_height", expected_physical_height),
+                    ("expected_physical_width", strict_width),
+                    ("expected_physical_height", strict_height),
                 ):
                     if value <= 0:
                         raise ValueError(f"{name} must be positive, got {value}")
                 strict_target = {
-                    "hwnd": expected_hwnd,
-                    "width": expected_physical_width,
-                    "height": expected_physical_height,
+                    "hwnd": strict_hwnd,
+                    "width": strict_width,
+                    "height": strict_height,
                     "unit": "physical_px",
                     "coordinate_space": "raw_raster",
                 }
@@ -1648,15 +1644,15 @@ def register_ui_tools(
                 else:
                     bridge_request: dict[str, bool | int] = {"evidence": True} if evidence else {}
                     if strict_target_requested:
-                        assert expected_hwnd is not None
-                        assert expected_physical_width is not None
-                        assert expected_physical_height is not None
+                        strict_target_values = cast(dict[str, int | str], strict_target)
                         bridge_request.update(
                             {
                                 "typed_bitblt_fallback": True,
-                                "expected_hwnd": expected_hwnd,
-                                "expected_physical_width": expected_physical_width,
-                                "expected_physical_height": expected_physical_height,
+                                "expected_hwnd": cast(int, strict_target_values["hwnd"]),
+                                "expected_physical_width": cast(int, strict_target_values["width"]),
+                                "expected_physical_height": cast(
+                                    int, strict_target_values["height"]
+                                ),
                                 "expected_process_id": pid,
                             }
                         )
@@ -1810,10 +1806,10 @@ def register_ui_tools(
                                         "Bridge screenshot dimensions do not match decoded PNG "
                                         "dimensions"
                                     )
-                                assert isinstance(bridge_window_bounds, dict)
+                                window_bounds = cast(dict[str, Any], bridge_window_bounds)
                                 if (
-                                    bridge_window_bounds["right"] - bridge_window_bounds["left"],
-                                    bridge_window_bounds["bottom"] - bridge_window_bounds["top"],
+                                    window_bounds["right"] - window_bounds["left"],
+                                    window_bounds["bottom"] - window_bounds["top"],
                                 ) != (raw_width, raw_height):
                                     raise _PhysicalCaptureProvenanceUnavailableError(
                                         "Bridge window bounds do not match claimed raw raster "
@@ -1825,13 +1821,13 @@ def register_ui_tools(
                                     bridge_hwnd,
                                     raw_width,
                                     raw_height,
-                                    method,
+                                    cast(str, method),
                                     client_rect=bridge_client_rect,
                                     dpi=bridge_dpi,
                                 ),
                             )
                             if typed_bitblt_fallback:
-                                capture_metadata.update(
+                                cast(dict[str, Any], capture_metadata).update(
                                     {
                                         "fallback": bridge_result["fallback"],
                                         "fallback_reason": bridge_result["fallback_reason"],
@@ -1858,8 +1854,8 @@ def register_ui_tools(
                                     }
                                 )
                             if strict_target_requested:
-                                assert strict_target is not None
-                                assert capture_metadata is not None
+                                strict_target_values = cast(dict[str, int | str], strict_target)
+                                capture_metadata_values = cast(dict[str, Any], capture_metadata)
                                 actual_target = {
                                     "hwnd": bridge_hwnd,
                                     "width": raw_width,
@@ -1871,7 +1867,7 @@ def register_ui_tools(
                                 mismatch_fields = [
                                     field
                                     for field in ("hwnd", "width", "height")
-                                    if actual_target[field] != strict_target[field]
+                                    if actual_target[field] != strict_target_values[field]
                                 ]
                                 physical_target = {
                                     "status": "matched" if not mismatch_fields else "mismatch",
@@ -1880,7 +1876,7 @@ def register_ui_tools(
                                         if mismatch_fields
                                         else {}
                                     ),
-                                    "expected": strict_target,
+                                    "expected": strict_target_values,
                                     "actual": actual_target,
                                     "mismatch_fields": mismatch_fields,
                                 }
@@ -1891,12 +1887,12 @@ def register_ui_tools(
                                         if mismatch_fields
                                         else {}
                                     ),
-                                    "expected": strict_target,
+                                    "expected": strict_target_values,
                                     "actual": actual_target,
                                     "mismatch_fields": mismatch_fields,
                                 }
                                 persist_evidence = not mismatch_fields
-                                capture_metadata["raw_raster"] = {
+                                capture_metadata_values["raw_raster"] = {
                                     "width": raw_width,
                                     "height": raw_height,
                                     "unit": "physical_px",
