@@ -17,21 +17,7 @@ async def handle_debug_evaluate(
     phase: str,
 ) -> dict[str, Any]:
     expression = str(probe.get("expression") or "")
-    adapters = context.action_context.service_adapters
-    if "debug.evaluate" in adapters:
-        result = await context.call_adapter("debug.evaluate", expression=expression)
-    else:
-        evaluate = getattr(context.session, "evaluate_expression", None)
-        if evaluate is None:
-            result = {
-                "status": "BLOCKED",
-                "reason": "no stopped frame",
-                "value": None,
-            }
-        else:
-            result = evaluate(expression)
-            if inspect.isawaitable(result):
-                result = await result
+    result = await _evaluate_probe_expression(context, expression)
     result = _normalize_evaluate_result(result)
     status = str(result.get("status", "PASS"))
     value = result.get("value")
@@ -60,6 +46,23 @@ async def handle_debug_evaluate(
         ),
         source_label=source_label,
     )
+
+
+async def _evaluate_probe_expression(context: Any, expression: str) -> Any:
+    adapters = context.action_context.service_adapters
+    if "debug.evaluate" in adapters:
+        return await context.call_adapter("debug.evaluate", expression=expression)
+    evaluate = getattr(context.session, "evaluate_expression", None)
+    if evaluate is None:
+        return {
+            "status": "BLOCKED",
+            "reason": "no stopped frame",
+            "value": None,
+        }
+    result = evaluate(expression)
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 
 def _normalize_evaluate_result(result: Any) -> dict[str, Any]:

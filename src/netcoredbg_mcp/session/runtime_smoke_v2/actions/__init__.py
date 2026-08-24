@@ -197,7 +197,7 @@ async def dispatch_action(
 def _attach_action_correlation(
     result: dict[str, Any],
     action: dict[str, Any],
-    context: ActionContext,
+    context: Any,
     adapter_results: list[dict[str, Any]],
 ) -> dict[str, Any]:
     observed = next(
