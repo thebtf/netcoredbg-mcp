@@ -123,8 +123,22 @@ async def test_create_and_inspect_group_returns_hits_and_trace_logs() -> None:
     assert inspected["summary"]["hit_count"] == 3
     assert inspected["summary"]["trace_log_count"] == 2
     assert inspected["tracepoints"][0]["logs"] == [
-        {"line": 20, "expression": "i", "value": "1", "tracepoint_id": tracepoint_id},
-        {"line": 20, "expression": "i", "value": "2", "tracepoint_id": tracepoint_id},
+        {
+            "line": 20,
+            "expression": "i",
+            "value": "1",
+            "thread_id": 1,
+            "frame_id": None,
+            "tracepoint_id": tracepoint_id,
+        },
+        {
+            "line": 20,
+            "expression": "i",
+            "value": "2",
+            "thread_id": 1,
+            "frame_id": None,
+            "tracepoint_id": tracepoint_id,
+        },
     ]
 
 

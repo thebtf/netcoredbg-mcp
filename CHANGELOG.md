@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.10] - 2026-08-24
+
+### Added
+- Runtime-smoke v2 can now bind action, tracepoint, evaluate, and acquired app-diagnostic evidence to the same media instance through a fail-closed provenance envelope. The correlation result is `NOT_COMPARABLE` rather than a product-pass claim when identities or execution provenance are missing, malformed, or unequal.
+
 ## [0.23.9] - 2026-08-23
 
 ### Fixed

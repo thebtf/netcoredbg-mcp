@@ -311,9 +311,7 @@ class TracepointManager:
             "global_after_timestamp": global_entries[-1].timestamp if global_entries else None,
             "global_after_ordinal": (
                 sum(
-                    1
-                    for entry in global_entries
-                    if entry.timestamp == global_entries[-1].timestamp
+                    1 for entry in global_entries if entry.timestamp == global_entries[-1].timestamp
                 )
                 if global_entries
                 else 0
@@ -543,6 +541,7 @@ class TracepointManager:
             top_frame: Pre-fetched top stack frame (avoids redundant DAP call).
         """
         async with self._lock:
+            frame_id = getattr(top_frame, "id", None)
             tp.hit_count += 1
 
             # Rate limiting
@@ -555,6 +554,7 @@ class TracepointManager:
                         expression=tp.expression,
                         value="<rate limited>",
                         thread_id=thread_id,
+                        frame_id=frame_id,
                         tracepoint_id=tp.id,
                     )
                 )
@@ -569,7 +569,6 @@ class TracepointManager:
             # Evaluate with short timeout
             value: str
             try:
-                frame_id = top_frame.id if top_frame else None
                 if frame_id is None:
                     frames = await session.get_stack_trace(thread_id=thread_id, levels=1)
                     frame_id = frames[0].id if frames else None
@@ -597,6 +596,7 @@ class TracepointManager:
                     value=value,
                     thread_id=thread_id,
                     tracepoint_id=tp.id,
+                    frame_id=frame_id,
                 )
             )
 

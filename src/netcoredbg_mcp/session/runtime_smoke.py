@@ -128,10 +128,12 @@ class RuntimeSmokeRunner:
         *,
         service_adapters: dict[str, OperationAdapter] | None = None,
         clock: Callable[[], float] = time.monotonic,
+        run_id: str | None = None,
     ) -> None:
         self._session = session
         self._service_adapters = dict(service_adapters or {})
         self._clock = clock
+        self._run_id = run_id
         self._case_progress_notifier: Callable[[dict[str, Any]], Any] | None = None
         self._app_diagnostics_progress_notifier: Callable[[dict[str, Any]], Any] | None = None
 
@@ -147,19 +149,21 @@ class RuntimeSmokeRunner:
     ) -> None:
         self._app_diagnostics_progress_notifier = notifier
 
+    def set_run_id(self, run_id: str) -> None:
+        self._run_id = run_id
+
     async def run(self, plan: Any) -> dict[str, Any]:
         started = self._clock()
         completed_steps: list[dict[str, Any]] = []
         failed_assertions: list[dict[str, Any]] = []
+        is_v2_plan = isinstance(plan, dict) and plan.get("schema") == SCHEMA_VERSION_V2
+        if is_v2_plan and self._run_id is None:
+            self._run_id = f"runtime-smoke-{uuid.uuid4().hex}"
         validation_errors = validate_plan(plan)
         if not validation_errors and isinstance(plan, dict):
             validation_errors.extend(self._validate_restore_paths(plan))
         if validation_errors:
-            status = (
-                "INVALID_SETUP"
-                if isinstance(plan, dict) and plan.get("schema") == SCHEMA_VERSION_V2
-                else "FAIL"
-            )
+            status = "INVALID_SETUP" if is_v2_plan else "FAIL"
             cleanup = await self._teardown(
                 plan if isinstance(plan, dict) else {},
                 allow_restore=False,
@@ -175,11 +179,12 @@ class RuntimeSmokeRunner:
                 cleanup=cleanup,
                 extra={
                     "validation_errors": validation_errors,
+                    **({"run_id": self._run_id} if is_v2_plan else {}),
                     **schema_help_fields(plan if isinstance(plan, dict) else None),
                 },
             )
 
-        if isinstance(plan, dict) and plan.get("schema") == SCHEMA_VERSION_V2:
+        if is_v2_plan:
             from .runtime_smoke_v2 import RuntimeStateOracleRunner
 
             return await RuntimeStateOracleRunner(
@@ -188,6 +193,7 @@ class RuntimeSmokeRunner:
                 clock=self._clock,
                 case_progress_notifier=self._case_progress_notifier,
                 app_diagnostics_progress_notifier=self._app_diagnostics_progress_notifier,
+                run_id=self._run_id,
             ).run(plan)
 
         budgets = _budgets(plan)
@@ -670,9 +676,7 @@ class RuntimeSmokeRunRecord:
     def tail(self, after_cursor: int, limit: int) -> dict[str, Any]:
         bounded_limit = max(0, min(limit, self.max_events))
         events = [
-            dict(event)
-            for event in self.events
-            if int(event.get("cursor", 0)) > after_cursor
+            dict(event) for event in self.events if int(event.get("cursor", 0)) > after_cursor
         ][:bounded_limit]
         stale_cursor = bool(self.events) and after_cursor < self.oldest_cursor - 1
         return {
@@ -704,9 +708,7 @@ class RuntimeSmokeRunRecord:
     ) -> dict[str, int] | None:
         if not self.app_diagnostics_source_enabled:
             return None
-        total_entries = self.app_diagnostics_dropped_count + len(
-            self.app_diagnostics_entries
-        )
+        total_entries = self.app_diagnostics_dropped_count + len(self.app_diagnostics_entries)
         if total_entries == 0 and not allow_empty:
             return None
         return {
@@ -721,9 +723,7 @@ class RuntimeSmokeRunRecord:
         entry_count: int,
         limit: int,
     ) -> tuple[dict[str, Any], dict[str, int]]:
-        total_entries = self.app_diagnostics_dropped_count + len(
-            self.app_diagnostics_entries
-        )
+        total_entries = self.app_diagnostics_dropped_count + len(self.app_diagnostics_entries)
         bounded_limit = max(0, int(limit))
         bounded_after_index = max(0, int(after_index))
         start_index = min(
@@ -776,10 +776,7 @@ def _collect_case_app_diagnostics_entries(
             if not isinstance(phase_probes, list):
                 continue
             for probe in phase_probes:
-                if (
-                    not isinstance(probe, dict)
-                    or probe.get("kind") != "app_diagnostics"
-                ):
+                if not isinstance(probe, dict) or probe.get("kind") != "app_diagnostics":
                     continue
                 entry: dict[str, Any] = {
                     "case_id": case_id,
@@ -794,6 +791,8 @@ def _collect_case_app_diagnostics_entries(
                     entry["value"] = compact_value(probe.get("value"))
                 if "evidence_ref" in probe:
                     entry["evidence_ref"] = probe.get("evidence_ref")
+                if isinstance(probe.get("correlation"), dict):
+                    entry["correlation"] = compact_value(probe["correlation"])
                 entries.append(compact_value(entry))
     return entries
 
@@ -1003,11 +1002,7 @@ class RuntimeSmokeRunRegistry:
         return [await self.stop(run_id, reason=reason) for run_id in run_ids]
 
     def active_run_ids(self) -> list[str]:
-        return [
-            run_id
-            for run_id, record in self._runs.items()
-            if record.result is None
-        ]
+        return [run_id for run_id, record in self._runs.items() if record.result is None]
 
     def retained_run_ids(self) -> list[str]:
         return list(self._runs)
@@ -1152,6 +1147,9 @@ class RuntimeSmokeRunRegistry:
         runner_factory: Callable[[], RuntimeSmokeRunner],
     ) -> None:
         runner = runner_factory()
+        set_run_id = getattr(runner, "set_run_id", None)
+        if callable(set_run_id):
+            set_run_id(record.run_id)
         attach_case_progress_notifier = getattr(
             runner,
             "attach_case_progress_notifier",
@@ -1538,6 +1536,10 @@ class RuntimeSmokeRunRegistry:
                 "final": True,
             }
         )
+        if record.app_diagnostics_source_enabled:
+            payload["app_diagnostics_history"] = [
+                dict(entry) for entry in record.app_diagnostics_entries
+            ]
         if self._contamination is not None:
             payload.update(_contamination_metadata(self._contamination))
         return payload

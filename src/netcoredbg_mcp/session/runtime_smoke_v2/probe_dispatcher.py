@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..runtime_smoke_correlation import correlation_source
 from .actions import ActionContext
 from .blocked import build_blocked
 from .probes import accepted_probe_kinds
@@ -78,39 +79,45 @@ async def dispatch_probe(
 ) -> dict[str, Any]:
     kind = str(probe.get("kind") or "")
     if kind == "debug.evaluate":
-        return await handle_debug_evaluate(probe, context, phase=phase)
-    if kind == "debug.tracepoint":
-        return await handle_debug_tracepoint(probe, context, phase=phase)
-    if kind == "app_diagnostics":
-        return await handle_app_diagnostics(probe, context, phase=phase)
-    if kind == "file.json":
-        return await handle_file_json(probe, context, phase=phase)
-    if kind == "oracle_pack":
-        return await handle_oracle_pack(probe, context, phase=phase)
-    if kind == "output.field":
-        return await handle_output_field(probe, context, phase=phase)
-    if kind == "output.since":
-        return await handle_output_since(probe, context, phase=phase)
-    if kind == "process.metric":
-        return await handle_process_metric(probe, context, phase=phase)
-    if kind == "ui.grid":
-        return await handle_ui_grid(probe, context, phase=phase)
-    if kind == "ui.grid.viewport":
-        return await handle_ui_grid_viewport(probe, context, phase=phase)
-    if kind == "ui.property":
-        return await handle_ui_property(probe, context, phase=phase)
-    if kind == "ui.text":
-        return await handle_ui_text(probe, context, phase=phase)
-    blocked = build_blocked(
-        reason="probe execution not implemented",
-        requested={"kind": kind},
-        accepted={"probe_kinds": accepted_probe_kinds()},
-        next_step="Use a probe kind implemented by this runtime-smoke phase.",
+        result = await handle_debug_evaluate(probe, context, phase=phase)
+    elif kind == "debug.tracepoint":
+        result = await handle_debug_tracepoint(probe, context, phase=phase)
+    elif kind == "app_diagnostics":
+        result = await handle_app_diagnostics(probe, context, phase=phase)
+    elif kind == "file.json":
+        result = await handle_file_json(probe, context, phase=phase)
+    elif kind == "oracle_pack":
+        result = await handle_oracle_pack(probe, context, phase=phase)
+    elif kind == "output.field":
+        result = await handle_output_field(probe, context, phase=phase)
+    elif kind == "output.since":
+        result = await handle_output_since(probe, context, phase=phase)
+    elif kind == "process.metric":
+        result = await handle_process_metric(probe, context, phase=phase)
+    elif kind == "ui.grid":
+        result = await handle_ui_grid(probe, context, phase=phase)
+    elif kind == "ui.grid.viewport":
+        result = await handle_ui_grid_viewport(probe, context, phase=phase)
+    elif kind == "ui.property":
+        result = await handle_ui_property(probe, context, phase=phase)
+    elif kind == "ui.text":
+        result = await handle_ui_text(probe, context, phase=phase)
+    else:
+        blocked = build_blocked(
+            reason="probe execution not implemented",
+            requested={"kind": kind},
+            accepted={"probe_kinds": accepted_probe_kinds()},
+            next_step="Use a probe kind implemented by this runtime-smoke phase.",
+        )
+        result = {
+            "name": str(probe.get("name") or kind),
+            "kind": kind,
+            "status": "BLOCKED",
+            "value": None,
+            **blocked,
+        }
+    result["correlation_source"] = correlation_source(
+        probe,
+        fallback=probe_path(probe),
     )
-    return {
-        "name": str(probe.get("name") or kind),
-        "kind": kind,
-        "status": "BLOCKED",
-        "value": None,
-        **blocked,
-    }
+    return result

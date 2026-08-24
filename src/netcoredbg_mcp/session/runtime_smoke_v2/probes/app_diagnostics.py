@@ -8,6 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from ...freshness import DebugFreshnessVerifier
+from ...runtime_smoke_correlation import (
+    action_sample_provenance,
+    attach_sample_correlation,
+    correlation_source,
+    redact_raw_correlation,
+)
 from ...runtime_smoke_schema import DIAGNOSTIC_SCHEMA_VERSION
 from ..blocked import build_blocked
 from ..evidence_manifest import (
@@ -42,23 +48,38 @@ async def handle_app_diagnostics(
     kind = "app_diagnostics"
     base_errors = diagnostic_validation_errors(probe, kind=kind)
     if base_errors:
-        return invalid_diagnostic_probe(probe, kind=kind, errors=base_errors)
+        return _attach_app_diagnostics_correlation(
+            invalid_diagnostic_probe(probe, kind=kind, errors=base_errors),
+            probe,
+            context,
+            acquired_correlation=None,
+        )
 
-    probe, acquisition, acquisition_field = await _probe_with_diagnostic_json(
+    probe, acquisition, acquisition_field, acquired_correlation = await _probe_with_diagnostic_json(
         probe,
         context,
         phase=phase,
     )
     if acquisition is not None and acquisition.get("observed") is not True:
-        return _blocked_diagnostic_json_probe(
+        return _attach_app_diagnostics_correlation(
+            _blocked_diagnostic_json_probe(
+                probe,
+                acquisition,
+                field=acquisition_field or "wait_json",
+            ),
             probe,
-            acquisition,
-            field=acquisition_field or "wait_json",
+            context,
+            acquired_correlation=None,
         )
 
     merged_errors = diagnostic_validation_errors(probe, kind=kind)
     if merged_errors:
-        return invalid_diagnostic_probe(probe, kind=kind, errors=merged_errors)
+        return _attach_app_diagnostics_correlation(
+            invalid_diagnostic_probe(probe, kind=kind, errors=merged_errors),
+            probe,
+            context,
+            acquired_correlation=None,
+        )
 
     observations = [
         dict(observation)
@@ -110,7 +131,28 @@ async def handle_app_diagnostics(
         output["reason"] = "app diagnostics freshness mismatch"
     elif status == "FAIL":
         output["reason"] = "app diagnostics reported FAIL"
-    return output
+    return _attach_app_diagnostics_correlation(
+        output,
+        probe,
+        context,
+        acquired_correlation=acquired_correlation,
+    )
+
+
+def _attach_app_diagnostics_correlation(
+    output: dict[str, Any],
+    probe: dict[str, Any],
+    context: Any,
+    *,
+    acquired_correlation: Any,
+) -> dict[str, Any]:
+    source_label = correlation_source(probe, fallback="") if "correlation_source" in probe else None
+    return attach_sample_correlation(
+        output,
+        acquired_correlation,
+        provenance=action_sample_provenance(context.action_context),
+        source_label=source_label,
+    )
 
 
 def _verify_declared_freshness(probe: dict[str, Any], context: Any) -> dict[str, Any] | None:
@@ -263,10 +305,10 @@ async def _probe_with_diagnostic_json(
     context: Any,
     *,
     phase: str,
-) -> tuple[dict[str, Any], dict[str, Any] | None, str | None]:
+) -> tuple[dict[str, Any], dict[str, Any] | None, str | None, Any]:
     field, source = _diagnostic_json_source(probe, context)
     if source is None:
-        return probe, None, None
+        return probe, None, None, None
 
     async def progress_reporter(metadata: dict[str, Any]) -> None:
         await _publish_app_diagnostics_progress(
@@ -283,10 +325,10 @@ async def _probe_with_diagnostic_json(
         progress_reporter=progress_reporter,
     )
     if acquired is None:
-        return probe, metadata, field
+        return probe, metadata, field, None
     merged = _merge_diagnostic_payload(probe, acquired)
     merged[field] = source
-    return merged, metadata, field
+    return merged, metadata, field, acquired.get("correlation")
 
 
 def _merge_diagnostic_payload(
@@ -480,9 +522,7 @@ async def _read_wait_json(
                         metadata["candidate_observed"] = True
                         metadata["condition"] = condition_result
                         if not condition_result["matched"]:
-                            metadata["reason"] = (
-                                "diagnostic JSON condition not satisfied"
-                            )
+                            metadata["reason"] = "diagnostic JSON condition not satisfied"
                             metadata.pop("error", None)
                             if condition_result.get("error"):
                                 metadata["error"] = condition_result["error"]
@@ -552,7 +592,9 @@ async def _maybe_report_diagnostic_progress(
     if not _metadata_has_progress_signal(metadata):
         return previous_fingerprint
     try:
-        progress_payload = compact_value(metadata)
+        progress_payload = compact_value(
+            redact_raw_correlation(metadata, redact_condition_values=True)
+        )
         fingerprint = json.dumps(
             _diagnostic_progress_fingerprint_payload(progress_payload),
             sort_keys=True,
@@ -602,7 +644,9 @@ async def _publish_app_diagnostics_progress(
             "reason": str(metadata.get("reason") or f"waiting for app_diagnostics.{field}"),
             "progress": {
                 "field": field,
-                "metadata": compact_value(metadata),
+                "metadata": compact_value(
+                    redact_raw_correlation(metadata, redact_condition_values=True)
+                ),
             },
             "evidence_ref": f"diagnostic:app_diagnostics:{app.get('name') or 'app'}",
         }
@@ -698,8 +742,7 @@ def _diagnostic_condition_values_equal(value: Any, expected: Any) -> bool:
         )
     if isinstance(value, dict) and isinstance(expected, dict):
         return value.keys() == expected.keys() and all(
-            _diagnostic_condition_values_equal(value[key], expected[key])
-            for key in value
+            _diagnostic_condition_values_equal(value[key], expected[key]) for key in value
         )
     if type(value) is not type(expected):
         return False

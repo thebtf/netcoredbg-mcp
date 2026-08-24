@@ -215,9 +215,7 @@ class CursorFacadeRegistry:
         after_cursor: int = 0,
         limit: int = 50,
     ) -> dict[str, Any]:
-        self.tail_calls.append(
-            {"run_id": run_id, "after_cursor": after_cursor, "limit": limit}
-        )
+        self.tail_calls.append({"run_id": run_id, "after_cursor": after_cursor, "limit": limit})
         if run_id == "missing-run":
             return {
                 "status": "FAIL",
@@ -287,9 +285,7 @@ class CursorFacadeRegistry:
             }
         if run_id == "manifest-final-run":
             events = [{"cursor": 9, "kind": "failed", "status": "FAIL"}]
-            events = [
-                event for event in events if int(event["cursor"]) > after_cursor
-            ][:limit]
+            events = [event for event in events if int(event["cursor"]) > after_cursor][:limit]
             return {
                 "status": "FAIL",
                 "reason": "after-phase manifest probe failed",
@@ -372,9 +368,7 @@ class CursorFacadeRegistry:
                 {"cursor": cursor, "kind": "progress", "status": "RUNNING"}
                 for cursor in range(1, 11)
             ]
-            events = [event for event in events if int(event["cursor"]) > after_cursor][
-                :limit
-            ]
+            events = [event for event in events if int(event["cursor"]) > after_cursor][:limit]
             return {
                 "status": "COMPLETED",
                 "run_id": run_id,
@@ -819,9 +813,7 @@ async def test_runtime_smoke_mark_event_cursor_agent_mode_active_app_diagnostics
         "agent_mode": True,
         "event_limit": 20,
     }
-    assert agent["next_request"]["arguments"]["cursor"]["sources"][
-        "app_diagnostics"
-    ] == {
+    assert agent["next_request"]["arguments"]["cursor"]["sources"]["app_diagnostics"] == {
         "after_index": 1,
         "entry_count": 1,
     }
@@ -917,6 +909,7 @@ async def test_runtime_smoke_get_event_delta_returns_trace_source_delta(
                 "expression": "expr",
                 "value": "new-1",
                 "thread_id": 1,
+                "frame_id": None,
                 "tracepoint_id": "tp-1",
             }
         ],
@@ -954,6 +947,7 @@ async def test_runtime_smoke_get_event_delta_returns_trace_source_delta(
                 "expression": "other",
                 "value": "new-2",
                 "thread_id": 2,
+                "frame_id": None,
                 "tracepoint_id": "tp-2",
             }
         ],
@@ -1711,6 +1705,7 @@ async def test_runtime_smoke_get_event_delta_marks_trace_source_cursor_stale(
                 "expression": "expr",
                 "value": "retained-1",
                 "thread_id": 1,
+                "frame_id": None,
                 "tracepoint_id": "tp-1",
             },
             {
@@ -1720,6 +1715,7 @@ async def test_runtime_smoke_get_event_delta_marks_trace_source_cursor_stale(
                 "expression": "expr",
                 "value": "retained-2",
                 "thread_id": 1,
+                "frame_id": None,
                 "tracepoint_id": "tp-1",
             },
         ],

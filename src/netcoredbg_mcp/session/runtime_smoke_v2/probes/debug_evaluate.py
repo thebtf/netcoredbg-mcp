@@ -3,6 +3,12 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
+from ...runtime_smoke_correlation import (
+    action_sample_provenance,
+    attach_sample_correlation,
+    correlation_source,
+)
+
 
 async def handle_debug_evaluate(
     probe: dict[str, Any],
@@ -44,7 +50,16 @@ async def handle_debug_evaluate(
         output["reason"] = result.get("reason", "expected value did not match")
     if status == "BLOCKED":
         output["reason"] = result.get("reason", "debug evaluation blocked")
-    return output
+    source_label = correlation_source(probe, fallback="") if "correlation_source" in probe else None
+    return attach_sample_correlation(
+        output,
+        result.get("correlation"),
+        provenance=action_sample_provenance(
+            context.action_context,
+            raw_result=result,
+        ),
+        source_label=source_label,
+    )
 
 
 def _normalize_evaluate_result(result: Any) -> dict[str, Any]:

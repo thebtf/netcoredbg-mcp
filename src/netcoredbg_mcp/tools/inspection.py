@@ -26,6 +26,7 @@ def _trace_entry_to_dict(entry: Any) -> dict[str, Any]:
         "expression": entry.expression,
         "value": entry.value,
         "thread_id": entry.thread_id,
+        "frame_id": getattr(entry, "frame_id", None),
         "tracepoint_id": entry.tracepoint_id,
     }
 

@@ -456,6 +456,7 @@ async def test_app_diagnostics_launch_default_falls_back_to_directory_when_path_
     )
     os.utime(diagnostic_path, ns=(1_000_000_000, 1_000_000_000))
     newer_path = diagnostic_path.parent / "newer-launch-advertised-app-diagnostics.json"
+
     def write_newer() -> None:
         newer_path.write_text(
             json.dumps(
@@ -842,9 +843,8 @@ async def test_app_diagnostics_wait_json_waits_until_condition_matches(
     assert wait_json["polls"] == 2
     assert wait_json["condition"] == {
         "jsonpath": "$.observations[0].value.activeCueIndex",
-        "expected": 1,
-        "value": 1,
         "matched": True,
+        "redacted_fields": ["expected", "value"],
     }
 
 
@@ -925,6 +925,8 @@ async def test_app_diagnostics_wait_json_publishes_live_source_progress_before_c
     assert progress_entries[0]["progress"]["field"] == "wait_json"
     assert progress_entries[0]["progress"]["metadata"]["candidate_observed"] is True
     assert progress_entries[0]["progress"]["metadata"]["condition"]["matched"] is False
+    assert "expected" not in progress_entries[0]["progress"]["metadata"]["condition"]
+    assert "value" not in progress_entries[0]["progress"]["metadata"]["condition"]
 
 
 @pytest.mark.asyncio
@@ -980,9 +982,8 @@ async def test_app_diagnostics_wait_json_blocks_when_condition_times_out(
     assert wait_json["candidate_observed"] is True
     assert wait_json["condition"] == {
         "jsonpath": "$.observations[0].value.activeCueIndex",
-        "expected": 1,
-        "value": 0,
         "matched": False,
+        "redacted_fields": ["expected", "value"],
     }
 
 
@@ -1036,9 +1037,8 @@ async def test_app_diagnostics_wait_json_condition_does_not_match_bool_to_int(
     assert probe["reason"] == "diagnostic JSON condition not satisfied"
     assert wait_json["condition"] == {
         "jsonpath": "$.observations[0].value.ready",
-        "expected": 1,
-        "value": True,
         "matched": False,
+        "redacted_fields": ["expected", "value"],
     }
 
 

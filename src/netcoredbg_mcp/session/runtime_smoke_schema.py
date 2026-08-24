@@ -6,6 +6,14 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
+from .runtime_smoke_correlation import (
+    CORRELATION_SCHEMA,
+    MEDIA_INSTANCE_SCOPE,
+    NOT_COMPARABLE,
+    SAME_MEDIA_INSTANCE,
+    validate_sample_correlation,
+)
+
 SCHEMA_VERSION = "netcoredbg.runtime_smoke.v1"
 SCHEMA_VERSION_V2 = "netcoredbg.runtime_smoke.v2"
 DIAGNOSTIC_SCHEMA_VERSION = "netcoredbg.runtime_smoke.diagnostics.v1"
@@ -218,6 +226,11 @@ def schema_help_fields(plan: dict[str, Any] | None = None) -> dict[str, Any]:
             op_name: list(schema.required_fields)
             for op_name, schema in sorted(OPERATION_SCHEMAS.items())
         },
+        "v2_transition_correlation": {
+            "fields": ["scope", "required_sources"],
+            "scope": MEDIA_INSTANCE_SCOPE,
+            "missing_or_unequal": NOT_COMPARABLE,
+        },
     }
     if _is_v2_shaped(plan):
         fields["accepted_top_level_keys_v2"] = list(ACCEPTED_TOP_LEVEL_KEYS_V2)
@@ -231,9 +244,7 @@ def diagnostic_schema_contract() -> dict[str, Any]:
         "schema": DIAGNOSTIC_SCHEMA_VERSION,
         "status_values": list(DIAGNOSTIC_STATUS_VALUES),
         "evidence_limits": _diagnostic_evidence_limits(),
-        "redaction": {
-            key: list(value) for key, value in DIAGNOSTIC_REDACTION.items()
-        },
+        "redaction": {key: list(value) for key, value in DIAGNOSTIC_REDACTION.items()},
         "oracle_pack": {
             "required_fields": list(DIAGNOSTIC_REQUIRED_FIELDS["oracle_pack"]),
             "optional_fields": [
@@ -260,6 +271,7 @@ def diagnostic_schema_contract() -> dict[str, Any]:
                 "wait_json",
                 "poll",
                 "diagnostic_launch",
+                "correlation",
             ],
             "launch_contract": {
                 "env_var_names": dict(APP_DIAGNOSTICS_ENV_VAR_NAMES),
@@ -328,7 +340,49 @@ def diagnostic_schema_contract() -> dict[str, Any]:
             ],
             "runtime_limits": _tracepoint_runtime_limits(),
         },
+        "correlation_envelope": _correlation_envelope_contract(),
         "evidence_pack_manifest": _evidence_pack_manifest_contract(),
+    }
+
+
+def _correlation_envelope_contract() -> dict[str, Any]:
+    return {
+        "schema": CORRELATION_SCHEMA,
+        "scope": MEDIA_INSTANCE_SCOPE,
+        "transition_policy": {
+            "fields": ["scope", "required_sources"],
+            "source_field": "correlation_source",
+            "comparison": {
+                "PASS": SAME_MEDIA_INSTANCE,
+                "BLOCKED": NOT_COMPARABLE,
+            },
+        },
+        "sample_fields": ["schema", "status", "provenance", "media_identity"],
+        "provenance": {
+            "session_id": "opaque debug session identifier",
+            "debuggee": ["pid", "epoch", "sequence"],
+            "run": [
+                "id",
+                "case_id",
+                "transition_id",
+                "transition_index",
+                "action.id",
+                "action.kind",
+            ],
+            "optional": ["thread_id", "frame_id"],
+        },
+        "product_media_identity": {
+            "input_fields": ["schema", "media_engine_id", "media_instance_id"],
+            "emitted_fields": ["media_engine_sha256", "media_instance_sha256"],
+            "raw_identifier_policy": (
+                "raw correlation identifiers are not emitted or persisted by correlation projections"
+            ),
+        },
+        "comparison_rule": (
+            "matching session/debuggee PID/epoch/sequence/run/action provenance and "
+            "matching media identity are SAME_MEDIA_INSTANCE; incomplete or unequal "
+            "tuples are NOT_COMPARABLE; process identity alone never proves same media"
+        ),
     }
 
 
@@ -455,9 +509,7 @@ def _normalize_diagnostic_path(value: str) -> str:
         raw = raw[3:]
     is_absolute = raw.startswith("/")
     safe_parts = [
-        _diagnostic_path_part(part)
-        for part in raw.split("/")
-        if part and part not in {".", ".."}
+        _diagnostic_path_part(part) for part in raw.split("/") if part and part not in {".", ".."}
     ]
     normalized = "/".join(part for part in safe_parts if part)
     if is_absolute and normalized:
@@ -467,8 +519,7 @@ def _normalize_diagnostic_path(value: str) -> str:
 
 def _diagnostic_path_part(value: str) -> str:
     safe = "".join(
-        char if char.isalnum() or char in {"-", "_", "."} else "-"
-        for char in str(value or "")
+        char if char.isalnum() or char in {"-", "_", "."} else "-" for char in str(value or "")
     ).strip("-")
     return "" if safe in {"", ".", ".."} else safe
 
@@ -683,6 +734,13 @@ def _validate_app_diagnostics_schema(payload: dict[str, Any], errors: list[str])
         if observation.get("status") == "BLOCKED":
             _require_blocked_diagnostics(prefix, observation, errors)
     _validate_app_diagnostics_freshness_shapes(payload, errors)
+    if "correlation" in payload:
+        errors.extend(
+            validate_sample_correlation(
+                payload["correlation"],
+                path="app_diagnostics",
+            )
+        )
     if payload.get("wait_json") is not None and payload.get("poll") is not None:
         errors.append("app_diagnostics.wait_json and app_diagnostics.poll are mutually exclusive")
     _validate_wait_json_schema(payload, errors, field_name="wait_json")
@@ -754,9 +812,7 @@ def _validate_wait_json_schema(
         if not isinstance(pattern, str) or not pattern:
             errors.append(f"app_diagnostics.{field_name}.pattern must be a string")
         elif "/" in pattern or "\\" in pattern:
-            errors.append(
-                f"app_diagnostics.{field_name}.pattern must be a file-name pattern"
-            )
+            errors.append(f"app_diagnostics.{field_name}.pattern must be a file-name pattern")
     _validate_wait_json_since_schema(wait_json, errors, field_name=field_name)
     _validate_wait_json_condition_schema(wait_json, errors, field_name=field_name)
     for numeric_field in ("timeout_ms", "poll_interval_ms"):
@@ -764,9 +820,7 @@ def _validate_wait_json_schema(
             continue
         value = wait_json[numeric_field]
         if isinstance(value, bool) or not isinstance(value, int):
-            errors.append(
-                f"app_diagnostics.{field_name}.{numeric_field} must be an integer"
-            )
+            errors.append(f"app_diagnostics.{field_name}.{numeric_field} must be an integer")
         elif value < 0:
             errors.append(f"app_diagnostics.{field_name}.{numeric_field} must be >= 0")
 
@@ -1236,9 +1290,7 @@ def _validate_op_args(
             ):
                 errors.append(f"{prefix}.{field_name} must be a string for op {op_name}")
             elif isinstance(args.get(field_name), str) and not args[field_name].strip():
-                errors.append(
-                    f"{prefix}.{field_name} must be a non-empty string for op {op_name}"
-                )
+                errors.append(f"{prefix}.{field_name} must be a non-empty string for op {op_name}")
 
 
 def _validate_int_arg(

@@ -4,9 +4,14 @@ import asyncio
 import inspect
 import math
 import time
+import uuid
 from collections.abc import Callable
 from typing import Any
 
+from ..runtime_smoke_correlation import (
+    validate_correlation_policy,
+    validate_correlation_source,
+)
 from ..runtime_smoke_schema import (
     ACCEPTED_SCHEMA_VALUES,
     ACCEPTED_TOP_LEVEL_KEYS_V2,
@@ -50,6 +55,8 @@ def compact_v2_result(result: dict[str, Any]) -> dict[str, Any]:
         compact["input_policy"] = compact_value(result["input_policy"])
     if isinstance(result.get("run_confidence"), dict):
         compact["run_confidence"] = compact_value(result["run_confidence"])
+    if isinstance(result.get("correlations"), list):
+        compact["correlations"] = compact_value(result["correlations"])
     if "operator_isolated" in result:
         compact["operator_isolated"] = result["operator_isolated"]
     return compact
@@ -59,9 +66,7 @@ def validate_v2_plan_contract(plan: dict[str, Any]) -> dict[str, Any]:
     """Validate v2-only planning semantics without executing the plan."""
     raw_cases = plan.get("cases", [])
     declared_cases = list(raw_cases) if isinstance(raw_cases, list) else []
-    executable_declared_cases = [
-        dict(case) for case in declared_cases if isinstance(case, dict)
-    ]
+    executable_declared_cases = [dict(case) for case in declared_cases if isinstance(case, dict)]
     generated_cases, generation_errors = expand_generated_cases(plan)
     validation_cases = [*declared_cases, *generated_cases]
     cases = [*executable_declared_cases, *generated_cases]
@@ -92,6 +97,7 @@ class RuntimeStateOracleRunner:
         clock: Callable[[], float] = time.monotonic,
         case_progress_notifier: Callable[[dict[str, Any]], Any] | None = None,
         app_diagnostics_progress_notifier: Callable[[dict[str, Any]], Any] | None = None,
+        run_id: str | None = None,
     ) -> None:
         self._session = session
         self._service_adapters = dict(service_adapters or {})
@@ -99,7 +105,7 @@ class RuntimeStateOracleRunner:
         self._diagnostic_launch: dict[str, Any] | None = None
         self._case_progress_notifier = case_progress_notifier
         self._input_policy = normalize_input_policy(None)
-        self._run_confidence = normalize_run_confidence(None)
+        self._run_id = run_id or f"runtime-smoke-{uuid.uuid4().hex}"
         self._app_diagnostics_progress_notifier = app_diagnostics_progress_notifier
 
     async def run(self, plan: dict[str, Any]) -> dict[str, Any]:
@@ -157,6 +163,7 @@ class RuntimeStateOracleRunner:
             input_policy=self._input_policy,
             run_confidence=self._run_confidence,
             app_diagnostics_progress_notifier=self._app_diagnostics_progress_notifier,
+            run_id=self._run_id,
         )
         try:
             budgets = _budgets_from_plan(plan)
@@ -201,8 +208,7 @@ class RuntimeStateOracleRunner:
                 extra=({"blocked": baseline_blocked_payload} if baseline_blocked_payload else None),
             )
         effective_diagnostic_launch = (
-            _diagnostic_launch_from_baseline_result(baseline_result)
-            or self._diagnostic_launch
+            _diagnostic_launch_from_baseline_result(baseline_result) or self._diagnostic_launch
         )
         if effective_diagnostic_launch != self._diagnostic_launch:
             self._diagnostic_launch = effective_diagnostic_launch
@@ -214,6 +220,7 @@ class RuntimeStateOracleRunner:
                 input_policy=self._input_policy,
                 run_confidence=self._run_confidence,
                 app_diagnostics_progress_notifier=self._app_diagnostics_progress_notifier,
+                run_id=self._run_id,
             )
 
         case_results: list[dict[str, Any]] = []
@@ -237,9 +244,7 @@ class RuntimeStateOracleRunner:
 
             max_actions_budget = budgets["max_actions"]
             remaining_actions = (
-                None
-                if max_actions_budget is None
-                else int(max_actions_budget) - action_count
+                None if max_actions_budget is None else int(max_actions_budget) - action_count
             )
             try:
                 case_result, executed_actions = await _execute_case_with_budget(
@@ -348,6 +353,8 @@ class RuntimeStateOracleRunner:
             "generated_case_count": generated_case_count,
             "cases": cases,
             "baseline": baseline,
+            "correlations": _collect_v2_correlations(cases),
+            "run_id": self._run_id,
             "metrics_thresholds": metrics_thresholds,
             "accepted_schema_values": list(ACCEPTED_SCHEMA_VALUES),
             "accepted_top_level_keys_v2": list(ACCEPTED_TOP_LEVEL_KEYS_V2),
@@ -391,10 +398,14 @@ def _cases_for_execution(
     else:
         validation_errors.append("cases must be a list")
     generated_cases, generation_errors = expand_generated_cases(plan)
-    return [*cases, *generated_cases], len(generated_cases), [
-        *validation_errors,
-        *generation_errors,
-    ]
+    return (
+        [*cases, *generated_cases],
+        len(generated_cases),
+        [
+            *validation_errors,
+            *generation_errors,
+        ],
+    )
 
 
 def _validate_v2_plan(
@@ -427,6 +438,12 @@ def _validate_v2_plan(
                     f"cases[{case_index}].transitions[{transition_index}] must be an object"
                 )
                 continue
+            errors.extend(
+                validate_correlation_policy(
+                    transition.get("correlation"),
+                    path=f"cases[{case_index}].transitions[{transition_index}]",
+                )
+            )
             action = transition.get("action")
             if action is None:
                 pass
@@ -443,9 +460,8 @@ def _validate_v2_plan(
             if isinstance(action, dict) and action:
                 action_path = f"cases[{case_index}].transitions[{transition_index}].action"
                 if action.get("kind") not in known_actions:
-                    errors.append(
-                        f"{action_path}.kind is not accepted: {action.get('kind')}"
-                    )
+                    errors.append(f"{action_path}.kind is not accepted: {action.get('kind')}")
+                errors.extend(validate_correlation_source(action, path=action_path))
                 if "input_policy" in action:
                     validate_input_policy_payload(
                         action_path + ".input_policy",
@@ -466,6 +482,10 @@ def _validate_v2_plan(
                         f"probes[{probe_index}] must be an object"
                     )
                     continue
+                probe_path_prefix = (
+                    f"cases[{case_index}].transitions[{transition_index}].probes[{probe_index}]"
+                )
+                errors.extend(validate_correlation_source(probe, path=probe_path_prefix))
                 phase_error = _probe_phase_error(probe)
                 if phase_error is not None:
                     errors.append(
@@ -487,9 +507,7 @@ def _validate_v2_plan(
                         )
                     )
                 if probe.get("kind") == "debug.tracepoint":
-                    policy_error = tracepoint_expression_policy_error(
-                        probe.get("expression")
-                    )
+                    policy_error = tracepoint_expression_policy_error(probe.get("expression"))
                     if policy_error is not None:
                         errors.append(
                             f"cases[{case_index}].transitions[{transition_index}]."
@@ -661,3 +679,26 @@ def _collect_v2_evidence_refs(cases: list[dict[str, Any]]) -> list[dict[str, Any
                             }
                         )
     return refs
+
+
+def _collect_v2_correlations(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    correlations: list[dict[str, Any]] = []
+    for case in cases:
+        transitions = case.get("transitions")
+        if not isinstance(transitions, list):
+            continue
+        for transition_index, transition in enumerate(transitions):
+            if not isinstance(transition, dict):
+                continue
+            correlation = transition.get("correlation")
+            if not isinstance(correlation, dict):
+                continue
+            correlations.append(
+                {
+                    **correlation,
+                    "case_id": case.get("id"),
+                    "transition_id": transition.get("id"),
+                    "transition_index": transition_index,
+                }
+            )
+    return correlations
