@@ -919,8 +919,349 @@ class TestSonarqubeExactHeadRunner(TestCase):
         self.assertEqual(blocked_receipt["analysis_current_after_issues"], binding)
         self.assertEqual(blocked_receipt["hotspots"], {"records": []})
         self.assertEqual(blocked_receipt["generated_artifacts_removed_after_scan"], ["obj"])
+        self.assertEqual(
+            blocked_receipt["cleanup"],
+            {"status": "PASS", "removed": ["obj"]},
+        )
         self.assertEqual(blocked_receipt["analysis_current_final"], binding)
         self.assertEqual(blocked_receipt["post_scan_head"], head)
+
+    def test_execute_disables_msbuild_node_reuse_for_solution_and_standalone_builds(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            head = "a" * 40
+            context = runner.GitContext(root, root / "common", root / "git", root, head)
+            solution = root / "netcoredbg-mcp.sln"
+            standalone_project = root / "tools" / "Standalone.csproj"
+            process_commands = []
+
+            def run_process(command, **_kwargs):
+                process_commands.append(command)
+                if command[:2] == ["scanner", "end"]:
+                    raise runner.RunnerError("stop after build command capture")
+
+            with ExitStack() as patches:
+                patches.enter_context(patch.object(runner, "process_environment", return_value={}))
+                patches.enter_context(
+                    patch.object(runner, "scrub_sonar_environment", return_value={})
+                )
+                patches.enter_context(patch.object(runner, "git_context", return_value=context))
+                patches.enter_context(
+                    patch.object(runner, "receipt_path", return_value=root / "candidate.json")
+                )
+                patches.enter_context(
+                    patch.object(runner, "sonar_secret_values", return_value=set())
+                )
+                patches.enter_context(
+                    patch.object(runner, "load_credentials", return_value=self.credentials())
+                )
+                patches.enter_context(
+                    patch.object(runner, "clear_generated_artifacts", return_value=[])
+                )
+                patches.enter_context(
+                    patch.object(runner, "strict_cleanliness", return_value={"status": "clean"})
+                )
+                patches.enter_context(
+                    patch.object(runner, "project_key_from_xml", return_value=runner.PROJECT_KEY)
+                )
+                patches.enter_context(patch.object(runner, "discover_scanner", return_value=["scanner"]))
+                patches.enter_context(
+                    patch.object(runner, "issue_inventory", return_value={"records": []})
+                )
+                patches.enter_context(patch.object(runner, "scanner_environment", return_value={}))
+                patches.enter_context(patch.object(runner, "run_process", side_effect=run_process))
+                patches.enter_context(
+                    patch.object(
+                        runner,
+                        "scanner_metadata",
+                        return_value={
+                            "observed": True,
+                            "project_key": runner.PROJECT_KEY,
+                            "sonar_scm_revision": head,
+                        },
+                    )
+                )
+                patches.enter_context(
+                    patch.object(
+                        runner,
+                        "project_inventory",
+                        return_value=(solution, [solution], [standalone_project]),
+                    )
+                )
+                patches.enter_context(patch.object(runner, "write_receipt"))
+                with self.assertRaisesRegex(runner.RunnerError, "stop after build command capture"):
+                    runner.execute("candidate", "scanner")
+
+        self.assertEqual(
+            [command for command in process_commands if command[:2] == ["dotnet", "build"]],
+            [
+                ["dotnet", "build", str(solution), "-nr:false"],
+                ["dotnet", "build", str(standalone_project), "-nr:false"],
+            ],
+        )
+
+    def test_generated_artifact_permission_error_is_typed_and_path_aware(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            artifact = root / "generated" / "obj"
+            artifact.mkdir(parents=True)
+            context = runner.GitContext(root, root, root, root, "a" * 40)
+
+            with (
+                patch.object(runner, "is_tracked", return_value=False),
+                patch.object(runner.shutil, "rmtree", side_effect=PermissionError("access denied")),
+                self.assertRaises(runner.RunnerError) as raised,
+            ):
+                runner.clear_generated_artifacts(context, {})
+
+        failure = raised.exception
+        self.assertEqual(failure.__class__.__name__, "GeneratedArtifactCleanupError")
+        self.assertEqual(
+            (failure.operation, failure.path, failure.error_type),
+            ("rmtree", "generated/obj", "PermissionError"),
+        )
+
+    def test_post_scan_cleanup_failure_preserves_error_gate_diagnostics(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            artifact = root / "generated" / "obj"
+            artifact.mkdir(parents=True)
+            head = "a" * 40
+            context = runner.GitContext(root, root / "common", root / "git", root, head)
+            captured_receipts = []
+            cleanup_calls = 0
+            binding_calls = 0
+            events = []
+            full_inventory = {"records": [{"key": "post-scan-issue"}]}
+            new_code_inventory = {"records": [{"key": "new-code-issue"}]}
+            hotspots = {"records": [{"key": "hotspot-1"}]}
+            error_quality_gate = {"analysis_id": "analysis-1", "status": "ERROR", "conditions": []}
+            binding = {
+                "observed": True,
+                "current": True,
+                "analysis_id": "analysis-1",
+                "query": {"project": runner.PROJECT_KEY, "p": "1", "ps": "1"},
+                "revision": head,
+            }
+            original_clear_generated_artifacts = runner.clear_generated_artifacts
+
+            def capture_receipt(_path, receipt, _secrets):
+                captured_receipts.append(json.loads(json.dumps(receipt)))
+
+            def clear_artifacts(cleanup_context, environment):
+                nonlocal cleanup_calls
+                cleanup_calls += 1
+                if cleanup_calls == 2:
+                    return original_clear_generated_artifacts(cleanup_context, environment)
+                return []
+
+            def full_issue_inventory(_host, _token):
+                events.append("pre_scan_issues" if len([event for event in events if event.endswith("issues")]) == 0 else "post_scan_issues")
+                return full_inventory
+
+            def current_binding(_host, _analysis_id, _head, _token):
+                nonlocal binding_calls
+                binding_calls += 1
+                events.append(("analysis_current_before_issues", "analysis_current_after_issues")[binding_calls - 1])
+                return binding
+
+            def quality_gate(_host, _analysis_id, _token):
+                events.append("quality_gate")
+                return error_quality_gate
+
+            def new_code_issue_inventory(_host, _token):
+                events.append("new_code_issues")
+                return new_code_inventory
+
+            def hotspot_inventory(_host, _token):
+                events.append("hotspots")
+                return hotspots
+
+            def fail_removal(_path):
+                events.append("post_scan_cleanup")
+                raise PermissionError("access denied")
+
+            with ExitStack() as patches:
+                patches.enter_context(patch.object(runner, "process_environment", return_value={}))
+                patches.enter_context(
+                    patch.object(runner, "scrub_sonar_environment", return_value={})
+                )
+                patches.enter_context(patch.object(runner, "git_context", return_value=context))
+                patches.enter_context(
+                    patch.object(runner, "receipt_path", return_value=root / "candidate.json")
+                )
+                patches.enter_context(
+                    patch.object(runner, "sonar_secret_values", return_value=set())
+                )
+                patches.enter_context(
+                    patch.object(runner, "load_credentials", return_value=self.credentials())
+                )
+                patches.enter_context(
+                    patch.object(runner, "clear_generated_artifacts", side_effect=clear_artifacts)
+                )
+                patches.enter_context(
+                    patch.object(runner, "strict_cleanliness", return_value={"status": "clean"})
+                )
+                patches.enter_context(
+                    patch.object(runner, "project_key_from_xml", return_value=runner.PROJECT_KEY)
+                )
+                patches.enter_context(patch.object(runner, "discover_scanner", return_value=["scanner"]))
+                patches.enter_context(
+                    patch.object(runner, "issue_inventory", side_effect=full_issue_inventory)
+                )
+                patches.enter_context(
+                    patch.object(
+                        runner,
+                        "new_code_issue_inventory",
+                        side_effect=new_code_issue_inventory,
+                    )
+                )
+                patches.enter_context(patch.object(runner, "scanner_environment", return_value={}))
+                patches.enter_context(patch.object(runner, "run_process"))
+                patches.enter_context(
+                    patch.object(
+                        runner,
+                        "scanner_metadata",
+                        return_value={
+                            "observed": True,
+                            "project_key": runner.PROJECT_KEY,
+                            "sonar_scm_revision": head,
+                        },
+                    )
+                )
+                patches.enter_context(
+                    patch.object(
+                        runner,
+                        "project_inventory",
+                        return_value=(root / "netcoredbg-mcp.sln", [], []),
+                    )
+                )
+                patches.enter_context(
+                    patch.object(runner, "report_task", return_value={"ce_task_id": "task-1"})
+                )
+                patches.enter_context(
+                    patch.object(runner, "wait_for_ce_task", return_value="analysis-1")
+                )
+                patches.enter_context(
+                    patch.object(runner, "current_analysis_binding", side_effect=current_binding)
+                )
+                patches.enter_context(
+                    patch.object(runner, "analysis_quality_gate", side_effect=quality_gate)
+                )
+                patches.enter_context(
+                    patch.object(
+                        runner,
+                        "issue_dispositions",
+                        return_value={"blocking_count": 0, "items": []},
+                    )
+                )
+                patches.enter_context(
+                    patch.object(runner, "hotspot_inventory", side_effect=hotspot_inventory)
+                )
+                patches.enter_context(
+                    patch.object(
+                        runner,
+                        "hotspot_dispositions",
+                        return_value={"blocking_count": 0, "items": []},
+                    )
+                )
+                patches.enter_context(patch.object(runner, "assert_head_unchanged"))
+                patches.enter_context(patch.object(runner, "is_tracked", return_value=False))
+                patches.enter_context(
+                    patch.object(runner.shutil, "rmtree", side_effect=fail_removal)
+                )
+                patches.enter_context(
+                    patch.object(runner, "write_receipt", side_effect=capture_receipt)
+                )
+                with self.assertRaises(runner.RunnerError) as raised:
+                    runner.execute("candidate", "scanner")
+
+        blocked_receipt = captured_receipts[-1]
+        self.assertNotIn("Unexpected runner failure", str(raised.exception))
+        self.assertEqual(blocked_receipt["outcome"], "BLOCKED")
+        self.assertEqual(
+            blocked_receipt["failure"],
+            "Analysis-bound quality gate is ERROR; only OK passes.",
+        )
+        self.assertEqual(blocked_receipt["quality_gate"], error_quality_gate)
+        self.assertEqual(blocked_receipt["post_scan_issues"], full_inventory)
+        self.assertEqual(blocked_receipt["new_code_issues"], new_code_inventory)
+        self.assertEqual(blocked_receipt["hotspots"], hotspots)
+        self.assertEqual(blocked_receipt["analysis_current_after_issues"], binding)
+        self.assertEqual(blocked_receipt["cleanup"]["status"], "BLOCKED")
+        self.assertEqual(blocked_receipt["cleanup"]["removed"], [])
+        self.assertEqual(
+            {
+                field: blocked_receipt["cleanup"]["failure"][field]
+                for field in ("path", "operation", "error_type")
+            },
+            {
+                "path": "generated/obj",
+                "operation": "rmtree",
+                "error_type": "PermissionError",
+            },
+        )
+        self.assertNotIn("post", blocked_receipt.get("cleanliness", {}))
+        self.assertNotIn("analysis_current_final", blocked_receipt)
+        self.assertNotIn("post_scan_head", blocked_receipt)
+        self.assertEqual(
+            events,
+            [
+                "pre_scan_issues",
+                "analysis_current_before_issues",
+                "quality_gate",
+                "post_scan_issues",
+                "new_code_issues",
+                "analysis_current_after_issues",
+                "hotspots",
+                "post_scan_cleanup",
+            ],
+        )
+
+    def test_generated_artifact_cleanup_orders_by_depth_then_normalized_path(self):
+        class ArtifactPath:
+            def __init__(self, relative_path, hash_value):
+                self.relative_path = relative_path
+                self.hash_value = hash_value
+                self.name = relative_path.rsplit("/", 1)[-1]
+                self.parts = tuple(relative_path.split("/"))
+
+            def __hash__(self):
+                return self.hash_value
+
+            def __eq__(self, other):
+                return isinstance(other, ArtifactPath) and self.relative_path == other.relative_path
+
+            def exists(self):
+                return True
+
+            def is_symlink(self):
+                return False
+
+            def resolve(self):
+                return self
+
+            def relative_to(self, _root):
+                return self.relative_path
+
+            def is_dir(self):
+                return True
+
+        alpha = ArtifactPath("alpha/obj", 2)
+        zulu = ArtifactPath("zulu/obj", 1)
+        nested = ArtifactPath("nested/deep/obj", 0)
+        removed = []
+        context = runner.GitContext(object(), object(), object(), object(), "a" * 40)
+
+        with (
+            patch.object(runner, "GENERATED_ROOT_NAMES", set()),
+            patch.object(runner, "iter_scanner_tree", return_value=[alpha, zulu, nested]),
+            patch.object(runner, "is_tracked", return_value=False),
+            patch.object(runner.shutil, "rmtree", side_effect=removed.append),
+        ):
+            runner.clear_generated_artifacts(context, {})
+
+        self.assertEqual(removed, [nested, alpha, zulu])
 
     def test_accepted_issue_disposition_blocks_release(self):
         before = {"records": []}
@@ -1189,6 +1530,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 "linked": True,
             },
             "cleanliness": {"pre": {"status": "clean"}, "post": {"status": "clean"}},
+            "cleanup": {"status": "PASS", "removed": []},
             "scanner_metadata": {
                 "observed": True,
                 "project_key": runner.PROJECT_KEY,
@@ -1315,6 +1657,20 @@ class TestSonarqubeExactHeadRunner(TestCase):
         receipt["scanner_metadata"].pop("observed")
         with self.assertRaisesRegex(runner.RunnerError, "scanner project/revision"):
             runner.validate_pass_receipt(receipt)
+        receipt["scanner_metadata"]["observed"] = True
+        invalid_cleanup_removals = (
+            ["/absolute/obj"],
+            ["C:/absolute/obj"],
+            ["../escaped/obj"],
+            ["nested/../not-normalized"],
+            ["nested/obj", "nested/obj"],
+            ["zulu", "nested/deep/obj"],
+        )
+        for removed in invalid_cleanup_removals:
+            with self.subTest(removed=removed):
+                receipt["cleanup"]["removed"] = removed
+                with self.assertRaises(runner.RunnerError):
+                    runner.validate_pass_receipt(receipt)
 
     def test_disposition_counts_are_recomputed_from_inventory(self):
         issue_before = {"records": []}
