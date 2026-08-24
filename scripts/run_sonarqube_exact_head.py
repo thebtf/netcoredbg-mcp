@@ -46,6 +46,21 @@ class RunnerError(RuntimeError):
     """A fail-closed release-gate error safe to place in a receipt."""
 
 
+class GeneratedArtifactCleanupError(RunnerError):
+    """A receipt-safe failure deleting one generated scanner artifact."""
+
+    def __init__(
+        self, path: str, operation: str, error_type: str, removed: Sequence[str]
+    ) -> None:
+        self.path = path
+        self.operation = operation
+        self.error_type = error_type
+        self.removed = list(removed)
+        super().__init__(
+            f"Generated artifact cleanup {operation} failed for {path}: {error_type}."
+        )
+
+
 class CredentialsUnavailable(RunnerError):
     """A credential-gate blocker that never includes a credential value."""
 
@@ -736,14 +751,28 @@ def is_tracked(repository_root: Path, environment: Mapping[str, str], path: Path
     return bool(git_output(repository_root, environment, "ls-files", "--", relative))
 
 
+def normalized_repository_relative_path(context: GitContext, path: Path) -> str:
+    try:
+        return str(path.relative_to(context.repository_root)).replace("\\", "/")
+    except ValueError as error:
+        raise RunnerError("Generated artifact path escapes the scanner worktree.") from error
+
+
 def clear_generated_artifacts(context: GitContext, environment: Mapping[str, str]) -> list[str]:
     """Delete only known ignored scanner/build output from the disposable worktree."""
     candidates = [context.repository_root / name for name in GENERATED_ROOT_NAMES]
     for directory in iter_scanner_tree(context.repository_root, "*"):
         if directory.name in GENERATED_DIRECTORY_NAMES and directory.is_dir():
             candidates.append(directory)
+    candidate_paths = [
+        (candidate, normalized_repository_relative_path(context, candidate))
+        for candidate in set(candidates)
+    ]
     removed: list[str] = []
-    for candidate in sorted(set(candidates), key=lambda path: len(path.parts), reverse=True):
+    for candidate, relative_path in sorted(
+        candidate_paths,
+        key=lambda item: (-len(item[1].split("/")), item[1].casefold(), item[1]),
+    ):
         if not candidate.exists():
             continue
         if candidate.is_symlink():
@@ -754,12 +783,18 @@ def clear_generated_artifacts(context: GitContext, environment: Mapping[str, str
             raise RunnerError("Generated artifact path escapes the scanner worktree.") from error
         if is_tracked(context.repository_root, environment, candidate):
             raise RunnerError("Refusing to remove a tracked path as generated scanner output.")
-        if candidate.is_dir():
-            shutil.rmtree(candidate)
-        else:
-            candidate.unlink()
-        removed.append(str(candidate.relative_to(context.repository_root)).replace("\\", "/"))
-    return sorted(removed)
+        operation = "rmtree" if candidate.is_dir() else "unlink"
+        try:
+            if operation == "rmtree":
+                shutil.rmtree(candidate)
+            else:
+                candidate.unlink()
+        except OSError as error:
+            raise GeneratedArtifactCleanupError(
+                relative_path, operation, error.__class__.__name__, removed
+            ) from None
+        removed.append(relative_path)
+    return removed
 
 
 def project_key_from_xml(path: Path) -> str:
@@ -1433,7 +1468,7 @@ def validate_pass_receipt(receipt: Mapping[str, Any]) -> None:
         "completed_at", "worktree", "cleanliness", "scanner_metadata", "task_report",
         "compute_engine", "analysis_current_before_issues", "analysis_current_after_issues",
         "analysis_current_final", "quality_gate", "pre_scan_issues", "post_scan_issues",
-        "new_code_issues", "issue_dispositions", "hotspots", "hotspot_dispositions", "post_scan_head",
+        "new_code_issues", "issue_dispositions", "hotspots", "hotspot_dispositions", "cleanup", "post_scan_head",
     )
     if (
         receipt.get("schema_version") != RECEIPT_SCHEMA_VERSION
@@ -1462,6 +1497,14 @@ def validate_pass_receipt(receipt: Mapping[str, Any]) -> None:
         raise RunnerError("PASS receipt lacks detached linked-worktree evidence.")
     if not isinstance(cleanliness, dict) or cleanliness.get("pre", {}).get("status") != "clean" or cleanliness.get("post", {}).get("status") != "clean":
         raise RunnerError("PASS receipt lacks clean-worktree evidence.")
+    cleanup = receipt["cleanup"]
+    if (
+        not isinstance(cleanup, dict)
+        or cleanup.get("status") != "PASS"
+        or not isinstance(cleanup.get("removed"), list)
+        or any(not isinstance(path, str) or not path for path in cleanup["removed"])
+    ):
+        raise RunnerError("PASS receipt lacks successful generated-artifact cleanup evidence.")
     if not isinstance(scanner, dict) or not scanner.get("observed") or scanner.get("project_key") != PROJECT_KEY or scanner.get("sonar_scm_revision") != receipt.get("captured_head"):
         raise RunnerError("PASS receipt lacks observed scanner project/revision evidence.")
     if (
@@ -1619,7 +1662,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
                 ],
             }
             run_process(
-                ["dotnet", "build", str(solution)],
+                ["dotnet", "build", str(solution), "-nr:false"],
                 cwd=context.repository_root,
                 environment=clean_environment,
                 secrets=secrets,
@@ -1627,7 +1670,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
             )
             for project in standalone_projects:
                 run_process(
-                    ["dotnet", "build", str(project)],
+                    ["dotnet", "build", str(project), "-nr:false"],
                     cwd=context.repository_root,
                     environment=clean_environment,
                     secrets=secrets,
@@ -1671,9 +1714,9 @@ def execute(role: str, scanner_override: str | None) -> Path:
             )
             receipt["hotspot_dispositions"] = hotspot_dispositions(receipt["hotspots"])
             assert_head_unchanged(context, clean_environment)
-            receipt["generated_artifacts_removed_after_scan"] = clear_generated_artifacts(
-                context, clean_environment
-            )
+            post_scan_cleanup = clear_generated_artifacts(context, clean_environment)
+            receipt["generated_artifacts_removed_after_scan"] = post_scan_cleanup
+            receipt["cleanup"] = {"status": "PASS", "removed": post_scan_cleanup}
             receipt["cleanliness"]["post"] = strict_cleanliness(context, clean_environment, "receipt publication")
             receipt["analysis_current_final"] = current_analysis_binding(
                 credentials["SONAR_HOST_URL"], analysis_id, context.head, credentials["SONAR_READ_TOKEN"]
@@ -1698,6 +1741,30 @@ def execute(role: str, scanner_override: str | None) -> Path:
                 write_receipt(target_receipt, receipt, secrets)
                 raise credential_error from error
             receipt["outcome"] = "BLOCKED"
+            receipt["failure"] = str(error)
+            receipt["completed_at"] = utc_now()
+            write_receipt(target_receipt, receipt, secrets)
+            raise
+        except GeneratedArtifactCleanupError as error:
+            receipt["outcome"] = "BLOCKED"
+            receipt["cleanup"] = {
+                "status": "BLOCKED",
+                "removed": error.removed,
+                "failure": {
+                    "path": error.path,
+                    "operation": error.operation,
+                    "error_type": error.error_type,
+                },
+            }
+            quality_gate = receipt.get("quality_gate")
+            if isinstance(quality_gate, Mapping):
+                try:
+                    require_ok_quality_gate(quality_gate)
+                except RunnerError as quality_gate_error:
+                    receipt["failure"] = str(quality_gate_error)
+                    receipt["completed_at"] = utc_now()
+                    write_receipt(target_receipt, receipt, secrets)
+                    raise error from quality_gate_error
             receipt["failure"] = str(error)
             receipt["completed_at"] = utc_now()
             write_receipt(target_receipt, receipt, secrets)

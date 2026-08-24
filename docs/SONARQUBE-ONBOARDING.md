@@ -86,6 +86,14 @@ The runner checks clean status before and after scanning, uses the committed
 by it, and requires the submitted CE task, current-analysis bookends, observed
 scanner/task metadata, analysis-bound quality gate, full issue disposition
 inventory, and full hotspot inventory to match that SHA.
+The runner appends `-nr:false` to every runner-owned `dotnet build` command so
+MSBuild worker nodes cannot retain scanner-artifact handles after a build. Its
+post-scan cleanup records a receipt-safe `cleanup` outcome: `PASS` includes
+the deterministic repository-relative removal list; an `OSError` is `BLOCKED`
+with only the failed relative path, operation, and error type. A cleanup block
+retains the already-collected gate and finding diagnostics but cannot publish
+post-cleanliness, final-analysis binding, or a passing receipt.
+
 
 Because SonarQube's analysis item has no project field, project proof is the
 recorded `project=thebtf_netcoredbg_mcp` analysis query together with the
