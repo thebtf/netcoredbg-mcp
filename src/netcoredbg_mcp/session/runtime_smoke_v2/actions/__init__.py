@@ -3,10 +3,16 @@ from __future__ import annotations
 import inspect
 import re
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from ....ui.hover import HOVER_SUCCESS_FIELDS, validate_hover_evidence, validate_hover_timeout
+from ...runtime_smoke_correlation import (
+    action_sample_provenance,
+    attach_sample_correlation,
+    correlation_source,
+    redact_raw_correlation,
+)
 from ..blocked import build_blocked
 from ..timing import sleep_ms
 from .ui_drag import handle_ui_drag
@@ -70,6 +76,11 @@ class ActionContext:
     input_policy: dict[str, Any] | None = None
     run_confidence: dict[str, Any] | None = None
     transition_index: int | None = None
+    run_id: str | None = None
+    transition_id: str | None = None
+    action_id: str | None = None
+    action_kind: str | None = None
+    action_adapter_results: list[dict[str, Any]] | None = None
     app_diagnostics_progress_notifier: Callable[[dict[str, Any]], Any] | None = None
 
     async def call_adapter(self, name: str, **kwargs: Any) -> dict[str, Any]:
@@ -85,7 +96,11 @@ class ActionContext:
         result = adapter(**kwargs)
         if inspect.isawaitable(result):
             result = await result
-        return result if isinstance(result, dict) else {"status": "PASS", "value": result}
+        normalized = result if isinstance(result, dict) else {"status": "PASS", "value": result}
+        if self.action_adapter_results is None:
+            return normalized
+        self.action_adapter_results.append(dict(normalized))
+        return _strip_adapter_correlation(normalized)
 
     def elapsed_ms(self, started: float) -> int:
         return int(max(0.0, self.clock() - started) * 1000)
@@ -100,6 +115,10 @@ class ActionContext:
                 await result
         except Exception:
             pass
+
+
+def _strip_adapter_correlation(value: Any) -> Any:
+    return redact_raw_correlation(value)
 
 
 def register_action(kind: str, handler: ActionHandler) -> None:
@@ -117,6 +136,13 @@ async def dispatch_action(
     context: ActionContext,
 ) -> dict[str, Any]:
     kind = str(action.get("kind") or "")
+    adapter_results: list[dict[str, Any]] = []
+    action_context = replace(
+        context,
+        action_id=str(action.get("id") or kind),
+        action_kind=kind,
+        action_adapter_results=adapter_results,
+    )
     handler = _ACTION_REGISTRY.get(kind)
     if handler is None:
         blocked = build_blocked(
@@ -125,7 +151,12 @@ async def dispatch_action(
             accepted={"action_kinds": accepted_action_kinds()},
             next_step="Use one of the accepted action kinds.",
         )
-        return {"status": "BLOCKED", **blocked}
+        return _attach_action_correlation(
+            {"status": "BLOCKED", **blocked},
+            action,
+            action_context,
+            adapter_results,
+        )
     input_policy = _effective_input_policy(action, context)
     input_classification = _input_classification_for_action(action)
     # UNSUPPORTED_BY_PROVIDER reaches this branch only for registered but
@@ -134,17 +165,61 @@ async def dispatch_action(
         _INPUT_CLASSIFICATION_REQUIRES_GLOBAL,
         _INPUT_CLASSIFICATION_UNSUPPORTED,
     }:
-        return _no_global_input_blocked_action(
+        blocked = _no_global_input_blocked_action(
             action,
             input_policy=input_policy,
             input_classification=input_classification,
         )
-    result = await handler(action, context)
+        return _attach_input_policy_evidence(
+            _attach_action_correlation(
+                blocked,
+                action,
+                action_context,
+                adapter_results,
+            ),
+            input_policy=input_policy,
+            input_classification=input_classification,
+        )
+    result = await handler(action, action_context)
+    result = _attach_action_correlation(
+        result,
+        action,
+        action_context,
+        adapter_results,
+    )
     return _attach_input_policy_evidence(
         result,
         input_policy=input_policy,
         input_classification=input_classification,
     )
+
+
+def _attach_action_correlation(
+    result: dict[str, Any],
+    action: dict[str, Any],
+    context: Any,
+    adapter_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    observed = next(
+        (
+            adapter_result
+            for adapter_result in reversed(adapter_results)
+            if "correlation" in adapter_result
+        ),
+        result,
+    )
+    source_label = correlation_source(
+        action,
+        fallback=str(action.get("id") or context.action_kind or "action"),
+    )
+    output = attach_sample_correlation(
+        result,
+        observed.get("correlation") if isinstance(observed, dict) else None,
+        provenance=action_sample_provenance(context, raw_result=observed),
+        source_label=source_label,
+    )
+    output["correlation_source"] = source_label
+    return output
 
 
 def _effective_input_policy(
@@ -249,10 +324,14 @@ def _attach_input_policy_evidence(
     enriched.setdefault("input_policy", dict(input_policy))
     enriched.setdefault("input_classification", input_classification)
     enriched.setdefault("physical_fallback_attempted", False)
-    enriched.setdefault("operator_isolated", input_classification in {
-        _INPUT_CLASSIFICATION_BACKGROUND_SAFE,
-        _INPUT_CLASSIFICATION_APP_DISPATCH_SAFE,
-    })
+    enriched.setdefault(
+        "operator_isolated",
+        input_classification
+        in {
+            _INPUT_CLASSIFICATION_BACKGROUND_SAFE,
+            _INPUT_CLASSIFICATION_APP_DISPATCH_SAFE,
+        },
+    )
     return enriched
 
 
@@ -1444,8 +1523,8 @@ async def _verify_postcondition(
 
 
 def _action_result(**payload: Any) -> dict[str, Any]:
-    result = dict(payload.get("result") or {})
-    action = dict(payload)
+    result = redact_raw_correlation(dict(payload.get("result") or {}))
+    action = {**payload, "result": result}
     if str(action.get("status", "PASS")) != "PASS":
         for key in ("reason", "requested", "accepted", "next_step"):
             if key in result:

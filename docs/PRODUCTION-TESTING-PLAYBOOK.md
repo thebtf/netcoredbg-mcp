@@ -387,6 +387,69 @@ Verification:
 uv run --locked --extra dev pytest tests/test_runtime_smoke_diagnostics_schema.py
 ```
 
+#### 8.1 Same-Media Correlation Envelope
+
+Use the additive `netcoredbg.runtime_smoke.correlation.v1` envelope when a
+runtime-smoke transition must prove that its UI action, tracepoint,
+`debug.evaluate`, and app-diagnostic samples concern one media engine and one
+media instance. Each sample exposes:
+
+- provenance: opaque debug `session_id`; debuggee `pid`, epoch, and sequence;
+  run/case/transition/action identity; and `thread_id`/`frame_id` when the
+  source makes them available;
+- redacted product identity: `media_engine_sha256` and
+  `media_instance_sha256`.
+
+The product supplies the unredacted input only at its evidence boundary:
+
+```json
+{
+  "correlation": {
+    "schema": "netcoredbg.runtime_smoke.correlation.v1",
+    "media_engine_id": "opaque-engine-id",
+    "media_instance_id": "opaque-media-id"
+  }
+}
+```
+
+Raw identifiers supplied in that `correlation` object are neither emitted nor
+persisted by the correlation envelope or its runtime-smoke projections. Other
+app-diagnostic observation fields retain their documented diagnostic semantics.
+For `app_diagnostics`, the correlation object must be present in acquired product
+JSON (`wait_json`, `poll`, or launch-advertised evidence). A correlation literal
+in the runtime-smoke plan is configuration, not observed product identity, and
+is deliberately reported as `NOT_COMPARABLE`.
+
+Media IDs that collide with a value already emitted as provenance are rejected as
+`NOT_COMPARABLE`; such ambiguous values cannot self-identify as media.
+
+Bind a named action or probe with `correlation_source`, then request equality at
+the transition boundary:
+
+```json
+{
+  "correlation": {
+    "scope": "media_instance",
+    "required_sources": ["play-action", "play-handler", "engine-state", "app-state"]
+  }
+}
+```
+
+Matching required sources return `status: PASS` and
+`comparison: SAME_MEDIA_INSTANCE`. Missing, malformed, or unequal core tuples
+return `status: BLOCKED` and `comparison: NOT_COMPARABLE`; they never support a
+product-pass claim. The equality key includes session, debuggee PID, epoch, and
+sequence; run/action provenance; and both product identity hashes. Thread/frame
+identify the observation point and may differ when the source makes them
+available. A PID, process name, module, or workspace match alone never proves
+that two observations share media.
+
+Verification:
+
+```powershell
+uv run --locked --extra dev pytest tests/test_runtime_smoke_v2_correlation.py
+```
+
 ### 9. NovaScript Action-Oracle App-Diagnostics Consumer Gate
 
 Contract source:

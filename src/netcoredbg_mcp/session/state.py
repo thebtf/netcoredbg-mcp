@@ -118,9 +118,7 @@ class Breakpoint:
     log_message: str | None = None
     verified: bool = False
     id: int | None = None
-    dap_line: int | None = (
-        None  # Adjusted line from DAP if different from requested `line`
-    )
+    dap_line: int | None = None  # Adjusted line from DAP if different from requested `line`
 
     def to_dap(self) -> dict[str, Any]:
         """Convert to DAP breakpoint format."""
@@ -260,9 +258,7 @@ class BreakpointRegistry:
     def remove_function_breakpoint(self, name: str) -> bool:
         """Remove a function breakpoint by name. Returns True if found."""
         original_count = len(self._function_breakpoints)
-        self._function_breakpoints = [
-            bp for bp in self._function_breakpoints if bp.name != name
-        ]
+        self._function_breakpoints = [bp for bp in self._function_breakpoints if bp.name != name]
         return len(self._function_breakpoints) < original_count
 
     def get_function_breakpoints(self) -> list[FunctionBreakpoint]:
@@ -328,6 +324,7 @@ class TraceEntry:
     value: str  # Result or "<error: ...>", "<timeout>", "<rate limited>"
     thread_id: int
     tracepoint_id: str
+    frame_id: int | None = None
 
 
 @dataclass
@@ -341,9 +338,7 @@ class Tracepoint:
     breakpoint_id: int | None = None  # DAP breakpoint ID
     hit_count: int = 0
     active: bool = True
-    dap_line: int | None = (
-        None  # Adjusted line propagated from the underlying DAP breakpoint
-    )
+    dap_line: int | None = None  # Adjusted line propagated from the underlying DAP breakpoint
 
 
 @dataclass
@@ -524,6 +519,7 @@ class SessionState:
         repr=False,
         compare=False,
     )
+    activity_epoch_sequence: int = 0
     continued_events: int = 0
     stopped_events: int = 0
     step_stops: int = 0
@@ -555,12 +551,8 @@ class SessionState:
             "lastResumeAt": self.last_resume_at,
             "lastStopAt": self.last_stop_at,
             "modules": [m.to_dict() for m in self.modules],
-            "loadedSources": {
-                key: value.to_dict() for key, value in self.loaded_sources.items()
-            },
-            "activeProgress": {
-                key: value.to_dict() for key, value in self.active_progress.items()
-            },
+            "loadedSources": {key: value.to_dict() for key, value in self.loaded_sources.items()},
+            "activeProgress": {key: value.to_dict() for key, value in self.active_progress.items()},
             "stopDescription": self.stop_description,
             "stopText": self.stop_text,
             "lastInvalidation": (

@@ -257,6 +257,8 @@ class InstrumentationGroupService:
                     "line": entry.line,
                     "expression": entry.expression,
                     "value": entry.value,
+                    "thread_id": entry.thread_id,
+                    "frame_id": entry.frame_id,
                     "tracepoint_id": entry.tracepoint_id,
                 }
                 for entry in entries[:MAX_TRACE_LOG_LINES]

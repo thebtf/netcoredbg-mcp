@@ -3,6 +3,14 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
+from ...runtime_smoke_correlation import (
+    action_sample_provenance,
+    attach_sample_correlation,
+    correlation_source,
+)
+
+KIND = "debug.evaluate"
+
 
 async def handle_debug_evaluate(
     probe: dict[str, Any],
@@ -11,21 +19,7 @@ async def handle_debug_evaluate(
     phase: str,
 ) -> dict[str, Any]:
     expression = str(probe.get("expression") or "")
-    adapters = context.action_context.service_adapters
-    if "debug.evaluate" in adapters:
-        result = await context.call_adapter("debug.evaluate", expression=expression)
-    else:
-        evaluate = getattr(context.session, "evaluate_expression", None)
-        if evaluate is None:
-            result = {
-                "status": "BLOCKED",
-                "reason": "no stopped frame",
-                "value": None,
-            }
-        else:
-            result = evaluate(expression)
-            if inspect.isawaitable(result):
-                result = await result
+    result = await _evaluate_probe_expression(context, expression)
     result = _normalize_evaluate_result(result)
     status = str(result.get("status", "PASS"))
     value = result.get("value")
@@ -33,8 +27,8 @@ async def handle_debug_evaluate(
     if phase == "after" and "expected" in probe and status == "PASS" and value != expected:
         status = "FAIL"
     output = {
-        "name": str(probe.get("name") or expression or "debug.evaluate"),
-        "kind": "debug.evaluate",
+        "name": str(probe.get("name") or expression or KIND),
+        "kind": KIND,
         "status": status,
         "value": value,
     }
@@ -44,7 +38,33 @@ async def handle_debug_evaluate(
         output["reason"] = result.get("reason", "expected value did not match")
     if status == "BLOCKED":
         output["reason"] = result.get("reason", "debug evaluation blocked")
-    return output
+    source_label = correlation_source(probe, fallback="") if "correlation_source" in probe else None
+    return attach_sample_correlation(
+        output,
+        result.get("correlation"),
+        provenance=action_sample_provenance(
+            context.action_context,
+            raw_result=result,
+        ),
+        source_label=source_label,
+    )
+
+
+async def _evaluate_probe_expression(context: Any, expression: str) -> Any:
+    adapters = context.action_context.service_adapters
+    if KIND in adapters:
+        return await context.call_adapter(KIND, expression=expression)
+    evaluate = getattr(context.session, "evaluate_expression", None)
+    if evaluate is None:
+        return {
+            "status": "BLOCKED",
+            "reason": "no stopped frame",
+            "value": None,
+        }
+    result = evaluate(expression)
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 
 def _normalize_evaluate_result(result: Any) -> dict[str, Any]:

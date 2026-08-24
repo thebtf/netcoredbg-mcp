@@ -13,7 +13,7 @@ agent workflow. `netcoredbg-mcp` combines `netcoredbg`, the Debug Adapter
 Protocol, and Windows UI Automation so an agent can observe a running app,
 stop it deliberately, and inspect the state that explains the behavior.
 
-**Python 3.10+ · Windows GUI automation · 135 tools · 8 prompts · 4 resources · v0.23.9**
+**Python 3.10+ · Windows GUI automation · 135 tools · 8 prompts · 4 resources · v0.23.10**
 
 ## What it enables
 

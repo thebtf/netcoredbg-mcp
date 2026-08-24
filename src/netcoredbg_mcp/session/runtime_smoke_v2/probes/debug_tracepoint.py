@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...runtime_smoke_correlation import (
+    action_sample_provenance,
+    attach_sample_correlation,
+    correlation_source,
+)
 from ...tracepoint_policy import (
     SAFE_TRACEPOINT_EXPRESSION_GUIDANCE,
     classify_tracepoint_logs,
@@ -24,34 +29,43 @@ async def handle_debug_tracepoint(
 ) -> dict[str, Any]:
     kind = "debug.tracepoint"
     if not service_available(context, kind):
-        return blocked_probe(
-            probe,
-            kind=kind,
-            requested={
-                "file": probe.get("file"),
-                "line": probe.get("line"),
-                "expression": probe.get("expression"),
-            },
-            next_step="Attach a tracepoint-capable debug adapter before running this probe.",
+        return _attach_tracepoint_correlation(
+            blocked_probe(
+                probe,
+                kind=kind,
+                requested={
+                    "file": probe.get("file"),
+                    "line": probe.get("line"),
+                    "expression": probe.get("expression"),
+                },
+                next_step="Attach a tracepoint-capable debug adapter before running this probe.",
+            ),
+            context,
         )
 
     line, line_error = _optional_int(probe.get("line"), field_name="line")
     if line_error is not None:
-        return _invalid_numeric_probe(probe, kind=kind, reason=line_error)
+        return _attach_tracepoint_correlation(
+            _invalid_numeric_probe(probe, kind=kind, reason=line_error),
+            context,
+        )
     expression = str(probe.get("expression") or "")
     policy_error = tracepoint_expression_policy_error(expression)
     if policy_error is not None:
-        return {
-            "name": probe_name(probe, kind),
-            "kind": kind,
-            "status": "FAIL",
-            "classification": "UNSAFE_EXPRESSION",
-            "reason": "unsafe tracepoint expression",
-            "value": None,
-            "accepted": {
-                "expression": SAFE_TRACEPOINT_EXPRESSION_GUIDANCE,
+        return _attach_tracepoint_correlation(
+            {
+                "name": probe_name(probe, kind),
+                "kind": kind,
+                "status": "FAIL",
+                "classification": "UNSAFE_EXPRESSION",
+                "reason": "unsafe tracepoint expression",
+                "value": None,
+                "accepted": {
+                    "expression": SAFE_TRACEPOINT_EXPRESSION_GUIDANCE,
+                },
             },
-        }
+            context,
+        )
 
     result = await context.call_adapter(
         kind,
@@ -61,11 +75,12 @@ async def handle_debug_tracepoint(
         phase=phase,
     )
     status = str(result.get("status", "PASS"))
-    value = {
+    logs: list[Any] = list(result.get("logs") or [])
+    value: dict[str, Any] = {
         "hit_count": _coerce_int(result.get("hit_count"), default=0),
-        "logs": list(result.get("logs") or []),
+        "logs": logs,
     }
-    output = {
+    output: dict[str, Any] = {
         "name": probe_name(probe, kind),
         "kind": kind,
         "status": status,
@@ -77,10 +92,21 @@ async def handle_debug_tracepoint(
     if ref:
         output["evidence_ref"] = ref
     classification, classification_reason = classify_tracepoint_logs(value["logs"])
+    source_label = correlation_source(probe, fallback="") if "correlation_source" in probe else None
+    correlation = attach_sample_correlation(
+        output,
+        result.get("correlation"),
+        provenance=action_sample_provenance(
+            context.action_context,
+            raw_result=result,
+        ),
+        source_label=source_label,
+    )
+    output = correlation
     if classification is not None:
         output["status"] = "BLOCKED"
         output["classification"] = classification
-        output["reason"] = classification_reason
+        output["reason"] = str(classification_reason or classification)
         return output
     if "expected_hit_count" in probe:
         expected, expected_error = _required_int(
@@ -112,6 +138,22 @@ async def handle_debug_tracepoint(
             output["reason"] = "tracepoint hit count did not match"
         return output
     return attach_expected_and_status(output, probe=probe, phase=phase, value=value)
+
+
+def _attach_tracepoint_correlation(
+    output: dict[str, Any],
+    context: Any,
+    *,
+    raw_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return attach_sample_correlation(
+        output,
+        raw_result.get("correlation") if raw_result is not None else None,
+        provenance=action_sample_provenance(
+            context.action_context,
+            raw_result=raw_result,
+        ),
+    )
 
 
 def _optional_int(value: Any, *, field_name: str) -> tuple[int, str | None]:
