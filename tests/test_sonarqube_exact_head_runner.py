@@ -65,13 +65,21 @@ class TestSonarqubeExactHeadRunner(TestCase):
         )
 
         self.assertEqual(
-            {key: scanner_environment[key] for key in runner.SONAR_ENV if key in scanner_environment},
+            {
+                key: scanner_environment[key]
+                for key in runner.SONAR_ENV
+                if key in scanner_environment
+            },
             {"SONAR_HOST_URL": "https://sonar.example.test", "SONAR_TOKEN": "scan-token"},
         )
 
     def test_scanner_commands_supply_token_but_render_redacted(self):
         begin = runner.scanner_begin_command(
-            ["scanner"], Path("SonarQube.Analysis.xml"), "https://sonar.example.test", "a" * 40, "scan-token"
+            ["scanner"],
+            Path("SonarQube.Analysis.xml"),
+            "https://sonar.example.test",
+            "a" * 40,
+            "scan-token",
         )
         end = runner.scanner_end_command(["scanner"], "scan-token")
 
@@ -112,7 +120,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
             (nested_directory / ".env").write_text("SONAR_TOKEN=synthetic", encoding="utf-8")
 
             with self.assertRaisesRegex(runner.RunnerError, "in-tree .env"):
-                runner.load_credentials(self.context(primary_root, scanner_root), self.credentials())
+                runner.load_credentials(
+                    self.context(primary_root, scanner_root), self.credentials()
+                )
 
     def test_scanner_tree_symlink_directory_is_rejected_before_dotenv_scanning(self):
         with TemporaryDirectory() as temporary_directory:
@@ -259,20 +269,31 @@ class TestSonarqubeExactHeadRunner(TestCase):
     def test_missing_primary_root_dotenv_or_value_is_a_named_blocker(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            for content in (None, "SONAR_HOST_URL=https://sonar.example.test\nSONAR_TOKEN=scan-token\n"):
+            for content in (
+                None,
+                "SONAR_HOST_URL=https://sonar.example.test\nSONAR_TOKEN=scan-token\n",
+            ):
                 with self.subTest(content=content):
                     primary_root = root / ("missing" if content is None else "incomplete")
-                    scanner_root = root / ("missing-scanner" if content is None else "incomplete-scanner")
+                    scanner_root = root / (
+                        "missing-scanner" if content is None else "incomplete-scanner"
+                    )
                     primary_root.mkdir()
                     scanner_root.mkdir()
                     reader = (
-                        patch.object(runner, "read_verified_primary_dotenv", side_effect=FileNotFoundError)
+                        patch.object(
+                            runner, "read_verified_primary_dotenv", side_effect=FileNotFoundError
+                        )
                         if content is None
-                        else patch.object(runner, "read_verified_primary_dotenv", return_value=content)
+                        else patch.object(
+                            runner, "read_verified_primary_dotenv", return_value=content
+                        )
                     )
 
                     with reader:
-                        with self.assertRaisesRegex(runner.CredentialsUnavailable, "SONAR_CREDENTIALS_UNAVAILABLE"):
+                        with self.assertRaisesRegex(
+                            runner.CredentialsUnavailable, "SONAR_CREDENTIALS_UNAVAILABLE"
+                        ):
                             runner.load_credentials(self.context(primary_root, scanner_root), {})
 
     def test_admin_token_is_rejected_from_primary_root_dotenv_and_process(self):
@@ -292,7 +313,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
                         runner, "read_verified_primary_dotenv", return_value=content or ""
                     ):
                         with self.assertRaisesRegex(runner.RunnerError, "SONAR_ADMIN_TOKEN"):
-                            runner.load_credentials(self.context(primary_root, scanner_root), process_env)
+                            runner.load_credentials(
+                                self.context(primary_root, scanner_root), process_env
+                            )
 
     def test_load_credentials_rejects_noncanonical_case_sonar_tokens(self):
         with TemporaryDirectory() as temporary_directory:
@@ -328,7 +351,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
                         runner, "read_verified_primary_dotenv", return_value=content or ""
                     ):
                         with self.assertRaisesRegex(runner.RunnerError, "Unknown"):
-                            runner.load_credentials(self.context(primary_root, scanner_root), process_env)
+                            runner.load_credentials(
+                                self.context(primary_root, scanner_root), process_env
+                            )
 
     def test_malformed_host_is_a_named_credential_blocker(self):
         with TemporaryDirectory() as temporary_directory:
@@ -337,7 +362,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
             scanner_root = root / "scanner"
             primary_root.mkdir()
             scanner_root.mkdir()
-            with self.assertRaisesRegex(runner.CredentialsUnavailable, r"^SONAR_CREDENTIALS_UNAVAILABLE: SONAR_HOST_URL\."):
+            with self.assertRaisesRegex(
+                runner.CredentialsUnavailable, r"^SONAR_CREDENTIALS_UNAVAILABLE: SONAR_HOST_URL\."
+            ):
                 runner.load_credentials(
                     self.context(primary_root, scanner_root),
                     {**self.credentials(), "SONAR_HOST_URL": "sonar.example.test"},
@@ -373,7 +400,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 "run",
                 return_value=runner.subprocess.CompletedProcess([], 1, "HTTP 401 unauthorized"),
             ):
-                with self.assertRaisesRegex(runner.CredentialsUnavailable, r"^SONAR_CREDENTIALS_UNAVAILABLE: SONAR_TOKEN\."):
+                with self.assertRaisesRegex(
+                    runner.CredentialsUnavailable, r"^SONAR_CREDENTIALS_UNAVAILABLE: SONAR_TOKEN\."
+                ):
                     runner.run_process(
                         ["scanner", "begin"],
                         cwd=Path(temporary_directory),
@@ -386,14 +415,19 @@ class TestSonarqubeExactHeadRunner(TestCase):
     def test_ce_http_auth_error_is_attributed_to_scan_credential(self):
         class Opener:
             def open(self, *_args, **_kwargs):
-                raise runner.urllib.error.HTTPError("https://sonar.example.test", 401, "Unauthorized", None, None)
+                raise runner.urllib.error.HTTPError(
+                    "https://sonar.example.test", 401, "Unauthorized", None, None
+                )
 
         with patch.object(runner, "API_OPENER", Opener()):
             with self.assertRaises(runner.ApiHttpError) as raised:
-                runner.api_json("https://sonar.example.test", "/api/ce/task", {"id": "task"}, "scan-token")
+                runner.api_json(
+                    "https://sonar.example.test", "/api/ce/task", {"id": "task"}, "scan-token"
+                )
 
-        self.assertEqual((raised.exception.status, raised.exception.input_name), (401, "SONAR_TOKEN"))
-
+        self.assertEqual(
+            (raised.exception.status, raised.exception.input_name), (401, "SONAR_TOKEN")
+        )
 
     def test_head_drift_after_scan_is_rejected(self):
         with TemporaryDirectory() as temporary_directory:
@@ -410,6 +444,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
             with patch.object(runner, "git_output", return_value="!! bin/"):
                 with self.assertRaisesRegex(runner.RunnerError, "not clean"):
                     runner.strict_cleanliness(context, {}, "scanner begin")
+
     def test_attached_worktree_is_rejected(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -429,6 +464,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 ):
                     with self.assertRaisesRegex(runner.RunnerError, "detached HEAD"):
                         runner.git_context(root, {})
+
     def test_project_inventory_in_agent_hosted_worktree_keeps_projects(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory) / ".agent" / "worktrees" / "scanner"
@@ -441,7 +477,10 @@ class TestSonarqubeExactHeadRunner(TestCase):
             )
             solution, projects, standalone_projects = runner.project_inventory(root)
 
-        self.assertEqual((solution.name, projects, standalone_projects), ("netcoredbg-mcp.sln", [project.resolve()], []))
+        self.assertEqual(
+            (solution.name, projects, standalone_projects),
+            ("netcoredbg-mcp.sln", [project.resolve()], []),
+        )
 
     def test_project_inventory_excludes_fixture_projects_outside_scan_scope(self):
         with TemporaryDirectory() as temporary_directory:
@@ -460,8 +499,6 @@ class TestSonarqubeExactHeadRunner(TestCase):
             _, projects, standalone_projects = runner.project_inventory(root)
 
         self.assertEqual((projects, standalone_projects), ([project.resolve()], []))
-
-
 
     def test_compute_engine_readback_uses_submitted_task_and_scan_credential(self):
         calls = []
@@ -495,7 +532,13 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 calls,
             ),
             (
-                "analysis-1", "task-1", "task-1", "task-1", "analysis-1", runner.PROJECT_KEY, "SUCCESS",
+                "analysis-1",
+                "task-1",
+                "task-1",
+                "task-1",
+                "analysis-1",
+                runner.PROJECT_KEY,
+                "SUCCESS",
                 [("https://sonar.example.test", "/api/ce/task", {"id": "task-1"}, "scan-token")],
             ),
         )
@@ -506,26 +549,44 @@ class TestSonarqubeExactHeadRunner(TestCase):
             patch.object(
                 runner,
                 "api_json",
-                return_value={"task": {"id": "task-1", "status": "PENDING", "componentKey": runner.PROJECT_KEY}},
+                return_value={
+                    "task": {
+                        "id": "task-1",
+                        "status": "PENDING",
+                        "componentKey": runner.PROJECT_KEY,
+                    }
+                },
             ),
             patch.object(runner.time, "monotonic", side_effect=[0, runner.CE_TIMEOUT_SECONDS + 1]),
         ):
             with self.assertRaisesRegex(runner.RunnerError, "10-minute deadline"):
-                runner.wait_for_ce_task("https://sonar.example.test", "task-1", "scan-token", receipt)
+                runner.wait_for_ce_task(
+                    "https://sonar.example.test", "task-1", "scan-token", receipt
+                )
 
         self.assertEqual(
-            (receipt["compute_engine"]["last_observed_state"], bool(receipt["compute_engine"]["poll_deadline_at"])),
+            (
+                receipt["compute_engine"]["last_observed_state"],
+                bool(receipt["compute_engine"]["poll_deadline_at"]),
+            ),
             ("PENDING", True),
         )
 
     def test_compute_engine_no_response_preserves_marker_and_deadline(self):
         receipt = {}
-        with patch.object(runner, "api_json", side_effect=runner.ApiHttpError("/api/ce/task", 503, "SONAR_TOKEN")):
+        with patch.object(
+            runner, "api_json", side_effect=runner.ApiHttpError("/api/ce/task", 503, "SONAR_TOKEN")
+        ):
             with self.assertRaises(runner.ApiHttpError):
-                runner.wait_for_ce_task("https://sonar.example.test", "task-1", "scan-token", receipt)
+                runner.wait_for_ce_task(
+                    "https://sonar.example.test", "task-1", "scan-token", receipt
+                )
 
         self.assertEqual(
-            (receipt["compute_engine"]["last_observed_state"], bool(receipt["compute_engine"]["poll_deadline_at"])),
+            (
+                receipt["compute_engine"]["last_observed_state"],
+                bool(receipt["compute_engine"]["poll_deadline_at"]),
+            ),
             ("NO_RESPONSE", True),
         )
 
@@ -547,7 +608,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
             return {"projectStatus": {"status": "OK", "conditions": []}}
 
         with patch.object(runner, "api_json", side_effect=fake_api):
-            gate = runner.analysis_quality_gate("https://sonar.example.test", "analysis-1", "read-token")
+            gate = runner.analysis_quality_gate(
+                "https://sonar.example.test", "analysis-1", "read-token"
+            )
 
         self.assertEqual(
             (gate["analysis_id"], calls),
@@ -625,6 +688,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 {"project": runner.PROJECT_KEY, "p": "1", "ps": "500"},
             ),
         )
+
     def test_warn_error_and_none_quality_gates_are_rejected(self):
         for status in ("WARN", "ERROR", "NONE"):
             with self.subTest(status=status):
@@ -638,7 +702,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
             calls.append((host, endpoint, parameters, token))
             return {
                 "paging": {"pageIndex": 1, "pageSize": 500, "total": 1},
-                "issues": [{"key": "accepted-1", "issueStatus": "ACCEPTED", "resolution": "WONTFIX"}],
+                "issues": [
+                    {"key": "accepted-1", "issueStatus": "ACCEPTED", "resolution": "WONTFIX"}
+                ],
             }
 
         with patch.object(runner, "api_json", side_effect=fake_api):
@@ -647,8 +713,16 @@ class TestSonarqubeExactHeadRunner(TestCase):
         self.assertEqual(
             (inventory["query"], calls[0][2]),
             (
-                {"components": runner.PROJECT_KEY, "issueStatuses": "OPEN,CONFIRMED,FALSE_POSITIVE,ACCEPTED,FIXED,IN_SANDBOX"},
-                {"components": runner.PROJECT_KEY, "issueStatuses": "OPEN,CONFIRMED,FALSE_POSITIVE,ACCEPTED,FIXED,IN_SANDBOX", "p": "1", "ps": "500"},
+                {
+                    "components": runner.PROJECT_KEY,
+                    "issueStatuses": "OPEN,CONFIRMED,FALSE_POSITIVE,ACCEPTED,FIXED,IN_SANDBOX",
+                },
+                {
+                    "components": runner.PROJECT_KEY,
+                    "issueStatuses": "OPEN,CONFIRMED,FALSE_POSITIVE,ACCEPTED,FIXED,IN_SANDBOX",
+                    "p": "1",
+                    "ps": "500",
+                },
             ),
         )
 
@@ -834,7 +908,6 @@ class TestSonarqubeExactHeadRunner(TestCase):
                         runner,
                         "new_code_issue_inventory",
                         side_effect=new_code_issue_inventory,
-                        create=True,
                     )
                 )
                 patches.enter_context(patch.object(runner, "scanner_environment", return_value={}))
@@ -941,7 +1014,15 @@ class TestSonarqubeExactHeadRunner(TestCase):
     def test_false_positive_issue_disposition_blocks_release(self):
         disposition = runner.issue_dispositions(
             {"records": []},
-            {"records": [{"key": "false-positive-1", "issueStatus": "FALSE_POSITIVE", "resolution": "FALSE-POSITIVE"}]},
+            {
+                "records": [
+                    {
+                        "key": "false-positive-1",
+                        "issueStatus": "FALSE_POSITIVE",
+                        "resolution": "FALSE-POSITIVE",
+                    }
+                ]
+            },
         )
 
         self.assertEqual(disposition["blocking_count"], 1)
@@ -999,8 +1080,18 @@ class TestSonarqubeExactHeadRunner(TestCase):
         runner.configure_windows_process_api(kernel32, WinTypes)
 
         self.assertEqual(
-            (kernel32.OpenProcess.argtypes, kernel32.OpenProcess.restype, kernel32.WaitForSingleObject.argtypes, kernel32.CloseHandle.argtypes),
-            ([WinTypes.DWORD, WinTypes.BOOL, WinTypes.DWORD], WinTypes.HANDLE, [WinTypes.HANDLE, WinTypes.DWORD], [WinTypes.HANDLE]),
+            (
+                kernel32.OpenProcess.argtypes,
+                kernel32.OpenProcess.restype,
+                kernel32.WaitForSingleObject.argtypes,
+                kernel32.CloseHandle.argtypes,
+            ),
+            (
+                [WinTypes.DWORD, WinTypes.BOOL, WinTypes.DWORD],
+                WinTypes.HANDLE,
+                [WinTypes.HANDLE, WinTypes.DWORD],
+                [WinTypes.HANDLE],
+            ),
         )
 
     def test_windows_handle_is_normalized_before_crt_conversion_and_invalid_value_is_rejected(self):
@@ -1042,8 +1133,16 @@ class TestSonarqubeExactHeadRunner(TestCase):
         with TemporaryDirectory() as temporary_directory:
             receipt_path = Path(temporary_directory) / "candidate.json"
             runner.write_receipt(receipt_path, {"outcome": "PASS"}, ())
-            context = runner.GitContext(Path(temporary_directory), Path(temporary_directory), Path(temporary_directory), Path(temporary_directory), "a" * 40)
-            runner.write_receipt(receipt_path, runner.receipt_base(context, "candidate", "new-run"), ())
+            context = runner.GitContext(
+                Path(temporary_directory),
+                Path(temporary_directory),
+                Path(temporary_directory),
+                Path(temporary_directory),
+                "a" * 40,
+            )
+            runner.write_receipt(
+                receipt_path, runner.receipt_base(context, "candidate", "new-run"), ()
+            )
             replacement = json.loads(receipt_path.read_text(encoding="utf-8"))
 
         self.assertEqual(replacement["outcome"], "RUNNING")
@@ -1068,7 +1167,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
 
         with patch.object(runner, "API_OPENER", Opener()):
             with self.assertRaisesRegex(runner.RunnerError, "origin differs"):
-                runner.api_json("https://sonar.example.test", "/api/ce/task", {"id": "task"}, "scan-token")
+                runner.api_json(
+                    "https://sonar.example.test", "/api/ce/task", {"id": "task"}, "scan-token"
+                )
 
     def test_report_task_receipt_contains_only_non_sensitive_url_evidence(self):
         with TemporaryDirectory() as temporary_directory:
@@ -1146,7 +1247,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
     def test_redirect_handler_never_constructs_a_redirect_request(self):
         handler = runner.NoRedirectHandler()
 
-        self.assertIsNone(handler.redirect_request(None, None, 302, "https://other.example.test", {}, None))
+        self.assertIsNone(
+            handler.redirect_request(None, None, 302, "https://other.example.test", {}, None)
+        )
 
     def test_pass_receipt_schema_rejects_missing_observed_evidence(self):
         with self.assertRaisesRegex(runner.RunnerError, "evidence schema"):
