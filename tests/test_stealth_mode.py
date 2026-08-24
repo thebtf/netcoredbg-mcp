@@ -748,6 +748,97 @@ def test_session_manager_stealth_restore_waits_for_known_foreground_owner(monkey
 
 
 @pytest.mark.asyncio
+async def test_session_manager_waits_for_active_stealth_restore_before_foreground_mutation(
+    monkeypatch,
+) -> None:
+    from netcoredbg_mcp.session.manager import SessionManager
+
+    manager = SessionManager.__new__(SessionManager)
+    manager._state = SimpleNamespace(process_id=42)
+    entered_restore = threading.Event()
+    release_restore = threading.Event()
+    restored: list[str] = []
+
+    def blocking_restore(_: int | None) -> bool:
+        entered_restore.set()
+        release_restore.wait(timeout=1)
+        restored.append("restore")
+        return False
+
+    monkeypatch.setattr(manager, "_restore_foreground_if_safe", blocking_restore)
+    manager._stealth_foreground_restore_task = asyncio.create_task(
+        manager._restore_foreground_after_stealth_launch(123)
+    )
+    await asyncio.wait_for(asyncio.to_thread(entered_restore.wait), timeout=0.1)
+
+    cancellation = asyncio.create_task(manager.cancel_pending_stealth_foreground_restore())
+    await asyncio.sleep(0)
+    assert not cancellation.done()
+
+    release_restore.set()
+    await cancellation
+    assert restored == ["restore"]
+    assert manager._stealth_foreground_restore_task is None
+
+
+@pytest.mark.asyncio
+async def test_session_manager_joins_restore_worker_without_outer_task() -> None:
+    from netcoredbg_mcp.session.manager import SessionManager
+
+    manager = SessionManager.__new__(SessionManager)
+    release_worker = asyncio.Event()
+
+    async def worker() -> bool:
+        await release_worker.wait()
+        return False
+
+    manager._stealth_foreground_restore_task = None
+    tracked_worker = asyncio.create_task(worker())
+    manager._stealth_foreground_restore_worker = tracked_worker
+    join = asyncio.create_task(manager.cancel_pending_stealth_foreground_restore())
+    await asyncio.sleep(0)
+    assert not join.done()
+
+    release_worker.set()
+    await join
+    assert tracked_worker.done()
+    assert manager._stealth_foreground_restore_worker is None
+
+
+@pytest.mark.asyncio
+async def test_ui_screenshot_waits_for_restore_before_bridge_capture(tmp_path) -> None:
+    from PIL import Image
+
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    png = io.BytesIO()
+    Image.new("RGB", (8, 8), (255, 255, 255)).save(png, format="PNG")
+    backend = _typed_bitblt_backend(_typed_bitblt_bridge_screenshot(png.getvalue()))
+    session = _stealth_evidence_session(tmp_path, [])
+    cancel_restore = AsyncMock()
+    session.cancel_pending_stealth_foreground_restore = cancel_restore
+
+    async def capture_after_join(*args, **kwargs):
+        assert cancel_restore.await_count == 1
+        return _typed_bitblt_bridge_screenshot(png.getvalue())
+
+    backend._client.call.side_effect = capture_after_join
+    registry = ToolRegistry()
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(registry, session, check_session_access=lambda _ctx: None)
+        await registry.tools["ui_take_screenshot"](
+            SimpleNamespace(),
+            evidence=True,
+            format="png",
+            expected_hwnd=777,
+            expected_physical_width=8,
+            expected_physical_height=8,
+        )
+
+    cancel_restore.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
 async def test_session_manager_stop_cancels_stealth_foreground_restore_task() -> None:
     from netcoredbg_mcp.session.manager import DebugState, SessionManager
 
@@ -2360,6 +2451,14 @@ async def test_ui_take_screenshot_strict_black_printwindow_uses_typed_bitblt_fal
     backend = _typed_bitblt_backend(_typed_bitblt_bridge_screenshot(fallback_png.getvalue()))
     bundle_calls: list[tuple[str, str, str | None, int]] = []
     session = _stealth_evidence_session(tmp_path, bundle_calls)
+    cancel_restore = AsyncMock()
+    session.cancel_pending_stealth_foreground_restore = cancel_restore
+
+    async def capture_after_restore_cancel(*args, **kwargs):
+        assert cancel_restore.await_count == 1
+        return _typed_bitblt_bridge_screenshot(fallback_png.getvalue())
+
+    backend._client.call.side_effect = capture_after_restore_cancel
     registry = ToolRegistry()
 
     with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):

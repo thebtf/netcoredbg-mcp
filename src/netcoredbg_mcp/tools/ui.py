@@ -1633,6 +1633,9 @@ def register_ui_tools(
             # Strict physical assertions require the FlaUI bridge's PrintWindow raster
             # even when the session is not in stealth mode.
             if strict_target_requested or getattr(session, "stealth_mode", False):
+                cancel_restore = getattr(session, "cancel_pending_stealth_foreground_restore", None)
+                if callable(cancel_restore):
+                    await cancel_restore()
                 ui = await _ensure_ui_connected()
                 from ..ui.flaui_client import FlaUIBackend
 
@@ -1656,6 +1659,7 @@ def register_ui_tools(
                                 "expected_process_id": pid,
                             }
                         )
+
                     try:
                         bridge_result = await ui.client.call("screenshot", bridge_request)
                     except RuntimeError as error:
