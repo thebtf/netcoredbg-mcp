@@ -342,19 +342,21 @@ class TestSonarqubeExactHeadRunner(TestCase):
                     {**self.credentials(), "SONAR_HOST_URL": "sonar.example.test"},
                 )
 
-    def test_credential_free_host_requires_secure_or_literal_loopback_http(self):
+    def test_credential_free_host_accepts_http_and_https_authorities(self):
         for supplied, expected in (
             ("https://sonar.example.test:9000", "https://sonar.example.test:9000"),
-            ("http://127.0.0.1:9000", "http://127.0.0.1:9000"),
-            ("http://[::1]:9000", "http://[::1]:9000"),
+            ("http://sonar.example.test:9000", "http://sonar.example.test:9000"),
+            ("https://sonar.example.test/", "https://sonar.example.test"),
+            ("http://sonar.example.test/", "http://sonar.example.test"),
         ):
             with self.subTest(supplied=supplied):
                 self.assertEqual(runner.credential_free_host(supplied), expected)
 
         for supplied in (
-            "http://sonar.example.test",
-            "http://localhost:9000",
-            "http://192.168.1.10:9000",
+            "https://user@sonar.example.test",
+            "https://user:password@sonar.example.test",
+            "https://sonar.example.test?query=value",
+            "https://sonar.example.test#fragment",
             "https://sonar.example.test:not-a-port",
             "https://sonar.example.test:65536",
             "https://sonar.example.test/path",
@@ -362,16 +364,6 @@ class TestSonarqubeExactHeadRunner(TestCase):
             with self.subTest(supplied=supplied):
                 with self.assertRaisesRegex(runner.CredentialsUnavailable, "SONAR_HOST_URL"):
                     runner.credential_free_host(supplied)
-
-    def test_credential_free_host_canonicalizes_root_slash_and_rejects_nonroot_paths(self):
-        canonical_origin = "https://sonar.example.test"
-
-        for supplied in (canonical_origin, f"{canonical_origin}/"):
-            with self.subTest(supplied=supplied):
-                self.assertEqual(runner.credential_free_host(supplied), canonical_origin)
-
-        with self.assertRaisesRegex(runner.CredentialsUnavailable, "SONAR_HOST_URL"):
-            runner.credential_free_host(f"{canonical_origin}/project")
 
     def test_scanner_auth_failure_is_a_named_credential_blocker(self):
         with TemporaryDirectory() as temporary_directory:
@@ -855,6 +847,27 @@ class TestSonarqubeExactHeadRunner(TestCase):
             )
 
             task_report = runner.report_task(root, "https://sonar.example.test")
+
+        self.assertTrue(task_report["server_origin_matches_configured"])
+
+    def test_report_task_accepts_http_server_url_against_configured_http_origin(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            report_path = root / ".sonarqube" / "out" / ".sonar" / "report-task.txt"
+            report_path.parent.mkdir(parents=True)
+            report_path.write_text(
+                "\n".join(
+                    (
+                        f"projectKey={runner.PROJECT_KEY}",
+                        "ceTaskId=task-1",
+                        "serverUrl=http://sonar.example.test",
+                        f"dashboardUrl=http://sonar.example.test/dashboard?id={runner.PROJECT_KEY}",
+                    )
+                ),
+                encoding="utf-8",
+            )
+
+            task_report = runner.report_task(root, "http://sonar.example.test")
 
         self.assertTrue(task_report["server_origin_matches_configured"])
 

@@ -21,11 +21,11 @@ path can be supplied as a single executable with `--scanner <path>`.
 The maintainer performing this one-time onboarding creates two **project-scoped**
 SonarQube tokens for `thebtf_netcoredbg_mcp`: an analysis token with Execute
 Analysis access and a separate non-admin Browse token. The maintainer writes
-them, together with an HTTPS SonarQube origin, to the primary repository-root
-`.env`. The only HTTP exception is a literal numeric IPv4 loopback address or
-`[::1]`. The runner accepts a pathless origin or a root `/` suffix and
-canonicalizes both to `scheme://netloc`. This is the durable local runtime source
-for the runner.
+them, together with a declared credential-free HTTP(S) SonarQube origin, to the
+primary repository-root `.env`. `SONAR_HOST_URL` is authoritative: the runner
+accepts a pathless origin or a root `/` suffix and canonicalizes both to
+`scheme://netloc`; it does not upgrade or rewrite the configured scheme or
+authority. This is the durable local runtime source for the runner.
 
 The runner derives that root instead of trusting its current working directory:
 

@@ -85,9 +85,10 @@ only dotenv path as `<coordination-root>/.env`, where `coordination-root` is
 the parent of `git rev-parse --git-common-dir`. It verifies and reads the same
 no-follow file object, requiring owner-only access. On Windows, this includes a
 non-reparse file, the current user's owner SID, a protected DACL, and no allow
-ACE for another SID. `SONAR_HOST_URL` must be HTTPS except for literal numeric
-IPv4 loopback or `[::1]` HTTP origins. The runner accepts a pathless origin or a
-root `/` suffix and canonicalizes both to `scheme://netloc`. Explicit process
+ACE for another SID. The declared credential-free HTTP(S) `SONAR_HOST_URL` origin
+is authoritative. The runner accepts a pathless origin or a root `/` suffix and
+canonicalizes both to `scheme://netloc`; it does not upgrade or rewrite the
+configured scheme or authority. Explicit process
 values override the file only when their names use exact canonical casing. The
 runner rejects `SONAR_ADMIN_TOKEN`, every other or mis-cased `SONAR_*` credential
 name, and a scanner worktree containing `.env`, a symbolic link, or any reparse

@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import ipaddress
 import json
 import os
 import re
@@ -135,13 +134,6 @@ def credential_free_host(value: str) -> str:
         or (parsed.netloc.endswith(":") and not parsed.netloc.endswith("]"))
     ):
         raise CredentialsUnavailable("SONAR_HOST_URL")
-    if parsed.scheme == "http":
-        try:
-            address = ipaddress.ip_address(hostname)
-        except ValueError as error:
-            raise CredentialsUnavailable("SONAR_HOST_URL") from error
-        if not ((address.version == 4 and address.is_loopback) or hostname == "::1"):
-            raise CredentialsUnavailable("SONAR_HOST_URL")
     return f"{parsed.scheme}://{parsed.netloc}"
 
 

@@ -112,11 +112,11 @@ points, a non-owner SID, a missing or unprotected DACL, and any allow ACE for a
 different SID. On other platforms, it requires the current user to own a regular
 file with no group or other permission bits.
 
-`SONAR_HOST_URL` must be an HTTPS origin. HTTP is allowed only for a literal
-numeric IPv4 loopback address or `[::1]`. The runner accepts a pathless origin
-or a root `/` suffix and canonicalizes both to `scheme://netloc`. It rejects HTTP
-hostnames, non-loopback HTTP addresses, non-root paths, queries, fragments,
-userinfo, and invalid ports. Explicit values in the runner's parent process
+`SONAR_HOST_URL` declares the authoritative credential-free `http` or `https`
+origin. The runner accepts a pathless origin or a root `/` suffix and canonicalizes
+both to `scheme://netloc`; it does not upgrade or rewrite the configured scheme
+or authority. It rejects non-root paths, queries, fragments, userinfo, and invalid
+ports. Explicit values in the runner's parent process
 override the corresponding `.env` values only when their names use the exact
 canonical casing. The runner rejects every other `SONAR_*` input and removes
 every case variant from child environments. It refuses a scanner worktree that
