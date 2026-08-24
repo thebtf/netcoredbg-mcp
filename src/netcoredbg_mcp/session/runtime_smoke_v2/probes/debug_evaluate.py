@@ -9,6 +9,8 @@ from ...runtime_smoke_correlation import (
     correlation_source,
 )
 
+KIND = "debug.evaluate"
+
 
 async def handle_debug_evaluate(
     probe: dict[str, Any],
@@ -25,8 +27,8 @@ async def handle_debug_evaluate(
     if phase == "after" and "expected" in probe and status == "PASS" and value != expected:
         status = "FAIL"
     output = {
-        "name": str(probe.get("name") or expression or "debug.evaluate"),
-        "kind": "debug.evaluate",
+        "name": str(probe.get("name") or expression or KIND),
+        "kind": KIND,
         "status": status,
         "value": value,
     }
@@ -50,8 +52,8 @@ async def handle_debug_evaluate(
 
 async def _evaluate_probe_expression(context: Any, expression: str) -> Any:
     adapters = context.action_context.service_adapters
-    if "debug.evaluate" in adapters:
-        return await context.call_adapter("debug.evaluate", expression=expression)
+    if KIND in adapters:
+        return await context.call_adapter(KIND, expression=expression)
     evaluate = getattr(context.session, "evaluate_expression", None)
     if evaluate is None:
         return {
