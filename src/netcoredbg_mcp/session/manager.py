@@ -202,7 +202,7 @@ class SessionManager:
             if delay_seconds:
                 await asyncio.sleep(delay_seconds)
 
-            if not self._restore_foreground_if_safe(saved_hwnd):
+            if not await asyncio.to_thread(self._restore_foreground_if_safe, saved_hwnd):
                 return
 
     async def _cancel_stealth_foreground_restore_task(self) -> None:

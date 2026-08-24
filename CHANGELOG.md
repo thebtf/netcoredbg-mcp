@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - `ui_take_screenshot` now uses the explicit validated crop and strict-capture values throughout its public execution path, so malformed input returns the documented validation error rather than relying on an internal assertion.
+- Stealth foreground restoration now performs native foreground work outside the MCP event loop, so a stalled Win32 restore cannot delay UI bridge discovery or its bounded timeout.
 
 ## [0.23.9] - 2026-08-23
 
