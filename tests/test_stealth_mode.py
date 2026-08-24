@@ -688,6 +688,37 @@ async def test_session_manager_stealth_launch_restores_while_safe(
     assert sleep.await_count == 2
 
 
+@pytest.mark.asyncio
+async def test_session_manager_stealth_restore_keeps_event_loop_responsive(monkeypatch) -> None:
+    from netcoredbg_mcp.session.manager import SessionManager
+
+    manager = SessionManager.__new__(SessionManager)
+    manager._state = SimpleNamespace(process_id=42)
+
+    entered_restore = threading.Event()
+    release_restore = threading.Event()
+
+    def blocking_restore(_: int | None) -> bool:
+        entered_restore.set()
+        release_restore.wait(timeout=1)
+        return False
+
+    monkeypatch.setattr(manager, "_restore_foreground_if_safe", blocking_restore)
+    heartbeat = asyncio.Event()
+
+    async def signal_heartbeat() -> None:
+        while not entered_restore.is_set():
+            await asyncio.sleep(0)
+        heartbeat.set()
+        release_restore.set()
+
+    restore_task = asyncio.create_task(manager._restore_foreground_after_stealth_launch(123))
+    heartbeat_task = asyncio.create_task(signal_heartbeat())
+    await asyncio.wait_for(heartbeat.wait(), timeout=0.1)
+    await restore_task
+    await heartbeat_task
+
+
 def test_session_manager_stealth_restore_waits_for_process_id(monkeypatch) -> None:
     from netcoredbg_mcp.session.manager import SessionManager
 
