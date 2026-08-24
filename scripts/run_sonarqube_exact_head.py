@@ -1505,6 +1505,23 @@ def validate_pass_receipt(receipt: Mapping[str, Any]) -> None:
         or any(not isinstance(path, str) or not path for path in cleanup["removed"])
     ):
         raise RunnerError("PASS receipt lacks successful generated-artifact cleanup evidence.")
+    removed = cleanup["removed"]
+    if (
+        any(
+            "\\" in path
+            or path.startswith("/")
+            or re.match(r"^[A-Za-z]:", path)
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+            for path in removed
+        )
+        or len(set(removed)) != len(removed)
+        or removed
+        != sorted(
+            removed,
+            key=lambda path: (-len(path.split("/")), path.casefold(), path),
+        )
+    ):
+        raise RunnerError("PASS receipt has invalid generated-artifact cleanup removals.")
     if not isinstance(scanner, dict) or not scanner.get("observed") or scanner.get("project_key") != PROJECT_KEY or scanner.get("sonar_scm_revision") != receipt.get("captured_head"):
         raise RunnerError("PASS receipt lacks observed scanner project/revision evidence.")
     if (

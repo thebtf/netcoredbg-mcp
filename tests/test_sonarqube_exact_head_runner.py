@@ -1657,6 +1657,20 @@ class TestSonarqubeExactHeadRunner(TestCase):
         receipt["scanner_metadata"].pop("observed")
         with self.assertRaisesRegex(runner.RunnerError, "scanner project/revision"):
             runner.validate_pass_receipt(receipt)
+        receipt["scanner_metadata"]["observed"] = True
+        invalid_cleanup_removals = (
+            ["/absolute/obj"],
+            ["C:/absolute/obj"],
+            ["../escaped/obj"],
+            ["nested/../not-normalized"],
+            ["nested/obj", "nested/obj"],
+            ["zulu", "nested/deep/obj"],
+        )
+        for removed in invalid_cleanup_removals:
+            with self.subTest(removed=removed):
+                receipt["cleanup"]["removed"] = removed
+                with self.assertRaises(runner.RunnerError):
+                    runner.validate_pass_receipt(receipt)
 
     def test_disposition_counts_are_recomputed_from_inventory(self):
         issue_before = {"records": []}
