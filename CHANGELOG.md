@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.10] - 2026-08-25
+
+### Fixed
+- `ui_take_screenshot` now uses the explicit validated crop and strict-capture values throughout its public execution path, so malformed input returns the documented validation error rather than relying on an internal assertion.
+
 ## [0.23.9] - 2026-08-23
 
 ### Fixed
