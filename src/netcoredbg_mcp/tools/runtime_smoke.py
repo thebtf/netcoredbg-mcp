@@ -8,7 +8,7 @@ import re
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 from mcp.server.fastmcp import Context, FastMCP
@@ -72,7 +72,7 @@ def register_runtime_smoke_tools(
             )
         return backend_holder["instance"]
 
-    async def _ensure_ui_connected() -> Any:
+    async def _ensure_ui_connected(*, observation: bool = False) -> Any:
         from ..ui import NoActiveSessionError, NoProcessIdError
 
         if session.state.state == DebugState.IDLE:
@@ -93,13 +93,27 @@ def register_runtime_smoke_tools(
                 process_id,
                 stealth_mode=getattr(session, "stealth_mode", False),
             )
+
+        method_name = (
+            "wait_for_pending_stealth_foreground_restore"
+            if observation
+            else "cancel_pending_stealth_foreground_restore"
+        )
+        join = getattr(session, method_name, None)
+        if join is not None:
+            await cast(Callable[[], Awaitable[None]], join)()
+
         return backend
+
+    async def _ensure_observation_ui_connected() -> Any:
+        return await _ensure_ui_connected(observation=True)
 
     def _runner() -> RuntimeSmokeRunner:
         return RuntimeSmokeRunner(
             session,
             service_adapters=ui_operation_adapters(
                 _ensure_ui_connected,
+                observation_ui_connected=_ensure_observation_ui_connected,
                 session=session,
             ),
         )

@@ -10,6 +10,7 @@ from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -56,6 +57,8 @@ class FakeRuntimeSmokeSession:
         self.grid_calls = 0
         self.workflow_calls: list[str] = []
         self.failing_action_calls = 0
+        self.cancel_pending_stealth_foreground_restore = AsyncMock()
+        self.process_registry = None
         self.stop_calls = 0
         self.launch_calls = 0
         self.allowed_root: Path | None = None
@@ -628,6 +631,10 @@ async def test_ui_invoke_uses_fallback_key_sequence_when_primary_missing() -> No
             self.key_sequence_calls.append((dict(selector), list(modifiers), list(keys)))
             return {
                 "status": "PASS",
+                "focused": {
+                    "foreground_verified": True,
+                    "target_focus_verified": True,
+                },
                 "sent_count": len(keys),
                 "final_held_modifiers": [],
             }
@@ -5687,6 +5694,156 @@ async def test_runner_skips_plan_owned_cleanup_when_restore_schema_is_invalid(
     assert session.stop_calls == 0
     assert session.hygiene_calls == 0
     assert result["cleanup"]["attempted"] == ["runtime_smoke_reset"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_observation_provider_preserves_pending_restore(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeRuntimeSmokeSession()
+    call_order: list[str] = []
+
+    async def wait_restore() -> None:
+        call_order.append("wait")
+
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock(side_effect=wait_restore)
+    session.cancel_pending_stealth_foreground_restore = AsyncMock()
+
+    class Backend:
+        process_id = 1234
+
+        async def find_element(self, **_kwargs: Any) -> dict[str, Any]:
+            call_order.append("find")
+            return {"status": "PASS", "name": "Ready"}
+
+    backend = Backend()
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_runtime_smoke_tools(
+        mcp=capturing_mcp,
+        session=cast(Any, session),
+        check_session_access=lambda _ctx: None,
+        resolve_project_root=_noop_resolve_project_root,
+    )
+
+    response = await capturing_mcp.tools["run_runtime_smoke"](
+        ctx=None,
+        plan={
+            "schema": "netcoredbg.runtime_smoke.v1",
+            "steps": [
+                {
+                    "op": "ui.get_property",
+                    "selector": {"automation_id": "StatusText"},
+                    "property": "Name",
+                }
+            ],
+        },
+    )
+
+    assert response["data"]["status"] == "PASS"
+    assert call_order == ["wait", "find"]
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_mutation_connect_failure_preserves_pending_restore(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeRuntimeSmokeSession()
+    backend = SimpleNamespace(process_id=None)
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    monkeypatch.setattr(
+        "netcoredbg_mcp.ui.backend.connect_backend",
+        AsyncMock(side_effect=TimeoutError("connect timeout")),
+    )
+    register_runtime_smoke_tools(
+        mcp=capturing_mcp,
+        session=cast(Any, session),
+        check_session_access=lambda _ctx: None,
+        resolve_project_root=_noop_resolve_project_root,
+    )
+
+    response = await capturing_mcp.tools["run_runtime_smoke"](
+        ctx=None,
+        plan={
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "connect-failure",
+            "cases": [
+                {
+                    "id": "case",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.invoke",
+                                "selector": {"automation_id": "StartButton"},
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    assert response["data"]["status"] == "BLOCKED"
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_runtime_smoke_ui_provider_joins_pending_restore_before_backend_action(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeRuntimeSmokeSession()
+    call_order: list[str] = []
+
+    async def join_restore() -> None:
+        call_order.append("join")
+
+    session.cancel_pending_stealth_foreground_restore = AsyncMock(side_effect=join_restore)
+
+    class Backend:
+        process_id = 1234
+
+        async def invoke_element(self, **_kwargs: Any) -> dict[str, Any]:
+            call_order.append("invoke")
+            return {"status": "PASS", "invoked": True}
+
+    backend = Backend()
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_runtime_smoke_tools(
+        mcp=capturing_mcp,
+        session=cast(Any, session),
+        check_session_access=lambda _ctx: None,
+        resolve_project_root=_noop_resolve_project_root,
+    )
+
+    response = await capturing_mcp.tools["run_runtime_smoke"](
+        ctx=None,
+        plan={
+            "schema": "netcoredbg.runtime_smoke.v2",
+            "name": "restore-join",
+            "cases": [
+                {
+                    "id": "case",
+                    "transitions": [
+                        {
+                            "action": {
+                                "kind": "ui.invoke",
+                                "selector": {"automation_id": "StartButton"},
+                            },
+                            "probes": [],
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    assert response["data"]["status"] == "PASS"
+    assert call_order == ["join", "invoke"]
 
 
 @pytest.mark.asyncio
