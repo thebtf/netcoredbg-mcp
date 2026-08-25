@@ -1647,8 +1647,8 @@ def register_ui_tools(
                 )
 
             loop = asyncio.get_running_loop()
+            restore_joined = False
 
-            await _join_launch_foreground_restore()
             if strict_target_requested or getattr(session, "stealth_mode", False):
                 ui = await _ensure_ui_connected(restore_joined=True)
                 from ..ui.flaui_client import FlaUIBackend
@@ -1674,12 +1674,15 @@ def register_ui_tools(
                             }
                         )
 
+                    await _join_launch_foreground_restore()
+                    restore_joined = True
                     try:
                         bridge_result = await ui.client.call("screenshot", bridge_request)
                     except RuntimeError as error:
                         if strict_target_requested:
                             raise _PhysicalCaptureProvenanceUnavailableError(
-                                f"Physical target assertions require successful bridge capture: {error}"
+                                "Physical target assertions require successful bridge capture: "
+                                f"{error}"
                             ) from error
                         raise
                     foreground_mutation_attempted = (
@@ -1932,6 +1935,9 @@ def register_ui_tools(
                         state=session.state.state,
                     )
 
+                if not restore_joined:
+                    await _join_launch_foreground_restore()
+                    restore_joined = True
                 if evidence:
                     png_bytes, raw_width, raw_height, capture_metadata = await loop.run_in_executor(
                         None,

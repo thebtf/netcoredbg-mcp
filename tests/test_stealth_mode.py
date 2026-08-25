@@ -1048,6 +1048,44 @@ async def test_ui_screenshot_waits_for_restore_before_bridge_capture(tmp_path) -
 
 
 @pytest.mark.asyncio
+async def test_ui_take_screenshot_connect_failure_preserves_pending_restore() -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    events: list[str] = []
+    backend = SimpleNamespace(process_id=None)
+
+    async def fail_connect(*_args, **_kwargs) -> None:
+        events.append("connect")
+        raise asyncio.TimeoutError("connect timeout")
+
+    async def cancel_restore() -> None:
+        events.append("cancel")
+
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=True,
+        cancel_pending_stealth_foreground_restore=AsyncMock(side_effect=cancel_restore),
+    )
+    registry = ToolRegistry()
+
+    with (
+        patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend),
+        patch(
+            "netcoredbg_mcp.ui.backend.connect_backend",
+            AsyncMock(side_effect=fail_connect),
+        ),
+    ):
+        register_ui_tools(registry, session, check_session_access=lambda _ctx: None)
+        response = await registry.tools["ui_take_screenshot"](SimpleNamespace())
+
+    assert response["error"] == "connect timeout"
+    assert events == ["connect"]
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_session_manager_stop_cancels_stealth_foreground_restore_task() -> None:
     from netcoredbg_mcp.session.manager import DebugState, SessionManager
 
