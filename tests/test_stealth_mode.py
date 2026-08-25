@@ -782,6 +782,49 @@ async def test_session_manager_waits_for_active_stealth_restore_before_foregroun
 
 
 @pytest.mark.asyncio
+async def test_session_manager_keeps_restore_joined_across_concurrent_callers(
+    monkeypatch,
+) -> None:
+    from netcoredbg_mcp.session.manager import SessionManager
+
+    manager = SessionManager.__new__(SessionManager)
+    manager._state = SimpleNamespace(process_id=42)
+    entered_restore = threading.Event()
+    release_restore = threading.Event()
+
+    def blocking_restore(_: int | None) -> bool:
+        entered_restore.set()
+        release_restore.wait(timeout=1)
+        return False
+
+    monkeypatch.setattr(manager, "_restore_foreground_if_safe", blocking_restore)
+    outer = asyncio.create_task(manager._restore_foreground_after_stealth_launch(123))
+    manager._stealth_foreground_restore_task = outer
+    outer.add_done_callback(manager._finish_stealth_foreground_restore_task)
+    await asyncio.wait_for(asyncio.to_thread(entered_restore.wait), timeout=0.1)
+
+    first = asyncio.create_task(manager.cancel_pending_stealth_foreground_restore())
+    for _ in range(10):
+        if outer.cancelling():
+            break
+        await asyncio.sleep(0)
+    assert outer.cancelling()
+
+    second = asyncio.create_task(manager.cancel_pending_stealth_foreground_restore())
+    for _ in range(10):
+        if outer.done():
+            break
+        await asyncio.sleep(0)
+
+    third = asyncio.create_task(manager.cancel_pending_stealth_foreground_restore())
+    await asyncio.sleep(0)
+    assert not third.done()
+
+    release_restore.set()
+    await asyncio.gather(first, second, third)
+
+
+@pytest.mark.asyncio
 async def test_session_manager_joins_restore_worker_without_outer_task() -> None:
     from netcoredbg_mcp.session.manager import SessionManager
 

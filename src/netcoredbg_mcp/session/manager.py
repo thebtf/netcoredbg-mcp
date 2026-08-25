@@ -125,6 +125,7 @@ class SessionManager:
         self._snapshot_manager: SnapshotManager | None = None
         self._stealth_foreground_restore_task: asyncio.Task[None] | None = None
         self._stealth_foreground_restore_worker: asyncio.Task[bool] | None = None
+        self._stealth_foreground_restore_join_task: asyncio.Task[None] | None = None
         self._resource_update_callback: Callable[[tuple[str, ...]], Awaitable[None]] | None = None
         # At most one live delivery task per URI; further revisions coalesce.
         self._resource_update_tasks: dict[str, asyncio.Task[None]] = {}
@@ -204,11 +205,15 @@ class SessionManager:
         if self._stealth_foreground_restore_task is task:
             self._stealth_foreground_restore_task = None
 
-    async def cancel_pending_stealth_foreground_restore(self) -> None:
-        """Join launch-owned foreground work before another foreground mutation."""
-        outer = self._stealth_foreground_restore_task
-        worker = self._stealth_foreground_restore_worker
+    def _finish_stealth_foreground_restore_join_task(self, task: asyncio.Task[None]) -> None:
+        if self._stealth_foreground_restore_join_task is task:
+            self._stealth_foreground_restore_join_task = None
 
+    async def _cancel_and_join_stealth_foreground_restore(
+        self,
+        outer: asyncio.Task[None] | None,
+        worker: asyncio.Task[bool] | None,
+    ) -> None:
         if outer is not None and not outer.done():
             outer.cancel()
 
@@ -237,6 +242,22 @@ class SessionManager:
                 self._stealth_foreground_restore_worker = None
             if self._stealth_foreground_restore_task is outer and (outer is None or outer.done()):
                 self._stealth_foreground_restore_task = None
+
+    async def cancel_pending_stealth_foreground_restore(self) -> None:
+        """Join launch-owned foreground work before another foreground mutation."""
+        join_task = getattr(self, "_stealth_foreground_restore_join_task", None)
+        if join_task is None or join_task.done():
+            outer = self._stealth_foreground_restore_task
+            worker = self._stealth_foreground_restore_worker
+            if outer is None and worker is None:
+                return
+            join_task = asyncio.create_task(
+                self._cancel_and_join_stealth_foreground_restore(outer, worker)
+            )
+            self._stealth_foreground_restore_join_task = join_task
+            join_task.add_done_callback(self._finish_stealth_foreground_restore_join_task)
+
+        await asyncio.shield(join_task)
 
     async def _cancel_stealth_foreground_restore_task(self) -> None:
         await self.cancel_pending_stealth_foreground_restore()
