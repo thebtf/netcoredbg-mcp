@@ -124,7 +124,7 @@ For **each** scan, perform and record all of the following:
 
 #### Exact analysis identity clarifications
 
-- Do not treat `report-task.txt` as SHA evidence. The report identifies the submitted task; the returned analysis **project** MUST equal that key and its **revision** MUST equal `HEAD_SHA`.
+- Do not treat `report-task.txt` as SHA evidence. The report identifies the submitted task; prove project scope through the recorded `project=thebtf_netcoredbg_mcp` analysis query and the submitted Compute Engine task's `componentKey`, then require its analysis key and revision to equal the submitted analysis ID and `HEAD_SHA`.
 - The analysis key is unique analysis identity. The scanner metadata key, and submitted task-report key MUST all equal the fixed project key; the task ID equals the submitted Compute Engine task ID. Retain task-report task/server-origin comparisons in the receipt.
 - Re-read `git rev-parse HEAD` after scanner end and before final receipt publication. A changed target invalidates the scan.
 - Paginate the complete project issue inventory for `issueStatuses=OPEN,CONFIRMED,FALSE_POSITIVE,ACCEPTED,FIXED,IN_SANDBOX` (and the same status set with `inNewCodePeriod=true`) plus the project-scoped hotspot inventory. Require `pagination_complete=true`; a zero-total inventory must have `result_empty=true`. Treat an issue as `FIXED_IN_CURRENT_HEAD` only when it is absent from the post-scan inventory or has `issueStatus=FIXED` with omitted or `FIXED` resolution; every other current issue is `BLOCKING_DISPOSITION`, and every hotspot is `BLOCKING_HOTSPOT`.
