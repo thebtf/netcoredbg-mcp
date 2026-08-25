@@ -1324,6 +1324,71 @@ async def test_ui_text_set_text_without_text_preserves_pending_restore(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "input_args"),
+    (
+        ("select_range", {"start_index": 1}),
+        ("ensure_visible", {}),
+        ("select_row", {}),
+        ("click_row", {}),
+        ("right_click_row", {}),
+        ("double_click_row", {}),
+    ),
+)
+async def test_ui_grid_mutation_without_required_input_preserves_pending_restore(
+    capturing_mcp,
+    monkeypatch,
+    action: str,
+    input_args: dict[str, int],
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = FakeEvidenceBackend()
+    backend.process_id = 42
+
+    def fail_if_backend_created(**_kwargs: Any) -> Any:
+        raise AssertionError("backend should not be created for an invalid grid request")
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", fail_if_backend_created)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda _ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_grid"](
+        ctx=None,
+        action=action,
+        automation_id="CueGrid",
+        **input_args,
+    )
+
+    if action == "select_range":
+        expected = {
+            "status": "FAIL",
+            "reason": "invalid grid request",
+            "error": "start_index and end_index are required for range actions",
+        }
+    else:
+        expected = {
+            "status": "BLOCKED",
+            "reason": "grid row request missing",
+            "requested": {"row_index": None, "row_key": None},
+            "accepted": {"row": "visible row_index or row_key"},
+            "next_step": (
+                "Provide row_index for a visible logical row or row_key for a "
+                "unique visible row identity."
+            ),
+            "requested_action": action,
+            "canonical_action": action,
+        }
+    assert response["data"] == expected
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+    assert backend.calls == []
+
+
+@pytest.mark.asyncio
 async def test_ui_text_set_text_joins_pending_restore_before_focus(
     capturing_mcp,
     monkeypatch,

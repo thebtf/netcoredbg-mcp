@@ -525,6 +525,38 @@ def register_ui_evidence_tools(
                     state=session.state.state,
                 )
 
+            result: Any
+            range_selection: tuple[int, int] | None = None
+            if canonical_action == "select_range":
+                range_selection = _require_range(start_index, end_index)
+            elif (
+                canonical_action
+                in {
+                    "ensure_visible",
+                    "select_row",
+                    "click_row",
+                    "right_click_row",
+                    "double_click_row",
+                }
+                and row_index is None
+                and not row_key
+            ):
+                return build_response(
+                    data={
+                        "status": "BLOCKED",
+                        "reason": "grid row request missing",
+                        "requested": {"row_index": row_index, "row_key": row_key},
+                        "accepted": {"row": "visible row_index or row_key"},
+                        "next_step": (
+                            "Provide row_index for a visible logical row or row_key for a "
+                            "unique visible row identity."
+                        ),
+                        "requested_action": action,
+                        "canonical_action": canonical_action,
+                    },
+                    state=session.state.state,
+                )
+
             if canonical_action == "viewport":
                 unsupported_expectations = _unsupported_direct_viewport_expectations(expect)
                 if unsupported_expectations:
@@ -597,7 +629,8 @@ def register_ui_evidence_tools(
                         scroll_settle_ms=scroll_settle_ms,
                     )
                 elif canonical_action == "select_range":
-                    start, end = _require_range(start_index, end_index)
+                    assert range_selection is not None
+                    start, end = range_selection
                     result = await select_grid_range(backend, selector, start, end)
                     if _passes(result):
                         result = await _confirm_grid_selection(
@@ -666,6 +699,8 @@ def register_ui_evidence_tools(
                 elif canonical_action == "assert_range":
                     start, end = _require_range(start_index, end_index)
                     result = await assert_grid_range(backend, selector, start, end)
+                else:
+                    raise RuntimeError(f"Unhandled grid action: {canonical_action}")
             if isinstance(result, dict):
                 result = _strip_unbounded_evidence_value(dict(result))
                 result["requested_action"] = action
