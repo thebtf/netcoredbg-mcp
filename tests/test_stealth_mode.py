@@ -748,6 +748,39 @@ def test_session_manager_stealth_restore_waits_for_known_foreground_owner(monkey
 
 
 @pytest.mark.asyncio
+async def test_session_manager_waits_for_active_stealth_restore_without_canceling_retries() -> None:
+    from netcoredbg_mcp.session.manager import SessionManager
+
+    manager = SessionManager.__new__(SessionManager)
+    manager._state = SimpleNamespace(process_id=42)
+    release_worker = asyncio.Event()
+
+    async def worker() -> bool:
+        await release_worker.wait()
+        return True
+
+    outer = asyncio.create_task(asyncio.sleep(60))
+    tracked_worker = asyncio.create_task(worker())
+    manager._stealth_foreground_restore_task = outer
+    manager._stealth_foreground_restore_worker = tracked_worker
+    join = asyncio.create_task(manager.wait_for_pending_stealth_foreground_restore())
+
+    await asyncio.sleep(0)
+    assert not join.done()
+    assert not outer.done()
+
+    release_worker.set()
+    await join
+
+    assert not outer.done()
+    assert manager._stealth_foreground_restore_task is outer
+    assert manager._stealth_foreground_restore_worker is None
+    outer.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await outer
+
+
+@pytest.mark.asyncio
 async def test_session_manager_waits_for_active_stealth_restore_before_foreground_mutation(
     monkeypatch,
 ) -> None:
@@ -818,7 +851,7 @@ async def test_session_manager_keeps_restore_joined_across_concurrent_callers(
 
     third = asyncio.create_task(manager.cancel_pending_stealth_foreground_restore())
     await asyncio.sleep(0)
-    assert not third.done()
+    assert not any(task.done() for task in (first, second, third))
 
     release_restore.set()
     await asyncio.gather(first, second, third)
@@ -916,6 +949,69 @@ async def test_ui_tree_keeps_pending_stealth_restore_without_process_id() -> Non
 
     assert response["error"].startswith("Process ID not available")
     pending_restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ui_tree_waits_for_pending_restore_without_canceling_retry() -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    wait_restore = AsyncMock()
+    cancel_restore = AsyncMock()
+    backend = SimpleNamespace(
+        process_id=42,
+        get_window_tree=AsyncMock(return_value={"windows": [], "count": 0}),
+    )
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=True,
+        wait_for_pending_stealth_foreground_restore=wait_restore,
+        cancel_pending_stealth_foreground_restore=cancel_restore,
+    )
+    registry = ToolRegistry()
+
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(registry, session, check_session_access=lambda _ctx: None)
+        response = await registry.tools["ui_get_window_tree"]()
+
+    assert response["data"]["count"] == 0
+    wait_restore.assert_awaited_once_with()
+    cancel_restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ui_annotated_screenshot_waits_for_pending_restore_without_canceling_retry(
+    monkeypatch,
+) -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    wait_restore = AsyncMock()
+    cancel_restore = AsyncMock()
+    backend = SimpleNamespace(process_id=42)
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=True,
+        wait_for_pending_stealth_foreground_restore=wait_restore,
+        cancel_pending_stealth_foreground_restore=cancel_restore,
+    )
+    registry = ToolRegistry()
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.screenshot.get_hwnd_for_pid", lambda _pid: 123)
+    monkeypatch.setattr("netcoredbg_mcp.ui.screenshot.capture_window", lambda _hwnd: (b"png", 1, 1))
+    monkeypatch.setattr(
+        "netcoredbg_mcp.ui.screenshot.analyze_screenshot_frame",
+        lambda _png: {"probable_black": True},
+    )
+    with patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend):
+        register_ui_tools(registry, session, check_session_access=lambda _ctx: None)
+        response = await registry.tools["ui_take_annotated_screenshot"](SimpleNamespace())
+
+    assert response["classification"] == "PROBABLE_BLACK_FRAME"
+    wait_restore.assert_awaited_once_with()
+    cancel_restore.assert_not_awaited()
 
 
 @pytest.mark.asyncio

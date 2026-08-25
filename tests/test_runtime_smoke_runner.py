@@ -5693,6 +5693,55 @@ async def test_runner_skips_plan_owned_cleanup_when_restore_schema_is_invalid(
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_observation_provider_preserves_pending_restore(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeRuntimeSmokeSession()
+    call_order: list[str] = []
+
+    async def wait_restore() -> None:
+        call_order.append("wait")
+
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock(side_effect=wait_restore)
+    session.cancel_pending_stealth_foreground_restore = AsyncMock()
+
+    class Backend:
+        process_id = 1234
+
+        async def find_element(self, **_kwargs: Any) -> dict[str, Any]:
+            call_order.append("find")
+            return {"status": "PASS", "name": "Ready"}
+
+    backend = Backend()
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_runtime_smoke_tools(
+        mcp=capturing_mcp,
+        session=cast(Any, session),
+        check_session_access=lambda _ctx: None,
+        resolve_project_root=_noop_resolve_project_root,
+    )
+
+    response = await capturing_mcp.tools["run_runtime_smoke"](
+        ctx=None,
+        plan={
+            "schema": "netcoredbg.runtime_smoke.v1",
+            "steps": [
+                {
+                    "op": "ui.get_property",
+                    "selector": {"automation_id": "StatusText"},
+                    "property": "Name",
+                }
+            ],
+        },
+    )
+
+    assert response["data"]["status"] == "PASS"
+    assert call_order == ["wait", "find"]
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_ui_provider_joins_pending_restore_before_backend_action(
     capturing_mcp,
     monkeypatch,

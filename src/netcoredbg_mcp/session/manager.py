@@ -243,6 +243,28 @@ class SessionManager:
             if self._stealth_foreground_restore_task is outer and (outer is None or outer.done()):
                 self._stealth_foreground_restore_task = None
 
+    async def wait_for_pending_stealth_foreground_restore(self) -> None:
+        """Wait for active foreground restore work without canceling future retries."""
+        join_task = getattr(self, "_stealth_foreground_restore_join_task", None)
+        if join_task is not None and not join_task.done():
+            await asyncio.shield(join_task)
+            return
+
+        worker = self._stealth_foreground_restore_worker
+        if worker is None:
+            return
+
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            if not worker.cancelled():
+                raise
+        except Exception as exc:
+            logger.debug("[launch] stealth foreground worker ended during observation: %s", exc)
+        finally:
+            if self._stealth_foreground_restore_worker is worker and worker.done():
+                self._stealth_foreground_restore_worker = None
+
     async def cancel_pending_stealth_foreground_restore(self) -> None:
         """Join launch-owned foreground work before another foreground mutation."""
         join_task = getattr(self, "_stealth_foreground_restore_join_task", None)

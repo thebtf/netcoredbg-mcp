@@ -94,7 +94,11 @@ def register_ui_tools(
             )
         return _backend_holder["instance"]
 
-    async def _ensure_ui_connected(*, restore_joined: bool = False) -> Any:
+    async def _ensure_ui_connected(
+        *,
+        restore_joined: bool = False,
+        observation: bool = False,
+    ) -> Any:
         """Ensure UI backend is connected to the debug process.
 
         Raises:
@@ -113,7 +117,7 @@ def register_ui_tools(
             )
 
         if not restore_joined:
-            await _join_launch_foreground_restore()
+            await _join_launch_foreground_restore(observation=observation)
 
         backend = _get_backend()
         if backend.process_id != process_id:
@@ -126,8 +130,13 @@ def register_ui_tools(
             )
         return backend
 
-    async def _join_launch_foreground_restore() -> None:
-        join = getattr(session, "cancel_pending_stealth_foreground_restore", None)
+    async def _join_launch_foreground_restore(*, observation: bool = False) -> None:
+        method_name = (
+            "wait_for_pending_stealth_foreground_restore"
+            if observation
+            else "cancel_pending_stealth_foreground_restore"
+        )
+        join = getattr(session, method_name, None)
         if join is not None:
             await cast(Callable[[], Awaitable[None]], join)()
 
@@ -477,7 +486,7 @@ def register_ui_tools(
         The top-ranked element from find_all_cascade is used for the actual selection,
         not just for ambiguity reporting.
         """
-        ui = await _ensure_ui_connected()
+        ui = await _ensure_ui_connected(observation=False)
         from ..ui.pywinauto_backend import PywinautoBackend
 
         if isinstance(ui, PywinautoBackend):
@@ -588,7 +597,7 @@ def register_ui_tools(
             treating the response itself as a single-window tree.
         """
         try:
-            ui = await _ensure_ui_connected()
+            ui = await _ensure_ui_connected(observation=True)
             try:
                 tree = await _read_window_tree(ui, max_depth, max_children)
             except RuntimeError as e:
@@ -760,7 +769,7 @@ def register_ui_tools(
             Element info if found
         """
         try:
-            ui = await _ensure_ui_connected()
+            ui = await _ensure_ui_connected(observation=True)
             result = await ui.find_element(
                 automation_id=automation_id,
                 name=name,
@@ -2172,7 +2181,7 @@ def register_ui_tools(
                     state=session.state.state,
                 )
 
-            backend = await _ensure_ui_connected()
+            backend = await _ensure_ui_connected(observation=True)
 
             loop = asyncio.get_running_loop()
 
@@ -3001,7 +3010,7 @@ def register_ui_tools(
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
 
-            ui = await _ensure_ui_connected()
+            ui = await _ensure_ui_connected(observation=True)
             result = await ui.get_held_modifiers()
             if not isinstance(result, dict):
                 return build_error_response(
@@ -3042,7 +3051,7 @@ def register_ui_tools(
             xpath: Optional XPath expression (FlaUI backend only)
         """
         try:
-            ui = await _ensure_ui_connected()
+            ui = await _ensure_ui_connected(observation=True)
             get_selected_item = getattr(ui, "get_selected_item", None)
             if callable(get_selected_item):
                 result = await get_selected_item(
@@ -3163,7 +3172,7 @@ def register_ui_tools(
             xpath: Optional XPath expression (FlaUI backend only)
         """
         try:
-            ui = await _ensure_ui_connected()
+            ui = await _ensure_ui_connected(observation=True)
             result = await ui.extract_text(
                 automation_id=automation_id,
                 name=name,
@@ -3186,7 +3195,7 @@ def register_ui_tools(
         Note: Returns focus within the app window, not always OS-level dialogs.
         """
         try:
-            ui = await _ensure_ui_connected()
+            ui = await _ensure_ui_connected(observation=True)
             get_focused_element = getattr(ui, "get_focused_element", None)
             if callable(get_focused_element):
                 result = await get_focused_element()
@@ -3287,7 +3296,7 @@ def register_ui_tools(
             # Clamp timeout to reasonable bounds
             clamped_timeout = max(0.5, min(timeout, 30.0))
 
-            ui = await _ensure_ui_connected()
+            ui = await _ensure_ui_connected(observation=True)
 
             import time as _time
 
@@ -3647,7 +3656,7 @@ def register_ui_tools(
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
 
-            ui = await _ensure_ui_connected()
+            ui = await _ensure_ui_connected(observation=True)
             result = await ui.clipboard_read()
             if not isinstance(result, dict):
                 return build_error_response(
