@@ -103,8 +103,6 @@ def register_ui_tools(
         """
         from ..ui import NoActiveSessionError, NoProcessIdError
 
-        if not restore_joined:
-            await _join_launch_foreground_restore()
         if session.state.state == DebugState.IDLE:
             raise NoActiveSessionError("No debug session is active. Start debugging first.")
 
@@ -113,6 +111,9 @@ def register_ui_tools(
             raise NoProcessIdError(
                 "Process ID not available. Debug session may not have started the process yet."
             )
+
+        if not restore_joined:
+            await _join_launch_foreground_restore()
 
         backend = _get_backend()
         if backend.process_id != process_id:

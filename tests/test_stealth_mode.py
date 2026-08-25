@@ -855,6 +855,27 @@ async def test_session_manager_preserves_joiner_cancellation_during_restore_clea
 
 
 @pytest.mark.asyncio
+async def test_ui_tree_keeps_pending_stealth_restore_without_process_id() -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    pending_restore = AsyncMock()
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=None),
+        stealth_mode=True,
+        cancel_pending_stealth_foreground_restore=pending_restore,
+    )
+    registry = ToolRegistry()
+    register_ui_tools(registry, session, check_session_access=lambda _ctx: None)
+
+    response = await registry.tools["ui_get_window_tree"]()
+
+    assert response["error"].startswith("Process ID not available")
+    pending_restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_ui_screenshot_waits_for_restore_before_bridge_capture(tmp_path) -> None:
     from PIL import Image
 

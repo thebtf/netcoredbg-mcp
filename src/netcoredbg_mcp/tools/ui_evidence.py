@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Awaitable, Callable
+from typing import Any, cast
 
 from mcp.server.fastmcp import Context, FastMCP
 
@@ -133,6 +133,10 @@ def register_ui_evidence_tools(
             raise NoProcessIdError(
                 "Process ID not available. Debug session may not have started the process yet."
             )
+
+        join = getattr(session, "cancel_pending_stealth_foreground_restore", None)
+        if join is not None:
+            await cast(Callable[[], Awaitable[None]], join)()
 
         backend = _get_backend()
         if backend.process_id != process_id:

@@ -8,7 +8,7 @@ import re
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 from mcp.server.fastmcp import Context, FastMCP
@@ -83,6 +83,10 @@ def register_runtime_smoke_tools(
             raise NoProcessIdError(
                 "Process ID not available. Debug session may not have started the process yet."
             )
+
+        join = getattr(session, "cancel_pending_stealth_foreground_restore", None)
+        if join is not None:
+            await cast(Callable[[], Awaitable[None]], join)()
 
         backend = _get_backend()
         if backend.process_id != process_id:
