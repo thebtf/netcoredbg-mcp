@@ -493,6 +493,7 @@ class FakeUiSession:
             process_id=None,
             output_buffer=deque(),
         )
+        self.cancel_pending_stealth_foreground_restore = AsyncMock()
         self.process_registry = None
 
 
@@ -1227,6 +1228,38 @@ async def test_ui_text_tool_assert_selection_fails_with_observed_range(
         "length": 0,
         "selected_text": "",
     }
+
+
+@pytest.mark.asyncio
+async def test_ui_text_set_text_joins_pending_restore_before_focus(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = FakeSetTextBackend()
+
+    async def join_restore() -> None:
+        assert backend.calls == []
+
+    session.cancel_pending_stealth_foreground_restore = AsyncMock(side_effect=join_restore)
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_text"](
+        ctx=None,
+        action="set_text",
+        automation_id="CueTextBox",
+        text="Replaced text",
+    )
+
+    assert response["data"]["status"] == "PASS"
+    session.cancel_pending_stealth_foreground_restore.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
