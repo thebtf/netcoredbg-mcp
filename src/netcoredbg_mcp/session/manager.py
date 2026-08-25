@@ -200,6 +200,10 @@ class SessionManager:
             if not keep_restoring:
                 return
 
+    def _finish_stealth_foreground_restore_task(self, task: asyncio.Task[None]) -> None:
+        if self._stealth_foreground_restore_task is task:
+            self._stealth_foreground_restore_task = None
+
     async def cancel_pending_stealth_foreground_restore(self) -> None:
         """Join launch-owned foreground work before another foreground mutation."""
         outer = self._stealth_foreground_restore_task
@@ -212,6 +216,9 @@ class SessionManager:
             if worker is not None:
                 try:
                     await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    if not worker.cancelled():
+                        raise
                 except Exception as exc:
                     logger.debug("[launch] stealth foreground worker ended during join: %s", exc)
 
@@ -219,7 +226,8 @@ class SessionManager:
                 try:
                     await asyncio.shield(outer)
                 except asyncio.CancelledError:
-                    pass
+                    if not outer.cancelled():
+                        raise
                 except Exception as exc:
                     logger.debug("[launch] stealth foreground task ended during join: %s", exc)
         finally:
@@ -1579,9 +1587,11 @@ class SessionManager:
         self._set_state(DebugState.RUNNING)
 
         if stealth_mode:
-            self._stealth_foreground_restore_task = asyncio.create_task(
+            restore_task = asyncio.create_task(
                 self._restore_foreground_after_stealth_launch(saved_foreground_hwnd)
             )
+            self._stealth_foreground_restore_task = restore_task
+            restore_task.add_done_callback(self._finish_stealth_foreground_restore_task)
 
         await report(100, 100, "Debug session started")
 

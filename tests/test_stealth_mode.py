@@ -806,6 +806,55 @@ async def test_session_manager_joins_restore_worker_without_outer_task() -> None
 
 
 @pytest.mark.asyncio
+async def test_session_manager_reconciles_canceled_restore_worker() -> None:
+    from netcoredbg_mcp.session.manager import SessionManager
+
+    manager = SessionManager.__new__(SessionManager)
+    worker = asyncio.create_task(asyncio.sleep(60))
+    worker.cancel()
+    try:
+        await worker
+    except asyncio.CancelledError:
+        pass
+
+    manager._stealth_foreground_restore_task = None
+    manager._stealth_foreground_restore_worker = worker
+    await manager.cancel_pending_stealth_foreground_restore()
+
+    assert manager._stealth_foreground_restore_worker is None
+
+
+@pytest.mark.asyncio
+async def test_session_manager_preserves_joiner_cancellation_during_restore_cleanup() -> None:
+    from netcoredbg_mcp.session.manager import SessionManager
+
+    manager = SessionManager.__new__(SessionManager)
+    restore_cancelling = asyncio.Event()
+    release_restore = asyncio.Event()
+
+    async def restore() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            restore_cancelling.set()
+            await release_restore.wait()
+            raise
+
+    manager._stealth_foreground_restore_task = asyncio.create_task(restore())
+    manager._stealth_foreground_restore_worker = None
+    join = asyncio.create_task(manager.cancel_pending_stealth_foreground_restore())
+    try:
+        await restore_cancelling.wait()
+        join.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await join
+    finally:
+        release_restore.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await manager._stealth_foreground_restore_task
+
+
+@pytest.mark.asyncio
 async def test_ui_screenshot_waits_for_restore_before_bridge_capture(tmp_path) -> None:
     from PIL import Image
 
@@ -947,6 +996,9 @@ async def test_session_manager_stealth_launch_defers_foreground_restore_until_ui
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+
+    await asyncio.sleep(0)
+    assert manager._stealth_foreground_restore_task is None
 
     assert result == {"success": True, "program": str(program)}
     assert restore_calls == []
