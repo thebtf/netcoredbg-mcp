@@ -1263,6 +1263,36 @@ async def test_ui_text_tool_assert_selection_fails_with_observed_range(
 
 
 @pytest.mark.asyncio
+async def test_ui_text_set_text_without_text_preserves_pending_restore(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock()
+    backend = FakeSetTextBackend()
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda _ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_text"](
+        ctx=None,
+        action="set_text",
+        automation_id="CueTextBox",
+    )
+
+    assert response["data"]["reason"] == "text is required"
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+    session.wait_for_pending_stealth_foreground_restore.assert_not_awaited()
+    assert backend.calls == []
+
+
+@pytest.mark.asyncio
 async def test_ui_text_set_text_joins_pending_restore_before_focus(
     capturing_mcp,
     monkeypatch,

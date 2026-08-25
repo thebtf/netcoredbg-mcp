@@ -237,17 +237,18 @@ def register_ui_evidence_tools(
                     state=session.state.state,
                 )
 
+            if canonical_action == "set_text" and text is None:
+                return build_response(
+                    data={
+                        "status": "FAIL",
+                        "reason": "text is required",
+                        "action": action,
+                    },
+                    state=session.state.state,
+                )
+
             backend = await _ensure_ui_connected(observation=canonical_action != "set_text")
             if canonical_action == "set_text":
-                if text is None:
-                    return build_response(
-                        data={
-                            "status": "FAIL",
-                            "reason": "text is required",
-                            "action": action,
-                        },
-                        state=session.state.state,
-                    )
                 backend_provider = _static_backend_provider(backend)
                 adapters = ui_operation_adapters(backend_provider)
                 result = await adapters["ui.text.set_text"](selector=selector, text=text)
