@@ -1019,6 +1019,38 @@ async def test_ui_text_tool_reads_text_without_assertion(capturing_mcp, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_ui_text_read_waits_for_pending_restore_without_canceling_retry(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock()
+    session.cancel_pending_stealth_foreground_restore = AsyncMock()
+    backend = FakeEvidenceBackend()
+    backend.process_id = 42
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda _ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_text"](
+        ctx=None,
+        action="read",
+        automation_id="CueTextBox",
+        control_type="TextBox",
+    )
+
+    assert response["data"]["status"] == "PASS"
+    session.wait_for_pending_stealth_foreground_restore.assert_awaited_once_with()
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_ui_text_tool_get_state_returns_textbox_selection_state(
     capturing_mcp,
     monkeypatch,

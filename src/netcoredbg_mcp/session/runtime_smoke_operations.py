@@ -39,12 +39,14 @@ SELECTED_PAYLOAD_SETTLE_INTERVAL_SECONDS = 0.1
 def ui_operation_adapters(
     ensure_ui_connected: BackendProvider,
     *,
+    observation_ui_connected: BackendProvider | None = None,
     session: Any | None = None,
 ) -> OperationAdapterMap:
     """Build runtime smoke UI operation adapters."""
+    observation_provider = observation_ui_connected or ensure_ui_connected
 
     async def ensure_connected(**_: Any) -> dict[str, Any]:
-        backend = await _backend_or_blocked(ensure_ui_connected)
+        backend = await _backend_or_blocked(observation_provider)
         if isinstance(backend, dict):
             return backend
         return {
@@ -54,7 +56,7 @@ def ui_operation_adapters(
         }
 
     async def grid_snapshot(**args: Any) -> dict[str, Any]:
-        backend = await _backend_or_blocked(ensure_ui_connected)
+        backend = await _backend_or_blocked(observation_provider)
         if isinstance(backend, dict):
             return backend
         return await snapshot_grid(
@@ -65,7 +67,7 @@ def ui_operation_adapters(
         )
 
     async def grid_get_state(**args: Any) -> dict[str, Any]:
-        backend = await _backend_or_blocked(ensure_ui_connected)
+        backend = await _backend_or_blocked(observation_provider)
         if isinstance(backend, dict):
             return backend
         return await read_grid_state(
@@ -77,7 +79,7 @@ def ui_operation_adapters(
         )
 
     async def grid_viewport(**args: Any) -> dict[str, Any]:
-        backend = await _backend_or_blocked(ensure_ui_connected)
+        backend = await _backend_or_blocked(observation_provider)
         if isinstance(backend, dict):
             return backend
         selector = _selector(args)
@@ -136,7 +138,7 @@ def ui_operation_adapters(
         )
 
     async def grid_assert_range(**args: Any) -> dict[str, Any]:
-        backend = await _backend_or_blocked(ensure_ui_connected)
+        backend = await _backend_or_blocked(observation_provider)
         if isinstance(backend, dict):
             return backend
         return await assert_grid_range(
@@ -353,7 +355,7 @@ def ui_operation_adapters(
         )
 
     async def grid_assert_rows(**args: Any) -> dict[str, Any]:
-        backend = await _backend_or_blocked(ensure_ui_connected)
+        backend = await _backend_or_blocked(observation_provider)
         if isinstance(backend, dict):
             return backend
         return await assert_grid_rows(
@@ -389,13 +391,13 @@ def ui_operation_adapters(
         return await _settle_after_state_change(result)
 
     async def focus_assert(**args: Any) -> dict[str, Any]:
-        backend = await _backend_or_blocked(ensure_ui_connected)
+        backend = await _backend_or_blocked(observation_provider)
         if isinstance(backend, dict):
             return backend
         return await assert_focus(backend, _selector(args))
 
     async def get_property(**args: Any) -> dict[str, Any]:
-        backend = await _backend_or_blocked(ensure_ui_connected)
+        backend = await _backend_or_blocked(observation_provider)
         if isinstance(backend, dict):
             return backend
         selector = _selector(args)
@@ -623,7 +625,7 @@ def ui_operation_adapters(
         )
 
     async def find_element(**args: Any) -> dict[str, Any]:
-        backend = await _backend_or_blocked(ensure_ui_connected)
+        backend = await _backend_or_blocked(observation_provider)
         if isinstance(backend, dict):
             return backend
         selector = _selector(args)
@@ -693,7 +695,7 @@ def ui_operation_adapters(
         return {"status": "PASS", "keys": keys, "result": result}
 
     async def text_assert(**args: Any) -> dict[str, Any]:
-        backend = await _backend_or_blocked(ensure_ui_connected)
+        backend = await _backend_or_blocked(observation_provider)
         if isinstance(backend, dict):
             return backend
         selector = _selector(args)
@@ -756,7 +758,7 @@ def ui_operation_adapters(
         return {"status": "PASS", "matched": True, "text": text, "result": text_result}
 
     async def text_read(**args: Any) -> dict[str, Any]:
-        backend = await _backend_or_blocked(ensure_ui_connected)
+        backend = await _backend_or_blocked(observation_provider)
         if isinstance(backend, dict):
             return backend
         selector = _selector(args)
@@ -796,13 +798,13 @@ def ui_operation_adapters(
         return result
 
     async def text_get_state(**args: Any) -> dict[str, Any]:
-        backend = await _backend_or_blocked(ensure_ui_connected)
+        backend = await _backend_or_blocked(observation_provider)
         if isinstance(backend, dict):
             return backend
         return await read_textbox_state(backend, _selector(args))
 
     async def text_assert_selection(**args: Any) -> dict[str, Any]:
-        backend = await _backend_or_blocked(ensure_ui_connected)
+        backend = await _backend_or_blocked(observation_provider)
         if isinstance(backend, dict):
             return backend
         selector = _selector(args)

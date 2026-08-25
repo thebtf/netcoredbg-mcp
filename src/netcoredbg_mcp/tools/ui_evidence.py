@@ -122,7 +122,7 @@ def register_ui_evidence_tools(
             )
         return backend_holder["instance"]
 
-    async def _ensure_ui_connected() -> Any:
+    async def _ensure_ui_connected(*, observation: bool = False) -> Any:
         from ..ui import NoActiveSessionError, NoProcessIdError
 
         if session.state.state == DebugState.IDLE:
@@ -134,7 +134,12 @@ def register_ui_evidence_tools(
                 "Process ID not available. Debug session may not have started the process yet."
             )
 
-        join = getattr(session, "cancel_pending_stealth_foreground_restore", None)
+        method_name = (
+            "wait_for_pending_stealth_foreground_restore"
+            if observation
+            else "cancel_pending_stealth_foreground_restore"
+        )
+        join = getattr(session, method_name, None)
         if join is not None:
             await cast(Callable[[], Awaitable[None]], join)()
 
@@ -232,7 +237,7 @@ def register_ui_evidence_tools(
                     state=session.state.state,
                 )
 
-            backend = await _ensure_ui_connected()
+            backend = await _ensure_ui_connected(observation=canonical_action != "set_text")
             if canonical_action == "set_text":
                 if text is None:
                     return build_response(
@@ -353,7 +358,7 @@ def register_ui_evidence_tools(
                     state=session.state.state,
                 )
 
-            backend = await _ensure_ui_connected()
+            backend = await _ensure_ui_connected(observation=True)
             selector_kwargs = {
                 "automation_id": automation_id,
                 "name": name,
@@ -446,7 +451,7 @@ def register_ui_evidence_tools(
                     state=session.state.state,
                 )
 
-            backend = await _ensure_ui_connected()
+            backend = await _ensure_ui_connected(observation=True)
             result = await assert_focus(backend, selector)
             if _is_selector_miss(result):
                 return build_response(
@@ -542,7 +547,9 @@ def register_ui_evidence_tools(
                         },
                         state=session.state.state,
                     )
-                result = await ui_operation_adapters(_ensure_ui_connected)["ui.grid.viewport"](
+                result = await ui_operation_adapters(
+                    lambda: _ensure_ui_connected(observation=True)
+                )["ui.grid.viewport"](
                     selector=selector,
                     rows=rows,
                     identity=identity,
@@ -551,7 +558,16 @@ def register_ui_evidence_tools(
                     probe_name=probe_name,
                 )
             else:
-                backend = await _ensure_ui_connected()
+                backend = await _ensure_ui_connected(
+                    observation=canonical_action
+                    in {
+                        "visible_rows",
+                        "snapshot",
+                        "selected_rows",
+                        "get_state",
+                        "assert_range",
+                    }
+                )
                 if canonical_action == "visible_rows":
                     result = await read_grid_visible_rows(backend, selector)
                 elif canonical_action == "snapshot":
@@ -688,7 +704,7 @@ def register_ui_evidence_tools(
                     },
                     state=session.state.state,
                 )
-            backend = await _ensure_ui_connected()
+            backend = await _ensure_ui_connected(observation=True)
             result = await query_ui_fields(
                 backend,
                 _selector(automation_id, name, control_type, root_id, xpath),
@@ -727,7 +743,7 @@ def register_ui_evidence_tools(
                     },
                     state=session.state.state,
                 )
-            backend = await _ensure_ui_connected()
+            backend = await _ensure_ui_connected(observation=True)
             result = await capture_ui_snapshot(
                 backend,
                 _snapshot_store(),
@@ -794,7 +810,7 @@ def register_ui_evidence_tools(
                         },
                         state=session.state.state,
                 )
-                backend = await _ensure_ui_connected()
+                backend = await _ensure_ui_connected(observation=True)
                 result = await store.start(
                     backend,
                     buffer_id=buffer_id,
@@ -803,7 +819,7 @@ def register_ui_evidence_tools(
                     max_events=max_events,
                 )
             elif action == "read":
-                backend = await _ensure_ui_connected()
+                backend = await _ensure_ui_connected(observation=True)
                 result = await store.read(buffer_id, backend=backend)
             elif action == "stop":
                 result = store.stop(buffer_id)
@@ -846,7 +862,7 @@ def register_ui_evidence_tools(
                     },
                     state=session.state.state,
                 )
-            backend = await _ensure_ui_connected()
+            backend = await _ensure_ui_connected(observation=True)
             result = await _event_store().monitor_start(
                 backend,
                 monitor_id=monitor_id,
@@ -869,7 +885,7 @@ def register_ui_evidence_tools(
             access_error = check_session_access(ctx)
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
-            backend = await _ensure_ui_connected()
+            backend = await _ensure_ui_connected(observation=True)
             result = await _event_store().monitor_poll(
                 monitor_id,
                 after_cursor=after_cursor,
@@ -897,7 +913,7 @@ def register_ui_evidence_tools(
                 after_cursor=after_cursor,
                 timeout_ms=timeout_ms,
                 poll_interval_ms=poll_interval_ms,
-                backend_provider=_ensure_ui_connected,
+                backend_provider=lambda: _ensure_ui_connected(observation=True),
             )
             return build_response(data=result, state=session.state.state)
         except Exception as exc:
