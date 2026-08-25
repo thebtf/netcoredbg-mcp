@@ -84,15 +84,6 @@ def register_runtime_smoke_tools(
                 "Process ID not available. Debug session may not have started the process yet."
             )
 
-        method_name = (
-            "wait_for_pending_stealth_foreground_restore"
-            if observation
-            else "cancel_pending_stealth_foreground_restore"
-        )
-        join = getattr(session, method_name, None)
-        if join is not None:
-            await cast(Callable[[], Awaitable[None]], join)()
-
         backend = _get_backend()
         if backend.process_id != process_id:
             from ..ui.backend import connect_backend
@@ -102,6 +93,16 @@ def register_runtime_smoke_tools(
                 process_id,
                 stealth_mode=getattr(session, "stealth_mode", False),
             )
+
+        method_name = (
+            "wait_for_pending_stealth_foreground_restore"
+            if observation
+            else "cancel_pending_stealth_foreground_restore"
+        )
+        join = getattr(session, method_name, None)
+        if join is not None:
+            await cast(Callable[[], Awaitable[None]], join)()
+
         return backend
 
     async def _ensure_observation_ui_connected() -> Any:

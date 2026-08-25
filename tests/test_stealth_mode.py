@@ -1543,6 +1543,36 @@ async def test_ui_get_window_tree_connect_timeout_is_not_discovery_timeout() -> 
 
 
 @pytest.mark.asyncio
+async def test_ui_mutation_connect_failure_preserves_pending_restore() -> None:
+    from netcoredbg_mcp.session.manager import DebugState
+    from netcoredbg_mcp.tools.ui import register_ui_tools
+
+    backend = SimpleNamespace(process_id=None, bring_to_front=AsyncMock())
+    cancel_restore = AsyncMock()
+    session = SimpleNamespace(
+        process_registry=None,
+        state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+        stealth_mode=True,
+        cancel_pending_stealth_foreground_restore=cancel_restore,
+    )
+    registry = ToolRegistry()
+
+    with (
+        patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend),
+        patch(
+            "netcoredbg_mcp.ui.backend.connect_backend",
+            AsyncMock(side_effect=asyncio.TimeoutError("connect timeout")),
+        ),
+    ):
+        register_ui_tools(registry, session, check_session_access=lambda _ctx: None)
+        response = await registry.tools["ui_bring_to_front"](SimpleNamespace())
+
+    assert response["error"] == "connect timeout"
+    cancel_restore.assert_not_awaited()
+    backend.bring_to_front.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_ui_bring_to_front_disables_session_stealth_mode() -> None:
     from netcoredbg_mcp.session.manager import DebugState
     from netcoredbg_mcp.tools.ui import register_ui_tools

@@ -1051,6 +1051,37 @@ async def test_ui_text_read_waits_for_pending_restore_without_canceling_retry(
 
 
 @pytest.mark.asyncio
+async def test_ui_key_sequence_connect_failure_preserves_pending_restore(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = SimpleNamespace(process_id=None)
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    monkeypatch.setattr(
+        "netcoredbg_mcp.ui.backend.connect_backend",
+        AsyncMock(side_effect=TimeoutError("connect timeout")),
+    )
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda _ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_key_sequence"](
+        ctx=None,
+        modifiers=[],
+        keys=["ENTER"],
+    )
+
+    assert response["error"] == "connect timeout"
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_ui_text_tool_get_state_returns_textbox_selection_state(
     capturing_mcp,
     monkeypatch,

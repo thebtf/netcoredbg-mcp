@@ -116,9 +116,6 @@ def register_ui_tools(
                 "Process ID not available. Debug session may not have started the process yet."
             )
 
-        if not restore_joined:
-            await _join_launch_foreground_restore(observation=observation)
-
         backend = _get_backend()
         if backend.process_id != process_id:
             from ..ui.backend import connect_backend
@@ -128,6 +125,10 @@ def register_ui_tools(
                 process_id,
                 stealth_mode=getattr(session, "stealth_mode", False),
             )
+
+        if not restore_joined:
+            await _join_launch_foreground_restore(observation=observation)
+
         return backend
 
     async def _join_launch_foreground_restore(*, observation: bool = False) -> None:
