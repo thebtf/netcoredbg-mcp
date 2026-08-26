@@ -43,4 +43,4 @@ netcoredbg-mcp --setup
 
 ## Release Evidence
 
-The candidate has not been merged, tagged, or published. Exact candidate build, installed consumer smoke, PR review, and exact-head Sonar evidence are pending; no pending gate is represented as complete.
+The exact candidate wheel build and installed consumer proof are complete. The installed consumer proof covers CLI and MCP catalog smoke plus negative stealth/foreground journeys. PR review, candidate Sonar, merge, tag, and publication evidence remain pending; no pending gate is represented as complete.

@@ -252,6 +252,20 @@ class SessionManager:
 
         worker = self._stealth_foreground_restore_worker
         if worker is None:
+            outer = self._stealth_foreground_restore_task
+            if outer is None:
+                return
+
+            try:
+                await asyncio.shield(outer)
+            except asyncio.CancelledError:
+                if not outer.cancelled():
+                    raise
+            except Exception as exc:
+                logger.debug("[launch] stealth foreground task ended during observation: %s", exc)
+            finally:
+                if self._stealth_foreground_restore_task is outer and outer.done():
+                    self._stealth_foreground_restore_task = None
             return
 
         try:

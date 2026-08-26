@@ -781,6 +781,61 @@ async def test_session_manager_waits_for_active_stealth_restore_without_cancelin
 
 
 @pytest.mark.asyncio
+async def test_session_manager_observation_waits_for_stealth_restore_retry_delay(
+    monkeypatch,
+) -> None:
+    from netcoredbg_mcp.session.manager import SessionManager
+
+    manager = SessionManager.__new__(SessionManager)
+    manager._state = SimpleNamespace(process_id=42)
+    manager._stealth_foreground_restore_worker = None
+    retry_delay_entered = asyncio.Event()
+    release_retry = asyncio.Event()
+    restore_attempts: list[int] = []
+    yield_to_loop = asyncio.sleep
+
+    async def controlled_sleep(delay_seconds: float) -> None:
+        assert delay_seconds == 0.05
+        retry_delay_entered.set()
+        await release_retry.wait()
+
+    async def immediate_to_thread(callback, *args, **kwargs):
+        return callback(*args, **kwargs)
+
+    def restore_foreground(_: int | None) -> bool:
+        restore_attempts.append(len(restore_attempts) + 1)
+        return len(restore_attempts) == 1
+
+    monkeypatch.setattr("netcoredbg_mcp.session.manager.asyncio.sleep", controlled_sleep)
+    monkeypatch.setattr("netcoredbg_mcp.session.manager.asyncio.to_thread", immediate_to_thread)
+    monkeypatch.setattr(manager, "_restore_foreground_if_safe", restore_foreground)
+    outer = asyncio.create_task(manager._restore_foreground_after_stealth_launch(123))
+    manager._stealth_foreground_restore_task = outer
+    outer.add_done_callback(manager._finish_stealth_foreground_restore_task)
+    observation = None
+
+    try:
+        await asyncio.wait_for(retry_delay_entered.wait(), timeout=0.1)
+        assert manager._stealth_foreground_restore_worker is None
+
+        observation = asyncio.create_task(manager.wait_for_pending_stealth_foreground_restore())
+        await yield_to_loop(0)
+
+        assert not observation.done()
+        assert restore_attempts == [1]
+
+        release_retry.set()
+        await observation
+        assert restore_attempts == [1, 2]
+    finally:
+        release_retry.set()
+        tasks = [outer]
+        if observation is not None:
+            tasks.append(observation)
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_session_manager_waits_for_active_stealth_restore_before_foreground_mutation(
     monkeypatch,
 ) -> None:
