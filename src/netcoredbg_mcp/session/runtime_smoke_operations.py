@@ -149,15 +149,15 @@ def ui_operation_adapters(
         )
 
     async def grid_select_row(**args: Any) -> dict[str, Any]:
-        backend = await _backend_or_blocked(ensure_ui_connected)
-        if isinstance(backend, dict):
-            return backend
         row_index, row_key, blocked = _grid_row_request(
             args.get("row"),
             adapter="ui.grid.select_row",
         )
         if blocked is not None:
             return blocked
+        backend = await _backend_or_blocked(ensure_ui_connected)
+        if isinstance(backend, dict):
+            return backend
         return await select_grid_row(
             backend,
             _selector(args),
@@ -172,15 +172,15 @@ def ui_operation_adapters(
         )
 
     async def grid_ensure_visible(**args: Any) -> dict[str, Any]:
-        backend = await _backend_or_blocked(ensure_ui_connected)
-        if isinstance(backend, dict):
-            return backend
         row_index, row_key, blocked = _grid_row_request(
             args.get("row"),
             adapter="ui.grid.ensure_visible",
         )
         if blocked is not None:
             return blocked
+        backend = await _backend_or_blocked(ensure_ui_connected)
+        if isinstance(backend, dict):
+            return backend
         return await ensure_grid_row_visible(
             backend,
             _selector(args),
@@ -194,15 +194,15 @@ def ui_operation_adapters(
         )
 
     async def grid_click_row(**args: Any) -> dict[str, Any]:
-        backend = await _backend_or_blocked(ensure_ui_connected)
-        if isinstance(backend, dict):
-            return backend
         row_index, row_key, blocked = _grid_row_request(
             args.get("row"),
             adapter="ui.grid.click_row",
         )
         if blocked is not None:
             return blocked
+        backend = await _backend_or_blocked(ensure_ui_connected)
+        if isinstance(backend, dict):
+            return backend
         return await click_grid_row(
             backend,
             _selector(args),
@@ -218,15 +218,15 @@ def ui_operation_adapters(
         )
 
     async def grid_right_click_row(**args: Any) -> dict[str, Any]:
-        backend = await _backend_or_blocked(ensure_ui_connected)
-        if isinstance(backend, dict):
-            return backend
         row_index, row_key, blocked = _grid_row_request(
             args.get("row"),
             adapter="ui.grid.right_click_row",
         )
         if blocked is not None:
             return blocked
+        backend = await _backend_or_blocked(ensure_ui_connected)
+        if isinstance(backend, dict):
+            return backend
         return await right_click_grid_row(
             backend,
             _selector(args),
@@ -242,15 +242,15 @@ def ui_operation_adapters(
         )
 
     async def grid_double_click_row(**args: Any) -> dict[str, Any]:
-        backend = await _backend_or_blocked(ensure_ui_connected)
-        if isinstance(backend, dict):
-            return backend
         row_index, row_key, blocked = _grid_row_request(
             args.get("row"),
             adapter="ui.grid.double_click_row",
         )
         if blocked is not None:
             return blocked
+        backend = await _backend_or_blocked(ensure_ui_connected)
+        if isinstance(backend, dict):
+            return backend
         return await double_click_grid_row(
             backend,
             _selector(args),

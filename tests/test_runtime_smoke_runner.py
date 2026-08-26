@@ -10,7 +10,7 @@ from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -5805,6 +5805,53 @@ async def test_runtime_smoke_observation_binds_after_pending_restore(
         "connect:main-window",
         "find:main-window",
     ]
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "ui.grid.ensure_visible",
+        "ui.grid.select_row",
+        "ui.grid.click_row",
+        "ui.grid.right_click_row",
+        "ui.grid.double_click_row",
+    ],
+)
+async def test_runtime_smoke_invalid_grid_row_preserves_pending_restore(
+    capturing_mcp,
+    monkeypatch,
+    operation: str,
+) -> None:
+    session = FakeRuntimeSmokeSession()
+    backend_factory = MagicMock(return_value=SimpleNamespace(process_id=1234))
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", backend_factory)
+    register_runtime_smoke_tools(
+        mcp=capturing_mcp,
+        session=cast(Any, session),
+        check_session_access=lambda _ctx: None,
+        resolve_project_root=_noop_resolve_project_root,
+    )
+
+    response = await capturing_mcp.tools["run_runtime_smoke"](
+        ctx=None,
+        plan={
+            "schema": "netcoredbg.runtime_smoke.v1",
+            "steps": [
+                {
+                    "op": operation,
+                    "selector": {"automation_id": "CueGrid"},
+                    "row": {},
+                }
+            ],
+        },
+    )
+
+    assert response["data"]["status"] == "BLOCKED"
+    assert response["data"]["reason"] == "invalid grid row identity"
+    backend_factory.assert_not_called()
     session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
 
 
