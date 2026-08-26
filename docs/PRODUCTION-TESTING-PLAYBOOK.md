@@ -206,7 +206,9 @@ Commands:
 if (-not $env:NETCOREDBG_PATH) { throw "Set NETCOREDBG_PATH to netcoredbg.exe before the submenu journey" }
 if (-not (Test-Path -LiteralPath $env:NETCOREDBG_PATH)) { throw "NETCOREDBG_PATH does not exist: $env:NETCOREDBG_PATH" }
 dotnet build tests/fixtures/WpfSmokeApp -c Debug
+if ($LASTEXITCODE -ne 0) { throw "dotnet build failed." }
 & $ConsumerCli --setup
+if ($LASTEXITCODE -ne 0) { throw "Consumer setup failed." }
 $env:NETCOREDBG_MCP_CONSUMER_CLI = $ConsumerCli
 $env:NETCOREDBG_MCP_WPF_ROOT = (Resolve-Path tests/fixtures/WpfSmokeApp).Path
 $env:FLAUI_BRIDGE_PATH = Join-Path $HOME ".netcoredbg-mcp\bridge\FlaUIBridge.exe"
