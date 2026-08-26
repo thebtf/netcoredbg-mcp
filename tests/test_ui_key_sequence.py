@@ -11,7 +11,10 @@ import pytest
 
 from netcoredbg_mcp.server import create_server
 from netcoredbg_mcp.ui.flaui_client import FlaUIBackend
-from netcoredbg_mcp.ui.key_sequence import run_scoped_key_sequence
+from netcoredbg_mcp.ui.key_sequence import (
+    run_scoped_key_sequence,
+    validate_scoped_key_sequence,
+)
 from netcoredbg_mcp.ui.pywinauto_backend import PywinautoBackend
 
 TEST_ROOT = Path(__file__).resolve().parent
@@ -44,6 +47,53 @@ def _make_flaui() -> FlaUIBackend:
     backend._client = MagicMock()
     backend._client.call = AsyncMock()
     return backend
+
+
+def test_key_sequence_validation_normalizes_without_mutating_requested_inputs() -> None:
+    modifiers = [" Shift ", "shift"]
+    keys = ["{Down}", "a"]
+
+    result = validate_scoped_key_sequence(modifiers, keys)
+
+    assert result == (["shift"], ["DOWN", "a"])
+    assert modifiers == [" Shift ", "shift"]
+    assert keys == ["{Down}", "a"]
+
+
+@pytest.mark.parametrize(
+    ("modifiers", "keys", "expected"),
+    [
+        (
+            ["shift"],
+            "DOWN",
+            {
+                "status": "FAIL",
+                "reason": "keys must be a list of strings",
+                "invalid_field": "keys",
+                "sent_count": 0,
+                "final_held_modifiers": [],
+            },
+        ),
+        (
+            [None],
+            ["DOWN"],
+            {
+                "status": "FAIL",
+                "reason": "modifiers must be a list of strings",
+                "invalid_field": "modifiers",
+                "sent_count": 0,
+                "final_held_modifiers": [],
+            },
+        ),
+    ],
+    ids=["keys-not-list", "modifier-not-string"],
+)
+def test_key_sequence_validation_rejects_malformed_public_input(
+    modifiers: Any,
+    keys: Any,
+    expected: dict[str, Any],
+) -> None:
+    assert validate_scoped_key_sequence(modifiers, keys) == expected
 
 
 @pytest.mark.asyncio

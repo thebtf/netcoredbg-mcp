@@ -26,7 +26,7 @@ from ..ui.grid import (
     select_grid_row,
     snapshot_grid,
 )
-from ..ui.key_sequence import run_scoped_key_sequence
+from ..ui.key_sequence import run_scoped_key_sequence, validate_scoped_key_sequence
 from ..ui.snapshots import (
     ALLOWED_UI_FIELDS,
     UISnapshotStore,
@@ -179,6 +179,9 @@ def register_ui_evidence_tools(
             access_error = check_session_access(ctx)
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
+            validation = validate_scoped_key_sequence(modifiers, keys)
+            if isinstance(validation, dict):
+                return build_response(data=validation, state=session.state.state)
 
             backend = await _ensure_ui_connected()
             result = await run_scoped_key_sequence(

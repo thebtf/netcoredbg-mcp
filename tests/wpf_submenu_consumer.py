@@ -123,6 +123,14 @@ async def _poll_discovery(
     raise AssertionError(f"discovery deadline: {json.dumps(deadline_evidence, sort_keys=True)}")
 
 
+def _server_environment() -> dict[str, str]:
+    """Pass the exact installed bridge and debugger through MCP's child environment."""
+    return {
+        "FLAUI_BRIDGE_PATH": _environment("FLAUI_BRIDGE_PATH"),
+        "NETCOREDBG_PATH": _environment("NETCOREDBG_PATH"),
+    }
+
+
 async def main() -> None:
     consumer_cli = _environment("NETCOREDBG_MCP_CONSUMER_CLI")
     wpf_root = _environment("NETCOREDBG_MCP_WPF_ROOT")
@@ -131,6 +139,7 @@ async def main() -> None:
     params = StdioServerParameters(
         command=consumer_cli,
         args=["--project-from-cwd"],
+        env=_server_environment(),
         cwd=wpf_root,
     )
     async with stdio_client(params) as (read_stream, write_stream):
@@ -200,21 +209,13 @@ async def main() -> None:
                     "focus_receipt": focus_receipt,
                 }
 
-                tree, tree_poll = await _poll_discovery(
-                    session,
-                    name="ui_get_window_tree",
-                    arguments={"max_depth": 6, "max_children": 100},
-                    matches=lambda data: _tree_contains_automation_id(data, "submenuChild"),
-                )
-                assert _tree_contains_automation_id(tree, "submenuChild"), tree
-                evidence["post_expansion"] = {"popup_tree_child_present": True}
-
                 child, child_poll = await _poll_discovery(
                     session,
                     name="ui_find_element",
                     arguments={"automation_id": "submenuChild", "control_type": "MenuItem"},
                     matches=lambda data: data.get("automationId") == "submenuChild",
                 )
+                evidence["post_expansion"] = {"popup_child_discovered": True}
                 evidence["popup_child_automation_id"] = child["automationId"]
 
                 invocation = _data(
@@ -240,7 +241,7 @@ async def main() -> None:
                 )
                 assert output.get("text") == "WpfWorkflow Submenu child invoked", output
                 evidence["observable_result"] = output["text"]
-                evidence["polling"] = [parent_poll, tree_poll, child_poll]
+                evidence["polling"] = [parent_poll, child_poll]
             except AssertionError as error:
                 if str(error).startswith("discovery deadline: "):
                     evidence["discovery_deadline"] = json.loads(

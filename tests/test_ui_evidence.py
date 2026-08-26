@@ -9,7 +9,7 @@ from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -1046,6 +1046,98 @@ async def test_ui_text_read_waits_for_pending_restore_without_canceling_retry(
     assert response["data"]["status"] == "PASS"
     session.wait_for_pending_stealth_foreground_restore.assert_awaited_once_with()
     session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("modifiers", "keys", "expected"),
+    [
+        (
+            [],
+            ["NotAKey"],
+            {
+                "status": "FAIL",
+                "reason": "unknown key",
+                "invalid_key": "NotAKey",
+                "sent_count": 0,
+                "final_held_modifiers": [],
+            },
+        ),
+        (
+            ["meta"],
+            ["DOWN"],
+            {
+                "status": "FAIL",
+                "reason": "unknown modifier",
+                "invalid_modifier": "meta",
+                "sent_count": 0,
+                "final_held_modifiers": [],
+            },
+        ),
+        (
+            ["shift"],
+            "DOWN",
+            {
+                "status": "FAIL",
+                "reason": "keys must be a list of strings",
+                "invalid_field": "keys",
+                "sent_count": 0,
+                "final_held_modifiers": [],
+            },
+        ),
+        (
+            [None],
+            ["DOWN"],
+            {
+                "status": "FAIL",
+                "reason": "modifiers must be a list of strings",
+                "invalid_field": "modifiers",
+                "sent_count": 0,
+                "final_held_modifiers": [],
+            },
+        ),
+    ],
+    ids=["unknown-key", "unknown-modifier", "keys-not-list", "modifier-not-string"],
+)
+async def test_ui_key_sequence_rejects_invalid_input_before_backend_or_restore(
+    capturing_mcp,
+    monkeypatch,
+    modifiers: Any,
+    keys: Any,
+    expected: dict[str, Any],
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock()
+    backend_factory = MagicMock()
+    connect_backend = AsyncMock()
+
+    monkeypatch.setattr(
+        "netcoredbg_mcp.ui.backend.create_backend",
+        backend_factory,
+    )
+    monkeypatch.setattr(
+        "netcoredbg_mcp.ui.backend.connect_backend",
+        connect_backend,
+    )
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda _ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_key_sequence"](
+        ctx=None,
+        modifiers=modifiers,
+        keys=keys,
+    )
+
+    assert response["data"] == expected
+    backend_factory.assert_not_called()
+    connect_backend.assert_not_awaited()
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+    session.wait_for_pending_stealth_foreground_restore.assert_not_awaited()
 
 
 @pytest.mark.asyncio
