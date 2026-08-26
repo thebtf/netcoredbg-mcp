@@ -1346,4 +1346,8 @@ def _row_index(row: dict[str, Any]) -> int | None:
 def _require_range(start_index: int | None, end_index: int | None) -> tuple[int, int]:
     if start_index is None or end_index is None:
         raise ValueError("start_index and end_index are required for range actions")
+    if start_index < 0 or end_index < 0:
+        raise ValueError("start_index and end_index must be non-negative")
+    if end_index < start_index:
+        raise ValueError("end_index must be greater than or equal to start_index")
     return start_index, end_index

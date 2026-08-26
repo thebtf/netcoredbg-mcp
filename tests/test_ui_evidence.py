@@ -1596,6 +1596,55 @@ async def test_ui_grid_assert_range_without_range_preserves_pending_restore(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "start_index", "end_index", "error"),
+    [
+        ("select_range", -1, 0, "start_index and end_index must be non-negative"),
+        ("assert_range", -1, 0, "start_index and end_index must be non-negative"),
+        ("select_range", 1, 0, "end_index must be greater than or equal to start_index"),
+        ("assert_range", 1, 0, "end_index must be greater than or equal to start_index"),
+    ],
+)
+async def test_ui_grid_static_invalid_range_preserves_pending_restore(
+    capturing_mcp,
+    monkeypatch,
+    action: str,
+    start_index: int,
+    end_index: int,
+    error: str,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock()
+    backend_factory = MagicMock(return_value=SimpleNamespace(process_id=42))
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", backend_factory)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda _ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_grid"](
+        ctx=None,
+        action=action,
+        automation_id="CueGrid",
+        start_index=start_index,
+        end_index=end_index,
+    )
+
+    assert response["data"] == {
+        "status": "FAIL",
+        "reason": "invalid grid request",
+        "error": error,
+    }
+    backend_factory.assert_not_called()
+    session.wait_for_pending_stealth_foreground_restore.assert_not_awaited()
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_ui_text_set_text_joins_pending_restore_before_focus(
     capturing_mcp,
     monkeypatch,
