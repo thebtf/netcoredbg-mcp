@@ -748,18 +748,24 @@ def test_session_manager_stealth_restore_waits_for_known_foreground_owner(monkey
 
 
 @pytest.mark.asyncio
-async def test_session_manager_waits_for_active_stealth_restore_without_canceling_retries() -> None:
+async def test_session_manager_waits_for_entire_active_stealth_restore_sequence_without_canceling_retries() -> (
+    None
+):
     from netcoredbg_mcp.session.manager import SessionManager
 
     manager = SessionManager.__new__(SessionManager)
     manager._state = SimpleNamespace(process_id=42)
     release_worker = asyncio.Event()
+    release_outer = asyncio.Event()
 
     async def worker() -> bool:
         await release_worker.wait()
         return True
 
-    outer = asyncio.create_task(asyncio.sleep(60))
+    async def restore_sequence() -> None:
+        await release_outer.wait()
+
+    outer = asyncio.create_task(restore_sequence())
     tracked_worker = asyncio.create_task(worker())
     manager._stealth_foreground_restore_task = outer
     manager._stealth_foreground_restore_worker = tracked_worker
@@ -770,14 +776,17 @@ async def test_session_manager_waits_for_active_stealth_restore_without_cancelin
     assert not outer.done()
 
     release_worker.set()
+    await tracked_worker
+    await asyncio.sleep(0)
+    assert not join.done()
+    assert not outer.done()
+
+    release_outer.set()
     await join
 
-    assert not outer.done()
-    assert manager._stealth_foreground_restore_task is outer
+    assert outer.done()
+    assert manager._stealth_foreground_restore_task is None
     assert manager._stealth_foreground_restore_worker is None
-    outer.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await outer
 
 
 @pytest.mark.asyncio

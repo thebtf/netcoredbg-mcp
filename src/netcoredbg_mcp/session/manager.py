@@ -251,11 +251,8 @@ class SessionManager:
             return
 
         worker = self._stealth_foreground_restore_worker
-        if worker is None:
-            outer = self._stealth_foreground_restore_task
-            if outer is None:
-                return
-
+        outer = self._stealth_foreground_restore_task
+        if outer is not None and not outer.done():
             try:
                 await asyncio.shield(outer)
             except asyncio.CancelledError:
@@ -266,6 +263,15 @@ class SessionManager:
             finally:
                 if self._stealth_foreground_restore_task is outer and outer.done():
                     self._stealth_foreground_restore_task = None
+                if (
+                    worker is not None
+                    and self._stealth_foreground_restore_worker is worker
+                    and worker.done()
+                ):
+                    self._stealth_foreground_restore_worker = None
+            return
+
+        if worker is None:
             return
 
         try:
