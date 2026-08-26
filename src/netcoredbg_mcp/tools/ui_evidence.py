@@ -260,6 +260,19 @@ def register_ui_evidence_tools(
                     state=session.state.state,
                 )
 
+            selection_range: tuple[int, int] | None = None
+            if canonical_action == "assert_selection":
+                if selection_start is None or selection_end is None:
+                    return build_response(
+                        data={
+                            "status": "FAIL",
+                            "reason": "selection_start and selection_end are required",
+                            "action": action,
+                        },
+                        state=session.state.state,
+                    )
+                selection_range = (selection_start, selection_end)
+
             backend = await _ensure_ui_connected(observation=canonical_action != "set_text")
             if canonical_action == "set_text":
                 backend_provider = _static_backend_provider(backend)
@@ -275,15 +288,8 @@ def register_ui_evidence_tools(
                     state=session.state.state,
                 )
             if canonical_action == "assert_selection":
-                if selection_start is None or selection_end is None:
-                    return build_response(
-                        data={
-                            "status": "FAIL",
-                            "reason": "selection_start and selection_end are required",
-                            "action": action,
-                        },
-                        state=session.state.state,
-                    )
+                assert selection_range is not None
+                selection_start, selection_end = selection_range
                 return build_response(
                     data=await assert_text_selection(
                         backend,

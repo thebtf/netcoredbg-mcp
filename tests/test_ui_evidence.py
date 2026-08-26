@@ -1461,6 +1461,41 @@ async def test_ui_text_set_text_without_text_preserves_pending_restore(
 
 
 @pytest.mark.asyncio
+async def test_ui_text_assert_selection_without_bounds_preserves_pending_restore(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock()
+    backend_factory = MagicMock(return_value=SimpleNamespace(process_id=42))
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", backend_factory)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda _ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_text"](
+        ctx=None,
+        action="assert_selection",
+        automation_id="CueTextBox",
+        selection_start=0,
+    )
+
+    assert response["data"] == {
+        "status": "FAIL",
+        "reason": "selection_start and selection_end are required",
+        "action": "assert_selection",
+    }
+    backend_factory.assert_not_called()
+    session.wait_for_pending_stealth_foreground_restore.assert_not_awaited()
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("action", "input_args"),
     (
