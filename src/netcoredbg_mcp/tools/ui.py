@@ -118,28 +118,23 @@ def register_ui_tools(
 
         backend = _get_backend()
         if backend.process_id != process_id:
-            from ..ui.backend import connect_backend
+            await _reconnect_ui_backend(backend, process_id)
 
-            await connect_backend(
-                backend,
-                process_id,
-                stealth_mode=getattr(session, "stealth_mode", False),
-            )
-
-        if not restore_joined:
-            await _join_launch_foreground_restore(observation=observation)
+        if not restore_joined and await _join_launch_foreground_restore(observation=observation):
+            await _reconnect_ui_backend(backend, process_id)
 
         return backend
 
-    async def _join_launch_foreground_restore(*, observation: bool = False) -> None:
+    async def _join_launch_foreground_restore(*, observation: bool = False) -> bool:
         method_name = (
             "wait_for_pending_stealth_foreground_restore"
             if observation
             else "cancel_pending_stealth_foreground_restore"
         )
         join = getattr(session, method_name, None)
-        if join is not None:
-            await cast(Callable[[], Awaitable[None]], join)()
+        if join is None:
+            return False
+        return (await cast(Callable[[], Awaitable[Any]], join)()) is True
 
     def _probable_black_frame_response(
         frame_analysis: dict[str, Any],
@@ -1674,8 +1669,10 @@ def register_ui_tools(
                             }
                         )
 
-                    await _join_launch_foreground_restore()
+                    restore_was_pending = await _join_launch_foreground_restore()
                     restore_joined = True
+                    if restore_was_pending:
+                        await _reconnect_ui_backend(ui, pid)
                     try:
                         bridge_result = await ui.client.call("screenshot", bridge_request)
                     except RuntimeError as error:
@@ -1927,6 +1924,10 @@ def register_ui_tools(
                     raise _PhysicalCaptureProvenanceUnavailableError(
                         "Physical target assertions require FlaUI bridge lossless capture"
                     )
+                if not restore_joined:
+                    await _join_launch_foreground_restore()
+                    restore_joined = True
+
                 hwnd = get_hwnd_for_pid(pid)
                 if not hwnd:
                     return build_error_response(
@@ -1935,9 +1936,6 @@ def register_ui_tools(
                         state=session.state.state,
                     )
 
-                if not restore_joined:
-                    await _join_launch_foreground_restore()
-                    restore_joined = True
                 if evidence:
                     png_bytes, raw_width, raw_height, capture_metadata = await loop.run_in_executor(
                         None,
@@ -2181,14 +2179,14 @@ def register_ui_tools(
             if not pid:
                 return build_error_response("No debug process.", state=session.state.state)
 
+            backend = await _ensure_ui_connected(observation=True)
+
             hwnd = get_hwnd_for_pid(pid)
             if not hwnd:
                 return build_error_response(
                     f"No visible window for process {pid}.",
                     state=session.state.state,
                 )
-
-            backend = await _ensure_ui_connected(observation=True)
 
             loop = asyncio.get_running_loop()
 

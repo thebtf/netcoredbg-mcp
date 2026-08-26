@@ -5746,6 +5746,69 @@ async def test_runtime_smoke_observation_provider_preserves_pending_restore(
 
 
 @pytest.mark.asyncio
+async def test_runtime_smoke_observation_binds_after_pending_restore(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeRuntimeSmokeSession()
+    target = {"name": "launch-window"}
+    call_order: list[str] = []
+
+    async def wait_for_restore() -> bool:
+        target["name"] = "main-window"
+        call_order.append("wait")
+        return True
+
+    class Backend:
+        process_id: int | None = None
+        bound_target: str | None = None
+
+        async def find_element(self, **_kwargs: Any) -> dict[str, Any]:
+            call_order.append(f"find:{self.bound_target}")
+            return {"status": "PASS", "name": self.bound_target}
+
+    backend = Backend()
+
+    async def connect_backend(backend_arg: Backend, process_id: int, **_kwargs: Any) -> None:
+        backend_arg.process_id = process_id
+        backend_arg.bound_target = target["name"]
+        call_order.append(f"connect:{target['name']}")
+
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock(side_effect=wait_for_restore)
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.connect_backend", connect_backend)
+    register_runtime_smoke_tools(
+        mcp=capturing_mcp,
+        session=cast(Any, session),
+        check_session_access=lambda _ctx: None,
+        resolve_project_root=_noop_resolve_project_root,
+    )
+
+    response = await capturing_mcp.tools["run_runtime_smoke"](
+        ctx=None,
+        plan={
+            "schema": "netcoredbg.runtime_smoke.v1",
+            "steps": [
+                {
+                    "op": "ui.get_property",
+                    "selector": {"automation_id": "StatusText"},
+                    "property": "Name",
+                }
+            ],
+        },
+    )
+
+    assert response["data"]["status"] == "PASS"
+    assert call_order == [
+        "connect:launch-window",
+        "wait",
+        "connect:main-window",
+        "find:main-window",
+    ]
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_runtime_smoke_mutation_connect_failure_preserves_pending_restore(
     capturing_mcp,
     monkeypatch,

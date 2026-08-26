@@ -1049,6 +1049,55 @@ async def test_ui_text_read_waits_for_pending_restore_without_canceling_retry(
 
 
 @pytest.mark.asyncio
+async def test_ui_text_binds_after_pending_restore(capturing_mcp, monkeypatch) -> None:
+    class Backend:
+        process_id: int | None = None
+        bound_text: str | None = None
+
+        async def extract_text(self, **_kwargs: Any) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "text": self.bound_text,
+                "source": "ValuePattern",
+            }
+
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    target = {"text": "launch-window"}
+    connection_targets: list[str] = []
+    backend = Backend()
+
+    async def wait_for_restore() -> bool:
+        target["text"] = "main-window"
+        return True
+
+    async def connect_backend(backend_arg: Backend, process_id: int, **_kwargs: Any) -> None:
+        backend_arg.process_id = process_id
+        backend_arg.bound_text = target["text"]
+        connection_targets.append(target["text"])
+
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock(side_effect=wait_for_restore)
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.connect_backend", connect_backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda _ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_text"](
+        ctx=None,
+        action="read",
+        automation_id="CueTextBox",
+    )
+
+    assert response["data"]["text"] == "main-window"
+    assert connection_targets[-1] == "main-window"
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("modifiers", "keys", "expected"),
     [

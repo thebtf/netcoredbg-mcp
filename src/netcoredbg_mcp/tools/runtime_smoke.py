@@ -84,10 +84,10 @@ def register_runtime_smoke_tools(
                 "Process ID not available. Debug session may not have started the process yet."
             )
 
+        from ..ui.backend import connect_backend
+
         backend = _get_backend()
         if backend.process_id != process_id:
-            from ..ui.backend import connect_backend
-
             await connect_backend(
                 backend,
                 process_id,
@@ -100,8 +100,17 @@ def register_runtime_smoke_tools(
             else "cancel_pending_stealth_foreground_restore"
         )
         join = getattr(session, method_name, None)
-        if join is not None:
-            await cast(Callable[[], Awaitable[None]], join)()
+        restore_was_pending = (
+            (await cast(Callable[[], Awaitable[Any]], join)()) is True
+            if join is not None
+            else False
+        )
+        if restore_was_pending:
+            await connect_backend(
+                backend,
+                process_id,
+                stealth_mode=getattr(session, "stealth_mode", False),
+            )
 
         return backend
 
