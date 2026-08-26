@@ -539,7 +539,7 @@ def register_ui_evidence_tools(
 
             result: Any
             range_selection: tuple[int, int] | None = None
-            if canonical_action == "select_range":
+            if canonical_action in {"select_range", "assert_range"}:
                 range_selection = _require_range(start_index, end_index)
             elif (
                 canonical_action
@@ -709,7 +709,8 @@ def register_ui_evidence_tools(
                         scroll_settle_ms=scroll_settle_ms,
                     )
                 elif canonical_action == "assert_range":
-                    start, end = _require_range(start_index, end_index)
+                    assert range_selection is not None
+                    start, end = range_selection
                     result = await assert_grid_range(backend, selector, start, end)
                 else:
                     raise RuntimeError(f"Unhandled grid action: {canonical_action}")

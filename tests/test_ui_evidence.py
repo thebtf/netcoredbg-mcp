@@ -1465,6 +1465,7 @@ async def test_ui_text_set_text_without_text_preserves_pending_restore(
     ("action", "input_args"),
     (
         ("select_range", {"start_index": 1}),
+        ("assert_range", {"start_index": 1}),
         ("ensure_visible", {}),
         ("select_row", {}),
         ("click_row", {}),
@@ -1501,7 +1502,7 @@ async def test_ui_grid_mutation_without_required_input_preserves_pending_restore
         **input_args,
     )
 
-    if action == "select_range":
+    if action in {"select_range", "assert_range"}:
         expected = {
             "status": "FAIL",
             "reason": "invalid grid request",
@@ -1523,6 +1524,40 @@ async def test_ui_grid_mutation_without_required_input_preserves_pending_restore
     assert response["data"] == expected
     session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
     assert backend.calls == []
+
+
+@pytest.mark.asyncio
+async def test_ui_grid_assert_range_without_range_preserves_pending_restore(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock()
+    backend = SimpleNamespace(process_id=42)
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda _ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_grid"](
+        ctx=None,
+        action="assert_range",
+        automation_id="CueGrid",
+        start_index=1,
+    )
+
+    assert response["data"] == {
+        "status": "FAIL",
+        "reason": "invalid grid request",
+        "error": "start_index and end_index are required for range actions",
+    }
+    session.wait_for_pending_stealth_foreground_restore.assert_not_awaited()
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
 
 
 @pytest.mark.asyncio
