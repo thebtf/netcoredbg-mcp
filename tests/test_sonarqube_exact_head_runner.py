@@ -226,6 +226,29 @@ class TestSonarqubeExactHeadRunner(TestCase):
             ],
         )
 
+    def test_coverage_environment_selects_external_python_for_host_tests(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "scanner-worktree"
+            coordination_root = Path(temporary_directory) / "coordination-root"
+            root.mkdir()
+            coordination_root.mkdir()
+            context = runner.GitContext(
+                root, coordination_root / ".git", root / ".git", coordination_root, "a" * 40
+            )
+            plan = runner.derive_coverage_plan(
+                context, "00000000-0000-4000-8000-000000000011"
+            )
+            environment = runner.coverage_environment(context, plan, {"SAFE": "kept"})
+
+        environment_root = runner.coverage_environment_directory(context, plan)
+        self.assertEqual(
+            environment["NETCOREDBG_MCP_PYTHON_EXECUTABLE"],
+            str(
+                environment_root
+                / (Path("Scripts") / "python.exe" if runner.os.name == "nt" else Path("bin") / "python")
+            ),
+        )
+
     def test_coverage_environment_is_external_and_cleanup_is_scoped(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory) / "scanner-worktree"

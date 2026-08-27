@@ -33,7 +33,10 @@ public sealed class RootsRelayRealPythonTests
     private const string ProjectRootEnvironmentVariable = "NETCOREDBG_PROJECT_ROOT";
 
     private static readonly string RepoRoot = LocateRepoRoot();
-    private static readonly string PythonExecutable = Path.Combine(RepoRoot, ".venv", "Scripts", "python.exe");
+    private static readonly string PythonExecutable =
+        Environment.GetEnvironmentVariable("NETCOREDBG_MCP_PYTHON_EXECUTABLE") is { Length: > 0 } configuredPython
+            ? configuredPython
+            : Path.Combine(RepoRoot, ".venv", "Scripts", "python.exe");
 
     private static string LocateRepoRoot()
     {
@@ -65,7 +68,7 @@ public sealed class RootsRelayRealPythonTests
     private static (RelaySession Session, PythonBackendProcess Python, DuplexChannel Downstream)
         StartRelayedRealPython(IReadOnlyList<string> pythonArgs)
     {
-        Assert.True(File.Exists(PythonExecutable), $"expected the worktree venv interpreter at {PythonExecutable}");
+        Assert.True(File.Exists(PythonExecutable), $"expected the configured Python interpreter at {PythonExecutable}");
         Environment.SetEnvironmentVariable("NETCOREDBG_MCP_PYTHON_EXECUTABLE", PythonExecutable);
         var python = PythonBackendProcess.Start(pythonArgs);
 

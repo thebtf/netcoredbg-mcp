@@ -1161,11 +1161,14 @@ public sealed class ProgressLoggingRelayTests
 
         public static RealProbePython Start(bool advertiseLogging)
         {
-            var pythonExecutable = Path.Combine(
-                RepoRoot,
-                ".venv",
-                OperatingSystem.IsWindows() ? Path.Combine("Scripts", "python.exe") : Path.Combine("bin", "python"));
-            Assert.True(File.Exists(pythonExecutable), $"expected the worktree venv interpreter at {pythonExecutable}");
+            var configuredPython = Environment.GetEnvironmentVariable("NETCOREDBG_MCP_PYTHON_EXECUTABLE");
+            var pythonExecutable = string.IsNullOrEmpty(configuredPython)
+                ? Path.Combine(
+                    RepoRoot,
+                    ".venv",
+                    OperatingSystem.IsWindows() ? Path.Combine("Scripts", "python.exe") : Path.Combine("bin", "python"))
+                : configuredPython;
+            Assert.True(File.Exists(pythonExecutable), $"expected the configured Python interpreter at {pythonExecutable}");
 
             var fixturePath = Path.Combine(RepoRoot, "tests", "fixtures", "fd002_notification_probe_server.py");
             Assert.True(File.Exists(fixturePath), $"expected the FD-002 probe fixture at {fixturePath}");

@@ -2472,6 +2472,12 @@ def coverage_environment_directory(context: GitContext, plan: CoveragePlan) -> P
     return directory
 
 
+def coverage_python_executable(environment_directory: Path) -> Path:
+    if os.name == "nt":
+        return environment_directory / "Scripts" / "python.exe"
+    return environment_directory / "bin" / "python"
+
+
 def clear_coverage_environment(context: GitContext, plan: CoveragePlan) -> None:
     directory = coverage_environment_directory(context, plan)
     if directory.is_symlink():
@@ -2490,9 +2496,13 @@ def coverage_environment(
     context: GitContext, plan: CoveragePlan, clean_environment: Mapping[str, str]
 ) -> dict[str, str]:
     environment = scrub_sonar_environment(clean_environment)
+    external_environment = coverage_environment_directory(context, plan)
     environment.update(
         {
-            "UV_PROJECT_ENVIRONMENT": str(coverage_environment_directory(context, plan)),
+            "UV_PROJECT_ENVIRONMENT": str(external_environment),
+            "NETCOREDBG_MCP_PYTHON_EXECUTABLE": str(
+                coverage_python_executable(external_environment)
+            ),
             "PYTHONDONTWRITEBYTECODE": "1",
             "COVERAGE_FILE": str(plan.root / "python" / ".coverage"),
         }
