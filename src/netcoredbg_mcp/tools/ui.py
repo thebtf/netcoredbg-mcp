@@ -157,6 +157,10 @@ def register_ui_tools(
         return response
 
     async def _reconnect_ui_backend(backend: Any, process_id: int) -> None:
+        cache = getattr(backend, "element_cache", None)
+        if isinstance(cache, dict):
+            cache.clear()
+
         from ..ui.backend import connect_backend
 
         await connect_backend(
@@ -2844,46 +2848,54 @@ def register_ui_tools(
                 )
 
             normalized_modifiers = _normalize_modifier_list(hold_modifiers)
+
+            def resolve_drag_coordinates(
+                cache_owner: Any | None,
+            ) -> tuple[int, int, int, int] | str:
+                cache = getattr(cache_owner, "element_cache", {})
+                if not isinstance(cache, dict):
+                    cache = {}
+                fx, fy, tx, ty = from_x, from_y, to_x, to_y
+
+                if from_automation_id and (fx is None or fy is None):
+                    from_rect = (cache.get(from_automation_id) or {}).get("rect")
+                    if from_rect:
+                        fx = (from_rect["left"] + from_rect["right"]) // 2
+                        fy = (from_rect["top"] + from_rect["bottom"]) // 2
+                    else:
+                        return (
+                            f"Element '{from_automation_id}' not in cache. "
+                            "Call ui_get_window_tree first."
+                        )
+
+                if to_automation_id and (tx is None or ty is None):
+                    to_rect = (cache.get(to_automation_id) or {}).get("rect")
+                    if to_rect:
+                        tx = (to_rect["left"] + to_rect["right"]) // 2
+                        ty = (to_rect["top"] + to_rect["bottom"]) // 2
+                    else:
+                        return (
+                            f"Element '{to_automation_id}' not in cache. "
+                            "Call ui_get_window_tree first."
+                        )
+
+                if fx is None or fy is None or tx is None or ty is None:
+                    return (
+                        "Provide either automation_ids or coordinates for both source and target."
+                    )
+                if fx == tx and fy == ty:
+                    return "from and to coordinates are identical (0 px distance)"
+                return fx, fy, tx, ty
+
+            preflight = resolve_drag_coordinates(_backend_holder["instance"])
+            if isinstance(preflight, str):
+                return build_error_response(preflight, state=session.state.state)
+
             ui = await _ensure_ui_connected()
-
-            # Resolve coordinates from automation IDs if needed
-            fx, fy, tx, ty = from_x, from_y, to_x, to_y
-
-            if from_automation_id and (fx is None or fy is None):
-                from_rect = (ui.element_cache.get(from_automation_id) or {}).get("rect")
-                if from_rect:
-                    fx = (from_rect["left"] + from_rect["right"]) // 2
-                    fy = (from_rect["top"] + from_rect["bottom"]) // 2
-                else:
-                    return build_error_response(
-                        f"Element '{from_automation_id}' not in cache. "
-                        "Call ui_get_window_tree first.",
-                        state=session.state.state,
-                    )
-
-            if to_automation_id and (tx is None or ty is None):
-                to_rect = (ui.element_cache.get(to_automation_id) or {}).get("rect")
-                if to_rect:
-                    tx = (to_rect["left"] + to_rect["right"]) // 2
-                    ty = (to_rect["top"] + to_rect["bottom"]) // 2
-                else:
-                    return build_error_response(
-                        f"Element '{to_automation_id}' not in cache. "
-                        "Call ui_get_window_tree first.",
-                        state=session.state.state,
-                    )
-
-            if fx is None or fy is None or tx is None or ty is None:
-                return build_error_response(
-                    "Provide either automation_ids or coordinates for both source and target.",
-                    state=session.state.state,
-                )
-
-            if fx == tx and fy == ty:
-                return build_error_response(
-                    "from and to coordinates are identical (0 px distance)",
-                    state=session.state.state,
-                )
+            coordinates = resolve_drag_coordinates(ui)
+            if isinstance(coordinates, str):
+                return build_error_response(coordinates, state=session.state.state)
+            fx, fy, tx, ty = coordinates
 
             result = await ui.drag(
                 fx,
