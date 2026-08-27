@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -40,6 +41,14 @@ SOLUTION_PROJECT_RE = re.compile(r'^Project\("[^"]+"\) = "([^"]+)", "([^"]+\.csp
 ISSUE_STATUSES = "OPEN,CONFIRMED,FALSE_POSITIVE,ACCEPTED,FIXED,IN_SANDBOX"
 GENERATED_DIRECTORY_NAMES = {"bin", "obj"}
 GENERATED_ROOT_NAMES = {".sonarqube", ".scannerwork"}
+COVERAGE_ROOT_PARTS = (".tmp", "sonarqube-coverage")
+CLOSED_DOTNET_COVERAGE_PROJECTS = (
+    "host/NetCoreDbg.Mcp.CodeSearch.Core.Tests/NetCoreDbg.Mcp.CodeSearch.Core.Tests.csproj",
+    "host/NetCoreDbg.Mcp.Host.Tests/NetCoreDbg.Mcp.Host.Tests.csproj",
+    "host/NetCoreDbg.Mcp.Stateless.Preview.Tests/NetCoreDbg.Mcp.Stateless.Preview.Tests.csproj",
+    "host/NetCoreDbg.Mcp.Stateless.Tests/NetCoreDbg.Mcp.Stateless.Tests.csproj",
+    "tests/dotnet/NetCoreDbg.Mcp.Host.PromptTests/NetCoreDbg.Mcp.Host.PromptTests.csproj",
+)
 PROJECT_VERSION_ASSIGNMENT_RE = re.compile(r'^version\s*=\s*"(?P<version>[^"]+)"\s*(?:#.*)?$')
 SEMVER_RE = re.compile(
     r"^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
@@ -98,6 +107,35 @@ class GitContext:
     git_dir: Path
     coordination_root: Path
     head: str
+
+
+@dataclass(frozen=True)
+class CoverageReportPlan:
+    language: str
+    format: str
+    absolute_path: Path
+    normalized_path: str
+    project: str | None
+    slug: str | None
+
+
+@dataclass(frozen=True)
+class CoveragePlan:
+    run_id: str
+    root: Path
+    marker_path: Path
+    reports: tuple[CoverageReportPlan, ...]
+
+    @property
+    def dotnet_reports(self) -> tuple[CoverageReportPlan, ...]:
+        return tuple(report for report in self.reports if report.language == "dotnet")
+
+    @property
+    def python_report(self) -> CoverageReportPlan:
+        reports = tuple(report for report in self.reports if report.language == "python")
+        if len(reports) != 1:
+            raise RunnerError("Coverage plan does not contain exactly one Python report.")
+        return reports[0]
 
 
 def utc_now() -> str:
@@ -840,6 +878,159 @@ def project_version(repository_root: Path) -> str:
     return versions[0]
 
 
+def _validate_coverage_run_id(run_id: str) -> None:
+    try:
+        parsed = uuid.UUID(run_id)
+    except (AttributeError, TypeError, ValueError) as error:
+        raise RunnerError("Coverage run id is invalid.") from error
+    if str(parsed) != run_id:
+        raise RunnerError("Coverage run id is invalid.")
+
+
+def _coverage_slug(project: str) -> str:
+    return hashlib.sha256(project.encode("utf-8")).hexdigest()[:16]
+
+
+def _normalized_coverage_path(path: Path, context: GitContext) -> str:
+    try:
+        relative = path.relative_to(context.repository_root)
+    except ValueError as error:
+        raise RunnerError("Coverage report path escapes the scanner worktree.") from error
+    normalized = str(relative).replace("\\", "/")
+    if (
+        not normalized
+        or normalized.startswith("/")
+        or re.match(r"^[A-Za-z]:", normalized)
+        or any(part in {"", ".", ".."} for part in normalized.split("/"))
+    ):
+        raise RunnerError("Coverage report path is invalid.")
+    return normalized
+
+
+def derive_coverage_plan(context: GitContext, run_id: str) -> CoveragePlan:
+    _validate_coverage_run_id(run_id)
+    if not SHA_RE.fullmatch(context.head):
+        raise RunnerError("Coverage plan requires a complete captured HEAD.")
+    root = context.repository_root.joinpath(*COVERAGE_ROOT_PARTS, run_id)
+    reports: list[CoverageReportPlan] = []
+    for project in CLOSED_DOTNET_COVERAGE_PROJECTS:
+        slug = _coverage_slug(project)
+        report_path = root / "dotnet" / slug / "coverage.opencover.xml"
+        reports.append(
+            CoverageReportPlan(
+                "dotnet",
+                "opencover",
+                report_path,
+                _normalized_coverage_path(report_path, context),
+                project,
+                slug,
+            )
+        )
+    reports.sort(key=lambda report: report.normalized_path)
+    python_path = root / "python" / "coverage.xml"
+    reports.append(
+        CoverageReportPlan(
+            "python",
+            "cobertura",
+            python_path,
+            _normalized_coverage_path(python_path, context),
+            None,
+            None,
+        )
+    )
+    return CoveragePlan(run_id, root, root / "coverage-run.json", tuple(reports))
+
+
+def coverage_scanner_properties(plan: CoveragePlan) -> tuple[str, str]:
+    dotnet_paths = ",".join(report.normalized_path for report in plan.dotnet_reports)
+    if not dotnet_paths or not plan.python_report.normalized_path:
+        raise RunnerError("Coverage report import paths are invalid.")
+    return (
+        f"/d:sonar.python.coverage.reportPaths={plan.python_report.normalized_path}",
+        f"/d:sonar.cs.opencover.reportsPaths={dotnet_paths}",
+    )
+
+
+def canonical_coverage_marker_payload(plan: CoveragePlan, context: GitContext) -> dict[str, Any]:
+    if plan.run_id != plan.root.name:
+        raise RunnerError("Coverage plan marker identity is invalid.")
+    return {
+        "schema": "netcoredbg-mcp.coverage-run/1",
+        "run_id": plan.run_id,
+        "captured_head": context.head,
+        "reports": [
+            {
+                "language": report.language,
+                "format": report.format,
+                "path": report.normalized_path,
+                "project": report.project,
+                "slug": report.slug,
+            }
+            for report in plan.reports
+        ],
+    }
+
+
+def canonical_coverage_marker_bytes(plan: CoveragePlan, context: GitContext) -> bytes:
+    return (
+        json.dumps(
+            canonical_coverage_marker_payload(plan, context),
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        + b"\n"
+    )
+
+
+def _assert_coverage_path(path: Path, plan: CoveragePlan, context: GitContext) -> None:
+    try:
+        path.relative_to(plan.root)
+        plan.root.relative_to(context.repository_root)
+    except ValueError as error:
+        raise RunnerError("Coverage path escapes the scanner worktree.") from error
+    current = context.repository_root
+    for part in path.relative_to(context.repository_root).parts:
+        current /= part
+        if not current.exists():
+            break
+        try:
+            attributes = current.lstat()
+        except OSError as error:
+            raise RunnerError("Coverage path metadata is unavailable.") from error
+        if current.is_symlink() or getattr(attributes, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            raise RunnerError("Coverage path must not traverse a symbolic link or reparse point.")
+
+
+def claim_coverage_run(plan: CoveragePlan, context: GitContext) -> str:
+    if plan.root.exists() or plan.root.is_symlink():
+        raise RunnerError("coverage run directory is unavailable.")
+    try:
+        plan.root.parent.mkdir(parents=True, exist_ok=True)
+        _assert_coverage_path(plan.root, plan, context)
+        plan.root.mkdir(exist_ok=False)
+        _assert_coverage_path(plan.marker_path, plan, context)
+        plan.marker_path.write_bytes(canonical_coverage_marker_bytes(plan, context))
+    except RunnerError:
+        raise
+    except (FileExistsError, OSError) as error:
+        raise RunnerError("coverage run directory is unavailable.") from error
+    return validate_coverage_marker(plan, context)
+
+
+def validate_coverage_marker(plan: CoveragePlan, context: GitContext) -> str:
+    _assert_coverage_path(plan.marker_path, plan, context)
+    if not plan.marker_path.is_file() or plan.marker_path.is_symlink():
+        raise RunnerError("Coverage marker is unavailable.")
+    try:
+        marker_bytes = plan.marker_path.read_bytes()
+    except OSError as error:
+        raise RunnerError("Coverage marker is unreadable.") from error
+    if marker_bytes != canonical_coverage_marker_bytes(plan, context):
+        raise RunnerError("Coverage marker does not match the current plan.")
+    return hashlib.sha256(marker_bytes).hexdigest()
+
+
 def discover_scanner(override: str | None) -> list[str]:
     candidates = [override] if override else [
         "dotnet-sonarscanner",
@@ -861,6 +1052,7 @@ def scanner_begin_command(
     head: str,
     project_version_value: str,
     token: str,
+    coverage_plan: CoveragePlan | None = None,
 ) -> list[str]:
     return [
         *scanner,
@@ -870,6 +1062,7 @@ def scanner_begin_command(
         f"/d:sonar.host.url={host}",
         f"/d:sonar.scm.revision={head}",
         f"/d:sonar.projectVersion={project_version_value}",
+        *(coverage_scanner_properties(coverage_plan) if coverage_plan is not None else ()),
         f"/d:sonar.token={token}",
     ]
 
@@ -907,11 +1100,17 @@ def project_inventory(repository_root: Path) -> tuple[Path, list[Path], list[Pat
     )
 
 
-def scanner_metadata(repository_root: Path, expected_head: str) -> dict[str, Any]:
+def scanner_metadata(
+    repository_root: Path, expected_head: str, expected_project_version: str
+) -> dict[str, Any]:
     metadata_root = repository_root / ".sonarqube"
     if not metadata_root.is_dir():
         raise RunnerError("SonarScanner did not create metadata.")
-    found: dict[str, list[tuple[str, str]]] = {"sonar.projectKey": [], "sonar.scm.revision": []}
+    found: dict[str, list[tuple[str, str]]] = {
+        "sonar.projectKey": [],
+        "sonar.projectVersion": [],
+        "sonar.scm.revision": [],
+    }
     for path in iter_scanner_tree(metadata_root, "*"):
         if not path.is_file() or path.is_symlink() or path.suffix.lower() not in {".xml", ".properties", ".txt"}:
             continue
@@ -933,12 +1132,18 @@ def scanner_metadata(repository_root: Path, expected_head: str) -> dict[str, Any
         except (OSError, ElementTree.ParseError) as error:
             raise RunnerError("SonarScanner metadata could not be parsed.") from error
     observed_project_keys = {value for _, value in found["sonar.projectKey"]}
+    observed_versions = {value for _, value in found["sonar.projectVersion"]}
     observed_revisions = {value for _, value in found["sonar.scm.revision"]}
-    if observed_project_keys != {PROJECT_KEY} or observed_revisions != {expected_head}:
-        raise RunnerError("Observed SonarScanner metadata does not bind the fixed project and exact HEAD.")
+    if (
+        observed_project_keys != {PROJECT_KEY}
+        or observed_versions != {expected_project_version}
+        or observed_revisions != {expected_head}
+    ):
+        raise RunnerError("Observed SonarScanner metadata does not bind the fixed project, release version, and exact HEAD.")
     return {
         "observed": True,
         "project_key": PROJECT_KEY,
+        "sonar_project_version": expected_project_version,
         "sonar_scm_revision": expected_head,
         "files": sorted({path for values in found.values() for path, _ in values}),
     }
@@ -1703,7 +1908,9 @@ def execute(role: str, scanner_override: str | None) -> Path:
                 label="SonarScanner begin",
                 credential_input_names=("SONAR_TOKEN",),
             )
-            receipt["scanner_metadata"] = scanner_metadata(context.repository_root, context.head)
+            receipt["scanner_metadata"] = scanner_metadata(
+                context.repository_root, context.head, release_version
+            )
 
             solution, projects, standalone_projects = project_inventory(context.repository_root)
             receipt["build_inventory"] = {

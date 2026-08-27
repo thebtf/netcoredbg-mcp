@@ -114,6 +114,74 @@ class TestSonarqubeExactHeadRunner(TestCase):
             with self.assertRaisesRegex(runner.RunnerError, "release version"):
                 runner.project_version(root)
 
+    def test_coverage_plan_is_side_effect_free_and_has_import_properties(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "scanner-worktree"
+            root.mkdir()
+            context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
+            plan = runner.derive_coverage_plan(
+                context, "00000000-0000-4000-8000-000000000002"
+            )
+
+        self.assertFalse(plan.root.exists())
+        self.assertEqual(
+            {report.project for report in plan.dotnet_reports},
+            set(runner.CLOSED_DOTNET_COVERAGE_PROJECTS),
+        )
+        self.assertEqual(
+            [report.normalized_path for report in plan.dotnet_reports],
+            sorted(report.normalized_path for report in plan.dotnet_reports),
+        )
+        self.assertEqual(
+            runner.coverage_scanner_properties(plan),
+            (
+                f"/d:sonar.python.coverage.reportPaths={plan.python_report.normalized_path}",
+                "/d:sonar.cs.opencover.reportsPaths="
+                + ",".join(report.normalized_path for report in plan.dotnet_reports),
+            ),
+        )
+
+    def test_scanner_begin_command_includes_coverage_properties(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
+            plan = runner.derive_coverage_plan(
+                context, "00000000-0000-4000-8000-000000000005"
+            )
+            command = runner.scanner_begin_command(
+                ["scanner"],
+                root / "SonarQube.Analysis.xml",
+                "https://sonar.example.test",
+                context.head,
+                "0.23.11",
+                "scan-token",
+                plan,
+            )
+
+        self.assertEqual(
+            [argument for argument in command if argument.startswith("/d:sonar.")][-3:-1],
+            list(runner.coverage_scanner_properties(plan)),
+        )
+
+    def test_coverage_claim_writes_and_validates_marker(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
+            plan = runner.derive_coverage_plan(
+                context, "00000000-0000-4000-8000-000000000003"
+            )
+
+            marker_sha256 = runner.claim_coverage_run(plan, context)
+
+            self.assertEqual(plan.marker_path.read_bytes(), runner.canonical_coverage_marker_bytes(plan, context))
+            self.assertEqual(runner.validate_coverage_marker(plan, context), marker_sha256)
+            stale_plan = runner.derive_coverage_plan(
+                context, "00000000-0000-4000-8000-000000000004"
+            )
+            stale_plan.root.mkdir(parents=True)
+            with self.assertRaisesRegex(runner.RunnerError, "coverage run directory"):
+                runner.claim_coverage_run(stale_plan, context)
+
     def test_scanner_metadata_reads_dotnet_analysis_config(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -124,16 +192,21 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 f"<SonarProjectKey>{runner.PROJECT_KEY}</SonarProjectKey>"
                 "<LocalSettings>"
                 f'<Property Name="sonar.scm.revision">{"a" * 40}</Property>'
+                '<Property Name="sonar.projectVersion">0.23.11</Property>'
                 "</LocalSettings>"
                 "</SonarQubeAnalysisConfig>",
                 encoding="utf-8",
             )
 
-            metadata = runner.scanner_metadata(root, "a" * 40)
+            metadata = runner.scanner_metadata(root, "a" * 40, "0.23.11")
 
         self.assertEqual(
-            (metadata["project_key"], metadata["sonar_scm_revision"]),
-            (runner.PROJECT_KEY, "a" * 40),
+            (
+                metadata["project_key"],
+                metadata["sonar_scm_revision"],
+                metadata["sonar_project_version"],
+            ),
+            (runner.PROJECT_KEY, "a" * 40, "0.23.11"),
         )
 
     def test_scanner_worktree_dotenv_is_rejected_before_primary_root_loading(self):
