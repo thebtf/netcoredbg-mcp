@@ -2022,6 +2022,20 @@ def _assert_coverage_path(path: Path, plan: CoveragePlan, context: GitContext) -
             raise RunnerError("Coverage path must not traverse a symbolic link or reparse point.")
 
 
+def _assert_claimed_coverage_path(path: Path, plan: CoveragePlan, context: GitContext) -> None:
+    if path.is_symlink() or plan.root.is_symlink():
+        raise CoverageFailure("report_validation", None, "COVERAGE_SYMLINK_REJECTED")
+    try:
+        path.relative_to(plan.root)
+        resolved_repository_root = context.repository_root.resolve()
+        resolved_root = plan.root.resolve()
+        resolved_path = path.resolve()
+        resolved_root.relative_to(resolved_repository_root)
+        resolved_path.relative_to(resolved_root)
+    except (OSError, ValueError) as error:
+        raise CoverageFailure("report_validation", None, "COVERAGE_PATH_ESCAPE") from error
+
+
 def claim_coverage_run(plan: CoveragePlan, context: GitContext) -> str:
     if plan.root.exists() or plan.root.is_symlink():
         raise RunnerError("coverage run directory is unavailable.")
@@ -2049,6 +2063,208 @@ def validate_coverage_marker(plan: CoveragePlan, context: GitContext) -> str:
     if marker_bytes != canonical_coverage_marker_bytes(plan, context):
         raise RunnerError("Coverage marker does not match the current plan.")
     return hashlib.sha256(marker_bytes).hexdigest()
+
+
+def _xml_local_name(value: str) -> str:
+    return value.rsplit("}", 1)[-1]
+
+
+def _coverage_file_bytes(
+    plan: CoveragePlan, context: GitContext, report: CoverageReportPlan
+) -> bytes:
+    _assert_claimed_coverage_path(report.absolute_path, plan, context)
+    if not report.absolute_path.exists():
+        raise CoverageFailure("report_validation", report.language, "COVERAGE_REPORT_MISSING")
+    try:
+        file_status = report.absolute_path.lstat()
+    except OSError as error:
+        raise CoverageFailure(
+            "report_validation", report.language, "COVERAGE_REPORT_UNREADABLE"
+        ) from error
+    if report.absolute_path.is_symlink():
+        raise CoverageFailure("report_validation", report.language, "COVERAGE_SYMLINK_REJECTED")
+    if not stat.S_ISREG(file_status.st_mode):
+        raise CoverageFailure("report_validation", report.language, "COVERAGE_REPORT_NOT_REGULAR")
+    try:
+        contents = report.absolute_path.read_bytes()
+    except OSError as error:
+        raise CoverageFailure(
+            "report_validation", report.language, "COVERAGE_REPORT_UNREADABLE"
+        ) from error
+    if not contents:
+        raise CoverageFailure("report_validation", report.language, "COVERAGE_REPORT_EMPTY")
+    return contents
+
+
+def _normalized_relative_source_path(value: str) -> str:
+    normalized = value.replace("\\", "/")
+    if (
+        not normalized
+        or normalized.startswith("/")
+        or re.match(r"^[A-Za-z]:", normalized)
+        or any(part in {"", ".", ".."} for part in normalized.split("/"))
+    ):
+        raise CoverageFailure("report_validation", None, "COVERAGE_SOURCE_PATH_INVALID")
+    return normalized
+
+
+def _source_path_set_sha256(paths: Collection[str]) -> str:
+    if not paths:
+        raise CoverageFailure("report_validation", None, "COVERAGE_SOURCE_MAPPING_EMPTY")
+    return hashlib.sha256(("\n".join(sorted(paths)) + "\n").encode("utf-8")).hexdigest()
+
+
+def _validate_python_sources(root: ElementTree.Element, context: GitContext) -> list[str]:
+    paths: list[str] = []
+    for element in root.iter():
+        if _xml_local_name(element.tag) != "class":
+            continue
+        filename = element.attrib.get("filename")
+        if not isinstance(filename, str):
+            raise CoverageFailure("report_validation", "python", "COVERAGE_SOURCE_MAPPING_INVALID")
+        normalized = _normalized_relative_source_path(filename)
+        if not normalized.startswith("src/netcoredbg_mcp/") or not normalized.endswith(".py"):
+            raise CoverageFailure("report_validation", "python", "COVERAGE_SOURCE_MAPPING_INVALID")
+        source = context.repository_root / normalized
+        try:
+            source.resolve().relative_to(context.repository_root.resolve())
+        except (OSError, ValueError) as error:
+            raise CoverageFailure(
+                "report_validation", "python", "COVERAGE_SOURCE_PATH_ESCAPE"
+            ) from error
+        if source.is_symlink() or not source.is_file():
+            raise CoverageFailure("report_validation", "python", "COVERAGE_SOURCE_MAPPING_INVALID")
+        paths.append(normalized)
+    if not paths or len(paths) != len(set(paths)):
+        raise CoverageFailure("report_validation", "python", "COVERAGE_SOURCE_MAPPING_INVALID")
+    return sorted(paths)
+
+
+def _normal_dotnet_source_path(context: GitContext, value: str) -> str:
+    source = Path(value)
+    if not source.is_absolute():
+        source = context.repository_root / source
+    try:
+        resolved = source.resolve()
+        normalized = _normalized_relative_source_path(
+            str(resolved.relative_to(context.repository_root.resolve())).replace("\\", "/")
+        )
+    except (OSError, ValueError) as error:
+        raise CoverageFailure(
+            "report_validation", "dotnet", "COVERAGE_SOURCE_PATH_ESCAPE"
+        ) from error
+    if source.is_symlink() or not source.is_file() or not normalized.endswith(".cs"):
+        raise CoverageFailure("report_validation", "dotnet", "COVERAGE_SOURCE_MAPPING_INVALID")
+    return normalized
+
+
+def _is_non_test_dotnet_source(normalized: str) -> bool:
+    components = normalized.casefold().split("/")
+    excluded = {"test", "tests", "fixture", "fixtures", "test-app"}
+    return not any(
+        component in excluded or component.endswith(".tests") for component in components
+    )
+
+
+def _validate_dotnet_sources(
+    root: ElementTree.Element, context: GitContext, report: CoverageReportPlan
+) -> list[str]:
+    paths: list[str] = []
+    for element in root.iter():
+        if _xml_local_name(element.tag) != "File":
+            continue
+        full_path = element.attrib.get("fullPath")
+        if not isinstance(full_path, str):
+            raise CoverageFailure("report_validation", "dotnet", "COVERAGE_SOURCE_MAPPING_INVALID")
+        paths.append(_normal_dotnet_source_path(context, full_path))
+    if (
+        not paths
+        or len(paths) != len(set(paths))
+        or not any(_is_non_test_dotnet_source(path) for path in paths)
+    ):
+        raise CoverageFailure("report_validation", "dotnet", "COVERAGE_SOURCE_MAPPING_INVALID")
+    if (
+        report.project is not None
+        and report.project.endswith("NetCoreDbg.Mcp.Stateless.Tests.csproj")
+        and not any(path.startswith("host/NetCoreDbg.Mcp.Stateless/") for path in paths)
+    ):
+        raise CoverageFailure(
+            "report_validation", "dotnet", "COVERAGE_STATELESS_HOST_MAPPING_MISSING"
+        )
+    return sorted(paths)
+
+
+def _positive_integer(value: Any, language: str) -> int:
+    if not isinstance(value, str) or not re.fullmatch(r"[1-9][0-9]*", value):
+        raise CoverageFailure("report_validation", language, "COVERAGE_DENOMINATOR_INVALID")
+    return int(value)
+
+
+def _coverage_report_binding(
+    plan: CoveragePlan, context: GitContext, report: CoverageReportPlan
+) -> dict[str, Any]:
+    contents = _coverage_file_bytes(plan, context, report)
+    try:
+        root = ElementTree.fromstring(contents)
+    except ElementTree.ParseError as error:
+        raise CoverageFailure(
+            "report_validation", report.language, "COVERAGE_REPORT_XML_INVALID"
+        ) from error
+    if report.language == "python":
+        if _xml_local_name(root.tag) != "coverage":
+            raise CoverageFailure("report_validation", "python", "COVERAGE_XML_ROOT_INVALID")
+        denominator = _positive_integer(root.attrib.get("lines-valid"), "python")
+        sources = _validate_python_sources(root, context)
+    elif report.language == "dotnet":
+        if _xml_local_name(root.tag) != "CoverageSession":
+            raise CoverageFailure("report_validation", "dotnet", "COVERAGE_XML_ROOT_INVALID")
+        summary = next((child for child in root if _xml_local_name(child.tag) == "Summary"), None)
+        if summary is None:
+            raise CoverageFailure("report_validation", "dotnet", "COVERAGE_DENOMINATOR_INVALID")
+        denominator = _positive_integer(summary.attrib.get("numSequencePoints"), "dotnet")
+        sources = _validate_dotnet_sources(root, context, report)
+    else:
+        raise CoverageFailure("report_validation", None, "COVERAGE_REPORT_LANGUAGE_INVALID")
+    return {
+        "path": report.normalized_path,
+        "project": report.project,
+        "sha256": hashlib.sha256(contents).hexdigest(),
+        "bytes": len(contents),
+        "xml_root": _xml_local_name(root.tag),
+        "coverage_denominator": denominator,
+        "mapped_source_count": len(sources),
+        "source_path_set_sha256": _source_path_set_sha256(sources),
+        "captured_head": context.head,
+    }
+
+
+def validate_coverage_evidence(plan: CoveragePlan, context: GitContext) -> dict[str, Any]:
+    marker_sha256 = validate_coverage_marker(plan, context)
+    if len(plan.dotnet_reports) != len(CLOSED_DOTNET_COVERAGE_PROJECTS):
+        raise CoverageFailure("report_validation", "dotnet", "COVERAGE_REPORT_SET_INVALID")
+    bindings = [_coverage_report_binding(plan, context, report) for report in plan.reports]
+    if len({binding["path"] for binding in bindings}) != len(bindings):
+        raise CoverageFailure("report_validation", None, "COVERAGE_REPORT_PATH_DUPLICATE")
+    dotnet_bindings = [binding for binding in bindings if binding["project"] is not None]
+    python_bindings = [binding for binding in bindings if binding["project"] is None]
+    return {
+        "evidence_sets": [
+            {
+                "language": "dotnet",
+                "format": "opencover",
+                "run_id": plan.run_id,
+                "marker_sha256": marker_sha256,
+                "reports": dotnet_bindings,
+            },
+            {
+                "language": "python",
+                "format": "cobertura",
+                "run_id": plan.run_id,
+                "marker_sha256": marker_sha256,
+                "reports": python_bindings,
+            },
+        ]
+    }
 
 
 def coverage_environment(
@@ -2120,6 +2336,46 @@ def coverage_producer_commands(context: GitContext, plan: CoveragePlan) -> list[
             ]
         )
     return commands
+
+
+def run_coverage_producers(
+    context: GitContext,
+    plan: CoveragePlan,
+    environment: Mapping[str, str],
+    secrets: Collection[str],
+    deadline: float,
+) -> None:
+    for report in plan.reports:
+        try:
+            report.absolute_path.parent.mkdir(parents=True, exist_ok=True)
+            _assert_claimed_coverage_path(report.absolute_path.parent, plan, context)
+        except RunnerError:
+            raise
+        except OSError as error:
+            raise CoverageFailure(
+                "report_validation", report.language, "COVERAGE_REPORT_DIRECTORY_CREATE_FAILED"
+            ) from error
+    commands = coverage_producer_commands(context, plan)
+    metadata = (
+        ("Python coverage environment sync", "python_producer", "python"),
+        ("Python coverage tests", "python_producer", "python"),
+        ("Python Cobertura XML", "python_producer", "python"),
+    )
+    for index, command in enumerate(commands):
+        if index < len(metadata):
+            label, stage, language = metadata[index]
+        else:
+            label, stage, language = (".NET OpenCover tests", "dotnet_producer", "dotnet")
+        run_coverage_process(
+            command,
+            cwd=context.repository_root,
+            environment=environment,
+            secrets=secrets,
+            label=label,
+            deadline=deadline,
+            stage=stage,
+            language=language,
+        )
 
 
 def discover_scanner(override: str | None) -> list[str]:

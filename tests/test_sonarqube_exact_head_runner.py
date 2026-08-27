@@ -195,6 +195,41 @@ class TestSonarqubeExactHeadRunner(TestCase):
             self.assertIn("/p:CoverletOutputFormat=opencover", command)
             self.assertIn(f"/p:CoverletOutput={report.absolute_path}", command)
 
+    def test_run_coverage_producers_owns_all_commands(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
+            plan = runner.derive_coverage_plan(
+                context, "00000000-0000-4000-8000-000000000008"
+            )
+            runner.claim_coverage_run(plan, context)
+            environment = runner.coverage_environment(
+                context, plan, {"SONAR_TOKEN": "must-not-reach-child", "SAFE": "kept"}
+            )
+            calls = []
+
+            def record(command, **kwargs):
+                calls.append((command, kwargs))
+
+            with patch.object(runner, "run_coverage_process", side_effect=record):
+                runner.run_coverage_producers(
+                    context,
+                    plan,
+                    environment,
+                    (),
+                    runner.time.monotonic() + 60,
+                )
+            self.assertTrue(all(report.absolute_path.parent.exists() for report in plan.reports))
+
+        self.assertEqual([command for command, _ in calls], runner.coverage_producer_commands(context, plan))
+        self.assertTrue(
+            all(
+                "SONAR_TOKEN" not in kwargs["environment"]
+                and kwargs["deadline"] > runner.time.monotonic()
+                for _, kwargs in calls
+            )
+        )
+
     def test_coverage_owner_refuses_non_windows(self):
         current_directory = Path.cwd()
         with (
@@ -293,6 +328,52 @@ class TestSonarqubeExactHeadRunner(TestCase):
             stale_plan.root.mkdir(parents=True)
             with self.assertRaisesRegex(runner.RunnerError, "coverage run directory"):
                 runner.claim_coverage_run(stale_plan, context)
+
+    def test_coverage_evidence_binds_reports_sources_and_marker(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
+            plan = runner.derive_coverage_plan(
+                context, "00000000-0000-4000-8000-000000000007"
+            )
+            runner.claim_coverage_run(plan, context)
+            python_source = root / "src" / "netcoredbg_mcp" / "module.py"
+            host_source = root / "host" / "NetCoreDbg.Mcp.Host" / "Program.cs"
+            stateless_source = root / "host" / "NetCoreDbg.Mcp.Stateless" / "Program.cs"
+            for source in (python_source, host_source, stateless_source):
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text("source", encoding="utf-8")
+            plan.python_report.absolute_path.parent.mkdir(parents=True)
+            plan.python_report.absolute_path.write_text(
+                '<coverage lines-valid="1"><packages><package><classes><class filename="src/netcoredbg_mcp/module.py" /></classes></package></packages></coverage>',
+                encoding="utf-8",
+            )
+            for report in plan.dotnet_reports:
+                report.absolute_path.parent.mkdir(parents=True, exist_ok=True)
+                source = (
+                    stateless_source
+                    if report.project and report.project.endswith("NetCoreDbg.Mcp.Stateless.Tests.csproj")
+                    else host_source
+                )
+                report.absolute_path.write_text(
+                    '<CoverageSession><Summary numSequencePoints="1" /><Modules><Module><Files><File uid="1" fullPath="'
+                    + str(source)
+                    + '" /></Files></Module></Modules></CoverageSession>',
+                    encoding="utf-8",
+                )
+
+            evidence = runner.validate_coverage_evidence(plan, context)
+
+            self.assertEqual(
+                [item["language"] for item in evidence["evidence_sets"]], ["dotnet", "python"]
+            )
+            self.assertEqual(
+                evidence["evidence_sets"][0]["marker_sha256"],
+                runner.validate_coverage_marker(plan, context),
+            )
+            plan.python_report.absolute_path.unlink()
+            with self.assertRaisesRegex(runner.CoverageFailure, "COVERAGE_REPORT_MISSING"):
+                runner.validate_coverage_evidence(plan, context)
 
     def test_scanner_metadata_reads_dotnet_analysis_config(self):
         with TemporaryDirectory() as temporary_directory:
