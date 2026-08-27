@@ -230,6 +230,24 @@ class TestSonarqubeExactHeadRunner(TestCase):
             )
         )
 
+    def test_produce_coverage_binds_owned_producers_and_evidence(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
+            plan = runner.derive_coverage_plan(
+                context, "00000000-0000-4000-8000-000000000009"
+            )
+            expected = {"evidence_sets": [{"language": "dotnet"}, {"language": "python"}]}
+            with (
+                patch.object(runner, "run_coverage_producers") as producers,
+                patch.object(runner, "validate_coverage_evidence", return_value=expected),
+            ):
+                evidence = runner.produce_coverage(context, plan, {"SONAR_TOKEN": "secret"}, ())
+
+        self.assertEqual(evidence, expected)
+        producers.assert_called_once()
+        self.assertNotIn("SONAR_TOKEN", producers.call_args.kwargs["environment"])
+
     def test_coverage_owner_refuses_non_windows(self):
         current_directory = Path.cwd()
         with (

@@ -2378,6 +2378,23 @@ def run_coverage_producers(
         )
 
 
+def produce_coverage(
+    context: GitContext,
+    plan: CoveragePlan,
+    clean_environment: Mapping[str, str],
+    secrets: Collection[str],
+) -> dict[str, Any]:
+    environment = coverage_environment(context, plan, clean_environment)
+    run_coverage_producers(
+        context,
+        plan,
+        environment=environment,
+        secrets=secrets,
+        deadline=time.monotonic() + CE_TIMEOUT_SECONDS,
+    )
+    return validate_coverage_evidence(plan, context)
+
+
 def discover_scanner(override: str | None) -> list[str]:
     candidates = [override] if override else [
         "dotnet-sonarscanner",
