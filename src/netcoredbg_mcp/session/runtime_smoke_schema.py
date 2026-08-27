@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeGuard
 
 SCHEMA_VERSION = "netcoredbg.runtime_smoke.v1"
 SCHEMA_VERSION_V2 = "netcoredbg.runtime_smoke.v2"
@@ -1195,15 +1195,28 @@ def _validate_op_args(
     elif op_name in {"ui.grid.select_range", "ui.grid.assert_range"}:
         _validate_int_arg(prefix, op_name, args, "start_index", errors)
         _validate_int_arg(prefix, op_name, args, "end_index", errors)
+        _validate_static_grid_range(prefix, op_name, args, errors)
     elif op_name == "ui.grid.assert_rows":
-        if "rows" in args and not isinstance(args["rows"], list):
+        rows = args.get("rows")
+        if "rows" in args and not isinstance(rows, list):
             errors.append(f"{prefix}.rows must be a list for op {op_name}")
+        elif isinstance(rows, list):
+            _validate_grid_row_assertions(prefix, op_name, rows, errors)
     elif op_name in {"ui.list.invoke_item", "ui.list.toggle_item_child"}:
-        if "item" in args and not isinstance(args["item"], dict):
+        item = args.get("item")
+        if "item" in args and not isinstance(item, dict):
             errors.append(f"{prefix}.item must be an object for op {op_name}")
+        elif isinstance(item, dict):
+            _validate_list_item_index(prefix, op_name, item, errors)
         if op_name == "ui.list.toggle_item_child":
-            if "child" in args and not isinstance(args["child"], dict):
+            child = args.get("child")
+            if "child" in args and not isinstance(child, dict):
                 errors.append(f"{prefix}.child must be an object for op {op_name}")
+            elif isinstance(child, dict) and not _has_child_selector(child):
+                errors.append(
+                    f"{prefix}.child must include automation_id, name, or control_type "
+                    f"for op {op_name}"
+                )
             if (
                 "target_state" in args
                 and args["target_state"] is not None
@@ -1239,6 +1252,68 @@ def _validate_op_args(
                 errors.append(
                     f"{prefix}.{field_name} must be a non-empty string for op {op_name}"
                 )
+
+
+def _is_int(value: Any) -> TypeGuard[int]:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _validate_static_grid_range(
+    prefix: str,
+    op_name: str,
+    args: dict[str, Any],
+    errors: list[str],
+) -> None:
+    start_index = args.get("start_index")
+    end_index = args.get("end_index")
+    if _is_int(start_index) and start_index < 0:
+        errors.append(f"{prefix}.start_index must be non-negative for op {op_name}")
+    if _is_int(end_index) and end_index < 0:
+        errors.append(f"{prefix}.end_index must be non-negative for op {op_name}")
+    if (
+        _is_int(start_index)
+        and _is_int(end_index)
+        and start_index >= 0
+        and end_index >= 0
+        and end_index < start_index
+    ):
+        errors.append(
+            f"{prefix}.end_index must be greater than or equal to start_index for op {op_name}"
+        )
+
+
+def _validate_grid_row_assertions(
+    prefix: str,
+    op_name: str,
+    rows: list[Any],
+    errors: list[str],
+) -> None:
+    for index, row in enumerate(rows):
+        row_prefix = f"{prefix}.rows[{index}]"
+        if not isinstance(row, dict):
+            errors.append(f"{row_prefix} must be an object for op {op_name}")
+            continue
+        if not _is_int(row.get("index")) or row["index"] < 0:
+            errors.append(f"{row_prefix}.index must be a non-negative integer for op {op_name}")
+        if not isinstance(row.get("contains"), dict):
+            errors.append(f"{row_prefix}.contains must be an object for op {op_name}")
+
+
+def _validate_list_item_index(
+    prefix: str,
+    op_name: str,
+    item: dict[str, Any],
+    errors: list[str],
+) -> None:
+    if "index" in item and (not _is_int(item["index"]) or item["index"] < 0):
+        errors.append(f"{prefix}.item.index must be a non-negative integer for op {op_name}")
+
+
+def _has_child_selector(child: dict[str, Any]) -> bool:
+    return any(
+        isinstance(child.get(key), str) and bool(child[key].strip())
+        for key in ("automation_id", "automationId", "name", "control_type", "controlType")
+    )
 
 
 def _validate_int_arg(

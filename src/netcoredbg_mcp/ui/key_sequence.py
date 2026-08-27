@@ -27,6 +27,26 @@ _SUPPORTED_KEYS = {
 _SUPPORTED_MODIFIERS = {"ctrl", "shift", "alt", "win"}
 
 
+def validate_scoped_key_sequence(
+    modifiers: Any,
+    keys: Any,
+) -> tuple[list[str], list[str]] | dict[str, Any]:
+    """Normalize one public key sequence without interacting with a UI backend."""
+    invalid = _invalid_sequence_field("modifiers", modifiers)
+    if invalid is not None:
+        return invalid
+    invalid = _invalid_sequence_field("keys", keys)
+    if invalid is not None:
+        return invalid
+    normalized_modifiers = _normalize_modifiers(modifiers)
+    if isinstance(normalized_modifiers, dict):
+        return normalized_modifiers
+    normalized_keys = _normalize_keys(keys)
+    if isinstance(normalized_keys, dict):
+        return normalized_keys
+    return normalized_modifiers, normalized_keys
+
+
 async def run_scoped_key_sequence(
     backend: Any,
     selector: dict[str, Any],
@@ -35,12 +55,10 @@ async def run_scoped_key_sequence(
     keys: list[str],
 ) -> dict[str, Any]:
     """Run a backend scoped key sequence and normalize terminal evidence."""
-    normalized_modifiers = _normalize_modifiers(modifiers)
-    if isinstance(normalized_modifiers, dict):
-        return normalized_modifiers
-    normalized_keys = _normalize_keys(keys)
-    if isinstance(normalized_keys, dict):
-        return normalized_keys
+    normalized = validate_scoped_key_sequence(modifiers, keys)
+    if isinstance(normalized, dict):
+        return normalized
+    normalized_modifiers, normalized_keys = normalized
 
     result = await backend.scoped_key_sequence(
         dict(selector),
@@ -77,6 +95,18 @@ async def run_scoped_key_sequence(
             "final_held_modifiers": final_held,
         }
     return {"status": status, **result, "final_held_modifiers": final_held}
+
+
+def _invalid_sequence_field(field_name: str, value: Any) -> dict[str, Any] | None:
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return None
+    return {
+        "status": "FAIL",
+        "reason": f"{field_name} must be a list of strings",
+        "invalid_field": field_name,
+        "sent_count": 0,
+        "final_held_modifiers": [],
+    }
 
 
 def _normalize_modifiers(modifiers: list[str]) -> list[str] | dict[str, Any]:

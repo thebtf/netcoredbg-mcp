@@ -203,10 +203,16 @@ surface. The fixture build is preparation, not the proof itself.
 Commands:
 
 ```powershell
+if (-not $env:NETCOREDBG_PATH) { throw "Set NETCOREDBG_PATH to netcoredbg.exe before the submenu journey" }
+if (-not (Test-Path -LiteralPath $env:NETCOREDBG_PATH)) { throw "NETCOREDBG_PATH does not exist: $env:NETCOREDBG_PATH" }
 dotnet build tests/fixtures/WpfSmokeApp -c Debug
+if ($LASTEXITCODE -ne 0) { throw "dotnet build failed." }
 & $ConsumerCli --setup
+if ($LASTEXITCODE -ne 0) { throw "Consumer setup failed." }
 $env:NETCOREDBG_MCP_CONSUMER_CLI = $ConsumerCli
 $env:NETCOREDBG_MCP_WPF_ROOT = (Resolve-Path tests/fixtures/WpfSmokeApp).Path
+$env:FLAUI_BRIDGE_PATH = Join-Path $HOME ".netcoredbg-mcp\bridge\FlaUIBridge.exe"
+if (-not (Test-Path -LiteralPath $env:FLAUI_BRIDGE_PATH)) { throw "Run $ConsumerCli --setup before the submenu journey" }
 Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
 & $ConsumerPython tests/wpf_submenu_consumer.py
 ```
@@ -221,9 +227,11 @@ Expected result:
   prints `terminal_event=timeout_no_response` for no response or
   `terminal_event=deadline_elapsed_after_response` after a received response.
   Both retain the last received public response, attempt count, and deadline.
-- Before native `ENTER` expansion, the public tree omits `submenuChild`; after
-  it, the popup-tree oracle and independently rediscovered element both identify
-  `submenuChild`. The fixture has no submenu-specific key handler.
+- Before native `ENTER` expansion, the bounded public tree omits `submenuChild`.
+  After it, bounded polling independently rediscovers the exact popup child with
+  `ui_find_element`. The journey intentionally does not require a second broad
+  tree traversal while the native popup is open. The fixture has no
+  submenu-specific key handler.
 - The separate child invocation reports `invoked=true` and exactly
   `method=InvokePattern`; `WpfWorkflow Submenu child invoked` is the observable
   result.

@@ -204,6 +204,34 @@ def test_wpf_submenu_parent_native_enter_rediscovers_popup_child_and_invokes_it(
     )
     assert install_wheel.returncode == 0, install_wheel.stdout + install_wheel.stderr
     assert consumer_cli.is_file(), f"wheel did not install CLI: {consumer_cli}"
+    installed_bridge_source = consumer_root / "Lib" / "site-packages" / "netcoredbg_mcp" / "bridge"
+    installed_bridge_project = installed_bridge_source / "FlaUIBridge.csproj"
+    assert installed_bridge_project.is_file(), (
+        f"wheel did not install bridge source: {installed_bridge_project}"
+    )
+
+    bridge_output = tmp_path / "installed-wheel-bridge"
+    bridge_publish = subprocess.run(
+        [
+            "dotnet",
+            "publish",
+            str(installed_bridge_project),
+            "-c",
+            "Release",
+            "-r",
+            "win-x64",
+            "--self-contained",
+            "-o",
+            str(bridge_output),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert bridge_publish.returncode == 0, bridge_publish.stdout + bridge_publish.stderr
+    bridge_path = bridge_output / "FlaUIBridge.exe"
+    assert bridge_path.is_file(), f"packaged bridge publish did not produce: {bridge_path}"
 
     consumer_env = dict(os.environ)
     consumer_env.pop("PYTHONPATH", None)
@@ -211,6 +239,7 @@ def test_wpf_submenu_parent_native_enter_rediscovers_popup_child_and_invokes_it(
         {
             "NETCOREDBG_MCP_CONSUMER_CLI": str(consumer_cli),
             "NETCOREDBG_MCP_WPF_ROOT": str(FIXTURE_ROOT),
+            "FLAUI_BRIDGE_PATH": str(bridge_path),
         }
     )
     consumer = subprocess.run(

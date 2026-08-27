@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Awaitable, Callable
+from typing import Any, cast
 
 from mcp.server.fastmcp import Context, FastMCP
 
@@ -26,7 +26,7 @@ from ..ui.grid import (
     select_grid_row,
     snapshot_grid,
 )
-from ..ui.key_sequence import run_scoped_key_sequence
+from ..ui.key_sequence import run_scoped_key_sequence, validate_scoped_key_sequence
 from ..ui.snapshots import (
     ALLOWED_UI_FIELDS,
     UISnapshotStore,
@@ -122,7 +122,7 @@ def register_ui_evidence_tools(
             )
         return backend_holder["instance"]
 
-    async def _ensure_ui_connected() -> Any:
+    async def _ensure_ui_connected(*, observation: bool = False) -> Any:
         from ..ui import NoActiveSessionError, NoProcessIdError
 
         if session.state.state == DebugState.IDLE:
@@ -134,15 +134,34 @@ def register_ui_evidence_tools(
                 "Process ID not available. Debug session may not have started the process yet."
             )
 
+        from ..ui.backend import connect_backend
+
         backend = _get_backend()
         if backend.process_id != process_id:
-            from ..ui.backend import connect_backend
-
             await connect_backend(
                 backend,
                 process_id,
                 stealth_mode=getattr(session, "stealth_mode", False),
             )
+
+        method_name = (
+            "wait_for_pending_stealth_foreground_restore"
+            if observation
+            else "cancel_pending_stealth_foreground_restore"
+        )
+        join = getattr(session, method_name, None)
+        restore_was_pending = (
+            (await cast(Callable[[], Awaitable[Any]], join)()) is True
+            if join is not None
+            else False
+        )
+        if restore_was_pending:
+            await connect_backend(
+                backend,
+                process_id,
+                stealth_mode=getattr(session, "stealth_mode", False),
+            )
+
         return backend
 
     @mcp.tool(annotations=ToolAnnotations(openWorldHint=False))
@@ -169,6 +188,9 @@ def register_ui_evidence_tools(
             access_error = check_session_access(ctx)
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
+            validation = validate_scoped_key_sequence(modifiers, keys)
+            if isinstance(validation, dict):
+                return build_response(data=validation, state=session.state.state)
 
             backend = await _ensure_ui_connected()
             result = await run_scoped_key_sequence(
@@ -228,17 +250,31 @@ def register_ui_evidence_tools(
                     state=session.state.state,
                 )
 
-            backend = await _ensure_ui_connected()
-            if canonical_action == "set_text":
-                if text is None:
+            if canonical_action == "set_text" and text is None:
+                return build_response(
+                    data={
+                        "status": "FAIL",
+                        "reason": "text is required",
+                        "action": action,
+                    },
+                    state=session.state.state,
+                )
+
+            selection_range: tuple[int, int] | None = None
+            if canonical_action == "assert_selection":
+                if selection_start is None or selection_end is None:
                     return build_response(
                         data={
                             "status": "FAIL",
-                            "reason": "text is required",
+                            "reason": "selection_start and selection_end are required",
                             "action": action,
                         },
                         state=session.state.state,
                     )
+                selection_range = (selection_start, selection_end)
+
+            backend = await _ensure_ui_connected(observation=canonical_action != "set_text")
+            if canonical_action == "set_text":
                 backend_provider = _static_backend_provider(backend)
                 adapters = ui_operation_adapters(backend_provider)
                 result = await adapters["ui.text.set_text"](selector=selector, text=text)
@@ -252,15 +288,8 @@ def register_ui_evidence_tools(
                     state=session.state.state,
                 )
             if canonical_action == "assert_selection":
-                if selection_start is None or selection_end is None:
-                    return build_response(
-                        data={
-                            "status": "FAIL",
-                            "reason": "selection_start and selection_end are required",
-                            "action": action,
-                        },
-                        state=session.state.state,
-                    )
+                assert selection_range is not None
+                selection_start, selection_end = selection_range
                 return build_response(
                     data=await assert_text_selection(
                         backend,
@@ -349,7 +378,7 @@ def register_ui_evidence_tools(
                     state=session.state.state,
                 )
 
-            backend = await _ensure_ui_connected()
+            backend = await _ensure_ui_connected(observation=True)
             selector_kwargs = {
                 "automation_id": automation_id,
                 "name": name,
@@ -442,7 +471,7 @@ def register_ui_evidence_tools(
                     state=session.state.state,
                 )
 
-            backend = await _ensure_ui_connected()
+            backend = await _ensure_ui_connected(observation=True)
             result = await assert_focus(backend, selector)
             if _is_selector_miss(result):
                 return build_response(
@@ -514,6 +543,64 @@ def register_ui_evidence_tools(
                     state=session.state.state,
                 )
 
+            result: Any
+            range_selection: tuple[int, int] | None = None
+            if canonical_action in {"select_range", "assert_range"}:
+                range_selection = _require_range(start_index, end_index)
+            elif (
+                canonical_action
+                in {
+                    "ensure_visible",
+                    "select_row",
+                    "click_row",
+                    "right_click_row",
+                    "double_click_row",
+                }
+                and row_index is None
+                and not row_key
+            ):
+                return build_response(
+                    data={
+                        "status": "BLOCKED",
+                        "reason": "grid row request missing",
+                        "requested": {"row_index": row_index, "row_key": row_key},
+                        "accepted": {"row": "visible row_index or row_key"},
+                        "next_step": (
+                            "Provide row_index for a visible logical row or row_key for a "
+                            "unique visible row identity."
+                        ),
+                        "requested_action": action,
+                        "canonical_action": canonical_action,
+                    },
+                    state=session.state.state,
+                )
+            elif (
+                canonical_action
+                in {
+                    "ensure_visible",
+                    "select_row",
+                    "click_row",
+                    "right_click_row",
+                    "double_click_row",
+                }
+                and row_index is not None
+                and row_index < 0
+            ):
+                return build_response(
+                    data={
+                        "status": "BLOCKED",
+                        "reason": "grid row is not visible",
+                        "requested": {"row_index": row_index, "row_key": row_key},
+                        "accepted": {"row": "currently visible row index or unique row key"},
+                        "next_step": (
+                            "Scroll the grid or choose a currently visible row before acting."
+                        ),
+                        "requested_action": action,
+                        "canonical_action": canonical_action,
+                    },
+                    state=session.state.state,
+                )
+
             if canonical_action == "viewport":
                 unsupported_expectations = _unsupported_direct_viewport_expectations(expect)
                 if unsupported_expectations:
@@ -538,7 +625,9 @@ def register_ui_evidence_tools(
                         },
                         state=session.state.state,
                     )
-                result = await ui_operation_adapters(_ensure_ui_connected)["ui.grid.viewport"](
+                result = await ui_operation_adapters(
+                    lambda: _ensure_ui_connected(observation=True)
+                )["ui.grid.viewport"](
                     selector=selector,
                     rows=rows,
                     identity=identity,
@@ -547,7 +636,16 @@ def register_ui_evidence_tools(
                     probe_name=probe_name,
                 )
             else:
-                backend = await _ensure_ui_connected()
+                backend = await _ensure_ui_connected(
+                    observation=canonical_action
+                    in {
+                        "visible_rows",
+                        "snapshot",
+                        "selected_rows",
+                        "get_state",
+                        "assert_range",
+                    }
+                )
                 if canonical_action == "visible_rows":
                     result = await read_grid_visible_rows(backend, selector)
                 elif canonical_action == "snapshot":
@@ -575,7 +673,8 @@ def register_ui_evidence_tools(
                         scroll_settle_ms=scroll_settle_ms,
                     )
                 elif canonical_action == "select_range":
-                    start, end = _require_range(start_index, end_index)
+                    assert range_selection is not None
+                    start, end = range_selection
                     result = await select_grid_range(backend, selector, start, end)
                     if _passes(result):
                         result = await _confirm_grid_selection(
@@ -642,8 +741,11 @@ def register_ui_evidence_tools(
                         scroll_settle_ms=scroll_settle_ms,
                     )
                 elif canonical_action == "assert_range":
-                    start, end = _require_range(start_index, end_index)
+                    assert range_selection is not None
+                    start, end = range_selection
                     result = await assert_grid_range(backend, selector, start, end)
+                else:
+                    raise RuntimeError(f"Unhandled grid action: {canonical_action}")
             if isinstance(result, dict):
                 result = _strip_unbounded_evidence_value(dict(result))
                 result["requested_action"] = action
@@ -684,7 +786,7 @@ def register_ui_evidence_tools(
                     },
                     state=session.state.state,
                 )
-            backend = await _ensure_ui_connected()
+            backend = await _ensure_ui_connected(observation=True)
             result = await query_ui_fields(
                 backend,
                 _selector(automation_id, name, control_type, root_id, xpath),
@@ -723,10 +825,21 @@ def register_ui_evidence_tools(
                     },
                     state=session.state.state,
                 )
-            backend = await _ensure_ui_connected()
+            store = _snapshot_store()
+            if store.has(snapshot):
+                return build_response(
+                    data={
+                        "status": "FAIL",
+                        "reason": "snapshot name already exists",
+                        "snapshot": snapshot,
+                        "available_snapshots": store.names(),
+                    },
+                    state=session.state.state,
+                )
+            backend = await _ensure_ui_connected(observation=True)
             result = await capture_ui_snapshot(
                 backend,
-                _snapshot_store(),
+                store,
                 name=snapshot,
                 selector=_selector(automation_id, name, control_type, root_id, xpath),
                 fields=fields,
@@ -789,18 +902,28 @@ def register_ui_evidence_tools(
                             "allowed_fields": list(ALLOWED_UI_FIELDS),
                         },
                         state=session.state.state,
-                )
-                backend = await _ensure_ui_connected()
-                result = await store.start(
-                    backend,
-                    buffer_id=buffer_id,
-                    selector=_selector(automation_id, name, control_type, root_id, xpath),
-                    fields=requested_fields,
-                    max_events=max_events,
-                )
+                    )
+                if buffer_id in store.buffers:
+                    result = {
+                        "status": "FAIL",
+                        "reason": "event buffer already exists",
+                        "buffer_id": buffer_id,
+                    }
+                else:
+                    backend = await _ensure_ui_connected(observation=True)
+                    result = await store.start(
+                        backend,
+                        buffer_id=buffer_id,
+                        selector=_selector(automation_id, name, control_type, root_id, xpath),
+                        fields=requested_fields,
+                        max_events=max_events,
+                    )
             elif action == "read":
-                backend = await _ensure_ui_connected()
-                result = await store.read(buffer_id, backend=backend)
+                if buffer_id not in store.buffers:
+                    result = await store.read(buffer_id)
+                else:
+                    backend = await _ensure_ui_connected(observation=True)
+                    result = await store.read(buffer_id, backend=backend)
             elif action == "stop":
                 result = store.stop(buffer_id)
             else:
@@ -842,14 +965,22 @@ def register_ui_evidence_tools(
                     },
                     state=session.state.state,
                 )
-            backend = await _ensure_ui_connected()
-            result = await _event_store().monitor_start(
-                backend,
-                monitor_id=monitor_id,
-                selector=_selector(automation_id, name, control_type, root_id, xpath),
-                fields=requested_fields,
-                max_events=max_events,
-            )
+            store = _event_store()
+            if monitor_id in store.buffers:
+                result = {
+                    "status": "FAIL",
+                    "reason": "event buffer already exists",
+                    "buffer_id": monitor_id,
+                }
+            else:
+                backend = await _ensure_ui_connected(observation=True)
+                result = await store.monitor_start(
+                    backend,
+                    monitor_id=monitor_id,
+                    selector=_selector(automation_id, name, control_type, root_id, xpath),
+                    fields=requested_fields,
+                    max_events=max_events,
+                )
             return build_response(data=result, state=session.state.state)
         except Exception as exc:
             return build_error_response(str(exc), state=session.state.state)
@@ -865,12 +996,16 @@ def register_ui_evidence_tools(
             access_error = check_session_access(ctx)
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
-            backend = await _ensure_ui_connected()
-            result = await _event_store().monitor_poll(
-                monitor_id,
-                after_cursor=after_cursor,
-                backend=backend,
-            )
+            store = _event_store()
+            if monitor_id not in store.buffers:
+                result = store.monitor_events(monitor_id, after_cursor=after_cursor)
+            else:
+                backend = await _ensure_ui_connected(observation=True)
+                result = await store.monitor_poll(
+                    monitor_id,
+                    after_cursor=after_cursor,
+                    backend=backend,
+                )
             return build_response(data=result, state=session.state.state)
         except Exception as exc:
             return build_error_response(str(exc), state=session.state.state)
@@ -893,7 +1028,7 @@ def register_ui_evidence_tools(
                 after_cursor=after_cursor,
                 timeout_ms=timeout_ms,
                 poll_interval_ms=poll_interval_ms,
-                backend_provider=_ensure_ui_connected,
+                backend_provider=lambda: _ensure_ui_connected(observation=True),
             )
             return build_response(data=result, state=session.state.state)
         except Exception as exc:
@@ -1270,4 +1405,8 @@ def _row_index(row: dict[str, Any]) -> int | None:
 def _require_range(start_index: int | None, end_index: int | None) -> tuple[int, int]:
     if start_index is None or end_index is None:
         raise ValueError("start_index and end_index are required for range actions")
+    if start_index < 0 or end_index < 0:
+        raise ValueError("start_index and end_index must be non-negative")
+    if end_index < start_index:
+        raise ValueError("end_index must be greater than or equal to start_index")
     return start_index, end_index

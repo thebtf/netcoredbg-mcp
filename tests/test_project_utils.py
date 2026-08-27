@@ -22,6 +22,25 @@ from netcoredbg_mcp.utils.project import (
 )
 
 
+@pytest.fixture
+def synthetic_project_tree_boundary(monkeypatch, tmp_path):
+    """Keep synthetic project-marker searches within ``tmp_path``."""
+    path_type = type(tmp_path)
+    boundary = tmp_path.resolve()
+    original_parents = path_type.parents
+
+    def parents_within_test_tree(path):
+        parents = tuple(original_parents.__get__(path, path_type))
+        if path == boundary:
+            return ()
+        try:
+            return parents[: parents.index(boundary) + 1]
+        except ValueError:
+            return parents
+
+    monkeypatch.setattr(path_type, "parents", property(parents_within_test_tree))
+
+
 class TestParseFileUri:
     """Tests for parse_file_uri function."""
 
@@ -80,6 +99,7 @@ class TestParseFileUri:
         assert is_network_file_uri("file://attacker.invalid/share") is True
 
 
+@pytest.mark.usefixtures("synthetic_project_tree_boundary")
 class TestFindDotnetProjectRoot:
     """Tests for find_dotnet_project_root function."""
 
@@ -193,7 +213,9 @@ class TestGetProjectRootSync:
         result = get_project_root_sync()
         assert result == tmp_path
 
-    def test_returns_cwd_with_marker_search(self, tmp_path, monkeypatch):
+    def test_returns_cwd_with_marker_search(
+        self, tmp_path, monkeypatch, synthetic_project_tree_boundary
+    ):
         """Test returns CWD with marker search when --project-from-cwd."""
         (tmp_path / "Solution.sln").touch()
         subdir = tmp_path / "src"
@@ -279,7 +301,7 @@ class TestGetProjectRoot:
         assert result == env_path
 
     @pytest.mark.asyncio
-    async def test_falls_back_to_startup_cwd(self, tmp_path):
+    async def test_falls_back_to_startup_cwd(self, tmp_path, synthetic_project_tree_boundary):
         """Test falls back to startup CWD when all else fails."""
         (tmp_path / "Solution.sln").touch()
 
@@ -296,7 +318,9 @@ class TestGetProjectRoot:
         assert result == tmp_path
 
     @pytest.mark.asyncio
-    async def test_falls_back_when_client_roots_never_reply(self, tmp_path):
+    async def test_falls_back_when_client_roots_never_reply(
+        self, tmp_path, synthetic_project_tree_boundary
+    ):
         """A stalled roots-capable client must not deadlock project resolution."""
         (tmp_path / "Solution.sln").touch()
         configure_project_root(

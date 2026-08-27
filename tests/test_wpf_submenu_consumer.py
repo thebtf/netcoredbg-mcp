@@ -8,7 +8,11 @@ from typing import Any
 import pytest
 from mcp.types import TextContent
 
-from tests.wpf_submenu_consumer import _poll_discovery, _tree_contains_automation_id
+from tests.wpf_submenu_consumer import (
+    _poll_discovery,
+    _server_environment,
+    _tree_contains_automation_id,
+)
 
 
 class _ToolResult:
@@ -50,6 +54,16 @@ def test_tree_contains_automation_id_distinguishes_closed_and_open_submenus() ->
 
     assert not _tree_contains_automation_id(closed_tree, "submenuChild")
     assert _tree_contains_automation_id(open_tree, "submenuChild")
+
+
+def test_server_environment_preserves_required_tool_paths(monkeypatch) -> None:
+    monkeypatch.setenv("FLAUI_BRIDGE_PATH", "C:/bridge/FlaUIBridge.exe")
+    monkeypatch.setenv("NETCOREDBG_PATH", "C:/debug/netcoredbg.exe")
+
+    assert _server_environment() == {
+        "FLAUI_BRIDGE_PATH": "C:/bridge/FlaUIBridge.exe",
+        "NETCOREDBG_PATH": "C:/debug/netcoredbg.exe",
+    }
 
 
 @pytest.mark.asyncio

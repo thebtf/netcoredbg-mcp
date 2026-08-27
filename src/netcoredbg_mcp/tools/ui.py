@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import math
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -94,7 +94,11 @@ def register_ui_tools(
             )
         return _backend_holder["instance"]
 
-    async def _ensure_ui_connected() -> Any:
+    async def _ensure_ui_connected(
+        *,
+        restore_joined: bool = False,
+        observation: bool = False,
+    ) -> Any:
         """Ensure UI backend is connected to the debug process.
 
         Raises:
@@ -114,14 +118,23 @@ def register_ui_tools(
 
         backend = _get_backend()
         if backend.process_id != process_id:
-            from ..ui.backend import connect_backend
+            await _reconnect_ui_backend(backend, process_id)
 
-            await connect_backend(
-                backend,
-                process_id,
-                stealth_mode=getattr(session, "stealth_mode", False),
-            )
+        if not restore_joined and await _join_launch_foreground_restore(observation=observation):
+            await _reconnect_ui_backend(backend, process_id)
+
         return backend
+
+    async def _join_launch_foreground_restore(*, observation: bool = False) -> bool:
+        method_name = (
+            "wait_for_pending_stealth_foreground_restore"
+            if observation
+            else "cancel_pending_stealth_foreground_restore"
+        )
+        join = getattr(session, method_name, None)
+        if join is None:
+            return False
+        return (await cast(Callable[[], Awaitable[Any]], join)()) is True
 
     def _probable_black_frame_response(
         frame_analysis: dict[str, Any],
@@ -144,6 +157,10 @@ def register_ui_tools(
         return response
 
     async def _reconnect_ui_backend(backend: Any, process_id: int) -> None:
+        cache = getattr(backend, "element_cache", None)
+        if isinstance(cache, dict):
+            cache.clear()
+
         from ..ui.backend import connect_backend
 
         await connect_backend(
@@ -469,7 +486,7 @@ def register_ui_tools(
         The top-ranked element from find_all_cascade is used for the actual selection,
         not just for ambiguity reporting.
         """
-        ui = await _ensure_ui_connected()
+        ui = await _ensure_ui_connected(observation=False)
         from ..ui.pywinauto_backend import PywinautoBackend
 
         if isinstance(ui, PywinautoBackend):
@@ -580,7 +597,7 @@ def register_ui_tools(
             treating the response itself as a single-window tree.
         """
         try:
-            ui = await _ensure_ui_connected()
+            ui = await _ensure_ui_connected(observation=True)
             try:
                 tree = await _read_window_tree(ui, max_depth, max_children)
             except RuntimeError as e:
@@ -752,7 +769,7 @@ def register_ui_tools(
             Element info if found
         """
         try:
-            ui = await _ensure_ui_connected()
+            ui = await _ensure_ui_connected(observation=True)
             result = await ui.find_element(
                 automation_id=automation_id,
                 name=name,
@@ -1629,11 +1646,10 @@ def register_ui_tools(
                 )
 
             loop = asyncio.get_running_loop()
+            restore_joined = False
 
-            # Strict physical assertions require the FlaUI bridge's PrintWindow raster
-            # even when the session is not in stealth mode.
             if strict_target_requested or getattr(session, "stealth_mode", False):
-                ui = await _ensure_ui_connected()
+                ui = await _ensure_ui_connected(restore_joined=True)
                 from ..ui.flaui_client import FlaUIBackend
 
                 if not isinstance(ui, FlaUIBackend):
@@ -1656,12 +1672,18 @@ def register_ui_tools(
                                 "expected_process_id": pid,
                             }
                         )
+
+                    restore_was_pending = await _join_launch_foreground_restore()
+                    restore_joined = True
+                    if restore_was_pending:
+                        await _reconnect_ui_backend(ui, pid)
                     try:
                         bridge_result = await ui.client.call("screenshot", bridge_request)
                     except RuntimeError as error:
                         if strict_target_requested:
                             raise _PhysicalCaptureProvenanceUnavailableError(
-                                f"Physical target assertions require successful bridge capture: {error}"
+                                "Physical target assertions require successful bridge capture: "
+                                f"{error}"
                             ) from error
                         raise
                     foreground_mutation_attempted = (
@@ -1906,6 +1928,10 @@ def register_ui_tools(
                     raise _PhysicalCaptureProvenanceUnavailableError(
                         "Physical target assertions require FlaUI bridge lossless capture"
                     )
+                if not restore_joined:
+                    await _join_launch_foreground_restore()
+                    restore_joined = True
+
                 hwnd = get_hwnd_for_pid(pid)
                 if not hwnd:
                     return build_error_response(
@@ -2157,14 +2183,14 @@ def register_ui_tools(
             if not pid:
                 return build_error_response("No debug process.", state=session.state.state)
 
+            backend = await _ensure_ui_connected(observation=True)
+
             hwnd = get_hwnd_for_pid(pid)
             if not hwnd:
                 return build_error_response(
                     f"No visible window for process {pid}.",
                     state=session.state.state,
                 )
-
-            backend = await _ensure_ui_connected()
 
             loop = asyncio.get_running_loop()
 
@@ -2822,46 +2848,54 @@ def register_ui_tools(
                 )
 
             normalized_modifiers = _normalize_modifier_list(hold_modifiers)
+
+            def resolve_drag_coordinates(
+                cache_owner: Any | None,
+            ) -> tuple[int, int, int, int] | str:
+                cache = getattr(cache_owner, "element_cache", {})
+                if not isinstance(cache, dict):
+                    cache = {}
+                fx, fy, tx, ty = from_x, from_y, to_x, to_y
+
+                if from_automation_id and (fx is None or fy is None):
+                    from_rect = (cache.get(from_automation_id) or {}).get("rect")
+                    if from_rect:
+                        fx = (from_rect["left"] + from_rect["right"]) // 2
+                        fy = (from_rect["top"] + from_rect["bottom"]) // 2
+                    else:
+                        return (
+                            f"Element '{from_automation_id}' not in cache. "
+                            "Call ui_get_window_tree first."
+                        )
+
+                if to_automation_id and (tx is None or ty is None):
+                    to_rect = (cache.get(to_automation_id) or {}).get("rect")
+                    if to_rect:
+                        tx = (to_rect["left"] + to_rect["right"]) // 2
+                        ty = (to_rect["top"] + to_rect["bottom"]) // 2
+                    else:
+                        return (
+                            f"Element '{to_automation_id}' not in cache. "
+                            "Call ui_get_window_tree first."
+                        )
+
+                if fx is None or fy is None or tx is None or ty is None:
+                    return (
+                        "Provide either automation_ids or coordinates for both source and target."
+                    )
+                if fx == tx and fy == ty:
+                    return "from and to coordinates are identical (0 px distance)"
+                return fx, fy, tx, ty
+
+            preflight = resolve_drag_coordinates(_backend_holder["instance"])
+            if isinstance(preflight, str):
+                return build_error_response(preflight, state=session.state.state)
+
             ui = await _ensure_ui_connected()
-
-            # Resolve coordinates from automation IDs if needed
-            fx, fy, tx, ty = from_x, from_y, to_x, to_y
-
-            if from_automation_id and (fx is None or fy is None):
-                from_rect = (ui.element_cache.get(from_automation_id) or {}).get("rect")
-                if from_rect:
-                    fx = (from_rect["left"] + from_rect["right"]) // 2
-                    fy = (from_rect["top"] + from_rect["bottom"]) // 2
-                else:
-                    return build_error_response(
-                        f"Element '{from_automation_id}' not in cache. "
-                        "Call ui_get_window_tree first.",
-                        state=session.state.state,
-                    )
-
-            if to_automation_id and (tx is None or ty is None):
-                to_rect = (ui.element_cache.get(to_automation_id) or {}).get("rect")
-                if to_rect:
-                    tx = (to_rect["left"] + to_rect["right"]) // 2
-                    ty = (to_rect["top"] + to_rect["bottom"]) // 2
-                else:
-                    return build_error_response(
-                        f"Element '{to_automation_id}' not in cache. "
-                        "Call ui_get_window_tree first.",
-                        state=session.state.state,
-                    )
-
-            if fx is None or fy is None or tx is None or ty is None:
-                return build_error_response(
-                    "Provide either automation_ids or coordinates for both source and target.",
-                    state=session.state.state,
-                )
-
-            if fx == tx and fy == ty:
-                return build_error_response(
-                    "from and to coordinates are identical (0 px distance)",
-                    state=session.state.state,
-                )
+            coordinates = resolve_drag_coordinates(ui)
+            if isinstance(coordinates, str):
+                return build_error_response(coordinates, state=session.state.state)
+            fx, fy, tx, ty = coordinates
 
             result = await ui.drag(
                 fx,
@@ -2993,7 +3027,7 @@ def register_ui_tools(
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
 
-            ui = await _ensure_ui_connected()
+            ui = await _ensure_ui_connected(observation=True)
             result = await ui.get_held_modifiers()
             if not isinstance(result, dict):
                 return build_error_response(
@@ -3034,7 +3068,7 @@ def register_ui_tools(
             xpath: Optional XPath expression (FlaUI backend only)
         """
         try:
-            ui = await _ensure_ui_connected()
+            ui = await _ensure_ui_connected(observation=True)
             get_selected_item = getattr(ui, "get_selected_item", None)
             if callable(get_selected_item):
                 result = await get_selected_item(
@@ -3155,7 +3189,7 @@ def register_ui_tools(
             xpath: Optional XPath expression (FlaUI backend only)
         """
         try:
-            ui = await _ensure_ui_connected()
+            ui = await _ensure_ui_connected(observation=True)
             result = await ui.extract_text(
                 automation_id=automation_id,
                 name=name,
@@ -3178,7 +3212,7 @@ def register_ui_tools(
         Note: Returns focus within the app window, not always OS-level dialogs.
         """
         try:
-            ui = await _ensure_ui_connected()
+            ui = await _ensure_ui_connected(observation=True)
             get_focused_element = getattr(ui, "get_focused_element", None)
             if callable(get_focused_element):
                 result = await get_focused_element()
@@ -3279,7 +3313,7 @@ def register_ui_tools(
             # Clamp timeout to reasonable bounds
             clamped_timeout = max(0.5, min(timeout, 30.0))
 
-            ui = await _ensure_ui_connected()
+            ui = await _ensure_ui_connected(observation=True)
 
             import time as _time
 
@@ -3639,7 +3673,7 @@ def register_ui_tools(
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
 
-            ui = await _ensure_ui_connected()
+            ui = await _ensure_ui_connected(observation=True)
             result = await ui.clipboard_read()
             if not isinstance(result, dict):
                 return build_error_response(

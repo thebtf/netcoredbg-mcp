@@ -992,6 +992,201 @@ class TestFlaUIBackendToggle:
         assert response["data"]["action"] == "ui_toggle"
 
 
+class TestUiDrag:
+    """Public ui_drag boundary behavior."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("arguments", "expected_error"),
+        [
+            (
+                {"from_x": 10, "from_y": 20, "to_x": 10, "to_y": 20},
+                "from and to coordinates are identical (0 px distance)",
+            ),
+            (
+                {"from_x": 10, "from_y": 20, "to_x": 30},
+                "Provide either automation_ids or coordinates for both source and target.",
+            ),
+            (
+                {"from_automation_id": "missing", "to_automation_id": "target"},
+                "Element 'missing' not in cache. Call ui_get_window_tree first.",
+            ),
+        ],
+        ids=["identical-coordinates", "incomplete-coordinates", "missing-cached-source"],
+    )
+    async def test_invalid_drag_coordinates_preserve_pending_foreground_restore(
+        self,
+        capturing_mcp,
+        arguments: dict[str, int | str],
+        expected_error: str,
+    ) -> None:
+        from netcoredbg_mcp.session.manager import DebugState
+        from netcoredbg_mcp.tools.ui import register_ui_tools
+
+        backend = SimpleNamespace(process_id=42, element_cache={}, drag=AsyncMock())
+        cancel_restore = AsyncMock(return_value=False)
+        session = SimpleNamespace(
+            process_registry=None,
+            state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+            stealth_mode=True,
+            cancel_pending_stealth_foreground_restore=cancel_restore,
+        )
+        backend_factory = MagicMock(return_value=backend)
+
+        with patch("netcoredbg_mcp.ui.backend.create_backend", backend_factory):
+            register_ui_tools(
+                capturing_mcp,
+                session,
+                check_session_access=lambda _ctx: None,
+            )
+            response = await capturing_mcp.tools["ui_drag"](SimpleNamespace(), **arguments)
+
+        assert response["error"] == expected_error
+        backend_factory.assert_not_called()
+        cancel_restore.assert_not_awaited()
+        backend.drag.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_valid_drag_connects_and_runs_after_preflight(self, capturing_mcp) -> None:
+        from netcoredbg_mcp.session.manager import DebugState
+        from netcoredbg_mcp.tools.ui import register_ui_tools
+
+        backend = SimpleNamespace(
+            process_id=42,
+            element_cache={},
+            drag=AsyncMock(return_value={"dragged": True}),
+        )
+        cancel_restore = AsyncMock(return_value=False)
+        session = SimpleNamespace(
+            process_registry=None,
+            state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+            stealth_mode=True,
+            cancel_pending_stealth_foreground_restore=cancel_restore,
+        )
+        backend_factory = MagicMock(return_value=backend)
+
+        with patch("netcoredbg_mcp.ui.backend.create_backend", backend_factory):
+            register_ui_tools(
+                capturing_mcp,
+                session,
+                check_session_access=lambda _ctx: None,
+            )
+            response = await capturing_mcp.tools["ui_drag"](
+                SimpleNamespace(),
+                from_x=10,
+                from_y=20,
+                to_x=30,
+                to_y=40,
+            )
+
+        assert response["data"] == {"dragged": True}
+        backend_factory.assert_called_once_with(process_registry=None)
+        cancel_restore.assert_awaited_once_with()
+        backend.drag.assert_awaited_once_with(10, 20, 30, 40, speed_ms=200, hold_modifiers=None)
+
+    @pytest.mark.asyncio
+    async def test_cached_drag_coordinates_run_after_preflight(self, capturing_mcp) -> None:
+        from netcoredbg_mcp.session.manager import DebugState
+        from netcoredbg_mcp.tools.ui import register_ui_tools
+
+        backend = SimpleNamespace(
+            process_id=42,
+            element_cache={
+                "source": {"rect": {"left": 0, "top": 0, "right": 20, "bottom": 20}},
+                "target": {"rect": {"left": 40, "top": 40, "right": 60, "bottom": 60}},
+            },
+            drag=AsyncMock(return_value={"dragged": True}),
+        )
+        cancel_restore = AsyncMock(return_value=False)
+        session = SimpleNamespace(
+            process_registry=None,
+            state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+            stealth_mode=True,
+            cancel_pending_stealth_foreground_restore=cancel_restore,
+        )
+        backend_factory = MagicMock(return_value=backend)
+
+        with patch("netcoredbg_mcp.ui.backend.create_backend", backend_factory):
+            register_ui_tools(
+                capturing_mcp,
+                session,
+                check_session_access=lambda _ctx: None,
+            )
+            await capturing_mcp.tools["ui_drag"](
+                SimpleNamespace(),
+                from_x=1,
+                from_y=1,
+                to_x=2,
+                to_y=2,
+            )
+            response = await capturing_mcp.tools["ui_drag"](
+                SimpleNamespace(),
+                from_automation_id="source",
+                to_automation_id="target",
+            )
+
+        assert response["data"] == {"dragged": True}
+        backend_factory.assert_called_once_with(process_registry=None)
+        assert cancel_restore.await_count == 2
+        assert backend.drag.await_args_list[-1].args == (10, 10, 50, 50)
+        assert backend.drag.await_args_list[-1].kwargs == {
+            "speed_ms": 200,
+            "hold_modifiers": None,
+        }
+
+    @pytest.mark.asyncio
+    async def test_cached_drag_requires_fresh_tree_after_pending_restore(
+        self,
+        capturing_mcp,
+    ) -> None:
+        from netcoredbg_mcp.session.manager import DebugState
+        from netcoredbg_mcp.tools.ui import register_ui_tools
+
+        backend = SimpleNamespace(
+            process_id=42,
+            element_cache={
+                "source": {"rect": {"left": 0, "top": 0, "right": 20, "bottom": 20}},
+                "target": {"rect": {"left": 40, "top": 40, "right": 60, "bottom": 60}},
+            },
+            drag=AsyncMock(return_value={"dragged": True}),
+        )
+        cancel_restore = AsyncMock(side_effect=[False, True])
+        reconnect_backend = AsyncMock()
+        session = SimpleNamespace(
+            process_registry=None,
+            state=SimpleNamespace(state=DebugState.RUNNING, process_id=42),
+            stealth_mode=True,
+            cancel_pending_stealth_foreground_restore=cancel_restore,
+        )
+
+        with (
+            patch("netcoredbg_mcp.ui.backend.create_backend", return_value=backend),
+            patch("netcoredbg_mcp.ui.backend.connect_backend", reconnect_backend),
+        ):
+            register_ui_tools(
+                capturing_mcp,
+                session,
+                check_session_access=lambda _ctx: None,
+            )
+            await capturing_mcp.tools["ui_drag"](
+                SimpleNamespace(),
+                from_x=1,
+                from_y=1,
+                to_x=2,
+                to_y=2,
+            )
+            response = await capturing_mcp.tools["ui_drag"](
+                SimpleNamespace(),
+                from_automation_id="source",
+                to_automation_id="target",
+            )
+
+        assert response["error"] == "Element 'source' not in cache. Call ui_get_window_tree first."
+        reconnect_backend.assert_awaited_once_with(backend, 42, stealth_mode=True)
+        assert backend.element_cache == {}
+        assert backend.drag.await_count == 1
+
+
 class TestFlaUIBackendXPath:
     """Tests for FlaUIBackend.find_by_xpath."""
 

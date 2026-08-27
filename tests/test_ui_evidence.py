@@ -9,7 +9,7 @@ from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -493,6 +493,7 @@ class FakeUiSession:
             process_id=None,
             output_buffer=deque(),
         )
+        self.cancel_pending_stealth_foreground_restore = AsyncMock()
         self.process_registry = None
 
 
@@ -956,9 +957,7 @@ async def test_ui_evidence_tools_register_and_reject_invalid_fields_before_backe
     server = create_server(str(os.getcwd()))
     tool_names = {tool.name for tool in await server.list_tools()}
 
-    assert {"ui_text", "ui_query", "ui_snapshot", "ui_diff", "ui_events"}.issubset(
-        tool_names
-    )
+    assert {"ui_text", "ui_query", "ui_snapshot", "ui_diff", "ui_events"}.issubset(tool_names)
 
     mcp = capturing_mcp
     session = FakeUiSession()
@@ -1015,6 +1014,210 @@ async def test_ui_text_tool_reads_text_without_assertion(capturing_mcp, monkeypa
         "root_id": None,
         "xpath": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_ui_text_read_waits_for_pending_restore_without_canceling_retry(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock()
+    session.cancel_pending_stealth_foreground_restore = AsyncMock()
+    backend = FakeEvidenceBackend()
+    backend.process_id = 42
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda _ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_text"](
+        ctx=None,
+        action="read",
+        automation_id="CueTextBox",
+        control_type="TextBox",
+    )
+
+    assert response["data"]["status"] == "PASS"
+    session.wait_for_pending_stealth_foreground_restore.assert_awaited_once_with()
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ui_text_binds_after_pending_restore(capturing_mcp, monkeypatch) -> None:
+    class Backend:
+        process_id: int | None = None
+        bound_text: str | None = None
+
+        async def extract_text(self, **_kwargs: Any) -> dict[str, Any]:
+            return {
+                "status": "PASS",
+                "text": self.bound_text,
+                "source": "ValuePattern",
+            }
+
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    target = {"text": "launch-window"}
+    connection_targets: list[str] = []
+    backend = Backend()
+
+    async def wait_for_restore() -> bool:
+        target["text"] = "main-window"
+        return True
+
+    async def connect_backend(backend_arg: Backend, process_id: int, **_kwargs: Any) -> None:
+        backend_arg.process_id = process_id
+        backend_arg.bound_text = target["text"]
+        connection_targets.append(target["text"])
+
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock(side_effect=wait_for_restore)
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.connect_backend", connect_backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda _ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_text"](
+        ctx=None,
+        action="read",
+        automation_id="CueTextBox",
+    )
+
+    assert response["data"]["text"] == "main-window"
+    assert connection_targets[-1] == "main-window"
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("modifiers", "keys", "expected"),
+    [
+        (
+            [],
+            ["NotAKey"],
+            {
+                "status": "FAIL",
+                "reason": "unknown key",
+                "invalid_key": "NotAKey",
+                "sent_count": 0,
+                "final_held_modifiers": [],
+            },
+        ),
+        (
+            ["meta"],
+            ["DOWN"],
+            {
+                "status": "FAIL",
+                "reason": "unknown modifier",
+                "invalid_modifier": "meta",
+                "sent_count": 0,
+                "final_held_modifiers": [],
+            },
+        ),
+        (
+            ["shift"],
+            "DOWN",
+            {
+                "status": "FAIL",
+                "reason": "keys must be a list of strings",
+                "invalid_field": "keys",
+                "sent_count": 0,
+                "final_held_modifiers": [],
+            },
+        ),
+        (
+            [None],
+            ["DOWN"],
+            {
+                "status": "FAIL",
+                "reason": "modifiers must be a list of strings",
+                "invalid_field": "modifiers",
+                "sent_count": 0,
+                "final_held_modifiers": [],
+            },
+        ),
+    ],
+    ids=["unknown-key", "unknown-modifier", "keys-not-list", "modifier-not-string"],
+)
+async def test_ui_key_sequence_rejects_invalid_input_before_backend_or_restore(
+    capturing_mcp,
+    monkeypatch,
+    modifiers: Any,
+    keys: Any,
+    expected: dict[str, Any],
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock()
+    backend_factory = MagicMock()
+    connect_backend = AsyncMock()
+
+    monkeypatch.setattr(
+        "netcoredbg_mcp.ui.backend.create_backend",
+        backend_factory,
+    )
+    monkeypatch.setattr(
+        "netcoredbg_mcp.ui.backend.connect_backend",
+        connect_backend,
+    )
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda _ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_key_sequence"](
+        ctx=None,
+        modifiers=modifiers,
+        keys=keys,
+    )
+
+    assert response["data"] == expected
+    backend_factory.assert_not_called()
+    connect_backend.assert_not_awaited()
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+    session.wait_for_pending_stealth_foreground_restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ui_key_sequence_connect_failure_preserves_pending_restore(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = SimpleNamespace(process_id=None)
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    monkeypatch.setattr(
+        "netcoredbg_mcp.ui.backend.connect_backend",
+        AsyncMock(side_effect=TimeoutError("connect timeout")),
+    )
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda _ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_key_sequence"](
+        ctx=None,
+        modifiers=[],
+        keys=["ENTER"],
+    )
+
+    assert response["error"] == "connect timeout"
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1083,9 +1286,7 @@ async def test_read_textbox_state_blocks_when_textbox_state_reader_raises() -> N
         "selector": {"automation_id": "CueTextBox"},
         "fields": ["focus", "selection", "value", "text", "enabled", "visible"],
     }
-    assert result["accepted"] == {
-        "backend": "connected UI backend supporting textbox_state"
-    }
+    assert result["accepted"] == {"backend": "connected UI backend supporting textbox_state"}
     assert result["next_step"] == "Inspect UI backend or bridge transport diagnostics."
 
 
@@ -1227,6 +1428,398 @@ async def test_ui_text_tool_assert_selection_fails_with_observed_range(
         "length": 0,
         "selected_text": "",
     }
+
+
+@pytest.mark.asyncio
+async def test_ui_text_set_text_without_text_preserves_pending_restore(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock()
+    backend = FakeSetTextBackend()
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda _ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_text"](
+        ctx=None,
+        action="set_text",
+        automation_id="CueTextBox",
+    )
+
+    assert response["data"]["reason"] == "text is required"
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+    session.wait_for_pending_stealth_foreground_restore.assert_not_awaited()
+    assert backend.calls == []
+
+
+@pytest.mark.asyncio
+async def test_ui_text_assert_selection_without_bounds_preserves_pending_restore(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock()
+    backend_factory = MagicMock(return_value=SimpleNamespace(process_id=42))
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", backend_factory)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda _ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_text"](
+        ctx=None,
+        action="assert_selection",
+        automation_id="CueTextBox",
+        selection_start=0,
+    )
+
+    assert response["data"] == {
+        "status": "FAIL",
+        "reason": "selection_start and selection_end are required",
+        "action": "assert_selection",
+    }
+    backend_factory.assert_not_called()
+    session.wait_for_pending_stealth_foreground_restore.assert_not_awaited()
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "input_args"),
+    (
+        ("select_range", {"start_index": 1}),
+        ("assert_range", {"start_index": 1}),
+        ("ensure_visible", {}),
+        ("select_row", {}),
+        ("click_row", {}),
+        ("right_click_row", {}),
+        ("double_click_row", {}),
+    ),
+)
+async def test_ui_grid_mutation_without_required_input_preserves_pending_restore(
+    capturing_mcp,
+    monkeypatch,
+    action: str,
+    input_args: dict[str, int],
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = FakeEvidenceBackend()
+    backend.process_id = 42
+
+    def fail_if_backend_created(**_kwargs: Any) -> Any:
+        raise AssertionError("backend should not be created for an invalid grid request")
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", fail_if_backend_created)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda _ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_grid"](
+        ctx=None,
+        action=action,
+        automation_id="CueGrid",
+        **input_args,
+    )
+
+    if action in {"select_range", "assert_range"}:
+        expected = {
+            "status": "FAIL",
+            "reason": "invalid grid request",
+            "error": "start_index and end_index are required for range actions",
+        }
+    else:
+        expected = {
+            "status": "BLOCKED",
+            "reason": "grid row request missing",
+            "requested": {"row_index": None, "row_key": None},
+            "accepted": {"row": "visible row_index or row_key"},
+            "next_step": (
+                "Provide row_index for a visible logical row or row_key for a "
+                "unique visible row identity."
+            ),
+            "requested_action": action,
+            "canonical_action": action,
+        }
+    assert response["data"] == expected
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+    assert backend.calls == []
+
+
+@pytest.mark.asyncio
+async def test_ui_grid_assert_range_without_range_preserves_pending_restore(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock()
+    backend = SimpleNamespace(process_id=42)
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda _ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_grid"](
+        ctx=None,
+        action="assert_range",
+        automation_id="CueGrid",
+        start_index=1,
+    )
+
+    assert response["data"] == {
+        "status": "FAIL",
+        "reason": "invalid grid request",
+        "error": "start_index and end_index are required for range actions",
+    }
+    session.wait_for_pending_stealth_foreground_restore.assert_not_awaited()
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "start_index", "end_index", "error"),
+    [
+        ("select_range", -1, 0, "start_index and end_index must be non-negative"),
+        ("assert_range", -1, 0, "start_index and end_index must be non-negative"),
+        ("select_range", 1, 0, "end_index must be greater than or equal to start_index"),
+        ("assert_range", 1, 0, "end_index must be greater than or equal to start_index"),
+    ],
+)
+async def test_ui_grid_static_invalid_range_preserves_pending_restore(
+    capturing_mcp,
+    monkeypatch,
+    action: str,
+    start_index: int,
+    end_index: int,
+    error: str,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock()
+    backend_factory = MagicMock(return_value=SimpleNamespace(process_id=42))
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", backend_factory)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda _ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_grid"](
+        ctx=None,
+        action=action,
+        automation_id="CueGrid",
+        start_index=start_index,
+        end_index=end_index,
+    )
+
+    assert response["data"] == {
+        "status": "FAIL",
+        "reason": "invalid grid request",
+        "error": error,
+    }
+    backend_factory.assert_not_called()
+    session.wait_for_pending_stealth_foreground_restore.assert_not_awaited()
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ui_snapshot_duplicate_preserves_pending_restore(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock()
+    session.runtime_smoke.ui_snapshots["before"] = {
+        "snapshot": "before",
+        "fields": ["text"],
+        "elements": [],
+    }
+    backend_factory = MagicMock(return_value=SimpleNamespace(process_id=42))
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", backend_factory)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda _ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_snapshot"](
+        ctx=None,
+        snapshot="before",
+        fields=["text"],
+        automation_id="CueGrid",
+    )
+
+    assert response["data"] == {
+        "status": "FAIL",
+        "reason": "snapshot name already exists",
+        "snapshot": "before",
+        "available_snapshots": ["before"],
+    }
+    backend_factory.assert_not_called()
+    session.wait_for_pending_stealth_foreground_restore.assert_not_awaited()
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "existing_id", "reason"),
+    [
+        (
+            "ui_events",
+            {"action": "start", "buffer_id": "existing"},
+            "existing",
+            "event buffer already exists",
+        ),
+        (
+            "ui_events",
+            {"action": "read", "buffer_id": "missing"},
+            None,
+            "event buffer not found",
+        ),
+        (
+            "ui_monitor_start",
+            {"monitor_id": "existing"},
+            "existing",
+            "event buffer already exists",
+        ),
+        (
+            "ui_monitor_poll",
+            {"monitor_id": "missing"},
+            None,
+            "event buffer not found",
+        ),
+    ],
+)
+async def test_ui_event_identity_failures_preserve_pending_restore(
+    capturing_mcp,
+    monkeypatch,
+    tool_name: str,
+    arguments: dict[str, Any],
+    existing_id: str | None,
+    reason: str,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock()
+    if existing_id is not None:
+        session.runtime_smoke.ui_event_buffers[existing_id] = SimpleNamespace()
+    backend_factory = MagicMock(return_value=SimpleNamespace(process_id=42))
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", backend_factory)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda _ctx: None,
+    )
+
+    response = await capturing_mcp.tools[tool_name](ctx=None, **arguments)
+
+    assert response["data"]["status"] == "FAIL"
+    assert response["data"]["reason"] == reason
+    backend_factory.assert_not_called()
+    session.wait_for_pending_stealth_foreground_restore.assert_not_awaited()
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "action",
+    [
+        "ensure_visible",
+        "select_row",
+        "click_row",
+        "right_click_row",
+        "double_click_row",
+    ],
+)
+async def test_ui_grid_negative_row_index_preserves_pending_restore(
+    capturing_mcp,
+    monkeypatch,
+    action: str,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock()
+    backend_factory = MagicMock(return_value=SimpleNamespace(process_id=42))
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", backend_factory)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda _ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_grid"](
+        ctx=None,
+        action=action,
+        automation_id="CueGrid",
+        row_index=-1,
+    )
+
+    assert response["data"]["status"] == "BLOCKED"
+    assert response["data"]["reason"] == "grid row is not visible"
+    backend_factory.assert_not_called()
+    session.wait_for_pending_stealth_foreground_restore.assert_not_awaited()
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ui_text_set_text_joins_pending_restore_before_focus(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    backend = FakeSetTextBackend()
+
+    async def join_restore() -> None:
+        assert backend.calls == []
+
+    session.cancel_pending_stealth_foreground_restore = AsyncMock(side_effect=join_restore)
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_text"](
+        ctx=None,
+        action="set_text",
+        automation_id="CueTextBox",
+        text="Replaced text",
+    )
+
+    assert response["data"]["status"] == "PASS"
+    session.cancel_pending_stealth_foreground_restore.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -1505,9 +2098,7 @@ async def test_ui_text_tool_maps_selector_miss_to_blocked(capturing_mcp, monkeyp
 
     assert response["data"]["status"] == "BLOCKED"
     assert response["data"]["reason"] == "selector not found"
-    assert response["data"]["requested"] == {
-        "selector": {"automation_id": "MissingCueTextBox"}
-    }
+    assert response["data"]["requested"] == {"selector": {"automation_id": "MissingCueTextBox"}}
     assert response["data"]["accepted"]["selector_keys"] == [
         "automation_id",
         "name",
@@ -1741,7 +2332,7 @@ async def test_ui_property_unknown_action_reports_accepted_actions_without_backe
         "reason": "unknown property action",
         "action": "set",
         "accepted_actions": ["read"],
-        "next_step": "Use ui_property(action=\"read\") for read-only property evidence.",
+        "next_step": 'Use ui_property(action="read") for read-only property evidence.',
     }
     create_backend.assert_not_called()
 
@@ -1782,9 +2373,7 @@ async def test_ui_property_tool_maps_selector_miss_to_blocked(
 
     assert response["data"]["status"] == "BLOCKED"
     assert response["data"]["reason"] == "selector not found"
-    assert response["data"]["requested"] == {
-        "selector": {"automation_id": "MissingCueTextBox"}
-    }
+    assert response["data"]["requested"] == {"selector": {"automation_id": "MissingCueTextBox"}}
     assert response["data"]["accepted"]["selector_keys"] == [
         "automation_id",
         "name",
@@ -1829,6 +2418,44 @@ async def test_ui_grid_accepts_rows_alias_for_visible_rows(capturing_mcp, monkey
     assert response["data"]["visible_rows"][0]["index"] == 0
     assert response["data"]["requested_action"] == "rows"
     assert response["data"]["canonical_action"] == "visible_rows"
+
+
+@pytest.mark.asyncio
+async def test_ui_grid_visible_rows_waits_for_pending_restore(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock()
+    session.cancel_pending_stealth_foreground_restore = AsyncMock()
+    backend = SimpleNamespace(
+        process_id=42,
+        grid_visible_rows=AsyncMock(
+            return_value={
+                "status": "PASS",
+                "visible_rows": [{"index": 0, "cells": {"Phrase": "Fixture cue"}}],
+            }
+        ),
+    )
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda _ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_grid"](
+        ctx=None,
+        action="visible_rows",
+        automation_id="dataGrid",
+    )
+
+    assert response["data"]["status"] == "PASS"
+    session.wait_for_pending_stealth_foreground_restore.assert_awaited_once_with()
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2377,14 +3004,14 @@ async def test_ui_grid_select_row_resolves_visible_logical_row_index(
             )
             return {
                 "status": "PASS",
-                "selected_rows": [
-                    {"index": 1, "row_index": 19, "cells": {"Phrase": "Cue 019"}}
-                ],
+                "selected_rows": [{"index": 1, "row_index": 19, "cells": {"Phrase": "Cue 019"}}],
             }
 
     session = FakeUiSession()
     session.state.state = DebugState.RUNNING
     session.state.process_id = 42
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock()
+    session.cancel_pending_stealth_foreground_restore = AsyncMock()
     backend = VirtualizedGridBackend()
     backend.process_id = 42
 
@@ -2411,6 +3038,8 @@ async def test_ui_grid_select_row_resolves_visible_logical_row_index(
         "identity": "Cue 019",
     }
     assert response["data"]["confirmed_selection"] is True
+    session.cancel_pending_stealth_foreground_restore.assert_awaited_once_with()
+    session.wait_for_pending_stealth_foreground_restore.assert_not_awaited()
     assert backend.calls[1] == {
         "grid_select_range": {
             "selector": {"automation_id": "CueGrid"},
@@ -2678,9 +3307,7 @@ async def test_ui_grid_select_range_ignores_malformed_string_index(
     assert response["data"]["status"] == "FAIL"
     assert response["data"]["confirmed_selection"] is False
     assert response["data"]["observed_selected_indices"] == []
-    assert response["data"]["selected_rows"] == [
-        {"index": "--5", "cells": {"Phrase": "Bad index"}}
-    ]
+    assert response["data"]["selected_rows"] == [{"index": "--5", "cells": {"Phrase": "Bad index"}}]
 
 
 @pytest.mark.asyncio
@@ -2905,9 +3532,7 @@ async def test_ui_grid_click_row_can_opt_in_to_ensure_visible(
                 }
             return {
                 "status": "PASS",
-                "visible_rows": [
-                    {"index": 0, "row_index": 42, "cells": {"PhraseId": "Cue 042"}}
-                ],
+                "visible_rows": [{"index": 0, "row_index": 42, "cells": {"PhraseId": "Cue 042"}}],
             }
 
         async def grid_ensure_visible(
@@ -3021,7 +3646,7 @@ async def test_ui_grid_click_row_can_opt_in_to_ensure_visible(
 
 
 @pytest.mark.asyncio
-async def test_ui_grid_viewport_returns_bounded_viewport_snapshot(
+async def test_ui_grid_viewport_uses_observation_provider(
     capturing_mcp,
     monkeypatch,
 ) -> None:
@@ -3070,7 +3695,19 @@ async def test_ui_grid_viewport_returns_bounded_viewport_snapshot(
     session.state.process_id = 42
     backend = ViewportGridBackend()
 
-    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", lambda **_kwargs: backend)
+    async def wait_for_restore() -> None:
+        assert backend.snapshot_calls == []
+
+    factory_calls: list[dict[str, Any]] = []
+
+    def create_backend(**kwargs: Any) -> ViewportGridBackend:
+        factory_calls.append(kwargs)
+        return backend
+
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock(side_effect=wait_for_restore)
+    session.cancel_pending_stealth_foreground_restore = AsyncMock()
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", create_backend)
     register_ui_evidence_tools(
         mcp=capturing_mcp,
         session=session,
@@ -3113,8 +3750,11 @@ async def test_ui_grid_viewport_returns_bounded_viewport_snapshot(
             "columns": ["PhraseId"],
         }
     ]
+    assert factory_calls == [{"process_registry": None}]
     assert "full_tree" not in str(response["data"])
     assert "raw_tree" not in str(response["data"])
+    session.wait_for_pending_stealth_foreground_restore.assert_awaited_once_with()
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
 
 
 @pytest.mark.asyncio
