@@ -143,9 +143,15 @@ class TestSonarqubeExactHeadRunner(TestCase):
             "tests/dotnet/NetCoreDbg.Mcp.Host.PromptTests/NetCoreDbg.Mcp.Host.PromptTests.csproj",
             runner.CLOSED_DOTNET_COVERAGE_PROJECTS,
         )
-        self.assertNotIn(
+        self.assertIn(
             runner.HOST_REAL_PYTHON_TEST_PROJECT,
             runner.CLOSED_DOTNET_COVERAGE_PROJECTS,
+        )
+        self.assertEqual(
+            runner.CLOSED_DOTNET_COVERAGE_PROJECTS.count(
+                runner.HOST_REAL_PYTHON_TEST_PROJECT
+            ),
+            1,
         )
         self.assertEqual(
             [report.normalized_path for report in plan.dotnet_reports],
@@ -205,7 +211,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 ],
             ],
         )
-        dotnet_commands = commands[3:-1]
+        dotnet_commands = commands[3:]
         self.assertEqual(len(dotnet_commands), len(runner.CLOSED_DOTNET_COVERAGE_PROJECTS))
         for command, report in zip(dotnet_commands, plan.dotnet_reports, strict=True):
             self.assertEqual(command[:2], ["dotnet", "test"])
@@ -215,16 +221,6 @@ class TestSonarqubeExactHeadRunner(TestCase):
             self.assertIn(f"/p:CoverletOutput={report.absolute_path}", command)
             self.assertNotIn("--no-build", command)
             self.assertNotIn("--no-restore", command)
-        real_python_validation = commands[-1]
-        self.assertEqual(
-            real_python_validation,
-            [
-                "dotnet",
-                "test",
-                str(context.repository_root / runner.HOST_REAL_PYTHON_TEST_PROJECT),
-                "-nr:false",
-            ],
-        )
 
     def test_dotnet_coverage_environment_selects_external_python(self):
         with TemporaryDirectory() as temporary_directory:
@@ -292,11 +288,11 @@ class TestSonarqubeExactHeadRunner(TestCase):
             with patch.object(
                 runner,
                 "run_coverage_producers",
-                side_effect=runner.CoverageFailure(
+                side_effect=runner.CoverageFailureError(
                     "python_producer", "python", "COVERAGE_PROCESS_FAILED"
                 ),
             ):
-                with self.assertRaisesRegex(runner.CoverageFailure, "COVERAGE_PROCESS_FAILED"):
+                with self.assertRaisesRegex(runner.CoverageFailureError, "COVERAGE_PROCESS_FAILED"):
                     runner.produce_coverage(context, plan, {"SAFE": "kept"}, ())
 
             self.assertFalse(coverage_environment.exists())
@@ -392,7 +388,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
         with (
             patch.object(runner.os, "name", "posix"),
             self.assertRaisesRegex(
-                runner.CoverageTreeOwnerUnavailable,
+                runner.CoverageTreeOwnerUnavailableError,
                 "COVERAGE_PROCESS_TREE_OWNER_UNAVAILABLE",
             ),
         ):
@@ -442,7 +438,10 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 if owner.observation.terminal_state != "TREE_EMPTY":
                     try:
                         owner.abort_and_wait_empty(runner.time.monotonic() + 5)
-                    except (runner.CoverageTreeOwnershipLost, runner.subprocess.TimeoutExpired):
+                    except (
+                        runner.CoverageTreeOwnershipLostError,
+                        runner.subprocess.TimeoutExpired,
+                    ):
                         owner.discard_unproven()
 
     def test_scanner_begin_command_includes_coverage_properties(self):
@@ -485,6 +484,34 @@ class TestSonarqubeExactHeadRunner(TestCase):
             stale_plan.root.mkdir(parents=True)
             with self.assertRaisesRegex(runner.RunnerError, "coverage run directory"):
                 runner.claim_coverage_run(stale_plan, context)
+
+    def test_claimed_coverage_run_cleanup_preserves_siblings(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = runner.GitContext(
+                root, root / "common", root / "git", root, "a" * 40
+            )
+            plan = runner.derive_coverage_plan(
+                context, "00000000-0000-4000-8000-000000000012"
+            )
+            runner.claim_coverage_run(plan, context)
+            sibling_run = plan.root.parent / "other-run"
+            sibling_run.mkdir()
+            sibling_marker = sibling_run / "marker.txt"
+            sibling_marker.write_text("preserve", encoding="utf-8")
+            unrelated = root / ".tmp" / "unrelated.txt"
+            unrelated.write_text("preserve", encoding="utf-8")
+
+            with patch.object(runner, "is_tracked", return_value=False):
+                removed = runner.clear_claimed_coverage_run(plan, context, {})
+
+            self.assertEqual(
+                removed,
+                [".tmp/sonarqube-coverage/00000000-0000-4000-8000-000000000012"],
+            )
+            self.assertFalse(plan.root.exists())
+            self.assertEqual(sibling_marker.read_text(encoding="utf-8"), "preserve")
+            self.assertEqual(unrelated.read_text(encoding="utf-8"), "preserve")
 
     def test_coverage_evidence_binds_reports_sources_and_marker(self):
         with TemporaryDirectory() as temporary_directory:
@@ -529,7 +556,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 runner.validate_coverage_marker(plan, context),
             )
             plan.python_report.absolute_path.unlink()
-            with self.assertRaisesRegex(runner.CoverageFailure, "COVERAGE_REPORT_MISSING"):
+            with self.assertRaisesRegex(runner.CoverageFailureError, "COVERAGE_REPORT_MISSING"):
                 runner.validate_coverage_evidence(plan, context)
 
     def test_windows_sealed_coverage_reports_block_rewrites(self):
@@ -1332,6 +1359,13 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 patches.enter_context(
                     patch.object(
                         runner,
+                        "validate_coverage_evidence",
+                        return_value={"evidence_sets": []},
+                    )
+                )
+                patches.enter_context(
+                    patch.object(
+                        runner,
                         "sealed_coverage_evidence",
                         return_value=self.sealed_coverage_context(),
                     )
@@ -1476,6 +1510,16 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 events.append("produce")
                 return {"evidence_sets": ["unsealed"]}
 
+            def revalidate_coverage(_plan, _context):
+                self.assertEqual(events[-1], "seal_exit")
+                events.append("revalidate")
+                return {"evidence_sets": ["sealed"]}
+
+            def cleanup_claimed_run(_plan, _context, _environment):
+                self.assertEqual(events[-1], "revalidate")
+                events.append("claimed_run_cleanup")
+                return [".tmp/sonarqube-coverage/claimed-run"]
+
             with ExitStack() as patches:
                 patches.enter_context(patch.object(runner, "process_environment", return_value={}))
                 patches.enter_context(
@@ -1514,6 +1558,21 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 patches.enter_context(patch.object(runner, "claim_coverage_run", side_effect=claim))
                 patches.enter_context(patch.object(runner, "produce_coverage", side_effect=produce))
                 patches.enter_context(
+                    patch.object(
+                        runner,
+                        "validate_coverage_evidence",
+                        side_effect=revalidate_coverage,
+                    )
+                )
+                patches.enter_context(
+                    patch.object(
+                        runner,
+                        "clear_claimed_coverage_run",
+                        side_effect=cleanup_claimed_run,
+                        create=True,
+                    )
+                )
+                patches.enter_context(
                     patch.object(runner, "sealed_coverage_evidence", return_value=Seal())
                 )
                 patches.enter_context(
@@ -1546,7 +1605,17 @@ class TestSonarqubeExactHeadRunner(TestCase):
 
         self.assertEqual(
             events,
-            ["begin", "claim", "produce", "seal_enter", "end", "seal_verify", "seal_exit"],
+            [
+                "begin",
+                "claim",
+                "produce",
+                "seal_enter",
+                "end",
+                "seal_verify",
+                "seal_exit",
+                "revalidate",
+                "claimed_run_cleanup",
+            ],
         )
 
     def test_execute_disables_msbuild_node_reuse_for_solution_and_standalone_builds(self):
@@ -1776,6 +1845,13 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 patches.enter_context(patch.object(runner, "claim_coverage_run", return_value="marker"))
                 patches.enter_context(
                     patch.object(runner, "produce_coverage", return_value={"evidence_sets": []})
+                )
+                patches.enter_context(
+                    patch.object(
+                        runner,
+                        "validate_coverage_evidence",
+                        return_value={"evidence_sets": []},
+                    )
                 )
                 patches.enter_context(
                     patch.object(

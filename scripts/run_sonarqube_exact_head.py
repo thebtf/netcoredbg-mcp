@@ -66,6 +66,7 @@ COVERAGE_ANALYSIS_QUERY = {
 HOST_REAL_PYTHON_TEST_PROJECT = "host/NetCoreDbg.Mcp.Host.Tests/NetCoreDbg.Mcp.Host.Tests.csproj"
 CLOSED_DOTNET_COVERAGE_PROJECTS = (
     "host/NetCoreDbg.Mcp.CodeSearch.Core.Tests/NetCoreDbg.Mcp.CodeSearch.Core.Tests.csproj",
+    HOST_REAL_PYTHON_TEST_PROJECT,
     "host/NetCoreDbg.Mcp.Stateless.Preview.Tests/NetCoreDbg.Mcp.Stateless.Preview.Tests.csproj",
     "host/NetCoreDbg.Mcp.Stateless.Tests/NetCoreDbg.Mcp.Stateless.Tests.csproj",
     "tests/dotnet/NetCoreDbg.Mcp.Host.PromptTests/NetCoreDbg.Mcp.Host.PromptTests.csproj",
@@ -80,7 +81,7 @@ class RunnerError(RuntimeError):
     """A fail-closed release-gate error safe to place in a receipt."""
 
 
-class CoverageFailure(RunnerError):
+class CoverageFailureError(RunnerError):
     """A secret-free, receipt-bindable coverage transaction failure."""
 
     def __init__(
@@ -128,7 +129,7 @@ class CoverageProcessOutcome:
     owner: CoverageTreeObservation
 
 
-class CoverageTreeOwnerUnavailable(RunnerError):
+class CoverageTreeOwnerUnavailableError(RunnerError):
     def __init__(
         self,
         observation: CoverageTreeObservation | None = None,
@@ -139,7 +140,7 @@ class CoverageTreeOwnerUnavailable(RunnerError):
         super().__init__("COVERAGE_PROCESS_TREE_OWNER_UNAVAILABLE")
 
 
-class CoverageTreeOwnershipLost(RunnerError):
+class CoverageTreeOwnershipLostError(RunnerError):
     def __init__(self, observation: CoverageTreeObservation) -> None:
         self.observation = observation
         super().__init__("COVERAGE_PROCESS_TREE_OWNERSHIP_LOST")
@@ -949,10 +950,31 @@ def clear_generated_artifacts(context: GitContext, environment: Mapping[str, str
     return removed
 
 
+def clear_claimed_coverage_run(
+    plan: CoveragePlan, context: GitContext, environment: Mapping[str, str]
+) -> list[str]:
+    """Remove exactly one successfully claimed coverage run."""
+    _assert_coverage_path(plan.root, plan, context)
+    if not plan.root.exists():
+        return []
+    if plan.root.is_symlink():
+        raise RunnerError("Refusing to remove a claimed coverage run through a symbolic link.")
+    relative_path = normalized_repository_relative_path(context, plan.root)
+    if is_tracked(context.repository_root, environment, plan.root):
+        raise RunnerError("Refusing to remove a tracked claimed coverage run.")
+    try:
+        shutil.rmtree(plan.root)
+    except OSError as error:
+        raise GeneratedArtifactCleanupError(
+            relative_path, "rmtree", error.__class__.__name__, []
+        ) from None
+    return [relative_path]
+
+
 def _remaining_coverage_seconds(deadline: float) -> float:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        raise CoverageFailure("python_producer", None, "COVERAGE_PROCESS_TIMEOUT")
+        raise CoverageFailureError("python_producer", None, "COVERAGE_PROCESS_TIMEOUT")
     return remaining
 
 
@@ -1455,7 +1477,7 @@ class CoverageTreeOwner:
         owner_slot: list[CoverageTreeOwner] | None = None,
     ) -> CoverageTreeOwner:
         if os.name != "nt":
-            raise CoverageTreeOwnerUnavailable()
+            raise CoverageTreeOwnerUnavailableError()
         api: Any | None = None
         job_handle: Any | None = None
         launch: _WindowsCoverageLaunch | None = None
@@ -1495,7 +1517,9 @@ class CoverageTreeOwner:
                     artifact_cleanup_permitted,
                     _ownership_cleanup_detail() if not artifact_cleanup_permitted else None,
                 ) from error
-            raise CoverageTreeOwnerUnavailable(observation, artifact_cleanup_permitted) from error
+            raise CoverageTreeOwnerUnavailableError(
+                observation, artifact_cleanup_permitted
+            ) from error
         except KeyboardInterrupt:
             if launch is None and launch_slot:
                 launch = launch_slot[0]
@@ -1519,7 +1543,9 @@ class CoverageTreeOwner:
             )
             if owner_slot is not None:
                 owner_slot.clear()
-            raise CoverageTreeOwnerUnavailable(observation, artifact_cleanup_permitted) from None
+            raise CoverageTreeOwnerUnavailableError(
+                observation, artifact_cleanup_permitted
+            ) from None
 
     @property
     def observation(self) -> CoverageTreeObservation:
@@ -1565,10 +1591,10 @@ class CoverageTreeOwner:
         self._close_direct_handles()
         return exit_code
 
-    def _ownership_lost(self, _error: OSError) -> CoverageTreeOwnershipLost:
+    def _ownership_lost(self, _error: OSError) -> CoverageTreeOwnershipLostError:
         if self._state != "TREE_EMPTY":
             self._state = "OWNER_LOST"
-        return CoverageTreeOwnershipLost(self.observation)
+        return CoverageTreeOwnershipLostError(self.observation)
 
     def wait_direct_exit(self, deadline: float) -> int:
         if self._state != "OWNER_ACKED":
@@ -1674,8 +1700,8 @@ def _unproven_owner_failure(
     failure_code: str,
     owner: CoverageTreeOwner,
     cleanup_error: BaseException | None = None,
-) -> CoverageFailure:
-    return CoverageFailure(
+) -> CoverageFailureError:
+    return CoverageFailureError(
         stage,
         language,
         failure_code,
@@ -1687,9 +1713,9 @@ def _unproven_owner_failure(
 
 def _cancellation_failure(
     owner: CoverageTreeOwner, stage: str, language: str | None
-) -> CoverageFailure:
+) -> CoverageFailureError:
     if owner.observation.terminal_state == "TREE_EMPTY":
-        return CoverageFailure(
+        return CoverageFailureError(
             stage,
             language,
             "COVERAGE_PROCESS_CANCELLED",
@@ -1697,7 +1723,7 @@ def _cancellation_failure(
         )
     if owner._state == "OWNER_LOST":
         owner.discard_unproven()
-        return CoverageFailure(
+        return CoverageFailureError(
             "process_owner",
             language,
             "COVERAGE_PROCESS_TREE_OWNERSHIP_LOST",
@@ -1707,7 +1733,7 @@ def _cancellation_failure(
     try:
         outcome = _abort_coverage_owner(owner)
     except (
-        CoverageTreeOwnershipLost,
+        CoverageTreeOwnershipLostError,
         subprocess.TimeoutExpired,
         KeyboardInterrupt,
         RuntimeError,
@@ -1716,7 +1742,7 @@ def _cancellation_failure(
         return _unproven_owner_failure(
             stage, language, "COVERAGE_PROCESS_CANCELLED", owner, cleanup_error
         )
-    return CoverageFailure(
+    return CoverageFailureError(
         stage,
         language,
         "COVERAGE_PROCESS_CANCELLED",
@@ -1738,8 +1764,8 @@ def run_coverage_process(
     """Run one coverage child under the Windows Job Object ownership contract."""
     try:
         _remaining_coverage_seconds(deadline)
-    except CoverageFailure as error:
-        raise CoverageFailure(stage, language, error.failure_code) from error
+    except CoverageFailureError as error:
+        raise CoverageFailureError(stage, language, error.failure_code) from error
 
     owner: CoverageTreeOwner | None = None
     owner_slot: list[CoverageTreeOwner] = []
@@ -1754,7 +1780,7 @@ def run_coverage_process(
             )
             owner_slot.clear()
         except CoverageTreeStartCancelledError as error:
-            raise CoverageFailure(
+            raise CoverageFailureError(
                 stage,
                 language,
                 "COVERAGE_PROCESS_CANCELLED",
@@ -1762,13 +1788,13 @@ def run_coverage_process(
                 owner=error.observation,
                 artifact_cleanup_permitted=error.artifact_cleanup_permitted,
             ) from error
-        except CoverageTreeOwnerUnavailable as error:
+        except CoverageTreeOwnerUnavailableError as error:
             failure_code = (
                 "COVERAGE_PROCESS_TREE_OWNER_UNAVAILABLE"
                 if error.artifact_cleanup_permitted
                 else "COVERAGE_PROCESS_TREE_OWNERSHIP_LOST"
             )
-            raise CoverageFailure(
+            raise CoverageFailureError(
                 "process_owner",
                 language,
                 failure_code,
@@ -1777,7 +1803,7 @@ def run_coverage_process(
             ) from error
 
         if owner is None:
-            raise CoverageFailure(
+            raise CoverageFailureError(
                 "process_owner",
                 language,
                 "COVERAGE_PROCESS_TREE_OWNERSHIP_LOST",
@@ -1790,7 +1816,7 @@ def run_coverage_process(
             try:
                 outcome = _abort_coverage_owner(owner)
             except (
-                CoverageTreeOwnershipLost,
+                CoverageTreeOwnershipLostError,
                 subprocess.TimeoutExpired,
                 KeyboardInterrupt,
             ) as cleanup_error:
@@ -1798,12 +1824,12 @@ def run_coverage_process(
                 raise _unproven_owner_failure(
                     stage, language, "COVERAGE_PROCESS_TIMEOUT", owner, cleanup_error
                 ) from error
-            raise CoverageFailure(
+            raise CoverageFailureError(
                 stage, language, "COVERAGE_PROCESS_TIMEOUT", owner=outcome.owner
             ) from error
         except KeyboardInterrupt as error:
             raise _cancellation_failure(owner, stage, language) from error
-        except CoverageTreeOwnershipLost as error:
+        except CoverageTreeOwnershipLostError as error:
             owner.discard_unproven()
             raise _unproven_owner_failure(
                 "process_owner", language, "COVERAGE_PROCESS_TREE_OWNERSHIP_LOST", owner
@@ -1813,7 +1839,7 @@ def run_coverage_process(
             try:
                 outcome = _abort_coverage_owner(owner)
             except (
-                CoverageTreeOwnershipLost,
+                CoverageTreeOwnershipLostError,
                 subprocess.TimeoutExpired,
                 KeyboardInterrupt,
             ) as cleanup_error:
@@ -1821,7 +1847,9 @@ def run_coverage_process(
                 raise _unproven_owner_failure(
                     stage, language, "COVERAGE_PROCESS_FAILED", owner, cleanup_error
                 ) from cleanup_error
-            raise CoverageFailure(stage, language, "COVERAGE_PROCESS_FAILED", owner=outcome.owner)
+            raise CoverageFailureError(
+                stage, language, "COVERAGE_PROCESS_FAILED", owner=outcome.owner
+            )
 
         try:
             outcome = owner.wait_empty(deadline)
@@ -1829,7 +1857,7 @@ def run_coverage_process(
             try:
                 outcome = _abort_coverage_owner(owner)
             except (
-                CoverageTreeOwnershipLost,
+                CoverageTreeOwnershipLostError,
                 subprocess.TimeoutExpired,
                 KeyboardInterrupt,
             ) as cleanup_error:
@@ -1837,12 +1865,12 @@ def run_coverage_process(
                 raise _unproven_owner_failure(
                     stage, language, "COVERAGE_PROCESS_TIMEOUT", owner, cleanup_error
                 ) from error
-            raise CoverageFailure(
+            raise CoverageFailureError(
                 stage, language, "COVERAGE_PROCESS_TIMEOUT", owner=outcome.owner
             ) from error
         except KeyboardInterrupt as error:
             raise _cancellation_failure(owner, stage, language) from error
-        except CoverageTreeOwnershipLost as error:
+        except CoverageTreeOwnershipLostError as error:
             owner.discard_unproven()
             raise _unproven_owner_failure(
                 "process_owner", language, "COVERAGE_PROCESS_TREE_OWNERSHIP_LOST", owner
@@ -1856,7 +1884,7 @@ def run_coverage_process(
     except KeyboardInterrupt as error:
         bound_owner = owner if owner is not None else (owner_slot[0] if owner_slot else None)
         if bound_owner is None:
-            raise CoverageFailure(
+            raise CoverageFailureError(
                 stage,
                 language,
                 "COVERAGE_PROCESS_CANCELLED",
@@ -2024,13 +2052,15 @@ def _assert_coverage_path(path: Path, plan: CoveragePlan, context: GitContext) -
             attributes = current.lstat()
         except OSError as error:
             raise RunnerError("Coverage path metadata is unavailable.") from error
-        if current.is_symlink() or getattr(attributes, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        if current.is_symlink() or (
+            getattr(attributes, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        ):
             raise RunnerError("Coverage path must not traverse a symbolic link or reparse point.")
 
 
 def _assert_claimed_coverage_path(path: Path, plan: CoveragePlan, context: GitContext) -> None:
     if path.is_symlink() or plan.root.is_symlink():
-        raise CoverageFailure("report_validation", None, "COVERAGE_SYMLINK_REJECTED")
+        raise CoverageFailureError("report_validation", None, "COVERAGE_SYMLINK_REJECTED")
     try:
         path.relative_to(plan.root)
         resolved_repository_root = context.repository_root.resolve()
@@ -2039,7 +2069,7 @@ def _assert_claimed_coverage_path(path: Path, plan: CoveragePlan, context: GitCo
         resolved_root.relative_to(resolved_repository_root)
         resolved_path.relative_to(resolved_root)
     except (OSError, ValueError) as error:
-        raise CoverageFailure("report_validation", None, "COVERAGE_PATH_ESCAPE") from error
+        raise CoverageFailureError("report_validation", None, "COVERAGE_PATH_ESCAPE") from error
 
 
 def claim_coverage_run(plan: CoveragePlan, context: GitContext) -> str:
@@ -2080,25 +2110,29 @@ def _coverage_file_bytes(
 ) -> bytes:
     _assert_claimed_coverage_path(report.absolute_path, plan, context)
     if not report.absolute_path.exists():
-        raise CoverageFailure("report_validation", report.language, "COVERAGE_REPORT_MISSING")
+        raise CoverageFailureError("report_validation", report.language, "COVERAGE_REPORT_MISSING")
     try:
         file_status = report.absolute_path.lstat()
     except OSError as error:
-        raise CoverageFailure(
+        raise CoverageFailureError(
             "report_validation", report.language, "COVERAGE_REPORT_UNREADABLE"
         ) from error
     if report.absolute_path.is_symlink():
-        raise CoverageFailure("report_validation", report.language, "COVERAGE_SYMLINK_REJECTED")
+        raise CoverageFailureError(
+            "report_validation", report.language, "COVERAGE_SYMLINK_REJECTED"
+        )
     if not stat.S_ISREG(file_status.st_mode):
-        raise CoverageFailure("report_validation", report.language, "COVERAGE_REPORT_NOT_REGULAR")
+        raise CoverageFailureError(
+            "report_validation", report.language, "COVERAGE_REPORT_NOT_REGULAR"
+        )
     try:
         contents = report.absolute_path.read_bytes()
     except OSError as error:
-        raise CoverageFailure(
+        raise CoverageFailureError(
             "report_validation", report.language, "COVERAGE_REPORT_UNREADABLE"
         ) from error
     if not contents:
-        raise CoverageFailure("report_validation", report.language, "COVERAGE_REPORT_EMPTY")
+        raise CoverageFailureError("report_validation", report.language, "COVERAGE_REPORT_EMPTY")
     return contents
 
 
@@ -2110,13 +2144,13 @@ def _normalized_relative_source_path(value: str) -> str:
         or re.match(r"^[A-Za-z]:", normalized)
         or any(part in {"", ".", ".."} for part in normalized.split("/"))
     ):
-        raise CoverageFailure("report_validation", None, "COVERAGE_SOURCE_PATH_INVALID")
+        raise CoverageFailureError("report_validation", None, "COVERAGE_SOURCE_PATH_INVALID")
     return normalized
 
 
 def _source_path_set_sha256(paths: Collection[str]) -> str:
     if not paths:
-        raise CoverageFailure("report_validation", None, "COVERAGE_SOURCE_MAPPING_EMPTY")
+        raise CoverageFailureError("report_validation", None, "COVERAGE_SOURCE_MAPPING_EMPTY")
     return hashlib.sha256(("\n".join(sorted(paths)) + "\n").encode("utf-8")).hexdigest()
 
 
@@ -2127,22 +2161,28 @@ def _validate_python_sources(root: ElementTree.Element, context: GitContext) -> 
             continue
         filename = element.attrib.get("filename")
         if not isinstance(filename, str):
-            raise CoverageFailure("report_validation", "python", "COVERAGE_SOURCE_MAPPING_INVALID")
+            raise CoverageFailureError(
+                "report_validation", "python", "COVERAGE_SOURCE_MAPPING_INVALID"
+            )
         normalized = _normalized_relative_source_path(filename)
         if not normalized.startswith("src/netcoredbg_mcp/") or not normalized.endswith(".py"):
-            raise CoverageFailure("report_validation", "python", "COVERAGE_SOURCE_MAPPING_INVALID")
+            raise CoverageFailureError(
+                "report_validation", "python", "COVERAGE_SOURCE_MAPPING_INVALID"
+            )
         source = context.repository_root / normalized
         try:
             source.resolve().relative_to(context.repository_root.resolve())
         except (OSError, ValueError) as error:
-            raise CoverageFailure(
+            raise CoverageFailureError(
                 "report_validation", "python", "COVERAGE_SOURCE_PATH_ESCAPE"
             ) from error
         if source.is_symlink() or not source.is_file():
-            raise CoverageFailure("report_validation", "python", "COVERAGE_SOURCE_MAPPING_INVALID")
+            raise CoverageFailureError(
+                "report_validation", "python", "COVERAGE_SOURCE_MAPPING_INVALID"
+            )
         paths.append(normalized)
     if not paths or len(paths) != len(set(paths)):
-        raise CoverageFailure("report_validation", "python", "COVERAGE_SOURCE_MAPPING_INVALID")
+        raise CoverageFailureError("report_validation", "python", "COVERAGE_SOURCE_MAPPING_INVALID")
     return sorted(paths)
 
 
@@ -2156,11 +2196,11 @@ def _normal_dotnet_source_path(context: GitContext, value: str) -> str:
             str(resolved.relative_to(context.repository_root.resolve())).replace("\\", "/")
         )
     except (OSError, ValueError) as error:
-        raise CoverageFailure(
+        raise CoverageFailureError(
             "report_validation", "dotnet", "COVERAGE_SOURCE_PATH_ESCAPE"
         ) from error
     if source.is_symlink() or not source.is_file() or not normalized.endswith(".cs"):
-        raise CoverageFailure("report_validation", "dotnet", "COVERAGE_SOURCE_MAPPING_INVALID")
+        raise CoverageFailureError("report_validation", "dotnet", "COVERAGE_SOURCE_MAPPING_INVALID")
     return normalized
 
 
@@ -2181,20 +2221,22 @@ def _validate_dotnet_sources(
             continue
         full_path = element.attrib.get("fullPath")
         if not isinstance(full_path, str):
-            raise CoverageFailure("report_validation", "dotnet", "COVERAGE_SOURCE_MAPPING_INVALID")
+            raise CoverageFailureError(
+                "report_validation", "dotnet", "COVERAGE_SOURCE_MAPPING_INVALID"
+            )
         paths.append(_normal_dotnet_source_path(context, full_path))
     if (
         not paths
         or len(paths) != len(set(paths))
         or not any(_is_non_test_dotnet_source(path) for path in paths)
     ):
-        raise CoverageFailure("report_validation", "dotnet", "COVERAGE_SOURCE_MAPPING_INVALID")
+        raise CoverageFailureError("report_validation", "dotnet", "COVERAGE_SOURCE_MAPPING_INVALID")
     if (
         report.project is not None
         and report.project.endswith("NetCoreDbg.Mcp.Stateless.Tests.csproj")
         and not any(path.startswith("host/NetCoreDbg.Mcp.Stateless/") for path in paths)
     ):
-        raise CoverageFailure(
+        raise CoverageFailureError(
             "report_validation", "dotnet", "COVERAGE_STATELESS_HOST_MAPPING_MISSING"
         )
     return sorted(paths)
@@ -2202,7 +2244,7 @@ def _validate_dotnet_sources(
 
 def _positive_integer(value: Any, language: str) -> int:
     if not isinstance(value, str) or not re.fullmatch(r"[1-9][0-9]*", value):
-        raise CoverageFailure("report_validation", language, "COVERAGE_DENOMINATOR_INVALID")
+        raise CoverageFailureError("report_validation", language, "COVERAGE_DENOMINATOR_INVALID")
     return int(value)
 
 
@@ -2212,24 +2254,26 @@ def _coverage_report_binding_from_contents(
     try:
         root = ElementTree.fromstring(contents)
     except ElementTree.ParseError as error:
-        raise CoverageFailure(
+        raise CoverageFailureError(
             "report_validation", report.language, "COVERAGE_REPORT_XML_INVALID"
         ) from error
     if report.language == "python":
         if _xml_local_name(root.tag) != "coverage":
-            raise CoverageFailure("report_validation", "python", "COVERAGE_XML_ROOT_INVALID")
+            raise CoverageFailureError("report_validation", "python", "COVERAGE_XML_ROOT_INVALID")
         denominator = _positive_integer(root.attrib.get("lines-valid"), "python")
         sources = _validate_python_sources(root, context)
     elif report.language == "dotnet":
         if _xml_local_name(root.tag) != "CoverageSession":
-            raise CoverageFailure("report_validation", "dotnet", "COVERAGE_XML_ROOT_INVALID")
+            raise CoverageFailureError("report_validation", "dotnet", "COVERAGE_XML_ROOT_INVALID")
         summary = next((child for child in root if _xml_local_name(child.tag) == "Summary"), None)
         if summary is None:
-            raise CoverageFailure("report_validation", "dotnet", "COVERAGE_DENOMINATOR_INVALID")
+            raise CoverageFailureError(
+                "report_validation", "dotnet", "COVERAGE_DENOMINATOR_INVALID"
+            )
         denominator = _positive_integer(summary.attrib.get("numSequencePoints"), "dotnet")
         sources = _validate_dotnet_sources(root, context, report)
     else:
-        raise CoverageFailure("report_validation", None, "COVERAGE_REPORT_LANGUAGE_INVALID")
+        raise CoverageFailureError("report_validation", None, "COVERAGE_REPORT_LANGUAGE_INVALID")
     return {
         "path": report.normalized_path,
         "project": report.project,
@@ -2256,9 +2300,9 @@ def _coverage_evidence_from_bindings(
 ) -> dict[str, Any]:
     marker_sha256 = validate_coverage_marker(plan, context)
     if len(plan.dotnet_reports) != len(CLOSED_DOTNET_COVERAGE_PROJECTS):
-        raise CoverageFailure("report_validation", "dotnet", "COVERAGE_REPORT_SET_INVALID")
+        raise CoverageFailureError("report_validation", "dotnet", "COVERAGE_REPORT_SET_INVALID")
     if len({binding["path"] for binding in bindings}) != len(bindings):
-        raise CoverageFailure("report_validation", None, "COVERAGE_REPORT_PATH_DUPLICATE")
+        raise CoverageFailureError("report_validation", None, "COVERAGE_REPORT_PATH_DUPLICATE")
     dotnet_bindings = [binding for binding in bindings if binding["project"] is not None]
     python_bindings = [binding for binding in bindings if binding["project"] is None]
     return {
@@ -2301,11 +2345,11 @@ class _SealedCoverageReport:
             self.stream.seek(0)
             contents = self.stream.read()
         except OSError as error:
-            raise CoverageFailure(
+            raise CoverageFailureError(
                 "report_validation", self.report.language, "COVERAGE_REPORT_SEAL_UNREADABLE"
             ) from error
         if not isinstance(contents, bytes):
-            raise CoverageFailure(
+            raise CoverageFailureError(
                 "report_validation", self.report.language, "COVERAGE_REPORT_SEAL_UNREADABLE"
             )
         return contents
@@ -2314,7 +2358,7 @@ class _SealedCoverageReport:
         try:
             self.stream.close()
         except OSError as error:
-            raise CoverageFailure(
+            raise CoverageFailureError(
                 "report_validation", self.report.language, "COVERAGE_REPORT_SEAL_CLOSE_FAILED"
             ) from error
 
@@ -2330,22 +2374,25 @@ class SealedCoverageEvidence:
         bindings = []
         for sealed in self.reports:
             contents = sealed.read_bytes()
-            if len(contents) != sealed.byte_count or hashlib.sha256(contents).hexdigest() != sealed.sha256:
-                raise CoverageFailure(
+            if (
+                len(contents) != sealed.byte_count
+                or hashlib.sha256(contents).hexdigest() != sealed.sha256
+            ):
+                raise CoverageFailureError(
                     "report_validation", sealed.report.language, "COVERAGE_REPORT_SEAL_DRIFT"
                 )
             bindings.append(
                 _coverage_report_binding_from_contents(self.context, sealed.report, contents)
             )
         if _coverage_evidence_from_bindings(self.plan, self.context, bindings) != self.evidence:
-            raise CoverageFailure("report_validation", None, "COVERAGE_REPORT_SEAL_DRIFT")
+            raise CoverageFailureError("report_validation", None, "COVERAGE_REPORT_SEAL_DRIFT")
 
     def close(self) -> None:
-        errors: list[CoverageFailure] = []
+        errors: list[CoverageFailureError] = []
         for sealed in reversed(self.reports):
             try:
                 sealed.close()
-            except CoverageFailure as error:
+            except CoverageFailureError as error:
                 errors.append(error)
         if errors:
             raise errors[0]
@@ -2355,7 +2402,7 @@ def _seal_coverage_report(
     plan: CoveragePlan, context: GitContext, report: CoverageReportPlan
 ) -> _SealedCoverageReport:
     if os.name != "nt":
-        raise CoverageFailure(
+        raise CoverageFailureError(
             "report_validation", report.language, "COVERAGE_REPORT_SEAL_UNAVAILABLE"
         )
     _assert_claimed_coverage_path(report.absolute_path, plan, context)
@@ -2411,16 +2458,18 @@ def _seal_coverage_report(
         sealed.sha256 = hashlib.sha256(contents).hexdigest()
         sealed.byte_count = len(contents)
         return sealed
-    except CoverageFailure:
+    except CoverageFailureError:
         raise
     except OSError as error:
-        raise CoverageFailure(
+        raise CoverageFailureError(
             "report_validation", report.language, "COVERAGE_REPORT_SEAL_UNAVAILABLE"
         ) from error
 
 
 @contextmanager
-def sealed_coverage_evidence(plan: CoveragePlan, context: GitContext) -> Iterator[SealedCoverageEvidence]:
+def sealed_coverage_evidence(
+    plan: CoveragePlan, context: GitContext
+) -> Iterator[SealedCoverageEvidence]:
     sealed_reports: list[_SealedCoverageReport] = []
     sealed: SealedCoverageEvidence | None = None
     try:
@@ -2441,11 +2490,11 @@ def sealed_coverage_evidence(plan: CoveragePlan, context: GitContext) -> Iterato
         if sealed is not None:
             sealed.close()
         else:
-            errors: list[CoverageFailure] = []
+            errors: list[CoverageFailureError] = []
             for report in reversed(sealed_reports):
                 try:
                     report.close()
-                except CoverageFailure as error:
+                except CoverageFailureError as error:
                     errors.append(error)
             if errors:
                 raise errors[0]
@@ -2454,7 +2503,9 @@ def sealed_coverage_evidence(plan: CoveragePlan, context: GitContext) -> Iterato
 def coverage_environment_directory(context: GitContext, plan: CoveragePlan) -> Path:
     _validate_coverage_run_id(plan.run_id)
     if not SHA_RE.fullmatch(context.head):
-        raise CoverageFailure("python_producer", "python", "COVERAGE_ENVIRONMENT_IDENTITY_INVALID")
+        raise CoverageFailureError(
+            "python_producer", "python", "COVERAGE_ENVIRONMENT_IDENTITY_INVALID"
+        )
     directory = (
         context.coordination_root
         / ".agent"
@@ -2466,7 +2517,7 @@ def coverage_environment_directory(context: GitContext, plan: CoveragePlan) -> P
     try:
         directory.resolve(strict=False).relative_to(context.coordination_root.resolve())
     except (OSError, ValueError) as error:
-        raise CoverageFailure(
+        raise CoverageFailureError(
             "python_producer", "python", "COVERAGE_ENVIRONMENT_PATH_ESCAPE"
         ) from error
     return directory
@@ -2481,13 +2532,15 @@ def coverage_python_executable(environment_directory: Path) -> Path:
 def clear_coverage_environment(context: GitContext, plan: CoveragePlan) -> None:
     directory = coverage_environment_directory(context, plan)
     if directory.is_symlink():
-        raise CoverageFailure("python_producer", "python", "COVERAGE_ENVIRONMENT_SYMLINK_REJECTED")
+        raise CoverageFailureError(
+            "python_producer", "python", "COVERAGE_ENVIRONMENT_SYMLINK_REJECTED"
+        )
     if not directory.exists():
         return
     try:
         shutil.rmtree(directory)
     except OSError as error:
-        raise CoverageFailure(
+        raise CoverageFailureError(
             "python_producer", "python", "COVERAGE_ENVIRONMENT_CLEANUP_FAILED"
         ) from error
 
@@ -2511,7 +2564,9 @@ def coverage_dotnet_environment(
     context: GitContext, plan: CoveragePlan, environment: Mapping[str, str]
 ) -> dict[str, str]:
     dotnet_environment = dict(environment)
-    python_executable = str(coverage_python_executable(coverage_environment_directory(context, plan)))
+    python_executable = str(
+        coverage_python_executable(coverage_environment_directory(context, plan))
+    )
     dotnet_environment.update(
         {
             "NETCOREDBG_MCP_PYTHON_EXECUTABLE": python_executable,
@@ -2565,14 +2620,6 @@ def coverage_producer_commands(context: GitContext, plan: CoveragePlan) -> list[
                 f"/p:CoverletOutput={report.absolute_path}",
             ]
         )
-    commands.append(
-        [
-            "dotnet",
-            "test",
-            str(context.repository_root / HOST_REAL_PYTHON_TEST_PROJECT),
-            "-nr:false",
-        ]
-    )
     return commands
 
 
@@ -2590,7 +2637,7 @@ def run_coverage_producers(
         except RunnerError:
             raise
         except OSError as error:
-            raise CoverageFailure(
+            raise CoverageFailureError(
                 "report_validation", report.language, "COVERAGE_REPORT_DIRECTORY_CREATE_FAILED"
             ) from error
     commands = coverage_producer_commands(context, plan)
@@ -2886,15 +2933,15 @@ def current_analysis_binding(host: str, analysis_id: str, head: str, token: str)
 
 def _coverage_decimal(value: Any, *, positive: bool) -> str:
     if not isinstance(value, str) or not re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?", value):
-        raise CoverageFailure("analysis_metrics", None, "COVERAGE_ANALYSIS_METRICS_INVALID")
+        raise CoverageFailureError("analysis_metrics", None, "COVERAGE_ANALYSIS_METRICS_INVALID")
     try:
         parsed = Decimal(value)
     except InvalidOperation as error:
-        raise CoverageFailure(
+        raise CoverageFailureError(
             "analysis_metrics", None, "COVERAGE_ANALYSIS_METRICS_INVALID"
         ) from error
     if not parsed.is_finite() or (parsed <= 0 if positive else parsed < 0):
-        raise CoverageFailure("analysis_metrics", None, "COVERAGE_ANALYSIS_METRICS_INVALID")
+        raise CoverageFailureError("analysis_metrics", None, "COVERAGE_ANALYSIS_METRICS_INVALID")
     return value
 
 
@@ -2904,7 +2951,7 @@ def analysis_coverage_binding(host: str, analysis_id: str, head: str, token: str
     component = response.get("component")
     measures = component.get("measures") if isinstance(component, dict) else None
     if not isinstance(measures, list):
-        raise CoverageFailure("analysis_metrics", None, "COVERAGE_ANALYSIS_METRICS_INVALID")
+        raise CoverageFailureError("analysis_metrics", None, "COVERAGE_ANALYSIS_METRICS_INVALID")
     observed = {
         measure.get("metric"): measure.get("value")
         for measure in measures
@@ -2912,7 +2959,7 @@ def analysis_coverage_binding(host: str, analysis_id: str, head: str, token: str
     }
     expected_metrics = ("coverage", "lines_to_cover", "new_coverage", "new_uncovered_lines")
     if set(observed) != set(expected_metrics):
-        raise CoverageFailure("analysis_metrics", None, "COVERAGE_ANALYSIS_METRICS_INVALID")
+        raise CoverageFailureError("analysis_metrics", None, "COVERAGE_ANALYSIS_METRICS_INVALID")
     metrics = {
         "coverage": _coverage_decimal(observed["coverage"], positive=True),
         "lines_to_cover": _coverage_decimal(observed["lines_to_cover"], positive=True),
@@ -3387,7 +3434,7 @@ def validate_coverage_receipt(receipt: Mapping[str, Any]) -> None:
     try:
         context = _receipt_coverage_context(receipt)
         plan = derive_coverage_plan(context, run_id)
-    except (CoverageFailure, RunnerError) as error:
+    except (CoverageFailureError, RunnerError) as error:
         raise _receipt_coverage_error() from error
     evidence_sets = coverage.get("evidence_sets")
     if not isinstance(evidence_sets, list) or len(evidence_sets) != 2:
@@ -3470,7 +3517,7 @@ def validate_analysis_coverage_receipt(receipt: Mapping[str, Any]) -> None:
         _coverage_decimal(metrics["lines_to_cover"], positive=True)
         _coverage_decimal(metrics["new_coverage"], positive=False)
         _coverage_decimal(metrics["new_uncovered_lines"], positive=False)
-    except CoverageFailure as error:
+    except CoverageFailureError as error:
         raise _receipt_analysis_coverage_error() from error
 
 
@@ -3696,6 +3743,43 @@ def execute(role: str, scanner_override: str | None) -> Path:
     target_receipt = receipt_path(context, role)
     receipt = receipt_base(context, role, run_id)
     secrets = sonar_secret_values(inherited_environment)
+    coverage_plan: CoveragePlan | None = None
+    coverage_run_claimed = False
+    coverage_cleanup_attempted = False
+
+    def record_claimed_coverage_cleanup() -> RunnerError | None:
+        nonlocal coverage_cleanup_attempted, coverage_run_claimed
+        if (
+            coverage_plan is None
+            or not coverage_run_claimed
+            or coverage_cleanup_attempted
+        ):
+            return None
+        coverage_cleanup_attempted = True
+        try:
+            removed = clear_claimed_coverage_run(coverage_plan, context, clean_environment)
+        except RunnerError as error:
+            failure: dict[str, Any] = {"error": str(error)}
+            if isinstance(error, GeneratedArtifactCleanupError):
+                failure.update(
+                    {
+                        "path": error.path,
+                        "operation": error.operation,
+                        "error_type": error.error_type,
+                    }
+                )
+                removed = error.removed
+            else:
+                removed = []
+            receipt["coverage_run_cleanup"] = {
+                "status": "BLOCKED",
+                "removed": removed,
+                "failure": failure,
+            }
+            return error
+        receipt["coverage_run_cleanup"] = {"status": "PASS", "removed": removed}
+        coverage_run_claimed = False
+        return None
 
     with project_lock(context.coordination_root, role, context.head, run_id):
         write_receipt(target_receipt, receipt, secrets)
@@ -3740,6 +3824,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
                 credential_input_names=("SONAR_TOKEN",),
             )
             claim_coverage_run(coverage_plan, context)
+            coverage_run_claimed = True
             receipt["scanner_metadata"] = scanner_metadata(
                 context.repository_root, context.head, release_version
             )
@@ -3782,6 +3867,11 @@ def execute(role: str, scanner_override: str | None) -> Path:
                     credential_input_names=("SONAR_TOKEN",),
                 )
                 sealed.assert_unchanged()
+            post_end_coverage = validate_coverage_evidence(coverage_plan, context)
+            if post_end_coverage != receipt["coverage"]:
+                raise CoverageFailureError(
+                    "report_validation", None, "COVERAGE_REPORT_SEAL_DRIFT"
+                )
             receipt["task_report"] = report_task(
                 context.repository_root, credentials["SONAR_HOST_URL"]
             )
@@ -3826,6 +3916,9 @@ def execute(role: str, scanner_override: str | None) -> Path:
             )
             receipt["hotspot_dispositions"] = hotspot_dispositions(receipt["hotspots"])
             assert_head_unchanged(context, clean_environment)
+            cleanup_error = record_claimed_coverage_cleanup()
+            if cleanup_error is not None:
+                raise cleanup_error
             post_scan_cleanup = clear_generated_artifacts(context, clean_environment)
             receipt["generated_artifacts_removed_after_scan"] = post_scan_cleanup
             receipt["cleanup"] = {"status": "PASS", "removed": post_scan_cleanup}
@@ -3852,6 +3945,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
             validate_pass_receipt(receipt)
             write_receipt(target_receipt, receipt, secrets)
         except ApiHttpError as error:
+            record_claimed_coverage_cleanup()
             if error.status in {401, 403}:
                 credential_error = CredentialsUnavailable(error.input_name)
                 receipt["outcome"] = "BLOCKED"
@@ -3865,6 +3959,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
             write_receipt(target_receipt, receipt, secrets)
             raise
         except GeneratedArtifactCleanupError as error:
+            record_claimed_coverage_cleanup()
             receipt["outcome"] = "BLOCKED"
             receipt["cleanup"] = {
                 "status": "BLOCKED",
@@ -3889,12 +3984,14 @@ def execute(role: str, scanner_override: str | None) -> Path:
             write_receipt(target_receipt, receipt, secrets)
             raise
         except RunnerError as error:
+            record_claimed_coverage_cleanup()
             receipt["outcome"] = "BLOCKED"
             receipt["failure"] = str(error)
             receipt["completed_at"] = utc_now()
             write_receipt(target_receipt, receipt, secrets)
             raise
         except Exception as error:
+            record_claimed_coverage_cleanup()
             receipt["outcome"] = "BLOCKED"
             receipt["failure"] = f"Unexpected runner failure: {error.__class__.__name__}."
             receipt["completed_at"] = utc_now()
