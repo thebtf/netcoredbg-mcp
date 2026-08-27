@@ -40,6 +40,10 @@ SOLUTION_PROJECT_RE = re.compile(r'^Project\("[^"]+"\) = "([^"]+)", "([^"]+\.csp
 ISSUE_STATUSES = "OPEN,CONFIRMED,FALSE_POSITIVE,ACCEPTED,FIXED,IN_SANDBOX"
 GENERATED_DIRECTORY_NAMES = {"bin", "obj"}
 GENERATED_ROOT_NAMES = {".sonarqube", ".scannerwork"}
+PROJECT_VERSION_ASSIGNMENT_RE = re.compile(r'^version\s*=\s*"(?P<version>[^"]+)"\s*(?:#.*)?$')
+SEMVER_RE = re.compile(
+    r"^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
 
 
 class RunnerError(RuntimeError):
@@ -814,6 +818,28 @@ def project_key_from_xml(path: Path) -> str:
     return keys[0]
 
 
+def project_version(repository_root: Path) -> str:
+    pyproject = repository_root / "pyproject.toml"
+    try:
+        lines = pyproject.read_text(encoding="utf-8").splitlines()
+    except OSError as error:
+        raise RunnerError("Authoritative release version is unavailable.") from error
+    in_project_section = False
+    versions: list[str] = []
+    for raw_line in lines:
+        line = raw_line.strip()
+        if line.startswith("[") and line.endswith("]"):
+            in_project_section = line == "[project]"
+            continue
+        if in_project_section:
+            match = PROJECT_VERSION_ASSIGNMENT_RE.fullmatch(line)
+            if match:
+                versions.append(match["version"])
+    if len(versions) != 1 or not SEMVER_RE.fullmatch(versions[0]):
+        raise RunnerError("Authoritative release version is unavailable.")
+    return versions[0]
+
+
 def discover_scanner(override: str | None) -> list[str]:
     candidates = [override] if override else [
         "dotnet-sonarscanner",
@@ -829,7 +855,12 @@ def discover_scanner(override: str | None) -> list[str]:
 
 
 def scanner_begin_command(
-    scanner: Sequence[str], analysis_xml: Path, host: str, head: str, token: str
+    scanner: Sequence[str],
+    analysis_xml: Path,
+    host: str,
+    head: str,
+    project_version_value: str,
+    token: str,
 ) -> list[str]:
     return [
         *scanner,
@@ -838,6 +869,7 @@ def scanner_begin_command(
         f"/s:{analysis_xml}",
         f"/d:sonar.host.url={host}",
         f"/d:sonar.scm.revision={head}",
+        f"/d:sonar.projectVersion={project_version_value}",
         f"/d:sonar.token={token}",
     ]
 
@@ -1647,6 +1679,8 @@ def execute(role: str, scanner_override: str | None) -> Path:
             receipt["cleanliness"] = {"pre": strict_cleanliness(context, clean_environment, "scanner begin")}
             analysis_xml = context.repository_root / "SonarQube.Analysis.xml"
             receipt["analysis_xml_project_key"] = project_key_from_xml(analysis_xml)
+            release_version = project_version(context.repository_root)
+            receipt["project_version"] = release_version
             scanner = discover_scanner(scanner_override)
             receipt["scanner"] = scanner
 
@@ -1660,6 +1694,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
                     analysis_xml,
                     credentials["SONAR_HOST_URL"],
                     context.head,
+                    release_version,
                     credentials["SONAR_TOKEN"],
                 ),
                 cwd=context.repository_root,

@@ -71,13 +71,48 @@ class TestSonarqubeExactHeadRunner(TestCase):
 
     def test_scanner_commands_supply_token_but_render_redacted(self):
         begin = runner.scanner_begin_command(
-            ["scanner"], Path("SonarQube.Analysis.xml"), "https://sonar.example.test", "a" * 40, "scan-token"
+            ["scanner"],
+            Path("SonarQube.Analysis.xml"),
+            "https://sonar.example.test",
+            "a" * 40,
+            "0.23.11",
+            "scan-token",
         )
         end = runner.scanner_end_command(["scanner"], "scan-token")
 
         self.assertIn("/d:sonar.token=scan-token", begin)
+        self.assertIn("/d:sonar.projectVersion=0.23.11", begin)
         self.assertIn("/d:sonar.token=scan-token", end)
         self.assertNotIn("scan-token", runner.redact(" ".join(begin), ("scan-token",)))
+
+    def test_project_version_reads_pyproject_authority(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            (root / "pyproject.toml").write_text(
+                '[project]\nversion = "0.23.11"\n', encoding="utf-8"
+            )
+
+            self.assertEqual(runner.project_version(root), "0.23.11")
+
+    def test_project_version_rejects_missing_authority(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            (root / "pyproject.toml").write_text(
+                '[project]\nname = "netcoredbg-mcp"\n', encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(runner.RunnerError, "release version"):
+                runner.project_version(root)
+
+    def test_project_version_rejects_nonsemantic_authority(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            (root / "pyproject.toml").write_text(
+                '[project]\nversion = "development"\n', encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(runner.RunnerError, "release version"):
+                runner.project_version(root)
 
     def test_scanner_metadata_reads_dotnet_analysis_config(self):
         with TemporaryDirectory() as temporary_directory:
@@ -823,6 +858,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 patches.enter_context(
                     patch.object(runner, "project_key_from_xml", return_value=runner.PROJECT_KEY)
                 )
+                patches.enter_context(patch.object(runner, "project_version", return_value="0.23.11"))
                 patches.enter_context(
                     patch.object(runner, "discover_scanner", return_value=["scanner"])
                 )
@@ -964,6 +1000,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 patches.enter_context(
                     patch.object(runner, "project_key_from_xml", return_value=runner.PROJECT_KEY)
                 )
+                patches.enter_context(patch.object(runner, "project_version", return_value="0.23.11"))
                 patches.enter_context(patch.object(runner, "discover_scanner", return_value=["scanner"]))
                 patches.enter_context(
                     patch.object(runner, "issue_inventory", return_value={"records": []})
@@ -999,6 +1036,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 ["dotnet", "build", str(standalone_project), "-nr:false"],
             ],
         )
+        self.assertIn("/d:sonar.projectVersion=0.23.11", process_commands[0])
 
     def test_generated_artifact_permission_error_is_typed_and_path_aware(self):
         with TemporaryDirectory() as temporary_directory:
@@ -1105,6 +1143,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 patches.enter_context(
                     patch.object(runner, "project_key_from_xml", return_value=runner.PROJECT_KEY)
                 )
+                patches.enter_context(patch.object(runner, "project_version", return_value="0.23.11"))
                 patches.enter_context(patch.object(runner, "discover_scanner", return_value=["scanner"]))
                 patches.enter_context(
                     patch.object(runner, "issue_inventory", side_effect=full_issue_inventory)
