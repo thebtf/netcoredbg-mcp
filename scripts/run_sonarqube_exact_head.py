@@ -2559,8 +2559,6 @@ def coverage_producer_commands(context: GitContext, plan: CoveragePlan) -> list[
                 "dotnet",
                 "test",
                 str(context.repository_root / report.project),
-                "--no-build",
-                "--no-restore",
                 "-nr:false",
                 "/p:CollectCoverage=true",
                 "/p:CoverletOutputFormat=opencover",
@@ -2572,8 +2570,6 @@ def coverage_producer_commands(context: GitContext, plan: CoveragePlan) -> list[
             "dotnet",
             "test",
             str(context.repository_root / HOST_REAL_PYTHON_TEST_PROJECT),
-            "--no-build",
-            "--no-restore",
             "-nr:false",
         ]
     )

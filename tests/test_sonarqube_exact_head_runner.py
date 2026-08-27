@@ -213,6 +213,8 @@ class TestSonarqubeExactHeadRunner(TestCase):
             self.assertIn("/p:CollectCoverage=true", command)
             self.assertIn("/p:CoverletOutputFormat=opencover", command)
             self.assertIn(f"/p:CoverletOutput={report.absolute_path}", command)
+            self.assertNotIn("--no-build", command)
+            self.assertNotIn("--no-restore", command)
         real_python_validation = commands[-1]
         self.assertEqual(
             real_python_validation,
@@ -220,8 +222,6 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 "dotnet",
                 "test",
                 str(context.repository_root / runner.HOST_REAL_PYTHON_TEST_PROJECT),
-                "--no-build",
-                "--no-restore",
                 "-nr:false",
             ],
         )
