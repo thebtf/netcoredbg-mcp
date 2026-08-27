@@ -45,6 +45,7 @@ ISSUE_STATUSES = "OPEN,CONFIRMED,FALSE_POSITIVE,ACCEPTED,FIXED,IN_SANDBOX"
 GENERATED_DIRECTORY_NAMES = {"bin", "obj"}
 GENERATED_ROOT_NAMES = {".sonarqube", ".scannerwork"}
 COVERAGE_PROCESS_CLEANUP_SECONDS = 5
+COVERAGE_PRODUCER_TIMEOUT_SECONDS = 30 * 60
 COVERAGE_FAILURE_STAGES = frozenset(
     {
         "process_owner",
@@ -62,9 +63,9 @@ COVERAGE_ANALYSIS_QUERY = {
     "component": PROJECT_KEY,
     "metricKeys": "coverage,lines_to_cover,new_coverage,new_uncovered_lines",
 }
+HOST_REAL_PYTHON_TEST_PROJECT = "host/NetCoreDbg.Mcp.Host.Tests/NetCoreDbg.Mcp.Host.Tests.csproj"
 CLOSED_DOTNET_COVERAGE_PROJECTS = (
     "host/NetCoreDbg.Mcp.CodeSearch.Core.Tests/NetCoreDbg.Mcp.CodeSearch.Core.Tests.csproj",
-    "host/NetCoreDbg.Mcp.Host.Tests/NetCoreDbg.Mcp.Host.Tests.csproj",
     "host/NetCoreDbg.Mcp.Stateless.Preview.Tests/NetCoreDbg.Mcp.Stateless.Preview.Tests.csproj",
     "host/NetCoreDbg.Mcp.Stateless.Tests/NetCoreDbg.Mcp.Stateless.Tests.csproj",
     "tests/dotnet/NetCoreDbg.Mcp.Host.PromptTests/NetCoreDbg.Mcp.Host.PromptTests.csproj",
@@ -2545,6 +2546,16 @@ def coverage_producer_commands(context: GitContext, plan: CoveragePlan) -> list[
                 f"/p:CoverletOutput={report.absolute_path}",
             ]
         )
+    commands.append(
+        [
+            "dotnet",
+            "test",
+            str(context.repository_root / HOST_REAL_PYTHON_TEST_PROJECT),
+            "--no-build",
+            "--no-restore",
+            "-nr:false",
+        ]
+    )
     return commands
 
 
@@ -2571,11 +2582,14 @@ def run_coverage_producers(
         ("Python coverage tests", "python_producer", "python"),
         ("Python Cobertura XML", "python_producer", "python"),
     )
+    coverage_command_count = len(plan.dotnet_reports)
     for index, command in enumerate(commands):
         if index < len(metadata):
             label, stage, language = metadata[index]
-        else:
+        elif index < len(metadata) + coverage_command_count:
             label, stage, language = (".NET OpenCover tests", "dotnet_producer", "dotnet")
+        else:
+            label, stage, language = (".NET real Python Host validation", "dotnet_producer", "dotnet")
         run_coverage_process(
             command,
             cwd=context.repository_root,
@@ -2601,7 +2615,7 @@ def produce_coverage(
             plan,
             environment=environment,
             secrets=secrets,
-            deadline=time.monotonic() + CE_TIMEOUT_SECONDS,
+            deadline=time.monotonic() + COVERAGE_PRODUCER_TIMEOUT_SECONDS,
         )
         return validate_coverage_evidence(plan, context)
     finally:

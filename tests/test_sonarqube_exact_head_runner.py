@@ -139,6 +139,14 @@ class TestSonarqubeExactHeadRunner(TestCase):
             {report.project for report in plan.dotnet_reports},
             set(runner.CLOSED_DOTNET_COVERAGE_PROJECTS),
         )
+        self.assertIn(
+            "tests/dotnet/NetCoreDbg.Mcp.Host.PromptTests/NetCoreDbg.Mcp.Host.PromptTests.csproj",
+            runner.CLOSED_DOTNET_COVERAGE_PROJECTS,
+        )
+        self.assertNotIn(
+            runner.HOST_REAL_PYTHON_TEST_PROJECT,
+            runner.CLOSED_DOTNET_COVERAGE_PROJECTS,
+        )
         self.assertEqual(
             [report.normalized_path for report in plan.dotnet_reports],
             sorted(report.normalized_path for report in plan.dotnet_reports),
@@ -197,7 +205,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 ],
             ],
         )
-        dotnet_commands = commands[3:]
+        dotnet_commands = commands[3:-1]
         self.assertEqual(len(dotnet_commands), len(runner.CLOSED_DOTNET_COVERAGE_PROJECTS))
         for command, report in zip(dotnet_commands, plan.dotnet_reports, strict=True):
             self.assertEqual(command[:2], ["dotnet", "test"])
@@ -205,6 +213,18 @@ class TestSonarqubeExactHeadRunner(TestCase):
             self.assertIn("/p:CollectCoverage=true", command)
             self.assertIn("/p:CoverletOutputFormat=opencover", command)
             self.assertIn(f"/p:CoverletOutput={report.absolute_path}", command)
+        real_python_validation = commands[-1]
+        self.assertEqual(
+            real_python_validation,
+            [
+                "dotnet",
+                "test",
+                str(context.repository_root / runner.HOST_REAL_PYTHON_TEST_PROJECT),
+                "--no-build",
+                "--no-restore",
+                "-nr:false",
+            ],
+        )
 
     def test_coverage_environment_is_external_and_cleanup_is_scoped(self):
         with TemporaryDirectory() as temporary_directory:
@@ -306,6 +326,25 @@ class TestSonarqubeExactHeadRunner(TestCase):
         self.assertEqual(evidence, expected)
         producers.assert_called_once()
         self.assertNotIn("SONAR_TOKEN", producers.call_args.kwargs["environment"])
+
+    def test_produce_coverage_uses_dedicated_producer_deadline(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
+            plan = runner.derive_coverage_plan(
+                context, "00000000-0000-4000-8000-000000000010"
+            )
+            with (
+                patch.object(runner.time, "monotonic", return_value=100.0),
+                patch.object(runner, "run_coverage_producers") as producers,
+                patch.object(runner, "validate_coverage_evidence", return_value={"evidence_sets": []}),
+            ):
+                runner.produce_coverage(context, plan, {"SAFE": "kept"}, ())
+
+        self.assertEqual(
+            producers.call_args.kwargs["deadline"],
+            100.0 + runner.COVERAGE_PRODUCER_TIMEOUT_SECONDS,
+        )
 
     def test_coverage_owner_refuses_non_windows(self):
         current_directory = Path.cwd()
