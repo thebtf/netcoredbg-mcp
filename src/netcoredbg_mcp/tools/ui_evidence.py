@@ -574,6 +574,32 @@ def register_ui_evidence_tools(
                     },
                     state=session.state.state,
                 )
+            elif (
+                canonical_action
+                in {
+                    "ensure_visible",
+                    "select_row",
+                    "click_row",
+                    "right_click_row",
+                    "double_click_row",
+                }
+                and row_index is not None
+                and row_index < 0
+            ):
+                return build_response(
+                    data={
+                        "status": "BLOCKED",
+                        "reason": "grid row is not visible",
+                        "requested": {"row_index": row_index, "row_key": row_key},
+                        "accepted": {"row": "currently visible row index or unique row key"},
+                        "next_step": (
+                            "Scroll the grid or choose a currently visible row before acting."
+                        ),
+                        "requested_action": action,
+                        "canonical_action": canonical_action,
+                    },
+                    state=session.state.state,
+                )
 
             if canonical_action == "viewport":
                 unsupported_expectations = _unsupported_direct_viewport_expectations(expect)
@@ -799,10 +825,21 @@ def register_ui_evidence_tools(
                     },
                     state=session.state.state,
                 )
+            store = _snapshot_store()
+            if store.has(snapshot):
+                return build_response(
+                    data={
+                        "status": "FAIL",
+                        "reason": "snapshot name already exists",
+                        "snapshot": snapshot,
+                        "available_snapshots": store.names(),
+                    },
+                    state=session.state.state,
+                )
             backend = await _ensure_ui_connected(observation=True)
             result = await capture_ui_snapshot(
                 backend,
-                _snapshot_store(),
+                store,
                 name=snapshot,
                 selector=_selector(automation_id, name, control_type, root_id, xpath),
                 fields=fields,
@@ -865,18 +902,28 @@ def register_ui_evidence_tools(
                             "allowed_fields": list(ALLOWED_UI_FIELDS),
                         },
                         state=session.state.state,
-                )
-                backend = await _ensure_ui_connected(observation=True)
-                result = await store.start(
-                    backend,
-                    buffer_id=buffer_id,
-                    selector=_selector(automation_id, name, control_type, root_id, xpath),
-                    fields=requested_fields,
-                    max_events=max_events,
-                )
+                    )
+                if buffer_id in store.buffers:
+                    result = {
+                        "status": "FAIL",
+                        "reason": "event buffer already exists",
+                        "buffer_id": buffer_id,
+                    }
+                else:
+                    backend = await _ensure_ui_connected(observation=True)
+                    result = await store.start(
+                        backend,
+                        buffer_id=buffer_id,
+                        selector=_selector(automation_id, name, control_type, root_id, xpath),
+                        fields=requested_fields,
+                        max_events=max_events,
+                    )
             elif action == "read":
-                backend = await _ensure_ui_connected(observation=True)
-                result = await store.read(buffer_id, backend=backend)
+                if buffer_id not in store.buffers:
+                    result = await store.read(buffer_id)
+                else:
+                    backend = await _ensure_ui_connected(observation=True)
+                    result = await store.read(buffer_id, backend=backend)
             elif action == "stop":
                 result = store.stop(buffer_id)
             else:
@@ -918,14 +965,22 @@ def register_ui_evidence_tools(
                     },
                     state=session.state.state,
                 )
-            backend = await _ensure_ui_connected(observation=True)
-            result = await _event_store().monitor_start(
-                backend,
-                monitor_id=monitor_id,
-                selector=_selector(automation_id, name, control_type, root_id, xpath),
-                fields=requested_fields,
-                max_events=max_events,
-            )
+            store = _event_store()
+            if monitor_id in store.buffers:
+                result = {
+                    "status": "FAIL",
+                    "reason": "event buffer already exists",
+                    "buffer_id": monitor_id,
+                }
+            else:
+                backend = await _ensure_ui_connected(observation=True)
+                result = await store.monitor_start(
+                    backend,
+                    monitor_id=monitor_id,
+                    selector=_selector(automation_id, name, control_type, root_id, xpath),
+                    fields=requested_fields,
+                    max_events=max_events,
+                )
             return build_response(data=result, state=session.state.state)
         except Exception as exc:
             return build_error_response(str(exc), state=session.state.state)
@@ -941,12 +996,16 @@ def register_ui_evidence_tools(
             access_error = check_session_access(ctx)
             if access_error:
                 return build_error_response(access_error, state=session.state.state)
-            backend = await _ensure_ui_connected(observation=True)
-            result = await _event_store().monitor_poll(
-                monitor_id,
-                after_cursor=after_cursor,
-                backend=backend,
-            )
+            store = _event_store()
+            if monitor_id not in store.buffers:
+                result = store.monitor_events(monitor_id, after_cursor=after_cursor)
+            else:
+                backend = await _ensure_ui_connected(observation=True)
+                result = await store.monitor_poll(
+                    monitor_id,
+                    after_cursor=after_cursor,
+                    backend=backend,
+                )
             return build_response(data=result, state=session.state.state)
         except Exception as exc:
             return build_error_response(str(exc), state=session.state.state)

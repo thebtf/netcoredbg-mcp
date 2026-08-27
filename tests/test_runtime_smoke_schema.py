@@ -304,6 +304,67 @@ def test_validate_plan_rejects_nested_operation_argument_type_errors() -> None:
     ]
 
 
+@pytest.mark.asyncio
+async def test_op_style_static_ui_payloads_fail_before_adapter_acquisition() -> None:
+    session = SchemaSmokeSession()
+    plan = {
+        "steps": [
+            {
+                "op": "ui.grid.select_range",
+                "selector": {"automation_id": "CueGrid"},
+                "start_index": -1,
+                "end_index": 0,
+            },
+            {
+                "op": "ui.grid.assert_range",
+                "selector": {"automation_id": "CueGrid"},
+                "start_index": 1,
+                "end_index": 0,
+            },
+            {
+                "op": "ui.grid.assert_rows",
+                "selector": {"automation_id": "CueGrid"},
+                "rows": [{}, "invalid"],
+            },
+            {
+                "op": "ui.list.invoke_item",
+                "selector": {"automation_id": "CharacterList"},
+                "item": {"index": -1},
+            },
+            {
+                "op": "ui.list.toggle_item_child",
+                "selector": {"automation_id": "CharacterList"},
+                "item": {"name": "Alice"},
+                "child": {},
+            },
+        ]
+    }
+    expected_errors = [
+        "steps[0].start_index must be non-negative for op ui.grid.select_range",
+        (
+            "steps[1].end_index must be greater than or equal to start_index "
+            "for op ui.grid.assert_range"
+        ),
+        "steps[2].rows[0].index must be a non-negative integer for op ui.grid.assert_rows",
+        "steps[2].rows[0].contains must be an object for op ui.grid.assert_rows",
+        "steps[2].rows[1] must be an object for op ui.grid.assert_rows",
+        "steps[3].item.index must be a non-negative integer for op ui.list.invoke_item",
+        (
+            "steps[4].child must include automation_id, name, or control_type "
+            "for op ui.list.toggle_item_child"
+        ),
+    ]
+
+    assert validate_plan(plan) == expected_errors
+
+    result = await RuntimeSmokeRunner(session).run(plan)
+
+    assert result["status"] == "FAIL"
+    assert result["reason"] == "invalid plan schema"
+    assert result["validation_errors"] == expected_errors
+    assert session.adapter_calls == []
+
+
 def test_runtime_smoke_schema_accepts_ui_text_read_operation() -> None:
     assert (
         validate_plan(

@@ -1645,6 +1645,152 @@ async def test_ui_grid_static_invalid_range_preserves_pending_restore(
 
 
 @pytest.mark.asyncio
+async def test_ui_snapshot_duplicate_preserves_pending_restore(
+    capturing_mcp,
+    monkeypatch,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock()
+    session.runtime_smoke.ui_snapshots["before"] = {
+        "snapshot": "before",
+        "fields": ["text"],
+        "elements": [],
+    }
+    backend_factory = MagicMock(return_value=SimpleNamespace(process_id=42))
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", backend_factory)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda _ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_snapshot"](
+        ctx=None,
+        snapshot="before",
+        fields=["text"],
+        automation_id="CueGrid",
+    )
+
+    assert response["data"] == {
+        "status": "FAIL",
+        "reason": "snapshot name already exists",
+        "snapshot": "before",
+        "available_snapshots": ["before"],
+    }
+    backend_factory.assert_not_called()
+    session.wait_for_pending_stealth_foreground_restore.assert_not_awaited()
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "existing_id", "reason"),
+    [
+        (
+            "ui_events",
+            {"action": "start", "buffer_id": "existing"},
+            "existing",
+            "event buffer already exists",
+        ),
+        (
+            "ui_events",
+            {"action": "read", "buffer_id": "missing"},
+            None,
+            "event buffer not found",
+        ),
+        (
+            "ui_monitor_start",
+            {"monitor_id": "existing"},
+            "existing",
+            "event buffer already exists",
+        ),
+        (
+            "ui_monitor_poll",
+            {"monitor_id": "missing"},
+            None,
+            "event buffer not found",
+        ),
+    ],
+)
+async def test_ui_event_identity_failures_preserve_pending_restore(
+    capturing_mcp,
+    monkeypatch,
+    tool_name: str,
+    arguments: dict[str, Any],
+    existing_id: str | None,
+    reason: str,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock()
+    if existing_id is not None:
+        session.runtime_smoke.ui_event_buffers[existing_id] = SimpleNamespace()
+    backend_factory = MagicMock(return_value=SimpleNamespace(process_id=42))
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", backend_factory)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda _ctx: None,
+    )
+
+    response = await capturing_mcp.tools[tool_name](ctx=None, **arguments)
+
+    assert response["data"]["status"] == "FAIL"
+    assert response["data"]["reason"] == reason
+    backend_factory.assert_not_called()
+    session.wait_for_pending_stealth_foreground_restore.assert_not_awaited()
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "action",
+    [
+        "ensure_visible",
+        "select_row",
+        "click_row",
+        "right_click_row",
+        "double_click_row",
+    ],
+)
+async def test_ui_grid_negative_row_index_preserves_pending_restore(
+    capturing_mcp,
+    monkeypatch,
+    action: str,
+) -> None:
+    session = FakeUiSession()
+    session.state.state = DebugState.RUNNING
+    session.state.process_id = 42
+    session.wait_for_pending_stealth_foreground_restore = AsyncMock()
+    backend_factory = MagicMock(return_value=SimpleNamespace(process_id=42))
+
+    monkeypatch.setattr("netcoredbg_mcp.ui.backend.create_backend", backend_factory)
+    register_ui_evidence_tools(
+        mcp=capturing_mcp,
+        session=session,
+        check_session_access=lambda _ctx: None,
+    )
+
+    response = await capturing_mcp.tools["ui_grid"](
+        ctx=None,
+        action=action,
+        automation_id="CueGrid",
+        row_index=-1,
+    )
+
+    assert response["data"]["status"] == "BLOCKED"
+    assert response["data"]["reason"] == "grid row is not visible"
+    backend_factory.assert_not_called()
+    session.wait_for_pending_stealth_foreground_restore.assert_not_awaited()
+    session.cancel_pending_stealth_foreground_restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_ui_text_set_text_joins_pending_restore_before_focus(
     capturing_mcp,
     monkeypatch,
