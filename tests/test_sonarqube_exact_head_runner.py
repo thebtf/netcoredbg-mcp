@@ -393,6 +393,49 @@ class TestSonarqubeExactHeadRunner(TestCase):
             with self.assertRaisesRegex(runner.CoverageFailure, "COVERAGE_REPORT_MISSING"):
                 runner.validate_coverage_evidence(plan, context)
 
+    def test_windows_sealed_coverage_reports_block_rewrites(self):
+        if runner.os.name != "nt":
+            self.skipTest("Windows report sealing fixture")
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
+            plan = runner.derive_coverage_plan(
+                context, "00000000-0000-4000-8000-000000000010"
+            )
+            runner.claim_coverage_run(plan, context)
+            python_source = root / "src" / "netcoredbg_mcp" / "module.py"
+            host_source = root / "host" / "NetCoreDbg.Mcp.Host" / "Program.cs"
+            stateless_source = root / "host" / "NetCoreDbg.Mcp.Stateless" / "Program.cs"
+            for source in (python_source, host_source, stateless_source):
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text("source", encoding="utf-8")
+            plan.python_report.absolute_path.parent.mkdir(parents=True)
+            plan.python_report.absolute_path.write_text(
+                '<coverage lines-valid="1"><packages><package><classes><class filename="src/netcoredbg_mcp/module.py" /></classes></package></packages></coverage>',
+                encoding="utf-8",
+            )
+            for report in plan.dotnet_reports:
+                report.absolute_path.parent.mkdir(parents=True, exist_ok=True)
+                source = (
+                    stateless_source
+                    if report.project and report.project.endswith("NetCoreDbg.Mcp.Stateless.Tests.csproj")
+                    else host_source
+                )
+                report.absolute_path.write_text(
+                    '<CoverageSession><Summary numSequencePoints="1" /><Modules><Module><Files><File uid="1" fullPath="'
+                    + str(source)
+                    + '" /></Files></Module></Modules></CoverageSession>',
+                    encoding="utf-8",
+                )
+
+            with runner.sealed_coverage_evidence(plan, context) as sealed:
+                with self.assertRaises(OSError):
+                    plan.python_report.absolute_path.write_text("forged", encoding="utf-8")
+                sealed.assert_unchanged()
+
+            plan.python_report.absolute_path.write_text("rewritten", encoding="utf-8")
+
     def test_scanner_metadata_reads_dotnet_analysis_config(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

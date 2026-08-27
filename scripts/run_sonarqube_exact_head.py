@@ -2200,10 +2200,9 @@ def _positive_integer(value: Any, language: str) -> int:
     return int(value)
 
 
-def _coverage_report_binding(
-    plan: CoveragePlan, context: GitContext, report: CoverageReportPlan
+def _coverage_report_binding_from_contents(
+    context: GitContext, report: CoverageReportPlan, contents: bytes
 ) -> dict[str, Any]:
-    contents = _coverage_file_bytes(plan, context, report)
     try:
         root = ElementTree.fromstring(contents)
     except ElementTree.ParseError as error:
@@ -2238,11 +2237,20 @@ def _coverage_report_binding(
     }
 
 
-def validate_coverage_evidence(plan: CoveragePlan, context: GitContext) -> dict[str, Any]:
+def _coverage_report_binding(
+    plan: CoveragePlan, context: GitContext, report: CoverageReportPlan
+) -> dict[str, Any]:
+    return _coverage_report_binding_from_contents(
+        context, report, _coverage_file_bytes(plan, context, report)
+    )
+
+
+def _coverage_evidence_from_bindings(
+    plan: CoveragePlan, context: GitContext, bindings: Sequence[dict[str, Any]]
+) -> dict[str, Any]:
     marker_sha256 = validate_coverage_marker(plan, context)
     if len(plan.dotnet_reports) != len(CLOSED_DOTNET_COVERAGE_PROJECTS):
         raise CoverageFailure("report_validation", "dotnet", "COVERAGE_REPORT_SET_INVALID")
-    bindings = [_coverage_report_binding(plan, context, report) for report in plan.reports]
     if len({binding["path"] for binding in bindings}) != len(bindings):
         raise CoverageFailure("report_validation", None, "COVERAGE_REPORT_PATH_DUPLICATE")
     dotnet_bindings = [binding for binding in bindings if binding["project"] is not None]
@@ -2265,6 +2273,176 @@ def validate_coverage_evidence(plan: CoveragePlan, context: GitContext) -> dict[
             },
         ]
     }
+
+
+def validate_coverage_evidence(plan: CoveragePlan, context: GitContext) -> dict[str, Any]:
+    return _coverage_evidence_from_bindings(
+        plan,
+        context,
+        [_coverage_report_binding(plan, context, report) for report in plan.reports],
+    )
+
+
+@dataclass
+class _SealedCoverageReport:
+    report: CoverageReportPlan
+    stream: Any
+    sha256: str
+    byte_count: int
+
+    def read_bytes(self) -> bytes:
+        try:
+            self.stream.seek(0)
+            contents = self.stream.read()
+        except OSError as error:
+            raise CoverageFailure(
+                "report_validation", self.report.language, "COVERAGE_REPORT_SEAL_UNREADABLE"
+            ) from error
+        if not isinstance(contents, bytes):
+            raise CoverageFailure(
+                "report_validation", self.report.language, "COVERAGE_REPORT_SEAL_UNREADABLE"
+            )
+        return contents
+
+    def close(self) -> None:
+        try:
+            self.stream.close()
+        except OSError as error:
+            raise CoverageFailure(
+                "report_validation", self.report.language, "COVERAGE_REPORT_SEAL_CLOSE_FAILED"
+            ) from error
+
+
+@dataclass
+class SealedCoverageEvidence:
+    plan: CoveragePlan
+    context: GitContext
+    evidence: dict[str, Any]
+    reports: tuple[_SealedCoverageReport, ...]
+
+    def assert_unchanged(self) -> None:
+        bindings = []
+        for sealed in self.reports:
+            contents = sealed.read_bytes()
+            if len(contents) != sealed.byte_count or hashlib.sha256(contents).hexdigest() != sealed.sha256:
+                raise CoverageFailure(
+                    "report_validation", sealed.report.language, "COVERAGE_REPORT_SEAL_DRIFT"
+                )
+            bindings.append(
+                _coverage_report_binding_from_contents(self.context, sealed.report, contents)
+            )
+        if _coverage_evidence_from_bindings(self.plan, self.context, bindings) != self.evidence:
+            raise CoverageFailure("report_validation", None, "COVERAGE_REPORT_SEAL_DRIFT")
+
+    def close(self) -> None:
+        errors: list[CoverageFailure] = []
+        for sealed in reversed(self.reports):
+            try:
+                sealed.close()
+            except CoverageFailure as error:
+                errors.append(error)
+        if errors:
+            raise errors[0]
+
+
+def _seal_coverage_report(
+    plan: CoveragePlan, context: GitContext, report: CoverageReportPlan
+) -> _SealedCoverageReport:
+    if os.name != "nt":
+        raise CoverageFailure(
+            "report_validation", report.language, "COVERAGE_REPORT_SEAL_UNAVAILABLE"
+        )
+    _assert_claimed_coverage_path(report.absolute_path, plan, context)
+    try:
+        import msvcrt
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        generic_read = 0x80000000
+        file_share_read = 0x00000001
+        open_existing = 3
+        file_attribute_normal = 0x00000080
+        file_flag_open_reparse_point = 0x00200000
+        invalid_handle_value = ctypes.c_void_p(-1).value
+        handle = kernel32.CreateFileW(
+            str(report.absolute_path),
+            generic_read,
+            file_share_read,
+            None,
+            open_existing,
+            file_attribute_normal | file_flag_open_reparse_point,
+            None,
+        )
+        handle_value = getattr(handle, "value", handle)
+        if handle_value in {None, invalid_handle_value}:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            descriptor = msvcrt.open_osfhandle(handle_value, os.O_RDONLY)
+        except OSError:
+            kernel32.CloseHandle(handle)
+            raise
+        handle = None
+        stream = os.fdopen(descriptor, "rb", closefd=True)
+        os.set_inheritable(stream.fileno(), False)
+        file_status = os.fstat(stream.fileno())
+        if not stat.S_ISREG(file_status.st_mode):
+            stream.close()
+            raise OSError("Coverage report is not regular")
+        sealed = _SealedCoverageReport(report, stream, "", 0)
+        contents = sealed.read_bytes()
+        sealed.sha256 = hashlib.sha256(contents).hexdigest()
+        sealed.byte_count = len(contents)
+        return sealed
+    except CoverageFailure:
+        raise
+    except OSError as error:
+        raise CoverageFailure(
+            "report_validation", report.language, "COVERAGE_REPORT_SEAL_UNAVAILABLE"
+        ) from error
+
+
+@contextmanager
+def sealed_coverage_evidence(plan: CoveragePlan, context: GitContext) -> Iterator[SealedCoverageEvidence]:
+    sealed_reports: list[_SealedCoverageReport] = []
+    sealed: SealedCoverageEvidence | None = None
+    try:
+        for report in plan.reports:
+            sealed_reports.append(_seal_coverage_report(plan, context, report))
+        bindings = [
+            _coverage_report_binding_from_contents(context, report.report, report.read_bytes())
+            for report in sealed_reports
+        ]
+        sealed = SealedCoverageEvidence(
+            plan,
+            context,
+            _coverage_evidence_from_bindings(plan, context, bindings),
+            tuple(sealed_reports),
+        )
+        yield sealed
+    finally:
+        if sealed is not None:
+            sealed.close()
+        else:
+            errors: list[CoverageFailure] = []
+            for report in reversed(sealed_reports):
+                try:
+                    report.close()
+                except CoverageFailure as error:
+                    errors.append(error)
+            if errors:
+                raise errors[0]
 
 
 def coverage_environment(
