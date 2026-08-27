@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import json
+import locale
 import os
 import re
 import shutil
@@ -41,6 +43,19 @@ SOLUTION_PROJECT_RE = re.compile(r'^Project\("[^"]+"\) = "([^"]+)", "([^"]+\.csp
 ISSUE_STATUSES = "OPEN,CONFIRMED,FALSE_POSITIVE,ACCEPTED,FIXED,IN_SANDBOX"
 GENERATED_DIRECTORY_NAMES = {"bin", "obj"}
 GENERATED_ROOT_NAMES = {".sonarqube", ".scannerwork"}
+COVERAGE_PROCESS_CLEANUP_SECONDS = 5
+COVERAGE_FAILURE_STAGES = frozenset(
+    {
+        "process_owner",
+        "scanner_begin",
+        "python_producer",
+        "dotnet_producer",
+        "report_validation",
+        "scanner_end",
+        "analysis_metrics",
+        "cleanup",
+    }
+)
 COVERAGE_ROOT_PARTS = (".tmp", "sonarqube-coverage")
 CLOSED_DOTNET_COVERAGE_PROJECTS = (
     "host/NetCoreDbg.Mcp.CodeSearch.Core.Tests/NetCoreDbg.Mcp.CodeSearch.Core.Tests.csproj",
@@ -57,6 +72,95 @@ SEMVER_RE = re.compile(
 
 class RunnerError(RuntimeError):
     """A fail-closed release-gate error safe to place in a receipt."""
+
+
+class CoverageFailure(RunnerError):
+    """A secret-free, receipt-bindable coverage transaction failure."""
+
+    def __init__(
+        self,
+        stage: str,
+        language: str | None,
+        failure_code: str,
+        *,
+        cleanup_failure: Mapping[str, str] | None = None,
+        owner: CoverageTreeObservation | None = None,
+        artifact_cleanup_permitted: bool = True,
+    ) -> None:
+        if stage not in COVERAGE_FAILURE_STAGES:
+            raise ValueError("Coverage failure stage is invalid.")
+        if language not in {None, "python", "dotnet"}:
+            raise ValueError("Coverage failure language is invalid.")
+        if not re.fullmatch(r"COVERAGE_[A-Z0-9_]+", failure_code):
+            raise ValueError("Coverage failure code is invalid.")
+        if (
+            owner is not None
+            and owner.terminal_state != "TREE_EMPTY"
+            and artifact_cleanup_permitted
+        ):
+            raise ValueError("Unproven process ownership cannot permit artifact cleanup.")
+        self.stage = stage
+        self.language = language
+        self.failure_code = failure_code
+        self.cleanup_failure = dict(cleanup_failure) if cleanup_failure is not None else None
+        self.owner = owner
+        self.artifact_cleanup_permitted = artifact_cleanup_permitted
+        super().__init__(failure_code)
+
+
+@dataclass(frozen=True)
+class CoverageTreeObservation:
+    target_platform: str
+    owner_kind: str
+    terminal_state: str | None
+
+
+@dataclass(frozen=True)
+class CoverageProcessOutcome:
+    returncode: int
+    output: str
+    owner: CoverageTreeObservation
+
+
+class CoverageTreeOwnerUnavailable(RunnerError):
+    def __init__(
+        self,
+        observation: CoverageTreeObservation | None = None,
+        artifact_cleanup_permitted: bool = True,
+    ) -> None:
+        self.observation = observation
+        self.artifact_cleanup_permitted = artifact_cleanup_permitted
+        super().__init__("COVERAGE_PROCESS_TREE_OWNER_UNAVAILABLE")
+
+
+class CoverageTreeOwnershipLost(RunnerError):
+    def __init__(self, observation: CoverageTreeObservation) -> None:
+        self.observation = observation
+        super().__init__("COVERAGE_PROCESS_TREE_OWNERSHIP_LOST")
+
+
+class CoverageTreeStartCancelledError(RunnerError):
+    def __init__(
+        self,
+        observation: CoverageTreeObservation | None,
+        artifact_cleanup_permitted: bool,
+        cleanup_failure: Mapping[str, str] | None = None,
+    ) -> None:
+        self.observation = observation
+        self.artifact_cleanup_permitted = artifact_cleanup_permitted
+        self.cleanup_failure = dict(cleanup_failure) if cleanup_failure is not None else None
+        super().__init__("COVERAGE_PROCESS_CANCELLED")
+
+
+class CoverageTreeFinalizationError(RunnerError):
+    def __init__(self, outcome: CoverageProcessOutcome, error: OSError) -> None:
+        self.outcome = outcome
+        self.cleanup_failure = {
+            "path": "coverage-process-tree",
+            "operation": "close",
+            "error_type": error.__class__.__name__,
+        }
+        super().__init__("COVERAGE_PROCESS_TREE_FINALIZATION_FAILED")
 
 
 class GeneratedArtifactCleanupError(RunnerError):
@@ -839,6 +943,922 @@ def clear_generated_artifacts(context: GitContext, environment: Mapping[str, str
     return removed
 
 
+def _remaining_coverage_seconds(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise CoverageFailure("python_producer", None, "COVERAGE_PROCESS_TIMEOUT")
+    return remaining
+
+
+def _ownership_cleanup_detail() -> dict[str, str]:
+    return {
+        "path": "coverage-process-tree",
+        "operation": "ownership",
+        "error_type": "COVERAGE_PROCESS_TREE_OWNERSHIP_LOST",
+    }
+
+
+@dataclass
+class _WindowsCoverageLaunch:
+    process_handle: Any
+    thread_handle: Any
+    output_file: Any
+
+
+class _WindowsCoverageLaunchFailureError(OSError):
+    def __init__(self, launch: _WindowsCoverageLaunch, cancelled: bool) -> None:
+        self.launch = launch
+        self.cancelled = cancelled
+        super().__init__("Coverage producer launch failed after CreateProcessW.")
+
+
+class _WindowsCoverageTreeApi:
+    _CREATE_SUSPENDED = 0x00000004
+    _CREATE_UNICODE_ENVIRONMENT = 0x00000400
+    _EXTENDED_STARTUPINFO_PRESENT = 0x00080000
+    _HANDLE_FLAG_INHERIT = 0x00000001
+    _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
+    _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+    _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+    _PROC_THREAD_ATTRIBUTE_HANDLE_LIST = 0x00020002
+    _STARTF_USESTDHANDLES = 0x00000100
+    _WAIT_FAILED = 0xFFFFFFFF
+    _WAIT_OBJECT_0 = 0
+    _WAIT_TIMEOUT = 258
+
+    def __init__(self) -> None:
+        from ctypes import wintypes
+
+        self._wintypes = wintypes
+        self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        class JobObjectBasicLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("per_process_user_time_limit", ctypes.c_longlong),
+                ("per_job_user_time_limit", ctypes.c_longlong),
+                ("limit_flags", wintypes.DWORD),
+                ("minimum_working_set_size", ctypes.c_size_t),
+                ("maximum_working_set_size", ctypes.c_size_t),
+                ("active_process_limit", wintypes.DWORD),
+                ("affinity", ctypes.c_size_t),
+                ("priority_class", wintypes.DWORD),
+                ("scheduling_class", wintypes.DWORD),
+            ]
+
+        class IoCounters(ctypes.Structure):
+            _fields_ = [
+                ("read_operation_count", ctypes.c_ulonglong),
+                ("write_operation_count", ctypes.c_ulonglong),
+                ("other_operation_count", ctypes.c_ulonglong),
+                ("read_transfer_count", ctypes.c_ulonglong),
+                ("write_transfer_count", ctypes.c_ulonglong),
+                ("other_transfer_count", ctypes.c_ulonglong),
+            ]
+
+        class JobObjectExtendedLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("basic_limit_information", JobObjectBasicLimitInformation),
+                ("io_info", IoCounters),
+                ("process_memory_limit", ctypes.c_size_t),
+                ("job_memory_limit", ctypes.c_size_t),
+                ("peak_process_memory_used", ctypes.c_size_t),
+                ("peak_job_memory_used", ctypes.c_size_t),
+            ]
+
+        class JobObjectBasicAccountingInformation(ctypes.Structure):
+            _fields_ = [
+                ("total_user_time", ctypes.c_longlong),
+                ("total_kernel_time", ctypes.c_longlong),
+                ("this_period_total_user_time", ctypes.c_longlong),
+                ("this_period_total_kernel_time", ctypes.c_longlong),
+                ("total_page_fault_count", wintypes.DWORD),
+                ("total_processes", wintypes.DWORD),
+                ("active_processes", wintypes.DWORD),
+                ("total_terminated_processes", wintypes.DWORD),
+            ]
+
+        class StartupInfo(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("reserved", wintypes.LPWSTR),
+                ("desktop", wintypes.LPWSTR),
+                ("title", wintypes.LPWSTR),
+                ("x", wintypes.DWORD),
+                ("y", wintypes.DWORD),
+                ("x_size", wintypes.DWORD),
+                ("y_size", wintypes.DWORD),
+                ("x_count_chars", wintypes.DWORD),
+                ("y_count_chars", wintypes.DWORD),
+                ("fill_attribute", wintypes.DWORD),
+                ("flags", wintypes.DWORD),
+                ("show_window", wintypes.WORD),
+                ("reserved2_count", wintypes.WORD),
+                ("reserved2", ctypes.POINTER(ctypes.c_byte)),
+                ("standard_input", wintypes.HANDLE),
+                ("standard_output", wintypes.HANDLE),
+                ("standard_error", wintypes.HANDLE),
+            ]
+
+        class StartupInfoEx(ctypes.Structure):
+            _fields_ = [("startup_info", StartupInfo), ("attribute_list", ctypes.c_void_p)]
+
+        class ProcessInformation(ctypes.Structure):
+            _fields_ = [
+                ("process", wintypes.HANDLE),
+                ("thread", wintypes.HANDLE),
+                ("process_id", wintypes.DWORD),
+                ("thread_id", wintypes.DWORD),
+            ]
+
+        self._JobObjectBasicAccountingInformation = JobObjectBasicAccountingInformation
+        self._JobObjectExtendedLimitInformation = JobObjectExtendedLimitInformation
+        self._ProcessInformation = ProcessInformation
+        self._StartupInfoEx = StartupInfoEx
+        self._configure_functions()
+
+    def _configure_functions(self) -> None:
+        kernel32 = self._kernel32
+        wintypes = self._wintypes
+        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+        ]
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.IsProcessInJob.argtypes = [
+            wintypes.HANDLE,
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.BOOL),
+        ]
+        kernel32.IsProcessInJob.restype = wintypes.BOOL
+        kernel32.QueryInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+        ]
+        kernel32.QueryInformationJobObject.restype = wintypes.BOOL
+        kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
+        kernel32.ResumeThread.restype = wintypes.DWORD
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateJobObject.restype = wintypes.BOOL
+        kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.SetHandleInformation.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.DWORD,
+        ]
+        kernel32.SetHandleInformation.restype = wintypes.BOOL
+        kernel32.InitializeProcThreadAttributeList.argtypes = [
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(ctypes.c_size_t),
+        ]
+        kernel32.InitializeProcThreadAttributeList.restype = wintypes.BOOL
+        kernel32.UpdateProcThreadAttribute.argtypes = [
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.c_size_t,
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        kernel32.UpdateProcThreadAttribute.restype = wintypes.BOOL
+        kernel32.DeleteProcThreadAttributeList.argtypes = [ctypes.c_void_p]
+        kernel32.DeleteProcThreadAttributeList.restype = None
+        kernel32.CreateProcessW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.LPWSTR,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            wintypes.BOOL,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.LPCWSTR,
+            ctypes.POINTER(self._StartupInfoEx),
+            ctypes.POINTER(self._ProcessInformation),
+        ]
+        kernel32.CreateProcessW.restype = wintypes.BOOL
+
+    def _error(self, operation: str) -> OSError:
+        return OSError(ctypes.get_last_error(), f"{operation} failed")
+
+    def _set_inheritable(self, handle: Any, inheritable: bool) -> None:
+        flags = self._HANDLE_FLAG_INHERIT if inheritable else 0
+        if not self._kernel32.SetHandleInformation(handle, self._HANDLE_FLAG_INHERIT, flags):
+            raise self._error("SetHandleInformation")
+
+    def create_job(self) -> Any:
+        job = self._kernel32.CreateJobObjectW(None, None)
+        if not job:
+            raise self._error("CreateJobObjectW")
+        return job
+
+    def configure_kill_on_close(self, job: Any) -> None:
+        limits = self._JobObjectExtendedLimitInformation()
+        limits.basic_limit_information.limit_flags = self._JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not self._kernel32.SetInformationJobObject(
+            job,
+            self._JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            ctypes.byref(limits),
+            ctypes.sizeof(limits),
+        ):
+            raise self._error("SetInformationJobObject")
+
+    def launch_suspended(
+        self,
+        command: Sequence[str],
+        cwd: Path,
+        environment: Mapping[str, str],
+        launch_slot: list[_WindowsCoverageLaunch] | None = None,
+    ) -> _WindowsCoverageLaunch:
+        if not command:
+            raise OSError("Coverage producer command is empty")
+        executable = shutil.which(command[0], path=environment.get("PATH"))
+        if executable is None:
+            raise OSError("Coverage producer executable is unavailable")
+
+        import msvcrt
+
+        output_file = tempfile.TemporaryFile(mode="w+b")
+        stdin_descriptor: int | None = None
+        attribute_buffer: Any | None = None
+        attribute_list: Any | None = None
+        attributes_initialized = False
+        process_information: Any | None = None
+        input_handle: Any | None = None
+        output_handle: Any | None = None
+        try:
+            stdin_descriptor = os.open(os.devnull, os.O_RDONLY)
+            input_handle = msvcrt.get_osfhandle(stdin_descriptor)
+            output_handle = msvcrt.get_osfhandle(output_file.fileno())
+            self._set_inheritable(input_handle, True)
+            self._set_inheritable(output_handle, True)
+
+            attribute_size = ctypes.c_size_t()
+            self._kernel32.InitializeProcThreadAttributeList(
+                None, 1, 0, ctypes.byref(attribute_size)
+            )
+            if not attribute_size.value:
+                raise self._error("InitializeProcThreadAttributeList")
+            attribute_buffer = ctypes.create_string_buffer(attribute_size.value)
+            attribute_list = ctypes.cast(attribute_buffer, ctypes.c_void_p)
+            if not self._kernel32.InitializeProcThreadAttributeList(
+                attribute_list, 1, 0, ctypes.byref(attribute_size)
+            ):
+                raise self._error("InitializeProcThreadAttributeList")
+            attributes_initialized = True
+
+            inheritable_handles = (self._wintypes.HANDLE * 2)(input_handle, output_handle)
+            if not self._kernel32.UpdateProcThreadAttribute(
+                attribute_list,
+                0,
+                self._PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                ctypes.cast(inheritable_handles, ctypes.c_void_p),
+                ctypes.sizeof(inheritable_handles),
+                None,
+                None,
+            ):
+                raise self._error("UpdateProcThreadAttribute")
+
+            command_line = ctypes.create_unicode_buffer(subprocess.list2cmdline(list(command)))
+            environment_block = ctypes.create_unicode_buffer(
+                "\0".join(
+                    f"{name}={value}"
+                    for name, value in sorted(environment.items(), key=lambda item: item[0].upper())
+                )
+                + "\0\0"
+            )
+            startup = self._StartupInfoEx()
+            startup.startup_info.cb = ctypes.sizeof(self._StartupInfoEx)
+            startup.startup_info.flags = self._STARTF_USESTDHANDLES
+            startup.startup_info.standard_input = input_handle
+            startup.startup_info.standard_output = output_handle
+            startup.startup_info.standard_error = output_handle
+            startup.attribute_list = attribute_list
+            process_information = self._ProcessInformation()
+            creation_flags = (
+                self._CREATE_SUSPENDED
+                | self._CREATE_UNICODE_ENVIRONMENT
+                | self._EXTENDED_STARTUPINFO_PRESENT
+            )
+            if not self._kernel32.CreateProcessW(
+                executable,
+                command_line,
+                None,
+                None,
+                True,
+                creation_flags,
+                environment_block,
+                str(cwd),
+                ctypes.byref(startup),
+                ctypes.byref(process_information),
+            ):
+                raise self._error("CreateProcessW")
+            launch = _WindowsCoverageLaunch(
+                process_information.process, process_information.thread, output_file
+            )
+            if launch_slot is not None:
+                launch_slot.append(launch)
+            self._set_inheritable(input_handle, False)
+            self._set_inheritable(output_handle, False)
+            return launch
+        except BaseException as error:
+            if process_information is not None and process_information.process:
+                launch = _WindowsCoverageLaunch(
+                    process_information.process, process_information.thread, output_file
+                )
+                raise _WindowsCoverageLaunchFailureError(
+                    launch, isinstance(error, KeyboardInterrupt)
+                ) from error
+            output_file.close()
+            raise
+        finally:
+            if attributes_initialized and attribute_list is not None:
+                self._kernel32.DeleteProcThreadAttributeList(attribute_list)
+            if stdin_descriptor is not None:
+                try:
+                    os.close(stdin_descriptor)
+                except OSError:
+                    pass
+
+    def assign_process(self, job: Any, process: Any) -> None:
+        if not self._kernel32.AssignProcessToJobObject(job, process):
+            raise self._error("AssignProcessToJobObject")
+
+    def is_process_in_job(self, job: Any, process: Any) -> bool:
+        in_job = self._wintypes.BOOL()
+        if not self._kernel32.IsProcessInJob(process, job, ctypes.byref(in_job)):
+            raise self._error("IsProcessInJob")
+        return bool(in_job.value)
+
+    def active_processes(self, job: Any) -> int:
+        accounting = self._JobObjectBasicAccountingInformation()
+        if not self._kernel32.QueryInformationJobObject(
+            job,
+            self._JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+            ctypes.byref(accounting),
+            ctypes.sizeof(accounting),
+            None,
+        ):
+            raise self._error("QueryInformationJobObject")
+        return int(accounting.active_processes)
+
+    def resume_thread(self, thread: Any) -> int:
+        result = self._kernel32.ResumeThread(thread)
+        if result == 0xFFFFFFFF:
+            raise self._error("ResumeThread")
+        return int(result)
+
+    def wait_process(self, process: Any, timeout_seconds: float) -> bool:
+        milliseconds = max(0, min(int(timeout_seconds * 1000), self._WAIT_FAILED - 1))
+        result = self._kernel32.WaitForSingleObject(process, milliseconds)
+        if result == self._WAIT_OBJECT_0:
+            return True
+        if result == self._WAIT_TIMEOUT:
+            return False
+        raise self._error("WaitForSingleObject")
+
+    def exit_code(self, process: Any) -> int:
+        exit_code = self._wintypes.DWORD()
+        if not self._kernel32.GetExitCodeProcess(process, ctypes.byref(exit_code)):
+            raise self._error("GetExitCodeProcess")
+        return int(exit_code.value)
+
+    def terminate_process(self, process: Any) -> None:
+        if not self._kernel32.TerminateProcess(process, 1):
+            raise self._error("TerminateProcess")
+
+    def terminate_job(self, job: Any) -> None:
+        if not self._kernel32.TerminateJobObject(job, 1):
+            raise self._error("TerminateJobObject")
+
+    def close_handle(self, handle: Any) -> None:
+        if not self._kernel32.CloseHandle(handle):
+            raise self._error("CloseHandle")
+
+
+def _windows_coverage_tree_api() -> _WindowsCoverageTreeApi:
+    if os.name != "nt":
+        raise OSError("Windows Job Object ownership is unavailable")
+    return _WindowsCoverageTreeApi()
+
+
+class CoverageTreeOwner:
+    def __init__(
+        self,
+        api: Any,
+        job_handle: Any,
+        launch: _WindowsCoverageLaunch,
+        state: str = "OWNER_ACKED",
+    ) -> None:
+        self._api = api
+        self._job_handle = job_handle
+        self._process_handle = launch.process_handle
+        self._thread_handle = launch.thread_handle
+        self._output_file = launch.output_file
+        self._direct_exit_code: int | None = None
+        self._state = state
+
+    @staticmethod
+    def _cleanup_unpublished_start(
+        api: Any | None,
+        job_handle: Any | None,
+        launch: _WindowsCoverageLaunch | None,
+        assigned: bool,
+    ) -> tuple[CoverageTreeObservation | None, bool]:
+        if api is None:
+            return None, launch is None
+        if launch is None:
+            if job_handle is not None:
+                try:
+                    api.close_handle(job_handle)
+                except (OSError, KeyboardInterrupt):
+                    pass
+            return None, True
+
+        tree_empty = False
+        direct_closed = False
+        try:
+            if assigned and job_handle is not None:
+                try:
+                    api.terminate_job(job_handle)
+                except (OSError, KeyboardInterrupt):
+                    api.terminate_process(launch.process_handle)
+            else:
+                api.terminate_process(launch.process_handle)
+            if not api.wait_process(launch.process_handle, COVERAGE_PROCESS_CLEANUP_SECONDS):
+                raise OSError("Suspended coverage producer did not terminate")
+            api.exit_code(launch.process_handle)
+            api.close_handle(launch.process_handle)
+            api.close_handle(launch.thread_handle)
+            direct_closed = True
+            if job_handle is not None:
+                deadline = time.monotonic() + COVERAGE_PROCESS_CLEANUP_SECONDS
+                while api.active_processes(job_handle) != 0:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(["coverage-process-tree"], 0)
+                    time.sleep(min(0.05, remaining))
+            tree_empty = True
+        except (OSError, KeyboardInterrupt, subprocess.TimeoutExpired):
+            tree_empty = False
+        finally:
+            if not direct_closed:
+                for handle in (launch.process_handle, launch.thread_handle):
+                    try:
+                        api.close_handle(handle)
+                    except (OSError, KeyboardInterrupt):
+                        pass
+            try:
+                launch.output_file.close()
+            except (OSError, KeyboardInterrupt):
+                pass
+            if job_handle is not None:
+                try:
+                    api.close_handle(job_handle)
+                except (OSError, KeyboardInterrupt):
+                    pass
+        observation = CoverageTreeObservation(
+            "windows", "job_object", "TREE_EMPTY" if tree_empty else None
+        )
+        return observation, tree_empty
+
+    @classmethod
+    def start_and_ack(
+        cls,
+        command: Sequence[str],
+        *,
+        cwd: Path,
+        environment: Mapping[str, str],
+        owner_slot: list[CoverageTreeOwner] | None = None,
+    ) -> CoverageTreeOwner:
+        if os.name != "nt":
+            raise CoverageTreeOwnerUnavailable()
+        api: Any | None = None
+        job_handle: Any | None = None
+        launch: _WindowsCoverageLaunch | None = None
+        launch_slot: list[_WindowsCoverageLaunch] = []
+        assigned = False
+        try:
+            api = _windows_coverage_tree_api()
+            job_handle = api.create_job()
+            api.configure_kill_on_close(job_handle)
+            launch = api.launch_suspended(command, cwd, environment, launch_slot=launch_slot)
+            launch_slot.clear()
+            assert launch is not None
+            api.assign_process(job_handle, launch.process_handle)
+            assigned = True
+            if not api.is_process_in_job(job_handle, launch.process_handle):
+                raise OSError("Coverage producer membership was not acknowledged")
+            if api.active_processes(job_handle) != 1:
+                raise OSError("Coverage producer accounting was not acknowledged")
+            owner = cls(api, job_handle, launch, "ADMISSION_PENDING")
+            if owner_slot is not None:
+                owner_slot.append(owner)
+            if api.resume_thread(launch.thread_handle) != 1:
+                raise OSError("Coverage producer suspend count was not acknowledged")
+            owner._state = "OWNER_ACKED"
+            return owner
+        except _WindowsCoverageLaunchFailureError as error:
+            launch = error.launch
+            launch_slot.clear()
+            observation, artifact_cleanup_permitted = cls._cleanup_unpublished_start(
+                api, job_handle, launch, assigned
+            )
+            if owner_slot is not None:
+                owner_slot.clear()
+            if error.cancelled:
+                raise CoverageTreeStartCancelledError(
+                    observation,
+                    artifact_cleanup_permitted,
+                    _ownership_cleanup_detail() if not artifact_cleanup_permitted else None,
+                ) from error
+            raise CoverageTreeOwnerUnavailable(observation, artifact_cleanup_permitted) from error
+        except KeyboardInterrupt:
+            if launch is None and launch_slot:
+                launch = launch_slot[0]
+            launch_slot.clear()
+            observation, artifact_cleanup_permitted = cls._cleanup_unpublished_start(
+                api, job_handle, launch, assigned
+            )
+            if owner_slot is not None:
+                owner_slot.clear()
+            raise CoverageTreeStartCancelledError(
+                observation,
+                artifact_cleanup_permitted,
+                _ownership_cleanup_detail() if not artifact_cleanup_permitted else None,
+            ) from None
+        except (OSError, RuntimeError, ValueError):
+            if launch is None and launch_slot:
+                launch = launch_slot[0]
+            launch_slot.clear()
+            observation, artifact_cleanup_permitted = cls._cleanup_unpublished_start(
+                api, job_handle, launch, assigned
+            )
+            if owner_slot is not None:
+                owner_slot.clear()
+            raise CoverageTreeOwnerUnavailable(observation, artifact_cleanup_permitted) from None
+
+    @property
+    def observation(self) -> CoverageTreeObservation:
+        return CoverageTreeObservation(
+            "windows", "job_object", "TREE_EMPTY" if self._state == "TREE_EMPTY" else None
+        )
+
+    def _remaining(self, deadline: float) -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(["coverage-process-tree"], 0)
+        return remaining
+
+    def _close_direct_handles(self) -> None:
+        handles = (self._process_handle, self._thread_handle)
+        self._process_handle = None
+        self._thread_handle = None
+        close_error: OSError | None = None
+        interrupted = False
+        for handle in handles:
+            if handle is None:
+                continue
+            try:
+                self._api.close_handle(handle)
+            except KeyboardInterrupt:
+                interrupted = True
+            except OSError as error:
+                close_error = error
+        if close_error is not None:
+            raise close_error
+        if interrupted:
+            raise KeyboardInterrupt
+
+    def _capture_direct_exit(self, deadline: float) -> int:
+        if self._process_handle is None:
+            if self._direct_exit_code is None:
+                raise RuntimeError("Coverage producer has no direct process handle")
+            return self._direct_exit_code
+        if not self._api.wait_process(self._process_handle, self._remaining(deadline)):
+            raise subprocess.TimeoutExpired(["coverage-process-tree"], 0)
+        exit_code = self._api.exit_code(self._process_handle)
+        self._direct_exit_code = exit_code
+        self._close_direct_handles()
+        return exit_code
+
+    def _ownership_lost(self, _error: OSError) -> CoverageTreeOwnershipLost:
+        if self._state != "TREE_EMPTY":
+            self._state = "OWNER_LOST"
+        return CoverageTreeOwnershipLost(self.observation)
+
+    def wait_direct_exit(self, deadline: float) -> int:
+        if self._state != "OWNER_ACKED":
+            raise RuntimeError("Coverage producer is not awaiting a direct exit")
+        try:
+            exit_code = self._capture_direct_exit(deadline)
+        except OSError as error:
+            raise self._ownership_lost(error) from error
+        self._state = "PRODUCER_EXITED"
+        return exit_code
+
+    def _read_output(self) -> str:
+        if self._output_file is None:
+            raise RuntimeError("Coverage producer output handle is unavailable")
+        self._output_file.seek(0)
+        output = self._output_file.read()
+        if isinstance(output, bytes):
+            return output.decode(locale.getpreferredencoding(False), errors="replace")
+        return str(output)
+
+    def _finalize_tree_empty(self) -> CoverageProcessOutcome:
+        if self._output_file is None or self._job_handle is None:
+            raise RuntimeError("Coverage producer ownership is unavailable")
+        output = self._read_output()
+        output_file = self._output_file
+        job_handle = self._job_handle
+        self._output_file = None
+        self._job_handle = None
+        self._state = "TREE_EMPTY"
+        close_error: OSError | None = None
+        interrupted = False
+        try:
+            output_file.close()
+        except KeyboardInterrupt:
+            interrupted = True
+        except OSError as error:
+            close_error = error
+        try:
+            self._api.close_handle(job_handle)
+        except KeyboardInterrupt:
+            interrupted = True
+        except OSError as error:
+            close_error = error
+        if close_error is not None:
+            raise close_error
+        if interrupted:
+            raise KeyboardInterrupt
+        if self._direct_exit_code is None:
+            raise RuntimeError("Coverage producer exit was not captured")
+        return CoverageProcessOutcome(self._direct_exit_code, output, self.observation)
+
+    def wait_empty(self, deadline: float) -> CoverageProcessOutcome:
+        if self._state != "PRODUCER_EXITED":
+            raise RuntimeError("Coverage producer is not awaiting tree drain")
+        try:
+            while True:
+                if self._api.active_processes(self._job_handle) == 0:
+                    return self._finalize_tree_empty()
+                time.sleep(min(0.05, self._remaining(deadline)))
+        except OSError as error:
+            raise self._ownership_lost(error) from error
+
+    def abort_and_wait_empty(self, deadline: float) -> CoverageProcessOutcome:
+        if self._state not in {"OWNER_ACKED", "PRODUCER_EXITED"}:
+            raise RuntimeError("Coverage producer cannot be aborted from its current state")
+        try:
+            self._api.terminate_job(self._job_handle)
+            self._capture_direct_exit(deadline)
+            self._state = "PRODUCER_EXITED"
+            return self.wait_empty(deadline)
+        except OSError as error:
+            raise self._ownership_lost(error) from error
+
+    def discard_unproven(self) -> None:
+        self._state = "OWNER_LOST"
+        output_file = self._output_file
+        handles = (self._process_handle, self._thread_handle, self._job_handle)
+        self._output_file = None
+        self._process_handle = None
+        self._thread_handle = None
+        self._job_handle = None
+        if output_file is not None:
+            try:
+                output_file.close()
+            except (OSError, KeyboardInterrupt):
+                pass
+        for handle in handles:
+            if handle is None:
+                continue
+            try:
+                self._api.close_handle(handle)
+            except (OSError, KeyboardInterrupt):
+                pass
+
+
+def _abort_coverage_owner(owner: CoverageTreeOwner) -> CoverageProcessOutcome:
+    return owner.abort_and_wait_empty(time.monotonic() + COVERAGE_PROCESS_CLEANUP_SECONDS)
+
+
+def _unproven_owner_failure(
+    stage: str,
+    language: str | None,
+    failure_code: str,
+    owner: CoverageTreeOwner,
+    cleanup_error: BaseException | None = None,
+) -> CoverageFailure:
+    return CoverageFailure(
+        stage,
+        language,
+        failure_code,
+        cleanup_failure=(_ownership_cleanup_detail() if cleanup_error is not None else None),
+        owner=owner.observation,
+        artifact_cleanup_permitted=False,
+    )
+
+
+def _cancellation_failure(
+    owner: CoverageTreeOwner, stage: str, language: str | None
+) -> CoverageFailure:
+    if owner.observation.terminal_state == "TREE_EMPTY":
+        return CoverageFailure(
+            stage,
+            language,
+            "COVERAGE_PROCESS_CANCELLED",
+            owner=owner.observation,
+        )
+    if owner._state == "OWNER_LOST":
+        owner.discard_unproven()
+        return CoverageFailure(
+            "process_owner",
+            language,
+            "COVERAGE_PROCESS_TREE_OWNERSHIP_LOST",
+            owner=owner.observation,
+            artifact_cleanup_permitted=False,
+        )
+    try:
+        outcome = _abort_coverage_owner(owner)
+    except (
+        CoverageTreeOwnershipLost,
+        subprocess.TimeoutExpired,
+        KeyboardInterrupt,
+        RuntimeError,
+    ) as cleanup_error:
+        owner.discard_unproven()
+        return _unproven_owner_failure(
+            stage, language, "COVERAGE_PROCESS_CANCELLED", owner, cleanup_error
+        )
+    return CoverageFailure(
+        stage,
+        language,
+        "COVERAGE_PROCESS_CANCELLED",
+        owner=outcome.owner,
+    )
+
+
+def run_coverage_process(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    environment: Mapping[str, str],
+    secrets: Collection[str],
+    label: str,
+    deadline: float,
+    stage: str,
+    language: str | None,
+) -> None:
+    """Run one coverage child under the Windows Job Object ownership contract."""
+    try:
+        _remaining_coverage_seconds(deadline)
+    except CoverageFailure as error:
+        raise CoverageFailure(stage, language, error.failure_code) from error
+
+    owner: CoverageTreeOwner | None = None
+    owner_slot: list[CoverageTreeOwner] = []
+    try:
+        print("+ " + redact(" ".join(command), secrets), flush=True)
+        try:
+            owner = CoverageTreeOwner.start_and_ack(
+                command,
+                cwd=cwd,
+                environment=environment,
+                owner_slot=owner_slot,
+            )
+            owner_slot.clear()
+        except CoverageTreeStartCancelledError as error:
+            raise CoverageFailure(
+                stage,
+                language,
+                "COVERAGE_PROCESS_CANCELLED",
+                cleanup_failure=error.cleanup_failure,
+                owner=error.observation,
+                artifact_cleanup_permitted=error.artifact_cleanup_permitted,
+            ) from error
+        except CoverageTreeOwnerUnavailable as error:
+            failure_code = (
+                "COVERAGE_PROCESS_TREE_OWNER_UNAVAILABLE"
+                if error.artifact_cleanup_permitted
+                else "COVERAGE_PROCESS_TREE_OWNERSHIP_LOST"
+            )
+            raise CoverageFailure(
+                "process_owner",
+                language,
+                failure_code,
+                owner=error.observation,
+                artifact_cleanup_permitted=error.artifact_cleanup_permitted,
+            ) from error
+
+        if owner is None:
+            raise CoverageFailure(
+                "process_owner",
+                language,
+                "COVERAGE_PROCESS_TREE_OWNERSHIP_LOST",
+                artifact_cleanup_permitted=False,
+            )
+
+        try:
+            exit_code = owner.wait_direct_exit(deadline)
+        except subprocess.TimeoutExpired as error:
+            try:
+                outcome = _abort_coverage_owner(owner)
+            except (
+                CoverageTreeOwnershipLost,
+                subprocess.TimeoutExpired,
+                KeyboardInterrupt,
+            ) as cleanup_error:
+                owner.discard_unproven()
+                raise _unproven_owner_failure(
+                    stage, language, "COVERAGE_PROCESS_TIMEOUT", owner, cleanup_error
+                ) from error
+            raise CoverageFailure(
+                stage, language, "COVERAGE_PROCESS_TIMEOUT", owner=outcome.owner
+            ) from error
+        except KeyboardInterrupt as error:
+            raise _cancellation_failure(owner, stage, language) from error
+        except CoverageTreeOwnershipLost as error:
+            owner.discard_unproven()
+            raise _unproven_owner_failure(
+                "process_owner", language, "COVERAGE_PROCESS_TREE_OWNERSHIP_LOST", owner
+            ) from error
+
+        if exit_code:
+            try:
+                outcome = _abort_coverage_owner(owner)
+            except (
+                CoverageTreeOwnershipLost,
+                subprocess.TimeoutExpired,
+                KeyboardInterrupt,
+            ) as cleanup_error:
+                owner.discard_unproven()
+                raise _unproven_owner_failure(
+                    stage, language, "COVERAGE_PROCESS_FAILED", owner, cleanup_error
+                ) from cleanup_error
+            raise CoverageFailure(stage, language, "COVERAGE_PROCESS_FAILED", owner=outcome.owner)
+
+        try:
+            outcome = owner.wait_empty(deadline)
+        except subprocess.TimeoutExpired as error:
+            try:
+                outcome = _abort_coverage_owner(owner)
+            except (
+                CoverageTreeOwnershipLost,
+                subprocess.TimeoutExpired,
+                KeyboardInterrupt,
+            ) as cleanup_error:
+                owner.discard_unproven()
+                raise _unproven_owner_failure(
+                    stage, language, "COVERAGE_PROCESS_TIMEOUT", owner, cleanup_error
+                ) from error
+            raise CoverageFailure(
+                stage, language, "COVERAGE_PROCESS_TIMEOUT", owner=outcome.owner
+            ) from error
+        except KeyboardInterrupt as error:
+            raise _cancellation_failure(owner, stage, language) from error
+        except CoverageTreeOwnershipLost as error:
+            owner.discard_unproven()
+            raise _unproven_owner_failure(
+                "process_owner", language, "COVERAGE_PROCESS_TREE_OWNERSHIP_LOST", owner
+            ) from error
+        if outcome.output:
+            print(
+                redact(outcome.output, secrets),
+                end="" if outcome.output.endswith("\n") else "\n",
+                flush=True,
+            )
+    except KeyboardInterrupt as error:
+        bound_owner = owner if owner is not None else (owner_slot[0] if owner_slot else None)
+        if bound_owner is None:
+            raise CoverageFailure(
+                stage,
+                language,
+                "COVERAGE_PROCESS_CANCELLED",
+                artifact_cleanup_permitted=True,
+            ) from error
+        raise _cancellation_failure(bound_owner, stage, language) from error
+
+
 def project_key_from_xml(path: Path) -> str:
     try:
         root = ElementTree.parse(path).getroot()
@@ -1029,6 +2049,77 @@ def validate_coverage_marker(plan: CoveragePlan, context: GitContext) -> str:
     if marker_bytes != canonical_coverage_marker_bytes(plan, context):
         raise RunnerError("Coverage marker does not match the current plan.")
     return hashlib.sha256(marker_bytes).hexdigest()
+
+
+def coverage_environment(
+    context: GitContext, plan: CoveragePlan, clean_environment: Mapping[str, str]
+) -> dict[str, str]:
+    environment = scrub_sonar_environment(clean_environment)
+    external_environment = (
+        context.coordination_root
+        / ".agent"
+        / "tmp"
+        / "sonarqube-coverage-python-venv"
+        / context.head
+        / plan.run_id
+    )
+    environment.update(
+        {
+            "UV_PROJECT_ENVIRONMENT": str(external_environment),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "COVERAGE_FILE": str(plan.root / "python" / ".coverage"),
+        }
+    )
+    return environment
+
+
+def coverage_producer_commands(context: GitContext, plan: CoveragePlan) -> list[list[str]]:
+    commands = [
+        ["uv", "sync", "--locked", "--extra", "dev"],
+        [
+            "uv",
+            "run",
+            "--no-sync",
+            "python",
+            "-m",
+            "coverage",
+            "run",
+            "--branch",
+            "-m",
+            "pytest",
+            "-p",
+            "no:cacheprovider",
+            "-q",
+        ],
+        [
+            "uv",
+            "run",
+            "--no-sync",
+            "python",
+            "-m",
+            "coverage",
+            "xml",
+            "-o",
+            str(plan.python_report.absolute_path),
+        ],
+    ]
+    for report in plan.dotnet_reports:
+        if report.project is None:
+            raise RunnerError("Coverage report project is invalid.")
+        commands.append(
+            [
+                "dotnet",
+                "test",
+                str(context.repository_root / report.project),
+                "--no-build",
+                "--no-restore",
+                "-nr:false",
+                "/p:CollectCoverage=true",
+                "/p:CoverletOutputFormat=opencover",
+                f"/p:CoverletOutput={report.absolute_path}",
+            ]
+        )
+    return commands
 
 
 def discover_scanner(override: str | None) -> list[str]:

@@ -141,6 +141,118 @@ class TestSonarqubeExactHeadRunner(TestCase):
             ),
         )
 
+    def test_coverage_producer_commands_scrub_sonar_environment(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
+            plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000006")
+            environment = runner.coverage_environment(
+                context, plan, {"SONAR_TOKEN": "must-not-reach-child", "SAFE": "kept"}
+            )
+            commands = runner.coverage_producer_commands(context, plan)
+
+        self.assertEqual(environment["SAFE"], "kept")
+        self.assertNotIn("SONAR_TOKEN", environment)
+        self.assertEqual(environment["COVERAGE_FILE"], str(plan.root / "python" / ".coverage"))
+        self.assertEqual(
+            commands[:3],
+            [
+                ["uv", "sync", "--locked", "--extra", "dev"],
+                [
+                    "uv",
+                    "run",
+                    "--no-sync",
+                    "python",
+                    "-m",
+                    "coverage",
+                    "run",
+                    "--branch",
+                    "-m",
+                    "pytest",
+                    "-p",
+                    "no:cacheprovider",
+                    "-q",
+                ],
+                [
+                    "uv",
+                    "run",
+                    "--no-sync",
+                    "python",
+                    "-m",
+                    "coverage",
+                    "xml",
+                    "-o",
+                    str(plan.python_report.absolute_path),
+                ],
+            ],
+        )
+        dotnet_commands = commands[3:]
+        self.assertEqual(len(dotnet_commands), len(runner.CLOSED_DOTNET_COVERAGE_PROJECTS))
+        for command, report in zip(dotnet_commands, plan.dotnet_reports, strict=True):
+            self.assertEqual(command[:2], ["dotnet", "test"])
+            self.assertIn(str(context.repository_root / report.project), command)
+            self.assertIn("/p:CollectCoverage=true", command)
+            self.assertIn("/p:CoverletOutputFormat=opencover", command)
+            self.assertIn(f"/p:CoverletOutput={report.absolute_path}", command)
+
+    def test_coverage_owner_refuses_non_windows(self):
+        current_directory = Path.cwd()
+        with (
+            patch.object(runner.os, "name", "posix"),
+            self.assertRaisesRegex(
+                runner.CoverageTreeOwnerUnavailable,
+                "COVERAGE_PROCESS_TREE_OWNER_UNAVAILABLE",
+            ),
+        ):
+            runner.CoverageTreeOwner.start_and_ack(
+                ["producer"], cwd=current_directory, environment={}
+            )
+
+    def test_windows_coverage_owner_terminates_child_tree(self):
+        if runner.os.name != "nt":
+            self.skipTest("Windows Job Object fixture")
+
+        import psutil
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            child_identity = root / "child.pid"
+            child_script = (
+                "import os, pathlib, sys, time; "
+                "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()), encoding='utf-8'); "
+                "time.sleep(60)"
+            )
+            root_script = (
+                "import subprocess, sys, time; "
+                f"subprocess.Popen([sys.executable, '-c', {child_script!r}, sys.argv[1]]); "
+                "time.sleep(60)"
+            )
+            owner = runner.CoverageTreeOwner.start_and_ack(
+                [sys.executable, "-c", root_script, str(child_identity)],
+                cwd=root,
+                environment=dict(runner.os.environ),
+            )
+            try:
+                deadline = runner.time.monotonic() + 5
+                while not child_identity.exists() and runner.time.monotonic() < deadline:
+                    runner.time.sleep(0.02)
+                self.assertTrue(child_identity.exists(), "owned child did not start")
+                child_pid = int(child_identity.read_text(encoding="utf-8"))
+                outcome = owner.abort_and_wait_empty(runner.time.monotonic() + 5)
+                self.assertEqual(outcome.owner.terminal_state, "TREE_EMPTY")
+                deadline = runner.time.monotonic() + 5
+                while psutil.pid_exists(child_pid) and runner.time.monotonic() < deadline:
+                    runner.time.sleep(0.02)
+                self.assertFalse(
+                    psutil.pid_exists(child_pid), "owned child survived Job Object cleanup"
+                )
+            finally:
+                if owner.observation.terminal_state != "TREE_EMPTY":
+                    try:
+                        owner.abort_and_wait_empty(runner.time.monotonic() + 5)
+                    except (runner.CoverageTreeOwnershipLost, runner.subprocess.TimeoutExpired):
+                        owner.discard_unproven()
+
     def test_scanner_begin_command_includes_coverage_properties(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
