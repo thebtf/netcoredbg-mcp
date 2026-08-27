@@ -112,37 +112,44 @@ public static class ElementCommands
         var searchRoot = ResolveSearchRoot(mainWindow, @params, automation);
 
         var cf = new ConditionFactory(automation.PropertyLibrary);
-        var conditions = new List<ConditionBase>();
-
         var automationId = @params?["automationId"]?.GetValue<string>();
-        if (automationId is not null)
-            conditions.Add(cf.ByAutomationId(automationId));
+        AutomationElement? element;
 
-        var name = @params?["name"]?.GetValue<string>();
-        if (name is not null)
-            conditions.Add(cf.ByName(name));
-
-        var controlType = @params?["controlType"]?.GetValue<string>();
-        if (controlType is not null)
+        if (!string.IsNullOrWhiteSpace(automationId))
         {
-            var ct = ParseControlType(controlType);
-            conditions.Add(cf.ByControlType(ct));
+            // Match action-command resolution: AutomationId is the stable primary selector.
+            // A combined UIA descendant condition can hang after a WPF Menu popup realizes,
+            // while the AutomationId query returns the exact popup peer.
+            element = searchRoot.FindFirstDescendant(cf.ByAutomationId(automationId));
         }
-
-        if (conditions.Count == 0)
+        else
         {
-            // If xpath provided without other criteria, delegate to XPath search
-            var xpath = @params?["xpath"]?.GetValue<string>();
-            if (!string.IsNullOrWhiteSpace(xpath))
-                return FindByXPath(@params, automation, mainWindow);
-            throw new ArgumentException("At least one search criterion required: automationId, name, controlType, or xpath");
+            var conditions = new List<ConditionBase>();
+            var name = @params?["name"]?.GetValue<string>();
+            if (name is not null)
+                conditions.Add(cf.ByName(name));
+
+            var controlType = @params?["controlType"]?.GetValue<string>();
+            if (controlType is not null)
+            {
+                var ct = ParseControlType(controlType);
+                conditions.Add(cf.ByControlType(ct));
+            }
+
+            if (conditions.Count == 0)
+            {
+                // If xpath provided without other criteria, delegate to XPath search.
+                var xpath = @params?["xpath"]?.GetValue<string>();
+                if (!string.IsNullOrWhiteSpace(xpath))
+                    return FindByXPath(@params, automation, mainWindow);
+                throw new ArgumentException("At least one search criterion required: automationId, name, controlType, or xpath");
+            }
+
+            var condition = conditions.Count == 1
+                ? conditions[0]
+                : new AndCondition(conditions.ToArray());
+            element = searchRoot.FindFirstDescendant(condition);
         }
-
-        var condition = conditions.Count == 1
-            ? conditions[0]
-            : new AndCondition(conditions.ToArray());
-
-        var element = searchRoot.FindFirstDescendant(condition);
         if (element is null)
             return new JsonObject
             {

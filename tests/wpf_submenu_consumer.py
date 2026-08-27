@@ -123,6 +123,51 @@ async def _poll_discovery(
     raise AssertionError(f"discovery deadline: {json.dumps(deadline_evidence, sort_keys=True)}")
 
 
+async def _poll_popup_tree(
+    session: ClientSession, automation_id: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + POLL_DEADLINE_SECONDS
+    attempts = 0
+    last_response: dict[str, Any] | None = None
+
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            terminal_event = "deadline_elapsed_after_response"
+            break
+
+        attempts += 1
+        try:
+            last_response = await asyncio.wait_for(
+                _call(session, "ui_get_window_tree", {"max_depth": 6, "max_children": 100}),
+                timeout=remaining,
+            )
+        except asyncio.TimeoutError:
+            terminal_event = "timeout_no_response"
+            break
+
+        tree = last_response.get("data")
+        if isinstance(tree, dict) and _tree_contains_automation_id(tree, automation_id):
+            return tree, {
+                "operation": "ui_get_window_tree",
+                "attempts": attempts,
+                "deadline_seconds": POLL_DEADLINE_SECONDS,
+            }
+
+        await asyncio.sleep(min(POLL_INTERVAL_SECONDS, max(0.0, deadline - loop.time())))
+
+    deadline_evidence = {
+        "operation": "ui_get_window_tree",
+        "automation_id": automation_id,
+        "attempts": attempts,
+        "deadline_seconds": POLL_DEADLINE_SECONDS,
+        "terminal_event": terminal_event,
+        "last_received_response": last_response,
+    }
+    raise AssertionError(f"popup tree deadline: {json.dumps(deadline_evidence, sort_keys=True)}")
+
+
 def _server_environment() -> dict[str, str]:
     """Pass the exact installed bridge and debugger through MCP's child environment."""
     return {
@@ -209,13 +254,20 @@ async def main() -> None:
                     "focus_receipt": focus_receipt,
                 }
 
+                post_expansion_tree, post_expansion_poll = await _poll_popup_tree(
+                    session, "submenuChild"
+                )
+                evidence["post_expansion"] = {
+                    "popup_child_tree_present": _tree_contains_automation_id(
+                        post_expansion_tree, "submenuChild"
+                    )
+                }
                 child, child_poll = await _poll_discovery(
                     session,
                     name="ui_find_element",
                     arguments={"automation_id": "submenuChild", "control_type": "MenuItem"},
                     matches=lambda data: data.get("automationId") == "submenuChild",
                 )
-                evidence["post_expansion"] = {"popup_child_discovered": True}
                 evidence["popup_child_automation_id"] = child["automationId"]
 
                 invocation = _data(
@@ -241,7 +293,7 @@ async def main() -> None:
                 )
                 assert output.get("text") == "WpfWorkflow Submenu child invoked", output
                 evidence["observable_result"] = output["text"]
-                evidence["polling"] = [parent_poll, child_poll]
+                evidence["polling"] = [parent_poll, post_expansion_poll, child_poll]
             except AssertionError as error:
                 if str(error).startswith("discovery deadline: "):
                     evidence["discovery_deadline"] = json.loads(

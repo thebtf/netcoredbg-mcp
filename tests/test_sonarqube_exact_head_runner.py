@@ -226,7 +226,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
             ],
         )
 
-    def test_coverage_environment_selects_external_python_for_host_tests(self):
+    def test_dotnet_coverage_environment_selects_external_python(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory) / "scanner-worktree"
             coordination_root = Path(temporary_directory) / "coordination-root"
@@ -239,14 +239,18 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 context, "00000000-0000-4000-8000-000000000011"
             )
             environment = runner.coverage_environment(context, plan, {"SAFE": "kept"})
+            dotnet_environment = runner.coverage_dotnet_environment(context, plan, environment)
 
         environment_root = runner.coverage_environment_directory(context, plan)
+        expected_python = str(
+            environment_root
+            / (Path("Scripts") / "python.exe" if runner.os.name == "nt" else Path("bin") / "python")
+        )
+        self.assertNotIn("NETCOREDBG_MCP_PYTHON_EXECUTABLE", environment)
+        self.assertNotIn("NETCOREDBG_MCP_TEST_PYTHON_EXECUTABLE", environment)
+        self.assertEqual(dotnet_environment["NETCOREDBG_MCP_PYTHON_EXECUTABLE"], expected_python)
         self.assertEqual(
-            environment["NETCOREDBG_MCP_PYTHON_EXECUTABLE"],
-            str(
-                environment_root
-                / (Path("Scripts") / "python.exe" if runner.os.name == "nt" else Path("bin") / "python")
-            ),
+            dotnet_environment["NETCOREDBG_MCP_TEST_PYTHON_EXECUTABLE"], expected_python
         )
 
     def test_coverage_environment_is_external_and_cleanup_is_scoped(self):
@@ -329,6 +333,20 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 "SONAR_TOKEN" not in kwargs["environment"]
                 and kwargs["deadline"] > runner.time.monotonic()
                 for _, kwargs in calls
+            )
+        )
+        self.assertTrue(
+            all(
+                "NETCOREDBG_MCP_PYTHON_EXECUTABLE" not in kwargs["environment"]
+                and "NETCOREDBG_MCP_TEST_PYTHON_EXECUTABLE" not in kwargs["environment"]
+                for _, kwargs in calls[:3]
+            )
+        )
+        self.assertTrue(
+            all(
+                kwargs["environment"]["NETCOREDBG_MCP_PYTHON_EXECUTABLE"]
+                == kwargs["environment"]["NETCOREDBG_MCP_TEST_PYTHON_EXECUTABLE"]
+                for _, kwargs in calls[3:]
             )
         )
 

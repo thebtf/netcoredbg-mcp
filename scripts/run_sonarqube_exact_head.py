@@ -2500,14 +2500,25 @@ def coverage_environment(
     environment.update(
         {
             "UV_PROJECT_ENVIRONMENT": str(external_environment),
-            "NETCOREDBG_MCP_PYTHON_EXECUTABLE": str(
-                coverage_python_executable(external_environment)
-            ),
             "PYTHONDONTWRITEBYTECODE": "1",
             "COVERAGE_FILE": str(plan.root / "python" / ".coverage"),
         }
     )
     return environment
+
+
+def coverage_dotnet_environment(
+    context: GitContext, plan: CoveragePlan, environment: Mapping[str, str]
+) -> dict[str, str]:
+    dotnet_environment = dict(environment)
+    python_executable = str(coverage_python_executable(coverage_environment_directory(context, plan)))
+    dotnet_environment.update(
+        {
+            "NETCOREDBG_MCP_PYTHON_EXECUTABLE": python_executable,
+            "NETCOREDBG_MCP_TEST_PYTHON_EXECUTABLE": python_executable,
+        }
+    )
+    return dotnet_environment
 
 
 def coverage_producer_commands(context: GitContext, plan: CoveragePlan) -> list[list[str]]:
@@ -2593,6 +2604,7 @@ def run_coverage_producers(
         ("Python Cobertura XML", "python_producer", "python"),
     )
     coverage_command_count = len(plan.dotnet_reports)
+    dotnet_environment = coverage_dotnet_environment(context, plan, environment)
     for index, command in enumerate(commands):
         if index < len(metadata):
             label, stage, language = metadata[index]
@@ -2600,10 +2612,11 @@ def run_coverage_producers(
             label, stage, language = (".NET OpenCover tests", "dotnet_producer", "dotnet")
         else:
             label, stage, language = (".NET real Python Host validation", "dotnet_producer", "dotnet")
+        producer_environment = environment if index < len(metadata) else dotnet_environment
         run_coverage_process(
             command,
             cwd=context.repository_root,
-            environment=environment,
+            environment=producer_environment,
             secrets=secrets,
             label=label,
             deadline=deadline,
