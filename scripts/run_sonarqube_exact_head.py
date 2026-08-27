@@ -24,6 +24,7 @@ import xml.etree.ElementTree as ElementTree
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Collection, Iterator, Mapping, Sequence
 
@@ -57,6 +58,10 @@ COVERAGE_FAILURE_STAGES = frozenset(
     }
 )
 COVERAGE_ROOT_PARTS = (".tmp", "sonarqube-coverage")
+COVERAGE_ANALYSIS_QUERY = {
+    "component": PROJECT_KEY,
+    "metricKeys": "coverage,lines_to_cover,new_coverage,new_uncovered_lines",
+}
 CLOSED_DOTNET_COVERAGE_PROJECTS = (
     "host/NetCoreDbg.Mcp.CodeSearch.Core.Tests/NetCoreDbg.Mcp.CodeSearch.Core.Tests.csproj",
     "host/NetCoreDbg.Mcp.Host.Tests/NetCoreDbg.Mcp.Host.Tests.csproj",
@@ -2445,11 +2450,11 @@ def sealed_coverage_evidence(plan: CoveragePlan, context: GitContext) -> Iterato
                 raise errors[0]
 
 
-def coverage_environment(
-    context: GitContext, plan: CoveragePlan, clean_environment: Mapping[str, str]
-) -> dict[str, str]:
-    environment = scrub_sonar_environment(clean_environment)
-    external_environment = (
+def coverage_environment_directory(context: GitContext, plan: CoveragePlan) -> Path:
+    _validate_coverage_run_id(plan.run_id)
+    if not SHA_RE.fullmatch(context.head):
+        raise CoverageFailure("python_producer", "python", "COVERAGE_ENVIRONMENT_IDENTITY_INVALID")
+    directory = (
         context.coordination_root
         / ".agent"
         / "tmp"
@@ -2457,9 +2462,36 @@ def coverage_environment(
         / context.head
         / plan.run_id
     )
+    try:
+        directory.resolve(strict=False).relative_to(context.coordination_root.resolve())
+    except (OSError, ValueError) as error:
+        raise CoverageFailure(
+            "python_producer", "python", "COVERAGE_ENVIRONMENT_PATH_ESCAPE"
+        ) from error
+    return directory
+
+
+def clear_coverage_environment(context: GitContext, plan: CoveragePlan) -> None:
+    directory = coverage_environment_directory(context, plan)
+    if directory.is_symlink():
+        raise CoverageFailure("python_producer", "python", "COVERAGE_ENVIRONMENT_SYMLINK_REJECTED")
+    if not directory.exists():
+        return
+    try:
+        shutil.rmtree(directory)
+    except OSError as error:
+        raise CoverageFailure(
+            "python_producer", "python", "COVERAGE_ENVIRONMENT_CLEANUP_FAILED"
+        ) from error
+
+
+def coverage_environment(
+    context: GitContext, plan: CoveragePlan, clean_environment: Mapping[str, str]
+) -> dict[str, str]:
+    environment = scrub_sonar_environment(clean_environment)
     environment.update(
         {
-            "UV_PROJECT_ENVIRONMENT": str(external_environment),
+            "UV_PROJECT_ENVIRONMENT": str(coverage_environment_directory(context, plan)),
             "PYTHONDONTWRITEBYTECODE": "1",
             "COVERAGE_FILE": str(plan.root / "python" / ".coverage"),
         }
@@ -2563,14 +2595,17 @@ def produce_coverage(
     secrets: Collection[str],
 ) -> dict[str, Any]:
     environment = coverage_environment(context, plan, clean_environment)
-    run_coverage_producers(
-        context,
-        plan,
-        environment=environment,
-        secrets=secrets,
-        deadline=time.monotonic() + CE_TIMEOUT_SECONDS,
-    )
-    return validate_coverage_evidence(plan, context)
+    try:
+        run_coverage_producers(
+            context,
+            plan,
+            environment=environment,
+            secrets=secrets,
+            deadline=time.monotonic() + CE_TIMEOUT_SECONDS,
+        )
+        return validate_coverage_evidence(plan, context)
+    finally:
+        clear_coverage_environment(context, plan)
 
 
 def discover_scanner(override: str | None) -> list[str]:
@@ -2813,6 +2848,51 @@ def current_analysis_binding(host: str, analysis_id: str, head: str, token: str)
         "revision": head,
         "date": analysis.get("date") if isinstance(analysis.get("date"), str) else None,
         "current": True,
+    }
+
+
+def _coverage_decimal(value: Any, *, positive: bool) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?", value):
+        raise CoverageFailure("analysis_metrics", None, "COVERAGE_ANALYSIS_METRICS_INVALID")
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as error:
+        raise CoverageFailure(
+            "analysis_metrics", None, "COVERAGE_ANALYSIS_METRICS_INVALID"
+        ) from error
+    if not parsed.is_finite() or (parsed <= 0 if positive else parsed < 0):
+        raise CoverageFailure("analysis_metrics", None, "COVERAGE_ANALYSIS_METRICS_INVALID")
+    return value
+
+
+def analysis_coverage_binding(host: str, analysis_id: str, head: str, token: str) -> dict[str, Any]:
+    before = current_analysis_binding(host, analysis_id, head, token)
+    response = api_json(host, "/api/measures/component", COVERAGE_ANALYSIS_QUERY, token)
+    component = response.get("component")
+    measures = component.get("measures") if isinstance(component, dict) else None
+    if not isinstance(measures, list):
+        raise CoverageFailure("analysis_metrics", None, "COVERAGE_ANALYSIS_METRICS_INVALID")
+    observed = {
+        measure.get("metric"): measure.get("value")
+        for measure in measures
+        if isinstance(measure, dict) and isinstance(measure.get("metric"), str)
+    }
+    expected_metrics = ("coverage", "lines_to_cover", "new_coverage", "new_uncovered_lines")
+    if set(observed) != set(expected_metrics):
+        raise CoverageFailure("analysis_metrics", None, "COVERAGE_ANALYSIS_METRICS_INVALID")
+    metrics = {
+        "coverage": _coverage_decimal(observed["coverage"], positive=True),
+        "lines_to_cover": _coverage_decimal(observed["lines_to_cover"], positive=True),
+        "new_coverage": _coverage_decimal(observed["new_coverage"], positive=False),
+        "new_uncovered_lines": _coverage_decimal(observed["new_uncovered_lines"], positive=False),
+    }
+    after = current_analysis_binding(host, analysis_id, head, token)
+    return {
+        "analysis_id": analysis_id,
+        "before": before,
+        "query": dict(COVERAGE_ANALYSIS_QUERY),
+        "metrics": metrics,
+        "after": after,
     }
 
 
@@ -3241,18 +3321,161 @@ def validate_hotspot_dispositions(inventory: Mapping[str, Any], dispositions: An
         raise RunnerError("PASS receipt hotspot blocking count does not match observed hotspots.")
 
 
+def _receipt_coverage_error() -> RunnerError:
+    return RunnerError("PASS receipt has invalid coverage evidence.")
+
+
+def _receipt_analysis_coverage_error() -> RunnerError:
+    return RunnerError("PASS receipt has invalid analysis coverage binding.")
+
+
+def _receipt_coverage_context(receipt: Mapping[str, Any]) -> GitContext:
+    worktree = receipt.get("worktree")
+    head = receipt.get("captured_head")
+    if not isinstance(worktree, Mapping) or not isinstance(head, str):
+        raise _receipt_coverage_error()
+    required_paths = ("repository_root", "common_dir", "git_dir", "coordination_root")
+    if any(not isinstance(worktree.get(key), str) or not worktree[key] for key in required_paths):
+        raise _receipt_coverage_error()
+    return GitContext(
+        Path(worktree["repository_root"]),
+        Path(worktree["common_dir"]),
+        Path(worktree["git_dir"]),
+        Path(worktree["coordination_root"]),
+        head,
+    )
+
+
+def validate_coverage_receipt(receipt: Mapping[str, Any]) -> None:
+    coverage = receipt.get("coverage")
+    run_id = receipt.get("run_id")
+    if not isinstance(coverage, Mapping) or not isinstance(run_id, str):
+        raise _receipt_coverage_error()
+    try:
+        context = _receipt_coverage_context(receipt)
+        plan = derive_coverage_plan(context, run_id)
+    except (CoverageFailure, RunnerError) as error:
+        raise _receipt_coverage_error() from error
+    evidence_sets = coverage.get("evidence_sets")
+    if not isinstance(evidence_sets, list) or len(evidence_sets) != 2:
+        raise _receipt_coverage_error()
+    expected_marker_sha256 = hashlib.sha256(
+        canonical_coverage_marker_bytes(plan, context)
+    ).hexdigest()
+    expected_sets = (
+        ("dotnet", "opencover", plan.dotnet_reports),
+        ("python", "cobertura", (plan.python_report,)),
+    )
+    for evidence, (language, report_format, expected_reports) in zip(evidence_sets, expected_sets):
+        if (
+            not isinstance(evidence, Mapping)
+            or evidence.get("language") != language
+            or evidence.get("format") != report_format
+            or evidence.get("run_id") != run_id
+            or evidence.get("marker_sha256") != expected_marker_sha256
+        ):
+            raise _receipt_coverage_error()
+        reports = evidence.get("reports")
+        if not isinstance(reports, list) or len(reports) != len(expected_reports):
+            raise _receipt_coverage_error()
+        for report, expected in zip(reports, expected_reports):
+            if not isinstance(report, Mapping):
+                raise _receipt_coverage_error()
+            if (
+                report.get("path") != expected.normalized_path
+                or report.get("project") != expected.project
+                or report.get("xml_root")
+                != ("CoverageSession" if language == "dotnet" else "coverage")
+                or report.get("captured_head") != context.head
+                or not isinstance(report.get("bytes"), int)
+                or isinstance(report.get("bytes"), bool)
+                or report["bytes"] <= 0
+                or not isinstance(report.get("coverage_denominator"), int)
+                or isinstance(report.get("coverage_denominator"), bool)
+                or report["coverage_denominator"] <= 0
+                or not isinstance(report.get("mapped_source_count"), int)
+                or isinstance(report.get("mapped_source_count"), bool)
+                or report["mapped_source_count"] <= 0
+                or not isinstance(report.get("sha256"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", report["sha256"])
+                or not isinstance(report.get("source_path_set_sha256"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", report["source_path_set_sha256"])
+            ):
+                raise _receipt_coverage_error()
+
+
+def validate_analysis_coverage_receipt(receipt: Mapping[str, Any]) -> None:
+    binding = receipt.get("analysis_coverage")
+    compute_engine = receipt.get("compute_engine")
+    head = receipt.get("captured_head")
+    if (
+        not isinstance(binding, Mapping)
+        or not isinstance(compute_engine, Mapping)
+        or not isinstance(head, str)
+    ):
+        raise _receipt_analysis_coverage_error()
+    analysis_id = compute_engine.get("analysis_id")
+    if binding.get("analysis_id") != analysis_id or binding.get("query") != COVERAGE_ANALYSIS_QUERY:
+        raise _receipt_analysis_coverage_error()
+    for boundary_name in ("before", "after"):
+        boundary = binding.get(boundary_name)
+        if (
+            not isinstance(boundary, Mapping)
+            or boundary.get("observed") is not True
+            or boundary.get("current") is not True
+            or boundary.get("analysis_id") != analysis_id
+            or boundary.get("revision") != head
+            or boundary.get("query") != {"project": PROJECT_KEY, "p": "1", "ps": "1"}
+        ):
+            raise _receipt_analysis_coverage_error()
+    metrics = binding.get("metrics")
+    expected = {"coverage", "lines_to_cover", "new_coverage", "new_uncovered_lines"}
+    if not isinstance(metrics, Mapping) or set(metrics) != expected:
+        raise _receipt_analysis_coverage_error()
+    try:
+        _coverage_decimal(metrics["coverage"], positive=True)
+        _coverage_decimal(metrics["lines_to_cover"], positive=True)
+        _coverage_decimal(metrics["new_coverage"], positive=False)
+        _coverage_decimal(metrics["new_uncovered_lines"], positive=False)
+    except CoverageFailure as error:
+        raise _receipt_analysis_coverage_error() from error
+
+
 def validate_pass_receipt(receipt: Mapping[str, Any]) -> None:
     required = (
-        "run_id", "role", "project_key", "analysis_xml_project_key", "captured_head",
-        "completed_at", "worktree", "cleanliness", "scanner_metadata", "task_report",
-        "compute_engine", "analysis_current_before_issues", "analysis_current_after_issues",
-        "analysis_current_final", "quality_gate", "pre_scan_issues", "post_scan_issues",
-        "new_code_issues", "issue_dispositions", "hotspots", "hotspot_dispositions", "cleanup", "post_scan_head",
+        "run_id",
+        "role",
+        "project_key",
+        "project_version",
+        "analysis_xml_project_key",
+        "coverage",
+        "analysis_coverage",
+        "captured_head",
+        "completed_at",
+        "worktree",
+        "cleanliness",
+        "scanner_metadata",
+        "task_report",
+        "compute_engine",
+        "analysis_current_before_issues",
+        "analysis_current_after_issues",
+        "analysis_current_final",
+        "quality_gate",
+        "pre_scan_issues",
+        "post_scan_issues",
+        "new_code_issues",
+        "issue_dispositions",
+        "hotspots",
+        "hotspot_dispositions",
+        "cleanup",
+        "post_scan_head",
     )
     if (
         receipt.get("schema_version") != RECEIPT_SCHEMA_VERSION
         or receipt.get("outcome") != "PASS"
         or receipt.get("project_key") != PROJECT_KEY
+        or not isinstance(receipt.get("project_version"), str)
+        or not SEMVER_RE.fullmatch(receipt["project_version"])
         or receipt.get("analysis_xml_project_key") != PROJECT_KEY
         or receipt.get("role") not in {"candidate", "post-merge"}
         or not isinstance(receipt.get("captured_head"), str)
@@ -3271,10 +3494,19 @@ def validate_pass_receipt(receipt: Mapping[str, Any]) -> None:
         not isinstance(worktree, dict)
         or not worktree.get("detached")
         or not worktree.get("linked")
-        or not all(isinstance(worktree.get(key), str) and worktree[key] for key in ("repository_root", "git_dir", "common_dir", "coordination_root"))
+        or not all(
+            isinstance(worktree.get(key), str) and worktree[key]
+            for key in ("repository_root", "git_dir", "common_dir", "coordination_root")
+        )
     ):
         raise RunnerError("PASS receipt lacks detached linked-worktree evidence.")
-    if not isinstance(cleanliness, dict) or cleanliness.get("pre", {}).get("status") != "clean" or cleanliness.get("post", {}).get("status") != "clean":
+    validate_coverage_receipt(receipt)
+    validate_analysis_coverage_receipt(receipt)
+    if (
+        not isinstance(cleanliness, dict)
+        or cleanliness.get("pre", {}).get("status") != "clean"
+        or cleanliness.get("post", {}).get("status") != "clean"
+    ):
         raise RunnerError("PASS receipt lacks clean-worktree evidence.")
     cleanup = receipt["cleanup"]
     if (
@@ -3301,7 +3533,13 @@ def validate_pass_receipt(receipt: Mapping[str, Any]) -> None:
         )
     ):
         raise RunnerError("PASS receipt has invalid generated-artifact cleanup removals.")
-    if not isinstance(scanner, dict) or not scanner.get("observed") or scanner.get("project_key") != PROJECT_KEY or scanner.get("sonar_scm_revision") != receipt.get("captured_head"):
+    if (
+        not isinstance(scanner, dict)
+        or not scanner.get("observed")
+        or scanner.get("project_key") != PROJECT_KEY
+        or scanner.get("sonar_project_version") != receipt.get("project_version")
+        or scanner.get("sonar_scm_revision") != receipt.get("captured_head")
+    ):
         raise RunnerError("PASS receipt lacks observed scanner project/revision evidence.")
     if (
         not isinstance(task_report, dict)
@@ -3341,9 +3579,17 @@ def validate_pass_receipt(receipt: Mapping[str, Any]) -> None:
     ):
         raise RunnerError("PASS receipt lacks successful fixed-project submitted-task evidence.")
     quality_gate = receipt["quality_gate"]
-    if not isinstance(quality_gate, dict) or quality_gate.get("status") != "OK" or quality_gate.get("analysis_id") != compute_engine.get("analysis_id"):
+    if (
+        not isinstance(quality_gate, dict)
+        or quality_gate.get("status") != "OK"
+        or quality_gate.get("analysis_id") != compute_engine.get("analysis_id")
+    ):
         raise RunnerError("PASS receipt has an invalid analysis-bound quality gate.")
-    for key in ("analysis_current_before_issues", "analysis_current_after_issues", "analysis_current_final"):
+    for key in (
+        "analysis_current_before_issues",
+        "analysis_current_after_issues",
+        "analysis_current_final",
+    ):
         binding = receipt[key]
         if (
             not isinstance(binding, dict)
@@ -3353,7 +3599,9 @@ def validate_pass_receipt(receipt: Mapping[str, Any]) -> None:
             or binding.get("analysis_id") != compute_engine.get("analysis_id")
             or binding.get("revision") != receipt.get("captured_head")
         ):
-            raise RunnerError("PASS receipt lacks current fixed-project exact-head analysis binding evidence.")
+            raise RunnerError(
+                "PASS receipt lacks current fixed-project exact-head analysis binding evidence."
+            )
     validate_inventory(
         receipt["pre_scan_issues"],
         "/api/issues/search",
@@ -3378,10 +3626,14 @@ def validate_pass_receipt(receipt: Mapping[str, Any]) -> None:
         receipt["pre_scan_issues"], receipt["post_scan_issues"], receipt["issue_dispositions"]
     )
     validate_hotspot_dispositions(receipt["hotspots"], receipt["hotspot_dispositions"])
-    if receipt["issue_dispositions"]["blocking_count"] != 0 or receipt["hotspot_dispositions"]["blocking_count"] != 0:
+    if (
+        receipt["issue_dispositions"]["blocking_count"] != 0
+        or receipt["hotspot_dispositions"]["blocking_count"] != 0
+    ):
         raise RunnerError("PASS receipt has unremediated issue or hotspot evidence.")
     if receipt.get("post_scan_head") != receipt.get("captured_head"):
         raise RunnerError("PASS receipt has a post-scan HEAD mismatch.")
+
 
 def receipt_base(context: GitContext, role: str, run_id: str) -> dict[str, Any]:
     return {
@@ -3423,9 +3675,12 @@ def execute(role: str, scanner_override: str | None) -> Path:
             receipt["generated_artifacts_removed_before_scan"] = clear_generated_artifacts(
                 context, clean_environment
             )
-            receipt["cleanliness"] = {"pre": strict_cleanliness(context, clean_environment, "scanner begin")}
+            receipt["cleanliness"] = {
+                "pre": strict_cleanliness(context, clean_environment, "scanner begin")
+            }
             analysis_xml = context.repository_root / "SonarQube.Analysis.xml"
             receipt["analysis_xml_project_key"] = project_key_from_xml(analysis_xml)
+            coverage_plan = derive_coverage_plan(context, run_id)
             release_version = project_version(context.repository_root)
             receipt["project_version"] = release_version
             scanner = discover_scanner(scanner_override)
@@ -3443,6 +3698,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
                     context.head,
                     release_version,
                     credentials["SONAR_TOKEN"],
+                    coverage_plan,
                 ),
                 cwd=context.repository_root,
                 environment=scanner_env,
@@ -3450,6 +3706,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
                 label="SonarScanner begin",
                 credential_input_names=("SONAR_TOKEN",),
             )
+            claim_coverage_run(coverage_plan, context)
             receipt["scanner_metadata"] = scanner_metadata(
                 context.repository_root, context.head, release_version
             )
@@ -3457,9 +3714,12 @@ def execute(role: str, scanner_override: str | None) -> Path:
             solution, projects, standalone_projects = project_inventory(context.repository_root)
             receipt["build_inventory"] = {
                 "solution": str(solution.relative_to(context.repository_root)),
-                "projects": [str(project.relative_to(context.repository_root)) for project in projects],
+                "projects": [
+                    str(project.relative_to(context.repository_root)) for project in projects
+                ],
                 "standalone_projects": [
-                    str(project.relative_to(context.repository_root)) for project in standalone_projects
+                    str(project.relative_to(context.repository_root))
+                    for project in standalone_projects
                 ],
             }
             run_process(
@@ -3477,23 +3737,38 @@ def execute(role: str, scanner_override: str | None) -> Path:
                     secrets=secrets,
                     label=f"Standalone project build ({project.name})",
                 )
-            run_process(
-                scanner_end_command(scanner, credentials["SONAR_TOKEN"]),
-                cwd=context.repository_root,
-                environment=scanner_env,
-                secrets=secrets,
-                label="SonarScanner end",
-                credential_input_names=("SONAR_TOKEN",),
+            produce_coverage(context, coverage_plan, clean_environment, secrets)
+            with sealed_coverage_evidence(coverage_plan, context) as sealed:
+                receipt["coverage"] = sealed.evidence
+                run_process(
+                    scanner_end_command(scanner, credentials["SONAR_TOKEN"]),
+                    cwd=context.repository_root,
+                    environment=scanner_env,
+                    secrets=secrets,
+                    label="SonarScanner end",
+                    credential_input_names=("SONAR_TOKEN",),
+                )
+                sealed.assert_unchanged()
+            receipt["task_report"] = report_task(
+                context.repository_root, credentials["SONAR_HOST_URL"]
             )
-            receipt["task_report"] = report_task(context.repository_root, credentials["SONAR_HOST_URL"])
             analysis_id = wait_for_ce_task(
                 credentials["SONAR_HOST_URL"],
                 receipt["task_report"]["ce_task_id"],
                 credentials["SONAR_TOKEN"],
                 receipt,
             )
+            receipt["analysis_coverage"] = analysis_coverage_binding(
+                credentials["SONAR_HOST_URL"],
+                analysis_id,
+                context.head,
+                credentials["SONAR_READ_TOKEN"],
+            )
             receipt["analysis_current_before_issues"] = current_analysis_binding(
-                credentials["SONAR_HOST_URL"], analysis_id, context.head, credentials["SONAR_READ_TOKEN"]
+                credentials["SONAR_HOST_URL"],
+                analysis_id,
+                context.head,
+                credentials["SONAR_READ_TOKEN"],
             )
             receipt["quality_gate"] = analysis_quality_gate(
                 credentials["SONAR_HOST_URL"], analysis_id, credentials["SONAR_READ_TOKEN"]
@@ -3508,7 +3783,10 @@ def execute(role: str, scanner_override: str | None) -> Path:
                 receipt["pre_scan_issues"], receipt["post_scan_issues"]
             )
             receipt["analysis_current_after_issues"] = current_analysis_binding(
-                credentials["SONAR_HOST_URL"], analysis_id, context.head, credentials["SONAR_READ_TOKEN"]
+                credentials["SONAR_HOST_URL"],
+                analysis_id,
+                context.head,
+                credentials["SONAR_READ_TOKEN"],
             )
             receipt["hotspots"] = hotspot_inventory(
                 credentials["SONAR_HOST_URL"], credentials["SONAR_READ_TOKEN"]
@@ -3518,9 +3796,14 @@ def execute(role: str, scanner_override: str | None) -> Path:
             post_scan_cleanup = clear_generated_artifacts(context, clean_environment)
             receipt["generated_artifacts_removed_after_scan"] = post_scan_cleanup
             receipt["cleanup"] = {"status": "PASS", "removed": post_scan_cleanup}
-            receipt["cleanliness"]["post"] = strict_cleanliness(context, clean_environment, "receipt publication")
+            receipt["cleanliness"]["post"] = strict_cleanliness(
+                context, clean_environment, "receipt publication"
+            )
             receipt["analysis_current_final"] = current_analysis_binding(
-                credentials["SONAR_HOST_URL"], analysis_id, context.head, credentials["SONAR_READ_TOKEN"]
+                credentials["SONAR_HOST_URL"],
+                analysis_id,
+                context.head,
+                credentials["SONAR_READ_TOKEN"],
             )
             assert_head_unchanged(context, clean_environment)
             receipt["post_scan_head"] = context.head
@@ -3528,7 +3811,9 @@ def execute(role: str, scanner_override: str | None) -> Path:
             if receipt["issue_dispositions"]["blocking_count"]:
                 raise RunnerError("Current project issues include a prohibited disposition.")
             if receipt["hotspot_dispositions"]["blocking_count"]:
-                raise RunnerError("Current project contains security hotspots requiring disposition.")
+                raise RunnerError(
+                    "Current project contains security hotspots requiring disposition."
+                )
             receipt["completed_at"] = utc_now()
             receipt["outcome"] = "PASS"
             validate_pass_receipt(receipt)

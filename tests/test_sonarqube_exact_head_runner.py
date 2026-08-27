@@ -2,7 +2,7 @@
 
 import importlib.util
 import json
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 import stat
 import sys
 from pathlib import Path
@@ -33,6 +33,17 @@ class TestSonarqubeExactHeadRunner(TestCase):
         return runner.GitContext(
             scanner_root, primary_root / ".git", scanner_root / ".git", primary_root, "a" * 40
         )
+
+    @staticmethod
+    def sealed_coverage_context():
+        class Seal:
+            evidence = {"evidence_sets": []}
+
+            @staticmethod
+            def assert_unchanged():
+                return None
+
+        return nullcontext(Seal())
 
     def test_build_environment_scrubs_all_sonar_credentials(self):
         build_environment = runner.scrub_sonar_environment(
@@ -194,6 +205,54 @@ class TestSonarqubeExactHeadRunner(TestCase):
             self.assertIn("/p:CollectCoverage=true", command)
             self.assertIn("/p:CoverletOutputFormat=opencover", command)
             self.assertIn(f"/p:CoverletOutput={report.absolute_path}", command)
+
+    def test_coverage_environment_is_external_and_cleanup_is_scoped(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "scanner-worktree"
+            coordination_root = Path(temporary_directory) / "coordination-root"
+            root.mkdir()
+            coordination_root.mkdir()
+            context = runner.GitContext(
+                root, coordination_root / ".git", root / ".git", coordination_root, "a" * 40
+            )
+            plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000007")
+            environment = runner.coverage_environment(context, plan, {"SAFE": "kept"})
+            coverage_environment = Path(environment["UV_PROJECT_ENVIRONMENT"])
+            coverage_environment.mkdir(parents=True)
+            (coverage_environment / "marker.txt").write_text("owned", encoding="utf-8")
+
+            runner.clear_coverage_environment(context, plan)
+
+            self.assertFalse(coverage_environment.exists())
+            self.assertTrue((coordination_root / ".agent" / "tmp").is_dir())
+
+    def test_produce_coverage_cleans_external_environment_after_failure(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "scanner-worktree"
+            coordination_root = Path(temporary_directory) / "coordination-root"
+            root.mkdir()
+            coordination_root.mkdir()
+            context = runner.GitContext(
+                root, coordination_root / ".git", root / ".git", coordination_root, "a" * 40
+            )
+            plan = runner.derive_coverage_plan(
+                context, "00000000-0000-4000-8000-000000000009"
+            )
+            runner.claim_coverage_run(plan, context)
+            coverage_environment = runner.coverage_environment_directory(context, plan)
+            coverage_environment.mkdir(parents=True)
+
+            with patch.object(
+                runner,
+                "run_coverage_producers",
+                side_effect=runner.CoverageFailure(
+                    "python_producer", "python", "COVERAGE_PROCESS_FAILED"
+                ),
+            ):
+                with self.assertRaisesRegex(runner.CoverageFailure, "COVERAGE_PROCESS_FAILED"):
+                    runner.produce_coverage(context, plan, {"SAFE": "kept"}, ())
+
+            self.assertFalse(coverage_environment.exists())
 
     def test_run_coverage_producers_owns_all_commands(self):
         with TemporaryDirectory() as temporary_directory:
@@ -1186,6 +1245,17 @@ class TestSonarqubeExactHeadRunner(TestCase):
                     patch.object(runner, "project_key_from_xml", return_value=runner.PROJECT_KEY)
                 )
                 patches.enter_context(patch.object(runner, "project_version", return_value="0.23.11"))
+                patches.enter_context(patch.object(runner, "claim_coverage_run", return_value="marker"))
+                patches.enter_context(
+                    patch.object(runner, "produce_coverage", return_value={"evidence_sets": []})
+                )
+                patches.enter_context(
+                    patch.object(
+                        runner,
+                        "sealed_coverage_evidence",
+                        return_value=self.sealed_coverage_context(),
+                    )
+                )
                 patches.enter_context(
                     patch.object(runner, "discover_scanner", return_value=["scanner"])
                 )
@@ -1224,6 +1294,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 )
                 patches.enter_context(
                     patch.object(runner, "wait_for_ce_task", return_value="analysis-1")
+                )
+                patches.enter_context(
+                    patch.object(runner, "analysis_coverage_binding", return_value={"analysis_id": "analysis-1"})
                 )
                 patches.enter_context(
                     patch.object(runner, "current_analysis_binding", side_effect=current_binding)
@@ -1289,6 +1362,113 @@ class TestSonarqubeExactHeadRunner(TestCase):
         self.assertEqual(blocked_receipt["analysis_current_final"], binding)
         self.assertEqual(blocked_receipt["post_scan_head"], head)
 
+    def test_execute_binds_coverage_transaction_before_scanner_end(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            head = "a" * 40
+            context = runner.GitContext(root, root / "common", root / "git", root, head)
+            events = []
+
+            class Seal:
+                evidence = {"evidence_sets": ["sealed"]}
+
+                def __enter__(self):
+                    events.append("seal_enter")
+                    return self
+
+                def assert_unchanged(self):
+                    events.append("seal_verify")
+
+                def __exit__(self, *_args):
+                    events.append("seal_exit")
+                    return False
+
+            def run_process(command, **_kwargs):
+                if command[:2] == ["scanner", "begin"]:
+                    events.append("begin")
+                elif command[:2] == ["scanner", "end"]:
+                    events.append("end")
+
+            def claim(_plan, _context):
+                events.append("claim")
+
+            def produce(_context, _plan, _environment, _secrets):
+                events.append("produce")
+                return {"evidence_sets": ["unsealed"]}
+
+            with ExitStack() as patches:
+                patches.enter_context(patch.object(runner, "process_environment", return_value={}))
+                patches.enter_context(
+                    patch.object(runner, "scrub_sonar_environment", return_value={})
+                )
+                patches.enter_context(patch.object(runner, "git_context", return_value=context))
+                patches.enter_context(
+                    patch.object(runner, "receipt_path", return_value=root / "candidate.json")
+                )
+                patches.enter_context(
+                    patch.object(runner, "sonar_secret_values", return_value=set())
+                )
+                patches.enter_context(
+                    patch.object(runner, "load_credentials", return_value=self.credentials())
+                )
+                patches.enter_context(
+                    patch.object(runner, "clear_generated_artifacts", return_value=[])
+                )
+                patches.enter_context(
+                    patch.object(runner, "strict_cleanliness", return_value={"status": "clean"})
+                )
+                patches.enter_context(
+                    patch.object(runner, "project_key_from_xml", return_value=runner.PROJECT_KEY)
+                )
+                patches.enter_context(
+                    patch.object(runner, "project_version", return_value="0.23.11")
+                )
+                patches.enter_context(
+                    patch.object(runner, "discover_scanner", return_value=["scanner"])
+                )
+                patches.enter_context(
+                    patch.object(runner, "issue_inventory", return_value={"records": []})
+                )
+                patches.enter_context(patch.object(runner, "scanner_environment", return_value={}))
+                patches.enter_context(patch.object(runner, "run_process", side_effect=run_process))
+                patches.enter_context(patch.object(runner, "claim_coverage_run", side_effect=claim))
+                patches.enter_context(patch.object(runner, "produce_coverage", side_effect=produce))
+                patches.enter_context(
+                    patch.object(runner, "sealed_coverage_evidence", return_value=Seal())
+                )
+                patches.enter_context(
+                    patch.object(
+                        runner,
+                        "scanner_metadata",
+                        return_value={
+                            "observed": True,
+                            "project_key": runner.PROJECT_KEY,
+                            "sonar_scm_revision": head,
+                            "sonar_project_version": "0.23.11",
+                        },
+                    )
+                )
+                patches.enter_context(
+                    patch.object(
+                        runner,
+                        "project_inventory",
+                        return_value=(root / "netcoredbg-mcp.sln", [], []),
+                    )
+                )
+                patches.enter_context(
+                    patch.object(
+                        runner, "report_task", side_effect=runner.RunnerError("stop after sealing")
+                    )
+                )
+                patches.enter_context(patch.object(runner, "write_receipt"))
+                with self.assertRaisesRegex(runner.RunnerError, "stop after sealing"):
+                    runner.execute("candidate", "scanner")
+
+        self.assertEqual(
+            events,
+            ["begin", "claim", "produce", "seal_enter", "end", "seal_verify", "seal_exit"],
+        )
+
     def test_execute_disables_msbuild_node_reuse_for_solution_and_standalone_builds(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -1328,6 +1508,17 @@ class TestSonarqubeExactHeadRunner(TestCase):
                     patch.object(runner, "project_key_from_xml", return_value=runner.PROJECT_KEY)
                 )
                 patches.enter_context(patch.object(runner, "project_version", return_value="0.23.11"))
+                patches.enter_context(patch.object(runner, "claim_coverage_run", return_value="marker"))
+                patches.enter_context(
+                    patch.object(runner, "produce_coverage", return_value={"evidence_sets": []})
+                )
+                patches.enter_context(
+                    patch.object(
+                        runner,
+                        "sealed_coverage_evidence",
+                        return_value=self.sealed_coverage_context(),
+                    )
+                )
                 patches.enter_context(patch.object(runner, "discover_scanner", return_value=["scanner"]))
                 patches.enter_context(
                     patch.object(runner, "issue_inventory", return_value={"records": []})
@@ -1364,6 +1555,37 @@ class TestSonarqubeExactHeadRunner(TestCase):
             ],
         )
         self.assertIn("/d:sonar.projectVersion=0.23.11", process_commands[0])
+
+    def test_analysis_coverage_binding_brackets_submitted_analysis(self):
+        head = "a" * 40
+        binding = {
+            "observed": True,
+            "current": True,
+            "analysis_id": "analysis",
+            "query": {"project": runner.PROJECT_KEY, "p": "1", "ps": "1"},
+            "revision": head,
+        }
+        response = {
+            "component": {
+                "measures": [
+                    {"metric": "coverage", "value": "80.0"},
+                    {"metric": "lines_to_cover", "value": "10"},
+                    {"metric": "new_coverage", "value": "80.0"},
+                    {"metric": "new_uncovered_lines", "value": "2"},
+                ]
+            }
+        }
+        with (
+            patch.object(runner, "current_analysis_binding", return_value=binding),
+            patch.object(runner, "api_json", return_value=response),
+        ):
+            result = runner.analysis_coverage_binding(
+                "https://sonar.example.test", "analysis", head, "read-token"
+            )
+
+        self.assertEqual(result["before"], binding)
+        self.assertEqual(result["after"], binding)
+        self.assertEqual(result["metrics"]["new_coverage"], "80.0")
 
     def test_generated_artifact_permission_error_is_typed_and_path_aware(self):
         with TemporaryDirectory() as temporary_directory:
@@ -1471,6 +1693,17 @@ class TestSonarqubeExactHeadRunner(TestCase):
                     patch.object(runner, "project_key_from_xml", return_value=runner.PROJECT_KEY)
                 )
                 patches.enter_context(patch.object(runner, "project_version", return_value="0.23.11"))
+                patches.enter_context(patch.object(runner, "claim_coverage_run", return_value="marker"))
+                patches.enter_context(
+                    patch.object(runner, "produce_coverage", return_value={"evidence_sets": []})
+                )
+                patches.enter_context(
+                    patch.object(
+                        runner,
+                        "sealed_coverage_evidence",
+                        return_value=self.sealed_coverage_context(),
+                    )
+                )
                 patches.enter_context(patch.object(runner, "discover_scanner", return_value=["scanner"]))
                 patches.enter_context(
                     patch.object(runner, "issue_inventory", side_effect=full_issue_inventory)
@@ -1507,6 +1740,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 )
                 patches.enter_context(
                     patch.object(runner, "wait_for_ce_task", return_value="analysis-1")
+                )
+                patches.enter_context(
+                    patch.object(runner, "analysis_coverage_binding", return_value={"analysis_id": "analysis-1"})
                 )
                 patches.enter_context(
                     patch.object(runner, "current_analysis_binding", side_effect=current_binding)
@@ -1617,7 +1853,8 @@ class TestSonarqubeExactHeadRunner(TestCase):
         zulu = ArtifactPath("zulu/obj", 1)
         nested = ArtifactPath("nested/deep/obj", 0)
         removed = []
-        context = runner.GitContext(object(), object(), object(), object(), "a" * 40)
+        root = Path("coverage-cleanup-order-test")
+        context = runner.GitContext(root, root, root, root, "a" * 40)
 
         with (
             patch.object(runner, "GENERATED_ROOT_NAMES", set()),
@@ -1860,6 +2097,70 @@ class TestSonarqubeExactHeadRunner(TestCase):
 
     def test_pass_receipt_requires_each_observed_evidence_owner(self):
         head = "a" * 40
+        run_id = "00000000-0000-4000-8000-000000000011"
+        coverage_context = runner.GitContext(
+            Path("root"), Path("common-dir"), Path("git-dir"), Path("coordination-root"), head
+        )
+        coverage_plan = runner.derive_coverage_plan(coverage_context, run_id)
+        marker_sha256 = runner.hashlib.sha256(
+            runner.canonical_coverage_marker_bytes(coverage_plan, coverage_context)
+        ).hexdigest()
+
+        def report_binding(report):
+            return {
+                "path": report.normalized_path,
+                "project": report.project,
+                "sha256": "a" * 64,
+                "bytes": 1,
+                "xml_root": "CoverageSession" if report.language == "dotnet" else "coverage",
+                "coverage_denominator": 1,
+                "mapped_source_count": 1,
+                "source_path_set_sha256": "b" * 64,
+                "captured_head": head,
+            }
+
+        coverage = {
+            "evidence_sets": [
+                {
+                    "language": "dotnet",
+                    "format": "opencover",
+                    "run_id": run_id,
+                    "marker_sha256": marker_sha256,
+                    "reports": [report_binding(report) for report in coverage_plan.dotnet_reports],
+                },
+                {
+                    "language": "python",
+                    "format": "cobertura",
+                    "run_id": run_id,
+                    "marker_sha256": marker_sha256,
+                    "reports": [report_binding(coverage_plan.python_report)],
+                },
+            ]
+        }
+        analysis_binding = {
+            "analysis_id": "analysis",
+            "before": {
+                "observed": True,
+                "current": True,
+                "analysis_id": "analysis",
+                "query": {"project": runner.PROJECT_KEY, "p": "1", "ps": "1"},
+                "revision": head,
+            },
+            "query": dict(runner.COVERAGE_ANALYSIS_QUERY),
+            "metrics": {
+                "coverage": "80.0",
+                "lines_to_cover": "10",
+                "new_coverage": "80.0",
+                "new_uncovered_lines": "2",
+            },
+            "after": {
+                "observed": True,
+                "current": True,
+                "analysis_id": "analysis",
+                "query": {"project": runner.PROJECT_KEY, "p": "1", "ps": "1"},
+                "revision": head,
+            },
+        }
 
         def inventory(endpoint, query=None):
             query = query or (
@@ -1881,8 +2182,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
             "schema_version": runner.RECEIPT_SCHEMA_VERSION,
             "outcome": "PASS",
             "project_key": runner.PROJECT_KEY,
+            "project_version": "0.23.11",
             "analysis_xml_project_key": runner.PROJECT_KEY,
-            "run_id": "run",
+            "run_id": run_id,
             "role": "candidate",
             "captured_head": head,
             "completed_at": "2026-08-23T00:00:00Z",
@@ -1900,6 +2202,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
             "scanner_metadata": {
                 "observed": True,
                 "project_key": runner.PROJECT_KEY,
+                "sonar_project_version": "0.23.11",
                 "sonar_scm_revision": head,
             },
             "task_report": {
@@ -1942,6 +2245,8 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 "revision": head,
             },
             "quality_gate": {"analysis_id": "analysis", "status": "OK"},
+            "coverage": coverage,
+            "analysis_coverage": analysis_binding,
             "pre_scan_issues": inventory("/api/issues/search"),
             "post_scan_issues": inventory("/api/issues/search"),
             "new_code_issues": inventory(
