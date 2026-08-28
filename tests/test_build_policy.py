@@ -11,6 +11,16 @@ from netcoredbg_mcp.build.policy import (
     BuildPolicy,
 )
 
+_CONTROL_FRAMEWORK_VALUES = (
+    "net8.0\n",
+    "net8.0\r",
+    "net8.0\r\n",
+    "net8.0\t",
+    "net8.0\0",
+    "net8\n.0",
+    "net8\r.0",
+)
+
 
 class TestBuildCommand:
     """Tests for BuildCommand enum."""
@@ -63,6 +73,10 @@ class TestPatterns:
         ]
         for framework in invalid:
             assert not FRAMEWORK_PATTERN.match(framework), f"Should not match: {framework}"
+
+    @pytest.mark.parametrize("framework", _CONTROL_FRAMEWORK_VALUES)
+    def test_framework_pattern_rejects_control_characters(self, framework):
+        assert not FRAMEWORK_PATTERN.match(framework)
 
     def test_runtime_pattern_valid(self):
         """Test valid runtime identifiers."""
@@ -208,6 +222,39 @@ class TestArgumentValidation:
         with pytest.raises(ValueError, match="Invalid framework"):
             policy.validate_arguments(["-f", "../etc/passwd"])
 
+    @pytest.mark.parametrize(
+        ("arguments", "expected"),
+        (
+            (["-f", "net8.0"], ["-f", "net8.0"]),
+            (["--framework", "net8.0"], ["--framework", "net8.0"]),
+            (["-f=net8.0"], ["-f", "net8.0"]),
+            (["--framework=net8.0"], ["--framework", "net8.0"]),
+        ),
+    )
+    def test_framework_argument_encodings_preserve_normalized_values(
+        self,
+        tmp_path,
+        arguments,
+        expected,
+    ):
+        policy = BuildPolicy(workspace_root=str(tmp_path))
+
+        assert policy.validate_arguments(arguments) == expected
+
+    @pytest.mark.parametrize("framework", _CONTROL_FRAMEWORK_VALUES)
+    @pytest.mark.parametrize("key", ("-f", "--framework", "-f=", "--framework="))
+    def test_framework_argument_encodings_reject_control_characters(
+        self,
+        tmp_path,
+        framework,
+        key,
+    ):
+        policy = BuildPolicy(workspace_root=str(tmp_path))
+        arguments = [f"{key}{framework}"] if key.endswith("=") else [key, framework]
+
+        with pytest.raises(ValueError, match="Invalid framework:"):
+            policy.validate_arguments(arguments)
+
     def test_allowed_runtime(self, tmp_path):
         """Test allowed runtime values."""
         policy = BuildPolicy(workspace_root=str(tmp_path))
@@ -324,6 +371,32 @@ class TestGetDotnetCommand:
 
         assert "-v" in cmd
         assert "minimal" in cmd
+
+    def test_framework_equals_extra_arg_is_normalized_in_command(self, tmp_path):
+        project = tmp_path / "Test.csproj"
+        project.touch()
+        policy = BuildPolicy(workspace_root=str(tmp_path))
+
+        command = policy.get_dotnet_command(
+            BuildCommand.BUILD,
+            str(project),
+            extra_args=["--framework=net8.0"],
+        )
+
+        framework_index = command.index("--framework")
+        assert command[framework_index : framework_index + 2] == ["--framework", "net8.0"]
+
+    def test_framework_equals_extra_arg_rejects_terminal_newline(self, tmp_path):
+        project = tmp_path / "Test.csproj"
+        project.touch()
+        policy = BuildPolicy(workspace_root=str(tmp_path))
+
+        with pytest.raises(ValueError, match="Invalid framework:"):
+            policy.get_dotnet_command(
+                BuildCommand.BUILD,
+                str(project),
+                extra_args=["--framework=net8.0\n"],
+            )
 
     def test_extra_args_invalid_rejected(self, tmp_path):
         """Test invalid extra arguments rejected."""

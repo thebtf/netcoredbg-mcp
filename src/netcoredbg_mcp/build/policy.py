@@ -70,7 +70,7 @@ ALLOWED_VERBOSITY: Final[frozenset[str]] = frozenset(
 # Supports: net8.0, net48, net451, netstandard2.1, netcoreapp3.1, net8.0-android,
 # net8.0-windows10.0.19041, etc.
 FRAMEWORK_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^net(?:standard|coreapp)?[0-9]+(?:\.[0-9]+)*(?:-[a-z0-9.]+)?$", re.IGNORECASE
+    r"\Anet(?:standard|coreapp)?[0-9]+(?:\.[0-9]+)*(?:-[a-z0-9.]+)?\Z", re.IGNORECASE
 )
 
 # Pattern for valid runtime identifiers
