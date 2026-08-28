@@ -567,35 +567,20 @@ internal static class Program
                 return NotFound();
             }
 
-            if (!_sessions.TryGetValue(sessionId!, out var session))
+            if (!_sessions.TryGetValue(sessionId!, out var session)
+                || !_slots.TryGetValue(sessionId!, out var slot))
             {
-                await RemoveNativeSceneBindingAsync(sessionId!).ConfigureAwait(false);
                 return NotFound();
             }
 
-            if (_slots.TryGetValue(sessionId!, out var slot))
+            if (!slot.TryBeginClose(cancellationToken, out var completion))
             {
-                try
-                {
-                    await slot.CloseAndDrainAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
-                    return StopSuccess(session.State);
-                }
-                catch (Exception) when (!cancellationToken.IsCancellationRequested)
-                {
-                    return NotFound();
-                }
-            }
-
-            if (!_sessions.TryRemove(sessionId!, out session))
-            {
-                await RemoveNativeSceneBindingAsync(sessionId!).ConfigureAwait(false);
                 return NotFound();
             }
 
-            await RemoveNativeSceneBindingAsync(sessionId!).ConfigureAwait(false);
             try
             {
-                await session.StopAsync(cancellationToken).ConfigureAwait(false);
+                await completion.WaitAsync(cancellationToken).ConfigureAwait(false);
                 return StopSuccess(session.State);
             }
             catch (Exception) when (!cancellationToken.IsCancellationRequested)
@@ -711,6 +696,21 @@ internal static class Program
                 }
             }
 
+            internal bool TryBeginClose(CancellationToken cancellationToken, out Task completion)
+            {
+                lock (_gate)
+                {
+                    if (_closeTask is not null)
+                    {
+                        completion = _closeTask;
+                        return false;
+                    }
+
+                    completion = BeginCloseAndDrainLocked(cancellationToken);
+                    return true;
+                }
+            }
+
             internal Task CloseAndDrainAsync(CancellationToken cancellationToken = default)
             {
                 lock (_gate)
@@ -721,14 +721,19 @@ internal static class Program
                         return _closeTask;
                     }
 
-                    _closed = true;
-                    var drained = _leases == 0
-                        ? Task.CompletedTask
-                        : (_drained ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
-                    _remove();
-                    RegisterCancellation(cancellationToken);
-                    return _closeTask = CloseAndDrainCoreAsync(drained);
+                    return BeginCloseAndDrainLocked(cancellationToken);
                 }
+            }
+
+            private Task BeginCloseAndDrainLocked(CancellationToken cancellationToken)
+            {
+                _closed = true;
+                var drained = _leases == 0
+                    ? Task.CompletedTask
+                    : (_drained ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
+                _remove();
+                RegisterCancellation(cancellationToken);
+                return _closeTask = CloseAndDrainCoreAsync(drained);
             }
 
             private async Task CloseAndDrainCoreAsync(Task drained)

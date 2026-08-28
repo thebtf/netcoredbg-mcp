@@ -119,6 +119,41 @@ public sealed class SessionSlotLifecycleTests
             new RequestId("slot-unusable-state")), isError: true));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GetThreads_RegisteredUnavailableOrClosedSlot_ReturnsNotFoundWithoutDapIo(
+        bool closedSlot)
+    {
+        // Arrange / Act
+        var observation = await ModernMcpRegistryContractDriver
+            .ObserveUnavailableThreadsAdmissionAsync(closedSlot);
+
+        // Assert
+        Assert.Equal("complete", observation.ResultType);
+        Assert.True(observation.IsError);
+        Assert.Equal("debug_session_not_found", observation.Kind);
+        Assert.Equal("DEBUG_SESSION_NOT_FOUND", observation.Error);
+        Assert.Equal(1, observation.StopCalls);
+        Assert.Equal(1, observation.DisposeCalls);
+        Assert.Equal(closedSlot, observation.SessionRetained);
+        Assert.Equal(closedSlot, observation.SlotRetained);
+    }
+
+    [Fact]
+    public async Task StopDebug_SessionWithoutSlot_ReturnsNotFoundWithoutRetiringSessionMap()
+    {
+        // Arrange / Act
+        var observation = await ModernMcpRegistryContractDriver.ObserveMissingSlotStopAsync();
+
+        // Assert
+        Assert.Equal("complete", observation.ResultType);
+        Assert.True(observation.IsError);
+        Assert.Equal("debug_session_not_found", observation.Kind);
+        Assert.Equal("DEBUG_SESSION_NOT_FOUND", observation.Error);
+        Assert.True(observation.SessionRetained);
+    }
+
     [Fact]
     public async Task ReaderFailureWithoutInflightThreads_EvictsTokenBeforeLaterThreadsCall()
     {
