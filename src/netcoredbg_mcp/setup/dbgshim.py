@@ -24,6 +24,7 @@ from .home import get_home_dir
 logger = logging.getLogger(__name__)
 
 _DBGSHIM_FILENAME = "dbgshim.dll" if os.name == "nt" else "libdbgshim.so"
+_RUNTIME_SHARED_PATH = Path("shared") / "Microsoft.NETCore.App"
 
 
 @dataclass(frozen=True)
@@ -61,31 +62,31 @@ def _get_runtime_scan_paths() -> list[Path]:
     if system == "Windows":
         # Standard install: C:\Program Files\dotnet\...
         program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
-        paths.append(Path(program_files) / "dotnet" / "shared" / "Microsoft.NETCore.App")
+        paths.append(Path(program_files) / "dotnet" / _RUNTIME_SHARED_PATH)
         # x86 on 64-bit Windows
         program_files_x86 = os.environ.get("ProgramFiles(x86)", "")
         if program_files_x86:
-            paths.append(Path(program_files_x86) / "dotnet" / "shared" / "Microsoft.NETCore.App")
+            paths.append(Path(program_files_x86) / "dotnet" / _RUNTIME_SHARED_PATH)
     elif system == "Linux":
         paths.extend(
             [
-                Path("/usr/share/dotnet/shared/Microsoft.NETCore.App"),
-                Path("/usr/local/share/dotnet/shared/Microsoft.NETCore.App"),
-                Path.home() / ".dotnet" / "shared" / "Microsoft.NETCore.App",
+                Path("/usr/share/dotnet") / _RUNTIME_SHARED_PATH,
+                Path("/usr/local/share/dotnet") / _RUNTIME_SHARED_PATH,
+                Path.home() / ".dotnet" / _RUNTIME_SHARED_PATH,
             ]
         )
     elif system == "Darwin":
         paths.extend(
             [
-                Path("/usr/local/share/dotnet/shared/Microsoft.NETCore.App"),
-                Path.home() / ".dotnet" / "shared" / "Microsoft.NETCore.App",
+                Path("/usr/local/share/dotnet") / _RUNTIME_SHARED_PATH,
+                Path.home() / ".dotnet" / _RUNTIME_SHARED_PATH,
             ]
         )
 
     # DOTNET_ROOT override (all platforms)
     dotnet_root = os.environ.get("DOTNET_ROOT")
     if dotnet_root:
-        custom = Path(dotnet_root) / "shared" / "Microsoft.NETCore.App"
+        custom = Path(dotnet_root) / _RUNTIME_SHARED_PATH
         if custom not in paths:
             paths.insert(0, custom)
 
