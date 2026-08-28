@@ -195,7 +195,10 @@ public sealed class GetThreadsContractTests
     {
         // Arrange
         await using var driver = await ModernMcpProcessDriver.StartAsync(Threads("timeout"));
-        var debugSessionId = await StartSessionAsync(driver, "threads-timeout-start");
+        var debugSessionId = await StartSessionAsync(
+            driver,
+            "threads-timeout-start",
+            setupObservationTimeout: TimeSpan.FromSeconds(35));
         using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
         var response = driver.CallToolRawAsync(
             Tool,
@@ -274,13 +277,17 @@ public sealed class GetThreadsContractTests
             SuppressLifecycleEvents: true,
             ThreadsResponseMode: responseMode));
 
-    private static async Task<string> StartSessionAsync(ModernMcpProcessDriver driver, string requestId)
+    private static async Task<string> StartSessionAsync(
+        ModernMcpProcessDriver driver,
+        string requestId,
+        TimeSpan? setupObservationTimeout = null)
     {
         var content = AssertApplicationEnvelope(await driver.CallToolRawAsync(
             "start_debug",
             new JsonObject { ["program"] = driver.InertProgramPath },
             ModernMcpProcessDriver.CurrentMeta(),
-            new RequestId(requestId)), isError: false);
+            new RequestId(requestId),
+            timeout: setupObservationTimeout), isError: false);
         Assert.Equal("start_debug_success", content["kind"]?.GetValue<string>());
         return Assert.IsType<string>(content["debugSessionId"]?.GetValue<string>());
     }

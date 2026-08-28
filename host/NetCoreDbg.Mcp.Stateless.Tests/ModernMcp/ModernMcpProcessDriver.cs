@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.Loader;
@@ -20,21 +21,31 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
 {
     internal const string CurrentProtocolVersion = "2026-07-28";
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan MaximumCoverageStartupTimeout = TimeSpan.FromSeconds(10);
+    internal const string CoverageStartupTimeoutEnvironmentVariable =
+        "NETCOREDBG_MCP_COVERAGE_STARTUP_TIMEOUT_MS";
 
     private readonly FixtureProcess _fixture;
     private readonly string _scratchDirectory;
     private readonly JsonObject? _initialMeta;
     private readonly List<ModernMcpRequestObservation> _requests = [];
-    private readonly List<string> _standardErrorLines = [];
+    private readonly ModernMcpStandardErrorTail _standardErrorTail;
     private readonly object _gate = new();
     private bool _clientClosed;
     private bool _disposed;
 
-    private ModernMcpProcessDriver(FixtureProcess fixture, string scratchDirectory, McpClient client, string inertProgramPath, JsonObject? initialMeta)
+    private ModernMcpProcessDriver(
+        FixtureProcess fixture,
+        string scratchDirectory,
+        McpClient client,
+        string inertProgramPath,
+        JsonObject? initialMeta,
+        ModernMcpStandardErrorTail standardErrorTail)
     {
         _scratchDirectory = scratchDirectory;
         _fixture = fixture;
         _initialMeta = initialMeta?.DeepClone().AsObject();
+        _standardErrorTail = standardErrorTail;
         Client = client;
         InertProgramPath = inertProgramPath;
     }
@@ -64,20 +75,27 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         options ??= new ModernMcpStartOptions();
+        var startupTimeout = ResolveCoverageStartupTimeout(
+            Environment.GetEnvironmentVariable(CoverageStartupTimeoutEnvironmentVariable));
+        using var operation = CreateBoundedCancellation(cancellationToken, startupTimeout);
+        var startupStartedAt = Stopwatch.GetTimestamp();
         var scratchDirectory = ModernMcpScratchDirectory.Create();
+        var standardErrorTail = new ModernMcpStandardErrorTail();
         FixtureProcess? fixture = null;
         StdioClientTransport? transport = null;
         McpClient? client = null;
         try
         {
             fixture = FixtureProcess.Create(options.FixtureConfiguration ?? new FixtureConfiguration());
-            var candidate = TestOutputPathResolver.ResolveProcess(Path.Combine(RepositoryLayout.Root, "host", "NetCoreDbg.Mcp.Stateless"), "NetCoreDbg.Mcp.Stateless");
+            var candidate = options.CandidateProcess
+                ?? TestOutputPathResolver.ResolveProcess(
+                    Path.Combine(RepositoryLayout.Root, "host", "NetCoreDbg.Mcp.Stateless"),
+                    "NetCoreDbg.Mcp.Stateless");
 
             var inertProgramPath = Path.Combine(scratchDirectory, "controlled-program.dll");
-            using var operation = CreateBoundedCancellation(cancellationToken);
+            var clientOptions = CreateClientOptions(startupTimeout);
             await File.WriteAllBytesAsync(inertProgramPath, [], operation.Token).ConfigureAwait(false);
 
-            ModernMcpProcessDriver? driver = null;
             transport = new StdioClientTransport(new StdioClientTransportOptions
             {
                 Command = candidate.Command,
@@ -86,20 +104,67 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
                 WorkingDirectory = RepositoryLayout.Root,
                 EnvironmentVariables = CandidateEnvironment(fixture, inertProgramPath, options.AdditionalEnvironment),
                 ShutdownTimeout = TimeSpan.FromSeconds(2),
-                StandardErrorLines = line => driver?.AddStandardErrorLine(line),
+                StandardErrorLines = standardErrorTail.Add,
             });
 
-            client = await McpClient.CreateAsync(transport, cancellationToken: operation.Token).ConfigureAwait(false);
-            driver = new ModernMcpProcessDriver(
+            try
+            {
+                client = await McpClient.CreateAsync(
+                    transport,
+                    clientOptions,
+                    cancellationToken: operation.Token).ConfigureAwait(false);
+            }
+            catch (TimeoutException exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw CreatePhaseTimeoutException(
+                    ModernMcpTimeoutPhase.SdkStartup,
+                    startupTimeout,
+                    startupStartedAt,
+                    toolName: null,
+                    method: null,
+                    requestId: null,
+                    exception);
+            }
+            var driver = new ModernMcpProcessDriver(
                 fixture,
                 scratchDirectory,
                 client,
                 inertProgramPath,
-                options.InitialMeta ?? CurrentMeta(formElicitation: !options.DisableFormElicitation));
+                options.InitialMeta ?? CurrentMeta(formElicitation: !options.DisableFormElicitation),
+                standardErrorTail);
             client = null;
             transport = null;
             fixture = null;
             return driver;
+        }
+        catch (ClientTransportClosedException exception)
+        {
+            var failure = ModernMcpProcessStartFailure.FromTransportClosed(
+                exception,
+                standardErrorTail.Snapshot());
+            await DisposeFailedStartTransportAsync(client, connection: null).ConfigureAwait(false);
+            await CleanupFailedStartAsync(fixture, scratchDirectory).ConfigureAwait(false);
+            throw new ModernMcpProcessStartException(failure, exception);
+        }
+        catch (ModernMcpPhaseTimeoutException)
+        {
+            await DisposeFailedStartTransportAsync(client, connection: null).ConfigureAwait(false);
+            await CleanupFailedStartAsync(fixture, scratchDirectory).ConfigureAwait(false);
+            throw;
+        }
+        catch (OperationCanceledException exception)
+            when (operation.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            await DisposeFailedStartTransportAsync(client, connection: null).ConfigureAwait(false);
+            await CleanupFailedStartAsync(fixture, scratchDirectory).ConfigureAwait(false);
+            throw CreatePhaseTimeoutException(
+                ModernMcpTimeoutPhase.SdkStartup,
+                startupTimeout,
+                startupStartedAt,
+                toolName: null,
+                method: null,
+                requestId: null,
+                exception);
         }
         catch
         {
@@ -162,12 +227,29 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
             static property => property.Key,
             static property => (object?)property.Value?.DeepClone());
 
-        using var operation = CreateBoundedCancellation(cancellationToken);
-        return await Client.CallToolAsync(
-            name,
-            convertedArguments,
-            options: requestOptions,
-            cancellationToken: operation.Token).ConfigureAwait(false);
+        var deadline = RequestTimeout;
+        using var operation = CreateBoundedCancellation(cancellationToken, deadline);
+        var startedAt = Stopwatch.GetTimestamp();
+        try
+        {
+            return await Client.CallToolAsync(
+                name,
+                convertedArguments,
+                options: requestOptions,
+                cancellationToken: operation.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException exception)
+            when (operation.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            throw CreatePhaseTimeoutException(
+                ModernMcpTimeoutPhase.PostStartMcpRequest,
+                deadline,
+                startedAt,
+                toolName: name,
+                method: null,
+                requestId: null,
+                exception);
+        }
     }
 
     internal static JsonObject CurrentMeta(bool formElicitation = false, JsonObject? extra = null)
@@ -226,15 +308,32 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
             _requests.Add(new ModernMcpRequestObservation(id, method, parameters?.DeepClone()));
         }
 
-        using var operation = CreateBoundedCancellation(cancellationToken, timeout);
-        return await Client.SendRequestAsync(
-            new JsonRpcRequest
-            {
-                Id = id,
-                Method = method,
-                Params = parameters?.DeepClone(),
-            },
-            operation.Token).ConfigureAwait(false);
+        var deadline = timeout ?? RequestTimeout;
+        using var operation = CreateBoundedCancellation(cancellationToken, deadline);
+        var startedAt = Stopwatch.GetTimestamp();
+        try
+        {
+            return await Client.SendRequestAsync(
+                new JsonRpcRequest
+                {
+                    Id = id,
+                    Method = method,
+                    Params = parameters?.DeepClone(),
+                },
+                operation.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException exception)
+            when (operation.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            throw CreatePhaseTimeoutException(
+                ModernMcpTimeoutPhase.PostStartMcpRequest,
+                deadline,
+                startedAt,
+                toolName: null,
+                method,
+                id.ToString(),
+                exception);
+        }
     }
 
     internal static JsonObject RequireResult(JsonRpcResponse response) =>
@@ -387,23 +486,38 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
         }
     }
 
-    private void AddStandardErrorLine(string line)
+    private IReadOnlyList<string> StandardErrorLines() => _standardErrorTail.Snapshot().Lines;
+
+
+    internal static TimeSpan ResolveCoverageStartupTimeout(string? rawMilliseconds)
     {
-        lock (_gate)
+        if (rawMilliseconds is null)
         {
-            _standardErrorLines.Add(line);
+            return RequestTimeout;
         }
+
+        if (!int.TryParse(
+                rawMilliseconds,
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out var milliseconds)
+            || milliseconds < (int)RequestTimeout.TotalMilliseconds
+            || milliseconds > (int)MaximumCoverageStartupTimeout.TotalMilliseconds)
+        {
+            throw new InvalidOperationException(
+                $"{CoverageStartupTimeoutEnvironmentVariable} must be an integer from {(int)RequestTimeout.TotalMilliseconds} through {(int)MaximumCoverageStartupTimeout.TotalMilliseconds}.");
+        }
+
+        return TimeSpan.FromMilliseconds(milliseconds);
     }
 
-    private IReadOnlyList<string> StandardErrorLines()
+
+    internal static McpClientOptions CreateClientOptions(TimeSpan startupTimeout) => new()
     {
-        lock (_gate)
-        {
-            return _standardErrorLines.ToArray();
-        }
-    }
-
-
+        ProtocolVersion = CurrentProtocolVersion,
+        InitializationTimeout = startupTimeout,
+        DiscoverProbeTimeout = startupTimeout,
+    };
     private static Dictionary<string, string?> CandidateEnvironment(
         FixtureProcess fixture,
         string inertProgramPath,
@@ -450,6 +564,25 @@ internal sealed class ModernMcpProcessDriver : IAsyncDisposable
             // Preserve the primary startup failure after fixture cleanup was attempted.
         }
     }
+
+    private static ModernMcpPhaseTimeoutException CreatePhaseTimeoutException(
+        ModernMcpTimeoutPhase phase,
+        TimeSpan deadline,
+        long startedAt,
+        string? toolName,
+        string? method,
+        string? requestId,
+        Exception exception) =>
+        new(
+            new ModernMcpPhaseTimeoutFailure(
+                phase,
+                "test_driver",
+                deadline,
+                Stopwatch.GetElapsedTime(startedAt),
+                toolName,
+                method,
+                requestId),
+            exception);
 
     private static CancellationTokenSource CreateBoundedCancellation(CancellationToken cancellationToken, TimeSpan? timeout = null)
     {
@@ -808,7 +941,8 @@ internal sealed record ModernMcpStartOptions(
     bool DisableFormElicitation = false,
     string? PriorProcessToken = null,
     FixtureConfiguration? FixtureConfiguration = null,
-    IReadOnlyDictionary<string, string?>? AdditionalEnvironment = null);
+    IReadOnlyDictionary<string, string?>? AdditionalEnvironment = null,
+    TestOutputProcess? CandidateProcess = null);
 
 /// <summary>Kind is the controlled transcript kind: <c>startup</c> or <c>request</c>.</summary>
 internal sealed record ModernNativeAction(string Kind, string? Command, string? Detail);
@@ -822,6 +956,200 @@ internal sealed record ModernMcpTransportClosure(
     int? ExitCode,
     IReadOnlyList<string> StandardErrorLines);
 
+internal enum ModernMcpTimeoutPhase
+{
+    SdkStartup,
+    PostStartMcpRequest,
+}
+
+internal sealed class ModernMcpPhaseTimeoutException : TimeoutException
+{
+    internal ModernMcpPhaseTimeoutException(
+        ModernMcpPhaseTimeoutFailure failure,
+        Exception innerException)
+        : base("Modern MCP test-driver phase deadline elapsed.", innerException)
+    {
+        Failure = failure;
+    }
+
+    internal ModernMcpPhaseTimeoutFailure Failure { get; }
+}
+
+internal sealed class ModernMcpPhaseTimeoutFailure
+{
+    internal ModernMcpPhaseTimeoutFailure(
+        ModernMcpTimeoutPhase phase,
+        string owner,
+        TimeSpan deadline,
+        TimeSpan elapsed,
+        string? toolName,
+        string? method,
+        string? requestId)
+    {
+        if (deadline <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(deadline));
+        }
+
+        if (elapsed < TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(elapsed));
+        }
+
+        Phase = phase;
+        Owner = owner;
+        Deadline = deadline;
+        Elapsed = elapsed;
+        ToolName = toolName;
+        Method = method;
+        RequestId = requestId;
+    }
+
+    internal ModernMcpTimeoutPhase Phase { get; }
+    internal string Owner { get; }
+    internal TimeSpan Deadline { get; }
+    internal TimeSpan Elapsed { get; }
+    internal string? ToolName { get; }
+    internal string? Method { get; }
+    internal string? RequestId { get; }
+    internal bool CompletionObserved => false;
+    internal int? ProcessId => null;
+    internal int? ExitCode => null;
+    internal IReadOnlyList<string> StandardErrorTail => Array.Empty<string>();
+}
+
+internal enum ModernMcpProcessStartFailureCategory
+{
+    TransportClosed,
+}
+
+internal sealed class ModernMcpProcessStartException : Exception
+{
+    internal ModernMcpProcessStartException(
+        ModernMcpProcessStartFailure failure,
+        ClientTransportClosedException innerException)
+        : base("Modern MCP client startup closed before initialization.", innerException)
+    {
+        Failure = failure;
+    }
+
+    internal ModernMcpProcessStartFailure Failure { get; }
+}
+
+internal sealed class ModernMcpProcessStartFailure
+{
+    private ModernMcpProcessStartFailure(
+        ModernMcpProcessStartFailureCategory category,
+        bool completionObserved,
+        int? processId,
+        int? exitCode,
+        IReadOnlyList<string> standardErrorTail,
+        bool standardErrorTruncated)
+    {
+        Category = category;
+        CompletionObserved = completionObserved;
+        ProcessId = processId;
+        ExitCode = exitCode;
+        StandardErrorTail = Array.AsReadOnly(standardErrorTail.ToArray());
+        StandardErrorTruncated = standardErrorTruncated;
+    }
+
+    internal ModernMcpProcessStartFailureCategory Category { get; }
+    internal bool CompletionObserved { get; }
+    internal int? ProcessId { get; }
+    internal int? ExitCode { get; }
+    internal IReadOnlyList<string> StandardErrorTail { get; }
+    internal bool StandardErrorTruncated { get; }
+
+    internal static ModernMcpProcessStartFailure FromTransportClosed(
+        ClientTransportClosedException exception,
+        ModernMcpStandardErrorTailSnapshot fallback)
+    {
+        if (exception.Details is not StdioClientCompletionDetails completion)
+        {
+            return new ModernMcpProcessStartFailure(
+                ModernMcpProcessStartFailureCategory.TransportClosed,
+                completionObserved: false,
+                processId: null,
+                exitCode: null,
+                fallback.Lines,
+                fallback.Truncated);
+        }
+
+        var sdkTail = ModernMcpStandardErrorTail.Capture(completion.StandardErrorTail);
+        return new ModernMcpProcessStartFailure(
+            ModernMcpProcessStartFailureCategory.TransportClosed,
+            completionObserved: true,
+            completion.ProcessId,
+            completion.ExitCode,
+            sdkTail.Lines.Count > 0 ? sdkTail.Lines : fallback.Lines,
+            sdkTail.Truncated || fallback.Truncated);
+    }
+}
+
+internal sealed class ModernMcpStandardErrorTail
+{
+    private const int MaximumLineCount = 10;
+    private const int MaximumLineCharacters = 512;
+
+    private readonly Queue<string> _lines = new();
+    private readonly object _gate = new();
+    private bool _truncated;
+
+    internal void Add(string? line)
+    {
+        if (line is null)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            if (line.Length > MaximumLineCharacters)
+            {
+                line = line[..MaximumLineCharacters];
+                _truncated = true;
+            }
+
+            if (_lines.Count == MaximumLineCount)
+            {
+                _lines.Dequeue();
+                _truncated = true;
+            }
+
+            _lines.Enqueue(line);
+        }
+    }
+
+    internal ModernMcpStandardErrorTailSnapshot Snapshot()
+    {
+        lock (_gate)
+        {
+            return new ModernMcpStandardErrorTailSnapshot(
+                Array.AsReadOnly(_lines.ToArray()),
+                _truncated);
+        }
+    }
+
+    internal static ModernMcpStandardErrorTailSnapshot Capture(
+        IEnumerable<string>? lines)
+    {
+        var tail = new ModernMcpStandardErrorTail();
+        if (lines is not null)
+        {
+            foreach (var line in lines)
+            {
+                tail.Add(line);
+            }
+        }
+
+        return tail.Snapshot();
+    }
+}
+
+internal sealed record ModernMcpStandardErrorTailSnapshot(
+    IReadOnlyList<string> Lines,
+    bool Truncated);
 internal static class ModernMcpScratchDirectory
 {
     private static readonly TimeSpan CleanupTimeout = TimeSpan.FromSeconds(1);
