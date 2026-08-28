@@ -596,11 +596,11 @@ def test_bridge_connect_stores_stealth_state_and_exposes_get_state() -> None:
         encoding="utf-8"
     )
 
-    assert "private static bool _stealth;" in router
-    assert "internal static bool Stealth" in router
+    assert "internal static bool Stealth { get; set; }" in router
+    assert "_stealth" not in router
     assert '["get_state"] = GetState' in router
     assert '["stealth"] = Stealth' in router
-    assert "_stealth = false;" in router
+    assert "Stealth = false;" in router
     assert 'var requestedStealth = @params?["stealth"]?.GetValue<bool>() ?? false;' in elements
     assert "JsonRpcHandler.Stealth = requestedStealth;" in elements
     assert elements.index("var window = SelectPrimaryWindow") < elements.index(

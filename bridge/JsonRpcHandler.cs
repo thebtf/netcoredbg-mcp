@@ -11,7 +11,6 @@ public static class JsonRpcHandler
     private static UIA3Automation? _automation;
     private static AutomationElement? _mainWindow;
     private static int _processId;
-    private static bool _stealth;
     // SendKeys / SendKeysBatch press and release modifiers within a single
     // batch (see InputCommands.cs) and do not read or update this set. If a
     // caller holds Ctrl via hold_modifiers and then fires a send_keys batch,
@@ -52,11 +51,7 @@ public static class JsonRpcHandler
         set => _processId = value;
     }
 
-    internal static bool Stealth
-    {
-        get => _stealth;
-        set => _stealth = value;
-    }
+    internal static bool Stealth { get; set; }
 
     private static readonly IReadOnlyDictionary<string, Func<JsonNode?, UIA3Automation, AutomationElement?, JsonNode>> Handlers =
         new Dictionary<string, Func<JsonNode?, UIA3Automation, AutomationElement?, JsonNode>>
@@ -161,6 +156,6 @@ public static class JsonRpcHandler
         _automation = null;
         _mainWindow = null;
         _processId = 0;
-        _stealth = false;
+        Stealth = false;
     }
 }
