@@ -155,6 +155,7 @@ class CoverageTreeObservation:
     target_platform: str
     owner_kind: str
     terminal_state: str | None
+    kill_on_close: bool = True
 
 
 @dataclass(frozen=True)
@@ -162,6 +163,50 @@ class CoverageProcessOutcome:
     returncode: int
     output: str
     owner: CoverageTreeObservation
+
+
+def _coverage_cleanup_failure_detail(error: CoverageFailureError) -> dict[str, str]:
+    if error.cleanup_failure is not None:
+        return dict(error.cleanup_failure)
+    return {
+        "path": "coverage-environment",
+        "operation": "cleanup",
+        "error_type": error.failure_code,
+    }
+
+
+def _preserve_coverage_failure(
+    primary: CoverageFailureError, cleanup: CoverageFailureError
+) -> CoverageFailureError:
+    return CoverageFailureError(
+        primary.stage,
+        primary.language,
+        primary.failure_code,
+        cleanup_failure=primary.cleanup_failure or _coverage_cleanup_failure_detail(cleanup),
+        owner=primary.owner,
+        artifact_cleanup_permitted=primary.artifact_cleanup_permitted,
+    )
+
+
+def _coverage_failure_payload(error: CoverageFailureError) -> dict[str, Any]:
+    owner = error.owner
+    return {
+        "stage": error.stage,
+        "language": error.language,
+        "failure_code": error.failure_code,
+        "owner": (
+            None
+            if owner is None
+            else {
+                "target_platform": owner.target_platform,
+                "owner_kind": owner.owner_kind,
+                "kill_on_close": owner.kill_on_close,
+                "terminal_state": owner.terminal_state,
+            }
+        ),
+        "artifact_cleanup_permitted": error.artifact_cleanup_permitted,
+        "cleanup_failure": error.cleanup_failure,
+    }
 
 
 class CoverageTreeOwnerUnavailableError(RunnerError):
@@ -378,6 +423,111 @@ class CoveragePlan:
         if len(reports) != 1:
             raise RunnerError("Coverage plan does not contain exactly one Python report.")
         return reports[0]
+
+    @property
+    def redacted_transcript_path(self) -> Path:
+        return self.root / "scope" / "scanner-context.redacted.log"
+
+
+@dataclass(frozen=True)
+class _CoveragePathComponent:
+    path: Path
+    mode: int
+    device: int
+    inode: int
+    file_attributes: int
+
+
+@dataclass(frozen=True)
+class _CoveragePathIdentity:
+    components: tuple[_CoveragePathComponent, ...]
+
+    def assert_current(
+        self,
+        *,
+        stage: str,
+        language: str | None,
+        failure_code: str,
+    ) -> None:
+        for component in self.components:
+            try:
+                current = component.path.lstat()
+            except OSError as error:
+                raise CoverageFailureError(stage, language, failure_code) from error
+            current_attributes = getattr(current, "st_file_attributes", 0)
+            if (
+                component.path.is_symlink()
+                or current_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+                or (
+                    current.st_mode,
+                    current.st_dev,
+                    current.st_ino,
+                    current_attributes,
+                )
+                != (
+                    component.mode,
+                    component.device,
+                    component.inode,
+                    component.file_attributes,
+                )
+            ):
+                raise CoverageFailureError(stage, language, failure_code)
+
+
+@dataclass(frozen=True)
+class CoverageRunClaim:
+    root_identity: _CoveragePathIdentity
+    marker_identity: _CoveragePathIdentity
+    transcript_parent_identity: _CoveragePathIdentity
+    marker_sha256: str
+    reserved_transcript_path: Path
+
+    def assert_current(self) -> None:
+        self.root_identity.assert_current(
+            stage="report_validation",
+            language=None,
+            failure_code="COVERAGE_RUN_IDENTITY_DRIFT",
+        )
+        self.marker_identity.assert_current(
+            stage="report_validation",
+            language=None,
+            failure_code="COVERAGE_RUN_IDENTITY_DRIFT",
+        )
+        self.transcript_parent_identity.assert_current(
+            stage="report_validation",
+            language=None,
+            failure_code="COVERAGE_RUN_IDENTITY_DRIFT",
+        )
+        try:
+            transcript_metadata = self.reserved_transcript_path.lstat()
+        except FileNotFoundError:
+            transcript_metadata = None
+        except OSError as error:
+            raise CoverageFailureError(
+                "report_validation", None, "COVERAGE_RUN_IDENTITY_DRIFT"
+            ) from error
+        if transcript_metadata is not None:
+            raise CoverageFailureError("report_validation", None, "COVERAGE_RUN_IDENTITY_DRIFT")
+        try:
+            marker_bytes = self.marker_identity.components[-1].path.read_bytes()
+        except OSError as error:
+            raise CoverageFailureError(
+                "report_validation", None, "COVERAGE_RUN_IDENTITY_DRIFT"
+            ) from error
+        if hashlib.sha256(marker_bytes).hexdigest() != self.marker_sha256:
+            raise CoverageFailureError("report_validation", None, "COVERAGE_RUN_IDENTITY_DRIFT")
+
+
+@dataclass(frozen=True)
+class CoverageEnvironmentClaim:
+    identity: _CoveragePathIdentity
+
+    def assert_current(self) -> None:
+        self.identity.assert_current(
+            stage="python_producer",
+            language="python",
+            failure_code="COVERAGE_ENVIRONMENT_IDENTITY_DRIFT",
+        )
 
 
 def utc_now() -> str:
@@ -1147,14 +1297,17 @@ def clear_generated_artifacts(context: GitContext, environment: Mapping[str, str
 
 
 def clear_claimed_coverage_run(
-    plan: CoveragePlan, context: GitContext, environment: Mapping[str, str]
+    plan: CoveragePlan,
+    context: GitContext,
+    environment: Mapping[str, str],
+    *,
+    claim: CoverageRunClaim,
 ) -> list[str]:
-    """Remove exactly one successfully claimed coverage run."""
+    """Remove one claimed coverage run only while its captured identity persists."""
+    if claim.reserved_transcript_path != plan.redacted_transcript_path:
+        raise CoverageFailureError("report_validation", None, "COVERAGE_RUN_IDENTITY_DRIFT")
+    claim.assert_current()
     _assert_coverage_path(plan.root, plan, context)
-    if not plan.root.exists():
-        return []
-    if plan.root.is_symlink():
-        raise RunnerError("Refusing to remove a claimed coverage run through a symbolic link.")
     relative_path = normalized_repository_relative_path(context, plan.root)
     if is_tracked(context.repository_root, environment, plan.root):
         raise RunnerError("Refusing to remove a tracked claimed coverage run.")
@@ -2233,6 +2386,128 @@ def canonical_coverage_marker_bytes(plan: CoveragePlan, context: GitContext) -> 
     )
 
 
+def _capture_coverage_path_identity(
+    path: Path,
+    trusted_root: Path,
+    *,
+    stage: str,
+    language: str | None,
+    failure_code: str,
+    expected_directory: bool,
+) -> _CoveragePathIdentity:
+    try:
+        relative = path.relative_to(trusted_root)
+    except ValueError as error:
+        raise CoverageFailureError(stage, language, failure_code) from error
+    if not relative.parts:
+        raise CoverageFailureError(stage, language, failure_code)
+    components: list[_CoveragePathComponent] = []
+    current = trusted_root
+    for part in relative.parts:
+        current /= part
+        try:
+            metadata = current.lstat()
+        except OSError as error:
+            raise CoverageFailureError(stage, language, failure_code) from error
+        attributes = getattr(metadata, "st_file_attributes", 0)
+        if current.is_symlink() or attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            raise CoverageFailureError(stage, language, failure_code)
+        components.append(
+            _CoveragePathComponent(
+                current,
+                metadata.st_mode,
+                metadata.st_dev,
+                metadata.st_ino,
+                attributes,
+            )
+        )
+    if expected_directory != stat.S_ISDIR(components[-1].mode):
+        raise CoverageFailureError(stage, language, failure_code)
+    return _CoveragePathIdentity(tuple(components))
+
+
+def _ensure_component_safe_directory(
+    path: Path,
+    trusted_root: Path,
+    *,
+    stage: str,
+    language: str | None,
+    failure_code: str,
+    allow_existing: bool,
+) -> _CoveragePathIdentity:
+    try:
+        relative = path.relative_to(trusted_root)
+    except ValueError as error:
+        raise CoverageFailureError(stage, language, failure_code) from error
+    if not relative.parts:
+        raise CoverageFailureError(stage, language, failure_code)
+    current = trusted_root
+    for index, part in enumerate(relative.parts):
+        current /= part
+        is_final = index == len(relative.parts) - 1
+        try:
+            current.mkdir(exist_ok=not is_final or allow_existing)
+        except FileExistsError as error:
+            if is_final and not allow_existing:
+                raise CoverageFailureError(stage, language, failure_code) from error
+        except OSError as error:
+            raise CoverageFailureError(stage, language, failure_code) from error
+        try:
+            metadata = current.lstat()
+        except OSError as error:
+            raise CoverageFailureError(stage, language, failure_code) from error
+        attributes = getattr(metadata, "st_file_attributes", 0)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            raise CoverageFailureError(stage, language, failure_code)
+    return _capture_coverage_path_identity(
+        path,
+        trusted_root,
+        stage=stage,
+        language=language,
+        failure_code=failure_code,
+        expected_directory=True,
+    )
+
+
+def capture_coverage_run_claim(plan: CoveragePlan, context: GitContext) -> CoverageRunClaim:
+    marker_sha256 = validate_coverage_marker(plan, context)
+    transcript_parent = plan.redacted_transcript_path.parent
+    transcript_parent_identity = _ensure_component_safe_directory(
+        transcript_parent,
+        context.repository_root,
+        stage="report_validation",
+        language=None,
+        failure_code="COVERAGE_RUN_IDENTITY_DRIFT",
+        allow_existing=False,
+    )
+    _assert_coverage_path(plan.redacted_transcript_path, plan, context)
+    return CoverageRunClaim(
+        _capture_coverage_path_identity(
+            plan.root,
+            context.repository_root,
+            stage="report_validation",
+            language=None,
+            failure_code="COVERAGE_RUN_IDENTITY_DRIFT",
+            expected_directory=True,
+        ),
+        _capture_coverage_path_identity(
+            plan.marker_path,
+            context.repository_root,
+            stage="report_validation",
+            language=None,
+            failure_code="COVERAGE_RUN_IDENTITY_DRIFT",
+            expected_directory=False,
+        ),
+        transcript_parent_identity,
+        marker_sha256,
+        plan.redacted_transcript_path,
+    )
+
+
 def _assert_coverage_path(path: Path, plan: CoveragePlan, context: GitContext) -> None:
     try:
         path.relative_to(plan.root)
@@ -2255,10 +2530,26 @@ def _assert_coverage_path(path: Path, plan: CoveragePlan, context: GitContext) -
 
 
 def _assert_claimed_coverage_path(path: Path, plan: CoveragePlan, context: GitContext) -> None:
-    if path.is_symlink() or plan.root.is_symlink():
-        raise CoverageFailureError("report_validation", None, "COVERAGE_SYMLINK_REJECTED")
     try:
-        path.relative_to(plan.root)
+        relative = path.relative_to(plan.root)
+    except ValueError as error:
+        raise CoverageFailureError("report_validation", None, "COVERAGE_PATH_ESCAPE") from error
+    current = plan.root
+    components = [current]
+    for part in relative.parts:
+        current /= part
+        components.append(current)
+    for component in components:
+        try:
+            metadata = component.lstat()
+        except FileNotFoundError:
+            break
+        except OSError as error:
+            raise CoverageFailureError("report_validation", None, "COVERAGE_PATH_ESCAPE") from error
+        attributes = getattr(metadata, "st_file_attributes", 0)
+        if stat.S_ISLNK(metadata.st_mode) or attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            raise CoverageFailureError("report_validation", None, "COVERAGE_SYMLINK_REJECTED")
+    try:
         resolved_repository_root = context.repository_root.resolve()
         resolved_root = plan.root.resolve()
         resolved_path = path.resolve()
@@ -2269,17 +2560,28 @@ def _assert_claimed_coverage_path(path: Path, plan: CoveragePlan, context: GitCo
 
 
 def claim_coverage_run(plan: CoveragePlan, context: GitContext) -> str:
-    if plan.root.exists() or plan.root.is_symlink():
-        raise RunnerError("coverage run directory is unavailable.")
+    _ensure_component_safe_directory(
+        plan.root.parent,
+        context.repository_root,
+        stage="report_validation",
+        language=None,
+        failure_code="COVERAGE_RUN_IDENTITY_DRIFT",
+        allow_existing=True,
+    )
+    _ensure_component_safe_directory(
+        plan.root,
+        context.repository_root,
+        stage="report_validation",
+        language=None,
+        failure_code="COVERAGE_RUN_IDENTITY_DRIFT",
+        allow_existing=False,
+    )
     try:
-        plan.root.parent.mkdir(parents=True, exist_ok=True)
-        _assert_coverage_path(plan.root, plan, context)
-        plan.root.mkdir(exist_ok=False)
         _assert_coverage_path(plan.marker_path, plan, context)
         plan.marker_path.write_bytes(canonical_coverage_marker_bytes(plan, context))
     except RunnerError:
         raise
-    except (FileExistsError, OSError) as error:
+    except OSError as error:
         raise RunnerError("coverage run directory is unavailable.") from error
     return validate_coverage_marker(plan, context)
 
@@ -2521,7 +2823,14 @@ def _coverage_evidence_from_bindings(
     }
 
 
-def validate_coverage_evidence(plan: CoveragePlan, context: GitContext) -> dict[str, Any]:
+def validate_coverage_evidence(
+    plan: CoveragePlan,
+    context: GitContext,
+    *,
+    claim: CoverageRunClaim | None = None,
+) -> dict[str, Any]:
+    if claim is not None:
+        claim.assert_current()
     return _coverage_evidence_from_bindings(
         plan,
         context,
@@ -2533,6 +2842,7 @@ def validate_coverage_evidence(plan: CoveragePlan, context: GitContext) -> dict[
 class _SealedCoverageReport:
     report: CoverageReportPlan
     stream: Any
+    identity: _CoveragePathIdentity
     sha256: str
     byte_count: int
 
@@ -2565,10 +2875,16 @@ class SealedCoverageEvidence:
     context: GitContext
     evidence: dict[str, Any]
     reports: tuple[_SealedCoverageReport, ...]
+    claim: CoverageRunClaim | None = None
 
     def assert_unchanged(self) -> None:
         bindings = []
         for sealed in self.reports:
+            sealed.identity.assert_current(
+                stage="report_validation",
+                language=sealed.report.language,
+                failure_code="COVERAGE_REPORT_SEAL_IDENTITY_DRIFT",
+            )
             contents = sealed.read_bytes()
             if (
                 len(contents) != sealed.byte_count
@@ -2582,6 +2898,36 @@ class SealedCoverageEvidence:
             )
         if _coverage_evidence_from_bindings(self.plan, self.context, bindings) != self.evidence:
             raise CoverageFailureError("report_validation", None, "COVERAGE_REPORT_SEAL_DRIFT")
+
+    def revalidate_after_close(self) -> dict[str, Any]:
+        if self.claim is not None:
+            self.claim.assert_current()
+        bindings = []
+        for sealed in self.reports:
+            if not sealed.stream.closed:
+                raise CoverageFailureError(
+                    "report_validation", sealed.report.language, "COVERAGE_REPORT_SEAL_UNREADABLE"
+                )
+            sealed.identity.assert_current(
+                stage="report_validation",
+                language=sealed.report.language,
+                failure_code="COVERAGE_REPORT_SEAL_IDENTITY_DRIFT",
+            )
+            contents = _coverage_file_bytes(self.plan, self.context, sealed.report)
+            if (
+                len(contents) != sealed.byte_count
+                or hashlib.sha256(contents).hexdigest() != sealed.sha256
+            ):
+                raise CoverageFailureError(
+                    "report_validation", sealed.report.language, "COVERAGE_REPORT_SEAL_DRIFT"
+                )
+            bindings.append(
+                _coverage_report_binding_from_contents(self.context, sealed.report, contents)
+            )
+        evidence = _coverage_evidence_from_bindings(self.plan, self.context, bindings)
+        if evidence != self.evidence:
+            raise CoverageFailureError("report_validation", None, "COVERAGE_REPORT_SEAL_DRIFT")
+        return evidence
 
     def close(self) -> None:
         errors: list[CoverageFailureError] = []
@@ -2602,6 +2948,7 @@ def _seal_coverage_report(
             "report_validation", report.language, "COVERAGE_REPORT_SEAL_UNAVAILABLE"
         )
     _assert_claimed_coverage_path(report.absolute_path, plan, context)
+    stream: Any | None = None
     try:
         import msvcrt
         from ctypes import wintypes
@@ -2649,14 +2996,32 @@ def _seal_coverage_report(
         if not stat.S_ISREG(file_status.st_mode):
             stream.close()
             raise OSError("Coverage report is not regular")
-        sealed = _SealedCoverageReport(report, stream, "", 0)
+        identity = _capture_coverage_path_identity(
+            report.absolute_path,
+            context.repository_root,
+            stage="report_validation",
+            language=report.language,
+            failure_code="COVERAGE_REPORT_SEAL_IDENTITY_DRIFT",
+            expected_directory=False,
+        )
+        sealed = _SealedCoverageReport(report, stream, identity, "", 0)
         contents = sealed.read_bytes()
         sealed.sha256 = hashlib.sha256(contents).hexdigest()
         sealed.byte_count = len(contents)
         return sealed
     except CoverageFailureError:
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError:
+                pass
         raise
     except OSError as error:
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError:
+                pass
         raise CoverageFailureError(
             "report_validation", report.language, "COVERAGE_REPORT_SEAL_UNAVAILABLE"
         ) from error
@@ -2664,11 +3029,16 @@ def _seal_coverage_report(
 
 @contextmanager
 def sealed_coverage_evidence(
-    plan: CoveragePlan, context: GitContext
+    plan: CoveragePlan,
+    context: GitContext,
+    *,
+    claim: CoverageRunClaim | None = None,
 ) -> Iterator[SealedCoverageEvidence]:
     sealed_reports: list[_SealedCoverageReport] = []
     sealed: SealedCoverageEvidence | None = None
     try:
+        if claim is not None:
+            claim.assert_current()
         for report in plan.reports:
             sealed_reports.append(_seal_coverage_report(plan, context, report))
         bindings = [
@@ -2680,6 +3050,7 @@ def sealed_coverage_evidence(
             context,
             _coverage_evidence_from_bindings(plan, context, bindings),
             tuple(sealed_reports),
+            claim,
         )
         yield sealed
     finally:
@@ -2711,12 +3082,28 @@ def coverage_environment_directory(context: GitContext, plan: CoveragePlan) -> P
         / plan.run_id
     )
     try:
-        directory.resolve(strict=False).relative_to(context.coordination_root.resolve())
-    except (OSError, ValueError) as error:
+        directory.relative_to(context.coordination_root)
+    except ValueError as error:
         raise CoverageFailureError(
             "python_producer", "python", "COVERAGE_ENVIRONMENT_PATH_ESCAPE"
         ) from error
     return directory
+
+
+def capture_coverage_environment_claim(
+    context: GitContext, plan: CoveragePlan
+) -> CoverageEnvironmentClaim:
+    directory = coverage_environment_directory(context, plan)
+    return CoverageEnvironmentClaim(
+        _capture_coverage_path_identity(
+            directory,
+            context.coordination_root,
+            stage="python_producer",
+            language="python",
+            failure_code="COVERAGE_ENVIRONMENT_IDENTITY_DRIFT",
+            expected_directory=True,
+        )
+    )
 
 
 def coverage_python_executable(environment_directory: Path) -> Path:
@@ -2725,14 +3112,18 @@ def coverage_python_executable(environment_directory: Path) -> Path:
     return environment_directory / "bin" / "python"
 
 
-def clear_coverage_environment(context: GitContext, plan: CoveragePlan) -> None:
+def clear_coverage_environment(
+    context: GitContext,
+    plan: CoveragePlan,
+    *,
+    claim: CoverageEnvironmentClaim,
+) -> None:
     directory = coverage_environment_directory(context, plan)
-    if directory.is_symlink():
+    if claim.identity.components[-1].path != directory:
         raise CoverageFailureError(
-            "python_producer", "python", "COVERAGE_ENVIRONMENT_SYMLINK_REJECTED"
+            "python_producer", "python", "COVERAGE_ENVIRONMENT_IDENTITY_DRIFT"
         )
-    if not directory.exists():
-        return
+    claim.assert_current()
     try:
         shutil.rmtree(directory)
     except OSError as error:
@@ -2825,10 +3216,21 @@ def run_coverage_producers(
     environment: Mapping[str, str],
     secrets: Collection[str],
     deadline: float,
-) -> None:
+    *,
+    claim: CoverageRunClaim | None = None,
+) -> CoverageEnvironmentClaim:
     for report in plan.reports:
+        if claim is not None:
+            claim.assert_current()
         try:
-            report.absolute_path.parent.mkdir(parents=True, exist_ok=True)
+            _ensure_component_safe_directory(
+                report.absolute_path.parent,
+                context.repository_root,
+                stage="report_validation",
+                language=report.language,
+                failure_code="COVERAGE_SYMLINK_REJECTED",
+                allow_existing=True,
+            )
             _assert_claimed_coverage_path(report.absolute_path.parent, plan, context)
         except RunnerError:
             raise
@@ -2844,7 +3246,12 @@ def run_coverage_producers(
     )
     coverage_command_count = len(plan.dotnet_reports)
     dotnet_environment = coverage_dotnet_environment(context, plan, environment)
+    environment_claim: CoverageEnvironmentClaim | None = None
     for index, command in enumerate(commands):
+        if claim is not None:
+            claim.assert_current()
+        if environment_claim is not None:
+            environment_claim.assert_current()
         if index < len(metadata):
             label, stage, language = metadata[index]
         elif index < len(metadata) + coverage_command_count:
@@ -2866,6 +3273,13 @@ def run_coverage_producers(
             stage=stage,
             language=language,
         )
+        if index == 0:
+            environment_claim = capture_coverage_environment_claim(context, plan)
+    if environment_claim is None:
+        raise CoverageFailureError(
+            "python_producer", "python", "COVERAGE_ENVIRONMENT_IDENTITY_DRIFT"
+        )
+    return environment_claim
 
 
 def produce_coverage(
@@ -2873,19 +3287,50 @@ def produce_coverage(
     plan: CoveragePlan,
     clean_environment: Mapping[str, str],
     secrets: Collection[str],
+    *,
+    claim: CoverageRunClaim | None = None,
 ) -> dict[str, Any]:
+    environment_path = coverage_environment_directory(context, plan)
+    _ensure_component_safe_directory(
+        environment_path.parent,
+        context.coordination_root,
+        stage="python_producer",
+        language="python",
+        failure_code="COVERAGE_ENVIRONMENT_IDENTITY_DRIFT",
+        allow_existing=True,
+    )
     environment = coverage_environment(context, plan, clean_environment)
+    if claim is not None:
+        claim.assert_current()
+    environment_claim: CoverageEnvironmentClaim | None = None
+    primary_error: CoverageFailureError | None = None
     try:
-        run_coverage_producers(
+        environment_claim = run_coverage_producers(
             context,
             plan,
             environment=environment,
             secrets=secrets,
             deadline=time.monotonic() + COVERAGE_PRODUCER_TIMEOUT_SECONDS,
+            claim=claim,
         )
-        return validate_coverage_evidence(plan, context)
+        return validate_coverage_evidence(plan, context, claim=claim)
+    except CoverageFailureError as error:
+        primary_error = error
+        raise
     finally:
-        clear_coverage_environment(context, plan)
+        if primary_error is None or primary_error.artifact_cleanup_permitted:
+            try:
+                environment_path = coverage_environment_directory(context, plan)
+                if environment_claim is None and (
+                    environment_path.exists() or environment_path.is_symlink()
+                ):
+                    environment_claim = capture_coverage_environment_claim(context, plan)
+                if environment_claim is not None:
+                    clear_coverage_environment(context, plan, claim=environment_claim)
+            except CoverageFailureError as cleanup_error:
+                if primary_error is None:
+                    raise
+                raise _preserve_coverage_failure(primary_error, cleanup_error) from cleanup_error
 
 
 def discover_scanner(override: str | None) -> list[str]:
@@ -4806,16 +5251,33 @@ def execute(role: str, scanner_override: str | None) -> Path:
     receipt = receipt_base(context, target, run_id)
     secrets = sonar_secret_values(inherited_environment)
     coverage_plan: CoveragePlan | None = None
-    coverage_run_claimed = False
+    coverage_run_claim: CoverageRunClaim | None = None
     coverage_cleanup_attempted = False
 
-    def record_claimed_coverage_cleanup() -> RunnerError | None:
-        nonlocal coverage_cleanup_attempted, coverage_run_claimed
-        if coverage_plan is None or not coverage_run_claimed or coverage_cleanup_attempted:
+    def record_claimed_coverage_cleanup(
+        causal_error: RunnerError | None = None,
+    ) -> RunnerError | None:
+        nonlocal coverage_cleanup_attempted, coverage_run_claim
+        if coverage_plan is None or coverage_run_claim is None or coverage_cleanup_attempted:
             return None
         coverage_cleanup_attempted = True
+        if (
+            isinstance(causal_error, CoverageFailureError)
+            and not causal_error.artifact_cleanup_permitted
+        ):
+            receipt["coverage_run_cleanup"] = {
+                "status": "BLOCKED",
+                "removed": [],
+                "failure": {"error": "COVERAGE_ARTIFACT_CLEANUP_WITHHELD"},
+            }
+            return None
         try:
-            removed = clear_claimed_coverage_run(coverage_plan, context, clean_environment)
+            removed = clear_claimed_coverage_run(
+                coverage_plan,
+                context,
+                clean_environment,
+                claim=coverage_run_claim,
+            )
         except RunnerError as error:
             failure: dict[str, Any] = {"error": str(error)}
             if isinstance(error, GeneratedArtifactCleanupError):
@@ -4836,7 +5298,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
             }
             return error
         receipt["coverage_run_cleanup"] = {"status": "PASS", "removed": removed}
-        coverage_run_claimed = False
+        coverage_run_claim = None
         return None
 
     recovery_credentials: dict[str, str] | None = None
@@ -4908,7 +5370,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
                 credential_input_names=("SONAR_TOKEN",),
             )
             claim_coverage_run(coverage_plan, context)
-            coverage_run_claimed = True
+            coverage_run_claim = capture_coverage_run_claim(coverage_plan, context)
             receipt["scanner_metadata"] = scanner_metadata(
                 context.repository_root, context.head, release_version
             )
@@ -4939,8 +5401,18 @@ def execute(role: str, scanner_override: str | None) -> Path:
                     secrets=secrets,
                     label=f"Standalone project build ({project.name})",
                 )
-            produce_coverage(context, coverage_plan, clean_environment, secrets)
-            with sealed_coverage_evidence(coverage_plan, context) as sealed:
+            produce_coverage(
+                context,
+                coverage_plan,
+                clean_environment,
+                secrets,
+                claim=coverage_run_claim,
+            )
+            with sealed_coverage_evidence(
+                coverage_plan,
+                context,
+                claim=coverage_run_claim,
+            ) as sealed:
                 receipt["coverage"] = sealed.evidence
                 lease.checkpoint("SCANNER_END_IN_FLIGHT")
                 run_process(
@@ -4952,7 +5424,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
                     credential_input_names=("SONAR_TOKEN",),
                 )
                 sealed.assert_unchanged()
-            post_end_coverage = validate_coverage_evidence(coverage_plan, context)
+            post_end_coverage = sealed.revalidate_after_close()
             if post_end_coverage != receipt["coverage"]:
                 raise CoverageFailureError("report_validation", None, "COVERAGE_REPORT_SEAL_DRIFT")
             receipt["task_report"] = report_task(
@@ -5045,7 +5517,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
             validate_pass_receipt(receipt)
             publish_receipt()
         except ApiHttpError as error:
-            record_claimed_coverage_cleanup()
+            record_claimed_coverage_cleanup(error)
             if error.status in {401, 403}:
                 credential_error = CredentialsUnavailable(error.input_name)
                 receipt["outcome"] = "BLOCKED"
@@ -5059,7 +5531,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
             publish_receipt()
             raise
         except GeneratedArtifactCleanupError as error:
-            record_claimed_coverage_cleanup()
+            record_claimed_coverage_cleanup(error)
             receipt["outcome"] = "BLOCKED"
             receipt["cleanup"] = {
                 "status": "BLOCKED",
@@ -5084,9 +5556,11 @@ def execute(role: str, scanner_override: str | None) -> Path:
             publish_receipt()
             raise
         except RunnerError as error:
-            record_claimed_coverage_cleanup()
+            record_claimed_coverage_cleanup(error)
             receipt["outcome"] = "BLOCKED"
             receipt["failure"] = str(error)
+            if isinstance(error, CoverageFailureError):
+                receipt["coverage_failure"] = _coverage_failure_payload(error)
             receipt["completed_at"] = utc_now()
             publish_receipt()
             raise

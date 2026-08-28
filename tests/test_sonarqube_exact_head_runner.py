@@ -44,6 +44,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
             def assert_unchanged():
                 return None
 
+            def revalidate_after_close(self):
+                return self.evidence
+
         return nullcontext(Seal())
 
     def test_build_environment_scrubs_all_sonar_credentials(self):
@@ -262,11 +265,39 @@ class TestSonarqubeExactHeadRunner(TestCase):
             coverage_environment = Path(environment["UV_PROJECT_ENVIRONMENT"])
             coverage_environment.mkdir(parents=True)
             (coverage_environment / "marker.txt").write_text("owned", encoding="utf-8")
+            claim = runner.capture_coverage_environment_claim(context, plan)
 
-            runner.clear_coverage_environment(context, plan)
+            runner.clear_coverage_environment(context, plan, claim=claim)
 
             self.assertFalse(coverage_environment.exists())
             self.assertTrue((coordination_root / ".agent" / "tmp").is_dir())
+
+    def test_coverage_environment_cleanup_refuses_same_path_replacement(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "scanner-worktree"
+            coordination_root = Path(temporary_directory) / "coordination-root"
+            root.mkdir()
+            coordination_root.mkdir()
+            context = runner.GitContext(
+                root, coordination_root / ".git", root / ".git", coordination_root, "a" * 40
+            )
+            plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000071")
+            environment_path = runner.coverage_environment_directory(context, plan)
+            environment_path.mkdir(parents=True)
+            (environment_path / "owned.txt").write_text("owned", encoding="utf-8")
+            claim = runner.capture_coverage_environment_claim(context, plan)
+            replacement = coordination_root / "replacement-environment"
+            environment_path.rename(replacement)
+            environment_path.mkdir(parents=True)
+            (environment_path / "replacement.txt").write_text("replacement", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                runner.CoverageFailureError, "COVERAGE_ENVIRONMENT_IDENTITY_DRIFT"
+            ):
+                runner.clear_coverage_environment(context, plan, claim=claim)
+
+            self.assertTrue((environment_path / "replacement.txt").is_file())
+            self.assertTrue((replacement / "owned.txt").is_file())
 
     def test_produce_coverage_cleans_external_environment_after_failure(self):
         with TemporaryDirectory() as temporary_directory:
@@ -294,6 +325,119 @@ class TestSonarqubeExactHeadRunner(TestCase):
 
             self.assertFalse(coverage_environment.exists())
 
+    def test_produce_coverage_preserves_failure_when_environment_cleanup_fails(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "scanner-worktree"
+            coordination_root = Path(temporary_directory) / "coordination-root"
+            root.mkdir()
+            coordination_root.mkdir()
+            context = runner.GitContext(
+                root, coordination_root / ".git", root / ".git", coordination_root, "a" * 40
+            )
+            plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000075")
+            environment_path = runner.coverage_environment_directory(context, plan)
+            environment_path.mkdir(parents=True)
+            producer_failure = runner.CoverageFailureError(
+                "python_producer", "python", "COVERAGE_PROCESS_FAILED"
+            )
+            cleanup_failure = runner.CoverageFailureError(
+                "python_producer", "python", "COVERAGE_ENVIRONMENT_CLEANUP_FAILED"
+            )
+
+            with (
+                patch.object(runner, "run_coverage_producers", side_effect=producer_failure),
+                patch.object(runner, "clear_coverage_environment", side_effect=cleanup_failure),
+                self.assertRaisesRegex(
+                    runner.CoverageFailureError, "COVERAGE_PROCESS_FAILED"
+                ) as raised,
+            ):
+                runner.produce_coverage(context, plan, {"SAFE": "kept"}, ())
+
+            self.assertEqual(
+                raised.exception.cleanup_failure,
+                {
+                    "path": "coverage-environment",
+                    "operation": "cleanup",
+                    "error_type": "COVERAGE_ENVIRONMENT_CLEANUP_FAILED",
+                },
+            )
+
+    def test_produce_coverage_withholds_environment_cleanup_for_unproven_owner(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "scanner-worktree"
+            coordination_root = Path(temporary_directory) / "coordination-root"
+            root.mkdir()
+            coordination_root.mkdir()
+            context = runner.GitContext(
+                root, coordination_root / ".git", root / ".git", coordination_root, "a" * 40
+            )
+            plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000076")
+            environment_path = runner.coverage_environment_directory(context, plan)
+            environment_path.mkdir(parents=True)
+            owner_failure = runner.CoverageFailureError(
+                "process_owner",
+                "python",
+                "COVERAGE_PROCESS_TREE_OWNERSHIP_LOST",
+                owner=runner.CoverageTreeObservation("windows", "job_object", None),
+                artifact_cleanup_permitted=False,
+            )
+
+            with (
+                patch.object(runner, "run_coverage_producers", side_effect=owner_failure),
+                patch.object(
+                    runner,
+                    "clear_coverage_environment",
+                    side_effect=AssertionError("cleanup must be withheld"),
+                ) as cleanup,
+                self.assertRaisesRegex(
+                    runner.CoverageFailureError, "COVERAGE_PROCESS_TREE_OWNERSHIP_LOST"
+                ),
+            ):
+                runner.produce_coverage(context, plan, {"SAFE": "kept"}, ())
+
+            cleanup.assert_not_called()
+            self.assertTrue(environment_path.is_dir())
+
+    def test_produce_coverage_rejects_reparse_environment_ancestor_before_child(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "scanner-worktree"
+            coordination_root = Path(temporary_directory) / "coordination-root"
+            root.mkdir()
+            coordination_root.mkdir()
+            context = runner.GitContext(
+                root, coordination_root / ".git", root / ".git", coordination_root, "a" * 40
+            )
+            plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000080")
+            agent_root = coordination_root / ".agent"
+            agent_root.mkdir()
+            original_lstat = type(agent_root).lstat
+
+            class ReparseMetadata:
+                def __init__(self, metadata):
+                    self.st_mode = metadata.st_mode
+                    self.st_dev = metadata.st_dev
+                    self.st_ino = metadata.st_ino
+                    self.st_file_attributes = stat.FILE_ATTRIBUTE_REPARSE_POINT
+
+            def nonfollowing_lstat(path):
+                metadata = original_lstat(path)
+                return ReparseMetadata(metadata) if path == agent_root else metadata
+
+            with (
+                patch.object(type(agent_root), "lstat", new=nonfollowing_lstat),
+                patch.object(
+                    runner,
+                    "run_coverage_producers",
+                    side_effect=AssertionError("producer must not start"),
+                ) as producers,
+                self.assertRaisesRegex(
+                    runner.CoverageFailureError, "COVERAGE_ENVIRONMENT_IDENTITY_DRIFT"
+                ),
+            ):
+                runner.produce_coverage(context, plan, {"SAFE": "kept"}, ())
+
+            producers.assert_not_called()
+
     def test_run_coverage_producers_owns_all_commands(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -307,6 +451,8 @@ class TestSonarqubeExactHeadRunner(TestCase):
 
             def record(command, **kwargs):
                 calls.append((command, kwargs))
+                if command[:2] == ["uv", "sync"]:
+                    runner.coverage_environment_directory(context, plan).mkdir(parents=True)
 
             with patch.object(runner, "run_coverage_process", side_effect=record):
                 runner.run_coverage_producers(
@@ -343,6 +489,130 @@ class TestSonarqubeExactHeadRunner(TestCase):
             )
         )
 
+    def test_report_parent_creation_rejects_reparse_before_producer(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
+            plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000082")
+            runner.claim_coverage_run(plan, context)
+            claim = runner.capture_coverage_run_claim(plan, context)
+            report_parent = plan.reports[0].absolute_path.parent
+            report_parent.mkdir(parents=True)
+            original_lstat = type(report_parent).lstat
+
+            class ReparseMetadata:
+                def __init__(self, metadata):
+                    self.st_mode = metadata.st_mode
+                    self.st_dev = metadata.st_dev
+                    self.st_ino = metadata.st_ino
+                    self.st_file_attributes = stat.FILE_ATTRIBUTE_REPARSE_POINT
+
+            def nonfollowing_lstat(path):
+                metadata = original_lstat(path)
+                return ReparseMetadata(metadata) if path == report_parent else metadata
+
+            with (
+                patch.object(type(report_parent), "lstat", new=nonfollowing_lstat),
+                patch.object(
+                    runner,
+                    "run_coverage_process",
+                    side_effect=AssertionError("producer must not start"),
+                ) as producer,
+                self.assertRaisesRegex(runner.CoverageFailureError, "COVERAGE_SYMLINK_REJECTED"),
+            ):
+                runner.run_coverage_producers(
+                    context,
+                    plan,
+                    runner.coverage_environment(context, plan, {"SAFE": "kept"}),
+                    (),
+                    runner.time.monotonic() + 60,
+                    claim=claim,
+                )
+
+            producer.assert_not_called()
+
+    def test_coverage_producers_refuse_claim_drift_between_children(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
+            plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000073")
+            runner.claim_coverage_run(plan, context)
+            claim = runner.capture_coverage_run_claim(plan, context)
+            environment = runner.coverage_environment(context, plan, {"SAFE": "kept"})
+            calls = []
+
+            def record(command, **kwargs):
+                calls.append((command, kwargs))
+                if len(calls) == 1:
+                    runner.coverage_environment_directory(context, plan).mkdir(parents=True)
+                    replacement = root / "replaced-coverage-run"
+                    plan.root.rename(replacement)
+                    plan.root.mkdir()
+                    plan.marker_path.write_bytes(
+                        runner.canonical_coverage_marker_bytes(plan, context)
+                    )
+
+            with patch.object(runner, "run_coverage_process", side_effect=record):
+                with self.assertRaisesRegex(
+                    runner.CoverageFailureError, "COVERAGE_RUN_IDENTITY_DRIFT"
+                ):
+                    runner.run_coverage_producers(
+                        context,
+                        plan,
+                        environment,
+                        (),
+                        runner.time.monotonic() + 60,
+                        claim=claim,
+                    )
+
+            self.assertEqual(len(calls), 1)
+
+    def test_coverage_producers_refuse_environment_drift_between_children(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
+            plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000074")
+            runner.claim_coverage_run(plan, context)
+            claim = runner.capture_coverage_run_claim(plan, context)
+            environment = runner.coverage_environment(context, plan, {"SAFE": "kept"})
+            environment_path = runner.coverage_environment_directory(context, plan)
+            calls = []
+            original_capture = runner.capture_coverage_environment_claim
+
+            def record(command, **kwargs):
+                calls.append((command, kwargs))
+                if len(calls) == 1:
+                    environment_path.mkdir(parents=True)
+
+            def capture_environment(_context, _plan):
+                environment_claim = original_capture(_context, _plan)
+                replacement = root / "replaced-environment"
+                environment_path.rename(replacement)
+                environment_path.mkdir(parents=True)
+                return environment_claim
+
+            with (
+                patch.object(runner, "run_coverage_process", side_effect=record),
+                patch.object(
+                    runner,
+                    "capture_coverage_environment_claim",
+                    side_effect=capture_environment,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    runner.CoverageFailureError, "COVERAGE_ENVIRONMENT_IDENTITY_DRIFT"
+                ):
+                    runner.run_coverage_producers(
+                        context,
+                        plan,
+                        environment,
+                        (),
+                        runner.time.monotonic() + 60,
+                        claim=claim,
+                    )
+
+            self.assertEqual(len(calls), 1)
+
     def test_produce_coverage_binds_owned_producers_and_evidence(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -350,7 +620,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
             plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000009")
             expected = {"evidence_sets": [{"language": "dotnet"}, {"language": "python"}]}
             with (
-                patch.object(runner, "run_coverage_producers") as producers,
+                patch.object(runner, "run_coverage_producers", return_value=None) as producers,
                 patch.object(runner, "validate_coverage_evidence", return_value=expected),
             ):
                 evidence = runner.produce_coverage(context, plan, {"SONAR_TOKEN": "secret"}, ())
@@ -366,7 +636,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
             plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000010")
             with (
                 patch.object(runner.time, "monotonic", return_value=100.0),
-                patch.object(runner, "run_coverage_producers") as producers,
+                patch.object(runner, "run_coverage_producers", return_value=None) as producers,
                 patch.object(
                     runner, "validate_coverage_evidence", return_value={"evidence_sets": []}
                 ),
@@ -475,8 +745,36 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 context, "00000000-0000-4000-8000-000000000004"
             )
             stale_plan.root.mkdir(parents=True)
-            with self.assertRaisesRegex(runner.RunnerError, "coverage run directory"):
+            with self.assertRaisesRegex(runner.CoverageFailureError, "COVERAGE_RUN_IDENTITY_DRIFT"):
                 runner.claim_coverage_run(stale_plan, context)
+
+    def test_coverage_run_claim_rejects_reparse_parent_before_creation(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
+            plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000081")
+            temporary_root = root / ".tmp"
+            temporary_root.mkdir()
+            original_lstat = type(temporary_root).lstat
+
+            class ReparseMetadata:
+                def __init__(self, metadata):
+                    self.st_mode = metadata.st_mode
+                    self.st_dev = metadata.st_dev
+                    self.st_ino = metadata.st_ino
+                    self.st_file_attributes = stat.FILE_ATTRIBUTE_REPARSE_POINT
+
+            def nonfollowing_lstat(path):
+                metadata = original_lstat(path)
+                return ReparseMetadata(metadata) if path == temporary_root else metadata
+
+            with patch.object(type(temporary_root), "lstat", new=nonfollowing_lstat):
+                with self.assertRaisesRegex(
+                    runner.CoverageFailureError, "COVERAGE_RUN_IDENTITY_DRIFT"
+                ):
+                    runner.claim_coverage_run(plan, context)
+
+            self.assertFalse(plan.root.parent.exists())
 
     def test_claimed_coverage_run_cleanup_preserves_siblings(self):
         with TemporaryDirectory() as temporary_directory:
@@ -484,6 +782,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
             context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
             plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000012")
             runner.claim_coverage_run(plan, context)
+            claim = runner.capture_coverage_run_claim(plan, context)
             sibling_run = plan.root.parent / "other-run"
             sibling_run.mkdir()
             sibling_marker = sibling_run / "marker.txt"
@@ -492,7 +791,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
             unrelated.write_text("preserve", encoding="utf-8")
 
             with patch.object(runner, "is_tracked", return_value=False):
-                removed = runner.clear_claimed_coverage_run(plan, context, {})
+                removed = runner.clear_claimed_coverage_run(plan, context, {}, claim=claim)
 
             self.assertEqual(
                 removed,
@@ -501,6 +800,70 @@ class TestSonarqubeExactHeadRunner(TestCase):
             self.assertFalse(plan.root.exists())
             self.assertEqual(sibling_marker.read_text(encoding="utf-8"), "preserve")
             self.assertEqual(unrelated.read_text(encoding="utf-8"), "preserve")
+
+    def test_claimed_coverage_run_cleanup_refuses_same_path_replacement(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
+            plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000072")
+            runner.claim_coverage_run(plan, context)
+            claim = runner.capture_coverage_run_claim(plan, context)
+            replacement = root / "replaced-coverage-run"
+            plan.root.rename(replacement)
+            plan.root.mkdir()
+            plan.marker_path.write_bytes(runner.canonical_coverage_marker_bytes(plan, context))
+
+            with self.assertRaisesRegex(runner.CoverageFailureError, "COVERAGE_RUN_IDENTITY_DRIFT"):
+                runner.clear_claimed_coverage_run(plan, context, {}, claim=claim)
+
+            self.assertTrue(plan.marker_path.is_file())
+            self.assertTrue((replacement / "coverage-run.json").is_file())
+
+    def test_claimed_coverage_run_refuses_replaced_transcript_parent(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
+            plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000077")
+            runner.claim_coverage_run(plan, context)
+            claim = runner.capture_coverage_run_claim(plan, context)
+            transcript_parent = plan.redacted_transcript_path.parent
+            self.assertTrue(transcript_parent.is_dir())
+            replacement = root / "replaced-transcript-parent"
+            transcript_parent.rename(replacement)
+            transcript_parent.mkdir()
+
+            with self.assertRaisesRegex(runner.CoverageFailureError, "COVERAGE_RUN_IDENTITY_DRIFT"):
+                claim.assert_current()
+
+            self.assertTrue(transcript_parent.is_dir())
+            self.assertTrue(replacement.is_dir())
+
+    def test_claimed_path_rejects_reparse_intermediate_component(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
+            plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000078")
+            runner.claim_coverage_run(plan, context)
+            report_parent = plan.python_report.absolute_path.parent
+            report_parent.mkdir(parents=True)
+            original_lstat = type(report_parent).lstat
+
+            class ReparseMetadata:
+                def __init__(self, metadata):
+                    self.st_mode = metadata.st_mode
+                    self.st_dev = metadata.st_dev
+                    self.st_ino = metadata.st_ino
+                    self.st_file_attributes = stat.FILE_ATTRIBUTE_REPARSE_POINT
+
+            def nonfollowing_lstat(path):
+                metadata = original_lstat(path)
+                return ReparseMetadata(metadata) if path == report_parent else metadata
+
+            with patch.object(type(report_parent), "lstat", new=nonfollowing_lstat):
+                with self.assertRaisesRegex(
+                    runner.CoverageFailureError, "COVERAGE_SYMLINK_REJECTED"
+                ):
+                    runner._assert_claimed_coverage_path(report_parent, plan, context)
 
     def test_coverage_evidence_binds_reports_sources_and_marker(self):
         with TemporaryDirectory() as temporary_directory:
@@ -582,12 +945,64 @@ class TestSonarqubeExactHeadRunner(TestCase):
                     encoding="utf-8",
                 )
 
+            original_bytes = plan.python_report.absolute_path.read_bytes()
             with runner.sealed_coverage_evidence(plan, context) as sealed:
                 with self.assertRaises(OSError):
                     plan.python_report.absolute_path.write_text("forged", encoding="utf-8")
                 sealed.assert_unchanged()
 
-            plan.python_report.absolute_path.write_text("rewritten", encoding="utf-8")
+            replacement = plan.python_report.absolute_path.with_name("replacement.opencover.xml")
+            replacement.write_bytes(original_bytes)
+            plan.python_report.absolute_path.unlink()
+            replacement.replace(plan.python_report.absolute_path)
+            with self.assertRaisesRegex(
+                runner.CoverageFailureError, "COVERAGE_REPORT_SEAL_IDENTITY_DRIFT"
+            ):
+                sealed.revalidate_after_close()
+
+    def test_windows_report_seal_closes_stream_when_identity_capture_refuses(self):
+        if runner.os.name != "nt":
+            self.skipTest("Windows report sealing fixture")
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
+            plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000079")
+            runner.claim_coverage_run(plan, context)
+            report = plan.python_report
+            report.absolute_path.parent.mkdir(parents=True)
+            report.absolute_path.write_bytes(b"report")
+            streams = []
+            original_fdopen = runner.os.fdopen
+            failure = runner.CoverageFailureError(
+                "report_validation", "python", "COVERAGE_REPORT_SEAL_IDENTITY_DRIFT"
+            )
+
+            def retain_fdopen(*args, **kwargs):
+                stream = original_fdopen(*args, **kwargs)
+                streams.append(stream)
+                return stream
+
+            try:
+                with (
+                    patch.object(runner.os, "fdopen", side_effect=retain_fdopen),
+                    patch.object(
+                        runner,
+                        "_capture_coverage_path_identity",
+                        side_effect=failure,
+                    ),
+                    self.assertRaisesRegex(
+                        runner.CoverageFailureError, "COVERAGE_REPORT_SEAL_IDENTITY_DRIFT"
+                    ),
+                ):
+                    runner._seal_coverage_report(plan, context, report)
+
+                self.assertEqual(len(streams), 1)
+                self.assertTrue(streams[0].closed)
+            finally:
+                for stream in streams:
+                    if not stream.closed:
+                        stream.close()
 
     def test_scanner_metadata_reads_dotnet_analysis_config(self):
         with TemporaryDirectory() as temporary_directory:
@@ -1412,6 +1827,12 @@ class TestSonarqubeExactHeadRunner(TestCase):
                     patch.object(runner, "claim_coverage_run", return_value="marker")
                 )
                 patches.enter_context(
+                    patch.object(runner, "capture_coverage_run_claim", return_value=object())
+                )
+                patches.enter_context(
+                    patch.object(runner, "clear_claimed_coverage_run", return_value=[])
+                )
+                patches.enter_context(
                     patch.object(runner, "produce_coverage", return_value={"evidence_sets": []})
                 )
                 patches.enter_context(
@@ -1559,6 +1980,11 @@ class TestSonarqubeExactHeadRunner(TestCase):
                     events.append("seal_exit")
                     return False
 
+                def revalidate_after_close(self):
+                    self_outer.assertEqual(events[-1], "seal_exit")
+                    events.append("revalidate")
+                    return self.evidence
+
             def run_process(command, **_kwargs):
                 if command[:2] == ["scanner", "begin"]:
                     events.append("begin")
@@ -1568,16 +1994,21 @@ class TestSonarqubeExactHeadRunner(TestCase):
             def claim(_plan, _context):
                 events.append("claim")
 
-            def produce(_context, _plan, _environment, _secrets):
+            coverage_claim = object()
+
+            def produce(_context, _plan, _environment, _secrets, *, claim):
                 events.append("produce")
+                self.assertIs(claim, coverage_claim)
                 return {"evidence_sets": ["unsealed"]}
 
-            def revalidate_coverage(_plan, _context):
-                self.assertEqual(events[-1], "seal_exit")
-                events.append("revalidate")
-                return {"evidence_sets": ["sealed"]}
+            def seal(_plan, _context, *, claim):
+                self.assertIs(claim, coverage_claim)
+                return Seal()
 
-            def cleanup_claimed_run(_plan, _context, _environment):
+            self_outer = self
+
+            def cleanup_claimed_run(_plan, _context, _environment, *, claim):
+                self.assertIs(claim, coverage_claim)
                 self.assertEqual(events[-1], "revalidate")
                 events.append("claimed_run_cleanup")
                 return [".tmp/sonarqube-coverage/claimed-run"]
@@ -1621,14 +2052,10 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 patches.enter_context(patch.object(runner, "scanner_environment", return_value={}))
                 patches.enter_context(patch.object(runner, "run_process", side_effect=run_process))
                 patches.enter_context(patch.object(runner, "claim_coverage_run", side_effect=claim))
-                patches.enter_context(patch.object(runner, "produce_coverage", side_effect=produce))
                 patches.enter_context(
-                    patch.object(
-                        runner,
-                        "validate_coverage_evidence",
-                        side_effect=revalidate_coverage,
-                    )
+                    patch.object(runner, "capture_coverage_run_claim", return_value=coverage_claim)
                 )
+                patches.enter_context(patch.object(runner, "produce_coverage", side_effect=produce))
                 patches.enter_context(
                     patch.object(
                         runner,
@@ -1638,7 +2065,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
                     )
                 )
                 patches.enter_context(
-                    patch.object(runner, "sealed_coverage_evidence", return_value=Seal())
+                    patch.object(runner, "sealed_coverage_evidence", side_effect=seal)
                 )
                 patches.enter_context(
                     patch.object(
@@ -1688,6 +2115,128 @@ class TestSonarqubeExactHeadRunner(TestCase):
             ],
         )
 
+    def test_execute_withholds_claimed_root_cleanup_for_unproven_producer_owner(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            head = "a" * 40
+            context = runner.GitContext(root, root / "common", root / "git", root, head)
+            receipts = []
+            coverage_claim = object()
+            producer_failure = runner.CoverageFailureError(
+                "process_owner",
+                "python",
+                "COVERAGE_PROCESS_TREE_OWNERSHIP_LOST",
+                owner=runner.CoverageTreeObservation("windows", "job_object", None),
+                artifact_cleanup_permitted=False,
+            )
+
+            class Lease:
+                state = "ACQUIRED"
+
+            class Handle:
+                lease = Lease()
+
+                def write_receipt(self, _target, receipt, _secrets):
+                    receipts.append(json.loads(json.dumps(receipt)))
+
+                def checkpoint(self, *_args, **_kwargs):
+                    return None
+
+            def project_lock(*_args, **_kwargs):
+                return nullcontext(Handle())
+
+            with ExitStack() as patches:
+                patches.enter_context(patch.object(runner, "process_environment", return_value={}))
+                patches.enter_context(
+                    patch.object(runner, "scrub_sonar_environment", return_value={})
+                )
+                patches.enter_context(patch.object(runner, "git_context", return_value=context))
+                patches.enter_context(
+                    patch.object(runner, "sonar_secret_values", return_value=set())
+                )
+                patches.enter_context(
+                    patch.object(runner, "load_credentials", return_value=self.credentials())
+                )
+                patches.enter_context(
+                    patch.object(runner, "clear_generated_artifacts", return_value=[])
+                )
+                patches.enter_context(
+                    patch.object(runner, "strict_cleanliness", return_value={"status": "clean"})
+                )
+                patches.enter_context(
+                    patch.object(runner, "project_key_from_xml", return_value=runner.PROJECT_KEY)
+                )
+                patches.enter_context(
+                    patch.object(runner, "project_version", return_value="0.23.11")
+                )
+                patches.enter_context(
+                    patch.object(runner, "discover_scanner", return_value=["scanner"])
+                )
+                patches.enter_context(
+                    patch.object(runner, "issue_inventory", return_value={"records": []})
+                )
+                patches.enter_context(patch.object(runner, "scanner_environment", return_value={}))
+                patches.enter_context(patch.object(runner, "run_process"))
+                patches.enter_context(patch.object(runner, "claim_coverage_run"))
+                patches.enter_context(
+                    patch.object(runner, "capture_coverage_run_claim", return_value=coverage_claim)
+                )
+                patches.enter_context(
+                    patch.object(runner, "scanner_metadata", return_value={"observed": True})
+                )
+                patches.enter_context(
+                    patch.object(
+                        runner,
+                        "project_inventory",
+                        return_value=(root / "netcoredbg-mcp.sln", [], []),
+                    )
+                )
+                patches.enter_context(
+                    patch.object(runner, "produce_coverage", side_effect=producer_failure)
+                )
+                cleanup = patches.enter_context(
+                    patch.object(
+                        runner,
+                        "clear_claimed_coverage_run",
+                        side_effect=AssertionError("cleanup must be withheld"),
+                    )
+                )
+                patches.enter_context(
+                    patch.object(runner, "project_lock", side_effect=project_lock)
+                )
+                with self.assertRaisesRegex(
+                    runner.CoverageFailureError, "COVERAGE_PROCESS_TREE_OWNERSHIP_LOST"
+                ):
+                    runner.execute("candidate", "scanner")
+
+            blocked = receipts[-1]
+            cleanup.assert_not_called()
+            self.assertEqual(blocked["failure"], "COVERAGE_PROCESS_TREE_OWNERSHIP_LOST")
+            self.assertEqual(
+                blocked["coverage_run_cleanup"],
+                {
+                    "status": "BLOCKED",
+                    "removed": [],
+                    "failure": {"error": "COVERAGE_ARTIFACT_CLEANUP_WITHHELD"},
+                },
+            )
+            self.assertEqual(
+                blocked["coverage_failure"],
+                {
+                    "stage": "process_owner",
+                    "language": "python",
+                    "failure_code": "COVERAGE_PROCESS_TREE_OWNERSHIP_LOST",
+                    "owner": {
+                        "target_platform": "windows",
+                        "owner_kind": "job_object",
+                        "kill_on_close": True,
+                        "terminal_state": None,
+                    },
+                    "artifact_cleanup_permitted": False,
+                    "cleanup_failure": None,
+                },
+            )
+
     def test_execute_disables_msbuild_node_reuse_for_solution_and_standalone_builds(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -1728,6 +2277,12 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 )
                 patches.enter_context(
                     patch.object(runner, "claim_coverage_run", return_value="marker")
+                )
+                patches.enter_context(
+                    patch.object(runner, "capture_coverage_run_claim", return_value=object())
+                )
+                patches.enter_context(
+                    patch.object(runner, "clear_claimed_coverage_run", return_value=[])
                 )
                 patches.enter_context(
                     patch.object(runner, "produce_coverage", return_value={"evidence_sets": []})
@@ -1928,6 +2483,12 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 )
                 patches.enter_context(
                     patch.object(runner, "claim_coverage_run", return_value="marker")
+                )
+                patches.enter_context(
+                    patch.object(runner, "capture_coverage_run_claim", return_value=object())
+                )
+                patches.enter_context(
+                    patch.object(runner, "clear_claimed_coverage_run", return_value=[])
                 )
                 patches.enter_context(
                     patch.object(runner, "produce_coverage", return_value={"evidence_sets": []})
