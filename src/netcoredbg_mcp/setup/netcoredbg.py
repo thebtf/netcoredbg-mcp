@@ -18,7 +18,6 @@ import zipfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
-from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from .home import get_config, get_home_dir, save_config
@@ -64,7 +63,7 @@ def get_latest_release_info() -> tuple[str, str, int] | None:
         req = Request(_GITHUB_API, headers={"User-Agent": "netcoredbg-mcp"})
         with urlopen(req, timeout=15) as resp:
             data: dict[str, Any] = json.loads(resp.read())
-    except (URLError, json.JSONDecodeError, OSError) as e:
+    except (json.JSONDecodeError, OSError) as e:
         logger.warning("Failed to query GitHub API: %s", e)
         return None
 
@@ -173,7 +172,7 @@ def download_netcoredbg(
         logger.info("Downloaded netcoredbg %s to %s", version, exe_path)
         return exe_path
 
-    except (URLError, OSError) as e:
+    except OSError as e:
         logger.warning("Download failed: %s", e)
         # Clean up partial download
         if "tmp_path" in locals():
