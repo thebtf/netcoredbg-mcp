@@ -89,7 +89,7 @@ def _check_deps_json(deps_path: Path) -> bool:
     """
     try:
         data = json.loads(deps_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
+    except (json.JSONDecodeError, OSError) as exc:
         logger.debug("Failed to read deps.json %s: %s", deps_path, exc)
         return False
 
