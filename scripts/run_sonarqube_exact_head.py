@@ -21,26 +21,57 @@ import urllib.parse
 import urllib.request
 import uuid
 import xml.etree.ElementTree as ElementTree
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Collection, Iterator, Mapping, Sequence
+from typing import Any
 
 PROJECT_KEY = "thebtf_netcoredbg_mcp"
 REQUIRED_ENV = ("SONAR_HOST_URL", "SONAR_TOKEN", "SONAR_READ_TOKEN")
 SONAR_ENV = (*REQUIRED_ENV, "SONAR_ADMIN_TOKEN")
 SIMPLE_DOTENV_ASSIGNMENT_RE = re.compile(r"(?P<name>[A-Z_][A-Z0-9_]*)=(?P<value>[^\r\n]*)\Z")
-RECEIPT_SCHEMA_VERSION = 2
+HISTORICAL_RECEIPT_SCHEMA_VERSION = 2
+RECEIPT_SCHEMA_VERSION = 3
+AUTHORITATIVE_ROLES = frozenset({"candidate", "post-merge"})
+DIAGNOSTIC_ROLE = "diagnostic"
+ROLE_CHOICES = (*sorted(AUTHORITATIVE_ROLES), DIAGNOSTIC_ROLE)
+ROLE_AUTHORITIES = {
+    "candidate": "candidate",
+    "post-merge": "post_merge",
+    DIAGNOSTIC_ROLE: DIAGNOSTIC_ROLE,
+}
+ROLE_BY_AUTHORITY = {authority: role for role, authority in ROLE_AUTHORITIES.items()}
+RECEIPT_OUTCOMES = frozenset({"RUNNING", "BLOCKED", "PASS"})
+ALLOWED_OUTCOMES_BY_AUTHORITY = {
+    "candidate": RECEIPT_OUTCOMES,
+    "post_merge": RECEIPT_OUTCOMES,
+    DIAGNOSTIC_ROLE: frozenset({"RUNNING", "BLOCKED"}),
+}
+TERMINAL_RECEIPT_OUTCOMES = frozenset({"BLOCKED", "PASS"})
+DIAGNOSTIC_RUN_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+SCAN_LEASE_STATES = frozenset(
+    {
+        "ACQUIRED",
+        "SCANNER_END_IN_FLIGHT",
+        "CE_SUBMITTED",
+        "CE_TERMINAL",
+        "RECEIPT_TERMINAL",
+        "CLOSED",
+    }
+)
+UNRECONCILED_LEASE_STATES = frozenset({"SCANNER_END_IN_FLIGHT", "CE_SUBMITTED"})
 CE_TIMEOUT_SECONDS = 10 * 60
 INDEX_TIMEOUT_SECONDS = 2 * 60
 POLL_SECONDS = 5
 PAGE_SIZE = 500
 RESULT_CAP = 10_000
-LOCK_LEASE_SECONDS = 30 * 60
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-SOLUTION_PROJECT_RE = re.compile(r'^Project\("[^"]+"\) = "([^"]+)", "([^"]+\.csproj)"', re.MULTILINE)
+SOLUTION_PROJECT_RE = re.compile(
+    r'^Project\("[^"]+"\) = "([^"]+)", "([^"]+\.csproj)"', re.MULTILINE
+)
 ISSUE_STATUSES = "OPEN,CONFIRMED,FALSE_POSITIVE,ACCEPTED,FIXED,IN_SANDBOX"
 GENERATED_DIRECTORY_NAMES = {"bin", "obj"}
 GENERATED_ROOT_NAMES = {".sonarqube", ".scannerwork"}
@@ -79,6 +110,10 @@ SEMVER_RE = re.compile(
 
 class RunnerError(RuntimeError):
     """A fail-closed release-gate error safe to place in a receipt."""
+
+
+class _ReceiptPreflightError(RunnerError):
+    """A deterministic receipt refusal that occurs before an atomic write."""
 
 
 class CoverageFailureError(RunnerError):
@@ -173,23 +208,21 @@ class CoverageTreeFinalizationError(RunnerError):
 class GeneratedArtifactCleanupError(RunnerError):
     """A receipt-safe failure deleting one generated scanner artifact."""
 
-    def __init__(
-        self, path: str, operation: str, error_type: str, removed: Sequence[str]
-    ) -> None:
+    def __init__(self, path: str, operation: str, error_type: str, removed: Sequence[str]) -> None:
         self.path = path
         self.operation = operation
         self.error_type = error_type
         self.removed = list(removed)
-        super().__init__(
-            f"Generated artifact cleanup {operation} failed for {path}: {error_type}."
-        )
+        super().__init__(f"Generated artifact cleanup {operation} failed for {path}: {error_type}.")
 
 
 class CredentialsUnavailable(RunnerError):
     """A credential-gate blocker that never includes a credential value."""
 
     def __init__(self, *input_names: str) -> None:
-        super().__init__("SONAR_CREDENTIALS_UNAVAILABLE: " + ", ".join(sorted(set(input_names))) + ".")
+        super().__init__(
+            "SONAR_CREDENTIALS_UNAVAILABLE: " + ", ".join(sorted(set(input_names))) + "."
+        )
 
 
 class ApiHttpError(RunnerError):
@@ -218,6 +251,104 @@ class GitContext:
     git_dir: Path
     coordination_root: Path
     head: str
+
+
+@dataclass(frozen=True)
+class ReceiptTarget:
+    path: Path
+    coordination_root: Path
+    authority: str
+    authoritative: bool
+    receipt_identity: str
+
+
+@dataclass(frozen=True)
+class ReceiptDispatch:
+    schema_version: int
+    authority: str | None
+    outcome: str | None
+    historical: bool
+
+
+@dataclass(frozen=True)
+class ScanLease:
+    run_id: str
+    generation_token: str
+    authority: str
+    project_key: str
+    captured_head: str
+    receipt_identity: str
+    scanner_worktree_identity: str
+    state: str
+    task_id: str | None
+    utc_deadline: str | None
+
+
+@dataclass
+class _ScanTransactionGuard:
+    path: Path
+    token: str
+    mutated: bool = False
+    unsafe: bool = False
+    released: bool = False
+
+    def require_held(self) -> None:
+        if self.unsafe:
+            raise RunnerError("scan transaction guard is unsafe.")
+        if self.released:
+            self.unsafe = True
+            raise RunnerError("scan transaction guard is no longer held.")
+        try:
+            metadata = self.path.lstat()
+            marker = self.path.read_bytes()
+        except OSError as error:
+            self.unsafe = True
+            raise RunnerError("scan transaction guard is unavailable.") from error
+        if not stat.S_ISREG(metadata.st_mode) or marker != self._marker:
+            self.unsafe = True
+            raise RunnerError("scan transaction guard has an invalid identity.")
+
+    @property
+    def _marker(self) -> bytes:
+        return f"scan lease transaction guard {self.token}".encode("ascii")
+
+    def release(self) -> None:
+        self.require_held()
+        try:
+            self.path.unlink()
+        except OSError as error:
+            self.unsafe = True
+            raise RunnerError("scan transaction guard cannot be released.") from error
+        self.released = True
+
+
+@dataclass
+class ScanLeaseHandle:
+    path: Path
+    lease: ScanLease
+    coordination_root: Path
+
+    def checkpoint(
+        self,
+        state: str,
+        *,
+        task_id: str | None = None,
+        utc_deadline: str | None = None,
+    ) -> ScanLease:
+        return _checkpoint_scan_lease(
+            self,
+            state,
+            task_id=task_id,
+            utc_deadline=utc_deadline,
+        )
+
+    def write_receipt(
+        self,
+        target: ReceiptTarget,
+        receipt: Mapping[str, Any],
+        secrets: Collection[str],
+    ) -> None:
+        _write_receipt_for_owned_lease(self, target, receipt, secrets)
 
 
 @dataclass(frozen=True)
@@ -253,9 +384,23 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _strict_utc_deadline(value: Any, error: str) -> datetime:
+    if not isinstance(value, str) or not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z", value
+    ):
+        raise RunnerError(error)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as cause:
+        raise RunnerError(error) from cause
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise RunnerError(error)
+    return parsed
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--role", required=True, choices=("candidate", "post-merge"))
+    parser.add_argument("--role", required=True, choices=ROLE_CHOICES)
     parser.add_argument(
         "--scanner",
         help="Optional SonarScanner for .NET executable path/name; never a shell command.",
@@ -332,7 +477,11 @@ def close_windows_handle_if_owned(
     kernel32: Any, handle: Any | None, invalid_handle_value: int | None
 ) -> None:
     normalized_handle = getattr(handle, "value", handle)
-    if normalized_handle is None or normalized_handle == 0 or normalized_handle == invalid_handle_value:
+    if (
+        normalized_handle is None
+        or normalized_handle == 0
+        or normalized_handle == invalid_handle_value
+    ):
         return
     kernel32.CloseHandle(handle)
 
@@ -382,7 +531,10 @@ def _read_posix_verified_primary_dotenv(dotenv_path: Path) -> str:
         file_status = os.fstat(descriptor)
         if not stat.S_ISREG(file_status.st_mode):
             raise OSError("The primary .env is not a regular file.")
-        if file_status.st_uid != getattr(os, "geteuid")() or stat.S_IMODE(file_status.st_mode) & 0o077:
+        if (
+            file_status.st_uid != getattr(os, "geteuid")()
+            or stat.S_IMODE(file_status.st_mode) & 0o077
+        ):
             raise PermissionError("The primary .env is not owner-only.")
         chunks: list[bytes] = []
         while chunk := os.read(descriptor, 64 * 1024):
@@ -401,7 +553,11 @@ def _read_windows_verified_primary_dotenv(dotenv_path: Path) -> str:
         _fields_ = [("file_attributes", wintypes.DWORD), ("reparse_tag", wintypes.DWORD)]
 
     class AceHeader(ctypes.Structure):
-        _fields_ = [("ace_type", ctypes.c_ubyte), ("ace_flags", ctypes.c_ubyte), ("ace_size", wintypes.WORD)]
+        _fields_ = [
+            ("ace_type", ctypes.c_ubyte),
+            ("ace_flags", ctypes.c_ubyte),
+            ("ace_size", wintypes.WORD),
+        ]
 
     class AclSizeInformation(ctypes.Structure):
         _fields_ = [
@@ -466,7 +622,11 @@ def _read_windows_verified_primary_dotenv(dotenv_path: Path) -> str:
     kernel32.LocalFree.restype = ctypes.c_void_p
     kernel32.GetCurrentProcess.argtypes = []
     kernel32.GetCurrentProcess.restype = wintypes.HANDLE
-    advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    advapi32.OpenProcessToken.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    ]
     advapi32.OpenProcessToken.restype = wintypes.BOOL
     advapi32.GetTokenInformation.argtypes = [
         wintypes.HANDLE,
@@ -522,10 +682,16 @@ def _read_windows_verified_primary_dotenv(dotenv_path: Path) -> str:
 
     def current_user_sid() -> tuple[ctypes.c_void_p, ctypes.Array[Any]]:
         token_handle = wintypes.HANDLE()
-        require(advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), token_query, ctypes.byref(token_handle)))
+        require(
+            advapi32.OpenProcessToken(
+                kernel32.GetCurrentProcess(), token_query, ctypes.byref(token_handle)
+            )
+        )
         try:
             required_size = wintypes.DWORD()
-            if advapi32.GetTokenInformation(token_handle, token_user, None, 0, ctypes.byref(required_size)):
+            if advapi32.GetTokenInformation(
+                token_handle, token_user, None, 0, ctypes.byref(required_size)
+            ):
                 raise OSError("The current process token returned no user SID.")
             if ctypes.get_last_error() != error_insufficient_buffer or not required_size.value:
                 raise ctypes.WinError(ctypes.get_last_error())
@@ -574,7 +740,9 @@ def _read_windows_verified_primary_dotenv(dotenv_path: Path) -> str:
                 ctypes.sizeof(attribute_tag),
             )
         )
-        if attribute_tag.file_attributes & (file_attribute_reparse_point | file_attribute_directory):
+        if attribute_tag.file_attributes & (
+            file_attribute_reparse_point | file_attribute_directory
+        ):
             raise OSError("The primary .env is not a regular non-reparse file.")
         owner_sid = ctypes.c_void_p()
         dacl = ctypes.c_void_p()
@@ -593,8 +761,14 @@ def _read_windows_verified_primary_dotenv(dotenv_path: Path) -> str:
             raise ctypes.WinError(result)
         try:
             user_sid, user_sid_buffer = current_user_sid()
-            if not owner_sid.value or not advapi32.IsValidSid(owner_sid) or not advapi32.EqualSid(owner_sid, user_sid):
-                raise PermissionError("The primary .env owner does not match the current token user.")
+            if (
+                not owner_sid.value
+                or not advapi32.IsValidSid(owner_sid)
+                or not advapi32.EqualSid(owner_sid, user_sid)
+            ):
+                raise PermissionError(
+                    "The primary .env owner does not match the current token user."
+                )
             dacl_present = wintypes.BOOL()
             dacl_defaulted = wintypes.BOOL()
             descriptor_dacl = ctypes.c_void_p()
@@ -618,7 +792,9 @@ def _read_windows_verified_primary_dotenv(dotenv_path: Path) -> str:
                 )
             )
             if not control.value & se_dacl_protected:
-                raise PermissionError("The primary .env DACL is not protected from inherited access.")
+                raise PermissionError(
+                    "The primary .env DACL is not protected from inherited access."
+                )
             acl_information = AclSizeInformation()
             require(
                 advapi32.GetAclInformation(
@@ -650,7 +826,9 @@ def _read_windows_verified_primary_dotenv(dotenv_path: Path) -> str:
                 if not sid_length or header.ace_size < sid_offset + sid_length:
                     raise OSError("The primary .env DACL allow ACE is malformed.")
                 if not advapi32.EqualSid(ace_sid, user_sid):
-                    raise PermissionError("The primary .env grants access outside the current token user.")
+                    raise PermissionError(
+                        "The primary .env grants access outside the current token user."
+                    )
             del user_sid_buffer
         finally:
             if security_descriptor.value:
@@ -732,7 +910,9 @@ def load_dotenv_credentials(
             raise RunnerError(f"Primary .env has an invalid assignment at line {line_number}.")
         name = assignment["name"]
         if name == "SONAR_ADMIN_TOKEN":
-            raise RunnerError("SONAR_ADMIN_TOKEN is forbidden; use only project-scoped credentials.")
+            raise RunnerError(
+                "SONAR_ADMIN_TOKEN is forbidden; use only project-scoped credentials."
+            )
         if name not in REQUIRED_ENV:
             raise RunnerError(f"Unknown primary .env key: {name}.")
         if name in credentials:
@@ -759,7 +939,9 @@ def load_credentials(
     assert_allowed_sonar_inputs(process_env)
     dotenv_credentials = load_dotenv_credentials(context.coordination_root, redaction_secrets)
     credentials = {
-        name: (process_env[name] if name in process_env else dotenv_credentials.get(name, "")).strip()
+        name: (
+            process_env[name] if name in process_env else dotenv_credentials.get(name, "")
+        ).strip()
         for name in REQUIRED_ENV
     }
     missing = [name for name, value in credentials.items() if not value]
@@ -773,7 +955,9 @@ def scrub_sonar_environment(source: Mapping[str, str]) -> dict[str, str]:
     return {key: value for key, value in source.items() if not is_sonar_environment_name(key)}
 
 
-def scanner_environment(base_environment: Mapping[str, str], credentials: Mapping[str, str]) -> dict[str, str]:
+def scanner_environment(
+    base_environment: Mapping[str, str], credentials: Mapping[str, str]
+) -> dict[str, str]:
     environment = scrub_sonar_environment(base_environment)
     environment["SONAR_HOST_URL"] = credentials["SONAR_HOST_URL"]
     environment["SONAR_TOKEN"] = credentials["SONAR_TOKEN"]
@@ -810,17 +994,23 @@ def run_process(
     except OSError as error:
         code = error.winerror if getattr(error, "winerror", None) is not None else error.errno
         detail = redact(str(error), secrets)
-        raise RunnerError(f"{label} could not start: {error.__class__.__name__} code={code}: {detail}") from error
+        raise RunnerError(
+            f"{label} could not start: {error.__class__.__name__} code={code}: {detail}"
+        ) from error
     output = completed.stdout or ""
     if output:
         print(redact(output, secrets), end="" if output.endswith("\n") else "\n", flush=True)
     if completed.returncode:
-        if credential_input_names and re.search(r"\b(?:401|403|authenticat|authoriz|forbidden|token)\b", output, re.IGNORECASE):
+        if credential_input_names and re.search(
+            r"\b(?:401|403|authenticat|authoriz|forbidden|token)\b", output, re.IGNORECASE
+        ):
             raise CredentialsUnavailable(*credential_input_names)
         raise RunnerError(f"{label} failed with exit code {completed.returncode}.")
 
 
-def git_result(repository_root: Path, environment: Mapping[str, str], *arguments: str) -> subprocess.CompletedProcess[str]:
+def git_result(
+    repository_root: Path, environment: Mapping[str, str], *arguments: str
+) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
             ["git", *arguments],
@@ -848,7 +1038,9 @@ def resolve_git_path(repository_root: Path, raw_path: str) -> Path:
 
 
 def git_context(start_directory: Path, environment: Mapping[str, str]) -> GitContext:
-    repository_root = Path(git_output(start_directory, environment, "rev-parse", "--show-toplevel")).resolve()
+    repository_root = Path(
+        git_output(start_directory, environment, "rev-parse", "--show-toplevel")
+    ).resolve()
     common_dir = resolve_git_path(
         repository_root, git_output(repository_root, environment, "rev-parse", "--git-common-dir")
     )
@@ -867,11 +1059,15 @@ def git_context(start_directory: Path, environment: Mapping[str, str]) -> GitCon
     if symbolic_head.returncode != 1:
         raise RunnerError("Git could not verify detached HEAD state.")
     if git_dir == common_dir or repository_root == common_dir.parent:
-        raise RunnerError("Exact-head scan requires a linked disposable worktree, not the primary checkout.")
+        raise RunnerError(
+            "Exact-head scan requires a linked disposable worktree, not the primary checkout."
+        )
     return GitContext(repository_root, common_dir, git_dir, common_dir.parent, head)
 
 
-def strict_cleanliness(context: GitContext, environment: Mapping[str, str], phase: str) -> dict[str, Any]:
+def strict_cleanliness(
+    context: GitContext, environment: Mapping[str, str], phase: str
+) -> dict[str, Any]:
     output = git_output(
         context.repository_root,
         environment,
@@ -2654,7 +2850,11 @@ def run_coverage_producers(
         elif index < len(metadata) + coverage_command_count:
             label, stage, language = (".NET OpenCover tests", "dotnet_producer", "dotnet")
         else:
-            label, stage, language = (".NET real Python Host validation", "dotnet_producer", "dotnet")
+            label, stage, language = (
+                ".NET real Python Host validation",
+                "dotnet_producer",
+                "dotnet",
+            )
         producer_environment = environment if index < len(metadata) else dotnet_environment
         run_coverage_process(
             command,
@@ -2689,11 +2889,15 @@ def produce_coverage(
 
 
 def discover_scanner(override: str | None) -> list[str]:
-    candidates = [override] if override else [
-        "dotnet-sonarscanner",
-        "SonarScanner.MSBuild.exe",
-        "SonarScanner.MSBuild",
-    ]
+    candidates = (
+        [override]
+        if override
+        else [
+            "dotnet-sonarscanner",
+            "SonarScanner.MSBuild.exe",
+            "SonarScanner.MSBuild",
+        ]
+    )
     for candidate in candidates:
         if candidate:
             found = shutil.which(candidate)
@@ -2752,8 +2956,12 @@ def project_inventory(repository_root: Path) -> tuple[Path, list[Path], list[Pat
     )
     if not projects:
         raise RunnerError("C# project inventory is empty.")
-    return solution, projects, sorted(
-        discovered_projects - set(solution_projects), key=lambda path: path.as_posix().lower()
+    return (
+        solution,
+        projects,
+        sorted(
+            discovered_projects - set(solution_projects), key=lambda path: path.as_posix().lower()
+        ),
     )
 
 
@@ -2769,14 +2977,22 @@ def scanner_metadata(
         "sonar.scm.revision": [],
     }
     for path in iter_scanner_tree(metadata_root, "*"):
-        if not path.is_file() or path.is_symlink() or path.suffix.lower() not in {".xml", ".properties", ".txt"}:
+        if (
+            not path.is_file()
+            or path.is_symlink()
+            or path.suffix.lower() not in {".xml", ".properties", ".txt"}
+        ):
             continue
         relative = str(path.relative_to(repository_root)).replace("\\", "/")
         try:
             if path.suffix.lower() == ".xml":
                 root = ElementTree.parse(path).getroot()
                 for element in root.iter():
-                    name = element.attrib.get("Name") or element.attrib.get("name") or element.attrib.get("key")
+                    name = (
+                        element.attrib.get("Name")
+                        or element.attrib.get("name")
+                        or element.attrib.get("key")
+                    )
                     if name in found and element.text:
                         found[name].append((relative, element.text.strip()))
                     if element.tag.rsplit("}", 1)[-1] == "SonarProjectKey" and element.text:
@@ -2796,7 +3012,9 @@ def scanner_metadata(
         or observed_versions != {expected_project_version}
         or observed_revisions != {expected_head}
     ):
-        raise RunnerError("Observed SonarScanner metadata does not bind the fixed project, release version, and exact HEAD.")
+        raise RunnerError(
+            "Observed SonarScanner metadata does not bind the fixed project, release version, and exact HEAD."
+        )
     return {
         "observed": True,
         "project_key": PROJECT_KEY,
@@ -2816,10 +3034,14 @@ def report_task(repository_root: Path, expected_host: str) -> dict[str, Any]:
         if separator:
             values[key] = value
     if values.get("projectKey") != PROJECT_KEY:
-        raise RunnerError("SonarScanner report-task project key does not match the fixed project key.")
+        raise RunnerError(
+            "SonarScanner report-task project key does not match the fixed project key."
+        )
     if not values.get("ceTaskId"):
         raise RunnerError("SonarScanner report-task lacks its Compute Engine task ID.")
-    server_origin_matches_configured = credential_free_host(values.get("serverUrl", "")) == expected_host
+    server_origin_matches_configured = (
+        credential_free_host(values.get("serverUrl", "")) == expected_host
+    )
     if not server_origin_matches_configured:
         raise RunnerError("SonarScanner report-task server origin does not match SONAR_HOST_URL.")
     dashboard_url = values.get("dashboardUrl", "")
@@ -2827,7 +3049,9 @@ def report_task(repository_root: Path, expected_host: str) -> dict[str, Any]:
     if not dashboard_url_present:
         raise RunnerError("SonarScanner report-task lacks its dashboard URL.")
     if response_origin(dashboard_url) != expected_host:
-        raise RunnerError("SonarScanner report-task dashboard origin does not match SONAR_HOST_URL.")
+        raise RunnerError(
+            "SonarScanner report-task dashboard origin does not match SONAR_HOST_URL."
+        )
     return {
         "observed": True,
         "path": str(path.relative_to(repository_root)).replace("\\", "/"),
@@ -2848,7 +3072,9 @@ def api_json(host: str, endpoint: str, parameters: Mapping[str, str], token: str
         with API_OPENER.open(request, timeout=30) as response:
             response_url = response.geturl()
             if response_origin(response_url) != host:
-                raise RunnerError("Refusing an API response whose origin differs from SONAR_HOST_URL.")
+                raise RunnerError(
+                    "Refusing an API response whose origin differs from SONAR_HOST_URL."
+                )
             payload = response.read().decode("utf-8")
     except urllib.error.HTTPError as error:
         input_name = "SONAR_TOKEN" if endpoint == "/api/ce/task" else "SONAR_READ_TOKEN"
@@ -2866,14 +3092,45 @@ def api_json(host: str, endpoint: str, parameters: Mapping[str, str], token: str
     return decoded
 
 
-def wait_for_ce_task(host: str, task_id: str, token: str, receipt: dict[str, Any]) -> str:
+def resolve_persisted_ce_task_status(host: str, token: str, lease: ScanLease) -> str:
+    if lease.authority != DIAGNOSTIC_ROLE:
+        raise RunnerError("persisted Compute Engine resolution is diagnostic-only.")
+
+    _assert_submitted_scan_lease(lease)
+    task_id = lease.task_id
+    if not isinstance(task_id, str) or not task_id:
+        raise RunnerError("scan lease has no known task to reconcile.")
+    response = api_json(host, "/api/ce/task", {"id": task_id}, token)
+    task = response.get("task")
+    if (
+        not isinstance(task, dict)
+        or task.get("id") != task_id
+        or task.get("componentKey") != PROJECT_KEY
+        or not isinstance(task.get("status"), str)
+        or task["status"] not in {"SUCCESS", "FAILED", "CANCELED"}
+    ):
+        raise RunnerError("persisted Compute Engine task is not an exact terminal submission.")
+    return task["status"]
+
+
+def wait_for_ce_task(
+    host: str,
+    task_id: str,
+    token: str,
+    receipt: dict[str, Any],
+    *,
+    lease_checkpoint: Callable[[str, str], None] | None = None,
+) -> str:
     deadline = time.monotonic() + CE_TIMEOUT_SECONDS
     deadline_at = datetime.now(timezone.utc) + timedelta(seconds=CE_TIMEOUT_SECONDS)
+    deadline_at_text = deadline_at.isoformat().replace("+00:00", "Z")
+    if lease_checkpoint is not None:
+        lease_checkpoint(task_id, deadline_at_text)
     receipt["compute_engine"] = {
         "submitted_task_id": task_id,
         "task_id": task_id,
         "poll_started_at": utc_now(),
-        "poll_deadline_at": deadline_at.isoformat().replace("+00:00", "Z"),
+        "poll_deadline_at": deadline_at_text,
         "timeout_seconds": CE_TIMEOUT_SECONDS,
         "last_observed_state": "NO_RESPONSE",
         "states": [],
@@ -2891,7 +3148,9 @@ def wait_for_ce_task(host: str, task_id: str, token: str, receipt: dict[str, Any
         receipt["compute_engine"]["last_observed_state"] = status
         component_key = task.get("componentKey")
         if component_key != PROJECT_KEY:
-            raise RunnerError("Submitted Compute Engine task does not prove the fixed project component key.")
+            raise RunnerError(
+                "Submitted Compute Engine task does not prove the fixed project component key."
+            )
         receipt["compute_engine"]["component_key"] = component_key
         if status == "SUCCESS":
             analysis_id = task.get("analysisId")
@@ -2903,7 +3162,9 @@ def wait_for_ce_task(host: str, task_id: str, token: str, receipt: dict[str, Any
         if status in {"FAILED", "CANCELED"}:
             raise RunnerError(f"Submitted Compute Engine task ended as {status}.")
         if time.monotonic() >= deadline:
-            raise RunnerError("Submitted Compute Engine task did not complete before the 10-minute deadline.")
+            raise RunnerError(
+                "Submitted Compute Engine task did not complete before the 10-minute deadline."
+            )
         time.sleep(POLL_SECONDS)
 
 
@@ -3032,7 +3293,9 @@ def require_ok_quality_gate(gate: Mapping[str, Any]) -> None:
         raise RunnerError(f"Analysis-bound quality gate is {gate.get('status')}; only OK passes.")
 
 
-def indexed_api_json(host: str, endpoint: str, parameters: Mapping[str, str], token: str) -> dict[str, Any]:
+def indexed_api_json(
+    host: str, endpoint: str, parameters: Mapping[str, str], token: str
+) -> dict[str, Any]:
     deadline = time.monotonic() + INDEX_TIMEOUT_SECONDS
     while True:
         try:
@@ -3062,7 +3325,11 @@ def paginated_inventory(
         raw_records = response.get(collection_name)
         if not isinstance(paging, dict) or not isinstance(raw_records, list):
             raise RunnerError(f"{endpoint} response is malformed.")
-        page_index, page_size, page_total = paging.get("pageIndex"), paging.get("pageSize"), paging.get("total")
+        page_index, page_size, page_total = (
+            paging.get("pageIndex"),
+            paging.get("pageSize"),
+            paging.get("total"),
+        )
         if (
             not isinstance(page_index, int)
             or not isinstance(page_size, int)
@@ -3088,7 +3355,11 @@ def paginated_inventory(
         if page_index * page_size >= total:
             break
         page += 1
-    if total is None or len(records) != total or len({record["key"] for record in records}) != len(records):
+    if (
+        total is None
+        or len(records) != total
+        or len({record["key"] for record in records}) != len(records)
+    ):
         raise RunnerError(f"{endpoint} pagination is incomplete or non-unique.")
     return {
         "endpoint": endpoint,
@@ -3108,7 +3379,18 @@ def issue_inventory(host: str, token: str) -> dict[str, Any]:
         "issues",
         {"components": PROJECT_KEY, "issueStatuses": ISSUE_STATUSES},
         token,
-        ("key", "rule", "severity", "status", "issueStatus", "resolution", "type", "component", "line", "impacts"),
+        (
+            "key",
+            "rule",
+            "severity",
+            "status",
+            "issueStatus",
+            "resolution",
+            "type",
+            "component",
+            "line",
+            "impacts",
+        ),
     )
 
 
@@ -3124,9 +3406,23 @@ def new_code_issue_inventory(host: str, token: str) -> dict[str, Any]:
         },
         token,
         (
-            "key", "rule", "severity", "status", "issueStatus", "resolution", "type",
-            "component", "project", "line", "message", "impacts", "creationDate",
-            "updateDate", "tags", "textRange", "flows",
+            "key",
+            "rule",
+            "severity",
+            "status",
+            "issueStatus",
+            "resolution",
+            "type",
+            "component",
+            "project",
+            "line",
+            "message",
+            "impacts",
+            "creationDate",
+            "updateDate",
+            "tags",
+            "textRange",
+            "flows",
         ),
     )
 
@@ -3190,106 +3486,793 @@ def lock_path(coordination_root: Path) -> Path:
     return coordination_root / ".agent" / "e" / "sonarqube" / PROJECT_KEY / ".scan.lock"
 
 
-def configure_windows_process_api(kernel32: Any, wintypes: Any) -> None:
-    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
-    kernel32.WaitForSingleObject.restype = wintypes.DWORD
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel32.CloseHandle.restype = wintypes.BOOL
+def scan_transaction_guard_path(scan_lock_path: Path) -> Path:
+    return scan_lock_path.with_name(".scan.recovery.guard")
 
 
-def windows_owner_is_alive(pid: int) -> bool | None:
-    import ctypes
-    from ctypes import wintypes
-
-    synchronize = 0x00100000
-    wait_object_0 = 0x00000000
-    wait_timeout = 0x00000102
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    configure_windows_process_api(kernel32, wintypes)
-    handle = kernel32.OpenProcess(synchronize, False, pid)
-    if not handle:
-        error = ctypes.get_last_error()
-        return True if error == 5 else False if error == 87 else None
+def _assert_coordination_storage_ancestors(coordination_root: Path, path: Path) -> None:
     try:
-        result = kernel32.WaitForSingleObject(handle, 0)
-        return True if result == wait_timeout else False if result == wait_object_0 else None
+        relative = path.relative_to(coordination_root)
+    except ValueError as error:
+        raise RunnerError("coordination storage path escapes the coordination root.") from error
+    current = coordination_root
+    for part in (None, *relative.parts[:-1]):
+        if part is not None:
+            if part in {".", ".."}:
+                raise RunnerError("coordination storage path escapes the coordination root.")
+            current /= part
+        try:
+            attributes = current.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            raise RunnerError("coordination storage path metadata is unavailable.") from error
+        if stat.S_ISLNK(attributes.st_mode) or (
+            getattr(attributes, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            raise RunnerError(
+                "coordination storage must not traverse a symbolic link or reparse point."
+            )
+        if not stat.S_ISDIR(attributes.st_mode):
+            raise RunnerError("coordination storage ancestor is not a directory.")
+
+
+def _assert_receipt_storage_target(target: ReceiptTarget) -> None:
+    _assert_coordination_storage_ancestors(target.coordination_root, target.path)
+    try:
+        attributes = target.path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise RunnerError("receipt storage target metadata is unavailable.") from error
+    if stat.S_ISLNK(attributes.st_mode) or (
+        getattr(attributes, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+    ):
+        raise RunnerError("receipt storage target must not be a symbolic link or reparse point.")
+    if not stat.S_ISREG(attributes.st_mode):
+        raise RunnerError("receipt storage target is not a regular file.")
+
+
+def scanner_worktree_identity(context: GitContext) -> str:
+    payload = "\0".join(
+        (
+            str(context.repository_root),
+            str(context.git_dir),
+            str(context.common_dir),
+        )
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _receipt_identity(context: GitContext, path: Path) -> str:
+    try:
+        return path.relative_to(context.coordination_root).as_posix()
+    except ValueError as error:
+        raise RunnerError("receipt target escapes the coordination root.") from error
+
+
+def receipt_target(context: GitContext, role: str, run_id: str | None) -> ReceiptTarget:
+    if role not in ROLE_CHOICES:
+        raise RunnerError("receipt role is invalid.")
+    root = context.coordination_root / ".agent" / "e" / "sonarqube" / PROJECT_KEY / context.head
+    authority = ROLE_AUTHORITIES[role]
+    if role == DIAGNOSTIC_ROLE:
+        if not isinstance(run_id, str) or not DIAGNOSTIC_RUN_ID_RE.fullmatch(run_id):
+            raise RunnerError("diagnostic receipts require a safe run identifier.")
+        path = root / "diagnostic" / f"{run_id}.json"
+    else:
+        if run_id is not None:
+            raise RunnerError("authoritative receipt targets do not accept a path run identifier.")
+        path = root / f"{role}.json"
+    return ReceiptTarget(
+        coordination_root=context.coordination_root,
+        path=path,
+        authority=authority,
+        authoritative=role in AUTHORITATIVE_ROLES,
+        receipt_identity=_receipt_identity(context, path),
+    )
+
+
+def _lease_receipt_identity(authority: str, captured_head: str, run_id: str) -> str:
+    role = ROLE_BY_AUTHORITY[authority]
+    root = Path(".agent") / "e" / "sonarqube" / PROJECT_KEY / captured_head
+    if role == DIAGNOSTIC_ROLE:
+        return (root / DIAGNOSTIC_ROLE / f"{run_id}.json").as_posix()
+    return (root / f"{role}.json").as_posix()
+
+
+def receipt_dispatch(receipt: Mapping[str, Any]) -> ReceiptDispatch:
+    schema_version = receipt.get("schema_version")
+    if schema_version == HISTORICAL_RECEIPT_SCHEMA_VERSION:
+        return ReceiptDispatch(
+            schema_version=HISTORICAL_RECEIPT_SCHEMA_VERSION,
+            authority=None,
+            outcome=receipt.get("outcome") if isinstance(receipt.get("outcome"), str) else None,
+            historical=True,
+        )
+    if schema_version != RECEIPT_SCHEMA_VERSION:
+        raise RunnerError("receipt schema version is unknown.")
+    authority = receipt.get("authority")
+    outcome = receipt.get("outcome")
+    if (
+        not isinstance(authority, str)
+        or authority not in ALLOWED_OUTCOMES_BY_AUTHORITY
+        or not isinstance(outcome, str)
+        or outcome not in ALLOWED_OUTCOMES_BY_AUTHORITY[authority]
+        or receipt.get("project_key") != PROJECT_KEY
+        or not isinstance(receipt.get("run_id"), str)
+        or not receipt["run_id"]
+        or not isinstance(receipt.get("captured_head"), str)
+        or not SHA_RE.fullmatch(receipt["captured_head"])
+        or not isinstance(receipt.get("receipt_identity"), str)
+        or not receipt["receipt_identity"]
+    ):
+        raise RunnerError("receipt authority or outcome is invalid.")
+    return ReceiptDispatch(
+        schema_version=RECEIPT_SCHEMA_VERSION,
+        authority=authority,
+        outcome=outcome,
+        historical=False,
+    )
+
+
+def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
+    encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary.write(encoded)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+            temporary_path = Path(temporary.name)
+        os.replace(temporary_path, path)
+        if path.read_bytes() != encoded:
+            raise RunnerError(
+                "atomic receipt or lease write did not re-open with the expected bytes."
+            )
     finally:
-        kernel32.CloseHandle(handle)
-
-def owner_is_alive(pid: int) -> bool | None:
-    if pid <= 0:
-        return False
-    if os.name == "nt":
-        return windows_owner_is_alive(pid)
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return None
-    return True
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
 
 
-def reclaim_stale_lock(path: Path) -> bool:
+def _scan_lease_payload(lease: ScanLease) -> dict[str, Any]:
+    return {
+        "run_id": lease.run_id,
+        "generation_token": lease.generation_token,
+        "authority": lease.authority,
+        "project_key": lease.project_key,
+        "captured_head": lease.captured_head,
+        "receipt_identity": lease.receipt_identity,
+        "scanner_worktree_identity": lease.scanner_worktree_identity,
+        "state": lease.state,
+        "task_id": lease.task_id,
+        "utc_deadline": lease.utc_deadline,
+    }
+
+
+def write_scan_lease(path: Path, lease: ScanLease) -> None:
+    _atomic_write_json(path, _scan_lease_payload(lease))
+
+
+def read_scan_lease(path: Path) -> ScanLease:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        payload = None
-    if isinstance(payload, dict) and isinstance(payload.get("pid"), int):
-        alive = owner_is_alive(payload["pid"])
-        if alive is not False:
-            return False
-    else:
-        try:
-            if time.time() - path.stat().st_mtime < LOCK_LEASE_SECONDS:
-                return False
-        except OSError:
-            return False
+    except (OSError, json.JSONDecodeError) as error:
+        raise RunnerError("existing scan lease is unreadable.") from error
+    required = {
+        "run_id",
+        "generation_token",
+        "authority",
+        "project_key",
+        "captured_head",
+        "receipt_identity",
+        "scanner_worktree_identity",
+        "state",
+        "task_id",
+        "utc_deadline",
+    }
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != required
+        or not isinstance(payload.get("run_id"), str)
+        or not payload["run_id"]
+        or not isinstance(payload.get("generation_token"), str)
+        or not re.fullmatch(r"[0-9a-f]{32}", payload["generation_token"])
+        or not isinstance(payload.get("authority"), str)
+        or payload["authority"] not in ROLE_BY_AUTHORITY
+        or payload.get("project_key") != PROJECT_KEY
+        or not isinstance(payload.get("captured_head"), str)
+        or not SHA_RE.fullmatch(payload["captured_head"])
+        or not isinstance(payload.get("receipt_identity"), str)
+        or not payload["receipt_identity"]
+        or not isinstance(payload.get("scanner_worktree_identity"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", payload["scanner_worktree_identity"])
+        or not isinstance(payload.get("state"), str)
+        or payload["state"] not in SCAN_LEASE_STATES
+        or (payload.get("task_id") is not None and not isinstance(payload.get("task_id"), str))
+        or (
+            payload.get("utc_deadline") is not None
+            and not isinstance(payload.get("utc_deadline"), str)
+        )
+    ):
+        raise RunnerError("existing scan lease has an invalid identity.")
+    if payload["authority"] == DIAGNOSTIC_ROLE and not DIAGNOSTIC_RUN_ID_RE.fullmatch(
+        payload["run_id"]
+    ):
+        raise RunnerError("existing diagnostic scan lease has an invalid run identifier.")
+    if payload["receipt_identity"] != _lease_receipt_identity(
+        payload["authority"], payload["captured_head"], payload["run_id"]
+    ):
+        if payload["authority"] == DIAGNOSTIC_ROLE:
+            raise RunnerError("existing diagnostic scan lease has an invalid receipt identity.")
+        raise RunnerError("existing scan lease has an invalid receipt identity.")
+    if payload["state"] == "CE_SUBMITTED" and (
+        not payload["task_id"] or not payload["utc_deadline"]
+    ):
+        raise RunnerError("existing scan lease lacks the submitted task handoff.")
+    if payload["utc_deadline"] is not None:
+        _strict_utc_deadline(
+            payload["utc_deadline"], "existing diagnostic scan lease has an invalid UTC deadline."
+        )
+    return ScanLease(
+        run_id=payload["run_id"],
+        generation_token=payload["generation_token"],
+        authority=payload["authority"],
+        project_key=payload["project_key"],
+        captured_head=payload["captured_head"],
+        receipt_identity=payload["receipt_identity"],
+        scanner_worktree_identity=payload["scanner_worktree_identity"],
+        state=payload["state"],
+        task_id=payload["task_id"],
+        utc_deadline=payload["utc_deadline"],
+    )
+
+
+def _acquire_scan_transaction_guard(scan_lock_path: Path) -> _ScanTransactionGuard:
+    guard_path = scan_transaction_guard_path(scan_lock_path)
+    token = uuid.uuid4().hex
+    marker = f"scan lease transaction guard {token}".encode("ascii")
     try:
-        path.unlink()
-    except FileNotFoundError:
-        pass
-    return True
+        guard_path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(str(guard_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError as error:
+        raise RunnerError(
+            "existing scan transaction guard prevents scan lease mutation."
+        ) from error
+    except OSError as error:
+        raise RunnerError("scan transaction guard cannot be acquired.") from error
+    try:
+        if os.write(descriptor, marker) != len(marker):
+            raise OSError("scan transaction guard write was incomplete.")
+        os.fsync(descriptor)
+    except OSError as error:
+        raise RunnerError("scan transaction guard cannot be initialized.") from error
+    finally:
+        os.close(descriptor)
+    return _ScanTransactionGuard(guard_path, token)
 
 
 @contextmanager
-def project_lock(coordination_root: Path, role: str, head: str, run_id: str) -> Iterator[None]:
-    path = lock_path(coordination_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    while True:
-        try:
-            descriptor = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            break
-        except FileExistsError as error:
-            if not reclaim_stale_lock(path):
-                raise RunnerError("Another exact-head SonarQube scan holds the project lock.") from error
+def _scan_transaction_guard_for_handle(
+    handle: ScanLeaseHandle,
+) -> Iterator[_ScanTransactionGuard]:
+    _assert_coordination_storage_ancestors(handle.coordination_root, handle.path)
+    guard = _acquire_scan_transaction_guard(handle.path)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as lock_file:
-            json.dump(
-                {
-                    "run_id": run_id,
-                    "pid": os.getpid(),
-                    "role": role,
-                    "head": head,
-                    "started_at": utc_now(),
-                    "lease_seconds": LOCK_LEASE_SECONDS,
-                },
-                lock_file,
-            )
-        yield
-    finally:
+        yield guard
+    except BaseException:
+        if not guard.mutated and not guard.unsafe:
+            try:
+                guard.release()
+            except RunnerError:
+                pass
+        raise
+    else:
+        guard.release()
+
+
+def _require_persisted_scan_lease_owner(
+    path: Path,
+    expected: ScanLease,
+    guard: _ScanTransactionGuard,
+) -> None:
+    guard.require_held()
+    try:
+        persisted = read_scan_lease(path)
+    except RunnerError:
+        guard.unsafe = True
+        raise
+    if persisted != expected:
+        raise RunnerError("scan lease owner changed before mutation.")
+
+
+def _write_scan_lease_for_owner(
+    path: Path,
+    expected: ScanLease,
+    next_lease: ScanLease,
+    guard: _ScanTransactionGuard,
+) -> None:
+    _require_persisted_scan_lease_owner(path, expected, guard)
+    try:
+        write_scan_lease(path, next_lease)
+    except BaseException:
+        guard.unsafe = True
+        raise
+    guard.mutated = True
+
+
+def _checkpoint_scan_lease(
+    handle: ScanLeaseHandle,
+    state: str,
+    *,
+    task_id: str | None = None,
+    utc_deadline: str | None = None,
+) -> ScanLease:
+    with _scan_transaction_guard_for_handle(handle) as guard:
+        next_lease = transition_scan_lease(
+            handle.lease,
+            state,
+            task_id=task_id,
+            utc_deadline=utc_deadline,
+        )
+        _write_scan_lease_for_owner(handle.path, handle.lease, next_lease, guard)
+        handle.lease = next_lease
+        return next_lease
+
+
+def _write_receipt_for_owned_lease(
+    handle: ScanLeaseHandle,
+    target: ReceiptTarget,
+    receipt: Mapping[str, Any],
+    secrets: Collection[str],
+) -> None:
+    with _scan_transaction_guard_for_handle(handle) as guard:
+        _write_receipt_for_persisted_owner(
+            handle.path,
+            handle.lease,
+            target,
+            receipt,
+            secrets,
+            guard,
+        )
+
+
+def _assert_owned_receipt_binding(
+    expected: ScanLease, target: ReceiptTarget, receipt: Mapping[str, Any]
+) -> None:
+    dispatch = receipt_dispatch(receipt)
+    if (
+        dispatch.authority != expected.authority
+        or target.authority != expected.authority
+        or receipt.get("run_id") != expected.run_id
+        or receipt.get("receipt_identity") != expected.receipt_identity
+        or target.receipt_identity != expected.receipt_identity
+        or receipt.get("captured_head") != expected.captured_head
+        or receipt.get("project_key") != expected.project_key
+    ):
+        raise RunnerError("owned receipt binding does not match scan lease.")
+
+
+def _write_receipt_for_persisted_owner(
+    path: Path,
+    expected: ScanLease,
+    target: ReceiptTarget,
+    receipt: Mapping[str, Any],
+    secrets: Collection[str],
+    guard: _ScanTransactionGuard,
+) -> None:
+    _require_persisted_scan_lease_owner(path, expected, guard)
+    try:
+        _assert_owned_receipt_binding(expected, target, receipt)
+        _assert_receipt_storage_target(target)
+    except RunnerError as error:
+        raise _ReceiptPreflightError(str(error)) from error
+    try:
+        write_receipt(target, receipt, secrets)
+    except _ReceiptPreflightError:
+        raise
+    except BaseException:
+        guard.unsafe = True
+        raise
+    guard.mutated = True
+
+
+def _create_fully_written_scan_lease(
+    path: Path,
+    lease: ScanLease,
+    guard: _ScanTransactionGuard,
+) -> None:
+    guard.require_held()
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+        write_scan_lease(temporary_path, lease)
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            if payload.get("run_id") == run_id:
-                path.unlink()
-        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            os.link(temporary_path, path)
+        except FileExistsError:
+            raise
+        except OSError as error:
+            guard.unsafe = True
+            raise RunnerError("scan lease cannot be atomically acquired.") from error
+        try:
+            if read_scan_lease(path) != lease:
+                raise RunnerError("atomic scan lease creation did not preserve its identity.")
+        except BaseException:
+            guard.unsafe = True
+            raise
+        guard.mutated = True
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                guard.unsafe = True
+                raise RunnerError("scan lease temporary file cannot be removed.") from error
+
+
+def _persisted_scan_lease_exists(path: Path, guard: _ScanTransactionGuard) -> bool:
+    guard.require_held()
+    try:
+        attributes = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise RunnerError("existing scan lease cannot be inspected.") from error
+    if (
+        stat.S_ISLNK(attributes.st_mode)
+        or (getattr(attributes, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+        or not stat.S_ISREG(attributes.st_mode)
+    ):
+        raise RunnerError("scan lease must not be a symbolic link or reparse point.")
+    return True
+
+
+def _unlink_scan_lease_for_owner(
+    path: Path,
+    expected: ScanLease,
+    guard: _ScanTransactionGuard,
+) -> None:
+    _require_persisted_scan_lease_owner(path, expected, guard)
+    try:
+        path.unlink()
+    except OSError as error:
+        guard.unsafe = True
+        raise RunnerError("scan lease cannot be closed.") from error
+    guard.mutated = True
+
+
+def new_scan_lease(context: GitContext, target: ReceiptTarget, run_id: str) -> ScanLease:
+    if not isinstance(run_id, str) or not run_id:
+        raise RunnerError("scan lease run identifier is invalid.")
+    if target.authority == DIAGNOSTIC_ROLE and not DIAGNOSTIC_RUN_ID_RE.fullmatch(run_id):
+        raise RunnerError("diagnostic scan lease run identifier is invalid.")
+    return ScanLease(
+        run_id=run_id,
+        generation_token=uuid.uuid4().hex,
+        authority=target.authority,
+        project_key=PROJECT_KEY,
+        captured_head=context.head,
+        receipt_identity=target.receipt_identity,
+        scanner_worktree_identity=scanner_worktree_identity(context),
+        state="ACQUIRED",
+        task_id=None,
+        utc_deadline=None,
+    )
+
+
+def _assert_lease_target(lease: ScanLease, context: GitContext, target: ReceiptTarget) -> None:
+    if (
+        lease.authority != target.authority
+        or lease.project_key != PROJECT_KEY
+        or lease.captured_head != context.head
+        or lease.receipt_identity != target.receipt_identity
+        or lease.scanner_worktree_identity != scanner_worktree_identity(context)
+    ):
+        raise RunnerError("scan lease identity does not match the requested target.")
+
+
+def _stored_diagnostic_lease_target(context: GitContext, lease: ScanLease) -> ReceiptTarget:
+    if (
+        lease.authority != DIAGNOSTIC_ROLE
+        or lease.project_key != PROJECT_KEY
+        or not isinstance(lease.captured_head, str)
+        or not SHA_RE.fullmatch(lease.captured_head)
+        or lease.captured_head != context.head
+        or not isinstance(lease.run_id, str)
+        or not DIAGNOSTIC_RUN_ID_RE.fullmatch(lease.run_id)
+        or lease.scanner_worktree_identity != scanner_worktree_identity(context)
+    ):
+        raise RunnerError("existing diagnostic scan lease identity cannot be reconciled.")
+    path = (
+        context.coordination_root
+        / ".agent"
+        / "e"
+        / "sonarqube"
+        / PROJECT_KEY
+        / lease.captured_head
+        / DIAGNOSTIC_ROLE
+        / f"{lease.run_id}.json"
+    )
+    target = ReceiptTarget(
+        coordination_root=context.coordination_root,
+        path=path,
+        authority=DIAGNOSTIC_ROLE,
+        authoritative=False,
+        receipt_identity=_receipt_identity(context, path),
+    )
+    if lease.receipt_identity != target.receipt_identity:
+        raise RunnerError("existing diagnostic scan lease identity cannot be reconciled.")
+    return target
+
+
+def transition_scan_lease(
+    lease: ScanLease,
+    state: str,
+    *,
+    task_id: str | None = None,
+    utc_deadline: str | None = None,
+) -> ScanLease:
+    allowed = {
+        "ACQUIRED": {"SCANNER_END_IN_FLIGHT", "RECEIPT_TERMINAL"},
+        "SCANNER_END_IN_FLIGHT": {"CE_SUBMITTED", "RECEIPT_TERMINAL"},
+        "CE_SUBMITTED": {"CE_TERMINAL"},
+        "CE_TERMINAL": {"RECEIPT_TERMINAL"},
+        "RECEIPT_TERMINAL": {"CLOSED"},
+        "CLOSED": set(),
+    }
+    if state not in allowed.get(lease.state, set()):
+        raise RunnerError("scan lease state transition is invalid.")
+    next_task_id = lease.task_id
+    next_deadline = lease.utc_deadline
+    if state == "CE_SUBMITTED":
+        if (
+            not isinstance(task_id, str)
+            or not task_id
+            or not isinstance(utc_deadline, str)
+            or not utc_deadline
+        ):
+            raise RunnerError("scan lease submitted task checkpoint is invalid.")
+        _strict_utc_deadline(utc_deadline, "scan lease submitted task deadline is invalid.")
+        next_task_id = task_id
+        next_deadline = utc_deadline
+    elif task_id is not None or utc_deadline is not None:
+        raise RunnerError("scan lease task metadata is only admitted at submission.")
+    return ScanLease(
+        run_id=lease.run_id,
+        generation_token=lease.generation_token,
+        authority=lease.authority,
+        project_key=lease.project_key,
+        captured_head=lease.captured_head,
+        receipt_identity=lease.receipt_identity,
+        scanner_worktree_identity=lease.scanner_worktree_identity,
+        state=state,
+        task_id=next_task_id,
+        utc_deadline=next_deadline,
+    )
+
+
+def _assert_submitted_scan_lease(lease: ScanLease) -> None:
+    if lease.state == "SCANNER_END_IN_FLIGHT":
+        raise RunnerError("scan lease scanner-end handoff is unreconciled.")
+    if lease.state != "CE_SUBMITTED" or not lease.task_id or not lease.utc_deadline:
+        raise RunnerError("scan lease has no known task to reconcile.")
+
+
+def reconcile_scan_lease(
+    lease: ScanLease,
+    context: GitContext,
+    target: ReceiptTarget,
+    task_status: str,
+) -> ScanLease:
+    _assert_lease_target(lease, context, target)
+    stored_target = _stored_diagnostic_lease_target(context, lease)
+    if target != stored_target:
+        raise RunnerError("scan lease identity does not match the stored diagnostic target.")
+    _assert_submitted_scan_lease(lease)
+    if not isinstance(task_status, str) or task_status not in {"SUCCESS", "FAILED", "CANCELED"}:
+        raise RunnerError("scan lease has no known task terminal state.")
+    return transition_scan_lease(lease, "CE_TERMINAL")
+
+
+def _read_running_diagnostic_receipt(
+    context: GitContext,
+    target: ReceiptTarget,
+    lease: ScanLease,
+    guard: _ScanTransactionGuard,
+) -> dict[str, Any]:
+    guard.require_held()
+    _assert_receipt_storage_target(target)
+    try:
+        payload = json.loads(target.path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RunnerError("existing diagnostic receipt cannot be reconciled.") from error
+    if not isinstance(payload, dict):
+        raise RunnerError("existing diagnostic receipt cannot be reconciled.")
+    try:
+        dispatch = receipt_dispatch(payload)
+    except RunnerError as error:
+        raise RunnerError("existing diagnostic receipt cannot be reconciled.") from error
+    worktree = payload.get("worktree")
+    if (
+        dispatch.historical
+        or dispatch.authority != DIAGNOSTIC_ROLE
+        or dispatch.outcome not in {"RUNNING", "BLOCKED"}
+        or payload.get("run_id") != lease.run_id
+        or payload.get("receipt_identity") != lease.receipt_identity
+        or lease.receipt_identity != target.receipt_identity
+        or payload.get("captured_head") != lease.captured_head
+        or lease.captured_head != context.head
+        or payload.get("project_key") != PROJECT_KEY
+        or not isinstance(worktree, Mapping)
+        or worktree.get("repository_root") != str(context.repository_root)
+        or worktree.get("git_dir") != str(context.git_dir)
+        or worktree.get("common_dir") != str(context.common_dir)
+        or worktree.get("coordination_root") != str(context.coordination_root)
+        or worktree.get("detached") is not True
+        or worktree.get("linked") is not True
+    ):
+        raise RunnerError("existing diagnostic receipt cannot be reconciled.")
+    return payload
+
+
+def _persisted_utc_deadline(lease: ScanLease) -> datetime:
+    deadline = lease.utc_deadline
+    if not isinstance(deadline, str) or not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})",
+        deadline,
+    ):
+        raise RunnerError("existing diagnostic scan lease has an invalid UTC deadline.")
+    try:
+        parsed = datetime.fromisoformat(deadline.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise RunnerError("existing diagnostic scan lease has an invalid UTC deadline.") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise RunnerError("existing diagnostic scan lease has an invalid UTC deadline.")
+    return parsed.astimezone(timezone.utc)
+
+
+def _default_recovery_utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _recovery_utc_now(now: Callable[[], datetime]) -> datetime:
+    observed = now()
+    if (
+        not isinstance(observed, datetime)
+        or observed.tzinfo is None
+        or observed.utcoffset() != timedelta(0)
+    ):
+        raise RunnerError("scan lease recovery clock is not aware UTC.")
+    return observed.astimezone(timezone.utc)
+
+
+def _reconcile_persisted_diagnostic_lease(
+    path: Path,
+    context: GitContext,
+    lease: ScanLease,
+    reconcile: Callable[[ScanLease], str] | None,
+    now: Callable[[], datetime],
+    guard: _ScanTransactionGuard,
+) -> None:
+    guard.require_held()
+    target = _stored_diagnostic_lease_target(context, lease)
+    _assert_submitted_scan_lease(lease)
+    if _recovery_utc_now(now) < _persisted_utc_deadline(lease):
+        raise RunnerError("existing diagnostic scan lease deadline has not elapsed.")
+    running_receipt = _read_running_diagnostic_receipt(context, target, lease, guard)
+    if reconcile is None:
+        raise RunnerError("existing scan lease requires exact-task reconciliation.")
+    task_status = reconcile(lease)
+    reconciled = reconcile_scan_lease(lease, context, target, task_status)
+    _write_scan_lease_for_owner(path, lease, reconciled, guard)
+    if _read_running_diagnostic_receipt(context, target, lease, guard) != running_receipt:
+        raise RunnerError("existing diagnostic receipt changed during reconciliation.")
+    if running_receipt["outcome"] == "RUNNING":
+        _write_receipt_for_persisted_owner(
+            path,
+            reconciled,
+            target,
+            {
+                **running_receipt,
+                "outcome": "BLOCKED",
+                "failure": f"SCAN_LEASE_RECONCILED_{task_status}",
+                "completed_at": utc_now(),
+            },
+            (),
+            guard,
+        )
+    receipt_terminal = transition_scan_lease(reconciled, "RECEIPT_TERMINAL")
+    _write_scan_lease_for_owner(path, reconciled, receipt_terminal, guard)
+    closed = transition_scan_lease(receipt_terminal, "CLOSED")
+    _write_scan_lease_for_owner(path, receipt_terminal, closed, guard)
+    _unlink_scan_lease_for_owner(path, closed, guard)
+
+
+def _finalize_scan_lease_handle(handle: ScanLeaseHandle) -> bool:
+    if handle.lease.state == "RECEIPT_TERMINAL":
+        handle.checkpoint("CLOSED")
+    if handle.lease.state in {"ACQUIRED", "CLOSED"}:
+        with _scan_transaction_guard_for_handle(handle) as guard:
+            _unlink_scan_lease_for_owner(handle.path, handle.lease, guard)
+        return True
+    return False
+
+
+def _release_unmutated_scan_transaction_guard(guard: _ScanTransactionGuard) -> None:
+    if not guard.mutated and not guard.unsafe:
+        try:
+            guard.release()
+        except RunnerError:
             pass
 
 
-def receipt_path(context: GitContext, role: str) -> Path:
-    return context.coordination_root / ".agent" / "e" / "sonarqube" / PROJECT_KEY / context.head / f"{role}.json"
+@contextmanager
+def project_lock(
+    context: GitContext,
+    target: ReceiptTarget,
+    run_id: str,
+    *,
+    reconcile: Callable[[ScanLease], str] | None = None,
+    now: Callable[[], datetime] = _default_recovery_utc_now,
+) -> Iterator[ScanLeaseHandle]:
+    path = lock_path(context.coordination_root)
+    _assert_coordination_storage_ancestors(context.coordination_root, path)
+    guard = _acquire_scan_transaction_guard(path)
+    try:
+        if _persisted_scan_lease_exists(path, guard):
+            try:
+                existing = read_scan_lease(path)
+            except RunnerError as read_error:
+                raise RunnerError(
+                    "existing scan lease is invalid and cannot be reclaimed."
+                ) from read_error
+            _reconcile_persisted_diagnostic_lease(
+                path,
+                context,
+                existing,
+                reconcile,
+                now,
+                guard,
+            )
+        next_lease = new_scan_lease(context, target, run_id)
+        try:
+            _create_fully_written_scan_lease(path, next_lease, guard)
+        except FileExistsError as error:
+            guard.unsafe = True
+            raise RunnerError("existing scan lease changed during guarded acquisition.") from error
+    except BaseException:
+        _release_unmutated_scan_transaction_guard(guard)
+        raise
+    else:
+        guard.release()
+
+    handle = ScanLeaseHandle(path, next_lease, context.coordination_root)
+    try:
+        yield handle
+    except BaseException:
+        try:
+            _finalize_scan_lease_handle(handle)
+        except BaseException:
+            pass
+        raise
+    else:
+        _finalize_scan_lease_handle(handle)
 
 
 def assert_secret_free(receipt: Mapping[str, Any], secrets: Collection[str]) -> None:
@@ -3298,30 +4281,62 @@ def assert_secret_free(receipt: Mapping[str, Any], secrets: Collection[str]) -> 
         raise RunnerError("Refusing to write a receipt containing a SonarQube credential.")
 
 
-def write_receipt(path: Path, receipt: Mapping[str, Any], secrets: Collection[str]) -> None:
-    assert_secret_free(receipt, secrets)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path: Path | None = None
+def _validate_receipt_write(
+    target: ReceiptTarget,
+    receipt: Mapping[str, Any],
+    secrets: Collection[str],
+) -> None:
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as temporary:
-            json.dump(receipt, temporary, indent=2, sort_keys=True)
-            temporary.write("\n")
-            temporary_path = Path(temporary.name)
-        os.replace(temporary_path, path)
-    finally:
-        if temporary_path is not None and temporary_path.exists():
-            temporary_path.unlink()
+        assert_secret_free(receipt, secrets)
+        dispatch = receipt_dispatch(receipt)
+        if dispatch.historical:
+            raise RunnerError("historical receipts are read-only.")
+        if (
+            dispatch.authority != target.authority
+            or receipt.get("receipt_identity") != target.receipt_identity
+        ):
+            raise RunnerError("receipt target identity does not match its authority.")
+        if target.path.exists():
+            try:
+                existing_payload = json.loads(target.path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as error:
+                raise RunnerError("existing receipt is unreadable.") from error
+            existing = receipt_dispatch(existing_payload)
+            if existing.historical:
+                raise RunnerError("historical receipt is immutable.")
+            if existing.outcome in TERMINAL_RECEIPT_OUTCOMES:
+                raise RunnerError("refusing to replace terminal receipt.")
+            if (
+                existing.authority != target.authority
+                or existing_payload.get("receipt_identity") != target.receipt_identity
+            ):
+                raise RunnerError("existing receipt identity does not match its target.")
+            if existing_payload.get("run_id") != receipt.get("run_id"):
+                raise RunnerError("refusing to replace another running receipt.")
+    except RunnerError as error:
+        raise _ReceiptPreflightError(str(error)) from error
+
+
+def write_receipt(
+    target: ReceiptTarget,
+    receipt: Mapping[str, Any],
+    secrets: Collection[str],
+) -> None:
+    _assert_receipt_storage_target(target)
+    _validate_receipt_write(target, receipt, secrets)
+    _atomic_write_json(target.path, receipt)
 
 
 def validate_inventory(inventory: Any, endpoint: str, expected_query: Mapping[str, str]) -> None:
-    required = ("endpoint", "query", "total", "pages", "pagination_complete", "result_empty", "records")
+    required = (
+        "endpoint",
+        "query",
+        "total",
+        "pages",
+        "pagination_complete",
+        "result_empty",
+        "records",
+    )
     if (
         not isinstance(inventory, dict)
         or any(key not in inventory for key in required)
@@ -3340,7 +4355,11 @@ def validate_inventory(inventory: Any, endpoint: str, expected_query: Mapping[st
         raise RunnerError("PASS receipt lacks complete inventory evidence.")
     keys: list[str] = []
     for record in inventory["records"]:
-        if not isinstance(record, dict) or not isinstance(record.get("key"), str) or not record["key"]:
+        if (
+            not isinstance(record, dict)
+            or not isinstance(record.get("key"), str)
+            or not record["key"]
+        ):
             raise RunnerError("PASS receipt inventory has an invalid record key.")
         keys.append(record["key"])
     if len(keys) != len(set(keys)):
@@ -3361,43 +4380,75 @@ def validate_inventory(inventory: Any, endpoint: str, expected_query: Mapping[st
             raise RunnerError("PASS receipt inventory lacks terminal pagination coverage.")
 
 
-def validate_issue_dispositions(before: Mapping[str, Any], after: Mapping[str, Any], dispositions: Any) -> None:
-    if not isinstance(dispositions, dict) or not isinstance(dispositions.get("items"), list) or type(dispositions.get("blocking_count")) is not int:
+def validate_issue_dispositions(
+    before: Mapping[str, Any], after: Mapping[str, Any], dispositions: Any
+) -> None:
+    if (
+        not isinstance(dispositions, dict)
+        or not isinstance(dispositions.get("items"), list)
+        or type(dispositions.get("blocking_count")) is not int
+    ):
         raise RunnerError("PASS receipt lacks issue-disposition evidence.")
     before_by_key = {record["key"]: record for record in before["records"]}
     after_by_key = {record["key"]: record for record in after["records"]}
     expected_keys = set(before_by_key) | set(after_by_key)
     item_by_key: dict[str, Mapping[str, Any]] = {}
     for item in dispositions["items"]:
-        if not isinstance(item, dict) or not isinstance(item.get("key"), str) or not item["key"] or item["key"] in item_by_key:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("key"), str)
+            or not item["key"]
+            or item["key"] in item_by_key
+        ):
             raise RunnerError("PASS receipt issue dispositions have invalid keys.")
         item_by_key[item["key"]] = item
     if set(item_by_key) != expected_keys:
-        raise RunnerError("PASS receipt issue dispositions do not cover the exact inventory-key union.")
+        raise RunnerError(
+            "PASS receipt issue dispositions do not cover the exact inventory-key union."
+        )
     expected_blocking = 0
     for key in expected_keys:
         current = after_by_key.get(key)
         expected_disposition = (
             "FIXED_IN_CURRENT_HEAD"
-            if current is None or (current.get("issueStatus") == "FIXED" and current.get("resolution") in {None, "FIXED"})
+            if current is None
+            or (
+                current.get("issueStatus") == "FIXED"
+                and current.get("resolution") in {None, "FIXED"}
+            )
             else "BLOCKING_DISPOSITION"
         )
         if item_by_key[key].get("disposition") != expected_disposition:
-            raise RunnerError("PASS receipt issue disposition does not match the observed current issue.")
+            raise RunnerError(
+                "PASS receipt issue disposition does not match the observed current issue."
+            )
         expected_blocking += expected_disposition == "BLOCKING_DISPOSITION"
     if dispositions["blocking_count"] != expected_blocking:
         raise RunnerError("PASS receipt issue blocking count does not match observed dispositions.")
 
 
 def validate_hotspot_dispositions(inventory: Mapping[str, Any], dispositions: Any) -> None:
-    if not isinstance(dispositions, dict) or not isinstance(dispositions.get("items"), list) or type(dispositions.get("blocking_count")) is not int:
+    if (
+        not isinstance(dispositions, dict)
+        or not isinstance(dispositions.get("items"), list)
+        or type(dispositions.get("blocking_count")) is not int
+    ):
         raise RunnerError("PASS receipt lacks hotspot-disposition evidence.")
     expected_keys = {record["key"] for record in inventory["records"]}
     items = dispositions["items"]
     keys = [item.get("key") for item in items if isinstance(item, dict)]
-    if len(keys) != len(items) or any(not isinstance(key, str) or not key for key in keys) or len(set(keys)) != len(keys) or set(keys) != expected_keys:
-        raise RunnerError("PASS receipt hotspot dispositions do not cover the exact inventory keys.")
-    if any(item.get("disposition") != "BLOCKING_HOTSPOT" for item in items) or dispositions["blocking_count"] != len(expected_keys):
+    if (
+        len(keys) != len(items)
+        or any(not isinstance(key, str) or not key for key in keys)
+        or len(set(keys)) != len(keys)
+        or set(keys) != expected_keys
+    ):
+        raise RunnerError(
+            "PASS receipt hotspot dispositions do not cover the exact inventory keys."
+        )
+    if any(item.get("disposition") != "BLOCKING_HOTSPOT" for item in items) or dispositions[
+        "blocking_count"
+    ] != len(expected_keys):
         raise RunnerError("PASS receipt hotspot blocking count does not match observed hotspots.")
 
 
@@ -3524,7 +4575,8 @@ def validate_analysis_coverage_receipt(receipt: Mapping[str, Any]) -> None:
 def validate_pass_receipt(receipt: Mapping[str, Any]) -> None:
     required = (
         "run_id",
-        "role",
+        "authority",
+        "receipt_identity",
         "project_key",
         "project_version",
         "analysis_xml_project_key",
@@ -3550,16 +4602,19 @@ def validate_pass_receipt(receipt: Mapping[str, Any]) -> None:
         "cleanup",
         "post_scan_head",
     )
+    try:
+        dispatch = receipt_dispatch(receipt)
+    except RunnerError as error:
+        raise RunnerError(
+            "PASS receipt does not satisfy the exact-head evidence schema."
+        ) from error
     if (
-        receipt.get("schema_version") != RECEIPT_SCHEMA_VERSION
-        or receipt.get("outcome") != "PASS"
-        or receipt.get("project_key") != PROJECT_KEY
+        dispatch.historical
+        or dispatch.authority not in {"candidate", "post_merge"}
+        or dispatch.outcome != "PASS"
         or not isinstance(receipt.get("project_version"), str)
         or not SEMVER_RE.fullmatch(receipt["project_version"])
         or receipt.get("analysis_xml_project_key") != PROJECT_KEY
-        or receipt.get("role") not in {"candidate", "post-merge"}
-        or not isinstance(receipt.get("captured_head"), str)
-        or not SHA_RE.fullmatch(receipt["captured_head"])
         or not isinstance(receipt.get("completed_at"), str)
         or not receipt["completed_at"]
         or any(key not in receipt for key in required)
@@ -3715,13 +4770,18 @@ def validate_pass_receipt(receipt: Mapping[str, Any]) -> None:
         raise RunnerError("PASS receipt has a post-scan HEAD mismatch.")
 
 
-def receipt_base(context: GitContext, role: str, run_id: str) -> dict[str, Any]:
+def receipt_base(
+    context: GitContext,
+    target: ReceiptTarget,
+    run_id: str,
+) -> dict[str, Any]:
     return {
         "schema_version": RECEIPT_SCHEMA_VERSION,
         "outcome": "RUNNING",
         "run_id": run_id,
+        "authority": target.authority,
+        "receipt_identity": target.receipt_identity,
         "project_key": PROJECT_KEY,
-        "role": role,
         "captured_head": context.head,
         "started_at": utc_now(),
         "worktree": {
@@ -3736,12 +4796,14 @@ def receipt_base(context: GitContext, role: str, run_id: str) -> dict[str, Any]:
 
 
 def execute(role: str, scanner_override: str | None) -> Path:
+    if role == DIAGNOSTIC_ROLE:
+        raise RunnerError("DIAGNOSTIC_SCAN_PREREQUISITES_INCOMPLETE")
     inherited_environment = process_environment()
     clean_environment = scrub_sonar_environment(inherited_environment)
     context = git_context(Path.cwd(), clean_environment)
     run_id = str(uuid.uuid4())
-    target_receipt = receipt_path(context, role)
-    receipt = receipt_base(context, role, run_id)
+    target = receipt_target(context, role, None)
+    receipt = receipt_base(context, target, run_id)
     secrets = sonar_secret_values(inherited_environment)
     coverage_plan: CoveragePlan | None = None
     coverage_run_claimed = False
@@ -3749,11 +4811,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
 
     def record_claimed_coverage_cleanup() -> RunnerError | None:
         nonlocal coverage_cleanup_attempted, coverage_run_claimed
-        if (
-            coverage_plan is None
-            or not coverage_run_claimed
-            or coverage_cleanup_attempted
-        ):
+        if coverage_plan is None or not coverage_run_claimed or coverage_cleanup_attempted:
             return None
         coverage_cleanup_attempted = True
         try:
@@ -3781,11 +4839,37 @@ def execute(role: str, scanner_override: str | None) -> Path:
         coverage_run_claimed = False
         return None
 
-    with project_lock(context.coordination_root, role, context.head, run_id):
-        write_receipt(target_receipt, receipt, secrets)
+    recovery_credentials: dict[str, str] | None = None
+
+    def resolve_persisted_diagnostic_lease(lease: ScanLease) -> str:
+        nonlocal recovery_credentials
+        if recovery_credentials is None:
+            recovery_credentials = load_credentials(context, inherited_environment, secrets)
+            secrets.update(recovery_credentials.values())
+        return resolve_persisted_ce_task_status(
+            recovery_credentials["SONAR_HOST_URL"],
+            recovery_credentials["SONAR_TOKEN"],
+            lease,
+        )
+
+    with project_lock(
+        context, target, run_id, reconcile=resolve_persisted_diagnostic_lease
+    ) as lease:
+
+        def publish_receipt() -> None:
+            lease.write_receipt(target, receipt, secrets)
+            if (
+                receipt.get("outcome") in TERMINAL_RECEIPT_OUTCOMES
+                and lease.lease.state not in UNRECONCILED_LEASE_STATES
+            ):
+                lease.checkpoint("RECEIPT_TERMINAL")
+
+        publish_receipt()
         try:
-            credentials = load_credentials(context, inherited_environment, secrets)
-            secrets.update(credentials.values())
+            credentials = recovery_credentials
+            if credentials is None:
+                credentials = load_credentials(context, inherited_environment, secrets)
+                secrets.update(credentials.values())
             receipt["credential_inputs"] = list(REQUIRED_ENV)
             if role == "post-merge":
                 assert_post_merge_target(context, clean_environment)
@@ -3858,6 +4942,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
             produce_coverage(context, coverage_plan, clean_environment, secrets)
             with sealed_coverage_evidence(coverage_plan, context) as sealed:
                 receipt["coverage"] = sealed.evidence
+                lease.checkpoint("SCANNER_END_IN_FLIGHT")
                 run_process(
                     scanner_end_command(scanner, credentials["SONAR_TOKEN"]),
                     cwd=context.repository_root,
@@ -3869,18 +4954,33 @@ def execute(role: str, scanner_override: str | None) -> Path:
                 sealed.assert_unchanged()
             post_end_coverage = validate_coverage_evidence(coverage_plan, context)
             if post_end_coverage != receipt["coverage"]:
-                raise CoverageFailureError(
-                    "report_validation", None, "COVERAGE_REPORT_SEAL_DRIFT"
-                )
+                raise CoverageFailureError("report_validation", None, "COVERAGE_REPORT_SEAL_DRIFT")
             receipt["task_report"] = report_task(
                 context.repository_root, credentials["SONAR_HOST_URL"]
             )
+            ce_submission_checkpointed = False
+
+            def checkpoint_ce_submission(task_id: str, deadline: str) -> None:
+                nonlocal ce_submission_checkpointed
+                lease.checkpoint(
+                    "CE_SUBMITTED",
+                    task_id=task_id,
+                    utc_deadline=deadline,
+                )
+                ce_submission_checkpointed = True
+
             analysis_id = wait_for_ce_task(
                 credentials["SONAR_HOST_URL"],
                 receipt["task_report"]["ce_task_id"],
                 credentials["SONAR_TOKEN"],
                 receipt,
+                lease_checkpoint=checkpoint_ce_submission,
             )
+            if not ce_submission_checkpointed:
+                raise RunnerError(
+                    "Compute Engine polling began without a durable submitted-task lease."
+                )
+            lease.checkpoint("CE_TERMINAL")
             receipt["analysis_coverage"] = analysis_coverage_binding(
                 credentials["SONAR_HOST_URL"],
                 analysis_id,
@@ -3943,7 +5043,7 @@ def execute(role: str, scanner_override: str | None) -> Path:
             receipt["completed_at"] = utc_now()
             receipt["outcome"] = "PASS"
             validate_pass_receipt(receipt)
-            write_receipt(target_receipt, receipt, secrets)
+            publish_receipt()
         except ApiHttpError as error:
             record_claimed_coverage_cleanup()
             if error.status in {401, 403}:
@@ -3951,12 +5051,12 @@ def execute(role: str, scanner_override: str | None) -> Path:
                 receipt["outcome"] = "BLOCKED"
                 receipt["failure"] = str(credential_error)
                 receipt["completed_at"] = utc_now()
-                write_receipt(target_receipt, receipt, secrets)
+                publish_receipt()
                 raise credential_error from error
             receipt["outcome"] = "BLOCKED"
             receipt["failure"] = str(error)
             receipt["completed_at"] = utc_now()
-            write_receipt(target_receipt, receipt, secrets)
+            publish_receipt()
             raise
         except GeneratedArtifactCleanupError as error:
             record_claimed_coverage_cleanup()
@@ -3977,27 +5077,27 @@ def execute(role: str, scanner_override: str | None) -> Path:
                 except RunnerError as quality_gate_error:
                     receipt["failure"] = str(quality_gate_error)
                     receipt["completed_at"] = utc_now()
-                    write_receipt(target_receipt, receipt, secrets)
+                    publish_receipt()
                     raise error from quality_gate_error
             receipt["failure"] = str(error)
             receipt["completed_at"] = utc_now()
-            write_receipt(target_receipt, receipt, secrets)
+            publish_receipt()
             raise
         except RunnerError as error:
             record_claimed_coverage_cleanup()
             receipt["outcome"] = "BLOCKED"
             receipt["failure"] = str(error)
             receipt["completed_at"] = utc_now()
-            write_receipt(target_receipt, receipt, secrets)
+            publish_receipt()
             raise
         except Exception as error:
             record_claimed_coverage_cleanup()
             receipt["outcome"] = "BLOCKED"
             receipt["failure"] = f"Unexpected runner failure: {error.__class__.__name__}."
             receipt["completed_at"] = utc_now()
-            write_receipt(target_receipt, receipt, secrets)
+            publish_receipt()
             raise RunnerError(receipt["failure"]) from error
-    return target_receipt
+    return target.path
 
 
 def main(argv: Sequence[str] | None = None) -> int:

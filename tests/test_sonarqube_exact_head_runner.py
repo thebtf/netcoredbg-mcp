@@ -3,6 +3,7 @@
 import importlib.util
 import json
 from contextlib import ExitStack, nullcontext
+from datetime import datetime, timezone
 import stat
 import sys
 from pathlib import Path
@@ -76,7 +77,11 @@ class TestSonarqubeExactHeadRunner(TestCase):
         )
 
         self.assertEqual(
-            {key: scanner_environment[key] for key in runner.SONAR_ENV if key in scanner_environment},
+            {
+                key: scanner_environment[key]
+                for key in runner.SONAR_ENV
+                if key in scanner_environment
+            },
             {"SONAR_HOST_URL": "https://sonar.example.test", "SONAR_TOKEN": "scan-token"},
         )
 
@@ -130,9 +135,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
             root = Path(temporary_directory) / "scanner-worktree"
             root.mkdir()
             context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
-            plan = runner.derive_coverage_plan(
-                context, "00000000-0000-4000-8000-000000000002"
-            )
+            plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000002")
 
         self.assertFalse(plan.root.exists())
         self.assertEqual(
@@ -148,9 +151,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
             runner.CLOSED_DOTNET_COVERAGE_PROJECTS,
         )
         self.assertEqual(
-            runner.CLOSED_DOTNET_COVERAGE_PROJECTS.count(
-                runner.HOST_REAL_PYTHON_TEST_PROJECT
-            ),
+            runner.CLOSED_DOTNET_COVERAGE_PROJECTS.count(runner.HOST_REAL_PYTHON_TEST_PROJECT),
             1,
         )
         self.assertEqual(
@@ -231,9 +232,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
             context = runner.GitContext(
                 root, coordination_root / ".git", root / ".git", coordination_root, "a" * 40
             )
-            plan = runner.derive_coverage_plan(
-                context, "00000000-0000-4000-8000-000000000011"
-            )
+            plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000011")
             environment = runner.coverage_environment(context, plan, {"SAFE": "kept"})
             dotnet_environment = runner.coverage_dotnet_environment(context, plan, environment)
 
@@ -278,9 +277,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
             context = runner.GitContext(
                 root, coordination_root / ".git", root / ".git", coordination_root, "a" * 40
             )
-            plan = runner.derive_coverage_plan(
-                context, "00000000-0000-4000-8000-000000000009"
-            )
+            plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000009")
             runner.claim_coverage_run(plan, context)
             coverage_environment = runner.coverage_environment_directory(context, plan)
             coverage_environment.mkdir(parents=True)
@@ -301,9 +298,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
-            plan = runner.derive_coverage_plan(
-                context, "00000000-0000-4000-8000-000000000008"
-            )
+            plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000008")
             runner.claim_coverage_run(plan, context)
             environment = runner.coverage_environment(
                 context, plan, {"SONAR_TOKEN": "must-not-reach-child", "SAFE": "kept"}
@@ -323,7 +318,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 )
             self.assertTrue(all(report.absolute_path.parent.exists() for report in plan.reports))
 
-        self.assertEqual([command for command, _ in calls], runner.coverage_producer_commands(context, plan))
+        self.assertEqual(
+            [command for command, _ in calls], runner.coverage_producer_commands(context, plan)
+        )
         self.assertTrue(
             all(
                 "SONAR_TOKEN" not in kwargs["environment"]
@@ -350,9 +347,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
-            plan = runner.derive_coverage_plan(
-                context, "00000000-0000-4000-8000-000000000009"
-            )
+            plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000009")
             expected = {"evidence_sets": [{"language": "dotnet"}, {"language": "python"}]}
             with (
                 patch.object(runner, "run_coverage_producers") as producers,
@@ -368,13 +363,13 @@ class TestSonarqubeExactHeadRunner(TestCase):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
-            plan = runner.derive_coverage_plan(
-                context, "00000000-0000-4000-8000-000000000010"
-            )
+            plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000010")
             with (
                 patch.object(runner.time, "monotonic", return_value=100.0),
                 patch.object(runner, "run_coverage_producers") as producers,
-                patch.object(runner, "validate_coverage_evidence", return_value={"evidence_sets": []}),
+                patch.object(
+                    runner, "validate_coverage_evidence", return_value={"evidence_sets": []}
+                ),
             ):
                 runner.produce_coverage(context, plan, {"SAFE": "kept"}, ())
 
@@ -448,9 +443,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
-            plan = runner.derive_coverage_plan(
-                context, "00000000-0000-4000-8000-000000000005"
-            )
+            plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000005")
             command = runner.scanner_begin_command(
                 ["scanner"],
                 root / "SonarQube.Analysis.xml",
@@ -470,13 +463,13 @@ class TestSonarqubeExactHeadRunner(TestCase):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
-            plan = runner.derive_coverage_plan(
-                context, "00000000-0000-4000-8000-000000000003"
-            )
+            plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000003")
 
             marker_sha256 = runner.claim_coverage_run(plan, context)
 
-            self.assertEqual(plan.marker_path.read_bytes(), runner.canonical_coverage_marker_bytes(plan, context))
+            self.assertEqual(
+                plan.marker_path.read_bytes(), runner.canonical_coverage_marker_bytes(plan, context)
+            )
             self.assertEqual(runner.validate_coverage_marker(plan, context), marker_sha256)
             stale_plan = runner.derive_coverage_plan(
                 context, "00000000-0000-4000-8000-000000000004"
@@ -488,12 +481,8 @@ class TestSonarqubeExactHeadRunner(TestCase):
     def test_claimed_coverage_run_cleanup_preserves_siblings(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            context = runner.GitContext(
-                root, root / "common", root / "git", root, "a" * 40
-            )
-            plan = runner.derive_coverage_plan(
-                context, "00000000-0000-4000-8000-000000000012"
-            )
+            context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
+            plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000012")
             runner.claim_coverage_run(plan, context)
             sibling_run = plan.root.parent / "other-run"
             sibling_run.mkdir()
@@ -517,9 +506,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
-            plan = runner.derive_coverage_plan(
-                context, "00000000-0000-4000-8000-000000000007"
-            )
+            plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000007")
             runner.claim_coverage_run(plan, context)
             python_source = root / "src" / "netcoredbg_mcp" / "module.py"
             host_source = root / "host" / "NetCoreDbg.Mcp.Host" / "Program.cs"
@@ -536,7 +523,8 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 report.absolute_path.parent.mkdir(parents=True, exist_ok=True)
                 source = (
                     stateless_source
-                    if report.project and report.project.endswith("NetCoreDbg.Mcp.Stateless.Tests.csproj")
+                    if report.project
+                    and report.project.endswith("NetCoreDbg.Mcp.Stateless.Tests.csproj")
                     else host_source
                 )
                 report.absolute_path.write_text(
@@ -566,9 +554,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             context = runner.GitContext(root, root / "common", root / "git", root, "a" * 40)
-            plan = runner.derive_coverage_plan(
-                context, "00000000-0000-4000-8000-000000000010"
-            )
+            plan = runner.derive_coverage_plan(context, "00000000-0000-4000-8000-000000000010")
             runner.claim_coverage_run(plan, context)
             python_source = root / "src" / "netcoredbg_mcp" / "module.py"
             host_source = root / "host" / "NetCoreDbg.Mcp.Host" / "Program.cs"
@@ -585,7 +571,8 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 report.absolute_path.parent.mkdir(parents=True, exist_ok=True)
                 source = (
                     stateless_source
-                    if report.project and report.project.endswith("NetCoreDbg.Mcp.Stateless.Tests.csproj")
+                    if report.project
+                    and report.project.endswith("NetCoreDbg.Mcp.Stateless.Tests.csproj")
                     else host_source
                 )
                 report.absolute_path.write_text(
@@ -640,7 +627,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
             (nested_directory / ".env").write_text("SONAR_TOKEN=synthetic", encoding="utf-8")
 
             with self.assertRaisesRegex(runner.RunnerError, "in-tree .env"):
-                runner.load_credentials(self.context(primary_root, scanner_root), self.credentials())
+                runner.load_credentials(
+                    self.context(primary_root, scanner_root), self.credentials()
+                )
 
     def test_scanner_tree_symlink_directory_is_rejected_before_dotenv_scanning(self):
         with TemporaryDirectory() as temporary_directory:
@@ -787,20 +776,31 @@ class TestSonarqubeExactHeadRunner(TestCase):
     def test_missing_primary_root_dotenv_or_value_is_a_named_blocker(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            for content in (None, "SONAR_HOST_URL=https://sonar.example.test\nSONAR_TOKEN=scan-token\n"):
+            for content in (
+                None,
+                "SONAR_HOST_URL=https://sonar.example.test\nSONAR_TOKEN=scan-token\n",
+            ):
                 with self.subTest(content=content):
                     primary_root = root / ("missing" if content is None else "incomplete")
-                    scanner_root = root / ("missing-scanner" if content is None else "incomplete-scanner")
+                    scanner_root = root / (
+                        "missing-scanner" if content is None else "incomplete-scanner"
+                    )
                     primary_root.mkdir()
                     scanner_root.mkdir()
                     reader = (
-                        patch.object(runner, "read_verified_primary_dotenv", side_effect=FileNotFoundError)
+                        patch.object(
+                            runner, "read_verified_primary_dotenv", side_effect=FileNotFoundError
+                        )
                         if content is None
-                        else patch.object(runner, "read_verified_primary_dotenv", return_value=content)
+                        else patch.object(
+                            runner, "read_verified_primary_dotenv", return_value=content
+                        )
                     )
 
                     with reader:
-                        with self.assertRaisesRegex(runner.CredentialsUnavailable, "SONAR_CREDENTIALS_UNAVAILABLE"):
+                        with self.assertRaisesRegex(
+                            runner.CredentialsUnavailable, "SONAR_CREDENTIALS_UNAVAILABLE"
+                        ):
                             runner.load_credentials(self.context(primary_root, scanner_root), {})
 
     def test_admin_token_is_rejected_from_primary_root_dotenv_and_process(self):
@@ -820,7 +820,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
                         runner, "read_verified_primary_dotenv", return_value=content or ""
                     ):
                         with self.assertRaisesRegex(runner.RunnerError, "SONAR_ADMIN_TOKEN"):
-                            runner.load_credentials(self.context(primary_root, scanner_root), process_env)
+                            runner.load_credentials(
+                                self.context(primary_root, scanner_root), process_env
+                            )
 
     def test_load_credentials_rejects_noncanonical_case_sonar_tokens(self):
         with TemporaryDirectory() as temporary_directory:
@@ -856,7 +858,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
                         runner, "read_verified_primary_dotenv", return_value=content or ""
                     ):
                         with self.assertRaisesRegex(runner.RunnerError, "Unknown"):
-                            runner.load_credentials(self.context(primary_root, scanner_root), process_env)
+                            runner.load_credentials(
+                                self.context(primary_root, scanner_root), process_env
+                            )
 
     def test_malformed_host_is_a_named_credential_blocker(self):
         with TemporaryDirectory() as temporary_directory:
@@ -865,7 +869,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
             scanner_root = root / "scanner"
             primary_root.mkdir()
             scanner_root.mkdir()
-            with self.assertRaisesRegex(runner.CredentialsUnavailable, r"^SONAR_CREDENTIALS_UNAVAILABLE: SONAR_HOST_URL\."):
+            with self.assertRaisesRegex(
+                runner.CredentialsUnavailable, r"^SONAR_CREDENTIALS_UNAVAILABLE: SONAR_HOST_URL\."
+            ):
                 runner.load_credentials(
                     self.context(primary_root, scanner_root),
                     {**self.credentials(), "SONAR_HOST_URL": "sonar.example.test"},
@@ -901,7 +907,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 "run",
                 return_value=runner.subprocess.CompletedProcess([], 1, "HTTP 401 unauthorized"),
             ):
-                with self.assertRaisesRegex(runner.CredentialsUnavailable, r"^SONAR_CREDENTIALS_UNAVAILABLE: SONAR_TOKEN\."):
+                with self.assertRaisesRegex(
+                    runner.CredentialsUnavailable, r"^SONAR_CREDENTIALS_UNAVAILABLE: SONAR_TOKEN\."
+                ):
                     runner.run_process(
                         ["scanner", "begin"],
                         cwd=Path(temporary_directory),
@@ -914,14 +922,19 @@ class TestSonarqubeExactHeadRunner(TestCase):
     def test_ce_http_auth_error_is_attributed_to_scan_credential(self):
         class Opener:
             def open(self, *_args, **_kwargs):
-                raise runner.urllib.error.HTTPError("https://sonar.example.test", 401, "Unauthorized", None, None)
+                raise runner.urllib.error.HTTPError(
+                    "https://sonar.example.test", 401, "Unauthorized", None, None
+                )
 
         with patch.object(runner, "API_OPENER", Opener()):
             with self.assertRaises(runner.ApiHttpError) as raised:
-                runner.api_json("https://sonar.example.test", "/api/ce/task", {"id": "task"}, "scan-token")
+                runner.api_json(
+                    "https://sonar.example.test", "/api/ce/task", {"id": "task"}, "scan-token"
+                )
 
-        self.assertEqual((raised.exception.status, raised.exception.input_name), (401, "SONAR_TOKEN"))
-
+        self.assertEqual(
+            (raised.exception.status, raised.exception.input_name), (401, "SONAR_TOKEN")
+        )
 
     def test_head_drift_after_scan_is_rejected(self):
         with TemporaryDirectory() as temporary_directory:
@@ -938,6 +951,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
             with patch.object(runner, "git_output", return_value="!! bin/"):
                 with self.assertRaisesRegex(runner.RunnerError, "not clean"):
                     runner.strict_cleanliness(context, {}, "scanner begin")
+
     def test_attached_worktree_is_rejected(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -957,6 +971,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 ):
                     with self.assertRaisesRegex(runner.RunnerError, "detached HEAD"):
                         runner.git_context(root, {})
+
     def test_project_inventory_in_agent_hosted_worktree_keeps_projects(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory) / ".agent" / "worktrees" / "scanner"
@@ -969,7 +984,10 @@ class TestSonarqubeExactHeadRunner(TestCase):
             )
             solution, projects, standalone_projects = runner.project_inventory(root)
 
-        self.assertEqual((solution.name, projects, standalone_projects), ("netcoredbg-mcp.sln", [project.resolve()], []))
+        self.assertEqual(
+            (solution.name, projects, standalone_projects),
+            ("netcoredbg-mcp.sln", [project.resolve()], []),
+        )
 
     def test_project_inventory_excludes_fixture_projects_outside_scan_scope(self):
         with TemporaryDirectory() as temporary_directory:
@@ -988,8 +1006,6 @@ class TestSonarqubeExactHeadRunner(TestCase):
             _, projects, standalone_projects = runner.project_inventory(root)
 
         self.assertEqual((projects, standalone_projects), ([project.resolve()], []))
-
-
 
     def test_compute_engine_readback_uses_submitted_task_and_scan_credential(self):
         calls = []
@@ -1023,7 +1039,13 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 calls,
             ),
             (
-                "analysis-1", "task-1", "task-1", "task-1", "analysis-1", runner.PROJECT_KEY, "SUCCESS",
+                "analysis-1",
+                "task-1",
+                "task-1",
+                "task-1",
+                "analysis-1",
+                runner.PROJECT_KEY,
+                "SUCCESS",
                 [("https://sonar.example.test", "/api/ce/task", {"id": "task-1"}, "scan-token")],
             ),
         )
@@ -1034,26 +1056,44 @@ class TestSonarqubeExactHeadRunner(TestCase):
             patch.object(
                 runner,
                 "api_json",
-                return_value={"task": {"id": "task-1", "status": "PENDING", "componentKey": runner.PROJECT_KEY}},
+                return_value={
+                    "task": {
+                        "id": "task-1",
+                        "status": "PENDING",
+                        "componentKey": runner.PROJECT_KEY,
+                    }
+                },
             ),
             patch.object(runner.time, "monotonic", side_effect=[0, runner.CE_TIMEOUT_SECONDS + 1]),
         ):
             with self.assertRaisesRegex(runner.RunnerError, "10-minute deadline"):
-                runner.wait_for_ce_task("https://sonar.example.test", "task-1", "scan-token", receipt)
+                runner.wait_for_ce_task(
+                    "https://sonar.example.test", "task-1", "scan-token", receipt
+                )
 
         self.assertEqual(
-            (receipt["compute_engine"]["last_observed_state"], bool(receipt["compute_engine"]["poll_deadline_at"])),
+            (
+                receipt["compute_engine"]["last_observed_state"],
+                bool(receipt["compute_engine"]["poll_deadline_at"]),
+            ),
             ("PENDING", True),
         )
 
     def test_compute_engine_no_response_preserves_marker_and_deadline(self):
         receipt = {}
-        with patch.object(runner, "api_json", side_effect=runner.ApiHttpError("/api/ce/task", 503, "SONAR_TOKEN")):
+        with patch.object(
+            runner, "api_json", side_effect=runner.ApiHttpError("/api/ce/task", 503, "SONAR_TOKEN")
+        ):
             with self.assertRaises(runner.ApiHttpError):
-                runner.wait_for_ce_task("https://sonar.example.test", "task-1", "scan-token", receipt)
+                runner.wait_for_ce_task(
+                    "https://sonar.example.test", "task-1", "scan-token", receipt
+                )
 
         self.assertEqual(
-            (receipt["compute_engine"]["last_observed_state"], bool(receipt["compute_engine"]["poll_deadline_at"])),
+            (
+                receipt["compute_engine"]["last_observed_state"],
+                bool(receipt["compute_engine"]["poll_deadline_at"]),
+            ),
             ("NO_RESPONSE", True),
         )
 
@@ -1075,7 +1115,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
             return {"projectStatus": {"status": "OK", "conditions": []}}
 
         with patch.object(runner, "api_json", side_effect=fake_api):
-            gate = runner.analysis_quality_gate("https://sonar.example.test", "analysis-1", "read-token")
+            gate = runner.analysis_quality_gate(
+                "https://sonar.example.test", "analysis-1", "read-token"
+            )
 
         self.assertEqual(
             (gate["analysis_id"], calls),
@@ -1153,6 +1195,7 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 {"project": runner.PROJECT_KEY, "p": "1", "ps": "500"},
             ),
         )
+
     def test_warn_error_and_none_quality_gates_are_rejected(self):
         for status in ("WARN", "ERROR", "NONE"):
             with self.subTest(status=status):
@@ -1166,7 +1209,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
             calls.append((host, endpoint, parameters, token))
             return {
                 "paging": {"pageIndex": 1, "pageSize": 500, "total": 1},
-                "issues": [{"key": "accepted-1", "issueStatus": "ACCEPTED", "resolution": "WONTFIX"}],
+                "issues": [
+                    {"key": "accepted-1", "issueStatus": "ACCEPTED", "resolution": "WONTFIX"}
+                ],
             }
 
         with patch.object(runner, "api_json", side_effect=fake_api):
@@ -1175,8 +1220,16 @@ class TestSonarqubeExactHeadRunner(TestCase):
         self.assertEqual(
             (inventory["query"], calls[0][2]),
             (
-                {"components": runner.PROJECT_KEY, "issueStatuses": "OPEN,CONFIRMED,FALSE_POSITIVE,ACCEPTED,FIXED,IN_SANDBOX"},
-                {"components": runner.PROJECT_KEY, "issueStatuses": "OPEN,CONFIRMED,FALSE_POSITIVE,ACCEPTED,FIXED,IN_SANDBOX", "p": "1", "ps": "500"},
+                {
+                    "components": runner.PROJECT_KEY,
+                    "issueStatuses": "OPEN,CONFIRMED,FALSE_POSITIVE,ACCEPTED,FIXED,IN_SANDBOX",
+                },
+                {
+                    "components": runner.PROJECT_KEY,
+                    "issueStatuses": "OPEN,CONFIRMED,FALSE_POSITIVE,ACCEPTED,FIXED,IN_SANDBOX",
+                    "p": "1",
+                    "ps": "500",
+                },
             ),
         )
 
@@ -1327,15 +1380,16 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 events.append("hotspots")
                 return {"records": []}
 
+            def wait_for_ce_task(_host, task_id, _token, _receipt, *, lease_checkpoint):
+                lease_checkpoint(task_id, "2026-08-27T00:10:00Z")
+                return "analysis-1"
+
             with ExitStack() as patches:
                 patches.enter_context(patch.object(runner, "process_environment", return_value={}))
                 patches.enter_context(
                     patch.object(runner, "scrub_sonar_environment", return_value={})
                 )
                 patches.enter_context(patch.object(runner, "git_context", return_value=context))
-                patches.enter_context(
-                    patch.object(runner, "receipt_path", return_value=root / "candidate.json")
-                )
                 patches.enter_context(
                     patch.object(runner, "sonar_secret_values", return_value=set())
                 )
@@ -1351,8 +1405,12 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 patches.enter_context(
                     patch.object(runner, "project_key_from_xml", return_value=runner.PROJECT_KEY)
                 )
-                patches.enter_context(patch.object(runner, "project_version", return_value="0.23.11"))
-                patches.enter_context(patch.object(runner, "claim_coverage_run", return_value="marker"))
+                patches.enter_context(
+                    patch.object(runner, "project_version", return_value="0.23.11")
+                )
+                patches.enter_context(
+                    patch.object(runner, "claim_coverage_run", return_value="marker")
+                )
                 patches.enter_context(
                     patch.object(runner, "produce_coverage", return_value={"evidence_sets": []})
                 )
@@ -1407,10 +1465,14 @@ class TestSonarqubeExactHeadRunner(TestCase):
                     patch.object(runner, "report_task", return_value={"ce_task_id": "task-1"})
                 )
                 patches.enter_context(
-                    patch.object(runner, "wait_for_ce_task", return_value="analysis-1")
+                    patch.object(runner, "wait_for_ce_task", side_effect=wait_for_ce_task)
                 )
                 patches.enter_context(
-                    patch.object(runner, "analysis_coverage_binding", return_value={"analysis_id": "analysis-1"})
+                    patch.object(
+                        runner,
+                        "analysis_coverage_binding",
+                        return_value={"analysis_id": "analysis-1"},
+                    )
                 )
                 patches.enter_context(
                     patch.object(runner, "current_analysis_binding", side_effect=current_binding)
@@ -1520,15 +1582,18 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 events.append("claimed_run_cleanup")
                 return [".tmp/sonarqube-coverage/claimed-run"]
 
+            original_write_scan_lease = runner.write_scan_lease
+
+            def write_scan_lease(path, lease):
+                events.append(f"lease:{lease.state}")
+                original_write_scan_lease(path, lease)
+
             with ExitStack() as patches:
                 patches.enter_context(patch.object(runner, "process_environment", return_value={}))
                 patches.enter_context(
                     patch.object(runner, "scrub_sonar_environment", return_value={})
                 )
                 patches.enter_context(patch.object(runner, "git_context", return_value=context))
-                patches.enter_context(
-                    patch.object(runner, "receipt_path", return_value=root / "candidate.json")
-                )
                 patches.enter_context(
                     patch.object(runner, "sonar_secret_values", return_value=set())
                 )
@@ -1599,6 +1664,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
                         runner, "report_task", side_effect=runner.RunnerError("stop after sealing")
                     )
                 )
+                patches.enter_context(
+                    patch.object(runner, "write_scan_lease", side_effect=write_scan_lease)
+                )
                 patches.enter_context(patch.object(runner, "write_receipt"))
                 with self.assertRaisesRegex(runner.RunnerError, "stop after sealing"):
                     runner.execute("candidate", "scanner")
@@ -1606,10 +1674,12 @@ class TestSonarqubeExactHeadRunner(TestCase):
         self.assertEqual(
             events,
             [
+                "lease:ACQUIRED",
                 "begin",
                 "claim",
                 "produce",
                 "seal_enter",
+                "lease:SCANNER_END_IN_FLIGHT",
                 "end",
                 "seal_verify",
                 "seal_exit",
@@ -1639,9 +1709,6 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 )
                 patches.enter_context(patch.object(runner, "git_context", return_value=context))
                 patches.enter_context(
-                    patch.object(runner, "receipt_path", return_value=root / "candidate.json")
-                )
-                patches.enter_context(
                     patch.object(runner, "sonar_secret_values", return_value=set())
                 )
                 patches.enter_context(
@@ -1656,8 +1723,12 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 patches.enter_context(
                     patch.object(runner, "project_key_from_xml", return_value=runner.PROJECT_KEY)
                 )
-                patches.enter_context(patch.object(runner, "project_version", return_value="0.23.11"))
-                patches.enter_context(patch.object(runner, "claim_coverage_run", return_value="marker"))
+                patches.enter_context(
+                    patch.object(runner, "project_version", return_value="0.23.11")
+                )
+                patches.enter_context(
+                    patch.object(runner, "claim_coverage_run", return_value="marker")
+                )
                 patches.enter_context(
                     patch.object(runner, "produce_coverage", return_value={"evidence_sets": []})
                 )
@@ -1668,7 +1739,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
                         return_value=self.sealed_coverage_context(),
                     )
                 )
-                patches.enter_context(patch.object(runner, "discover_scanner", return_value=["scanner"]))
+                patches.enter_context(
+                    patch.object(runner, "discover_scanner", return_value=["scanner"])
+                )
                 patches.enter_context(
                     patch.object(runner, "issue_inventory", return_value={"records": []})
                 )
@@ -1792,13 +1865,21 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 return []
 
             def full_issue_inventory(_host, _token):
-                events.append("pre_scan_issues" if len([event for event in events if event.endswith("issues")]) == 0 else "post_scan_issues")
+                events.append(
+                    "pre_scan_issues"
+                    if len([event for event in events if event.endswith("issues")]) == 0
+                    else "post_scan_issues"
+                )
                 return full_inventory
 
             def current_binding(_host, _analysis_id, _head, _token):
                 nonlocal binding_calls
                 binding_calls += 1
-                events.append(("analysis_current_before_issues", "analysis_current_after_issues")[binding_calls - 1])
+                events.append(
+                    ("analysis_current_before_issues", "analysis_current_after_issues")[
+                        binding_calls - 1
+                    ]
+                )
                 return binding
 
             def quality_gate(_host, _analysis_id, _token):
@@ -1817,15 +1898,16 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 events.append("post_scan_cleanup")
                 raise PermissionError("access denied")
 
+            def wait_for_ce_task(_host, task_id, _token, _receipt, *, lease_checkpoint):
+                lease_checkpoint(task_id, "2026-08-27T00:10:00Z")
+                return "analysis-1"
+
             with ExitStack() as patches:
                 patches.enter_context(patch.object(runner, "process_environment", return_value={}))
                 patches.enter_context(
                     patch.object(runner, "scrub_sonar_environment", return_value={})
                 )
                 patches.enter_context(patch.object(runner, "git_context", return_value=context))
-                patches.enter_context(
-                    patch.object(runner, "receipt_path", return_value=root / "candidate.json")
-                )
                 patches.enter_context(
                     patch.object(runner, "sonar_secret_values", return_value=set())
                 )
@@ -1841,8 +1923,12 @@ class TestSonarqubeExactHeadRunner(TestCase):
                 patches.enter_context(
                     patch.object(runner, "project_key_from_xml", return_value=runner.PROJECT_KEY)
                 )
-                patches.enter_context(patch.object(runner, "project_version", return_value="0.23.11"))
-                patches.enter_context(patch.object(runner, "claim_coverage_run", return_value="marker"))
+                patches.enter_context(
+                    patch.object(runner, "project_version", return_value="0.23.11")
+                )
+                patches.enter_context(
+                    patch.object(runner, "claim_coverage_run", return_value="marker")
+                )
                 patches.enter_context(
                     patch.object(runner, "produce_coverage", return_value={"evidence_sets": []})
                 )
@@ -1860,7 +1946,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
                         return_value=self.sealed_coverage_context(),
                     )
                 )
-                patches.enter_context(patch.object(runner, "discover_scanner", return_value=["scanner"]))
+                patches.enter_context(
+                    patch.object(runner, "discover_scanner", return_value=["scanner"])
+                )
                 patches.enter_context(
                     patch.object(runner, "issue_inventory", side_effect=full_issue_inventory)
                 )
@@ -1895,10 +1983,14 @@ class TestSonarqubeExactHeadRunner(TestCase):
                     patch.object(runner, "report_task", return_value={"ce_task_id": "task-1"})
                 )
                 patches.enter_context(
-                    patch.object(runner, "wait_for_ce_task", return_value="analysis-1")
+                    patch.object(runner, "wait_for_ce_task", side_effect=wait_for_ce_task)
                 )
                 patches.enter_context(
-                    patch.object(runner, "analysis_coverage_binding", return_value={"analysis_id": "analysis-1"})
+                    patch.object(
+                        runner,
+                        "analysis_coverage_binding",
+                        return_value={"analysis_id": "analysis-1"},
+                    )
                 )
                 patches.enter_context(
                     patch.object(runner, "current_analysis_binding", side_effect=current_binding)
@@ -2040,7 +2132,15 @@ class TestSonarqubeExactHeadRunner(TestCase):
     def test_false_positive_issue_disposition_blocks_release(self):
         disposition = runner.issue_dispositions(
             {"records": []},
-            {"records": [{"key": "false-positive-1", "issueStatus": "FALSE_POSITIVE", "resolution": "FALSE-POSITIVE"}]},
+            {
+                "records": [
+                    {
+                        "key": "false-positive-1",
+                        "issueStatus": "FALSE_POSITIVE",
+                        "resolution": "FALSE-POSITIVE",
+                    }
+                ]
+            },
         )
 
         self.assertEqual(disposition["blocking_count"], 1)
@@ -2053,54 +2153,1350 @@ class TestSonarqubeExactHeadRunner(TestCase):
 
         self.assertEqual(runner.hotspot_dispositions(inventory)["blocking_count"], 1)
 
-    def test_stale_dead_owner_lock_is_reclaimed(self):
+    def test_diagnostic_receipt_target_is_run_namespaced_and_non_authoritative(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
+            context = self.context(root, root / "scanner")
+            run_id = "00000000-0000-4000-8000-000000000121"
+
+            arguments = runner.parse_args(["--role", "diagnostic"])
+            target = runner.receipt_target(context, arguments.role, run_id)
+
+        self.assertEqual(target.authority, "diagnostic")
+        self.assertFalse(target.authoritative)
+        self.assertEqual(
+            target.path,
+            root
+            / ".agent"
+            / "e"
+            / "sonarqube"
+            / runner.PROJECT_KEY
+            / ("a" * 40)
+            / "diagnostic"
+            / f"{run_id}.json",
+        )
+
+    def test_diagnostic_execution_refuses_before_context_credentials_or_scanner(self):
+        with (
+            patch.object(runner, "process_environment", return_value={}),
+            patch.object(runner, "scrub_sonar_environment", return_value={}),
+            patch.object(
+                runner,
+                "git_context",
+                side_effect=AssertionError("git context must not be read"),
+            ) as git_context,
+            patch.object(
+                runner,
+                "load_credentials",
+                side_effect=AssertionError("credentials must not be read"),
+            ) as load_credentials,
+            self.assertRaisesRegex(
+                runner.RunnerError,
+                "DIAGNOSTIC_SCAN_PREREQUISITES_INCOMPLETE",
+            ),
+        ):
+            runner.execute("diagnostic", None)
+
+        git_context.assert_not_called()
+        load_credentials.assert_not_called()
+
+    def test_receipt_dispatch_preserves_historical_v2_and_refuses_unknown_v3_shape(self):
+        historical = runner.receipt_dispatch({"schema_version": 2, "outcome": "BLOCKED"})
+
+        self.assertTrue(historical.historical)
+        self.assertEqual((historical.schema_version, historical.authority), (2, None))
+        for malformed in (
+            {"schema_version": 3, "authority": "unknown", "outcome": "RUNNING"},
+            {"schema_version": 3, "authority": "diagnostic", "outcome": "UNKNOWN"},
+            {"schema_version": 99, "outcome": "BLOCKED"},
+        ):
+            with self.subTest(malformed=malformed):
+                with self.assertRaisesRegex(runner.RunnerError, "receipt"):
+                    runner.receipt_dispatch(malformed)
+
+    def test_terminal_and_historical_authoritative_receipts_refuse_replacement(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self.context(root, root / "scanner")
+            candidate = runner.receipt_target(context, "candidate", None)
+            candidate_running = runner.receipt_base(context, candidate, "candidate-run")
+            runner.write_receipt(candidate, candidate_running, ())
+            candidate_terminal = {**candidate_running, "outcome": "PASS"}
+            runner.write_receipt(candidate, candidate_terminal, ())
+            with self.assertRaisesRegex(runner.RunnerError, "terminal receipt"):
+                runner.write_receipt(candidate, candidate_running, ())
+
+            post_merge = runner.receipt_target(context, "post-merge", None)
+            post_merge.path.parent.mkdir(parents=True, exist_ok=True)
+            post_merge.path.write_text(
+                json.dumps({"schema_version": 2, "outcome": "BLOCKED"}),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(runner.RunnerError, "historical receipt"):
+                runner.write_receipt(
+                    post_merge,
+                    runner.receipt_base(context, post_merge, "post-merge-run"),
+                    (),
+                )
+
+    def test_stale_same_run_id_lease_handle_cannot_checkpoint_successor_generation(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self.context(root, root / "scanner")
+            run_id = "00000000-0000-4000-8000-000000000147"
+            target = runner.receipt_target(context, "diagnostic", run_id)
+            lease_path = runner.lock_path(context.coordination_root)
+
+            with runner.project_lock(context, target, run_id) as closed_handle:
+                stale_handle = closed_handle
+                first_lease_bytes = lease_path.read_bytes()
+
+            self.assertFalse(lease_path.exists())
+
+            with runner.project_lock(context, target, run_id) as successor_handle:
+                successor_lease_bytes = lease_path.read_bytes()
+
+                with self.assertRaises(runner.RunnerError):
+                    stale_handle.checkpoint("SCANNER_END_IN_FLIGHT")
+
+                self.assertEqual(lease_path.read_bytes(), successor_lease_bytes)
+                self.assertEqual(runner.read_scan_lease(lease_path), successor_handle.lease)
+                self.assertNotEqual(first_lease_bytes, successor_lease_bytes)
+
+    def test_project_lock_rejects_reparse_storage_ancestor_before_c1a_mutation(self):
+        class ReparseDirectoryMetadata:
+            st_mode = stat.S_IFDIR
+            st_file_attributes = 0x0400
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            coordination_root = root / "coordination-root"
+            scanner_root = root / "scanner-worktree"
+            coordination_root.mkdir()
+            scanner_root.mkdir()
+            context = self.context(coordination_root, scanner_root)
+            run_id = "00000000-0000-4000-8000-000000000148"
+            target = runner.receipt_target(context, "diagnostic", run_id)
+            receipt = runner.receipt_base(context, target, run_id)
+            storage_ancestor = coordination_root / ".agent"
+            storage_ancestor.mkdir()
+            lease_path = runner.lock_path(context.coordination_root)
+            guard_path = runner.scan_transaction_guard_path(lease_path)
+            outside_sentinel = root / "outside-sentinel.json"
+            outside_sentinel_bytes = b"must remain outside C1a storage"
+            outside_sentinel.write_bytes(outside_sentinel_bytes)
+            lstat_calls = []
+            guard_directory_mutations = []
+            original_lstat = Path.lstat
+            original_mkdir = Path.mkdir
+
+            def nonfollowing_lstat(path):
+                lstat_calls.append(path)
+                if path == storage_ancestor:
+                    return ReparseDirectoryMetadata()
+                return original_lstat(path)
+
+            def refuse_guard_directory_mutation(path, mode=0o777, parents=False, exist_ok=False):
+                if path == guard_path.parent:
+                    guard_directory_mutations.append(path)
+                    raise AssertionError(
+                        "guard directory mutation reached before storage ancestry admission"
+                    )
+                return original_mkdir(path, mode=mode, parents=parents, exist_ok=exist_ok)
+
+            with (
+                patch.object(Path, "lstat", autospec=True, side_effect=nonfollowing_lstat),
+                patch.object(
+                    Path, "mkdir", autospec=True, side_effect=refuse_guard_directory_mutation
+                ),
+                patch.object(runner, "write_scan_lease") as write_scan_lease,
+                patch.object(runner, "write_receipt") as write_receipt,
+            ):
+                with self.assertRaisesRegex(runner.RunnerError, "symbolic link|reparse point"):
+                    with runner.project_lock(context, target, run_id) as handle:
+                        handle.write_receipt(target, receipt, ())
+
+            self.assertIn(context.coordination_root, lstat_calls)
+            self.assertIn(storage_ancestor, lstat_calls)
+            self.assertLess(
+                lstat_calls.index(context.coordination_root), lstat_calls.index(storage_ancestor)
+            )
+            self.assertEqual(guard_directory_mutations, [])
+            write_scan_lease.assert_not_called()
+            write_receipt.assert_not_called()
+            self.assertFalse(guard_path.exists())
+            self.assertFalse(lease_path.exists())
+            self.assertFalse(target.path.exists())
+            self.assertEqual(outside_sentinel.read_bytes(), outside_sentinel_bytes)
+
+    def test_project_lock_rejects_reparse_final_lease_leaf_before_read_or_reconciliation(
+        self,
+    ):
+        class ReparseFileMetadata:
+            st_mode = stat.S_IFREG
+            st_file_attributes = 0x0400
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            coordination_root = root / "coordination-root"
+            scanner_root = root / "scanner-worktree"
+            coordination_root.mkdir()
+            scanner_root.mkdir()
+            context = self.context(coordination_root, scanner_root)
+            run_id = "00000000-0000-4000-8000-000000000150"
+            target = runner.receipt_target(context, "diagnostic", run_id)
+            lease_path = runner.lock_path(context.coordination_root)
+            lease_path.parent.mkdir(parents=True)
+            lease_path.write_text("{}\n", encoding="utf-8")
+            lease_bytes = lease_path.read_bytes()
+            lstat_calls = []
+            reconciliation_calls = []
+            original_lstat = Path.lstat
+
+            def nonfollowing_lstat(path):
+                lstat_calls.append(path)
+                if path == lease_path:
+                    return ReparseFileMetadata()
+                return original_lstat(path)
+
+            def refuse_reconciliation(lease):
+                reconciliation_calls.append(lease)
+                raise AssertionError("reconciliation reached after final-leaf reparse detection")
+
+            with (
+                patch.object(Path, "lstat", autospec=True, side_effect=nonfollowing_lstat),
+                patch.object(
+                    runner,
+                    "read_scan_lease",
+                    side_effect=AssertionError(
+                        "lease read reached after final-leaf reparse detection"
+                    ),
+                ) as read_scan_lease,
+                patch.object(runner, "_create_fully_written_scan_lease") as create_scan_lease,
+                patch.object(runner, "_unlink_scan_lease_for_owner") as unlink_scan_lease,
+            ):
+                with self.assertRaisesRegex(runner.RunnerError, "symbolic link|reparse point"):
+                    with runner.project_lock(
+                        context, target, run_id, reconcile=refuse_reconciliation
+                    ):
+                        pass
+
+            self.assertIn(lease_path, lstat_calls)
+            read_scan_lease.assert_not_called()
+            self.assertEqual(reconciliation_calls, [])
+            create_scan_lease.assert_not_called()
+            unlink_scan_lease.assert_not_called()
+            self.assertEqual(lease_path.read_bytes(), lease_bytes)
+
+    def test_scan_lease_handle_checkpoint_rejects_reparse_storage_ancestor_before_guard_mutation(
+        self,
+    ):
+        class ReparseDirectoryMetadata:
+            st_mode = stat.S_IFDIR
+            st_file_attributes = 0x0400
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            coordination_root = root / "coordination-root"
+            scanner_root = root / "scanner-worktree"
+            coordination_root.mkdir()
+            scanner_root.mkdir()
+            context = self.context(coordination_root, scanner_root)
+            run_id = "00000000-0000-4000-8000-000000000149"
+            target = runner.receipt_target(context, "diagnostic", run_id)
+            storage_ancestor = coordination_root / ".agent"
+            lease_path = runner.lock_path(context.coordination_root)
+            guard_path = runner.scan_transaction_guard_path(lease_path)
+            lstat_calls = []
+            guard_directory_mutations = []
+            original_lstat = Path.lstat
+            original_mkdir = Path.mkdir
+
+            with runner.project_lock(context, target, run_id) as handle:
+                self.assertTrue(storage_ancestor.is_dir())
+
+                def nonfollowing_lstat(path):
+                    lstat_calls.append(path)
+                    if path == storage_ancestor:
+                        return ReparseDirectoryMetadata()
+                    return original_lstat(path)
+
+                def refuse_guard_directory_mutation(
+                    path, mode=0o777, parents=False, exist_ok=False
+                ):
+                    if path == guard_path.parent:
+                        guard_directory_mutations.append(path)
+                        raise AssertionError(
+                            "guard directory mutation reached before storage ancestry admission"
+                        )
+                    return original_mkdir(path, mode=mode, parents=parents, exist_ok=exist_ok)
+
+                with (
+                    patch.object(Path, "lstat", autospec=True, side_effect=nonfollowing_lstat),
+                    patch.object(
+                        Path, "mkdir", autospec=True, side_effect=refuse_guard_directory_mutation
+                    ),
+                    patch.object(runner, "write_scan_lease") as write_scan_lease,
+                ):
+                    with self.assertRaisesRegex(runner.RunnerError, "symbolic link|reparse point"):
+                        handle.checkpoint("SCANNER_END_IN_FLIGHT")
+
+                self.assertIn(context.coordination_root, lstat_calls)
+                self.assertIn(storage_ancestor, lstat_calls)
+                self.assertLess(
+                    lstat_calls.index(context.coordination_root),
+                    lstat_calls.index(storage_ancestor),
+                )
+                self.assertEqual(guard_directory_mutations, [])
+                write_scan_lease.assert_not_called()
+                self.assertEqual(handle.lease.state, "ACQUIRED")
+
+    def test_project_lock_releases_guard_and_acquired_lease_after_target_receipt_storage_reparse(
+        self,
+    ):
+        class ReparseDirectoryMetadata:
+            st_mode = stat.S_IFDIR
+            st_file_attributes = 0x0400
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self.context(root, root / "scanner")
+            run_id = "00000000-0000-4000-8000-000000000151"
+            target = runner.receipt_target(context, "diagnostic", run_id)
+            receipt = runner.receipt_base(context, target, run_id)
+            lease_path = runner.lock_path(context.coordination_root)
+            guard_path = runner.scan_transaction_guard_path(lease_path)
+            receipt_storage_ancestor = target.path.parent
+            original_lstat = Path.lstat
+
+            with runner.project_lock(context, target, run_id) as handle:
+                receipt_storage_ancestor.mkdir(parents=True)
+
+                def nonfollowing_lstat(path):
+                    if path == receipt_storage_ancestor:
+                        return ReparseDirectoryMetadata()
+                    return original_lstat(path)
+
+                with patch.object(Path, "lstat", autospec=True, side_effect=nonfollowing_lstat):
+                    with self.assertRaisesRegex(runner.RunnerError, "symbolic link|reparse point"):
+                        handle.write_receipt(target, receipt, ())
+
+            self.assertFalse(target.path.exists())
+            self.assertFalse(guard_path.exists())
+            self.assertFalse(lease_path.exists())
+
+    def test_project_lock_releases_acquired_lease_after_reparse_target_receipt_leaf(self):
+        class ReparseFileMetadata:
+            st_mode = stat.S_IFREG
+            st_file_attributes = 0x0400
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self.context(root, root / "scanner")
+            run_id = "00000000-0000-4000-8000-000000000152"
+            target = runner.receipt_target(context, "diagnostic", run_id)
+            receipt = runner.receipt_base(context, target, run_id)
+            lease_path = runner.lock_path(context.coordination_root)
+            guard_path = runner.scan_transaction_guard_path(lease_path)
+            original_lstat = Path.lstat
+            original_read_text = Path.read_text
+
+            with runner.project_lock(context, target, run_id) as handle:
+                target.path.parent.mkdir(parents=True)
+                target.path.write_text("{}\n", encoding="utf-8")
+
+                def nonfollowing_lstat(path):
+                    if path == target.path:
+                        return ReparseFileMetadata()
+                    return original_lstat(path)
+
+                def refuse_receipt_read(path, *args, **kwargs):
+                    if path == target.path:
+                        raise AssertionError(
+                            "receipt read reached after final-leaf reparse detection"
+                        )
+                    return original_read_text(path, *args, **kwargs)
+
+                with (
+                    patch.object(Path, "lstat", autospec=True, side_effect=nonfollowing_lstat),
+                    patch.object(Path, "read_text", autospec=True, side_effect=refuse_receipt_read),
+                    patch.object(
+                        runner,
+                        "write_receipt",
+                        side_effect=AssertionError(
+                            "receipt write reached after final-leaf reparse detection"
+                        ),
+                    ) as write_receipt,
+                ):
+                    with self.assertRaisesRegex(
+                        runner.RunnerError, "receipt storage target.*symbolic link|reparse point"
+                    ):
+                        handle.write_receipt(target, receipt, ())
+
+                write_receipt.assert_not_called()
+                self.assertEqual(handle.lease.state, "ACQUIRED")
+                self.assertFalse(guard_path.exists())
+
+            self.assertEqual(target.path.read_text(encoding="utf-8"), "{}\n")
+            self.assertFalse(guard_path.exists())
+            self.assertFalse(lease_path.exists())
+
+    def test_scan_lease_persists_full_identity_and_reopens_atomic_bytes(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self.context(root, root / "scanner")
+            run_id = "00000000-0000-4000-8000-000000000122"
+            target = runner.receipt_target(context, "diagnostic", run_id)
+            lease = runner.new_scan_lease(context, target, run_id)
+            path = runner.lock_path(context.coordination_root)
+
+            runner.write_scan_lease(path, lease)
+            persisted = runner.read_scan_lease(path)
+
+        self.assertEqual(persisted, lease)
+        self.assertEqual(
+            (
+                persisted.run_id,
+                persisted.authority,
+                persisted.project_key,
+                persisted.captured_head,
+                persisted.receipt_identity,
+                persisted.scanner_worktree_identity,
+                persisted.state,
+            ),
+            (
+                run_id,
+                "diagnostic",
+                runner.PROJECT_KEY,
+                "a" * 40,
+                target.receipt_identity,
+                runner.scanner_worktree_identity(context),
+                "ACQUIRED",
+            ),
+        )
+
+    def test_scan_lease_reconciles_only_exact_known_submission(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self.context(root, root / "scanner")
+            run_id = "00000000-0000-4000-8000-000000000123"
+            target = runner.receipt_target(context, "diagnostic", run_id)
+            lease = runner.new_scan_lease(context, target, run_id)
+            scanner_end = runner.transition_scan_lease(lease, "SCANNER_END_IN_FLIGHT")
+            with self.assertRaisesRegex(runner.RunnerError, "scanner-end handoff"):
+                runner.reconcile_scan_lease(scanner_end, context, target, "SUCCESS")
+
+            submitted = runner.transition_scan_lease(
+                scanner_end,
+                "CE_SUBMITTED",
+                task_id="task-123",
+                utc_deadline="2026-08-27T00:10:00Z",
+            )
+            reconciled = runner.reconcile_scan_lease(submitted, context, target, "SUCCESS")
+            self.assertEqual(reconciled.state, "CE_TERMINAL")
+            self.assertEqual(reconciled.task_id, "task-123")
+            other_target = runner.receipt_target(context, "candidate", None)
+            with self.assertRaisesRegex(runner.RunnerError, "identity"):
+                runner.reconcile_scan_lease(submitted, context, other_target, "SUCCESS")
+            with self.assertRaisesRegex(runner.RunnerError, "known task"):
+                runner.reconcile_scan_lease(submitted, context, target, "PENDING")
+
+    def test_scan_lease_submission_admits_only_strict_utc_deadlines(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self.context(root, root / "scanner")
+            target = runner.receipt_target(
+                context,
+                "diagnostic",
+                "00000000-0000-4000-8000-000000000144",
+            )
+            scanner_end = runner.transition_scan_lease(
+                runner.new_scan_lease(
+                    context,
+                    target,
+                    "00000000-0000-4000-8000-000000000144",
+                ),
+                "SCANNER_END_IN_FLIGHT",
+            )
+
+            for deadline in (
+                "not-a-deadline",
+                "2026-08-27T00:10:00",
+                "2026-08-27T00:10:00+01:00",
+            ):
+                with self.subTest(deadline=deadline):
+                    with self.assertRaisesRegex(runner.RunnerError, "deadline"):
+                        runner.transition_scan_lease(
+                            scanner_end,
+                            "CE_SUBMITTED",
+                            task_id="task-144",
+                            utc_deadline=deadline,
+                        )
+
+            accepted = runner.transition_scan_lease(
+                scanner_end,
+                "CE_SUBMITTED",
+                task_id="task-144",
+                utc_deadline="2026-08-27T00:10:00Z",
+            )
+            self.assertEqual(accepted.utc_deadline, "2026-08-27T00:10:00Z")
+
+    def test_ce_lease_checkpoint_precedes_first_compute_engine_poll(self):
+        events = []
+
+        def checkpoint(task_id, deadline):
+            events.append(("checkpoint", task_id, deadline))
+
+        def api_json(_host, _endpoint, _parameters, _token):
+            self.assertEqual(events[0][0], "checkpoint")
+            events.append(("poll",))
+            return {
+                "task": {
+                    "id": "task-124",
+                    "status": "SUCCESS",
+                    "componentKey": runner.PROJECT_KEY,
+                    "analysisId": "analysis-124",
+                }
+            }
+
+        with patch.object(runner, "api_json", side_effect=api_json):
+            analysis_id = runner.wait_for_ce_task(
+                "https://sonar.example.test",
+                "task-124",
+                "scan-token",
+                {},
+                lease_checkpoint=checkpoint,
+            )
+
+        self.assertEqual(analysis_id, "analysis-124")
+        self.assertEqual([event[0] for event in events], ["checkpoint", "poll"])
+
+    def test_project_lock_refuses_submitted_diagnostic_receipt_with_mismatched_run_id(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self.context(root, root / "scanner")
+            previous_run_id = "00000000-0000-4000-8000-000000000130"
+            mismatched_run_id = "00000000-0000-4000-8000-000000000131"
+            next_run_id = "00000000-0000-4000-8000-000000000132"
+            previous_target = runner.receipt_target(context, "diagnostic", previous_run_id)
+            next_target = runner.receipt_target(context, "diagnostic", next_run_id)
+            mismatched_receipt = runner.receipt_base(context, previous_target, previous_run_id)
+            mismatched_receipt["run_id"] = mismatched_run_id
+            runner.write_receipt(previous_target, mismatched_receipt, ())
+            expected_receipt_bytes = previous_target.path.read_bytes()
+            submitted = runner.transition_scan_lease(
+                runner.transition_scan_lease(
+                    runner.new_scan_lease(context, previous_target, previous_run_id),
+                    "SCANNER_END_IN_FLIGHT",
+                ),
+                "CE_SUBMITTED",
+                task_id="task-130",
+                utc_deadline="2026-08-27T00:10:00Z",
+            )
+            lease_path = runner.lock_path(context.coordination_root)
+            runner.write_scan_lease(lease_path, submitted)
+            reconciled = []
+
+            def reconcile(lease):
+                reconciled.append(lease)
+                return "SUCCESS"
+
+            with self.assertRaisesRegex(
+                runner.RunnerError, "existing diagnostic receipt cannot be reconciled"
+            ):
+                with runner.project_lock(
+                    context,
+                    next_target,
+                    next_run_id,
+                    reconcile=reconcile,
+                ):
+                    pass
+
+            retained_receipt_bytes = previous_target.path.read_bytes()
+            self.assertTrue(lease_path.exists())
+            retained_lease = runner.read_scan_lease(lease_path)
+
+        self.assertEqual(reconciled, [])
+        self.assertEqual(retained_receipt_bytes, expected_receipt_bytes)
+        self.assertEqual(retained_lease, submitted)
+
+    def test_project_lock_refuses_submitted_diagnostic_receipt_with_mismatched_captured_head(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self.context(root, root / "scanner")
+            previous_run_id = "00000000-0000-4000-8000-000000000133"
+            next_run_id = "00000000-0000-4000-8000-000000000134"
+            previous_target = runner.receipt_target(context, "diagnostic", previous_run_id)
+            next_target = runner.receipt_target(context, "diagnostic", next_run_id)
+            mismatched_receipt = runner.receipt_base(context, previous_target, previous_run_id)
+            mismatched_receipt["captured_head"] = "b" * 40
+            runner.write_receipt(previous_target, mismatched_receipt, ())
+            expected_receipt_bytes = previous_target.path.read_bytes()
+            submitted = runner.transition_scan_lease(
+                runner.transition_scan_lease(
+                    runner.new_scan_lease(context, previous_target, previous_run_id),
+                    "SCANNER_END_IN_FLIGHT",
+                ),
+                "CE_SUBMITTED",
+                task_id="task-133",
+                utc_deadline="2026-08-27T00:10:00Z",
+            )
+            lease_path = runner.lock_path(context.coordination_root)
+            runner.write_scan_lease(lease_path, submitted)
+            reconciled = []
+
+            def reconcile(lease):
+                reconciled.append(lease)
+                return "SUCCESS"
+
+            with self.assertRaisesRegex(
+                runner.RunnerError, "existing diagnostic receipt cannot be reconciled"
+            ):
+                with runner.project_lock(
+                    context,
+                    next_target,
+                    next_run_id,
+                    reconcile=reconcile,
+                ):
+                    pass
+
+            retained_receipt_bytes = previous_target.path.read_bytes()
+            self.assertTrue(lease_path.exists())
+            retained_lease = runner.read_scan_lease(lease_path)
+
+        self.assertEqual(reconciled, [])
+        self.assertEqual(retained_receipt_bytes, expected_receipt_bytes)
+        self.assertEqual(retained_lease, submitted)
+
+    def test_project_lock_refuses_persisted_candidate_or_post_merge_submission(self):
+        for role, run_id in (
+            ("candidate", "candidate-submission"),
+            ("post-merge", "post-merge-submission"),
+        ):
+            with self.subTest(role=role):
+                with TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    context = self.context(root, root / "scanner")
+                    target = runner.receipt_target(context, role, None)
+                    next_run_id = "00000000-0000-4000-8000-000000000135"
+                    next_target = runner.receipt_target(context, "diagnostic", next_run_id)
+                    submitted = runner.transition_scan_lease(
+                        runner.transition_scan_lease(
+                            runner.new_scan_lease(context, target, run_id),
+                            "SCANNER_END_IN_FLIGHT",
+                        ),
+                        "CE_SUBMITTED",
+                        task_id=f"task-{role}",
+                        utc_deadline="2026-08-27T00:10:00Z",
+                    )
+                    lease_path = runner.lock_path(context.coordination_root)
+                    runner.write_scan_lease(lease_path, submitted)
+                    expected_lease_bytes = lease_path.read_bytes()
+                    reconciled = []
+
+                    def reconcile(lease):
+                        reconciled.append(lease)
+                        return "SUCCESS"
+
+                    with self.assertRaises(runner.RunnerError):
+                        with runner.project_lock(
+                            context,
+                            next_target,
+                            next_run_id,
+                            reconcile=reconcile,
+                        ):
+                            pass
+
+                    self.assertEqual(reconciled, [])
+                    self.assertTrue(lease_path.exists())
+                    self.assertEqual(lease_path.read_bytes(), expected_lease_bytes)
+
+    def test_project_lock_waits_for_persisted_deadline_before_diagnostic_recovery(self):
+        for case, now_value, should_recover in (
+            (
+                "before_deadline",
+                datetime(2026, 8, 27, 0, 9, tzinfo=timezone.utc),
+                False,
+            ),
+            (
+                "at_deadline",
+                datetime(2026, 8, 27, 0, 10, tzinfo=timezone.utc),
+                True,
+            ),
+        ):
+            with self.subTest(case=case):
+                with TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    context = self.context(root, root / "scanner")
+                    previous_run_id = "00000000-0000-4000-8000-000000000136"
+                    next_run_id = "00000000-0000-4000-8000-000000000137"
+                    previous_target = runner.receipt_target(context, "diagnostic", previous_run_id)
+                    next_target = runner.receipt_target(context, "diagnostic", next_run_id)
+                    previous_receipt = runner.receipt_base(
+                        context, previous_target, previous_run_id
+                    )
+                    runner.write_receipt(previous_target, previous_receipt, ())
+                    expected_receipt_bytes = previous_target.path.read_bytes()
+                    submitted = runner.transition_scan_lease(
+                        runner.transition_scan_lease(
+                            runner.new_scan_lease(context, previous_target, previous_run_id),
+                            "SCANNER_END_IN_FLIGHT",
+                        ),
+                        "CE_SUBMITTED",
+                        task_id="task-136",
+                        utc_deadline="2026-08-27T00:10:00Z",
+                    )
+                    lease_path = runner.lock_path(context.coordination_root)
+                    runner.write_scan_lease(lease_path, submitted)
+                    expected_lease_bytes = lease_path.read_bytes()
+                    reconciled = []
+                    now_calls = []
+
+                    def reconcile(lease):
+                        reconciled.append((lease.run_id, lease.task_id))
+                        return "SUCCESS"
+
+                    def now():
+                        now_calls.append(now_value)
+                        return now_value
+
+                    if should_recover:
+                        with runner.project_lock(
+                            context,
+                            next_target,
+                            next_run_id,
+                            reconcile=reconcile,
+                            now=now,
+                        ) as handle:
+                            self.assertEqual(handle.lease.state, "ACQUIRED")
+
+                        recovered_receipt = json.loads(
+                            previous_target.path.read_text(encoding="utf-8")
+                        )
+                        self.assertEqual(reconciled, [(previous_run_id, "task-136")])
+                        self.assertEqual(recovered_receipt["outcome"], "BLOCKED")
+                        self.assertFalse(lease_path.exists())
+                    else:
+                        writes = []
+                        write_scan_lease = runner.write_scan_lease
+
+                        def record_write(path, lease):
+                            writes.append((path, lease))
+                            write_scan_lease(path, lease)
+
+                        with patch.object(runner, "write_scan_lease", side_effect=record_write):
+                            with self.assertRaisesRegex(runner.RunnerError, "deadline"):
+                                with runner.project_lock(
+                                    context,
+                                    next_target,
+                                    next_run_id,
+                                    reconcile=reconcile,
+                                    now=now,
+                                ):
+                                    pass
+
+                        self.assertEqual(reconciled, [])
+                        self.assertEqual(writes, [])
+                        self.assertTrue(lease_path.exists())
+                        self.assertEqual(lease_path.read_bytes(), expected_lease_bytes)
+                        self.assertEqual(previous_target.path.read_bytes(), expected_receipt_bytes)
+
+                    self.assertTrue(now_calls)
+
+    def test_scan_transaction_guard_refuses_regular_file_replacement_without_unlinking_it(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            lease_path = runner.lock_path(root)
+            guard = runner._acquire_scan_transaction_guard(lease_path)
+            replacement_bytes = b"replacement scan transaction guard"
+
+            guard.path.unlink()
+            guard.path.write_bytes(replacement_bytes)
+
+            with self.assertRaisesRegex(runner.RunnerError, "guard"):
+                guard.release()
+
+            self.assertEqual(guard.path.read_bytes(), replacement_bytes)
+
+    def test_project_lock_releases_guard_and_acquired_lease_after_prewrite_terminal_receipt_refusal(
+        self,
+    ):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self.context(root, root / "scanner")
+            run_id = "00000000-0000-4000-8000-000000000143"
+            target = runner.receipt_target(context, "diagnostic", run_id)
+            terminal_receipt = {
+                **runner.receipt_base(context, target, run_id),
+                "outcome": "BLOCKED",
+            }
+            runner.write_receipt(target, terminal_receipt, ())
+            lease_path = runner.lock_path(context.coordination_root)
+            guard_path = runner.scan_transaction_guard_path(lease_path)
+
+            with self.assertRaisesRegex(runner.RunnerError, "terminal receipt"):
+                with runner.project_lock(context, target, run_id) as handle:
+                    handle.write_receipt(
+                        target,
+                        runner.receipt_base(context, target, run_id),
+                        (),
+                    )
+
+            self.assertFalse(guard_path.exists())
+            self.assertFalse(lease_path.exists())
+
+    def test_project_lock_refuses_existing_transaction_guard_before_primary_mutation(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self.context(root, root / "scanner")
+            previous_run_id = "00000000-0000-4000-8000-000000000138"
+            next_run_id = "00000000-0000-4000-8000-000000000139"
+            previous_target = runner.receipt_target(context, "diagnostic", previous_run_id)
+            next_target = runner.receipt_target(context, "diagnostic", next_run_id)
+            previous_receipt = runner.receipt_base(context, previous_target, previous_run_id)
+            runner.write_receipt(previous_target, previous_receipt, ())
+            expected_receipt_bytes = previous_target.path.read_bytes()
+            submitted = runner.transition_scan_lease(
+                runner.transition_scan_lease(
+                    runner.new_scan_lease(context, previous_target, previous_run_id),
+                    "SCANNER_END_IN_FLIGHT",
+                ),
+                "CE_SUBMITTED",
+                task_id="task-138",
+                utc_deadline="2026-08-27T00:10:00Z",
+            )
+            lease_path = runner.lock_path(context.coordination_root)
+            runner.write_scan_lease(lease_path, submitted)
+            expected_lease_bytes = lease_path.read_bytes()
+            guard_path = runner.scan_transaction_guard_path(lease_path)
+            self.assertEqual(guard_path.parent, lease_path.parent)
+            self.assertNotEqual(guard_path, lease_path)
+            guard_bytes = b"crash-left scan transaction guard"
+            guard_path.write_bytes(guard_bytes)
+            reconciled = []
+
+            def reconcile(lease):
+                reconciled.append(lease)
+                return "SUCCESS"
+
+            with patch.object(
+                runner,
+                "read_scan_lease",
+                side_effect=AssertionError("primary lease must not be inspected while guarded"),
+            ) as read_scan_lease:
+                with patch.object(runner, "write_scan_lease") as write_scan_lease:
+                    with self.assertRaises(runner.RunnerError):
+                        with runner.project_lock(
+                            context,
+                            next_target,
+                            next_run_id,
+                            reconcile=reconcile,
+                        ):
+                            pass
+
+            read_scan_lease.assert_not_called()
+            write_scan_lease.assert_not_called()
+            self.assertEqual(reconciled, [])
+            self.assertEqual(previous_target.path.read_bytes(), expected_receipt_bytes)
+            self.assertEqual(lease_path.read_bytes(), expected_lease_bytes)
+            self.assertEqual(guard_path.read_bytes(), guard_bytes)
+
+    def test_project_lock_releases_transaction_guard_after_submitted_failure(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self.context(root, root / "scanner")
+            run_id = "00000000-0000-4000-8000-000000000142"
+            target = runner.receipt_target(context, "diagnostic", run_id)
+            lease_path = runner.lock_path(context.coordination_root)
+            submitted = None
+            guard_path = runner.scan_transaction_guard_path(lease_path)
+
+            with self.assertRaisesRegex(runner.RunnerError, "controlled submitted failure"):
+                with runner.project_lock(context, target, run_id) as handle:
+                    handle.checkpoint("SCANNER_END_IN_FLIGHT")
+                    submitted = handle.checkpoint(
+                        "CE_SUBMITTED",
+                        task_id="task-142",
+                        utc_deadline="2026-08-27T00:10:00Z",
+                    )
+                    handle.write_receipt(
+                        target,
+                        {
+                            **runner.receipt_base(context, target, run_id),
+                            "outcome": "BLOCKED",
+                            "failure": "INTERRUPTED_AFTER_CE_SUBMISSION",
+                        },
+                        (),
+                    )
+                    raise runner.RunnerError("controlled submitted failure")
+
+            retained_lease = runner.read_scan_lease(lease_path)
+            retained_receipt = json.loads(target.path.read_text(encoding="utf-8"))
+
+        self.assertEqual(retained_lease, submitted)
+        self.assertEqual(retained_lease.state, "CE_SUBMITTED")
+        self.assertEqual(retained_receipt["outcome"], "BLOCKED")
+        self.assertFalse(guard_path.exists())
+
+    def test_scan_lease_handle_checkpoint_requires_persisted_owner_and_preserves_memory(
+        self,
+    ):
+        with self.subTest(case="persisted owner mismatch"):
+            with TemporaryDirectory() as temporary_directory:
+                root = Path(temporary_directory)
+                context = self.context(root, root / "scanner")
+                run_id = "00000000-0000-4000-8000-000000000140"
+                target = runner.receipt_target(context, "diagnostic", run_id)
+                lease = runner.new_scan_lease(context, target, run_id)
+                persisted = runner.transition_scan_lease(lease, "SCANNER_END_IN_FLIGHT")
+                lease_path = runner.lock_path(context.coordination_root)
+                runner.write_scan_lease(lease_path, persisted)
+                handle = runner.ScanLeaseHandle(lease_path, lease, context.coordination_root)
+
+                with patch.object(runner, "write_scan_lease") as write_scan_lease:
+                    with self.assertRaises(runner.RunnerError):
+                        handle.checkpoint("SCANNER_END_IN_FLIGHT")
+
+                write_scan_lease.assert_not_called()
+                self.assertEqual(handle.lease, lease)
+                self.assertEqual(runner.read_scan_lease(lease_path), persisted)
+
+        with self.subTest(case="write failure"):
+            with TemporaryDirectory() as temporary_directory:
+                root = Path(temporary_directory)
+                context = self.context(root, root / "scanner")
+                run_id = "00000000-0000-4000-8000-000000000141"
+                target = runner.receipt_target(context, "diagnostic", run_id)
+                lease = runner.new_scan_lease(context, target, run_id)
+                lease_path = runner.lock_path(context.coordination_root)
+                runner.write_scan_lease(lease_path, lease)
+                handle = runner.ScanLeaseHandle(lease_path, lease, context.coordination_root)
+                events = []
+                read_scan_lease = runner.read_scan_lease
+
+                def record_read(path):
+                    events.append(("read", path))
+                    return read_scan_lease(path)
+
+                def fail_write(path, next_lease):
+                    events.append(("write", path, next_lease))
+                    raise runner.RunnerError("checkpoint write failed")
+
+                with (
+                    patch.object(runner, "read_scan_lease", side_effect=record_read),
+                    patch.object(runner, "write_scan_lease", side_effect=fail_write),
+                ):
+                    with self.assertRaisesRegex(runner.RunnerError, "checkpoint write failed"):
+                        handle.checkpoint("SCANNER_END_IN_FLIGHT")
+
+                self.assertEqual([event[0] for event in events], ["read", "write"])
+                self.assertEqual(events[0][1], lease_path)
+                self.assertEqual(events[1][1], lease_path)
+                self.assertEqual(events[1][2].state, "SCANNER_END_IN_FLIGHT")
+                self.assertEqual(handle.lease, lease)
+                self.assertEqual(runner.read_scan_lease(lease_path), lease)
+
+    def test_scan_lease_handle_refuses_receipt_for_different_diagnostic_run_before_creation(
+        self,
+    ):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self.context(root, root / "scanner")
+            owned_run_id = "00000000-0000-4000-8000-000000000145"
+            other_run_id = "00000000-0000-4000-8000-000000000146"
+            owned_target = runner.receipt_target(context, "diagnostic", owned_run_id)
+            other_target = runner.receipt_target(context, "diagnostic", other_run_id)
+            lease = runner.new_scan_lease(context, owned_target, owned_run_id)
+            lease_path = runner.lock_path(context.coordination_root)
+            runner.write_scan_lease(lease_path, lease)
+            handle = runner.ScanLeaseHandle(lease_path, lease, context.coordination_root)
+            other_receipt = runner.receipt_base(context, other_target, other_run_id)
+
+            self.assertFalse(other_target.path.exists())
+            with self.assertRaisesRegex(runner.RunnerError, "lease"):
+                handle.write_receipt(other_target, other_receipt, ())
+
+            self.assertFalse(other_target.path.exists())
+            self.assertEqual(runner.read_scan_lease(lease_path), lease)
+
+    def test_project_lock_recovery_rejects_target_only_reparse_before_receipt_read_or_mutation(
+        self,
+    ):
+        class ReparseDirectoryMetadata:
+            st_mode = stat.S_IFDIR
+            st_file_attributes = 0x0400
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self.context(root, root / "scanner")
+            previous_run_id = "00000000-0000-4000-8000-000000000153"
+            next_run_id = "00000000-0000-4000-8000-000000000154"
+            previous_target = runner.receipt_target(context, "diagnostic", previous_run_id)
+            next_target = runner.receipt_target(context, "diagnostic", next_run_id)
+            previous_receipt = runner.receipt_base(context, previous_target, previous_run_id)
+            runner.write_receipt(previous_target, previous_receipt, ())
+            expected_receipt_bytes = previous_target.path.read_bytes()
+            submitted = runner.transition_scan_lease(
+                runner.transition_scan_lease(
+                    runner.new_scan_lease(context, previous_target, previous_run_id),
+                    "SCANNER_END_IN_FLIGHT",
+                ),
+                "CE_SUBMITTED",
+                task_id="task-153",
+                utc_deadline="2026-08-27T00:10:00Z",
+            )
+            lease_path = runner.lock_path(context.coordination_root)
+            guard_path = runner.scan_transaction_guard_path(lease_path)
+            runner.write_scan_lease(lease_path, submitted)
+            expected_lease_bytes = lease_path.read_bytes()
+            original_lstat = Path.lstat
+            original_read_text = Path.read_text
+            original_unlink = Path.unlink
+            unlinked_paths = []
+
+            def nonfollowing_lstat(path):
+                if path == previous_target.path.parent:
+                    return ReparseDirectoryMetadata()
+                return original_lstat(path)
+
+            def refuse_target_receipt_read(path, *args, **kwargs):
+                if path == previous_target.path:
+                    raise AssertionError("receipt read reached after target-only reparse detection")
+                return original_read_text(path, *args, **kwargs)
+
+            def record_unlink(path, *args, **kwargs):
+                unlinked_paths.append(path)
+                return original_unlink(path, *args, **kwargs)
+
+            with (
+                patch.object(Path, "lstat", autospec=True, side_effect=nonfollowing_lstat),
+                patch.object(
+                    Path,
+                    "read_text",
+                    autospec=True,
+                    side_effect=refuse_target_receipt_read,
+                ),
+                patch.object(
+                    runner,
+                    "write_scan_lease",
+                    side_effect=AssertionError(
+                        "CE transition reached after target-only reparse detection"
+                    ),
+                ) as write_scan_lease,
+                patch.object(Path, "unlink", autospec=True, side_effect=record_unlink),
+            ):
+                with self.assertRaisesRegex(runner.RunnerError, "symbolic link|reparse point"):
+                    with runner.project_lock(
+                        context,
+                        next_target,
+                        next_run_id,
+                        reconcile=lambda _lease: (_ for _ in ()).throw(
+                            AssertionError("resolver reached after target-only reparse detection")
+                        ),
+                    ):
+                        pass
+
+            write_scan_lease.assert_not_called()
+            self.assertEqual(previous_target.path.read_bytes(), expected_receipt_bytes)
+            self.assertEqual(lease_path.read_bytes(), expected_lease_bytes)
+            self.assertNotIn(lease_path, unlinked_paths)
+            self.assertIn(guard_path, unlinked_paths)
+            self.assertFalse(guard_path.exists())
+
+    def test_project_lock_reconciles_exact_submitted_diagnostic_lease(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self.context(root, root / "scanner")
+            previous_run_id = "00000000-0000-4000-8000-000000000124"
+            next_run_id = "00000000-0000-4000-8000-000000000125"
+            previous_target = runner.receipt_target(context, "diagnostic", previous_run_id)
+            next_target = runner.receipt_target(context, "diagnostic", next_run_id)
+            previous_receipt = runner.receipt_base(context, previous_target, previous_run_id)
+            runner.write_receipt(previous_target, previous_receipt, ())
+            submitted = runner.transition_scan_lease(
+                runner.transition_scan_lease(
+                    runner.new_scan_lease(context, previous_target, previous_run_id),
+                    "SCANNER_END_IN_FLIGHT",
+                ),
+                "CE_SUBMITTED",
+                task_id="task-125",
+                utc_deadline="2026-08-27T00:10:00Z",
+            )
+            lease_path = runner.lock_path(context.coordination_root)
+            runner.write_scan_lease(lease_path, submitted)
+            reconciled = []
+
+            def reconcile(lease):
+                reconciled.append((lease.run_id, lease.task_id))
+                return "SUCCESS"
+
+            with runner.project_lock(
+                context,
+                next_target,
+                next_run_id,
+                reconcile=reconcile,
+            ) as handle:
+                self.assertEqual(handle.lease.state, "ACQUIRED")
+
+            recovered_receipt = json.loads(previous_target.path.read_text(encoding="utf-8"))
+
+        self.assertEqual(reconciled, [(previous_run_id, "task-125")])
+        self.assertEqual(recovered_receipt["outcome"], "BLOCKED")
+        self.assertEqual(recovered_receipt["failure"], "SCAN_LEASE_RECONCILED_SUCCESS")
+        self.assertFalse(lease_path.exists())
+
+    def test_project_lock_reconciles_submitted_lease_with_existing_terminal_receipt(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self.context(root, root / "scanner")
+            previous_run_id = "00000000-0000-4000-8000-000000000128"
+            next_run_id = "00000000-0000-4000-8000-000000000129"
+            previous_target = runner.receipt_target(context, "diagnostic", previous_run_id)
+            next_target = runner.receipt_target(context, "diagnostic", next_run_id)
+            previous_receipt = runner.receipt_base(context, previous_target, previous_run_id)
+            runner.write_receipt(previous_target, previous_receipt, ())
+            terminal_receipt = {
+                **previous_receipt,
+                "outcome": "BLOCKED",
+                "failure": "INTERRUPTED_AFTER_CE_SUBMISSION",
+            }
+            runner.write_receipt(previous_target, terminal_receipt, ())
+            expected_receipt_bytes = previous_target.path.read_bytes()
+            submitted = runner.transition_scan_lease(
+                runner.transition_scan_lease(
+                    runner.new_scan_lease(context, previous_target, previous_run_id),
+                    "SCANNER_END_IN_FLIGHT",
+                ),
+                "CE_SUBMITTED",
+                task_id="task-128",
+                utc_deadline="2026-08-27T00:10:00Z",
+            )
+            lease_path = runner.lock_path(context.coordination_root)
+            runner.write_scan_lease(lease_path, submitted)
+            reconciled = []
+            persisted_states = []
+            deletion_states = []
+            write_scan_lease = runner.write_scan_lease
+            unlink = Path.unlink
+
+            def reconcile(lease):
+                reconciled.append((lease.run_id, lease.task_id))
+                return "FAILED"
+
+            def record_scan_lease(path, lease):
+                persisted_states.append(lease.state)
+                write_scan_lease(path, lease)
+
+            def record_unlink(path, *args, **kwargs):
+                if path == lease_path:
+                    deletion_states.append(runner.read_scan_lease(path).state)
+                return unlink(path, *args, **kwargs)
+
+            with (
+                patch.object(runner, "write_scan_lease", side_effect=record_scan_lease),
+                patch.object(Path, "unlink", autospec=True, side_effect=record_unlink),
+                runner.project_lock(
+                    context,
+                    next_target,
+                    next_run_id,
+                    reconcile=reconcile,
+                ) as handle,
+            ):
+                self.assertEqual(handle.lease.state, "ACQUIRED")
+                self.assertEqual(handle.lease.run_id, next_run_id)
+                self.assertEqual(runner.read_scan_lease(lease_path), handle.lease)
+
+            retained_receipt_bytes = previous_target.path.read_bytes()
+
+        self.assertEqual(reconciled, [(previous_run_id, "task-128")])
+        self.assertEqual(
+            persisted_states,
+            ["CE_TERMINAL", "RECEIPT_TERMINAL", "CLOSED", "ACQUIRED"],
+        )
+        self.assertEqual(deletion_states, ["CLOSED", "ACQUIRED"])
+        self.assertEqual(retained_receipt_bytes, expected_receipt_bytes)
+        self.assertFalse(lease_path.exists())
+
+    def test_execute_wires_a_credentialed_persisted_ce_resolver(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self.context(root, root / "scanner")
+            previous_run_id = "00000000-0000-4000-8000-000000000127"
+            previous_target = runner.receipt_target(context, "diagnostic", previous_run_id)
+            submitted = runner.transition_scan_lease(
+                runner.transition_scan_lease(
+                    runner.new_scan_lease(context, previous_target, previous_run_id),
+                    "SCANNER_END_IN_FLIGHT",
+                ),
+                "CE_SUBMITTED",
+                task_id="task-127",
+                utc_deadline="2026-08-27T00:10:00Z",
+            )
+            events = []
+            resolved_statuses = []
+            receipt_outcomes = []
+
+            def load_credentials(_context, _environment, _secrets):
+                events.append("credentials")
+                return self.credentials()
+
+            def api_json(host, endpoint, parameters, token):
+                events.append("ce-task")
+                self.assertEqual(
+                    (host, endpoint, parameters, token),
+                    (
+                        "https://sonar.example.test",
+                        "/api/ce/task",
+                        {"id": "task-127"},
+                        "scan-token",
+                    ),
+                )
+                return {
+                    "task": {
+                        "id": "task-127",
+                        "componentKey": runner.PROJECT_KEY,
+                        "status": "SUCCESS",
+                    }
+                }
+
+            class CapturingLock:
+                def __init__(self, target, run_id, reconcile):
+                    self.target = target
+                    self.run_id = run_id
+                    self.reconcile = reconcile
+
+                def __enter__(self):
+                    events.append("resolver")
+                    resolved_statuses.append(self.reconcile(submitted))
+                    lease_path = root / ".scan.lock"
+                    lease = runner.new_scan_lease(context, self.target, self.run_id)
+                    runner.write_scan_lease(lease_path, lease)
+                    return runner.ScanLeaseHandle(lease_path, lease, context.coordination_root)
+
+                def __exit__(self, _type, _value, _traceback):
+                    return False
+
+            def project_lock(observed_context, target, run_id, *, reconcile):
+                self.assertIs(observed_context, context)
+                self.assertTrue(callable(reconcile))
+                events.append("lock")
+                return CapturingLock(target, run_id, reconcile)
+
+            def write_receipt(_target, receipt, _secrets):
+                receipt_outcomes.append(receipt["outcome"])
+                events.append(f"receipt:{receipt['outcome']}")
+
+            def stop_after_initial_receipt(_context, _environment):
+                events.append("after-receipt")
+                raise runner.RunnerError("stop after receipt")
+
+            with ExitStack() as patches:
+                patches.enter_context(patch.object(runner, "process_environment", return_value={}))
+                patches.enter_context(
+                    patch.object(runner, "scrub_sonar_environment", return_value={})
+                )
+                patches.enter_context(patch.object(runner, "git_context", return_value=context))
+                patches.enter_context(
+                    patch.object(runner, "sonar_secret_values", return_value=set())
+                )
+                patches.enter_context(
+                    patch.object(runner, "project_lock", side_effect=project_lock)
+                )
+                credential_loader = patches.enter_context(
+                    patch.object(runner, "load_credentials", side_effect=load_credentials)
+                )
+                patches.enter_context(patch.object(runner, "api_json", side_effect=api_json))
+                patches.enter_context(
+                    patch.object(runner, "write_receipt", side_effect=write_receipt)
+                )
+                patches.enter_context(
+                    patch.object(
+                        runner,
+                        "clear_generated_artifacts",
+                        side_effect=stop_after_initial_receipt,
+                    )
+                )
+                with self.assertRaisesRegex(runner.RunnerError, "stop after receipt"):
+                    runner.execute("candidate", "scanner")
+
+        self.assertEqual(resolved_statuses, ["SUCCESS"])
+        self.assertEqual(credential_loader.call_count, 1)
+        self.assertEqual(receipt_outcomes, ["RUNNING", "BLOCKED"])
+        self.assertEqual(
+            events,
+            [
+                "lock",
+                "resolver",
+                "credentials",
+                "ce-task",
+                "receipt:RUNNING",
+                "after-receipt",
+                "receipt:BLOCKED",
+            ],
+        )
+
+    def test_receipt_writer_refuses_existing_identity_mismatch(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self.context(root, root / "scanner")
+            target = runner.receipt_target(context, "candidate", None)
+            receipt = runner.receipt_base(context, target, "candidate-run")
+            runner.write_receipt(target, receipt, ())
+            existing = json.loads(target.path.read_text(encoding="utf-8"))
+            existing["receipt_identity"] = ".agent/e/sonarqube/other/identity.json"
+            target.path.write_text(json.dumps(existing), encoding="utf-8")
+
+            with self.assertRaisesRegex(runner.RunnerError, "identity"):
+                runner.write_receipt(target, receipt, ())
+
+    def test_persisted_diagnostic_lease_requires_safe_run_identifier(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self.context(root, root / "scanner")
+            target = runner.receipt_target(
+                context,
+                "diagnostic",
+                "00000000-0000-4000-8000-000000000126",
+            )
+            lease = runner.new_scan_lease(
+                context,
+                target,
+                "00000000-0000-4000-8000-000000000126",
+            )
+            payload = runner._scan_lease_payload(lease)
+            payload["run_id"] = "unsafe/diagnostic-run"
+            path = runner.lock_path(context.coordination_root)
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            with self.assertRaisesRegex(runner.RunnerError, "diagnostic"):
+                runner.read_scan_lease(path)
+
+    def test_receipt_dispatch_refuses_diagnostic_pass(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self.context(root, root / "scanner")
+            target = runner.receipt_target(context, "diagnostic", "diagnostic-run")
+            receipt = {
+                **runner.receipt_base(context, target, "diagnostic-run"),
+                "outcome": "PASS",
+            }
+
+            with self.assertRaisesRegex(runner.RunnerError, "authority or outcome"):
+                runner.receipt_dispatch(receipt)
+
+    def test_legacy_pid_only_lock_is_not_reclaimed(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self.context(root, root / "scanner")
+            target = runner.receipt_target(context, "candidate", None)
             stale_path = runner.lock_path(root)
             stale_path.parent.mkdir(parents=True)
             stale_path.write_text(json.dumps({"pid": 42}), encoding="utf-8")
-            with patch.object(runner, "owner_is_alive", return_value=False):
-                with runner.project_lock(root, "candidate", "a" * 40, "new-run"):
-                    acquired = stale_path.exists()
 
-        self.assertTrue(acquired)
-
-    def test_windows_owner_probe_never_calls_os_kill(self):
-        with (
-            patch.object(runner.os, "name", "nt"),
-            patch.object(runner, "windows_owner_is_alive", return_value=True) as windows_probe,
-            patch.object(runner.os, "kill") as kill,
-        ):
-            self.assertTrue(runner.owner_is_alive(42))
-
-        windows_probe.assert_called_once_with(42)
-        kill.assert_not_called()
-
-    def test_windows_api_handles_use_pointer_safe_prototypes(self):
-        class Function:
-            argtypes: object
-            restype: object
-
-            def __call__(self, *_args):
-                return 0
-
-        class Kernel32:
-            OpenProcess = Function()
-            WaitForSingleObject = Function()
-            CloseHandle = Function()
-
-        class WinTypes:
-            DWORD = object()
-            BOOL = object()
-            HANDLE = object()
-
-        kernel32 = Kernel32()
-        runner.configure_windows_process_api(kernel32, WinTypes)
-
-        self.assertEqual(
-            (kernel32.OpenProcess.argtypes, kernel32.OpenProcess.restype, kernel32.WaitForSingleObject.argtypes, kernel32.CloseHandle.argtypes),
-            ([WinTypes.DWORD, WinTypes.BOOL, WinTypes.DWORD], WinTypes.HANDLE, [WinTypes.HANDLE, WinTypes.DWORD], [WinTypes.HANDLE]),
-        )
+            with self.assertRaisesRegex(runner.RunnerError, "lease"):
+                with runner.project_lock(context, target, "new-run"):
+                    pass
 
     def test_windows_handle_is_normalized_before_crt_conversion_and_invalid_value_is_rejected(self):
         import ctypes
@@ -2137,16 +3533,6 @@ class TestSonarqubeExactHeadRunner(TestCase):
 
         self.assertEqual(kernel32.closed_handles, [owned_handle])
 
-    def test_running_receipt_replaces_prior_pass_before_work(self):
-        with TemporaryDirectory() as temporary_directory:
-            receipt_path = Path(temporary_directory) / "candidate.json"
-            runner.write_receipt(receipt_path, {"outcome": "PASS"}, ())
-            context = runner.GitContext(Path(temporary_directory), Path(temporary_directory), Path(temporary_directory), Path(temporary_directory), "a" * 40)
-            runner.write_receipt(receipt_path, runner.receipt_base(context, "candidate", "new-run"), ())
-            replacement = json.loads(receipt_path.read_text(encoding="utf-8"))
-
-        self.assertEqual(replacement["outcome"], "RUNNING")
-
     def test_cross_origin_api_response_is_rejected(self):
         class Response:
             def __enter__(self):
@@ -2167,7 +3553,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
 
         with patch.object(runner, "API_OPENER", Opener()):
             with self.assertRaisesRegex(runner.RunnerError, "origin differs"):
-                runner.api_json("https://sonar.example.test", "/api/ce/task", {"id": "task"}, "scan-token")
+                runner.api_json(
+                    "https://sonar.example.test", "/api/ce/task", {"id": "task"}, "scan-token"
+                )
 
     def test_report_task_receipt_contains_only_non_sensitive_url_evidence(self):
         with TemporaryDirectory() as temporary_directory:
@@ -2245,7 +3633,9 @@ class TestSonarqubeExactHeadRunner(TestCase):
     def test_redirect_handler_never_constructs_a_redirect_request(self):
         handler = runner.NoRedirectHandler()
 
-        self.assertIsNone(handler.redirect_request(None, None, 302, "https://other.example.test", {}, None))
+        self.assertIsNone(
+            handler.redirect_request(None, None, 302, "https://other.example.test", {}, None)
+        )
 
     def test_pass_receipt_schema_rejects_missing_observed_evidence(self):
         with self.assertRaisesRegex(runner.RunnerError, "evidence schema"):
@@ -2341,7 +3731,8 @@ class TestSonarqubeExactHeadRunner(TestCase):
             "project_version": "0.23.11",
             "analysis_xml_project_key": runner.PROJECT_KEY,
             "run_id": run_id,
-            "role": "candidate",
+            "authority": "candidate",
+            "receipt_identity": (f".agent/e/sonarqube/{runner.PROJECT_KEY}/{head}/candidate.json"),
             "captured_head": head,
             "completed_at": "2026-08-23T00:00:00Z",
             "post_scan_head": head,
@@ -2519,9 +3910,13 @@ class TestSonarqubeExactHeadRunner(TestCase):
 
     def test_receipt_rejects_credential_content(self):
         with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            context = self.context(root, root / "scanner")
+            target = runner.receipt_target(context, "diagnostic", "credential-run")
+            receipt = {
+                **runner.receipt_base(context, target, "credential-run"),
+                "outcome": "BLOCKED",
+                "failure": "scan-token",
+            }
             with self.assertRaisesRegex(runner.RunnerError, "credential"):
-                runner.write_receipt(
-                    Path(temporary_directory) / "receipt.json",
-                    {"failure": "scan-token"},
-                    ("scan-token", "read-token"),
-                )
+                runner.write_receipt(target, receipt, ("scan-token", "read-token"))
