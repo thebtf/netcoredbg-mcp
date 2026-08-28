@@ -80,6 +80,24 @@ class TestSessionOwnershipUnit:
         assert ownership.check_access("agent-B") is None
         assert ownership.owner == "agent-B"
 
+    def test_zero_origin_claim_expires_only_after_strict_timeout(self, monkeypatch):
+        clock = [0.0]
+        monkeypatch.setattr("netcoredbg_mcp.mux.time.monotonic", lambda: clock[0])
+        ownership = SessionOwnership()
+
+        assert ownership.check_access("agent-A") is None
+        assert ownership.owner == "agent-A"
+
+        clock[0] = SESSION_OWNERSHIP_TIMEOUT
+
+        assert ownership.check_access("agent-B") is not None
+        assert ownership.owner == "agent-A"
+
+        clock[0] += 0.001
+
+        assert ownership.check_access("agent-B") is None
+        assert ownership.owner == "agent-B"
+
     def test_touch_on_the_owning_session_resets_the_idle_clock(self, monkeypatch):
         clock = [1000.0]
         monkeypatch.setattr("netcoredbg_mcp.mux.time.monotonic", lambda: clock[0])

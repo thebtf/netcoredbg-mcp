@@ -63,7 +63,7 @@ class SessionOwnership:
 
     def __init__(self) -> None:
         self._owner_session_id: str | None = None
-        self._last_activity: float = 0.0
+        self._last_activity: float | None = None
 
     @property
     def owner(self) -> str | None:
@@ -126,6 +126,6 @@ class SessionOwnership:
 
     def _is_stale(self) -> bool:
         """Check if ownership has timed out."""
-        if self._last_activity == 0.0:
+        if self._last_activity is None:
             return False
         return (time.monotonic() - self._last_activity) > SESSION_OWNERSHIP_TIMEOUT
