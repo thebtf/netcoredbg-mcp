@@ -391,6 +391,28 @@ class TestClipboard:
         assert result["unsupported"] is True
         assert "Clipboard" in result["reason"]
 
+    @pytest.mark.asyncio
+    async def test_unsupported_clipboard_read_preserves_exact_payload(self):
+        backend = PywinautoBackend()
+
+        result = await backend.clipboard_read()
+
+        assert result == {
+            "unsupported": True,
+            "reason": "FlaUI bridge required for Clipboard (STA threading)",
+        }
+
+    @pytest.mark.asyncio
+    async def test_unsupported_clipboard_write_preserves_exact_payload(self):
+        backend = PywinautoBackend()
+
+        result = await backend.clipboard_write(text="emoji 🎉 ünicöde")
+
+        assert result == {
+            "unsupported": True,
+            "reason": "FlaUI bridge required for Clipboard (STA threading)",
+        }
+
 
 # ─────────────────────────────────────────────────────────────
 # TestVirtualizedItem

@@ -803,6 +803,13 @@ class PywinautoBackend:
             "reason": "FlaUI bridge required for ExpandCollapsePattern",
         }
 
+    @staticmethod
+    def _unsupported_clipboard() -> dict[str, Any]:
+        return {
+            "unsupported": True,
+            "reason": "FlaUI bridge required for Clipboard (STA threading)",
+        }
+
     async def close_window(self, window_title: str | None = None) -> dict[str, Any]:
         """WindowPattern requires FlaUI bridge backend."""
         return self._unsupported_window_pattern()
@@ -855,17 +862,11 @@ class PywinautoBackend:
 
     async def clipboard_read(self) -> dict[str, Any]:
         """Clipboard (STA threading) requires FlaUI bridge backend."""
-        return {
-            "unsupported": True,
-            "reason": "FlaUI bridge required for Clipboard (STA threading)",
-        }
+        return self._unsupported_clipboard()
 
     async def clipboard_write(self, text: str) -> dict[str, Any]:
         """Clipboard (STA threading) requires FlaUI bridge backend."""
-        return {
-            "unsupported": True,
-            "reason": "FlaUI bridge required for Clipboard (STA threading)",
-        }
+        return self._unsupported_clipboard()
 
     async def realize_virtualized_item(
         self,
