@@ -30,6 +30,9 @@ MAX_OUTPUT_LINE: int = 10_000  # 10KB per line
 MAX_BUILD_RETRIES: int = 3
 RETRY_DELAY_SECONDS: float = 1.0
 
+# Bound external cancellation cleanup so cancellation remains observable.
+EXTERNAL_CANCELLATION_PROCESS_WAIT_SECONDS: float = 2.0
+
 
 class BuildSession:
     """Per-workspace build session with state machine.
@@ -210,6 +213,30 @@ class BuildSession:
         except Exception as e:
             logger.warning(f"Failed to close job object: {e}")
 
+    async def _cleanup_external_cancellation_process(self) -> None:
+        """Best-effort root-process cleanup before external cancellation propagates."""
+        process = self._current_process
+        if process is None or process.returncode is not None:
+            return
+
+        try:
+            process.kill()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Failed to kill externally cancelled build process: %s", exc)
+            return
+
+        try:
+            await asyncio.wait_for(
+                process.wait(),
+                timeout=EXTERNAL_CANCELLATION_PROCESS_WAIT_SECONDS,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Cancelled build process did not exit cleanly: %s", exc)
+
     async def _run_command(
         self,
         command: list[str],
@@ -312,6 +339,11 @@ class BuildSession:
             exit_code = self._current_process.returncode or 0
 
             return exit_code, "".join(stdout_lines), "".join(stderr_lines)
+
+        except asyncio.CancelledError:
+            if not self._cancel_requested:
+                await self._cleanup_external_cancellation_process()
+            raise
 
         finally:
             self._current_process = None
@@ -517,7 +549,9 @@ class BuildSession:
                 )
                 self._last_result = result
                 self._set_state(BuildState.CANCELLED)
-                return result
+                if self._cancel_requested:
+                    return result
+                raise
 
             except asyncio.TimeoutError:
                 duration = (time.perf_counter() - start_time) * 1000

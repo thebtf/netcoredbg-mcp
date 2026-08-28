@@ -1,6 +1,7 @@
 """Tests for build session - per-workspace state machine."""
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -305,6 +306,199 @@ class TestBuildSessionRebuild:
             ("dotnet", "clean", str(project), "-c", "Debug"),
             ("dotnet", "build", str(project), "-c", "Debug", "-v", "minimal"),
         ]
+
+
+class TestBuildSessionCancellationSources:
+    """Distinguish explicit build cancellation from external task cancellation."""
+
+    @pytest.mark.asyncio
+    async def test_build_returns_cancelled_result_for_session_requested_cancellation(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        project = tmp_path / "Test.csproj"
+        project.touch()
+        session = BuildSession(workspace_root=str(tmp_path))
+
+        async def cancel_from_session(**_kwargs):
+            session._cancel_requested = True
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(session, "_run_build_with_retry", cancel_from_session)
+
+        result = await session.build(str(project))
+
+        assert result.state == BuildState.CANCELLED
+        assert result.cancelled is True
+        assert session.state == BuildState.CANCELLED
+        assert session.last_result is result
+
+    @pytest.mark.asyncio
+    async def test_build_propagates_external_cancellation_after_recording_result(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        project = tmp_path / "Test.csproj"
+        project.touch()
+        session = BuildSession(workspace_root=str(tmp_path))
+
+        async def cancel_externally(**_kwargs):
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(session, "_run_build_with_retry", cancel_externally)
+
+        with pytest.raises(asyncio.CancelledError):
+            await session.build(str(project))
+
+        assert session.state == BuildState.CANCELLED
+        assert session.last_result is not None
+        assert session.last_result.state == BuildState.CANCELLED
+        assert session.last_result.cancelled is True
+
+
+class _BlockingBuildStream:
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self._release = asyncio.Event()
+
+    async def readline(self) -> bytes:
+        self.entered.set()
+        await self._release.wait()
+        return b""
+
+
+def _blocking_build_process(stream: _BlockingBuildStream) -> MagicMock:
+    process = MagicMock()
+    process.pid = 42
+    process.returncode = None
+    process.stdout = stream
+    process.stderr = stream
+    process.kill = MagicMock()
+    process.wait = AsyncMock(return_value=1)
+    return process
+
+
+async def _cancel_no_job_command(
+    session: BuildSession,
+    process: MagicMock,
+    stream: _BlockingBuildStream,
+    monkeypatch,
+) -> None:
+    async def no_job() -> None:
+        return None
+
+    async def create_process(*_args, **_kwargs):
+        return process
+
+    monkeypatch.setattr(session, "_create_job_object", no_job)
+    monkeypatch.setattr("asyncio.create_subprocess_exec", create_process)
+    task = asyncio.create_task(session._run_command(["dotnet", "build"]))
+    await stream.entered.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+class TestBuildSessionExternalCancellationCleanup:
+    """External build cancellation must not orphan a no-Job child."""
+
+    @pytest.mark.asyncio
+    async def test_run_command_kills_and_awaits_no_job_child_on_external_cancellation(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        session = BuildSession(workspace_root=str(tmp_path))
+        stream = _BlockingBuildStream()
+        process = _blocking_build_process(stream)
+
+        await _cancel_no_job_command(session, process, stream, monkeypatch)
+
+        process.kill.assert_called_once()
+        process.wait.assert_awaited_once()
+        assert session._current_process is None
+
+    @pytest.mark.asyncio
+    async def test_run_command_bounds_no_job_child_wait_on_external_cancellation(
+        self,
+        tmp_path,
+        monkeypatch,
+        caplog,
+    ):
+        session = BuildSession(workspace_root=str(tmp_path))
+        stream = _BlockingBuildStream()
+        process = _blocking_build_process(stream)
+        caplog.set_level(logging.WARNING, logger="netcoredbg_mcp.build.session")
+
+        async def never_finishes():
+            await asyncio.Event().wait()
+
+        process.wait = AsyncMock(side_effect=never_finishes)
+        monkeypatch.setattr(
+            "netcoredbg_mcp.build.session.EXTERNAL_CANCELLATION_PROCESS_WAIT_SECONDS",
+            0.01,
+            raising=False,
+        )
+
+        await _cancel_no_job_command(session, process, stream, monkeypatch)
+
+        process.kill.assert_called_once()
+        process.wait.assert_awaited_once()
+        assert "Cancelled build process did not exit cleanly" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_run_command_does_not_kill_an_already_gone_child_on_external_cancellation(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        session = BuildSession(workspace_root=str(tmp_path))
+        stream = _BlockingBuildStream()
+        process = _blocking_build_process(stream)
+        process.returncode = 1
+
+        await _cancel_no_job_command(session, process, stream, monkeypatch)
+
+        process.kill.assert_not_called()
+        process.wait.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_run_command_propagates_cancellation_when_no_job_kill_fails(
+        self,
+        tmp_path,
+        monkeypatch,
+        caplog,
+    ):
+        session = BuildSession(workspace_root=str(tmp_path))
+        stream = _BlockingBuildStream()
+        process = _blocking_build_process(stream)
+        process.kill.side_effect = RuntimeError("kill unavailable")
+        caplog.set_level(logging.WARNING, logger="netcoredbg_mcp.build.session")
+
+        await _cancel_no_job_command(session, process, stream, monkeypatch)
+
+        process.kill.assert_called_once()
+        process.wait.assert_not_awaited()
+        assert "Failed to kill externally cancelled build process" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_run_command_skips_external_cleanup_for_session_requested_cancellation(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        session = BuildSession(workspace_root=str(tmp_path))
+        session._cancel_requested = True
+        stream = _BlockingBuildStream()
+        process = _blocking_build_process(stream)
+
+        await _cancel_no_job_command(session, process, stream, monkeypatch)
+
+        process.kill.assert_not_called()
+        process.wait.assert_not_awaited()
 
 
 class TestBuildSessionCancel:

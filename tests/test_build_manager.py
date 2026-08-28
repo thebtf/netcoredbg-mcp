@@ -1,5 +1,6 @@
 """Tests for build manager."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -211,6 +212,21 @@ class TestBuildManagerPreLaunchBuild:
         dotnet_commands = [c for c in commands if c[0] == "dotnet"]
         assert len(dotnet_commands) == 1
         assert "build" in dotnet_commands[0]
+
+    @pytest.mark.asyncio
+    async def test_pre_launch_build_propagates_external_cancellation(self, tmp_path, monkeypatch):
+        manager = BuildManager()
+        project = tmp_path / "Test.csproj"
+        project.touch()
+        session = manager.get_session(str(tmp_path))
+
+        async def cancel_externally(*_args, **_kwargs):
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(session, "build", cancel_externally)
+
+        with pytest.raises(asyncio.CancelledError):
+            await manager.pre_launch_build(str(tmp_path), str(project), restore_first=False)
 
     @pytest.mark.asyncio
     async def test_pre_launch_build_restore_failure_raises(self, tmp_path):
