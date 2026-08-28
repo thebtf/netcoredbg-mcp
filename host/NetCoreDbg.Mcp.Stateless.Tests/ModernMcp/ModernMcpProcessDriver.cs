@@ -548,6 +548,198 @@ internal static class ModernMcpRegistryContractDriver
             Assert.IsType<JsonElement>(missing.StructuredContent));
     }
 
+    internal static async Task<RegistryThreadsAdmissionObservation>
+        ObserveUnavailableThreadsAdmissionAsync(bool closedSlot)
+    {
+        var productionAssembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(
+            TestOutputPathResolver.ResolveManagedAssembly(
+                RepositoryLayout.Root,
+                Path.Combine("host", ProductionAssemblyName),
+                ProductionAssemblyName));
+        var registryType = productionAssembly.GetType(RegistryTypeName, throwOnError: false);
+        var sessionType = productionAssembly.GetType(SessionTypeName, throwOnError: false);
+        Assert.NotNull(registryType);
+        Assert.NotNull(sessionType);
+
+        var isUsableType = typeof(Func<,>).MakeGenericType(sessionType!, typeof(bool));
+        var disposeType = typeof(Func<,>).MakeGenericType(sessionType, typeof(ValueTask));
+        var registryConstructor = registryType!.GetConstructor(
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            types: [typeof(string), isUsableType, disposeType],
+            modifiers: null);
+        Assert.NotNull(registryConstructor);
+        var registry = registryConstructor!.Invoke([
+            null,
+            CreateIsUsableDelegate(sessionType, _ => closedSlot),
+            CreateDisposerDelegate(sessionType, static _ => ValueTask.CompletedTask),
+        ]);
+
+        var sessionsField = registryType.GetField("_sessions", BindingFlags.Instance | BindingFlags.NonPublic);
+        var slotsField = registryType.GetField("_slots", BindingFlags.Instance | BindingFlags.NonPublic);
+        var slotType = registryType.GetNestedType("SessionSlot", BindingFlags.NonPublic);
+        Assert.NotNull(sessionsField);
+        Assert.NotNull(slotsField);
+        Assert.NotNull(slotType);
+        var sessions = sessionsField!.GetValue(registry)
+            ?? throw new InvalidOperationException("DebugSessionRegistry._sessions returned null.");
+        var slots = slotsField!.GetValue(registry)
+            ?? throw new InvalidOperationException("DebugSessionRegistry._slots returned null.");
+        var session = RuntimeHelpers.GetUninitializedObject(sessionType);
+        const string sessionId = "unavailable-threads-session";
+        var addSession = sessions.GetType().GetMethod("TryAdd", [typeof(string), sessionType]);
+        var addSlot = slots.GetType().GetMethod("TryAdd", [typeof(string), slotType]);
+        var removeSession = sessions.GetType().GetMethod("TryRemove", [typeof(string), sessionType.MakeByRefType()]);
+        var removeSlot = slots.GetType().GetMethod("TryRemove", [typeof(string), slotType.MakeByRefType()]);
+        var containsSession = sessions.GetType().GetMethod("ContainsKey", [typeof(string)]);
+        var containsSlot = slots.GetType().GetMethod("ContainsKey", [typeof(string)]);
+        Assert.NotNull(addSession);
+        Assert.NotNull(addSlot);
+        Assert.NotNull(removeSession);
+        Assert.NotNull(removeSlot);
+        Assert.NotNull(containsSession);
+        Assert.NotNull(containsSlot);
+
+        var stopCalls = 0;
+        var disposeCalls = 0;
+        Func<CancellationToken, Task> stop = _ =>
+        {
+            stopCalls++;
+            return Task.CompletedTask;
+        };
+        Func<ValueTask> dispose = () =>
+        {
+            disposeCalls++;
+            return ValueTask.CompletedTask;
+        };
+        Action remove = closedSlot
+            ? static () => { }
+            : () =>
+            {
+                _ = removeSlot!.Invoke(slots, [sessionId, null]);
+                _ = removeSession!.Invoke(sessions, [sessionId, null]);
+            };
+        var slotConstructor = slotType!.GetConstructor(
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            types: [typeof(TimeSpan), typeof(Func<CancellationToken, Task>), typeof(Func<ValueTask>), typeof(Action)],
+            modifiers: null);
+        Assert.NotNull(slotConstructor);
+        var slot = slotConstructor!.Invoke([TimeSpan.FromSeconds(1), stop, dispose, remove]);
+        Assert.True((bool)addSession!.Invoke(sessions, [sessionId, session])!);
+        Assert.True((bool)addSlot!.Invoke(slots, [sessionId, slot])!);
+
+        if (closedSlot)
+        {
+            var close = slotType.GetMethod(
+                "CloseAndDrainAsync",
+                BindingFlags.Instance | BindingFlags.NonPublic,
+                binder: null,
+                types: [typeof(CancellationToken)],
+                modifiers: null);
+            Assert.NotNull(close);
+            await Assert.IsAssignableFrom<Task>(close!.Invoke(slot, [CancellationToken.None]));
+        }
+
+        var getThreadsAsync = registryType.GetMethod(
+            "GetThreadsAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            types: [typeof(CallToolRequestParams), typeof(CancellationToken)],
+            modifiers: null);
+        Assert.NotNull(getThreadsAsync);
+        var pending = getThreadsAsync!.Invoke(registry,
+        [
+            new CallToolRequestParams
+            {
+                Name = "get_threads",
+                Arguments = new Dictionary<string, JsonElement>
+                {
+                    ["debugSessionId"] = JsonSerializer.SerializeToElement(sessionId),
+                },
+            },
+            CancellationToken.None,
+        ]);
+        var asTask = pending?.GetType().GetMethod("AsTask", BindingFlags.Instance | BindingFlags.Public, Type.EmptyTypes);
+        Assert.NotNull(asTask);
+        var task = Assert.IsAssignableFrom<Task>(asTask!.Invoke(pending, []));
+        await task.ConfigureAwait(false);
+        var result = Assert.IsType<CallToolResult>(task.GetType().GetProperty("Result")!.GetValue(task));
+        var content = Assert.IsType<JsonElement>(result.StructuredContent);
+        return new RegistryThreadsAdmissionObservation(
+            result.ResultType,
+            result.IsError == true,
+            content.GetProperty("kind").GetString(),
+            content.GetProperty("error").GetString(),
+            (bool)containsSession!.Invoke(sessions, [sessionId])!,
+            (bool)containsSlot!.Invoke(slots, [sessionId])!,
+            stopCalls,
+            disposeCalls);
+    }
+
+    internal static async Task<RegistryMissingSlotStopObservation> ObserveMissingSlotStopAsync()
+    {
+        var productionAssembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(
+            TestOutputPathResolver.ResolveManagedAssembly(
+                RepositoryLayout.Root,
+                Path.Combine("host", ProductionAssemblyName),
+                ProductionAssemblyName));
+        var registryType = productionAssembly.GetType(RegistryTypeName, throwOnError: false);
+        var sessionType = productionAssembly.GetType(SessionTypeName, throwOnError: false);
+        Assert.NotNull(registryType);
+        Assert.NotNull(sessionType);
+        var registryConstructor = registryType!.GetConstructor(
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            types: [typeof(string)],
+            modifiers: null);
+        Assert.NotNull(registryConstructor);
+        var registry = registryConstructor!.Invoke([null]);
+        var sessionsField = registryType.GetField("_sessions", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(sessionsField);
+        var sessions = sessionsField!.GetValue(registry)
+            ?? throw new InvalidOperationException("DebugSessionRegistry._sessions returned null.");
+        var session = RuntimeHelpers.GetUninitializedObject(sessionType);
+        const string sessionId = "missing-slot-stop-session";
+        var addSession = sessions.GetType().GetMethod("TryAdd", [typeof(string), sessionType]);
+        var containsSession = sessions.GetType().GetMethod("ContainsKey", [typeof(string)]);
+        Assert.NotNull(addSession);
+        Assert.NotNull(containsSession);
+        Assert.True((bool)addSession!.Invoke(sessions, [sessionId, session])!);
+
+        var stopAsync = registryType.GetMethod(
+            "StopAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            types: [typeof(CallToolRequestParams), typeof(CancellationToken)],
+            modifiers: null);
+        Assert.NotNull(stopAsync);
+        var pending = stopAsync!.Invoke(registry,
+        [
+            new CallToolRequestParams
+            {
+                Name = "stop_debug",
+                Arguments = new Dictionary<string, JsonElement>
+                {
+                    ["debugSessionId"] = JsonSerializer.SerializeToElement(sessionId),
+                },
+            },
+            CancellationToken.None,
+        ]);
+        var asTask = pending?.GetType().GetMethod("AsTask", BindingFlags.Instance | BindingFlags.Public, Type.EmptyTypes);
+        Assert.NotNull(asTask);
+        var task = Assert.IsAssignableFrom<Task>(asTask!.Invoke(pending, []));
+        await task.ConfigureAwait(false);
+        var result = Assert.IsType<CallToolResult>(task.GetType().GetProperty("Result")!.GetValue(task));
+        var content = Assert.IsType<JsonElement>(result.StructuredContent);
+        return new RegistryMissingSlotStopObservation(
+            result.ResultType,
+            result.IsError == true,
+            content.GetProperty("kind").GetString(),
+            content.GetProperty("error").GetString(),
+            (bool)containsSession!.Invoke(sessions, [sessionId])!);
+    }
+
     private static Delegate CreateIsUsableDelegate(Type sessionType, Func<object, bool> isUsable) =>
         (Delegate)typeof(ModernMcpRegistryContractDriver)
             .GetMethod(nameof(CreateIsUsableDelegateCore), BindingFlags.Static | BindingFlags.NonPublic)!
@@ -593,6 +785,23 @@ internal sealed record RegistryCleanupFailureObservation(
     bool IsError,
     JsonElement UnusableContent,
     JsonElement MissingContent);
+
+internal sealed record RegistryThreadsAdmissionObservation(
+    string? ResultType,
+    bool IsError,
+    string? Kind,
+    string? Error,
+    bool SessionRetained,
+    bool SlotRetained,
+    int StopCalls,
+    int DisposeCalls);
+
+internal sealed record RegistryMissingSlotStopObservation(
+    string? ResultType,
+    bool IsError,
+    string? Kind,
+    string? Error,
+    bool SessionRetained);
 
 internal sealed record ModernMcpStartOptions(
     JsonObject? InitialMeta = null,

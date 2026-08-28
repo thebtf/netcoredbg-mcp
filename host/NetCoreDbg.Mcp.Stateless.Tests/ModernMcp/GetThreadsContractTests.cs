@@ -40,6 +40,7 @@ public sealed class GetThreadsContractTests
                 "get_debug_state",
                 "stop_debug",
                 Tool,
+                "get_call_stack",
                 "get_ui_probe_capabilities",
                 "capture_visual_evidence",
                 "read_capture_artifact",
