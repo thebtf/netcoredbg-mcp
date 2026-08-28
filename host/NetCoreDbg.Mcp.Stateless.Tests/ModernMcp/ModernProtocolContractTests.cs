@@ -2,6 +2,8 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
+using ModelContextProtocol.Client;
+using NetCoreDbg.Mcp.Stateless.Tests.DebugAdapter;
 using Xunit;
 
 namespace NetCoreDbg.Mcp.Stateless.Tests.ModernMcp;
@@ -157,6 +159,222 @@ public sealed class ModernProtocolContractTests
     }
 
     [Fact]
+    public async Task FailedSdkInitialization_ReportsBoundedStdioCompletionWithoutConstructingDriver()
+    {
+        var candidate = TestOutputPathResolver.ResolveProcess(
+            RepositoryLayout.ControlledAdapterDirectory,
+            "ControlledDapAdapter");
+        candidate.Arguments.Add("--invalid-mcp-bootstrap-option");
+
+        var exception = await Assert.ThrowsAsync<ModernMcpProcessStartException>(
+            () => ModernMcpProcessDriver.StartAsync(
+                new ModernMcpStartOptions(CandidateProcess: candidate)));
+
+        Assert.IsType<ClientTransportClosedException>(exception.InnerException);
+        Assert.Equal(ModernMcpProcessStartFailureCategory.TransportClosed, exception.Failure.Category);
+        Assert.True(exception.Failure.CompletionObserved);
+        Assert.NotNull(exception.Failure.ProcessId);
+        Assert.True(exception.Failure.ExitCode.HasValue);
+        Assert.Contains(
+            exception.Failure.StandardErrorTail,
+            static line => line.Contains("Unknown fixture option", StringComparison.Ordinal));
+        Assert.False(exception.Failure.StandardErrorTruncated);
+    }
+
+    [Fact]
+    public void FailedStartStandardErrorCollector_BoundsLinesAndCharacters()
+    {
+        var collector = new ModernMcpStandardErrorTail();
+        for (var index = 0; index < 11; index++)
+        {
+            collector.Add($"{index}:{new string('x', 600)}");
+        }
+
+        var snapshot = collector.Snapshot();
+
+        Assert.True(snapshot.Truncated);
+        Assert.Equal(10, snapshot.Lines.Count);
+        Assert.All(snapshot.Lines, static line => Assert.InRange(line.Length, 1, 512));
+    }
+
+    [Theory]
+    [InlineData(null, 2_000)]
+    [InlineData("4500", 4_500)]
+    public void CoverageStartupTimeout_UsesDefaultOrValidatedOverride(
+        string? rawMilliseconds,
+        int expectedMilliseconds)
+    {
+        Assert.Equal(
+            TimeSpan.FromMilliseconds(expectedMilliseconds),
+            ModernMcpProcessDriver.ResolveCoverageStartupTimeout(rawMilliseconds));
+    }
+
+    [Theory]
+    [InlineData("1_999")]
+    [InlineData("10_001")]
+    [InlineData("not-a-number")]
+    public void CoverageStartupTimeout_RejectsInvalidOverride(string rawMilliseconds)
+    {
+        Assert.Throws<InvalidOperationException>(
+            () => ModernMcpProcessDriver.ResolveCoverageStartupTimeout(rawMilliseconds));
+    }
+
+    [Fact]
+    public void CoverageStartupClientOptions_PinPerRequestProtocolAndOneDeadline()
+    {
+        var timeout = TimeSpan.FromSeconds(10);
+
+        var options = ModernMcpProcessDriver.CreateClientOptions(timeout);
+
+        Assert.Equal(ModernMcpProcessDriver.CurrentProtocolVersion, options.ProtocolVersion);
+        Assert.Equal(timeout, options.InitializationTimeout);
+        Assert.Equal(timeout, options.DiscoverProbeTimeout);
+    }
+
+    [Fact]
+    public async Task SdkStartupDeadline_ReportsDriverTimingWithoutCompletionFacts()
+    {
+        var expectedDeadline = ModernMcpProcessDriver.ResolveCoverageStartupTimeout(
+            Environment.GetEnvironmentVariable(
+                ModernMcpProcessDriver.CoverageStartupTimeoutEnvironmentVariable));
+        var candidate = TestOutputPathResolver.ResolveProcess(
+            RepositoryLayout.ControlledAdapterDirectory,
+            "ControlledDapAdapter");
+        candidate.Arguments.Add("--controlled-dap-descendant");
+
+        var exception = await Assert.ThrowsAsync<ModernMcpPhaseTimeoutException>(
+            () => ModernMcpProcessDriver.StartAsync(
+                new ModernMcpStartOptions(CandidateProcess: candidate)));
+
+        Assert.Equal(ModernMcpTimeoutPhase.SdkStartup, exception.Failure.Phase);
+        Assert.Equal("test_driver", exception.Failure.Owner);
+        Assert.Equal(expectedDeadline, exception.Failure.Deadline);
+        Assert.True(exception.Failure.Elapsed >= TimeSpan.Zero);
+        Assert.Null(exception.Failure.ToolName);
+        Assert.Null(exception.Failure.Method);
+        Assert.Null(exception.Failure.RequestId);
+        Assert.False(exception.Failure.CompletionObserved);
+        Assert.Null(exception.Failure.ProcessId);
+        Assert.Null(exception.Failure.ExitCode);
+        Assert.Empty(exception.Failure.StandardErrorTail);
+    }
+
+    [Fact]
+    public async Task CallerCancelledStartup_RethrowsWithoutDriverTimingDiagnostic()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => ModernMcpProcessDriver.StartAsync(cancellationToken: cancellation.Token));
+
+        Assert.IsNotType<ModernMcpPhaseTimeoutException>(exception);
+    }
+
+    [Fact]
+    public async Task PostStartRawRequestDeadline_ReportsMethodAndRequestIdentity()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(HeldThreads());
+        var debugSessionId = await StartThreadsSessionAsync(driver, "post-start-raw-start");
+        var requestId = new RequestId("post-start-raw-timeout");
+
+        var exception = await Assert.ThrowsAsync<ModernMcpPhaseTimeoutException>(
+            () => driver.CallToolRawAsync(
+                "get_threads",
+                new JsonObject { ["debugSessionId"] = debugSessionId },
+                ModernMcpProcessDriver.CurrentMeta(),
+                requestId));
+
+        Assert.Equal(ModernMcpTimeoutPhase.PostStartMcpRequest, exception.Failure.Phase);
+        Assert.Equal("test_driver", exception.Failure.Owner);
+        Assert.Equal(TimeSpan.FromSeconds(2), exception.Failure.Deadline);
+        Assert.True(exception.Failure.Elapsed >= TimeSpan.Zero);
+        Assert.Equal("tools/call", exception.Failure.Method);
+        Assert.Equal("post-start-raw-timeout", exception.Failure.RequestId);
+        Assert.Null(exception.Failure.ToolName);
+    }
+
+    [Fact]
+    public async Task PostStartExplicitDeadline_RemainsLocalToRawRequest()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(HeldThreads());
+        var debugSessionId = await StartThreadsSessionAsync(driver, "post-start-explicit-start");
+
+        var exception = await Assert.ThrowsAsync<ModernMcpPhaseTimeoutException>(
+            () => driver.CallToolRawAsync(
+                "get_threads",
+                new JsonObject { ["debugSessionId"] = debugSessionId },
+                ModernMcpProcessDriver.CurrentMeta(),
+                new RequestId("post-start-explicit-timeout"),
+                timeout: TimeSpan.FromMilliseconds(500)));
+
+        Assert.Equal(TimeSpan.FromMilliseconds(500), exception.Failure.Deadline);
+        Assert.Equal("post-start-explicit-timeout", exception.Failure.RequestId);
+    }
+
+    [Fact]
+    public async Task PostStartTypedCallDeadline_ReportsToolWithoutSdkRequestIdentity()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(HeldThreads());
+        var debugSessionId = await StartThreadsSessionAsync(driver, "post-start-typed-start");
+
+        var exception = await Assert.ThrowsAsync<ModernMcpPhaseTimeoutException>(
+            () => driver.CallToolAsync(
+                "get_threads",
+                new JsonObject { ["debugSessionId"] = debugSessionId },
+                ModernMcpProcessDriver.CurrentMeta()));
+
+        Assert.Equal(ModernMcpTimeoutPhase.PostStartMcpRequest, exception.Failure.Phase);
+        Assert.Equal("test_driver", exception.Failure.Owner);
+        Assert.Equal("get_threads", exception.Failure.ToolName);
+        Assert.Null(exception.Failure.Method);
+        Assert.Null(exception.Failure.RequestId);
+    }
+
+    [Fact]
+    public async Task CallerCancelledPostStartRawRequest_RethrowsWithoutDriverTimingDiagnostic()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(HeldThreads());
+        var debugSessionId = await StartThreadsSessionAsync(driver, "post-start-raw-cancel-start");
+        using var cancellation = new CancellationTokenSource();
+        var pending = driver.CallToolRawAsync(
+            "get_threads",
+            new JsonObject { ["debugSessionId"] = debugSessionId },
+            ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("post-start-raw-cancel"),
+            cancellation.Token);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await driver.WaitForThreadsRequestAsync(observation.Token);
+
+        cancellation.Cancel();
+
+        var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
+        Assert.IsNotType<ModernMcpPhaseTimeoutException>(exception);
+        driver.ReleaseThreadsResponse();
+    }
+
+    [Fact]
+    public async Task CallerCancelledPostStartTypedCall_RethrowsWithoutDriverTimingDiagnostic()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(HeldThreads());
+        var debugSessionId = await StartThreadsSessionAsync(driver, "post-start-typed-cancel-start");
+        using var cancellation = new CancellationTokenSource();
+        var pending = driver.CallToolAsync(
+            "get_threads",
+            new JsonObject { ["debugSessionId"] = debugSessionId },
+            ModernMcpProcessDriver.CurrentMeta(),
+            cancellation.Token);
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await driver.WaitForThreadsRequestAsync(observation.Token);
+
+        cancellation.Cancel();
+
+        var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
+        Assert.IsNotType<ModernMcpPhaseTimeoutException>(exception);
+        driver.ReleaseThreadsResponse();
+    }
+
+    [Fact]
     public async Task MissingProgram_WithFormElicitation_UsesInputRequiredAndNewIdRetryWithoutRequestState()
     {
         await using var driver = await ModernMcpProcessDriver.StartFirstWireAsync();
@@ -309,6 +527,26 @@ public sealed class ModernProtocolContractTests
         Assert.False(driver.Client.Completion.IsCompleted, "Non-MCP stdout would make the official stdio transport fail the exchange.");
     }
 
+
+    private static ModernMcpStartOptions HeldThreads() => new(
+        DisableFormElicitation: true,
+        FixtureConfiguration: new FixtureConfiguration(
+            SuppressLifecycleEvents: true,
+            ThreadsResponseMode: "hold"));
+
+    private static async Task<string> StartThreadsSessionAsync(
+        ModernMcpProcessDriver driver,
+        string requestId)
+    {
+        var result = ModernMcpProcessDriver.RequireResult(await driver.CallToolRawAsync(
+            "start_debug",
+            new JsonObject { ["program"] = driver.InertProgramPath },
+            ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId(requestId)));
+
+        AssertCompleteStartEnvelope(result);
+        return Assert.IsType<string>(result["structuredContent"]?["debugSessionId"]?.GetValue<string>());
+    }
     private static void AssertCacheable(JsonObject result)
     {
         Assert.True(result["ttlMs"]?.GetValue<long>() > 0);

@@ -245,7 +245,6 @@ public sealed class GetCallStackContractTests
     [InlineData("wrong-command", true)]
     [InlineData("malformed-body", true)]
     [InlineData("reader-failure", true)]
-    [InlineData("timeout", true)]
     [InlineData("too-many-frames", true)]
     [InlineData("too-many-name-bytes", true)]
     [InlineData("too-many-path-bytes", true)]
@@ -267,6 +266,34 @@ public sealed class GetCallStackContractTests
 
         AssertRefused(content);
         Assert.Equal("debug_state_success", AssertApplicationEnvelope(await driver.CallToolRawAsync("get_debug_state", new JsonObject { ["debugSessionId"] = debugSessionId }, ModernMcpProcessDriver.CurrentMeta(), new RequestId($"call-stack-{responseMode}-state")), isError: false)["kind"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task GetCallStack_Timeout_ReturnsRedactedProtocolErrorAndEvictsToken()
+    {
+        await using var driver = await ModernMcpProcessDriver.StartAsync(CallStack("timeout"));
+        var debugSessionId = await StartStoppedSessionAsync(
+            driver,
+            "call-stack-timeout-start",
+            setupObservationTimeout: TimeSpan.FromSeconds(35));
+        using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        var response = driver.CallToolRawAsync(
+            Tool,
+            Arguments(debugSessionId, 1),
+            ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("call-stack-timeout"),
+            timeout: TimeSpan.FromSeconds(35));
+        await driver.WaitForStackTraceRequestAsync(observation.Token);
+        await driver.WaitForFixtureRecordAsync("stack-trace-response-timeout", observation.Token);
+
+        var content = AssertApplicationEnvelope(await response, isError: true);
+
+        AssertProtocolError(content);
+        AssertNotFound(AssertApplicationEnvelope(await driver.CallToolRawAsync(
+            "get_debug_state",
+            new JsonObject { ["debugSessionId"] = debugSessionId },
+            ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId("call-stack-timeout-state")), isError: true));
     }
 
     [Theory]
@@ -308,9 +335,17 @@ public sealed class GetCallStackContractTests
             LifecycleMode: lifecycleMode,
             StackTraceResponseMode: responseMode));
 
-    private static async Task<string> StartStoppedSessionAsync(ModernMcpProcessDriver driver, string requestId)
+    private static async Task<string> StartStoppedSessionAsync(
+        ModernMcpProcessDriver driver,
+        string requestId,
+        TimeSpan? setupObservationTimeout = null)
     {
-        var start = AssertApplicationEnvelope(await driver.CallToolRawAsync("start_debug", new JsonObject { ["program"] = driver.InertProgramPath }, ModernMcpProcessDriver.CurrentMeta(), new RequestId(requestId)), isError: false);
+        var start = AssertApplicationEnvelope(await driver.CallToolRawAsync(
+            "start_debug",
+            new JsonObject { ["program"] = driver.InertProgramPath },
+            ModernMcpProcessDriver.CurrentMeta(),
+            new RequestId(requestId),
+            timeout: setupObservationTimeout), isError: false);
         using var observation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
         await driver.WaitForFixtureEventAsync("stopped", observation.Token);
         return Assert.IsType<string>(start["debugSessionId"]?.GetValue<string>());
