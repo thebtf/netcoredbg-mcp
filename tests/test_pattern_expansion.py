@@ -249,6 +249,25 @@ class TestExpandCollapse:
         assert result["unsupported"] is True
         assert "ExpandCollapsePattern" in result["reason"]
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("method_name", "automation_id"),
+        (("expand", "TreeRoot"), ("collapse", "TreeBranch")),
+    )
+    async def test_unsupported_expand_collapse_preserves_input_payload(
+        self,
+        method_name: str,
+        automation_id: str,
+    ) -> None:
+        backend = PywinautoBackend()
+
+        result = await getattr(backend, method_name)(automation_id)
+
+        assert result == {
+            "unsupported": True,
+            "reason": "FlaUI bridge required for ExpandCollapsePattern",
+        }
+
 
 # ─────────────────────────────────────────────────────────────
 # TestSetValue (RangeValue)

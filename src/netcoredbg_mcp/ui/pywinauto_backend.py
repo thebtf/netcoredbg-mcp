@@ -796,6 +796,13 @@ class PywinautoBackend:
             "reason": "FlaUI bridge required for WindowPattern",
         }
 
+    @staticmethod
+    def _unsupported_expand_collapse_pattern() -> dict[str, Any]:
+        return {
+            "unsupported": True,
+            "reason": "FlaUI bridge required for ExpandCollapsePattern",
+        }
+
     async def close_window(self, window_title: str | None = None) -> dict[str, Any]:
         """WindowPattern requires FlaUI bridge backend."""
         return self._unsupported_window_pattern()
@@ -833,17 +840,11 @@ class PywinautoBackend:
 
     async def expand(self, automation_id: str) -> dict[str, Any]:
         """ExpandCollapsePattern requires FlaUI bridge backend."""
-        return {
-            "unsupported": True,
-            "reason": "FlaUI bridge required for ExpandCollapsePattern",
-        }
+        return self._unsupported_expand_collapse_pattern()
 
     async def collapse(self, automation_id: str) -> dict[str, Any]:
         """ExpandCollapsePattern requires FlaUI bridge backend."""
-        return {
-            "unsupported": True,
-            "reason": "FlaUI bridge required for ExpandCollapsePattern",
-        }
+        return self._unsupported_expand_collapse_pattern()
 
     async def set_value(self, automation_id: str, value: float) -> dict[str, Any]:
         """RangeValuePattern requires FlaUI bridge backend."""
