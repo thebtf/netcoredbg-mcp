@@ -359,6 +359,48 @@ class TestGetDotnetCommand:
         assert cmd[0] == "dotnet"
         assert cmd[1] == "build"
 
+    @pytest.mark.parametrize(
+        ("configuration", "extra_args"),
+        [
+            ("Debug", []),
+            ("Release", ["-v", "minimal"]),
+            ("Debug", ["--framework=net8.0", "--no-restore"]),
+        ],
+    )
+    def test_build_and_rebuild_commands_are_identical(
+        self,
+        tmp_path,
+        configuration,
+        extra_args,
+    ):
+        project = tmp_path / "Test.csproj"
+        project.touch()
+        policy = BuildPolicy(workspace_root=str(tmp_path))
+
+        build = policy.get_dotnet_command(
+            BuildCommand.BUILD,
+            str(project),
+            configuration,
+            extra_args,
+        )
+        rebuild = policy.get_dotnet_command(
+            BuildCommand.REBUILD,
+            str(project),
+            configuration,
+            extra_args,
+        )
+
+        assert rebuild == build
+
+    @pytest.mark.parametrize("command", [BuildCommand.BUILD, BuildCommand.REBUILD])
+    def test_build_and_rebuild_reject_identical_invalid_extra_arguments(self, tmp_path, command):
+        project = tmp_path / "Test.csproj"
+        project.touch()
+        policy = BuildPolicy(workspace_root=str(tmp_path))
+
+        with pytest.raises(ValueError, match="Argument not allowed: --evil-flag"):
+            policy.get_dotnet_command(command, str(project), extra_args=["--evil-flag"])
+
     def test_extra_args_validated(self, tmp_path):
         """Test extra arguments are validated."""
         project = tmp_path / "Test.csproj"

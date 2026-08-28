@@ -451,18 +451,7 @@ class BuildPolicy:
                 "false",
                 *validated_args,
             ]
-        elif command == BuildCommand.BUILD:
-            return [
-                "dotnet",
-                "build",
-                validated_project,
-                "-c",
-                configuration,
-                *validated_args,
-            ]
-        elif command == BuildCommand.REBUILD:
-            # Rebuild is clean + build, but we return build command
-            # The caller handles clean first
+        elif command in (BuildCommand.BUILD, BuildCommand.REBUILD):
             return [
                 "dotnet",
                 "build",

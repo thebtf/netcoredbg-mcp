@@ -299,11 +299,12 @@ class TestBuildSessionRebuild:
             return mock_process
 
         with patch("asyncio.create_subprocess_exec", capture_exec):
-            await session.rebuild(str(project))
+            await session.rebuild(str(project), extra_args=["-v", "minimal"])
 
-        assert len(commands) == 2
-        assert "clean" in commands[0]
-        assert "build" in commands[1]
+        assert commands == [
+            ("dotnet", "clean", str(project), "-c", "Debug"),
+            ("dotnet", "build", str(project), "-c", "Debug", "-v", "minimal"),
+        ]
 
 
 class TestBuildSessionCancel:
